@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -360,7 +361,7 @@ def test_doctor_reports_the_classified_version_failure_and_exits_one(tmp_path: P
     config = config_for(workspace, "openocd", FAKE_TRANSCRIPT, config_path=tmp_path / "config" / "config.yaml")
     environment = {**os.environ, "AGENTIC_HIL_CONFIG": str(config.config_path)}
 
-    answered = subprocess.run([sys.executable, "-m", "agentic_hil", "doctor", "--json"], capture_output=True, text=True, cwd=str(workspace), env=environment, timeout=120, check=False)
+    answered = subprocess.run([sys.executable, "-m", "agentic_hil", "doctor", "--json"], capture_output=True, text=True, cwd=str(workspace), env=environment, timeout=scaled_time_bound(120), check=False)
 
     assert answered.returncode == 1, answered.stdout + answered.stderr
     assert answered.stdout.strip(), f"doctor --json wrote no document on stdout; stderr was:\n{answered.stderr}"
@@ -1219,6 +1220,62 @@ def test_a_failed_verify_or_flash_hands_the_operator_that_tools_own_steps(tmp_pa
     # entry for these buckets, and a result carrying one would mean somebody
     # wrote the generic entry this design decided against.
     assert remediation_fields(error_type) == {}, error_type
+
+
+# pyOCD's own defaults for the two options the `flash_failed:pyocd` steps put to
+# the tool, each out of a recording rather than out of memory: the erase method
+# as `pyocd flash --help` documents it, and the clock as `pyocd json --features`
+# lists it, because the help names no default for `--frequency`. The backend
+# passes neither option, so a step that offers a default back as the thing to
+# try asks a question the failed run has already answered (#516).
+FLASH_TOOL_HELP_RECORDINGS = FIXTURES / "flash_tool_help_recordings.json"
+PYOCD_OPTION_DEFAULTS_RECORDING = FIXTURES / "pyocd_option_defaults_recording.json"
+
+
+def pyocd_hertz(value: str) -> int:
+    """pyOCD's grammar for `--frequency` as its recorded help states it: `1000`, `2.5khz`, `10m`."""
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([km]?)(?:hz)?", value.strip().lower())
+    assert match, value
+    return int(float(match.group(1)) * {"": 1, "k": 1_000, "m": 1_000_000}[match.group(2)])
+
+
+def hertz_as_written(hertz: int) -> str:
+    """A clock the way the catalogue's sentences write one: 1000000 as `1 MHz`, 400000 as `400 kHz`."""
+    for factor, unit in ((1_000_000, "MHz"), (1_000, "kHz")):
+        if hertz % factor == 0:
+            return f"{hertz // factor} {unit}"
+    return f"{hertz} Hz"
+
+
+def test_the_erase_method_the_pyocd_flash_steps_offer_is_not_pyocds_recorded_default() -> None:
+    """An erase method offered "against the default" has to be something other than the default."""
+    recorded = json.loads(FLASH_TOOL_HELP_RECORDINGS.read_text(encoding="utf-8"))["tools"]["pyocd"]
+    assert recorded["version"] == "0.45.1", recorded["version"]
+    documented = re.search(r"Choose flash erase method\.\s+Default is (\w+)\.", recorded["help"])
+    assert documented, recorded["help"]
+    steps = " ".join(remediation_fields("flash_failed", "pyocd")["remediation"])
+    offered = set(re.findall(r"--erase (\w+)", steps))
+
+    assert documented.group(1) not in offered, (documented.group(1), offered)
+
+
+def test_the_clock_the_pyocd_flash_steps_offer_as_slower_is_below_pyocds_recorded_default() -> None:
+    """A clock offered as "a slower SWD clock" has to be slower than the one the run already used."""
+    recorded = json.loads(PYOCD_OPTION_DEFAULTS_RECORDING.read_text(encoding="utf-8"))
+    assert recorded["version"] == "0.45.1", recorded["version"]
+    (frequency,) = [option for option in recorded["output"]["options"] if option["name"] == "frequency"]
+    steps = " ".join(remediation_fields("flash_failed", "pyocd")["remediation"])
+    offered = re.findall(r"--frequency ([0-9][0-9.]*[kKmM]?(?:[hH][zZ])?)", steps)
+
+    assert offered, steps
+    for value in offered:
+        assert pyocd_hertz(value) < frequency["default"], (value, pyocd_hertz(value), frequency["default"])
+
+    # The sentence names the clock the failed run used, so it has to be the
+    # recorded default: a re-recording that finds another one fails here rather
+    # than leaving the sentence stale.
+    named = f"default of {hertz_as_written(frequency['default'])}"
+    assert named in steps, (named, steps)
 
 
 # The two shapes a pyOCD read fails in, both classified `memory_read_failed` and

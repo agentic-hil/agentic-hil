@@ -64,7 +64,7 @@ PEER_SCRIPT = Path(__file__).with_name("can_peer.py")
 # by BUS_TIMEOUT_S below, which is far inside this.
 ANSWER_TIMEOUT_S = 60.0
 # How long the far end waits for a frame the product said it sent.
-WIRE_TIMEOUT_S = 5.0
+WIRE_TIMEOUT_S = scaled_time_bound(5.0)
 # The bus entry's own `timeout_s`, which bounds every read's wait.
 BUS_TIMEOUT_S = 2.0
 # Slack for a wait that is measured against the clock: scheduling, the pipe,
@@ -103,7 +103,7 @@ def ip_command() -> str:
 
 
 def ip_link(*arguments: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([ip_command(), "link", *arguments], capture_output=True, text=True, timeout=30, check=False)
+    return subprocess.run([ip_command(), "link", *arguments], capture_output=True, text=True, timeout=scaled_time_bound(30), check=False)
 
 
 def observer_is_bound(channel: str, seconds: float) -> bool:
@@ -295,10 +295,10 @@ class LiveServer:
         assert self.process.stdin is not None
         self.process.stdin.close()
         try:
-            self.process.wait(timeout=30)
+            self.process.wait(timeout=scaled_time_bound(30))
         except subprocess.TimeoutExpired:
             self.process.kill()
-            self.process.wait(timeout=30)
+            self.process.wait(timeout=scaled_time_bound(30))
 
 
 @contextmanager
@@ -345,16 +345,22 @@ def a_frame_at_the_far_end(bus: object, timeout_s: float = WIRE_TIMEOUT_S) -> tu
 
 
 @contextmanager
-def flooding(bus: object, frames: list[tuple[int, bytes, dict]], *, gap_s: float = 0.001) -> Iterator[None]:
+def flooding(bus: object, frames: list[tuple[int, bytes, dict]], *, gap_s: float = 0.001, after: tuple[int, bytes] | None = None) -> Iterator[None]:
     """Keep sending frames from the far end for as long as the block runs.
 
     A background sender, so a read-until-match or a drain that cannot keep up has
     a bus that keeps carrying traffic under it. Each entry is `(id, data, kwargs)`
     where kwargs is forwarded to `send_from_far_end` (for example `extended`).
+    With `after`, an `(id, data)` frame, it starts only once the far end has read
+    that frame, so the flood begins at a point the other side marks on the bus
+    rather than whenever the block is entered (#540).
     """
     stop = threading.Event()
 
     def pump() -> None:
+        while after is not None and not stop.is_set():
+            if a_frame_at_the_far_end(bus, timeout_s=0.05) == after:
+                break
         while not stop.is_set():
             for frame_id, data, kwargs in frames:
                 if stop.is_set():
@@ -392,10 +398,10 @@ def scripted_peer(channel: str, ready: Path, *replies: str) -> Iterator[subproce
         if peer.poll() is None:
             peer.terminate()
         try:
-            peer.wait(timeout=10)
+            peer.wait(timeout=scaled_time_bound(10))
         except subprocess.TimeoutExpired:
             peer.kill()
-            peer.wait(timeout=10)
+            peer.wait(timeout=scaled_time_bound(10))
 
 
 def reactor(project: Path, config: Path, plan: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -564,7 +570,7 @@ def test_a_frame_the_product_sent_is_what_candump_reads_off_the_interface(tmp_pa
         finally:
             if observer.poll() is None:
                 observer.kill()
-                observer.wait(timeout=10)
+                observer.wait(timeout=scaled_time_bound(10))
 
     assert observer.returncode == 0, stderr
     lines = stdout.strip().splitlines()
@@ -1088,6 +1094,80 @@ def test_extended_and_remote_frames_cross_the_read_path_with_their_shape_intact(
         assert remote["rtr"] is True and remote["extended"] is False, remote
 
 
+# What the comparator test's far end floods: one identifier and one payload in
+# both frame types, so only the frame type tells the two apart.
+COMPARATOR_FLOOD = [(0x123, b"\x5a", {}), (0x123, b"\x5a", {"extended": True})]
+# The session's marker (#540): the frame the comparator plan sends right after
+# `can_open`, on an identifier neither flood frame uses, so it can never meet
+# the comparator.
+SESSION_OPEN_MARKER = (0x300, b"\x01")
+
+
+def candump_frame(frame_id: int, data: bytes, *, extended: bool = False) -> str:
+    """A classic frame the way `candump -L` writes it after the interface name.
+
+    Three hexadecimal digits of identifier for a standard frame and eight for an
+    extended one, which is how its output tells the two frame types apart, then
+    `#` and the payload in upper case.
+    """
+    return f"{frame_id:0{8 if extended else 3}X}#{data.hex().upper()}"
+
+
+@contextmanager
+def recording_the_bus(channel: str) -> Iterator[list[str]]:
+    """Every frame on the interface while the block runs, in the order candump read them.
+
+    The observer with no stake again. candump binds the fresh interface before
+    anything else does and is waited for through the kernel's rcvlist rather
+    than a sleep, so the first frame anything puts on the interface inside the
+    block is its first line. Each entry is spelled as `candump_frame` spells it,
+    and the list is filled when the block ends.
+    """
+    candump = shutil.which("candump")
+    assert candump is not None, "can-utils is not in this image"
+    observer = subprocess.Popen([candump, "-L", channel], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    recorded: list[str] = []
+    try:
+        assert observer_is_bound(channel, WIRE_TIMEOUT_S), f"candump did not bind {channel} within {WIRE_TIMEOUT_S:.0f}s: {observer.stderr.read() if observer.poll() is not None else 'still starting'}"
+        yield recorded
+    finally:
+        # candump ends its read loop on SIGTERM and flushes each line as it
+        # prints it, so everything it read is on the pipe when it exits.
+        observer.terminate()
+        try:
+            stdout, stderr = observer.communicate(timeout=WIRE_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            observer.kill()
+            stdout, stderr = observer.communicate()
+    assert observer.returncode == 0, f"candump exited {observer.returncode} while recording {channel}: {stderr}"
+    recorded.extend(line.split()[2] for line in stdout.splitlines() if line.strip())
+
+
+def run_the_comparator_plan_under_a_flood(tmp_path: Path, vcan: str) -> subprocess.CompletedProcess[str]:
+    """The comparator test's run: a plan reading for the extended 0x123 while the far end floods both frame types.
+
+    The flood waits for the marker the plan sends right after `can_open`, so the
+    session opens on a quiet bus and its pre-session drain has no flood to race (#540).
+    """
+    marker_id, marker_data = SESSION_OPEN_MARKER
+    project, config = can_project(tmp_path, bus_entry("bus", vcan))
+    plan = project / "extended.yaml"
+    plan.write_text(
+        f"""version: 3
+name: extended
+steps:
+  - {{device: bus, action: can_open}}
+  - {{device: bus, action: can_send, frame_id: "{marker_id:#x}", data_hex: "{marker_data.hex()}"}}
+  - {{device: bus, action: can_read, comparator: {{id: "0x123", extended: true, equals: "5a"}}, timeout_s: 4}}
+  - {{device: bus, action: can_close}}
+""",
+        encoding="utf-8",
+    )
+
+    with far_end(vcan) as peer, flooding(peer, COMPARATOR_FLOOD, after=SESSION_OPEN_MARKER):
+        return reactor(project, config, plan, "--json")
+
+
 def test_a_comparator_only_matches_the_frame_type_it_asked_for(tmp_path: Path, vcan: str) -> None:
     """The reactor's `can_read` comparator selects on the identifier and the frame type.
 
@@ -1096,28 +1176,51 @@ def test_a_comparator_only_matches_the_frame_type_it_asked_for(tmp_path: Path, v
     both while the plan reads until its claim is met, and the run is green only
     because the extended frame arrived and matched.
     """
-    project, config = can_project(tmp_path, bus_entry("bus", vcan))
-    plan = project / "extended.yaml"
-    plan.write_text(
-        """version: 3
-name: extended
-steps:
-  - {device: bus, action: can_open}
-  - {device: bus, action: can_read, comparator: {id: "0x123", extended: true, equals: "5a"}, timeout_s: 4}
-  - {device: bus, action: can_close}
-""",
-        encoding="utf-8",
-    )
-
-    with far_end(vcan) as peer, flooding(peer, [(0x123, b"\x5a", {}), (0x123, b"\x5a", {"extended": True})]):
-        ran = reactor(project, config, plan, "--json")
+    ran = run_the_comparator_plan_under_a_flood(tmp_path, vcan)
 
     assert ran.returncode == 0, ran.stdout + ran.stderr
     result = json.loads(ran.stdout)
     assert result["ok"] is True, result
-    matched = result["steps"][1]["result"]
+    matched = result["steps"][2]["result"]
     assert matched["frame"]["extended"] is True, matched
     assert matched["frame"]["id_hex"] == "0x123" and matched["frame"]["data_hex"] == "5a", matched
+
+
+def test_the_comparator_flood_waits_for_the_session_to_open(tmp_path: Path, vcan: str) -> None:
+    """No flood frame reaches the bus ahead of the frame the plan sends once its session is open (#540).
+
+    The comparator test's far end used to start flooding before the plan ran,
+    so the plan's `can_open` raced it: the pre-session drain reads bounded
+    batches, and on a loaded machine the flood outran them, the start was
+    refused as `can_queue_clear_limit` (`frames_drained: 128`), and a test about
+    the comparator failed on a session that never opened. That refusal is right
+    and is the subject of its own test below, which keeps its race. The
+    comparator test wants the opposite: a session that opens on a quiet bus,
+    then a bus that keeps carrying both frame types while the plan reads.
+
+    Load does not reproduce a race on demand, so this pins the order instead:
+    candump records the comparator test's own run from before the far end
+    binds, and no flood frame comes ahead of the session's marker, which the
+    plan sends right after `can_open`. The product's own account of the same
+    moment agrees: the open step's drain found the bus quiet. After the marker
+    the bus carries both frame types, because that is what the comparator test
+    is about.
+    """
+    with recording_the_bus(vcan) as recorded:
+        ran = run_the_comparator_plan_under_a_flood(tmp_path, vcan)
+
+    marker = candump_frame(*SESSION_OPEN_MARKER)
+    flood = {candump_frame(frame_id, data, **options) for frame_id, data, options in COMPARATOR_FLOOD}
+    # The order is candump's queue. The far end floods only once handed the marker, in the kernel pass that hands it to
+    # candump too, so a flood frame gets ahead only if that pass stalls between its two deliveries (a preempted CPU).
+    opened = recorded.index(marker) if marker in recorded else len(recorded)
+    early = sum(frame in flood for frame in recorded[:opened])
+    assert early == 0, f"{early} flood frame(s) reached {vcan} ahead of the session's marker {marker}{'' if marker in recorded else ', which never came'}; the bus began {recorded[:6]}"
+    assert marker in recorded, f"the session's marker {marker} never reached {vcan}: {ran.stdout}{ran.stderr}"
+    opening = json.loads(ran.stdout)["steps"][0]
+    assert opening["action"] == "can_open" and opening["result"]["ok"] is True, opening
+    assert opening["result"]["frames_drained"] == 0, opening
+    assert flood <= set(recorded[opened + 1 :]), f"the bus did not carry both frame types after the session's marker: {recorded[:6]}"
 
 
 def test_receive_own_messages_reads_back_the_frame_the_same_session_sent(tmp_path: Path, vcan: str) -> None:

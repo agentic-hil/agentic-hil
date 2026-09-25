@@ -103,7 +103,7 @@ def assert_refused_before_contact(result: dict, config) -> None:
 
 
 def run_fixture(*arguments: str, timeout: float = 30.0, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([sys.executable, str(FAKE_PYOCD_NO_PROBE), *arguments], capture_output=True, text=True, timeout=timeout, env=env, check=False)
+    return subprocess.run([sys.executable, str(FAKE_PYOCD_NO_PROBE), *arguments], capture_output=True, text=True, timeout=scaled_time_bound(timeout), env=env, check=False)
 
 
 # ---------------------------------------------------------------------------

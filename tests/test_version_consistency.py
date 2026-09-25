@@ -19,7 +19,6 @@ from check_version_consistency import (  # noqa: E402
     UNTRACKED_MENTIONS,
     anticipated_release,
     contract_problems,
-    expected_for,
     is_development,
     is_newer,
     locations,
@@ -38,6 +37,18 @@ from check_version_consistency import (  # noqa: E402
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CHECK = "tools/check_version_consistency.py"
+
+# The shipped CI examples and the page that prints their pin. A reader copies
+# one of them and installs exactly the version it names, on whatever day that is.
+EXAMPLE_POSITIONS = ("examples/ci/github-actions.yml", "examples/ci/gitlab-ci.yml", "docs/ci-examples.md")
+# `## [X.Y.Z] - YYYY-MM-DD`: a release with the date it was published. The
+# newest one is the newest release the package index carries, learned offline.
+DATED_RELEASE_HEADING = re.compile(r"^## \[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}\s*$", re.MULTILINE)
+
+
+def _dated_releases(root: Path) -> list[str]:
+    """Every release CHANGELOG.md dates, newest first."""
+    return DATED_RELEASE_HEADING.findall((root / "CHANGELOG.md").read_text(encoding="utf-8"))
 
 
 def test_the_gate_runs_on_every_python_this_project_supports() -> None:
@@ -100,12 +111,17 @@ def test_the_release_carries_its_version_where_the_release_that_exposed_this_car
 
 
 def test_every_stated_position_actually_carries_a_version() -> None:
+    """The two positions that name the tree state it; every other one states the newest published release.
+
+    The CI examples among them (#525): a pin to the release this tree builds
+    toward names a distribution the package index does not carry until that
+    release ships, so a copied pipeline stops at its install.
+    """
     distribution = package_version(REPOSITORY_ROOT)
-    release = release_version(REPOSITORY_ROOT)
-    anticipated = anticipated_release(REPOSITORY_ROOT)
+    published = _dated_releases(REPOSITORY_ROOT)[0]
     for location in locations(REPOSITORY_ROOT):
         assert location.versions, f"{location.path} states no version"
-        expected = expected_for(location, distribution, release, anticipated)
+        expected = distribution if location.tracks == DISTRIBUTION else published
         assert set(location.versions) == {expected}, location
 
 
@@ -177,15 +193,12 @@ def tree(tmp_path: Path) -> Path:
 
 
 def _set_distribution_version(root: Path, version: str) -> None:
-    """Move the built artifact's version, and the positions derived from it.
+    """Move the built artifact's version, and nothing else.
 
     The two positions that identify the artifact are pyproject.toml and
-    __init__.py. The CI examples are derived from it a step removed: they track
-    the anticipated release, which is the distribution version without its
-    development suffix, so moving the distribution version moves what they must
-    state too. A synthesized release or development tree that left them behind
-    would disagree with itself the moment the anticipated release stopped being
-    the one the real files were stamped for.
+    __init__.py, and they are all a development bump moves. Every other position
+    states a release, the CI examples included (#525), and only a release stamp
+    moves a release.
     """
     pyproject = root / "pyproject.toml"
     pyproject.write_text(
@@ -209,13 +222,16 @@ def _set_distribution_version(root: Path, version: str) -> None:
         ),
         encoding="utf-8",
     )
-    anticipated = anticipated_release(root)
-    for relative in ("examples/ci/github-actions.yml", "examples/ci/gitlab-ci.yml", "docs/ci-examples.md"):
+
+
+def _pin_examples(root: Path, version: str) -> None:
+    """Pin the shipped CI examples and their page: the one line each a reader copies."""
+    for relative in EXAMPLE_POSITIONS:
         path = root / relative
         path.write_text(
             re.sub(
                 r'AGENTIC_HIL_VERSION: "\d+\.\d+\.\d+"',
-                f'AGENTIC_HIL_VERSION: "{anticipated}"',
+                f'AGENTIC_HIL_VERSION: "{version}"',
                 path.read_text(encoding="utf-8"),
             ),
             encoding="utf-8",
@@ -227,16 +243,26 @@ def released_tree(tree: Path) -> Path:
     """A release commit: one version, stated everywhere, as it always was.
 
     Built from the copy rather than assumed of it, so these tests say what they
-    mean whichever shape `master` happens to carry when they run.
+    mean whichever shape `master` happens to carry when they run. The examples
+    are pinned with it because the release stamp pins them.
     """
-    _set_distribution_version(tree, release_version(tree))
+    release = release_version(tree)
+    _set_distribution_version(tree, release)
+    _pin_examples(tree, release)
     return tree
 
 
 @pytest.fixture
 def development_tree(tree: Path) -> Path:
-    """The commit after a release: the tree moved on, the release positions did not."""
-    _set_distribution_version(tree, next_development_version(release_version(tree)))
+    """The commit after a release: the tree moved on, the release positions did not.
+
+    The examples stay where the release stamp put them, at the release the
+    package index carries, and the development bump moves only the two
+    positions that name the tree.
+    """
+    release = release_version(tree)
+    _pin_examples(tree, release)
+    _set_distribution_version(tree, next_development_version(release))
     return tree
 
 
@@ -332,6 +358,15 @@ def test_the_copied_tree_is_a_fair_starting_point(tree: Path) -> None:
             RELEASE,
             lambda text, version: text.replace(f'"expected_version": "{version}"', '"expected_version": "9.9.9"'),
             "evals/install/README.md",
+        ),
+        # The recorded command surface speaks for the release the CI examples pin,
+        # so it tracks that release like they do, and a release stamp that moves
+        # the pin is refused until the surface is recorded again (#525).
+        (
+            "tests/fixtures/published_cli_surface.json",
+            RELEASE,
+            lambda text, version: text.replace(f'"version": "{version}"', '"version": "9.9.9"'),
+            "tests/fixtures/published_cli_surface.json",
         ),
     ],
 )
@@ -546,13 +581,13 @@ def test_a_new_home_for_the_development_version_cannot_appear_either(development
 
 
 def test_a_new_home_for_the_anticipated_release_cannot_appear_either(development_tree: Path) -> None:
-    """The sweep learned the third version, or the CI examples' own pin would be unwatched.
+    """The sweep knows the third version, though no position may state it.
 
-    The anticipated release is the exact `X.Y.Z` the shipped CI examples pin, and
-    between releases it is neither the last release nor this tree's development
-    version. A document that starts carrying that exact pin is the CI examples'
-    mistake happening somewhere no entry claims yet, so the sweep has to recognise
-    it as well, not just the two versions it already knew.
+    Between releases the anticipated `X.Y.Z` is neither the last release nor
+    this tree's development version, and the package index does not carry it
+    yet. A document that starts pinning it is the mistake the CI examples made
+    (#525), happening somewhere no entry claims, so the sweep has to recognise
+    it as well as the two versions the positions do state.
     """
     anticipated = anticipated_release(development_tree)
     assert anticipated != release_version(development_tree)
@@ -675,18 +710,67 @@ def test_the_tree_after_a_release_states_two_versions_and_passes(development_tre
 
     The distribution positions name the tree, the release positions keep naming
     the release a reader can install, and the gate is silent: that is the whole
-    of the decision, checked rather than described.
+    of the decision, checked rather than described. The CI examples are release
+    positions like any other: pinned to the newest release CHANGELOG.md dates,
+    they install on the day they are copied (#525).
     """
     distribution = package_version(development_tree)
     release = release_version(development_tree)
-    anticipated = anticipated_release(development_tree)
+    published = _dated_releases(development_tree)[0]
 
     assert is_development(distribution)
     assert distribution != release
+    assert release == published
     assert problems(development_tree) == []
     for location in locations(development_tree):
-        expected = expected_for(location, distribution, release, anticipated)
+        expected = distribution if location.tracks == DISTRIBUTION else published
         assert set(location.versions) == {expected}, location
+
+
+def test_a_development_tree_whose_examples_pin_the_release_it_builds_toward_is_refused(
+    development_tree: Path,
+) -> None:
+    """#525: the examples pinned a release the package index did not carry yet.
+
+    A reader who copied either file got a pipeline whose first job stopped at
+    the install with a resolver error, and a bench operator was told to update
+    to a release that did not exist. The refusal names the release the examples
+    have to pin instead: the newest one CHANGELOG.md dates, which the gate reads
+    offline.
+    """
+    published = _dated_releases(development_tree)[0]
+    unpublished = anticipated_release(development_tree)
+    assert unpublished != published
+    _pin_examples(development_tree, unpublished)
+
+    found = version_problems(development_tree)
+
+    for relative in EXAMPLE_POSITIONS:
+        named = [problem for problem in found if problem.startswith(f"{relative} states {unpublished}")]
+        assert named, found
+        assert all(published in problem for problem in named), named
+
+
+def test_a_release_tree_passes_only_with_the_examples_at_the_release(released_tree: Path) -> None:
+    """On a release commit the newest dated heading is the release itself.
+
+    So the release stamp moves the examples with every other release position,
+    and a stamp that left them at the release before is refused, naming the
+    release they have to state.
+    """
+    release = package_version(released_tree)
+    dated = _dated_releases(released_tree)
+    assert dated[0] == release
+    assert problems(released_tree) == []
+
+    before = dated[1]
+    _pin_examples(released_tree, before)
+    found = version_problems(released_tree)
+
+    for relative in EXAMPLE_POSITIONS:
+        named = [problem for problem in found if problem.startswith(f"{relative} states {before}")]
+        assert named, found
+        assert all(release in problem for problem in named), named
 
 
 def test_a_development_version_that_does_not_follow_the_release_is_refused(development_tree: Path) -> None:

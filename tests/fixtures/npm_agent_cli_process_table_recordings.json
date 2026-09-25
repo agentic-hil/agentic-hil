@@ -1,0 +1,395 @@
+{
+  "what": "The process table entries of the three agent CLIs step 5 of install.sh looks for, each installed with `npm install -g` from its official package at the version the agent registration job pins (evals/install/container/package.json), and each left running at its first prompt: never logged in, never given a key, never sent a prompt. For every process in the table: `comm` and the command line as /proc holds them, the parent, the executable, and what the real pgrep answered to the two questions step 5 asks. Recorded so the matcher's tests replay what the kernel published rather than a stand-in written from a description of it (#518). The codex launcher is `node /usr/local/bin/codex`, and the platform binary it starts is called `codex` in full, because its path ends in `.../x86_64-unknown-linux-musl/bin/codex`. Claude Code and opencode start no node at these versions: npm links the command straight to the platform binary, so each is one process whose `comm` is the command's own name. No path here names a home directory: npm's global prefix in the image is /usr/local and every command ran as root.",
+  "recorded_on": "2026-09-25",
+  "image": "node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5, the base image of evals/install/container/Dockerfile, run as root with HOME=/root, x86_64, Debian 12.15",
+  "tool_versions": {
+    "node": "v22.23.2",
+    "npm": "10.9.8",
+    "pgrep": "pgrep from procps-ng 4.0.2",
+    "ps": "ps from procps-ng 4.0.2",
+    "script": "script from util-linux 2.38.1"
+  },
+  "how": [
+    "`docker run -d <image> sleep infinity`, then `apt-get update -qq && apt-get install -y -qq --no-install-recommends procps` for pgrep and ps (script is the image's own), then `npm install -g --no-fund --no-audit <package>@<version>` for each of the three packages below, then `docker network disconnect bridge <container>`.",
+    "Each CLI was started detached under a pseudo-terminal: `docker exec -d <container> sh -c 'sleep 100000 | TERM=xterm-256color script -qfc \"stty cols 120 rows 40; exec <name>\" /tmp/<name>.screen'`, the `sh -c` lines the tables show. The `sleep` holds the terminal's input open and sends nothing, and the `exec` makes the CLI the process `script` started, which is the PID each table's `started` names for it.",
+    "The container had no network while codex and opencode started and while both tables were read. Claude Code 2.1.218 exits at start without one (\"Unable to connect to Anthropic services\", exit code 1), which is why the first table holds its `sh -c` and `sleep` but no claude. For its start alone the container was connected again, with DISABLE_AUTOUPDATER=1 and CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 in its environment, and disconnected before the second table was read. The prompts they sat at: codex's sign-in choice, Claude Code's theme picker, opencode's input line.",
+    "Each table was read by one script: `ps -e -o pid,ppid,comm,args` (kept as `ps`), then for every process `ps -o pid,ppid,comm,args -p <pid>`, `cat /proc/<pid>/comm`, `tr \"\\0\" \" \" < /proc/<pid>/cmdline; echo` (kept as `cmdline`, its trailing space included), `base64 -w0 /proc/<pid>/cmdline` (decoded into `argv`, so the argument boundaries the `tr` line loses are kept) and `readlink /proc/<pid>/exe`, and last `pgrep -x <name>` and `pgrep -f \"(^|/)<name>(\\.js)?( |\\$)\"` for each of the three names. The reading script and the `ps` it ran are in the `ps` lines and not among `processes`.",
+    "Afterwards every CLI was stopped with SIGTERM and the container was removed."
+  ],
+  "packages": {
+    "claude": {
+      "package": "@anthropic-ai/claude-code",
+      "version": "2.1.218",
+      "installed_with": "npm install -g --no-fund --no-audit @anthropic-ai/claude-code@2.1.218",
+      "platform_package": "@anthropic-ai/claude-code-linux-x64@2.1.218",
+      "bin": "/usr/local/bin/claude -> ../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+      "bin_is_a_hard_link_of": "/usr/local/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/claude"
+    },
+    "codex": {
+      "package": "@openai/codex",
+      "version": "0.145.0",
+      "installed_with": "npm install -g --no-fund --no-audit @openai/codex@0.145.0",
+      "platform_package": "@openai/codex-linux-x64@npm:@openai/codex@0.145.0-linux-x64",
+      "bin": "/usr/local/bin/codex -> ../lib/node_modules/@openai/codex/bin/codex.js",
+      "bin_first_line": "#!/usr/bin/env node"
+    },
+    "opencode": {
+      "package": "opencode-ai",
+      "version": "1.18.3",
+      "installed_with": "npm install -g --no-fund --no-audit opencode-ai@1.18.3",
+      "platform_package": "opencode-linux-x64@1.18.3, with opencode-linux-x64-baseline@1.18.3 installed beside it",
+      "bin": "/usr/local/bin/opencode -> ../lib/node_modules/opencode-ai/bin/opencode.exe",
+      "bin_is_a_hard_link_of": "/usr/local/lib/node_modules/opencode-ai/node_modules/opencode-linux-x64/bin/opencode"
+    }
+  },
+  "tables": {
+    "codex_and_opencode": {
+      "started": {
+        "codex": 393,
+        "opencode": 481
+      },
+      "ps": [
+        "    PID    PPID COMMAND         COMMAND",
+        "      1       0 sleep           sleep infinity",
+        "    385       0 sh              sh -c sleep 100000 | TERM=xterm-256color script -qfc \"stty cols 120 rows 40; exec codex\" /tmp/codex.screen",
+        "    391     385 sleep           sleep 100000",
+        "    392     385 script          script -qfc stty cols 120 rows 40; exec codex /tmp/codex.screen",
+        "    393     392 node            node /usr/local/bin/codex",
+        "    401     393 codex           /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex",
+        "    454       0 sh              sh -c sleep 100000 | TERM=xterm-256color script -qfc \"stty cols 120 rows 40; exec claude\" /tmp/claude.screen",
+        "    460     454 sleep           sleep 100000",
+        "    473       0 sh              sh -c sleep 100000 | TERM=xterm-256color script -qfc \"stty cols 120 rows 40; exec opencode\" /tmp/opencode.screen",
+        "    479     473 sleep           sleep 100000",
+        "    480     473 script          script -qfc stty cols 120 rows 40; exec opencode /tmp/opencode.screen",
+        "    481     480 opencode        opencode",
+        "    577       0 sh              sh /tmp/capture.sh",
+        "    584     577 ps              ps -e -o pid,ppid,comm,args"
+      ],
+      "processes": [
+        {
+          "pid": 1,
+          "ppid": 0,
+          "comm": "sleep",
+          "cmdline": "sleep infinity ",
+          "argv": [
+            "sleep",
+            "infinity"
+          ],
+          "exe": "/usr/bin/sleep"
+        },
+        {
+          "pid": 385,
+          "ppid": 0,
+          "comm": "sh",
+          "cmdline": "sh -c sleep 100000 | TERM=xterm-256color script -qfc \"stty cols 120 rows 40; exec codex\" /tmp/codex.screen ",
+          "argv": [
+            "sh",
+            "-c",
+            "sleep 100000 | TERM=xterm-256color script -qfc \"stty cols 120 rows 40; exec codex\" /tmp/codex.screen"
+          ],
+          "exe": "/usr/bin/dash"
+        },
+        {
+          "pid": 391,
+          "ppid": 385,
+          "comm": "sleep",
+          "cmdline": "sleep 100000 ",
+          "argv": [
+            "sleep",
+            "100000"
+          ],
+          "exe": "/usr/bin/sleep"
+        },
+        {
+          "pid": 392,
+          "ppid": 385,
+          "comm": "script",
+          "cmdline": "script -qfc stty cols 120 rows 40; exec codex /tmp/codex.screen ",
+          "argv": [
+            "script",
+            "-qfc",
+            "stty cols 120 rows 40; exec codex",
+            "/tmp/codex.screen"
+          ],
+          "exe": "/usr/bin/script"
+        },
+        {
+          "pid": 393,
+          "ppid": 392,
+          "comm": "node",
+          "cmdline": "node /usr/local/bin/codex ",
+          "argv": [
+            "node",
+            "/usr/local/bin/codex"
+          ],
+          "exe": "/usr/local/bin/node"
+        },
+        {
+          "pid": 401,
+          "ppid": 393,
+          "comm": "codex",
+          "cmdline": "/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex ",
+          "argv": [
+            "/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+          ],
+          "exe": "/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+        },
+        {
+          "pid": 454,
+          "ppid": 0,
+          "comm": "sh",
+          "cmdline": "sh -c sleep 100000 | TERM=xterm-256color script -qfc \"stty cols 120 rows 40; exec claude\" /tmp/claude.screen ",
+          "argv": [
+            "sh",
+            "-c",
+            "sleep 100000 | TERM=xterm-256color script -qfc \"stty cols 120 rows 40; exec claude\" /tmp/claude.screen"
+          ],
+          "exe": "/usr/bin/dash"
+        },
+        {
+          "pid": 460,
+          "ppid": 454,
+          "comm": "sleep",
+          "cmdline": "sleep 100000 ",
+          "argv": [
+            "sleep",
+            "100000"
+          ],
+          "exe": "/usr/bin/sleep"
+        },
+        {
+          "pid": 473,
+          "ppid": 0,
+          "comm": "sh",
+          "cmdline": "sh -c sleep 100000 | TERM=xterm-256color script -qfc \"stty cols 120 rows 40; exec opencode\" /tmp/opencode.screen ",
+          "argv": [
+            "sh",
+            "-c",
+            "sleep 100000 | TERM=xterm-256color script -qfc \"stty cols 120 rows 40; exec opencode\" /tmp/opencode.screen"
+          ],
+          "exe": "/usr/bin/dash"
+        },
+        {
+          "pid": 479,
+          "ppid": 473,
+          "comm": "sleep",
+          "cmdline": "sleep 100000 ",
+          "argv": [
+            "sleep",
+            "100000"
+          ],
+          "exe": "/usr/bin/sleep"
+        },
+        {
+          "pid": 480,
+          "ppid": 473,
+          "comm": "script",
+          "cmdline": "script -qfc stty cols 120 rows 40; exec opencode /tmp/opencode.screen ",
+          "argv": [
+            "script",
+            "-qfc",
+            "stty cols 120 rows 40; exec opencode",
+            "/tmp/opencode.screen"
+          ],
+          "exe": "/usr/bin/script"
+        },
+        {
+          "pid": 481,
+          "ppid": 480,
+          "comm": "opencode",
+          "cmdline": "opencode ",
+          "argv": [
+            "opencode"
+          ],
+          "exe": "/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe"
+        }
+      ],
+      "pgrep": [
+        {
+          "argv": [
+            "pgrep",
+            "-x",
+            "claude"
+          ],
+          "stdout": "",
+          "returncode": 1
+        },
+        {
+          "argv": [
+            "pgrep",
+            "-f",
+            "(^|/)claude(\\.js)?( |$)"
+          ],
+          "stdout": "",
+          "returncode": 1
+        },
+        {
+          "argv": [
+            "pgrep",
+            "-x",
+            "codex"
+          ],
+          "stdout": "401\n",
+          "returncode": 0
+        },
+        {
+          "argv": [
+            "pgrep",
+            "-f",
+            "(^|/)codex(\\.js)?( |$)"
+          ],
+          "stdout": "393\n401\n",
+          "returncode": 0
+        },
+        {
+          "argv": [
+            "pgrep",
+            "-x",
+            "opencode"
+          ],
+          "stdout": "481\n",
+          "returncode": 0
+        },
+        {
+          "argv": [
+            "pgrep",
+            "-f",
+            "(^|/)opencode(\\.js)?( |$)"
+          ],
+          "stdout": "481\n",
+          "returncode": 0
+        }
+      ]
+    },
+    "claude": {
+      "started": {
+        "claude": 723
+      },
+      "ps": [
+        "    PID    PPID COMMAND         COMMAND",
+        "      1       0 sleep           sleep infinity",
+        "    714       0 sh              sh -c sleep 100000 | TERM=xterm-256color DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 script -qfc \"stty cols 120 rows 40; exec claude\" /tmp/claude3.screen",
+        "    721     714 sleep           sleep 100000",
+        "    722     714 script          script -qfc stty cols 120 rows 40; exec claude /tmp/claude3.screen",
+        "    723     722 claude          claude",
+        "    754       0 sh              sh /tmp/capture.sh",
+        "    761     754 ps              ps -e -o pid,ppid,comm,args"
+      ],
+      "processes": [
+        {
+          "pid": 1,
+          "ppid": 0,
+          "comm": "sleep",
+          "cmdline": "sleep infinity ",
+          "argv": [
+            "sleep",
+            "infinity"
+          ],
+          "exe": "/usr/bin/sleep"
+        },
+        {
+          "pid": 714,
+          "ppid": 0,
+          "comm": "sh",
+          "cmdline": "sh -c sleep 100000 | TERM=xterm-256color DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 script -qfc \"stty cols 120 rows 40; exec claude\" /tmp/claude3.screen ",
+          "argv": [
+            "sh",
+            "-c",
+            "sleep 100000 | TERM=xterm-256color DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 script -qfc \"stty cols 120 rows 40; exec claude\" /tmp/claude3.screen"
+          ],
+          "exe": "/usr/bin/dash"
+        },
+        {
+          "pid": 721,
+          "ppid": 714,
+          "comm": "sleep",
+          "cmdline": "sleep 100000 ",
+          "argv": [
+            "sleep",
+            "100000"
+          ],
+          "exe": "/usr/bin/sleep"
+        },
+        {
+          "pid": 722,
+          "ppid": 714,
+          "comm": "script",
+          "cmdline": "script -qfc stty cols 120 rows 40; exec claude /tmp/claude3.screen ",
+          "argv": [
+            "script",
+            "-qfc",
+            "stty cols 120 rows 40; exec claude",
+            "/tmp/claude3.screen"
+          ],
+          "exe": "/usr/bin/script"
+        },
+        {
+          "pid": 723,
+          "ppid": 722,
+          "comm": "claude",
+          "cmdline": "claude ",
+          "argv": [
+            "claude"
+          ],
+          "exe": "/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+        }
+      ],
+      "pgrep": [
+        {
+          "argv": [
+            "pgrep",
+            "-x",
+            "claude"
+          ],
+          "stdout": "723\n",
+          "returncode": 0
+        },
+        {
+          "argv": [
+            "pgrep",
+            "-f",
+            "(^|/)claude(\\.js)?( |$)"
+          ],
+          "stdout": "723\n",
+          "returncode": 0
+        },
+        {
+          "argv": [
+            "pgrep",
+            "-x",
+            "codex"
+          ],
+          "stdout": "",
+          "returncode": 1
+        },
+        {
+          "argv": [
+            "pgrep",
+            "-f",
+            "(^|/)codex(\\.js)?( |$)"
+          ],
+          "stdout": "",
+          "returncode": 1
+        },
+        {
+          "argv": [
+            "pgrep",
+            "-x",
+            "opencode"
+          ],
+          "stdout": "",
+          "returncode": 1
+        },
+        {
+          "argv": [
+            "pgrep",
+            "-f",
+            "(^|/)opencode(\\.js)?( |$)"
+          ],
+          "stdout": "",
+          "returncode": 1
+        }
+      ]
+    }
+  }
+}

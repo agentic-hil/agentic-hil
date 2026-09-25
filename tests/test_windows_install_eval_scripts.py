@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from evals.install.adapters import REASONING_EFFORTS
 
@@ -18,7 +19,7 @@ WINDOWS_ONLY = pytest.mark.skipif(
 # Windows PowerShell 5.1 takes seconds to start, and on a loaded runner these
 # invocations exceeded 30 s: the 3.10 Windows job spent 7m26s where its
 # siblings spent 3m and passed. The budget bounds a hang, not a slow start.
-SCRIPT_TIMEOUT_S = 180
+SCRIPT_TIMEOUT_S = scaled_time_bound(180)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SETUP_SCRIPT = REPOSITORY_ROOT / "evals" / "install" / "setup-environment-windows.ps1"
@@ -52,7 +53,7 @@ def _run_script(
     script: Path,
     *arguments: str,
     input_text: str | None = None,
-    timeout: int = SCRIPT_TIMEOUT_S,
+    timeout: int = 180,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -69,7 +70,7 @@ def _run_script(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
-        timeout=timeout,
+        timeout=scaled_time_bound(timeout),
     )
 
 

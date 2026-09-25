@@ -55,6 +55,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, Bench, child_command
 
@@ -90,7 +91,7 @@ CALL_TIMEOUT_S = 90.0
 # target, each of them bounded by the configured debugger timeout rather than by
 # anything here, so this has to sit above that budget rather than inside it.
 START_SESSION_TIMEOUT_S = 240.0
-SERVER_EXIT_TIMEOUT_S = 30.0
+SERVER_EXIT_TIMEOUT_S = scaled_time_bound(30.0)
 
 # What a resume is given. The long one is for a breakpoint that will be reached
 # in microseconds and only needs room for the round trip; the short one is for
@@ -284,7 +285,7 @@ def server(bench: Bench) -> Iterator[McpServer]:
 
 
 @pytest.fixture()
-def session(server: McpServer, bench: Bench, firmware: Path) -> Iterator[McpServer]:
+def session(server: McpServer, bench: Bench, gdb: None, firmware: Path) -> Iterator[McpServer]:
     """A debug session on the demo ELF, reset and halted, closed in teardown.
 
     `reset_halt` rather than `attach`, so every test starts at the reset vector

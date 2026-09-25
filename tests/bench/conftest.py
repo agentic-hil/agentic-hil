@@ -16,10 +16,26 @@ How a run reaches the bench:
 
 * ``AGENTIC_HIL_BENCH=1`` says this is one. Without it every test here skips, so
   a developer's ``pytest``, the hosted matrix and the container image are
-  unaffected. With it, a setup step that cannot be completed is a failure and
-  not a skip: the variable is the operator's statement that a probe and a board
-  are attached, and a tier that skipped its way past a false one would report
-  success having executed nothing on hardware.
+  unaffected. With it, the tier has one rule for what a setup step cannot find,
+  and the rule has two halves. The probe and the board are strict: a hardware
+  setup step that cannot be completed is a failure and not a skip, because the
+  variable is the operator's statement that a probe and a board are attached,
+  and a tier that skipped its way past a false one would report success having
+  executed nothing on hardware. A missing host tool is not that. An executable
+  the host provides (the cross compiler and the build tools ``firmware`` looks
+  for, the cross debugger ``gdb`` resolves the way the product resolves it, any
+  other host package) skips the tests that need it, with one sentence naming
+  the executable and where it was looked for, and the rest still run: the
+  variable says nothing about the host's toolchain, and a bench without one
+  still has hardware worth measuring. Each check runs once per session, before
+  any test that needs it reaches the probe, and pytest reports its skip once,
+  with a count, at the line of the check.
+* the run ends with a ``bench tier`` section that says, for the hardware tests,
+  the build half and the debug half, whether each ran, was skipped and why, or
+  was not selected, so a bench that skipped a half cannot be read as a full
+  tier that passed. There is one probe, so the tier runs serially: the section
+  is written by the process that ran the tests, and a run split across workers
+  writes none.
 * the CLI every command here runs is this checkout. The user site directory is
   left out of the child and this tree's ``src`` goes to the front of its import
   path, and the session fixture then asks the child where its ``agentic_hil``
@@ -48,10 +64,13 @@ import os
 import shutil
 import subprocess
 import sys
+from collections import Counter
+from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 # What says this run is on a bench. Set by the operator, or by the battery in
 # `tools/bench_battery.py`, and by nothing that runs unattended.
@@ -66,6 +85,39 @@ DEMO = REPOSITORY_ROOT / "examples" / "nucleo-f446re_demo"
 # board.
 WHERE_THE_PRODUCT_CAME_FROM = "import agentic_hil; print(agentic_hil.__file__)"
 
+# What a child of this tier runs to find the debugger the way a debug session
+# finds it: the configuration loaded as the server loads it, pinning included,
+# then the resolver every debug session calls. Where the product refuses the
+# debugger, the child also reads what the document itself names, and whether
+# that is there: by name on PATH, as the product looks a bare name up, or as a
+# path from the workspace.
+FIND_THE_DEBUGGER = r"""
+import json
+import shutil
+import sys
+from pathlib import Path
+
+from agentic_hil.backends.gdbdebug import resolve_gdb_executable
+from agentic_hil.config import GDB_AUTODETECT_CANDIDATES, ConfigError, load_authoritative_config, load_config, resolve_work_path
+
+workspace, document = sys.argv[1:3]
+try:
+    config = load_authoritative_config(workspace)
+except ConfigError as refused:
+    product = refused.to_dict()
+else:
+    product = resolve_gdb_executable(config, "" if config.debugger is None else config.debugger.type)
+configured, by_name, there = None, False, False
+if product.get("error_type") == "gdb_not_found" or product.get("field") == "debug.gdb_executable":
+    written = load_config(document)
+    configured = written.debug.gdb_executable
+    if configured is not None:
+        by_name = not (Path(configured).is_absolute() or "/" in configured or "\\" in configured)
+        there = shutil.which(configured) is not None if by_name else Path(resolve_work_path(written, configured)).exists()
+answer = {"product": product, "candidates": GDB_AUTODETECT_CANDIDATES, "configured": configured, "by_name": by_name, "exists": there}
+print(json.dumps(answer, default=str))
+"""
+
 # The operator's own home, read here, at collection, before the suite's own
 # isolation has moved it. The commands this tier runs get it back, because the
 # device locks that serialise this bench are under it; the test process itself
@@ -75,8 +127,8 @@ OPERATOR_HOME = str(Path.home())
 
 # Long enough for a flash and a boot on a slow link, short enough that a wedged
 # probe fails the run rather than holding it.
-COMMAND_TIMEOUT_S = 600.0
-BUILD_TIMEOUT_S = 900.0
+COMMAND_TIMEOUT_S = scaled_time_bound(600.0)
+BUILD_TIMEOUT_S = scaled_time_bound(900.0)
 
 
 def _why_this_is_not_a_bench() -> str | None:
@@ -182,6 +234,18 @@ def refuse(why: str) -> None:
     pytest.fail(why, pytrace=False)
 
 
+class MissingHostTool(pytest.skip.Exception):
+    """The skip for an executable this host does not provide, and only that one.
+
+    A class of its own so the report hook at the end of this module finds these
+    skips by what raised them and never by what they say. pytest reports a skip
+    raised in a fixture at each test that asked for it, which lists a half the
+    host could not run test by test; the hook reports these at the check that
+    raised them instead, so the tests one missing tool skipped fold into one
+    line with a count. Every other skip keeps pytest's own report.
+    """
+
+
 @dataclass(frozen=True)
 class Bench:
     """One configured project on this machine's bench, and how to drive it."""
@@ -283,6 +347,65 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> Bench:
     return prepared
 
 
+def missing_gdb(bench: Bench) -> str | None:
+    """Why the debug half cannot run on this bench, in one sentence, or None where it can.
+
+    Asked of the product and not of PATH: a child with the bench's own
+    environment loads the configuration the way the server does and calls the
+    resolver every debug session calls, so a debugger the product would run is
+    never missing here, whatever it is called and wherever it is. What the
+    resolver reports missing is a missing host tool. So is a debugger the
+    configuration names and this host has not got, told apart from one the
+    product refuses for another reason by whether what the document names is
+    there, never by the product's wording. The tier's own configuration never
+    names such a debugger, because ``init`` writes ``debug.gdb_executable`` only
+    for one it has just found on this host. Anything else the product refuses, a
+    debugger that is there among it, is a bench that was not set up, and fails
+    with the product's own line.
+    """
+    found = subprocess.run(
+        [sys.executable, "-s", "-c", FIND_THE_DEBUGGER, str(bench.project), str(bench.config)],
+        capture_output=True,
+        text=True,
+        cwd=str(bench.project),
+        env=bench.environment(),
+        timeout=COMMAND_TIMEOUT_S,
+        check=False,
+    )
+    try:
+        answer = json.loads(found.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        refuse(f"the bench tier could not ask the product for this bench's debugger (exit {found.returncode}):\n{found.stdout}\n{found.stderr}")
+    product = answer["product"]
+    if product.get("ok") is True:
+        return None
+    configured = answer["configured"]
+    missing = product.get("error_type") == "gdb_not_found" or (
+        product.get("field") == "debug.gdb_executable" and configured is not None and not answer["exists"]
+    )
+    if not missing:
+        refuse(f"the bench tier could not check this bench's debugger: {product.get('error_type')}: {product.get('summary')}\n{json.dumps(product, indent=2)}")
+    if configured is None:
+        *others, last = answer["candidates"]
+        names = f"{', '.join(others)} and {last} are" if others else f"{last} is"
+        return f"{names} not on PATH and debug.gdb_executable is not set, so the debug half cannot run here: {product.get('summary')}"
+    where = "which is not on PATH" if answer["by_name"] else "which does not exist"
+    return f"debug.gdb_executable names {configured}, {where}, so the debug half cannot run here: {product.get('summary')}"
+
+
+@pytest.fixture(scope="session")
+def gdb(bench: Bench) -> None:
+    """The debugger the debug half drives, checked once, before any test of that half reaches the probe.
+
+    The debug half's counterpart of the build tools ``firmware`` looks for, and
+    asked for ahead of it: a bench without a debugger skips every test that asks
+    for this with the one sentence ``missing_gdb`` gives, and runs the rest.
+    """
+    why = missing_gdb(bench)
+    if why is not None:
+        raise MissingHostTool(why)
+
+
 @pytest.fixture(scope="session")
 def firmware(bench: Bench) -> Path:
     """The demo's ELF, built here, because a plan that flashes needs one.
@@ -294,7 +417,7 @@ def firmware(bench: Bench) -> Path:
     """
     for tool in ("cmake", "arm-none-eabi-gcc"):
         if shutil.which(tool) is None:
-            pytest.skip(f"{tool} is not on PATH, so the demo firmware cannot be built here")
+            raise MissingHostTool(f"{tool} is not on PATH, so the demo firmware cannot be built here")
     for command in (["cmake", "--preset", "Debug"], ["cmake", "--build", "--preset", "Debug"]):
         built = subprocess.run(command, capture_output=True, text=True, cwd=str(bench.project), timeout=BUILD_TIMEOUT_S, check=False)
         if built.returncode != 0:
@@ -351,3 +474,115 @@ def debugger_capture(bench: Bench, log_path: str) -> str:
     """Everything the debugger wrote for one step, out of the log the step names."""
     recorded = json.loads((bench.project / log_path).read_text(encoding="utf-8"))
     return f"{recorded.get('stdout') or ''}\n{recorded.get('stderr') or ''}"
+
+
+# The parts of the tier the closing section accounts for, by what a test of each
+# needs beyond the probe and the board: nothing, the demo firmware built, or a
+# debugger on top of that.
+HALVES = ("hardware tests", "build half", "debug half")
+
+# What became of one test, in the order the section counts them, and the kinds
+# that mean its body ran.
+OUTCOME_KINDS = (
+    "passed",
+    "failed",
+    "errored in setup",
+    "errored in teardown",
+    "skipped for a missing host tool",
+    "skipped",
+    "not reached",
+)
+EXECUTED = frozenset({"passed", "failed", "errored in teardown"})
+
+SELECTED = pytest.StashKey[dict[str, list[str]]]()
+OUTCOMES = pytest.StashKey[dict[str, tuple[str, str]]]()
+
+
+def half_of(item: pytest.Item) -> str:
+    needs = getattr(item, "fixturenames", ())
+    if "gdb" in needs:
+        return "debug half"
+    if "firmware" in needs:
+        return "build half"
+    return "hardware tests"
+
+
+def first_line_of_why(report: pytest.TestReport, excinfo: pytest.ExceptionInfo[BaseException] | None) -> str:
+    """The first line of why a test did not pass, as the run reported it."""
+    if report.skipped and isinstance(report.longrepr, tuple):
+        why = report.longrepr[2].removeprefix("Skipped: ")
+    elif excinfo is not None and isinstance(excinfo.value, pytest.fail.Exception):
+        why = excinfo.value.msg or ""
+    elif excinfo is not None:
+        why = excinfo.exconly()
+    else:
+        why = str(report.longrepr or "")
+    lines = why.strip().splitlines()
+    return lines[0] if lines else ""
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[None]
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    """A missing host tool reported at its check, and every test's outcome kept for the closing section."""
+    report = yield
+    excinfo = call.excinfo
+    missing_tool = excinfo is not None and isinstance(excinfo.value, MissingHostTool) and report.skipped
+    if missing_tool:
+        raised = excinfo.traceback[-1]
+        report.longrepr = (str(raised.path), raised.lineno + 1, f"Skipped: {excinfo.value.msg}")
+    outcomes = item.config.stash.setdefault(OUTCOMES, {})
+    kind = None
+    if report.when == "setup" and report.failed:
+        kind = "errored in setup"
+    elif report.when == "setup" and report.skipped:
+        kind = "skipped for a missing host tool" if missing_tool else "skipped"
+    elif report.when == "call":
+        kind = report.outcome
+    elif report.failed and outcomes.get(item.nodeid, ("", ""))[0] == "passed":
+        kind = "errored in teardown"
+    if kind is not None:
+        outcomes[item.nodeid] = (kind, "" if report.passed else first_line_of_why(report, excinfo))
+    return report
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """The tests of the tier this run selected, by half, for the section that closes it."""
+    selected: dict[str, list[str]] = {half: [] for half in HALVES}
+    for item in session.items:
+        if item.get_closest_marker("bench") is not None:
+            selected[half_of(item)].append(item.nodeid)
+    if any(selected.values()):
+        session.config.stash[SELECTED] = selected
+
+
+def verdict(outcomes: list[tuple[str, str]]) -> str:
+    """One half's line: whether it ran, what came of its tests, and the first line of each reason one did not pass."""
+    if not outcomes:
+        return "not selected"
+    counted = Counter(kind for kind, _ in outcomes)
+    counts = ", ".join(f"{counted[kind]} {kind}" for kind in OUTCOME_KINDS if counted[kind])
+    missing = counted["skipped for a missing host tool"]
+    if EXECUTED & counted.keys():
+        head = f"ran, {counts}"
+    elif missing == len(outcomes):
+        head = f"skipped {missing} for a missing host tool"
+    elif missing + counted["skipped"] == len(outcomes):
+        head = f"skipped {len(outcomes)}" + (f", {missing} for a missing host tool" if missing else "")
+    else:
+        head = f"did not run, {counts}"
+    reasons = "; ".join(dict.fromkeys(why for _, why in outcomes if why))
+    return f"{head}: {reasons}" if reasons else head
+
+
+def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter, config: pytest.Config) -> None:
+    """Which halves of the tier ran, so a bench that skipped one is not read as a full tier that passed."""
+    selected = config.stash.get(SELECTED, None)
+    if os.environ.get(BENCH_ENV) != "1" or selected is None or config.option.collectonly:
+        return
+    outcomes = config.stash.get(OUTCOMES, {})
+    terminalreporter.write_sep("=", "bench tier")
+    for half in HALVES:
+        reached = [outcomes.get(nodeid, ("not reached", "")) for nodeid in selected[half]]
+        terminalreporter.write_line(f"{half}: {verdict(reached)}")

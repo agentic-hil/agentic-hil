@@ -2356,9 +2356,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "flash_failed:pyocd": ErrorRemedy(
         meaning=(
-            "pyOCD's flash reported a failure that is neither an erase it named nor a verify mismatch. The run is "
+            "pyOCD's flash reported a failure other than an erase it named. The run is "
             "`pyocd flash --no-reset` over the artifact this call passed, with the configured target and probe on the "
-            "command line, and `Flash programming failed` is the wording it most often carries. The whole transcript "
+            "command line. The whole transcript "
             "travels with the result under `programmer_output`.\n\n"
             "Nothing is confirmed about how much of the image reached the flash, so the board holds an indeterminate "
             "image rather than either the old one or the new one."
@@ -2376,12 +2376,11 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "value resolves to, in `debuggers.<name>.target_support`; provenance is in MCP resource "
             + TARGET_SUPPORT_URI
             + ".",
-            "If the run fails part-way rather than at the first sector, put pyOCD's own options to it yourself. This "
-            "server passes the target and the probe and no clock of its own, so the link runs at pyOCD's default "
-            "frequency: `pyocd flash --target <target_type> --frequency 1M` against the same board says whether a "
-            "slower SWD clock carries the image, and `--erase sector` against the default says whether the erase "
-            "strategy is what the device refuses. Report what those runs answered rather than changing the bench on "
-            "the strength of one of them.",
+            "If the run fails part-way rather than at the first sector, put pyOCD's own clock option to it yourself. "
+            "This server passes the target and the probe and no clock of its own, so the link runs at pyOCD's default "
+            "of 1 MHz: `pyocd flash --target <target_type> --frequency 100k` against the same board says whether a "
+            "slower SWD clock carries the image. Report what that run answered rather than changing the bench on the "
+            "strength of it.",
             "Treat the board as holding an indeterminate image until a flash programs and verifies, and read the "
             "reflash as writing over an unknown image rather than a clean one.",
         ),
@@ -2409,9 +2408,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Read `programmer_output.stdout` and `programmer_output.stderr` before anything else, and the log the "
             "result names by `log_path`. They are OpenOCD's own account of what it opened, examined and wrote, and the "
             "line before `** Programming Failed **` is what places the failure.",
-            "Ask which half of `program` failed. It is a write, a read-back and an optional reset in one command here, "
-            "so a failure after the image was written is a different fault from one before it, and the transcript is "
-            "the only place that order is written down.",
+            "Read the line as the write failing. `program` prints `** Programming Failed **` only when its "
+            "`flash write_image erase` step fails, after `init` and `reset init` succeeded and before any read-back "
+            "(a failed read-back is `** Verify Failed **`, which is `verify_failed`), so the error lines just before "
+            "it are that step's own account of what stopped it.",
             "Read the flash bank OpenOCD was working from. `flash info <bank>` names the driver, the base address and "
             "the sector map it chose, and a bank whose base or size is not this device's fails at the first write "
             "outside it while the connect and the examine both succeeded.",

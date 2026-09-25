@@ -35,6 +35,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SHELL_SCRIPT = REPOSITORY_ROOT / "install.sh"
@@ -42,10 +43,10 @@ POWERSHELL_SCRIPT = REPOSITORY_ROOT / "install.ps1"
 
 # Windows PowerShell 5.1 takes seconds to start, and the shared runners are
 # slower still. The budget bounds a hang, not a slow start.
-SCRIPT_TIMEOUT_S = 180
+SCRIPT_TIMEOUT_S = scaled_time_bound(180)
 # A healthy daemon answers in milliseconds. One that spends the whole budget is
 # a machine these tests skip on, not fail on.
-DOCKER_PROBE_TIMEOUT_S = 10
+DOCKER_PROBE_TIMEOUT_S = scaled_time_bound(10)
 CONTAINER_TIMEOUT_S = 600
 CONTAINER_IMAGE = "python:3.12"
 
@@ -402,9 +403,19 @@ def test_neither_script_writes_a_project_configuration() -> None:
         assert "no project configuration" in source, name
 
 
+def _opening_comment_block(source: str) -> str:
+    """Every line from the top of a script up to the first that is neither its shebang nor a comment."""
+    block = []
+    for line in source.splitlines():
+        if not line.startswith("#"):
+            break
+        block.append(line)
+    return "\n".join(block)
+
+
 def test_both_scripts_open_with_the_five_lines_that_say_what_they_touch() -> None:
     for name, source in _both_sources().items():
-        header = "\n".join(source.splitlines()[:8])
+        header = _opening_comment_block(source)
         assert "What this script touches, and nothing else" in header, name
         for claim in ("user-local", "skill", "MCP registration", "repository", "administrator rights"):
             assert claim in header, f"{name} header does not mention {claim}"
@@ -3457,7 +3468,7 @@ def test_the_one_liner_installs_the_machine_half_in_a_fresh_container() -> None:
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=CONTAINER_TIMEOUT_S,
+        timeout=scaled_time_bound(CONTAINER_TIMEOUT_S),
         check=False,
     )
 
@@ -3868,7 +3879,7 @@ class _WindowsBench:
             **extra,
         }
 
-    def run(self, *arguments: str, manager_bin_on_path: bool = True, timeout: float = SCRIPT_TIMEOUT_S, **extra: str) -> tuple[subprocess.CompletedProcess[str], str]:
+    def run(self, *arguments: str, manager_bin_on_path: bool = True, timeout: float = 180, **extra: str) -> tuple[subprocess.CompletedProcess[str], str]:
         # -NoPath on every run from here. Everything else this bench fakes lives
         # in tmp_path, but the Path step 3 writes is the one belonging to the
         # account running the suite, and there is no second one to hand it. What
@@ -3883,7 +3894,7 @@ class _WindowsBench:
             encoding="utf-8",
             errors="replace",
             env=self.environment(manager_bin_on_path=manager_bin_on_path, **extra),
-            timeout=timeout,
+            timeout=scaled_time_bound(timeout),
             check=False,
         )
         return result, f"{result.stdout}{result.stderr}"
@@ -4412,6 +4423,236 @@ def test_step_five_says_there_is_nothing_to_restart_when_only_an_unrelated_node_
 
 
 # ---------------------------------------------------------------------------
+# Step 5 of install.sh against the process tables of real npm-installed agent
+# CLIs (#518). The tables were recorded in a container, each CLI installed from
+# its official package and sitting at its first prompt, and the matcher is run
+# against them here through a `pgrep` that answers from the recording. What it
+# is held to is what the kernel published, not a description of it.
+NPM_AGENT_CLI_RECORDINGS = REPOSITORY_ROOT / "tests" / "fixtures" / "npm_agent_cli_process_table_recordings.json"
+# The functions step 5 goes through from an agent id to a PID, in the order the
+# script defines them, taken out of the script verbatim. A helper added on that
+# path has to be added here too, or the harness fails on a name it does not
+# know rather than on an assertion.
+_STEP_FIVE_MATCHER_FUNCTIONS = ("have", "process_name_for", "running_pid")
+# The other programs a Linux machine answers "what is running" with. The replay
+# holds no answer for them, so each is shadowed by one that writes down what it
+# was asked and refuses: a matcher that reached for one fails naming it, rather
+# than reading the table of whatever machine runs these tests.
+_TABLE_READERS_NOT_REPLAYED = ("ps", "pidof")
+
+
+def _npm_agent_cli_tables() -> dict:
+    return json.loads(NPM_AGENT_CLI_RECORDINGS.read_text(encoding="utf-8"))["tables"]
+
+
+def _shell_function(source: str, name: str) -> str:
+    """One `name() { ... }` of install.sh, closed at the first `}` in column 0."""
+    found = re.search(rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+    assert found is not None, f"install.sh defines no {name}"
+    return found.group(0)
+
+
+def _pgrep_replaying(listing: Path, refused: Path) -> str:
+    """A `pgrep` answering from a recorded table, for the two questions the recording asked.
+
+    `-x NAME` is matched against each process's `comm` and `-f PATTERN` against
+    its arguments joined by single spaces, both as extended regular expressions
+    and the way pgrep matches them: the whole name for `-x`, anywhere in the line
+    for `-f`. Matching PIDs come out one per line in ascending order, with status
+    0 for a match and 1 for none. Anything else it is asked is written to
+    `refused` and answered with status 2, because the recording holds no answer
+    to it.
+    """
+    return (
+        f"listing='{listing}'\n"
+        f"refused='{refused}'\n"
+        'if [ "$#" -ne 2 ]; then echo "pgrep $*" >> "$refused"; exit 2; fi\n'
+        'case "$1" in\n'
+        "  -x) field=comm ;;\n"
+        "  -f) field=args ;;\n"
+        '  *) echo "pgrep $*" >> "$refused"; exit 2 ;;\n'
+        "esac\n"
+        "pattern=$2\n"
+        "status=1\n"
+        "while IFS='\t' read -r pid ppid comm args; do\n"
+        '  if [ "$field" = comm ]; then\n'
+        '    printf \'%s\\n\' "$comm" | grep -Eqx -e "$pattern" || continue\n'
+        "  else\n"
+        '    printf \'%s\\n\' "$args" | grep -Eq -e "$pattern" || continue\n'
+        "  fi\n"
+        '  echo "$pid"\n'
+        "  status=0\n"
+        'done < "$listing"\n'
+        'exit "$status"\n'
+    )
+
+
+def _replayed_table(tmp_path: Path, table: dict) -> tuple[Path, Path]:
+    """One recorded table as a directory to put first on PATH, and the file its refusals land in."""
+    replay = tmp_path / "replayed-process-table"
+    replay.mkdir()
+    listing = tmp_path / "recorded-processes"
+    refused = tmp_path / "asked-of-the-replay-and-refused"
+    rows = []
+    for process in sorted(table["processes"], key=lambda process: process["pid"]):
+        joined = " ".join(process["argv"])
+        # The recording read each command line twice: `tr` turned every NUL
+        # into a space, the last one included, and `argv` is the same bytes
+        # split at the NULs. The two have to agree before either is replayed.
+        assert process["cmdline"] == f"{joined} ", f"the recording's two readings of pid {process['pid']} disagree"
+        rows.append(f"{process['pid']}\t{process['ppid']}\t{process['comm']}\t{joined}\n")
+    listing.write_bytes("".join(rows).encode("utf-8"))
+    _stub_executable(replay / "pgrep", _pgrep_replaying(listing, refused))
+    for reader in _TABLE_READERS_NOT_REPLAYED:
+        _stub_executable(replay / reader, f'echo "{reader} $*" >> "{refused}"\nexit 2\n')
+    return replay, refused
+
+
+def _refused_by_the_replay(refused: Path) -> str:
+    return refused.read_text(encoding="utf-8") if refused.is_file() else ""
+
+
+def _step_five_names(tmp_path: Path, table: dict, agent_id: str) -> str:
+    """The PID step 5 of install.sh finds for `agent_id`, with a recorded table as the machine's own.
+
+    The matcher's functions run out of the script verbatim, under the script's
+    own `set -eu`, followed by the two lines step 5 runs for each agent it
+    configured. The replay comes first on PATH and the system directories after
+    it, so the recorded table is the only one the matcher can read, and the text
+    tools it calls on the way are the machine's own.
+    """
+    replay, refused = _replayed_table(tmp_path, table)
+    functions = "".join(_shell_function(_shell_source(), name) for name in _STEP_FIVE_MATCHER_FUNCTIONS)
+    harness = tmp_path / "step-five-matcher.sh"
+    harness.write_bytes(f'set -eu\n{functions}process=$(process_name_for "$1")\nrunning_pid "$process"\n'.encode())
+    result = subprocess.run(
+        [_posix_shell(), str(harness), agent_id],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={"PATH": f"{replay}:/usr/bin:/bin"},
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+    asked = _refused_by_the_replay(refused)
+    assert asked == "", f"the matcher asked for something the recording holds no answer to:\n{asked}"
+    return result.stdout.strip()
+
+
+@pytest.mark.parametrize("recorded", ["codex_and_opencode", "claude"])
+def test_the_replayed_pgrep_answers_what_pgrep_answered_in_the_recording(tmp_path: Path, recorded: str) -> None:
+    """The replay the two tests below read through, held to the recording's own pgrep.
+
+    While each table stood, the recording asked the real pgrep both of step 5's
+    questions for all three names. The replay has to give every one of those
+    answers back line for line and with the same status, or what the tests below
+    measure is the replay and not the matcher.
+    """
+    if os.name != "posix":
+        pytest.skip("install.sh's matcher is replayed on the POSIX half")
+    table = _npm_agent_cli_tables()[recorded]
+    replay, refused = _replayed_table(tmp_path, table)
+
+    mismatched = []
+    for asked in table["pgrep"]:
+        answered = subprocess.run(
+            [_posix_shell(), str(replay / "pgrep"), *asked["argv"][1:]],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env={"PATH": "/usr/bin:/bin"},
+            timeout=SCRIPT_TIMEOUT_S,
+            check=False,
+        )
+        if (answered.stdout, answered.returncode) != (asked["stdout"], asked["returncode"]):
+            mismatched.append(
+                f"{' '.join(asked['argv'])}: recorded {asked['stdout']!r} with status {asked['returncode']}, "
+                f"replayed {answered.stdout!r} with status {answered.returncode} {answered.stderr}"
+            )
+
+    assert _refused_by_the_replay(refused) == "", _refused_by_the_replay(refused)
+    assert mismatched == [], "\n".join(mismatched)
+
+
+@pytest.mark.parametrize(
+    ("recorded", "agent_id", "cli", "started_by_a_node_launcher"),
+    [
+        pytest.param("codex_and_opencode", "codex", "codex", True, id="codex"),
+        pytest.param("codex_and_opencode", "opencode", "opencode", False, id="opencode"),
+        pytest.param("claude", "claude-code", "claude", False, id="claude-code"),
+    ],
+)
+def test_step_five_names_the_process_whose_comm_is_the_agent_cli_name(
+    tmp_path: Path, recorded: str, agent_id: str, cli: str, started_by_a_node_launcher: bool
+) -> None:
+    """Step 5 names a running agent CLI by the one process whose `comm` is the command's name.
+
+    For codex that is the platform binary, the child of the
+    `node /usr/local/bin/codex` that was started, and not that launcher: it is
+    the one process in the table called `codex`. The launcher, bin/codex.js of
+    @openai/codex 0.145.0, forwards SIGINT, SIGTERM and SIGHUP to the binary,
+    and when the binary ends, exits with its status or raises the signal it
+    ended on. So any end of the binary ends the launcher too, while ending the
+    launcher reaches the binary only through that forwarding, which a SIGKILL
+    skips. Claude Code and opencode are one process each at the recorded
+    versions, so for them the process started and the process named are the
+    same one.
+    """
+    if os.name != "posix":
+        pytest.skip("install.sh's matcher is replayed on the POSIX half")
+    table = _npm_agent_cli_tables()[recorded]
+    by_pid = {str(process["pid"]): process for process in table["processes"]}
+    started = by_pid[str(table["started"][cli])]
+    called_by_its_name = [process for process in table["processes"] if process["comm"] == cli]
+    assert len(called_by_its_name) == 1, f"the recording holds {len(called_by_its_name)} processes called {cli}"
+    anchor = called_by_its_name[0]
+    if started_by_a_node_launcher:
+        assert started["comm"] == "node" and anchor["ppid"] == started["pid"], (
+            f"the process called {cli} is not the child of the node launcher that was started: {anchor}, started {started}"
+        )
+    else:
+        assert anchor is started, f"the process called {cli} is not the one that was started: {anchor}, started {started}"
+
+    named = _step_five_names(tmp_path, table, agent_id)
+
+    found = by_pid.get(named)
+    described = f"{named} (`{found['comm']}`, {' '.join(found['argv'])}, child of {found['ppid']})" if found else repr(named)
+    assert named == str(anchor["pid"]), (
+        f"step 5 named {described} for {agent_id}, and the one process called {cli} is {anchor['pid']} "
+        f"({' '.join(anchor['argv'])}, child of {anchor['ppid']})"
+    )
+
+
+@pytest.mark.parametrize(
+    ("recorded", "agent_id"),
+    [
+        pytest.param("codex_and_opencode", "claude-code", id="claude-code-exited-at-start"),
+        pytest.param("claude", "codex", id="codex-never-started"),
+        pytest.param("claude", "opencode", id="opencode-never-started"),
+    ],
+)
+def test_step_five_names_no_process_for_a_recorded_agent_cli_that_is_not_in_the_table(
+    tmp_path: Path, recorded: str, agent_id: str
+) -> None:
+    """An agent CLI missing from the table gets no PID, whatever else carries its name.
+
+    In the first table claude had exited at start, and what is left of it is
+    the `sh -c` that started it, with `exec claude` and `/tmp/claude.screen` on
+    its command line. That is not claude running, and a PID for it would ask an
+    operator to quit a process that was never theirs. In the second table codex
+    and opencode were never started, and step 5 has nothing to name for them.
+    """
+    if os.name != "posix":
+        pytest.skip("install.sh's matcher is replayed on the POSIX half")
+    table = _npm_agent_cli_tables()[recorded]
+
+    assert _step_five_names(tmp_path, table, agent_id) == ""
+
+
+# ---------------------------------------------------------------------------
 # The routes and refusals no run had executed (#507): step 2 on a machine with
 # nothing, its fetch failure, the digest abort against the real hashing tools,
 # the virtualenv interpreter, step 4 with no agent CLI, and the spellings the
@@ -4828,6 +5069,17 @@ def _receipt_document(path: Path) -> dict:
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
+def _uv_wheel_download(into: Path) -> list[str]:
+    """The command `real_uv_on_windows` runs to fetch the uv wheel into `into`.
+
+    pip's cache is named, and kept inside `into`: left to find its own, pip on
+    Windows asks the shell, which answers out of USERPROFILE, and a USERPROFILE
+    an earlier test left on a deleted sandbox home sent the cache into the
+    working directory, which is the repository root (#544).
+    """
+    return [sys.executable, "-m", "pip", "download", "--quiet", "--disable-pip-version-check", "--no-deps", "--only-binary=:all:", "--dest", str(into), "--cache-dir", str(into / "pip-cache"), "uv"]
+
+
 @pytest.fixture(scope="session")
 def real_uv_on_windows(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """`uv.exe` out of the uv wheel the index serves, once per session.
@@ -4844,10 +5096,10 @@ def real_uv_on_windows(tmp_path_factory: pytest.TempPathFactory) -> Path:
         pytest.skip("install.ps1 runs under Windows PowerShell 5.1, which exists on Windows alone")
     into = tmp_path_factory.mktemp("real-uv")
     downloaded = subprocess.run(
-        [sys.executable, "-m", "pip", "download", "--quiet", "--disable-pip-version-check", "--no-deps", "--only-binary=:all:", "--dest", str(into), "uv"],
+        _uv_wheel_download(into),
         capture_output=True,
         text=True,
-        timeout=CONTAINER_TIMEOUT_S,
+        timeout=scaled_time_bound(CONTAINER_TIMEOUT_S),
         check=False,
     )
     if downloaded.returncode != 0:
@@ -4865,6 +5117,25 @@ def real_uv_on_windows(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(scope="session")
 def real_uv_cache(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tmp_path_factory.mktemp("real-uv-cache")
+
+
+def test_the_uv_wheel_download_keeps_pips_cache_in_the_fixtures_own_scratch_space(tmp_path: Path) -> None:
+    """pip's cache goes where the download goes, and the command line says so (#544).
+
+    Left to find its own cache, pip on Windows asks the shell for Local AppData,
+    and the shell answers out of USERPROFILE. Before #563 a session fixture
+    could run with a USERPROFILE an earlier test had left on a sandbox home
+    that no longer existed: the lookup failed, pip fell back to a cache under
+    the working directory, and a full run left 18 MB of it in the repository
+    root. With the session's own USERPROFILE the lookup now finds the
+    developer's own pip cache, which a test run should not fill either. A
+    cache named on the command line needs no lookup, and it goes away with the
+    rest of the fixture's scratch space.
+    """
+    command = _uv_wheel_download(tmp_path)
+
+    assert "--cache-dir" in command, command
+    assert command[command.index("--cache-dir") + 1] == str(tmp_path / "pip-cache"), command
 
 
 class _RealUvWindowsBench:
@@ -4892,7 +5163,7 @@ class _RealUvWindowsBench:
         return environment
 
     def uv(self, *arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run([str(self.uv_bin / "uv.exe"), *arguments], capture_output=True, text=True, env=self.environment(tool_bin_on_path=False), timeout=CONTAINER_TIMEOUT_S, check=False)
+        return subprocess.run([str(self.uv_bin / "uv.exe"), *arguments], capture_output=True, text=True, env=self.environment(tool_bin_on_path=False), timeout=scaled_time_bound(CONTAINER_TIMEOUT_S), check=False)
 
     def run(self, *arguments: str, tool_bin_on_path: bool) -> tuple[subprocess.CompletedProcess[str], str]:
         # -NoPath for the same reason as the bench above: this one reaches the
@@ -4906,7 +5177,7 @@ class _RealUvWindowsBench:
             encoding="utf-8",
             errors="replace",
             env=self.environment(tool_bin_on_path=tool_bin_on_path),
-            timeout=CONTAINER_TIMEOUT_S,
+            timeout=scaled_time_bound(CONTAINER_TIMEOUT_S),
             check=False,
         )
         return result, f"{result.stdout}{result.stderr}"
@@ -5071,9 +5342,11 @@ def test_the_two_pages_that_already_describe_the_restart_keep_describing_it() ->
 # ---------------------------------------------------------------------------
 # Step 3 puts the directory the command landed in on the PATH of the shells
 # that come after the run, which the one line in the README leaves no room to
-# do by hand. The edit is one line in one file on POSIX and the account's own
-# Path value on Windows, it happens only on the branch that already says the
-# directory is missing, and --no-path leaves both alone.
+# do by hand. The edit is one line in each startup file the shell reads on
+# POSIX, which is one file for every shell but bash on Linux (#548, below), and
+# the account's own Path value on Windows; it happens only on the branch that
+# already says the directory is missing, but for the one bash account below
+# that the release before #548 left half done, and --no-path leaves both alone.
 
 
 def test_the_shell_installer_adds_one_line_to_one_profile_and_a_second_run_adds_nothing(tmp_path: Path) -> None:
@@ -5172,6 +5445,474 @@ def test_no_path_leaves_every_profile_alone_and_prints_the_line_instead(tmp_path
     assert not (home / ".profile").exists(), sorted(path.name for path in home.iterdir())
     assert not (home / ".bashrc").exists(), sorted(path.name for path in home.iterdir())
     assert not (home / ".zshrc").exists(), sorted(path.name for path in home.iterdir())
+
+
+# #548. bash on Linux reads `~/.bashrc` only as an interactive shell that is not
+# a login shell, and as a login shell it reads the first of `~/.bash_profile`,
+# `~/.bash_login` and `~/.profile` that exists, and no other file of the
+# account's. The one line in `~/.bashrc` therefore never reached a login shell
+# in a home whose `~/.profile` does not source it, and the sentence that said
+# the next shell would find the command was wrong there. Which of the two
+# layouts a bash account gets is decided by `uname -s`, so every run below
+# answers that with a stub of its own rather than with the machine running the
+# suite. The real shell reading these files is the container tier's subject, in
+# tests/container/test_install_path_reaches_the_shells.py.
+
+_BASH_STARTUP_FILES = (".bashrc", ".bash_profile", ".bash_login", ".profile")
+
+
+def _a_machine_whose_shell_is(tmp_path: Path, shell: str = "/bin/bash", kernel: str = "Linux") -> tuple[dict[str, str], Path, Path, Path]:
+    """The machine of `_machine_whose_only_python_is`, with `shell` as `SHELL` and `uname -s` answering `kernel`.
+
+    Returns the environment, the project directory, the home directory and the
+    user bin the command lands in, which is not on the PATH the run starts with,
+    so step 3 always takes the branch that writes.
+    """
+    env, project, _marker, _uv_log, _fetched = _machine_whose_only_python_is(tmp_path, _PYTHON_EXTERNALLY_MANAGED)
+    env["SHELL"] = shell
+    _stub_executable(tmp_path / "early-bin" / "uname", f'echo "{kernel}"\nexit 0\n')
+    home = Path(env["HOME"])
+    return env, project, home, home / ".local" / "bin"
+
+
+def _text_of(path: Path) -> str:
+    """A startup file's text, or nothing for a file that was never written, so a missing line is an assertion and not an error."""
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def _what_step_three_said(transcript: str) -> str:
+    """Every line from step 3's own line up to the line of the step after it."""
+    lines = transcript.splitlines()
+    starts = [index for index, line in enumerate(lines) if "step 3/" in line]
+    assert starts, transcript
+    ends = [index for index, line in enumerate(lines) if "step 4/" in line]
+    return "\n".join(lines[starts[0] : ends[0] if ends else None])
+
+
+def _assert_step_three_says_what_misses_it(said: str, user_bin: Path, *, over_ssh: bool) -> str:
+    """The one sentence about the shells that may read none of the files step 3 named, and what works there (#548).
+
+    A shell that is not interactive may read none of these files, and that is
+    where `ssh host 'agentic-hil doctor'`, a cron job and a CI step run their
+    commands. "May", because bash reads `~/.bashrc` for a command ssh hands it
+    where it was built to, and the `~/.bashrc` Debian seeds a new account with
+    returns for such a shell before a line appended to it, which the container
+    tier shows. So the sentence names the remedy there, the command's full path
+    or the line.
+    fish reads its `conf.d` in every instance, ssh commands included, so its
+    sentence names cron and CI and not ssh, and its remedy is the full path
+    alone: cron and CI run a POSIX shell, where `fish_add_path` means nothing.
+    Returns the sentence.
+    """
+    sentences = [text for text in said.splitlines() if "cron job" in text]
+    assert len(sentences) == 1, said
+    sentence = sentences[0]
+    rest = sentence.replace(str(user_bin), "")
+    assert "CI step" in sentence, sentence
+    assert f"{user_bin}/agentic-hil" in sentence, sentence
+    if over_ssh:
+        assert "non-interactive" in rest, sentence
+        assert "ssh host 'agentic-hil doctor'" in rest, sentence
+        assert re.search(r"\bmay\b", rest), sentence
+    else:
+        assert "ssh" not in rest, sentence
+        assert "fish_add_path" not in rest, sentence
+        assert re.search(r"\bline\b", rest) is None, sentence
+    return sentence
+
+
+def _assert_step_three_hands_over_the_line_and_says_what_misses_it(said: str, line: str, user_bin: Path, *, over_ssh: bool) -> None:
+    """What follows every file step 3 wrote or found, whatever the shell (#548).
+
+    The shell the reader started the installer from read its startup files
+    before any of them was touched, and the installer ran as its child, so that
+    shell does not have the directory: the line is printed for it, on a line of
+    its own so it can be copied whole. And a shell that is not interactive may
+    read none of these files, which one sentence says, with what works there.
+    """
+    assert line in [text.strip() for text in said.splitlines()], said
+    _assert_step_three_says_what_misses_it(said, user_bin, over_ssh=over_ssh)
+
+
+def test_bash_on_linux_puts_the_line_in_bashrc_and_in_a_profile_it_creates_when_no_login_file_exists(tmp_path: Path) -> None:
+    """The home of #548, which has no startup file at all.
+
+    0.21.5 wrote `~/.bashrc` alone there and said the next shell would find the
+    command; the next login shell found none of the three login files and so
+    never read the line. It now goes into `~/.bashrc` for the interactive shells
+    and into a `~/.profile` created for the login shells. `~/.profile` and not
+    `~/.bash_profile`: bash reads only the first of the three that exists, so a
+    `~/.bash_profile` of ours would hide a `~/.profile` created after it.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, home, user_bin = _a_machine_whose_shell_is(tmp_path)
+    assert not any((home / name).exists() for name in _BASH_STARTUP_FILES), sorted(path.name for path in home.iterdir())
+
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    line = f'export PATH="{user_bin}:$PATH"'
+    for name in (".bashrc", ".profile"):
+        assert _text_of(home / name).count(line) == 1, f"{name}:\n{_text_of(home / name)}\n{transcript}"
+    assert not (home / ".bash_profile").exists(), transcript
+    assert not (home / ".bash_login").exists(), transcript
+    said = _what_step_three_said(transcript)
+    assert str(home / ".bashrc") in said, said
+    assert str(home / ".profile") in said, said
+
+
+@pytest.mark.parametrize(
+    ("present", "chosen"),
+    [
+        ((".bash_profile", ".bash_login", ".profile"), ".bash_profile"),
+        ((".bash_login", ".profile"), ".bash_login"),
+        ((".profile",), ".profile"),
+    ],
+    ids=["bash-profile-first", "bash-login-before-profile", "profile-alone"],
+)
+def test_bash_on_linux_puts_the_line_in_bashrc_and_in_the_login_file_bash_reads(tmp_path: Path, present: tuple[str, ...], chosen: str) -> None:
+    """A login shell reads the first of the three login files that exists, and only that one.
+
+    So the line goes into that file as well as into `~/.bashrc`, and a login
+    file after it is left exactly as it was: bash never reads a line put there
+    while the first one exists. Every file here was written by its owner and
+    none of them sources `~/.bashrc`; `profile-alone` is the other home #548
+    names, a `~/.profile` with no reason to read `~/.bashrc`.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, home, user_bin = _a_machine_whose_shell_is(tmp_path)
+    (home / ".bashrc").write_text("# the operator's own bashrc\nalias ll='ls -l'\n", encoding="utf-8")
+    for name in present:
+        (home / name).write_text(f"# the operator's own {name}, which does not read ~/.bashrc\nexport EDITOR=vi\n", encoding="utf-8")
+    before = {name: _text_of(home / name) for name in (".bashrc", *present)}
+
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    line = f'export PATH="{user_bin}:$PATH"'
+    for name in (".bashrc", chosen):
+        written = _text_of(home / name)
+        assert written.startswith(before[name]), f"{name}:\n{written}"
+        assert written.count(line) == 1, f"{name}:\n{written}\n{transcript}"
+    for name in present:
+        if name != chosen:
+            assert _text_of(home / name) == before[name], f"{name} was edited, and bash does not read it while {chosen} exists:\n{_text_of(home / name)}"
+    for name in (".bash_profile", ".bash_login"):
+        if name not in present:
+            assert not (home / name).exists(), f"{name} was created, and bash would read it instead of {chosen}"
+    said = _what_step_three_said(transcript)
+    assert str(home / ".bashrc") in said, said
+    assert str(home / chosen) in said, said
+
+
+def test_a_second_run_of_bash_on_linux_adds_nothing_to_either_file(tmp_path: Path) -> None:
+    """Each of the two files is asked on its own whether it already names the directory.
+
+    A rerun finds the line in both, adds nothing to either, and still names
+    both, so the transcript of any run says where the line is.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, home, user_bin = _a_machine_whose_shell_is(tmp_path)
+    line = f'export PATH="{user_bin}:$PATH"'
+
+    first = _install_on(env, project)
+
+    transcript = f"{first.stdout}{first.stderr}"
+    assert first.returncode == 0, transcript
+    written = {name: _text_of(home / name) for name in (".bashrc", ".profile")}
+    assert [text.count(line) for text in written.values()] == [1, 1], f"{written}\n{transcript}"
+
+    second = _install_on(env, project)
+
+    transcript = f"{second.stdout}{second.stderr}"
+    assert second.returncode == 0, transcript
+    for name, text in written.items():
+        assert _text_of(home / name) == text, f"{name}:\n{_text_of(home / name)}"
+    said = _what_step_three_said(transcript)
+    assert str(home / ".bashrc") in said, said
+    assert str(home / ".profile") in said, said
+    assert "new interactive bash shells and bash login shells" in said, said
+
+
+def test_a_bashrc_that_already_names_the_directory_still_gets_its_login_file(tmp_path: Path) -> None:
+    """The machine the release before #548 already edited, run again.
+
+    Its `~/.bashrc` carries the block that release appended and no login file
+    exists. The two files are asked separately, so the `~/.bashrc` that answers
+    "present" is left byte for byte and `~/.profile` still gets its line; one
+    answer for both would leave the login shell where the issue found it.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, home, user_bin = _a_machine_whose_shell_is(tmp_path)
+    line = f'export PATH="{user_bin}:$PATH"'
+    bashrc = home / ".bashrc"
+    bashrc.write_text(f"# the operator's own bashrc\nalias ll='ls -l'\n\n# added by the agentic-hil installer: the directory it installed the command in\n{line}\n", encoding="utf-8")
+    kept = bashrc.read_bytes()
+
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert bashrc.read_bytes() == kept, bashrc.read_text(encoding="utf-8")
+    profile = home / ".profile"
+    assert _text_of(profile).count(line) == 1, f"{_text_of(profile)}\n{transcript}"
+    said = _what_step_three_said(transcript)
+    assert str(bashrc) in said, said
+    assert str(profile) in said, said
+
+
+# What the release before #548 appended to a startup file, its marker line and
+# the line itself, for a directory spelled `{bin}`.
+_THE_BLOCK_0_21_5_WROTE = '\n# added by the agentic-hil installer: the directory it installed the command in\nexport PATH="{bin}:$PATH"\n'
+
+
+@pytest.mark.parametrize(("present", "chosen"), [((), ".profile"), ((".bash_profile",), ".bash_profile")], ids=["no-login-file", "bash-profile"])
+def test_the_account_the_release_before_left_half_done_gets_its_login_half_with_the_directory_already_on_path(tmp_path: Path, present: tuple[str, ...], chosen: str) -> None:
+    """The one account whose directory is already on PATH and still gets a line.
+
+    The release before #548 put its line in `~/.bashrc` alone, so an interactive
+    shell of the account has the directory, and a reader who runs the installer
+    again from one is told, truly, that it is on PATH. Before #548 step 3
+    stopped there and wrote nothing, which left every bash login shell of that
+    account where the issue found it. The installer's own marker line with that
+    directory under it is what tells this line from one the operator wrote, so
+    this account gets the login half, in the file a first run would choose, and
+    `~/.bashrc` is left byte for byte. Step 3 names both files and the shells
+    they reach. It prints no line for a shell already open, because the one that
+    started this run has the directory, and it keeps the sentence about the
+    shells that may read none of it, with no line there to point at.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, home, user_bin = _a_machine_whose_shell_is(tmp_path)
+    env["PATH"] = f"{user_bin}:{env['PATH']}"
+    line = f'export PATH="{user_bin}:$PATH"'
+    bashrc = home / ".bashrc"
+    bashrc.write_text("# the operator's own bashrc\nalias ll='ls -l'\n" + _THE_BLOCK_0_21_5_WROTE.format(bin=user_bin), encoding="utf-8")
+    kept = bashrc.read_bytes()
+    for name in present:
+        (home / name).write_text(f"# the operator's own {name}, which does not read ~/.bashrc\nexport EDITOR=vi\n", encoding="utf-8")
+    before = _text_of(home / chosen)
+
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert f"PATH: agentic-hil is installed in {user_bin}, already on your PATH" in transcript, transcript
+    assert bashrc.read_bytes() == kept, bashrc.read_text(encoding="utf-8")
+    login_file = home / chosen
+    written = _text_of(login_file)
+    assert written.startswith(before), written
+    assert written.count(line) == 1, f"{chosen}:\n{written}\n{transcript}"
+    for name in (".bash_profile", ".bash_login", ".profile"):
+        if name != chosen and name not in present:
+            assert not (home / name).exists(), f"{name} was created, and bash reads {chosen}:\n{transcript}"
+    said = _what_step_three_said(transcript)
+    assert f"PATH: {bashrc} already names that directory" in said, said
+    assert f"PATH: added one line to {login_file}" in said, said
+    assert "bash login shells" in said, said
+    assert line not in [text.strip() for text in said.splitlines()], said
+    sentence = _assert_step_three_says_what_misses_it(said, user_bin, over_ssh=True)
+    assert re.search(r"\bline\b", sentence.replace(str(user_bin), "")) is None, sentence
+
+
+@pytest.mark.parametrize(
+    ("shell", "files", "arguments"),
+    [
+        ("/bin/bash", {}, ()),
+        ("/bin/bash", {".bashrc": '# the operator\'s own line\nexport PATH="{bin}:$PATH"\n'}, ()),
+        ("/bin/bash", {".bashrc": 'export PATH="{bin}:$PATH"\n' + _THE_BLOCK_0_21_5_WROTE.format(bin="/opt/elsewhere/bin")}, ()),
+        ("/bin/bash", {".bashrc": _THE_BLOCK_0_21_5_WROTE, ".profile": _THE_BLOCK_0_21_5_WROTE}, ()),
+        ("/bin/bash", {".bashrc": _THE_BLOCK_0_21_5_WROTE}, ("--no-path",)),
+        ("/bin/zsh", {".bashrc": _THE_BLOCK_0_21_5_WROTE}, ()),
+    ],
+    ids=["no-startup-file", "the-operators-own-line", "the-marker-over-another-directory", "the-login-file-names-it-too", "no-path", "zsh-since"],
+)
+def test_every_other_account_with_the_directory_already_on_path_gets_nothing_written(tmp_path: Path, shell: str, files: dict[str, str], arguments: tuple[str, ...]) -> None:
+    """Already on PATH still writes nothing and prints nothing to paste, but for the account above (#548).
+
+    A directory the operator put on PATH themselves, in whatever file, is
+    theirs to place; the installer's marker over another directory says nothing
+    about this one; a login file that already names it has its half;
+    `--no-path` touches nothing; and an account that has run zsh since reads
+    neither `~/.bashrc` nor a bash login file.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, home, user_bin = _a_machine_whose_shell_is(tmp_path, shell)
+    env["PATH"] = f"{user_bin}:{env['PATH']}"
+    for name, text in files.items():
+        (home / name).write_text(text.format(bin=user_bin), encoding="utf-8")
+    watched = (*_BASH_STARTUP_FILES, ".zshrc", ".config/fish/conf.d/agentic-hil.fish")
+    before = {name: _text_of(home / name) if (home / name).exists() else None for name in watched}
+
+    result = _install_on(env, project, *arguments)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert f"PATH: agentic-hil is installed in {user_bin}, already on your PATH" in transcript, transcript
+    assert "export PATH=" not in transcript, transcript
+    after = {name: _text_of(home / name) if (home / name).exists() else None for name in watched}
+    assert after == before, f"{after}\n{transcript}"
+
+
+def test_step_three_on_linux_bash_names_both_files_the_shells_they_reach_and_the_shells_they_miss(tmp_path: Path) -> None:
+    """What the reader is told, which is where #548 started.
+
+    "the next shell you open finds the command" held for a new terminal window
+    on a desktop and not for the login shell an ssh session starts, nor for
+    `ssh host 'agentic-hil doctor'`, a cron job or a CI step, which may read
+    none of the account's startup files. Step 3 names both files and the shells
+    they reach, prints the line for the shell that is already open, and says in
+    one sentence which shells may read none of it and what to do there.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, home, user_bin = _a_machine_whose_shell_is(tmp_path)
+
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "the next shell you open" not in transcript, transcript
+    said = _what_step_three_said(transcript)
+    assert "new interactive bash shells and bash login shells" in said, said
+    assert str(home / ".bashrc") in said, said
+    assert str(home / ".profile") in said, said
+    _assert_step_three_hands_over_the_line_and_says_what_misses_it(said, f'export PATH="{user_bin}:$PATH"', user_bin, over_ssh=True)
+
+
+@pytest.mark.parametrize(
+    ("shell", "kernel", "written", "reaches", "line", "over_ssh"),
+    [
+        ("/bin/bash", "Darwin", ".bash_profile", "new bash login shells, which is what a macOS terminal window opens", 'export PATH="{bin}:$PATH"', True),
+        ("/bin/zsh", "Linux", ".zshrc", "new interactive zsh shells", 'export PATH="{bin}:$PATH"', True),
+        ("/usr/bin/fish", "Linux", ".config/fish/conf.d/agentic-hil.fish", "new fish shells", 'fish_add_path "{bin}"', False),
+        ("/bin/sh", "Linux", ".profile", "new login shells", 'export PATH="{bin}:$PATH"', True),
+    ],
+    ids=["bash-on-macos", "zsh", "fish", "any-other-shell"],
+)
+def test_every_other_shell_keeps_its_one_file_and_step_three_names_the_shells_it_reaches(tmp_path: Path, shell: str, kernel: str, written: str, reaches: str, line: str, over_ssh: bool) -> None:
+    """Two files is bash on Linux alone; every other shell keeps the one file it had.
+
+    A macOS terminal window starts bash as a login shell, which reads
+    `~/.bash_profile`; zsh reads `~/.zshrc` in every interactive shell; fish
+    reads its `conf.d` in every instance; and a shell this script does not know
+    gets `~/.profile`, which login shells read. What changes for them is what
+    step 3 says (#548): the shells the file reaches instead of "the next shell
+    you open", the line for the shell already open, and what may read none of it.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, home, user_bin = _a_machine_whose_shell_is(tmp_path, shell, kernel)
+    expected = line.format(bin=user_bin)
+
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    target = home / written
+    assert _text_of(target).count(expected) == 1, f"{_text_of(target)}\n{transcript}"
+    for other in (*_BASH_STARTUP_FILES, ".zshrc", ".config/fish/conf.d/agentic-hil.fish"):
+        if other != written:
+            assert not (home / other).exists(), f"{other} was created for {shell} on {kernel}:\n{transcript}"
+    assert "the next shell you open" not in transcript, transcript
+    said = _what_step_three_said(transcript)
+    assert str(target) in said, said
+    assert reaches in said, said
+    _assert_step_three_hands_over_the_line_and_says_what_misses_it(said, expected, user_bin, over_ssh=over_ssh)
+
+
+def test_no_path_on_linux_bash_names_both_files_and_prints_the_line(tmp_path: Path) -> None:
+    """The opt-out names every file the line would have gone in, which for bash on Linux is two.
+
+    An operator who keeps the edit for themselves has to know where bash will
+    look for it, and "your shell profile" names one file where two are needed.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, home, user_bin = _a_machine_whose_shell_is(tmp_path)
+
+    result = _install_on(env, project, "--no-path")
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    said = _what_step_three_said(transcript)
+    assert "--no-path" in said, said
+    assert str(home / ".bashrc") in said, said
+    assert str(home / ".profile") in said, said
+    assert f'export PATH="{user_bin}:$PATH"' in [text.strip() for text in said.splitlines()], said
+    for name in _BASH_STARTUP_FILES:
+        assert not (home / name).exists(), f"{name} was written under --no-path:\n{transcript}"
+
+
+@pytest.mark.parametrize("unwritable", [(".bashrc", ".profile"), (".bashrc",)], ids=["neither-file", "bashrc-alone"])
+def test_a_startup_file_step_three_cannot_write_is_named_with_the_line_to_add(tmp_path: Path, unwritable: tuple[str, ...]) -> None:
+    """Every file the line could not go in is named, and the line is printed for it.
+
+    A directory where the file should be refuses the append for every account,
+    root included, so it stands in for a file this run may not write. With both
+    refused the transcript names both, the way `--no-path` does; with only
+    `~/.bashrc` refused, `~/.profile` still gets its line, because each file is
+    its own question, and the transcript says which one is left to the reader.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, home, user_bin = _a_machine_whose_shell_is(tmp_path)
+    for name in unwritable:
+        (home / name).mkdir()
+    line = f'export PATH="{user_bin}:$PATH"'
+
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    said = _what_step_three_said(transcript)
+    for name in unwritable:
+        assert any(str(home / name) in text and "could not be written" in text for text in said.splitlines()), said
+    assert line in [text.strip() for text in said.splitlines()], said
+    for name in (".bashrc", ".profile"):
+        if name not in unwritable:
+            assert _text_of(home / name).count(line) == 1, f"{name}:\n{_text_of(home / name)}\n{transcript}"
+            assert str(home / name) in said, said
+    assert not (home / ".bash_profile").exists(), transcript
+
+
+def test_the_header_promises_one_line_in_each_startup_file_the_shell_reads() -> None:
+    """The fourth promise at the top of install.sh, as #548 leaves it true.
+
+    "one line, in one file" stopped being true for the one shell that needs two
+    files, bash on Linux, and the header is what a stranger reads before piping
+    this script into a shell.
+    """
+    header = " ".join(line.lstrip("#").strip() for line in _opening_comment_block(_shell_source()).splitlines())
+    assert "in one file" not in header, header
+    for claim in ("each startup file your shell reads", "two for bash on Linux", "named as it is written", "skipped by --no-path"):
+        assert claim in header, f"the install.sh header does not say {claim!r}: {header}"
+
+
+def test_no_page_still_promises_one_file_for_every_shell() -> None:
+    """The pages that repeat the header's promise and step 3's sentence repeat the corrected ones (#548)."""
+    for page in (REPOSITORY_ROOT / "README.md", REPOSITORY_ROOT / "TROUBLESHOOTING.md", REPOSITORY_ROOT / "docs" / "installation.md"):
+        text = " ".join(page.read_text(encoding="utf-8").split())
+        for withdrawn in ("the one shell profile your shell reads", "the one file the shell you run reads", "the next shell you open"):
+            assert withdrawn not in text, f"{page.name} still says {withdrawn!r}"
 
 
 @WINDOWS_ONLY

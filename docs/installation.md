@@ -42,10 +42,21 @@ there is neither, which includes the pip-less `python3` a Debian or Ubuntu serve
 ships) and then runs
 `agentic-hil agent-install` for every agent CLI it finds on `PATH`. That is the
 machine half and nothing else: it writes no project configuration, asks for no
-admin rights, and of a shell profile it writes one line, and only where the
-directory the command landed in is not on your `PATH` already. That line is in
-the one file the shell you run reads, the transcript names it, and a second run
-finds it and adds nothing. On Windows it is your own `Path` value instead, read
+admin rights, and in each startup file your shell reads it writes one line, and
+only where the directory the command landed in is not on your `PATH` already.
+That is one file for every shell but bash on Linux, which reads `~/.bashrc` in
+a new terminal window and its login file (the first of `~/.bash_profile`,
+`~/.bash_login` and `~/.profile` that exists, or a new `~/.profile`) in the
+login shell an ssh session or a console starts, so the line goes in both. The
+transcript names each file, a second run finds the line and adds nothing, and a
+run over an earlier install that put the line in `~/.bashrc` alone adds it to
+the login file even from a shell that already has the directory. Step 3
+also prints the line for a shell that is already open, which read its files
+before the line was there, and the full path to call the command by in a
+non-interactive shell, such as `ssh host 'agentic-hil doctor'`, a cron job or a
+CI step, which may read none of them. Every fish reads its file, an ssh
+command's included, so under fish that leaves cron and CI, which run a POSIX
+shell. On Windows the edit is to your own `Path` value instead, read
 and written with the kind it already had so that a `%USERPROFILE%` in it stays
 written that way. `--no-path` keeps the edit for you and prints the exact line
 in its place. After one restart of your agent,
@@ -57,7 +68,7 @@ registers one agent instead of every one it finds, `--no-agent-install` stops
 after the package, `--version <x.y.z>` installs exactly that release (later
 upgrades go through `agentic-hil upgrade`, not through a second run with a new
 pin), `--no-can` drops the `[can]` extra that is on by default, `--no-path`
-leaves your shell profile and your `Path` alone, and `--help` prints all of
+leaves your shell's startup files and your `Path` alone, and `--help` prints all of
 them. Piped, `sh` takes them after `-s --`:
 
 ```bash

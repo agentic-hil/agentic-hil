@@ -37,6 +37,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, COMMAND_TIMEOUT_S, Bench, child_command, isolated_environment
 
@@ -50,7 +51,7 @@ CLIENT_PROTOCOL_VERSION = "2025-06-18"
 # slow link, short enough that a wedged probe fails this file rather than holding
 # the session open until somebody notices.
 RESPONSE_TIMEOUT_S = 300.0
-SHUTDOWN_TIMEOUT_S = 60.0
+SHUTDOWN_TIMEOUT_S = scaled_time_bound(60.0)
 
 # How much of the server's own error output a failure here carries. Kept rather
 # than read on demand: a pipe nobody empties fills and stops the process it

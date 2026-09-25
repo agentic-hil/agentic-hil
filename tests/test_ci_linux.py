@@ -40,6 +40,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from support import scaled_time_bound
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
@@ -787,7 +788,7 @@ def test_two_runs_that_both_find_a_dead_holder_yield_exactly_one_container(
         # break and create, the loser to read the winner's live record -- so the
         # barrier releases them into the lock together and the OS serialises the
         # takeover, not the test.
-        at_the_guard.wait(timeout=10)
+        at_the_guard.wait(timeout=scaled_time_bound(10))
         real_lock_fd(descriptor)
 
     monkeypatch.setattr(run_lock, "_lock_fd_exclusive", both_reach_the_guard_together)
@@ -938,7 +939,7 @@ def test_an_older_checkouts_unguarded_create_is_never_taken_for_a_stale_lock(
         # record and returned holding the lock is what turns the window into the
         # two-holder outcome the assertion rejects; the fix never lets the
         # contender read this file as stale, so this never runs.
-        creator_holds.wait(timeout=10)
+        creator_holds.wait(timeout=scaled_time_bound(10))
         real_break(self)
 
     monkeypatch.setattr(run_lock.RunLock, "_break", break_that_waits_for_the_creator_to_hold)
@@ -956,7 +957,7 @@ def test_an_older_checkouts_unguarded_create_is_never_taken_for_a_stale_lock(
         long_ago = time.time() - 600.0
         os.utime(path, (long_ago, long_ago))
         empty_published.set()
-        contender_made_its_call.wait(timeout=10)
+        contender_made_its_call.wait(timeout=scaled_time_bound(10))
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(legacy_record, indent=2) + "\n")
         # The create's confirming read: the record on disk is still this
@@ -967,7 +968,7 @@ def test_an_older_checkouts_unguarded_create_is_never_taken_for_a_stale_lock(
         creator_holds.set()
 
     def be_the_contender() -> None:
-        empty_published.wait(timeout=10)
+        empty_published.wait(timeout=scaled_time_bound(10))
         run = run_lock.RunLock()
         try:
             run.acquire(wait=False)

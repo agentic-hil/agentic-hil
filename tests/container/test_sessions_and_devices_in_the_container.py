@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from .conftest import (
     ABOVE_EVERY_RELEASE,
@@ -173,7 +174,7 @@ def test_a_server_installed_without_the_can_extra_answers_can_backend_not_availa
     is that installation's own console script.
     """
     uv_tool.install("--find-links", str(wheelhouse.only(ABOVE_EVERY_RELEASE)), f"agentic-hil>={ABOVE_EVERY_RELEASE}")
-    absent = subprocess.run([str(uv_tool.interpreter), "-c", "import can"], capture_output=True, text=True, timeout=60, check=False)
+    absent = subprocess.run([str(uv_tool.interpreter), "-c", "import can"], capture_output=True, text=True, timeout=scaled_time_bound(60), check=False)
     assert absent.returncode != 0, "python-can is installed in an environment that asked for no CAN extra"
     assert "ModuleNotFoundError" in absent.stderr, absent.stderr
 

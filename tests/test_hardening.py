@@ -78,7 +78,7 @@ from agentic_hil.types import CanBusConfig, DebuggerConfig
 from tests.test_virtualized_user_paths import virtualize
 
 WAIT_TIMEOUT_S = 5.0
-POLL_INTERVAL_S = 0.01
+POLL_INTERVAL_S = scaled_time_bound(0.01)
 
 COM_PORT_YAML = 'com_ports:\n  dut:\n    device: "/dev/ttyAGENTIC_HILTEST"\n'
 CAN_BUS_YAML = 'can_buses:\n  bench:\n    adapter: "process"\n    channel: "vcan0"\n    executable: "python"\n'
@@ -936,7 +936,7 @@ def test_com_input_read_before_a_concurrent_write_is_logged_before_it(tmp_path: 
             # On the serialised build the reader already holds the lock, so the
             # write waits and this bounded pause simply expires.
             reader_at_rx.set()
-            write_done.wait(0.2)
+            write_done.wait(scaled_time_bound(0.2))
         return session_append(event, event_config)
 
     session.append_audit = announce_rx  # type: ignore[method-assign]
@@ -3850,7 +3850,7 @@ def test_report_pair_lock_keeps_last_files_on_same_operation(tmp_path: Path, mon
         payload = json.loads(text)
         if payload["operation"] == "A" and Path(path).name == "last-failure.json":
             first_failure_started.set()
-            assert release_first.wait(5)
+            assert release_first.wait(scaled_time_bound(5))
         if payload["operation"] == "B":
             second_write_started.set()
         return original_write(config, path, text, **kwargs)
@@ -3867,9 +3867,9 @@ def test_report_pair_lock_keeps_last_files_on_same_operation(tmp_path: Path, mon
     first = threading.Thread(target=write, args=("A",))
     second = threading.Thread(target=write, args=("B",))
     first.start()
-    assert first_failure_started.wait(5)
+    assert first_failure_started.wait(scaled_time_bound(5))
     second.start()
-    assert not second_write_started.wait(0.1)
+    assert not second_write_started.wait(scaled_time_bound(0.1))
     release_first.set()
     first.join(5)
     second.join(5)

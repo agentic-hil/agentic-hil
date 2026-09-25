@@ -38,6 +38,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from tests import test_install_scripts as install_scripts
 
@@ -206,7 +207,7 @@ def _one_nested_run(arguments: list[str], timeout: float) -> subprocess.Complete
         cwd=REPOSITORY_ROOT,
         capture_output=True,
         text=True,
-        timeout=timeout,
+        timeout=scaled_time_bound(timeout),
     )
 
 

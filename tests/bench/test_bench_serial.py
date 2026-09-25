@@ -55,6 +55,7 @@ from contextlib import suppress
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, Bench, child_command
 
@@ -85,7 +86,7 @@ READ_SLICE_S = 0.5
 REPLY_TIMEOUT_S = 300.0
 
 # How long a server gets to close its sessions and exit after its input closes.
-SHUTDOWN_TIMEOUT_S = 60.0
+SHUTDOWN_TIMEOUT_S = scaled_time_bound(60.0)
 
 # How many empty-handed passes it takes to call a line quiet.
 DRAIN_PASSES = 6

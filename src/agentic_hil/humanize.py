@@ -870,6 +870,20 @@ def _host_port_inventory(key: str, value: Sequence[object]) -> list[JsonObject]:
     return entries if len(entries) == len(value) and all(str(entry.get("device") or "") for entry in entries) else []
 
 
+def split_by_usb_identity(entries: Sequence[JsonObject]) -> tuple[list[JsonObject], list[JsonObject]]:
+    """The ports that carry a USB identity and the ones that do not, each in the host's order.
+
+    One reading of "a port somebody plugged in" for every place that puts those
+    first: this rendering, and the COM-port advice `init` and `setup` end their
+    config step with, which named the first five of a host's 32 legacy
+    `/dev/ttyS*` ports and counted the debugger's own port off under "and 28
+    more" (#549).
+    """
+    identified = [entry for entry in entries if any(entry.get(name) not in (None, "") for name in _USB_IDENTITY_KEYS)]
+    plain = [entry for entry in entries if entry not in identified]
+    return identified, plain
+
+
 def _port_inventory_lines(entries: Sequence[JsonObject], indent: str) -> list[str]:
     """The ports that can be identified, then a count of the ones that cannot.
 
@@ -883,8 +897,7 @@ def _port_inventory_lines(entries: Sequence[JsonObject], indent: str) -> list[st
     inventory was read in, and the collapsed line describes a stretch of that
     list rather than a claim about numbering.
     """
-    identified = [entry for entry in entries if any(entry.get(name) not in (None, "") for name in _USB_IDENTITY_KEYS)]
-    plain = [entry for entry in entries if entry not in identified]
+    identified, plain = split_by_usb_identity(entries)
     lines = _nested_sequence(identified, indent) if identified else []
     if plain:
         lines.extend(_wrap(_collapsed_ports(plain), indent=f"{indent}- ", hanging=f"{indent}  "))
@@ -943,6 +956,18 @@ def _result_head(value: Mapping[str, object]) -> str:
     return _summary(value) or _verdict(value) or "ok"
 
 
+# The paragraph a probe bound off the USB serial inventory is reported with
+# (`bootstrap.probe_inventory_caveat`). Its producers put it in more than one
+# field on purpose, so that a caller reading any one of them has it; a screen
+# shows it once (#549).
+_INVENTORY_NOTE_KEY = "probe_inventory_note"
+
+
+def _inventory_note(value: Mapping[str, object]) -> str:
+    note = value.get(_INVENTORY_NOTE_KEY)
+    return _flat(note) if isinstance(note, str) else ""
+
+
 def _result_lines(value: Mapping[str, object], indent: str = _INDENT) -> list[str]:
     """A nested result: its verdict, its summary, its own fields, its remediation.
 
@@ -969,7 +994,12 @@ def _result_body(value: Mapping[str, object], indent: str) -> list[str]:
     """
     error_type = _error_type(value)
     lines = _fields([("error_type", error_type)], indent=indent) if error_type else []
-    rows, bodies = _members({key: item for key, item in value.items() if key not in _HANDLED_EVERYWHERE})
+    # A discovery's summary heads this body and already ends with its inventory
+    # note, so the `probe_inventory_note` row under it was the same paragraph a
+    # second time (#549). The field stays in the document.
+    note = _inventory_note(value)
+    handled = _HANDLED_EVERYWHERE | ({_INVENTORY_NOTE_KEY} if note and note in _summary(value) else set())
+    rows, bodies = _members({key: item for key, item in value.items() if key not in handled})
     lines.extend(_fields(rows, indent=indent))
     for key, item in bodies:
         lines.extend(_member_lines(key, item, indent))
@@ -1039,6 +1069,24 @@ def _step_carries(step: Mapping[str, object], indent: str) -> list[str]:
     return lines
 
 
+def _step_headline(step: Mapping[str, object]) -> str:
+    """A step's summary, less the inventory note when a next step under it prints it.
+
+    `init` appends that note to its config step's summary, so that a caller
+    reading only `summary` has it, and puts it first among the step's next steps
+    as well, with where the file records the same. On one screen that was the
+    same paragraph twice, as the headline and as item 1 (#549). Item 1 keeps it,
+    because it is the one that says what to do and where the file says so; the
+    headline keeps the outcome. The document is untouched, the same rule
+    `_restart_lines` applies to the restart notice.
+    """
+    summary = _summary(step)
+    note = _inventory_note(_mapping(step.get("hardware_discovery")))
+    if note and note in summary and any(note in item for item in _strings(step.get("next_steps"))):
+        return _flat(summary.replace(note, ""))
+    return summary
+
+
 def _steps_block(steps: Mapping[str, object]) -> list[str]:
     """One line per step, plus what the step carries under it.
 
@@ -1057,7 +1105,7 @@ def _steps_block(steps: Mapping[str, object]) -> list[str]:
     for name, step in rows:
         verdict = _step_verdict(step)
         head = f"{_INDENT}{_step_label(name).ljust(label_width)}  {verdict.ljust(verdict_width)}  "
-        lines.extend(_wrap(_summary(step) or verdict, indent=head, hanging=" " * len(head)))
+        lines.extend(_wrap(_step_headline(step) or verdict, indent=head, hanging=" " * len(head)))
         detail = " " * len(head)
         error_type = _error_type(step)
         if error_type:

@@ -1,16 +1,16 @@
 """The release-time proof that the CI examples' pin is a runnable distribution.
 
-`tests/test_ci_examples.py` checks the shipped examples against this checkout's
-`build_parser`: it proves the examples invoke only commands the code defines and
-that the pin equals the release this tree builds toward. It cannot reach the
-published distribution, because it has no network and, between releases, the pin
-names a release the index does not carry yet.
+`tests/test_ci_examples.py` checks the shipped examples against a committed
+recording of the pinned release's command surface: it proves the examples invoke
+only commands that release defines and that the pin equals the newest release
+CHANGELOG.md dates. It cannot reach the published distribution itself, because
+it has no network.
 
 `tools/verify_published_examples.py` is the other half, run by the publish
 workflow after PyPI has the release: it installs the exact pinned distribution
 and asks its CLI to answer for itself. This module holds that tool to what it
-promises -- the pin it reads is the one both examples carry and the release this
-tree builds toward, and the commands it probes are exactly the ones the examples
+promises -- the pin it reads is the one both examples carry and the newest
+published release, and the commands it probes are exactly the ones the examples
 invoke -- with the network hop stubbed by a fake command runner, so the logic is
 covered on a pull request while the real download stays a release-time step.
 
@@ -22,6 +22,7 @@ tests.
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -44,14 +45,22 @@ TOOL = "tools/verify_published_examples.py"
 # A synthetic tree's versions, chosen so nothing here matches the version this
 # repository actually carries: the version sweep in check_version_consistency
 # would otherwise read a test fixture as an uncovered home for the release.
-DEVELOPMENT = "1.2.3.dev0"
-ANTICIPATED = "1.2.3"
-OTHER = "1.2.4"
+# PUBLISHED is the newest release the synthetic CHANGELOG.md dates, DEVELOPMENT
+# the tree after it, and UNPUBLISHED the release that tree builds toward, which
+# the index does not carry yet.
+PUBLISHED = "1.2.3"
+DEVELOPMENT = "1.2.4.dev0"
+UNPUBLISHED = "1.2.4"
+OTHER = "1.2.2"
 
 
 def _write_tree(root: Path, github_pin: str, gitlab_pin: str, package: str = DEVELOPMENT) -> None:
-    """A minimal tree: the two example pins and the pyproject the pin is held to."""
+    """A minimal tree: the two example pins, the pyproject, and the CHANGELOG that dates the published release."""
     (root / "pyproject.toml").write_text(f'[project]\nname = "agentic-hil"\nversion = "{package}"\n', encoding="utf-8")
+    (root / "CHANGELOG.md").write_text(
+        f"# Changelog\n\n## [Unreleased]\n\n## [{PUBLISHED}] - 2020-01-02\n\n## [{OTHER}] - 2020-01-01\n",
+        encoding="utf-8",
+    )
     examples = root / "examples" / "ci"
     examples.mkdir(parents=True)
     (examples / "github-actions.yml").write_text(f'env:\n  AGENTIC_HIL_VERSION: "{github_pin}"\n', encoding="utf-8")
@@ -128,32 +137,36 @@ def test_the_probed_commands_are_exactly_the_ones_the_examples_invoke() -> None:
     assert set(REQUIRED_COMMANDS) == invoked
 
 
-def test_example_pin_reads_the_real_examples_as_the_release_they_build_toward() -> None:
-    """Against the real tree, the pin the tool would install is the anticipated one."""
-    sys.path.insert(0, str(REPOSITORY_ROOT / "tools"))
-    from check_version_consistency import anticipated_release  # noqa: PLC0415
+def test_example_pin_reads_the_real_examples_as_the_newest_published_release() -> None:
+    """Against the real tree, the pin the tool would install is the newest release CHANGELOG.md dates."""
+    from test_ci_examples import CHANGELOG, newest_published_release  # noqa: PLC0415
 
-    assert example_pin(REPOSITORY_ROOT) == anticipated_release(REPOSITORY_ROOT)
+    assert example_pin(REPOSITORY_ROOT) == newest_published_release(CHANGELOG.read_text(encoding="utf-8"))
 
 
 def test_example_pin_reads_a_synthetic_tree(tmp_path: Path) -> None:
-    _write_tree(tmp_path, ANTICIPATED, ANTICIPATED)
+    """Between releases the pin is the release before the tree, and the tool accepts it."""
+    _write_tree(tmp_path, PUBLISHED, PUBLISHED)
 
-    assert example_pin(tmp_path) == ANTICIPATED
+    assert example_pin(tmp_path) == PUBLISHED
 
 
 def test_example_pin_refuses_examples_that_disagree(tmp_path: Path) -> None:
-    _write_tree(tmp_path, ANTICIPATED, OTHER)
+    _write_tree(tmp_path, PUBLISHED, OTHER)
 
     with pytest.raises(SystemExit, match="disagree on AGENTIC_HIL_VERSION"):
         example_pin(tmp_path)
 
 
-def test_example_pin_refuses_a_pin_that_is_not_the_anticipated_release(tmp_path: Path) -> None:
-    """A pin both examples agree on is still wrong if it is not what this tree builds."""
-    _write_tree(tmp_path, OTHER, OTHER, package=DEVELOPMENT)
+def test_example_pin_refuses_a_pin_the_index_does_not_carry_yet(tmp_path: Path) -> None:
+    """#525: a pin both examples agree on is still wrong if the index cannot serve it.
 
-    with pytest.raises(SystemExit, match="builds toward"):
+    The release this tree builds toward is not published until it ships, so the
+    refusal names the newest published release, the one the pin has to be.
+    """
+    _write_tree(tmp_path, UNPUBLISHED, UNPUBLISHED, package=DEVELOPMENT)
+
+    with pytest.raises(SystemExit, match=re.escape(PUBLISHED)):
         example_pin(tmp_path)
 
 
@@ -161,7 +174,7 @@ def test_example_pin_refuses_a_range_that_carries_no_exact_version(tmp_path: Pat
     """A `>=` or a `latest` reads as zero pins, which is the unpinned install the
     examples exist to refuse, not one this tool can install.
     """
-    _write_tree(tmp_path, ANTICIPATED, ANTICIPATED)
+    _write_tree(tmp_path, PUBLISHED, PUBLISHED)
     (tmp_path / "examples" / "ci" / "github-actions.yml").write_text(
         'env:\n  AGENTIC_HIL_VERSION: ">=1.0.0"\n', encoding="utf-8"
     )
@@ -171,11 +184,11 @@ def test_example_pin_refuses_a_range_that_carries_no_exact_version(tmp_path: Pat
 
 
 def test_a_matching_install_that_exposes_every_command_passes() -> None:
-    results = {("--version",): _completed(0, stdout=f"{ANTICIPATED}\n")}
+    results = {("--version",): _completed(0, stdout=f"{PUBLISHED}\n")}
     for command in REQUIRED_COMMANDS:
         results[(command, "--help")] = _completed(0, stdout="usage: ...")
 
-    assert cli_problems("agentic-hil", ANTICIPATED, run=_run(results)) == []
+    assert cli_problems("agentic-hil", PUBLISHED, run=_run(results)) == []
 
 
 def test_a_wrong_installed_version_is_caught() -> None:
@@ -184,21 +197,21 @@ def test_a_wrong_installed_version_is_caught() -> None:
     for command in REQUIRED_COMMANDS:
         results[(command, "--help")] = _completed(0)
 
-    problems = cli_problems("agentic-hil", ANTICIPATED, run=_run(results))
+    problems = cli_problems("agentic-hil", PUBLISHED, run=_run(results))
 
     assert len(problems) == 1
     assert OTHER in problems[0]
-    assert ANTICIPATED in problems[0]
+    assert PUBLISHED in problems[0]
 
 
 def test_a_missing_command_is_caught() -> None:
     """argparse exits non-zero for a subcommand a distribution does not define."""
-    results = {("--version",): _completed(0, stdout=f"{ANTICIPATED}\n")}
+    results = {("--version",): _completed(0, stdout=f"{PUBLISHED}\n")}
     for command in REQUIRED_COMMANDS:
         results[(command, "--help")] = _completed(0)
     results[("run-evidence", "--help")] = _completed(2, stderr="invalid choice: 'run-evidence'")
 
-    problems = cli_problems("agentic-hil", ANTICIPATED, run=_run(results))
+    problems = cli_problems("agentic-hil", PUBLISHED, run=_run(results))
 
     assert len(problems) == 1
     assert "run-evidence" in problems[0]
@@ -209,20 +222,20 @@ def test_a_version_probe_that_fails_outright_is_caught() -> None:
     for command in REQUIRED_COMMANDS:
         results[(command, "--help")] = _completed(0)
 
-    problems = cli_problems("agentic-hil", ANTICIPATED, run=_run(results))
+    problems = cli_problems("agentic-hil", PUBLISHED, run=_run(results))
 
     assert any("--version" in problem and "exited 1" in problem for problem in problems)
 
 
 def test_main_prints_the_pin(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    _write_tree(tmp_path, ANTICIPATED, ANTICIPATED)
+    _write_tree(tmp_path, PUBLISHED, PUBLISHED)
 
     assert main(["--print-pin", f"--root={tmp_path}"]) == 0
-    assert capsys.readouterr().out.strip() == ANTICIPATED
+    assert capsys.readouterr().out.strip() == PUBLISHED
 
 
 def test_main_refuses_a_run_without_an_executable(tmp_path: Path) -> None:
-    _write_tree(tmp_path, ANTICIPATED, ANTICIPATED)
+    _write_tree(tmp_path, PUBLISHED, PUBLISHED)
 
     with pytest.raises(SystemExit, match="--agentic-hil"):
         main([f"--root={tmp_path}"])

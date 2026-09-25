@@ -11,11 +11,15 @@ evals/install/container/package-lock.json pins; its package.json declares
 `"bin": {"codex": "bin/codex.js"}` and that file opens with
 `#!/usr/bin/env node`, both read out of the published tarball on 2026-09-06)
 is therefore a process whose `comm` is `node` and whose second argument is the
-path of the `codex` launcher; its native child is `codex-x86_64-un...`,
-which is `codex-x86_64-unknown-linux-musl` cut at the fifteen characters
-`comm` holds. `pgrep -x codex` matches neither. So a machine with codex open
-was told `no agent CLI of yours is running, so there is nothing to restart`,
-the operator did not restart it, and the tools did not appear.
+path of the `codex` launcher. That launcher is not all of it: installed with
+`npm install -g` and recorded at its first prompt
+(tests/fixtures/npm_agent_cli_process_table_recordings.json), codex runs the
+platform binary the package vendors as the launcher's child, and that binary's
+`comm` is `codex` in full, because its path ends in `bin/codex`. So
+`pgrep -x codex` answers with the binary. The command-line question step 5
+asks when that one answers nothing is there for a CLI that npm installs as a
+node script: that is a process called `node`, and the launcher's path is its
+argument, as it is for the codex launcher here.
 
 None of the five branches of step 5 had ever produced output in a test: the
 restart lines were grepped out of the source. Here they run against the real
@@ -26,32 +30,40 @@ has the shape a native binary gives it. The `node` and the native child are
 copies of this image's `sh` and `sleep` under those names, because what
 `pgrep` and `/proc` see is the executable's name and its argument list, and
 those are the whole of the shape. The image has no node and no codex, so the
-names come from the published package rather than from a run of it; the
-recording that would replace them is named in the report.
+names and the paths are the recording's, moved under a prefix of the test's
+own.
 
-Which of the two processes step 5 names is decided here, and it is the node
-parent: that is the process an operator quits, and the native child goes with
-it. So the child is present in the table for every case below, and no case may
+Which of the two processes step 5 names is the one whose `comm` is the
+command's own name, the binary. The launcher forwards SIGINT, SIGTERM and
+SIGHUP to it and, when it ends, exits with its status or raises the signal it
+ended on. So any end of the binary ends the launcher too, while ending the
+launcher reaches the binary only through that forwarding, which a SIGKILL
+skips. The launcher is in the table for every npm case below, and no case may
 name it.
 """
 
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import signal
 import subprocess
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
+from support import scaled_time_bound
 
 from .conftest import CONTAINER_ONLY, INSTALL_TIMEOUT_S, REPOSITORY_ROOT
 
 pytestmark = [pytest.mark.container, CONTAINER_ONLY]
 
 SHELL_SCRIPT = REPOSITORY_ROOT / "install.sh"
+# What `npm install -g` laid out for each agent CLI step 5 looks for, and the
+# process table each one then ran as (#518). The npm stand-in is built from it.
+NPM_AGENT_CLI_RECORDINGS = REPOSITORY_ROOT / "tests" / "fixtures" / "npm_agent_cli_process_table_recordings.json"
 # Long enough to outlive the install run by a wide margin; killed in any case.
 LINGER_S = "600"
 SETTLE_S = 0.5
@@ -78,7 +90,8 @@ class Machine:
         self.uv_bin = tmp_path / "uv-tools" / "bin"
         self.uv_root = tmp_path / "uv-tools" / "tools"
         self.clis = tmp_path / "clis"
-        for directory in (self.project, self.tools, self.uv_bin, self.uv_root, self.clis):
+        self.npm_prefix = tmp_path / "npm-prefix"
+        for directory in (self.project, self.tools, self.uv_bin, self.uv_root, self.clis, self.npm_prefix / "bin"):
             directory.mkdir(parents=True)
         self.registered = tmp_path / "registered"
         executable(
@@ -108,7 +121,7 @@ class Machine:
     def environment(self, **extra: str) -> dict[str, str]:
         return {
             **os.environ,
-            "PATH": f"{self.tools}{os.pathsep}{self.clis}{os.pathsep}/usr/bin:/bin",
+            "PATH": f"{self.tools}{os.pathsep}{self.clis}{os.pathsep}{self.npm_prefix / 'bin'}{os.pathsep}/usr/bin:/bin",
             "UV_TOOL_BIN_DIR": str(self.uv_bin),
             "UV_TOOL_DIR": str(self.uv_root),
             **extra,
@@ -151,30 +164,42 @@ class Machine:
             shutil.copy2(shell, node_dir / "node")
         return node_dir
 
-    def npm_cli(self, name: str, package: str, native: str) -> subprocess.Popen[bytes]:
-        """A running agent CLI installed through npm: `comm` is `node`, argv[1] the launcher symlink.
+    def npm_cli(self, name: str) -> subprocess.Popen[bytes]:
+        """A running agent CLI laid out and started the way the recording holds it for `name`.
 
-        The layout is npm's: `<prefix>/lib/node_modules/<package>/bin/<name>.js`
-        opening with `#!/usr/bin/env node`, and `<prefix>/bin/<name>` a
-        symlink to it. The `node` on PATH is a copy of `sh`, so the script
-        body is shell and the process keeps the name and the arguments the
-        kernel gave it. Under it the launcher starts the platform binary the
-        package vendors, `native`, whose `comm` the kernel cuts to fifteen
-        characters, which is the process a name-based matcher sees instead of
-        the CLI's.
+        The recording names the link npm made, `<prefix>/bin/<name>`, the file
+        in the package it points to and that file's first line, and its table
+        holds the process started and the one process under it called `name`.
+        Here all of it sits under the test's own prefix: the link with the
+        recorded target, the launcher opening with the recorded line, and at
+        the binary's recorded path a copy of `sleep`, whose `comm` is then the
+        name that path ends in, as the kernel gave the real one. The `node` on
+        PATH is a copy of `sh`, so the launcher's body is shell and the process
+        keeps the name and the arguments the kernel gave it. The binary is
+        handed the one argument `sleep` needs, where the recorded one had none,
+        and neither question step 5 asks answers differently for it.
         """
         node_dir = self._node_runtime()
         sleep = shutil.which("sleep")
         assert sleep is not None
-        vendored = self.clis.parent / "npm-prefix" / "lib" / "node_modules" / package / "vendor" / native
+        recording = json.loads(NPM_AGENT_CLI_RECORDINGS.read_text(encoding="utf-8"))
+        package = recording["packages"][name]
+        link, target = package["bin"].split(" -> ")
+        recorded_prefix = PurePosixPath(link).parent.parent
+        (table,) = [table for table in recording["tables"].values() if name in table["started"]]
+        binaries = [
+            process for process in table["processes"] if process["comm"] == name and process["ppid"] == table["started"][name]
+        ]
+        assert len(binaries) == 1, f"the recording holds {len(binaries)} processes called {name} under the one started for it"
+        vendored = self.npm_prefix / PurePosixPath(binaries[0]["exe"]).relative_to(recorded_prefix)
         vendored.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(sleep, vendored)
-        script = self.clis.parent / "npm-prefix" / "lib" / "node_modules" / package / "bin" / f"{name}.js"
+        launcher = self.npm_prefix / PurePosixPath(link).relative_to(recorded_prefix)
+        script = (launcher.parent / target).resolve()
         script.parent.mkdir(parents=True, exist_ok=True)
-        script.write_text(f'#!/usr/bin/env node\n"{vendored}" {LINGER_S}\n', encoding="utf-8")
+        script.write_text(f'{package["bin_first_line"]}\n"{vendored}" {LINGER_S}\n', encoding="utf-8")
         script.chmod(0o755)
-        launcher = self.clis / name
-        launcher.symlink_to(os.path.relpath(script, self.clis))
+        launcher.symlink_to(target)
         started = self._start([str(launcher)], PATH=f"{node_dir}{os.pathsep}{os.environ.get('PATH', '')}")
         self.native_children[started.pid] = self._child_of(started.pid)
         return started
@@ -215,9 +240,17 @@ class Machine:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(child, signal.SIGKILL)
         for process in self.started:
+            # A launcher reaps the child just killed and then exits by itself.
+            # Killed before it has, it leaves that child a zombie of the
+            # container's first process, which reaps only what it started, and
+            # a zombie keeps its `comm`: a binary called `codex` would answer
+            # every later test's `pgrep -x codex`.
+            if process.pid in self.native_children:
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=scaled_time_bound(30))
             if process.poll() is None:
                 process.kill()
-            process.wait(timeout=30)
+            process.wait(timeout=scaled_time_bound(30))
 
 
 @pytest.fixture
@@ -237,29 +270,28 @@ def cmdline_of(pid: int) -> list[str]:
     return [part for part in Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8").split("\0") if part]
 
 
-NATIVE_CODEX = "codex-x86_64-unknown-linux-musl"
-
-
 def test_step_five_names_a_running_npm_installed_codex(machine: Machine) -> None:
     """The shape npm gives codex, in the real process table, and the block step 5 owes for it."""
-    codex = machine.npm_cli("codex", "@openai/codex", NATIVE_CODEX)
+    codex = machine.npm_cli("codex")
     child = machine.native_children[codex.pid]
-    # The premise, read out of the kernel: this is what a `pgrep -x codex`
-    # cannot see, on either process.
+    # The premise, read out of the kernel: the shape the recording holds, a
+    # `node` running the launcher and under it the one process called `codex`,
+    # which is the process `pgrep -x codex` answers with.
     assert comm_of(codex.pid) == "node", comm_of(codex.pid)
     arguments = cmdline_of(codex.pid)
     assert arguments[0] == "node" and arguments[1].endswith("/codex"), arguments
-    assert comm_of(child) == NATIVE_CODEX[:15], comm_of(child)
-    assert subprocess.run(["pgrep", "-x", "codex"], capture_output=True, text=True, check=False).stdout.strip() == ""
+    assert comm_of(child) == "codex", comm_of(child)
+    assert subprocess.run(["pgrep", "-x", "codex"], capture_output=True, text=True, check=False).stdout.strip() == str(child)
 
     transcript = machine.install("--agent", "codex")
 
     assert "codex registered" in transcript, transcript
-    assert f"RESTART REQUIRED: codex is running right now (PID {codex.pid})." in transcript, transcript
-    # The node parent and not the binary under it: that is the process the
-    # operator quits, and naming the child would send them after one that dies
-    # with it anyway.
-    assert f"PID {child}" not in transcript, transcript
+    assert f"RESTART REQUIRED: codex is running right now (PID {child})." in transcript, transcript
+    # The binary and not the node launcher above it: the binary is the one
+    # process called `codex`, any end of it ends the launcher too, and ending
+    # the launcher reaches it only through a forwarded signal, which a SIGKILL
+    # skips.
+    assert f"(PID {codex.pid})" not in transcript, transcript
     assert "nothing to restart" not in transcript, transcript
 
 
@@ -280,14 +312,16 @@ def test_step_five_lists_every_running_cli_whichever_way_each_was_installed(mach
     reason the plural branch exists, and it had never run either.
     """
     claude = machine.native_cli("claude")
-    codex = machine.npm_cli("codex", "@openai/codex", NATIVE_CODEX)
+    codex = machine.npm_cli("codex")
+    child = machine.native_children[codex.pid]
 
     transcript = machine.install()
 
     assert "claude-code registered" in transcript and "codex registered" in transcript, transcript
     assert "RESTART REQUIRED: these agent CLIs are running right now:" in transcript, transcript
     assert f"    claude (PID {claude.pid})" in transcript, transcript
-    assert f"    codex (PID {codex.pid})" in transcript, transcript
+    assert f"    codex (PID {child})" in transcript, transcript
+    assert f"(PID {codex.pid})" not in transcript, transcript
     assert "restart: 2 of your agent CLIs are running right now" in transcript, transcript
 
 

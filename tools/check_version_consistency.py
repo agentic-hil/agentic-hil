@@ -232,18 +232,12 @@ UNTRACKED_MENTIONS: dict[str, str] = {
 # Which version a position states. RELEASE is the release users can install: a
 # floor, an install pin, a manifest a registry serves, the version an eval
 # installs from the index. DISTRIBUTION is what a build of *this tree* calls
-# itself, which between releases is ahead of the release and says so. ANTICIPATED
-# is the release this tree builds toward -- the distribution version without its
-# development suffix. It is the release these positions are written for rather
-# than the last one published, which matters for a position that demonstrates a
-# command this tree adds: pinning it to the previous release names a distribution
-# that does not yet expose the command, so a CI example that invokes `check-plan`
-# or `run-evidence` names the release those commands first ship in, not the one
-# before it. On a release commit ANTICIPATED equals RELEASE, so nothing about a
-# release changes.
+# itself, which between releases is ahead of the release and says so. The shipped
+# CI examples are release positions too: a copied example installs its pin from
+# the index on the day it is copied, so it names a release the index carries
+# (#525).
 RELEASE = "release"
 DISTRIBUTION = "distribution"
-ANTICIPATED = "anticipated"
 
 
 @dataclass(frozen=True)
@@ -388,6 +382,18 @@ def _ci_example_versions(root: Path, relative: str) -> tuple[str, ...]:
     return tuple(match.group(1) for match in SEMVER.finditer(body))
 
 
+def _recorded_surface_versions(root: Path, relative: str) -> tuple[str, ...]:
+    """Every version the recording of the pinned release's command surface states.
+
+    Exhaustive, the way the CI examples are. The recording speaks for one
+    release, the one the examples pin, so its `version` and the release its
+    source sentence says was installed are both that release. A release stamp
+    moves the pin, and holding the recording to the same version is what refuses
+    the stamp until the surface is recorded again from the stamped tree.
+    """
+    return tuple(match.group(1) for match in SEMVER.finditer(_read(root, relative)))
+
+
 def _changelog_release(root: Path) -> str:
     match = CHANGELOG_RELEASE.search(_read(root, "CHANGELOG.md"))
     if match is None:
@@ -407,35 +413,32 @@ def release_version(root: Path) -> str:
     version = package_version(root)
     if not is_development(version):
         return version
+    # The newest heading, dated or not, where #525 defines the newest published
+    # release as the newest heading CHANGELOG.md dates. The two readings differ
+    # only when an undated version heading sits above the newest dated one, and
+    # such a heading does not get through: one this tree does not follow is
+    # refused in `version_problems`, and one it does follow passes here only once
+    # every release position states it, which is a release stamped without its
+    # date, and the suite reads the dated headings and refuses that. So on a tree
+    # that passes both, this is the newest published release, and the CI examples
+    # that pin it name a release the package index carries.
     return _changelog_release(root)
 
 
 def anticipated_release(root: Path) -> str:
     """The release this tree builds toward: the distribution version, without suffix.
 
-    On a release commit that is the release itself, and equal to `release_version`
-    there, so a release stamps an anticipated position exactly as it stamps a
-    release one. Between releases it is the `X.Y.Z` the `X.Y.Z.devN` anticipates:
-    the release the features this tree adds -- and the CI examples that demonstrate
-    them -- will first ship in. A CI example pinned to `release_version` between
-    releases would name the previous release, which does not expose a command this
-    tree only just added; pinned to the anticipated release it names the one that
-    does, and matches the code the example was written and tested against.
+    On a release commit that is the release itself. Between releases it is the
+    `X.Y.Z` the `X.Y.Z.devN` anticipates, which the package index does not carry
+    until that release ships. No position states it: the CI examples used to, and
+    a copied example then stopped at its install (#525). `uncovered_files` still
+    sweeps for it, because a new file that pins it is that same mistake again.
     """
     version = package_version(root)
     development = DEVELOPMENT_VERSION.match(version)
     if development is not None:
         return development.group("release")
     return version
-
-
-def expected_for(location: Location, distribution: str, release: str, anticipated: str) -> str:
-    """The version a position is supposed to state, given which of the three it tracks."""
-    if location.tracks == DISTRIBUTION:
-        return distribution
-    if location.tracks == ANTICIPATED:
-        return anticipated
-    return release
 
 
 def _json_document(root: Path, relative: str) -> dict:
@@ -541,19 +544,22 @@ def locations(root: Path) -> list[Location]:
             "examples/ci/github-actions.yml",
             "AGENTIC_HIL_VERSION and every other version the shipped GitHub Actions example states",
             _ci_example_versions(root, "examples/ci/github-actions.yml"),
-            tracks=ANTICIPATED,
         ),
         Location(
             "examples/ci/gitlab-ci.yml",
             "AGENTIC_HIL_VERSION and every other version the shipped GitLab CI example states",
             _ci_example_versions(root, "examples/ci/gitlab-ci.yml"),
-            tracks=ANTICIPATED,
         ),
         Location(
             "docs/ci-examples.md",
             "the release the CI examples page tells a runner operator to pin and install",
             _ci_example_versions(root, "docs/ci-examples.md"),
-            tracks=ANTICIPATED,
+        ),
+        Location(
+            "tests/fixtures/published_cli_surface.json",
+            "version, and every version the source sentence names: the release whose command surface the CI "
+            "examples are checked against; a release records it again with tools/record_cli_surface.py --from-tree",
+            _recorded_surface_versions(root, "tests/fixtures/published_cli_surface.json"),
         ),
     ]
 
@@ -568,7 +574,6 @@ def version_problems(root: Path, release_tag: str | None = None) -> list[str]:
     """
     distribution = package_version(root)
     release = release_version(root)
-    anticipated = anticipated_release(root)
     found = []
     if is_development(distribution) and not is_newer(distribution, release):
         found.append(
@@ -576,16 +581,11 @@ def version_problems(root: Path, release_tag: str | None = None) -> list[str]:
             f"{distribution}, which does not follow it"
         )
     for location in locations(root):
-        expected = expected_for(location, distribution, release, anticipated)
+        expected = distribution if location.tracks == DISTRIBUTION else release
         if not location.versions:
             found.append(f"{location.path} carries no version, but {location.carries} was expected")
             continue
-        if location.tracks == DISTRIBUTION:
-            subject = "this tree builds"
-        elif location.tracks == ANTICIPATED:
-            subject = "the release this tree builds toward is"
-        else:
-            subject = "this release is"
+        subject = "this tree builds" if location.tracks == DISTRIBUTION else "this release is"
         for stated in location.versions:
             if stated != expected:
                 found.append(f"{location.path} states {stated}, but {subject} {expected} ({location.carries})")
@@ -668,10 +668,10 @@ def uncovered_files(root: Path, version: str | None = None) -> list[str]:
     home for a version without adding it here turns the build red, and the
     message says where. The default sweep is every version the gate manages,
     deduplicated: the release, this tree's development version, and the
-    anticipated release the CI examples pin. That third one is the exact pin
-    `agentic-hil==X.Y.Z` the examples carry between releases; leaving it out of
-    the sweep let a new, uncovered home for that pin pass unnoticed, which is
-    the very drift this function exists to catch.
+    anticipated release. No position states that third one, and between
+    releases the package index does not carry it, so a file that pins it names a
+    release nobody can install yet. That is the mistake the CI examples made
+    (#525), and the sweep has to see it wherever it happens next.
     """
     swept = (
         (version,)
@@ -956,8 +956,6 @@ def render_list(root: Path) -> str:
             marks.append(f"{count} occurrences")
         if location.tracks == DISTRIBUTION:
             marks.append("the distribution version")
-        elif location.tracks == ANTICIPATED:
-            marks.append("the release this tree builds toward")
         suffix = f"  [{', '.join(marks)}]" if marks else ""
         lines.append(f"  {location.path}{suffix}")
         lines.append(f"      {location.carries}")

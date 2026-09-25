@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import struct
+import subprocess
 import tempfile
 import threading
 import time
@@ -15,9 +16,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-pytest_plugins = ["pytester"]
+pytest_plugins = ["pytester", "suite_ledger"]
 
-from support import remove_trusted_launcher, sweep_stale_launchers  # noqa: E402
+from support import remove_trusted_launcher, scaled_time_bound, sweep_stale_launchers  # noqa: E402
 
 # The real index reader, bound before the autouse fixture below replaces the
 # name it lives under. A test about the reader itself calls this one, and every
@@ -238,6 +239,125 @@ FAKE_PYOCD_ERASE_REFUSED = ROOT / "tests" / "fixtures" / "fake_pyocd_erase_refus
 FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"
 
 
+# A run leaves the working tree the way it found it (#544). A full run once left
+# an 18 MB pip cache in the repository root and passed, and nothing in the run
+# said so: the files were simply there afterwards, untracked, until someone
+# looked. So the session lists the checkout's untracked, not ignored files when
+# it starts and again when it finishes, and a file that appeared in between
+# fails the run by name. What was already untracked is the developer's and does
+# not count. Nothing is deleted, because what a test wrote is the evidence of
+# which test wrote it, and every test keeps its own outcome, so nobody hunts for
+# a failing test that does not exist.
+#
+# Only the process that sees the whole session looks: the xdist controller, or
+# the one process of a run without workers. A worker starts after the
+# controller and shares its tree, and a session a test starts (two tests in
+# this suite start one of this checkout) begins and ends while the run around
+# it keeps writing, so the listings of either would compare a tree other tests
+# are changing. Such a session is told by the PYTEST_CURRENT_TEST pytest sets for
+# the test that started it, which the session inherits; the run around it
+# checks the tree, the session's files included. A tree without a `.git` of
+# its own is left alone: the sdist gate in CI collects the suite inside an
+# unpacked archive within the CI checkout, where git would answer for the
+# outer repository. A machine without git runs the suite the way it did before
+# the check existed.
+TREE_LISTING_S = 60.0
+_TREE_AT_START = pytest.StashKey[tuple[str, dict[str, str], frozenset[str]]]()
+_TREE_NOT_CHECKED = pytest.StashKey[str]()
+
+
+class _GitCouldNotList(Exception):
+    """git did not list the tree; the message is its own last line, word for word."""
+
+
+def _untracked_files(git: str, environment: dict[str, str]) -> frozenset[str]:
+    """The checkout's untracked, not ignored files, named the way git names them from the root."""
+    try:
+        listed = subprocess.run(
+            [git, "ls-files", "-z", "--others", "--exclude-standard"],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            timeout=scaled_time_bound(TREE_LISTING_S),
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise _GitCouldNotList(str(error)) from error
+    if listed.returncode != 0:
+        said = listed.stderr.decode("utf-8", errors="replace").strip().splitlines()
+        raise _GitCouldNotList(said[-1] if said else f"git exited with status {listed.returncode}")
+    return frozenset(name for name in listed.stdout.decode("utf-8", errors="replace").split("\0") if name)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """List the tree before any test runs, and before xdist starts a worker that could write into it."""
+    if hasattr(session.config, "workerinput") or "PYTEST_CURRENT_TEST" in os.environ or not (ROOT / ".git").exists():
+        return
+    git = shutil.which("git")
+    if git is None:
+        return
+    # The finish is listed with this environment rather than the one the tests
+    # leave behind. `--exclude-standard` reads the global excludes file, which
+    # git finds through HOME, USERPROFILE and XDG_CONFIG_HOME. A test's
+    # isolation puts those back when the test ends, even after a direct write,
+    # but a fixture or hook that changes one of them outside a test's
+    # isolation, by writing `os.environ` directly, leaves its value in place
+    # for the rest of the session: listed that way, every file the developer
+    # ignores globally would count as new.
+    environment = dict(os.environ)
+    try:
+        session.config.stash[_TREE_AT_START] = (git, environment, _untracked_files(git, environment))
+    except _GitCouldNotList as error:
+        session.config.stash[_TREE_NOT_CHECKED] = f"git could not list it when the run started: {error}"
+
+
+@pytest.hookimpl(wrapper=True, trylast=True)
+def pytest_sessionfinish(session: pytest.Session) -> Generator[None, object, object]:
+    """List the tree again once the session is over, and fail a passing run that left files in it.
+
+    The innermost wrapper, so this runs after every plugin's own finish: after
+    pytest has torn down what an early stop left set up and xdist has taken its
+    workers down, and before the terminal reporter's summary. The report goes
+    to the terminal from here rather than into a summary section, because
+    `--no-summary` drops those, and the run would then fail with every line it
+    printed saying that it passed.
+    """
+    result = yield
+    config = session.config
+    not_checked = config.stash.get(_TREE_NOT_CHECKED, None)
+    new: list[str] = []
+    if _TREE_AT_START in config.stash:
+        git, environment, before = config.stash[_TREE_AT_START]
+        try:
+            after = _untracked_files(git, environment)
+        except _GitCouldNotList as error:
+            not_checked = f"git could not list it when the run finished: {error}"
+        else:
+            # pytest's own scratch space is not a stray, even inside the
+            # checkout: a developer points `--basetemp` there to keep paths
+            # short (see SANDBOX_ROOT), and every `tmp_path` of such a run lies
+            # there, untracked and not ignored. Read the way pytest's own
+            # tmpdir plugin reads it when the session finishes.
+            basetemp = getattr(getattr(config, "_tmp_path_factory", None), "_basetemp", None)
+            new = sorted(name for name in after - before if basetemp is None or not (ROOT / name).is_relative_to(basetemp))
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None and (new or not_checked):
+        # A quiet run's progress line has no newline yet; pytest's own summary
+        # adds one when it starts, and this comes first.
+        reporter.write_line("")
+        if not_checked:
+            reporter.write_line(f"The working tree {ROOT} was not checked for files a test left behind: {not_checked}", yellow=True)
+        else:
+            reporter.write_sep("=", "a test wrote into the working tree", red=True)
+            reporter.write_line(f"New since the run started, untracked, not ignored, and left in place in {ROOT}:")
+            for name in new:
+                reporter.write_line(f"  {name}")
+    if new and session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    return result
+
+
 
 @pytest.fixture(autouse=True)
 def isolated_config_environment(
@@ -259,9 +379,11 @@ def isolated_config_environment(
     # it, this redirect included; one test did exactly that, and the CLI calls
     # that followed installed into and then uninstalled from the developer's real
     # profile (#270). An instance the fixture owns is out of reach of anything a
-    # test does to its own, and the finalizer registered for it runs after the
-    # test's monkeypatch has already rolled its own changes back onto these
-    # values, so the environment still unwinds in the order it was built.
+    # test does to its own. The test's own is the `monkeypatch` below, which
+    # depends on this fixture, so pytest rolls the test's changes back onto
+    # these values before the finalizer registered for this instance runs, and
+    # the environment unwinds in the order it was built whatever the fixtures
+    # are called (#563).
     isolation = pytest.MonkeyPatch()
     request.addfinalizer(isolation.undo)
     home_root.mkdir(parents=True)
@@ -303,6 +425,34 @@ def isolated_config_environment(
     isolation.setenv("LINES", "24")
     isolation.delenv("AGENTIC_HIL_CONFIG", raising=False)
     return config_root
+
+
+@pytest.fixture
+def monkeypatch(isolated_config_environment: Path, monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+    """pytest's own `monkeypatch`, set up after the sandbox and undone before it, whoever asks for it.
+
+    A change made through `monkeypatch` records the value it replaced, and for
+    every variable the isolation redirects that value is the sandbox's, so the
+    change has to be undone before the isolation is, or it puts the sandbox
+    back after the isolation has restored the session. Without this fixture it
+    was not: pytest sets a conftest's autouse fixtures up in the order their
+    names sort, three of them take `monkeypatch` and sort ahead of the
+    isolation, and the instance they share with the test was therefore created
+    first and undone last. Every variable a test moved through it stayed on its
+    deleted sandbox for the session fixtures, module fixtures and hooks after
+    it on that worker, and a developer's own AGENTIC_HIL_CONFIG was gone for
+    the rest of the session (#563).
+
+    Depending on the isolation makes the order a matter of dependency instead
+    of names. pytest resolves a fixture's name for the test that needs it, so
+    this is the `monkeypatch` every requester under tests/ receives, the test
+    itself, an autouse fixture or pytester alike, and asking for its own name
+    reaches pytest's instance one level up. A fixture is set up after the
+    fixtures it depends on and torn down before them, so this one is created
+    once the sandbox is in place and undone while it still is, whatever any
+    fixture is called.
+    """
+    return monkeypatch
 
 
 @pytest.fixture(autouse=True)

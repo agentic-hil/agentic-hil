@@ -8,10 +8,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, suppress
 from dataclasses import asdict, dataclass
 from importlib import resources
 from pathlib import Path, PurePath
+from typing import Any
 
 import yaml
 
@@ -27,7 +29,7 @@ from agentic_hil.bootstrap import (
     enumerate_attached_probes,
     load_project_profile,
 )
-from agentic_hil.comports import list_available_com_ports, port_identity_fields
+from agentic_hil.comports import list_available_com_ports, port_identity_fields, port_names_device
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
     ADOPT_HARDWARE_COMMAND,
@@ -89,7 +91,7 @@ from agentic_hil.coordination import (
     standing_foreign_incidents,
 )
 from agentic_hil.devices import config_devices
-from agentic_hil.humanize import JSON_FLAG_HELP, PROTOCOL_COMMANDS, render_result, write_rendered
+from agentic_hil.humanize import JSON_FLAG_HELP, PROTOCOL_COMMANDS, render_result, split_by_usb_identity, write_rendered
 from agentic_hil.junit import detached_junit_refusal, write_refusal_junit_xml
 from agentic_hil.knowledge import (
     CONFIG_GRANT_COMMAND,
@@ -248,13 +250,36 @@ class FileSnapshot:
             return None
 
 
+@dataclass(frozen=True)
+class KnownAgent:
+    """An agent this program sets up, as it is on every machine: its id, the
+    name it is shown by, every spelling that names it, where under the home
+    directory it keeps its skills, and how it finds an installed skill.
+
+    Nothing here is read from the machine, so a command line can be parsed,
+    `--help` printed and an `--agent` name checked where no home directory can
+    be found. `skill_agents` adds the home directory for the commands that
+    write or read a skill."""
+
+    id: str
+    display_name: str
+    aliases: tuple[str, ...]
+    skills_directory: tuple[str, ...]
+    registration: str
+
+
+KNOWN_AGENTS = (
+    KnownAgent("opencode", "opencode", ("opencode", "open-code"), (".config", "opencode", "skills"), "skills-directory"),
+    KnownAgent("claude-code", "Claude Code", ("claude-code", "claude", "claude_code"), (".claude", "skills"), "skills-directory"),
+    KnownAgent("codex", "Codex", ("codex", "codex-cli", "openai-codex"), (".codex", "skills"), "agents-md"),
+)
+
+
 def skill_agents() -> list[SkillAgent]:
+    """`KNOWN_AGENTS`, each with the path of its skill in this user's home
+    directory: the one part of an agent that is read from the machine."""
     home = Path.home()
-    return [
-        SkillAgent("opencode", "opencode", ("opencode", "open-code"), str(home / ".config" / "opencode" / "skills" / SKILL_NAME / SKILL_FILE), "skills-directory"),
-        SkillAgent("claude-code", "Claude Code", ("claude-code", "claude", "claude_code"), str(home / ".claude" / "skills" / SKILL_NAME / SKILL_FILE), "skills-directory"),
-        SkillAgent("codex", "Codex", ("codex", "codex-cli", "openai-codex"), str(home / ".codex" / "skills" / SKILL_NAME / SKILL_FILE), "agents-md"),
-    ]
+    return [SkillAgent(agent.id, agent.display_name, agent.aliases, str(home.joinpath(*agent.skills_directory, SKILL_NAME, SKILL_FILE)), agent.registration) for agent in KNOWN_AGENTS]
 
 
 def entrypoint(argv: list[str] | None = None) -> int:
@@ -398,15 +423,78 @@ def result_succeeded(result: JsonObject) -> bool:
     return conclusive_success(result)
 
 
+class AgentChoices:
+    """The values an `--agent` option accepts: the agents in `KNOWN_AGENTS`.
+
+    Iterated, it gives their ids, which is what `--help` prints and what a
+    refusal lists. A name is in it when `known_agent` finds it, so every
+    spelling that reached an agent before (an alias, another case, `_` for
+    `-`, blanks around it) still parses, and reaches the command exactly as it
+    was typed. Both are read from `KNOWN_AGENTS` whenever argparse asks, so an
+    agent added there is offered by every `--agent` at once, and neither reads
+    the home directory, so a machine without one still gets its help and its
+    usage errors.
+    """
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(supported_skill_agents())
+
+    def __contains__(self, name: object) -> bool:
+        return isinstance(name, str) and known_agent(name) is not None
+
+
+class AnyAgentChoices(AgentChoices):
+    """`skill-install --agent`: the same agents printed, and any name taken.
+
+    With `--target` that command writes the skill for an agent it does not know
+    to the path it is given, so whether a name is refused depends on an option
+    that may come after it on the command line. `refuse_an_unknown_agent_without_a_target`
+    decides it once the line has been read whole.
+    """
+
+    def __contains__(self, name: object) -> bool:
+        return isinstance(name, str)
+
+
+class SubcommandParser(argparse.ArgumentParser):
+    """The parser of every subcommand: argparse's own, plus a `check_parsed` it
+    runs once it has read the command line whole, for a check that an option's
+    `choices` cannot make because it depends on another option."""
+
+    def __init__(self, *, check_parsed: Callable[[argparse.ArgumentParser, argparse.Namespace], None] | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.check_parsed = check_parsed
+
+    def parse_known_args(self, args: Sequence[str] | None = None, namespace: argparse.Namespace | None = None) -> tuple[argparse.Namespace, list[str]]:
+        parsed, extras = super().parse_known_args(args, namespace)
+        if self.check_parsed is not None:
+            self.check_parsed(self, parsed)
+        return parsed, extras
+
+
+def refuse_an_unknown_agent_without_a_target(parser: argparse.ArgumentParser, parsed: argparse.Namespace) -> None:
+    """`skill-install` without `--target` writes to the agent's own skill
+    directory, so it refuses an agent that has none the way every other
+    `--agent` refuses one: argparse's own `invalid choice`, from this command's
+    parser, with its usage and exit status 2. An empty name is left to
+    `install_skill`, which takes it for the default."""
+    if parsed.target is not None or not parsed.agent:
+        return
+    try:
+        parser._check_value(argparse.Action(["--agent"], "agent", choices=AgentChoices()), parsed.agent)
+    except argparse.ArgumentError as refused:
+        parser.error(str(refused))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentic-hil", description="Agentic Hardware-in-the-Loop (Agentic HIL) local MCP stdio server")
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--json", action="store_true", help=JSON_FLAG_HELP)
-    subparsers = parser.add_subparsers(dest="command")
+    subparsers = parser.add_subparsers(dest="command", parser_class=SubcommandParser)
 
     init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted but the two flashing is interlocked against, and verify it with doctor. A config that is already there is kept, unchanged, and only the steps that do not touch it run")
     init_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
-    init_parser.add_argument("--agent", default=None, help="also ask this agent to refuse its own write tools on the config and the state root; on a config that is already there, adding or refreshing those rules is the whole of what this command does")
+    init_parser.add_argument("--agent", choices=AgentChoices(), default=None, help="also ask this agent to refuse its own write tools on the config and the state root; on a config that is already there, adding or refreshing those rules is the whole of what this command does")
     init_parser.add_argument(
         "--force",
         action="store_true",
@@ -548,21 +636,21 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_config_parser.add_argument("--output", default=None)
     mcp_config_parser.add_argument("--force", action="store_true")
 
-    skill_parser = subparsers.add_parser("skill-install", help="install/update the Agentic HIL agent setup skill")
-    skill_parser.add_argument("--agent", default="opencode")
+    skill_parser = subparsers.add_parser("skill-install", help="install/update the Agentic HIL agent setup skill", check_parsed=refuse_an_unknown_agent_without_a_target)
+    skill_parser.add_argument("--agent", choices=AnyAgentChoices(), default="opencode", help="(default: %(default)s)")
     skill_parser.add_argument("--target", default=None)
     skill_parser.add_argument("--force", action="store_true")
 
     agent_install_parser = subparsers.add_parser("agent-install", help="user half, once per user and agent: install the agent skill and register the MCP server at user level; needs no workspace and no config")
-    agent_install_parser.add_argument("--agent", default="claude-code")
+    agent_install_parser.add_argument("--agent", choices=AgentChoices(), default="claude-code", help="install the skill for this agent and register the MCP server with it at user level; without --agent, the default agent is the one registered (default: %(default)s)")
     agent_install_parser.add_argument("--force", action="store_true")
 
     setup_parser = subparsers.add_parser("setup", help="first run in one command: agent-install (user half) then init (project half)")
-    setup_parser.add_argument("--agent", default="claude-code")
+    setup_parser.add_argument("--agent", choices=AgentChoices(), default="claude-code", help="install the skill for this agent, register the MCP server with it at user level and ask it to refuse its own write tools on this project's config and state root; without --agent, the default agent is the one registered (default: %(default)s)")
     setup_parser.add_argument("--force", action="store_true")
 
     upgrade_parser = subparsers.add_parser("upgrade", help="upgrade this Agentic HIL installation and refresh the agent skills and MCP registrations it wrote")
-    upgrade_parser.add_argument("--agent", action="append", default=[], help="refresh only this agent, instead of every agent this installation had already set up; repeat for multiple agents. An agent that has neither a skill nor a registration is never installed for.")
+    upgrade_parser.add_argument("--agent", choices=AgentChoices(), action="append", default=[], help="refresh only this agent, instead of every agent this installation had already set up; repeat for multiple agents. An agent that has neither a skill nor a registration is never installed for.")
 
     uninstall_parser = subparsers.add_parser(
         "uninstall",
@@ -574,7 +662,7 @@ def build_parser() -> argparse.ArgumentParser:
         # root by hand instead.
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    uninstall_parser.add_argument("--agent", action="append", default=[], help="take back only this agent's half, instead of every agent this installation set up; repeat for multiple agents. An agent that has nothing installed is reported and left alone.")
+    uninstall_parser.add_argument("--agent", choices=AgentChoices(), action="append", default=[], help="take back only this agent's half, instead of every agent this installation set up; repeat for multiple agents. An agent that has nothing installed is reported and left alone.")
 
     # `--json` on every subcommand as well as on the parser, so both
     # `agentic-hil --json init` and the `agentic-hil init --json` everybody
@@ -2906,6 +2994,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         narrowed=sorted(narrowed),
         opened_interlocks=opened,
         drives_hardware=any(debugger_drives_hardware(written, entry) for entry in written.debuggers.values()),
+        bound_com_ports={name: port.device for name, port in written.com_ports.items() if not com_port_is_unbound(port)},
     )
     if not discovered:
         # The placeholders are a finding, not a default. An operator who is not
@@ -3297,7 +3386,7 @@ def _init_granted_clause(narrowed: list[str], opened_interlocks: list[str]) -> s
     return f"{base}, and {len(narrowed)} {'permission' if len(narrowed) == 1 else 'permissions'} the project profile set to false"
 
 
-def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, opened_interlocks: list[str] | None = None, drives_hardware: bool = True) -> list[str]:
+def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, opened_interlocks: list[str] | None = None, drives_hardware: bool = True, bound_com_ports: dict[str, str] | None = None) -> list[str]:
     narrowed = narrowed or []
     opened_interlocks = opened_interlocks or []
     granted_prefix = (
@@ -3357,16 +3446,53 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narro
         "turning one on costs you flashing and buys nothing.",
         "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (on an OpenOCD bench the ids come from this host's USB serial inventory, which reaches an ST-Link and no other adapter: for one of those, read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
     ])
+    # A port the file binds is confirmed rather than asked for, and is not named
+    # again among the others. The file `init` wrote on a stock Ubuntu bound
+    # `com_ports.dut_uart` to the debugger's `/dev/serial/by-id/` path, and this
+    # step went on to ask for the DUT UART to be added (#549). The inventory lists
+    # that port by its kernel name with the stable path beside it, so either one
+    # is the bound port, by the test the port's identity check finds it with
+    # (`comports.port_names_device`). Nothing here says a bound device is
+    # present: the file names it, and the inventory may not list it.
+    bound = {name: device for name, device in (bound_com_ports or {}).items() if device}
+    confirmed = "".join(f"com_ports.{name} is bound to {device}. " for name, device in bound.items())
     if available_com_ports.get("ok"):
         ports = available_com_ports.get("ports", [])
-        if ports:
-            devices = ", ".join(str(port.get("device", "")) for port in ports[:5])
-            suffix = "" if len(ports) <= 5 else f", and {len(ports) - 5} more"
+        others = [port for port in ports if not any(port_names_device(port, device) for device in bound.values())]
+        # The ports somebody plugged in first, then the ones the kernel declares
+        # whether anything is attached or not: that host lists 32 legacy ports
+        # ahead of the one USB port a board is on, and the sample of five never
+        # reached it. Both groups stay in the sample and the count, each in the
+        # host's order, because on some hosts a legacy port is a real UART.
+        identified, plain = split_by_usb_identity(others)
+        others = [*identified, *plain]
+        devices = ", ".join(str(port.get("device", "")) for port in others[:5])
+        suffix = "" if len(others) <= 5 else f", and {len(others) - 5} more"
+        if bound and others:
+            label = "Other COM ports detected" if len(others) < len(ports) else "Detected COM ports"
+            next_steps.append(f"{confirmed}{label}: {devices}{suffix}.")
+        elif bound and ports:
+            next_steps.append(f"{confirmed}No other COM ports detected.")
+        elif ports:
             next_steps.append(f"Detected COM ports: {devices}{suffix}. Add the DUT UART under com_ports if serial feedback is needed.")
         else:
-            next_steps.append("No host COM ports detected. Connect USB serial hardware and run: agentic-hil com-ports")
+            next_steps.append(f"{confirmed}No host COM ports detected. Connect USB serial hardware and run: agentic-hil com-ports")
     else:
-        next_steps.append("COM port discovery failed. Run: agentic-hil com-ports after checking the pyserial installation.")
+        # The item that says the listing failed also says how, with the error
+        # whole: the discovery carries it as `backend_error`, and neither the init
+        # nor the setup screen prints `available_com_ports`. An OS error raised
+        # while listing means pyserial was imported, so what to do follows the
+        # causes that result names; only a pyserial that could not be imported is
+        # sent to its installation. A Windows error is the system's own sentence
+        # and brings its own full stop.
+        error = str(available_com_ports.get("backend_error") or "")
+        failed = f"COM port discovery failed: {error}" if error else "COM port discovery failed"
+        stop = "" if failed.endswith(".") else "."
+        if available_com_ports.get("error_type") == "com_port_discovery_failed":
+            advice = "Run: agentic-hil com-ports again once the USB serial devices have settled."
+        else:
+            advice = "Run: agentic-hil com-ports after checking the pyserial installation."
+        next_steps.append(f"{confirmed}{failed}{stop} {advice}")
     next_steps.extend(
         [
             "For CAN access, add a named bus under can_buses.",
@@ -5599,13 +5725,21 @@ def normalize_agent(agent: str) -> str:
     return agent.strip().lower().replace("_", "-")
 
 
-def resolve_skill_agent(agent: str) -> SkillAgent | None:
+def known_agent(agent: str) -> KnownAgent | None:
+    """The agent in `KNOWN_AGENTS` a name stands for: any of its aliases, in
+    any case, with `_` for `-` and blanks around it. It reads nothing from the
+    machine, which is what lets parsing ask it."""
     normalized = normalize_agent(agent)
-    return next((candidate for candidate in skill_agents() if normalized in {normalize_agent(alias) for alias in candidate.aliases}), None)
+    return next((candidate for candidate in KNOWN_AGENTS if normalized in {normalize_agent(alias) for alias in candidate.aliases}), None)
+
+
+def resolve_skill_agent(agent: str) -> SkillAgent | None:
+    known = known_agent(agent)
+    return None if known is None else next((candidate for candidate in skill_agents() if candidate.id == known.id), None)
 
 
 def supported_skill_agents() -> list[str]:
-    return [agent.id for agent in skill_agents()]
+    return [agent.id for agent in KNOWN_AGENTS]
 
 
 def register_skill(agent: SkillAgent | None, target_path: str, version: str, requested_agent: str) -> JsonObject | None:

@@ -58,7 +58,7 @@ pytestmark = [pytest.mark.bench, BENCH_ONLY]
 HANDSHAKE_TIMEOUT_S = 60.0
 
 # How long a shutdown is given before the process is killed instead.
-SHUTDOWN_TIMEOUT_S = 60.0
+SHUTDOWN_TIMEOUT_S = scaled_time_bound(60.0)
 
 # How long a caller that asked for no wait may take to be refused a held device.
 # Generous on purpose: what this catches is a refusal that quietly waits for the

@@ -3,8 +3,9 @@
 #   1. the agentic-hil package, installed user-local (uv tool, or pip --user).
 #   2. your agent's skill file, under your own home directory.
 #   3. your agent's user-level MCP registration, under your own home directory.
-#   4. nothing in any repository and no project configuration; of your shell
-#      profile, one line, in one file, named as it is written, skipped by --no-path.
+#   4. nothing in any repository and no project configuration; one line in each
+#      startup file your shell reads (two for bash on Linux), named as it is
+#      written, skipped by --no-path.
 #   5. nothing that needs administrator rights: no sudo, no system package manager.
 
 set -eu
@@ -82,9 +83,10 @@ Options:
   --can               Install the [can] extra for PEAK and SocketCAN adapters.
                       This is the default.
   --no-can            Install without the [can] extra.
-  --no-path           Do not touch your shell profile. Step 3 then prints
-                      the one line to add yourself, as it always does when
-                      it cannot write the file.
+  --no-path           Do not touch your shell's startup files. Step 3 then
+                      prints the one line to add yourself and names the
+                      files it goes in, as it always does when it cannot
+                      write one.
   --system-certs      Validate TLS against this machine's own certificate
                       store, the one curl and apt already read, from the start.
                       Rarely needed: a failure that carries the signature of a
@@ -994,11 +996,17 @@ installed_executable_dir() {
     return 1
 }
 
-# The one file of yours step 3 may add a line to, chosen from the shell you
-# actually run. One file and never three: Astral's installer appends to
-# ~/.profile and to ~/.bashrc and creates ~/.zshrc, which is the spread this
-# script refuses and turns off with UV_NO_MODIFY_PATH (#488). The transcript
-# names whichever file this returns, so the edit can be found and undone.
+# The files of yours step 3 may add a line to, one per line, chosen from the
+# shell you actually run: only files that shell reads, and never a file for a
+# shell you do not run. Astral's installer appends to ~/.profile and to
+# ~/.bashrc and creates ~/.zshrc, which is the spread this script refuses and
+# turns off with UV_NO_MODIFY_PATH (#488). Every shell needs one file but
+# bash on Linux, which needs two (#548): an interactive shell that is not a
+# login shell reads ~/.bashrc and no login file, a login shell reads the first
+# of ~/.bash_profile, ~/.bash_login and ~/.profile that exists and not
+# ~/.bashrc, and only a login file that sources ~/.bashrc joins the two, which
+# a home with no startup file at all does not have. The transcript names every
+# file this returns, so each edit can be found and undone.
 path_profile() {
     case "$(basename "${SHELL:-sh}")" in
         zsh)
@@ -1007,11 +1015,13 @@ path_profile() {
         bash)
             # A macOS terminal window is a login shell and reads .bash_profile,
             # a Linux one is an interactive non-login shell and reads .bashrc,
-            # and neither reads the other by default.
+            # and neither reads the other by default. The login shell an ssh
+            # session or a console starts on Linux reads its login file.
             if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]; then
                 printf '%s\n' "$HOME/.bash_profile"
             else
                 printf '%s\n' "$HOME/.bashrc"
+                bash_login_file
             fi
             ;;
         fish)
@@ -1023,7 +1033,59 @@ path_profile() {
     esac
 }
 
-# That line, in the syntax of the file it goes in.
+# The login file bash reads on Linux: the first of the three that exists, or
+# ~/.profile when none does. Never a new ~/.bash_profile, which would hide a
+# ~/.profile created after it from bash.
+bash_login_file() {
+    for bash_login in "$HOME/.bash_profile" "$HOME/.bash_login"; do
+        if [ -e "$bash_login" ]; then
+            printf '%s\n' "$bash_login"
+            return 0
+        fi
+    done
+    printf '%s\n' "$HOME/.profile"
+}
+
+# The shells that read the files path_profile names, as step 3 says it.
+path_reach() {
+    case "$(basename "${SHELL:-sh}")" in
+        zsh)
+            printf '%s\n' "new interactive zsh shells"
+            ;;
+        bash)
+            if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]; then
+                printf '%s\n' "new bash login shells, which is what a macOS terminal window opens"
+            else
+                printf '%s\n' "new interactive bash shells and bash login shells"
+            fi
+            ;;
+        fish)
+            printf '%s\n' "new fish shells"
+            ;;
+        *)
+            printf '%s\n' "new login shells"
+            ;;
+    esac
+}
+
+# The files path_profile printed ($1), as step 3 names them: "A", or "A and B".
+path_phrase() {
+    path_joined=""
+    while IFS= read -r path_file; do
+        path_joined="${path_joined:+$path_joined and }$path_file"
+    done <<PATH_FILES
+$1
+PATH_FILES
+    printf '%s\n' "$path_joined"
+}
+
+# Whether the files path_profile printed ($1) are more than one.
+path_files_are_several() {
+    [ -n "$(printf '%s\n' "$1" | sed -n 2p)" ]
+}
+
+# That line, in the syntax of the file it goes in. $1 may be every file
+# path_profile printed: the files one shell reads all take its syntax.
 path_line() {
     case "$1" in
         *.fish)
@@ -1035,33 +1097,114 @@ path_line() {
     esac
 }
 
-# Put the directory the command landed in on the PATH of the shells that come
-# after this one. Sets PATH_PROFILE_FILE to the file it decided on either way,
-# and PATH_PROFILE_RESULT to what happened there: "written" for the line this
-# run added, "present" for a file that already names the directory, so a second
-# run of this script adds nothing. Returns non-zero when the file could not be
-# written, and the caller then prints the line for the reader to add.
-PATH_PROFILE_FILE=""
-PATH_PROFILE_RESULT=""
+# Put the directory the command landed in ($1) on the PATH of the shells that
+# come after this one: one line in each file path_profile printed ($2). Each
+# file is asked on its own whether it already names the directory, so a second
+# run of this script adds nothing to either, and each gets a line of the
+# transcript saying what happened there. Leaves in PATH_UNWRITTEN the files the
+# line could not go in, as step 3 names them, and nothing when every file has
+# it.
+PATH_UNWRITTEN=""
 persist_path() {
-    PATH_PROFILE_FILE=$(path_profile)
-    if [ -f "$PATH_PROFILE_FILE" ] && grep -Fqs -- "$1" "$PATH_PROFILE_FILE"; then
-        PATH_PROFILE_RESULT="present"
-        return 0
-    fi
-    if ! mkdir -p "$(dirname "$PATH_PROFILE_FILE")" 2>/dev/null; then
-        PATH_PROFILE_RESULT="failed"
-        return 1
-    fi
+    PATH_UNWRITTEN=""
+    while IFS= read -r path_file; do
+        if [ -f "$path_file" ] && grep -Fqs -- "$1" "$path_file"; then
+            say "PATH: $path_file already names that directory"
+        elif path_refusal=$(append_path_line "$path_file" "$1" 2>&1); then
+            say "PATH: added one line to $path_file"
+        else
+            # In the words of whatever refused it, so the reader sees why: a
+            # directory in the way, a home that is read-only, a full disk.
+            say "PATH: $path_file could not be written${path_refusal:+: $path_refusal}"
+            PATH_UNWRITTEN="${PATH_UNWRITTEN:+$PATH_UNWRITTEN and }$path_file"
+        fi
+    done <<PATH_FILES
+$2
+PATH_FILES
+}
+
+# Append that line for the directory $2 to the file $1, creating the file and
+# the directories above it where they do not exist yet. Whatever refuses it
+# says why on stderr.
+append_path_line() {
+    mkdir -p "$(dirname "$1")" || return 1
     {
         printf '\n# added by the agentic-hil installer: the directory it installed the command in\n'
-        path_line "$PATH_PROFILE_FILE" "$1"
-    } >> "$PATH_PROFILE_FILE" 2>/dev/null || {
-        PATH_PROFILE_RESULT="failed"
-        return 1
-    }
-    PATH_PROFILE_RESULT="written"
-    return 0
+        path_line "$1" "$2"
+    } >> "$1" || return 1
+}
+
+# Whether this is the account the release before #548 left half done: bash on
+# Linux, a ~/.bashrc in which this script's own marker line stands over a line
+# naming the directory ($1), and a login file that does not name it. That
+# release wrote ~/.bashrc alone, so every interactive shell of the account has
+# the directory, which is why step 3 finds it on PATH, and no bash login shell
+# does. The marker is what tells that line from one the operator wrote, which
+# is theirs to place.
+bash_login_half_missing() {
+    [ "$(basename "${SHELL:-sh}")" = "bash" ] || return 1
+    [ "$(uname -s 2>/dev/null || true)" != "Darwin" ] || return 1
+    [ -f "$HOME/.bashrc" ] || return 1
+    sed -n '/^# added by the agentic-hil installer/{n;p;}' "$HOME/.bashrc" | grep -Fqs -- "$1" || return 1
+    bash_login_half=$(bash_login_file)
+    ! { [ -f "$bash_login_half" ] && grep -Fqs -- "$1" "$bash_login_half"; }
+}
+
+# What step 3 says after the line for each file: the shells that read those
+# files, the line itself wherever a shell still lacks the directory, and the
+# shells that may read none of the files. $1 is the directory, $2 the files
+# path_profile printed, and $3 is 1 when the shell that started this run lacks
+# the directory too, which it does whenever step 3 found it off PATH: that
+# shell read its startup files before any of them was touched, and this run is
+# its child, so nothing written here reaches it.
+say_what_path_reaches() {
+    if path_files_are_several "$2"; then
+        path_reads="PATH: these files are read by $(path_reach)"
+    else
+        path_reads="PATH: this file is read by $(path_reach)"
+    fi
+    if [ -n "$PATH_UNWRITTEN" ] && [ "$3" -eq 1 ]; then
+        say "$path_reads; add this line to $PATH_UNWRITTEN yourself, and run it in any shell that is already open, yours included:"
+    elif [ -n "$PATH_UNWRITTEN" ]; then
+        say "$path_reads; add this line to $PATH_UNWRITTEN yourself:"
+    elif [ "$3" -eq 1 ]; then
+        say "$path_reads; this run already has the command, and a shell that is already open, yours included, gets it with this line:"
+    else
+        say "$path_reads"
+        say_what_misses_path "$1" "$2" 0
+        return 0
+    fi
+    printf '\n    %s\n\n' "$(path_line "$2" "$1")"
+    say_what_misses_path "$1" "$2" 1
+}
+
+# The shells that may read none of these files, and what works there. A shell
+# that is not interactive may read no startup file of the account's at all,
+# and that is where ssh host 'command', a cron job and a CI step run their
+# commands: bash reads ~/.bashrc for a command ssh hands it only where it was
+# built to, the ~/.bashrc Debian seeds a new account with returns for such a
+# shell before a line appended to it, and cron and CI start a POSIX shell.
+# fish reads its conf.d in every instance, ssh commands included, so for fish
+# only cron and CI are named, and the full path is the one remedy there: the
+# POSIX shell they run makes nothing of fish_add_path. $3 is 1 when the line
+# was printed above.
+say_what_misses_path() {
+    case "$2" in
+        *.fish)
+            say "PATH: a cron job or a CI step runs its command in a POSIX shell, which does not read this file; there, call the command by its full path, $1/agentic-hil"
+            return 0
+            ;;
+    esac
+    if path_files_are_several "$2"; then
+        path_misses="may read none of these files"
+    else
+        path_misses="may not read this file"
+    fi
+    if [ "$3" -eq 1 ]; then
+        say "PATH: a non-interactive shell, such as ssh host 'agentic-hil doctor', a cron job or a CI step, $path_misses; there, call the command by its full path, $1/agentic-hil, or run the line above first"
+    else
+        say "PATH: a non-interactive shell, such as ssh host 'agentic-hil doctor', a cron job or a CI step, $path_misses; there, call the command by its full path, $1/agentic-hil"
+    fi
 }
 
 report_path() {
@@ -1087,21 +1230,26 @@ report_path() {
         case ":$STARTUP_PATH:" in
             *":$found_dir:"*)
                 step 3 "PATH: agentic-hil is installed in $found_dir, already on your PATH"
+                # Nothing to add, except for the one account whose login
+                # shells lack the directory although this shell has it: see
+                # bash_login_half_missing. The shell that started this run has
+                # the directory, so no line is printed for it.
+                if [ "$WITH_PATH" -eq 1 ] && bash_login_half_missing "$found_dir"; then
+                    path_files=$(path_profile)
+                    persist_path "$found_dir" "$path_files"
+                    say_what_path_reaches "$found_dir" "$path_files" 0
+                fi
                 ;;
             *)
                 step 3 "PATH: agentic-hil landed in $found_dir, which is not on your PATH"
+                path_files=$(path_profile)
                 if [ "$WITH_PATH" -eq 0 ]; then
-                    say "PATH: --no-path was given, so no file of yours was touched; add this line to your shell profile yourself, then open a new shell:"
-                    printf '\n    %s\n\n' "$(path_line "$(path_profile)" "$found_dir")"
-                elif persist_path "$found_dir"; then
-                    if [ "$PATH_PROFILE_RESULT" = "written" ]; then
-                        say "PATH: added one line to $PATH_PROFILE_FILE, so the next shell you open finds the command; this run already has it"
-                    else
-                        say "PATH: $PATH_PROFILE_FILE already names that directory, so the next shell you open finds the command; this run already has it"
-                    fi
+                    say "PATH: --no-path was given, so no file of yours was touched; add this line to $(path_phrase "$path_files") yourself, and run it in any shell that is already open, yours included:"
+                    printf '\n    %s\n\n' "$(path_line "$path_files" "$found_dir")"
+                    say_what_misses_path "$found_dir" "$path_files" 1
                 else
-                    say "PATH: $PATH_PROFILE_FILE could not be written, so add this line to your shell profile yourself, then open a new shell:"
-                    printf '\n    %s\n\n' "$(path_line "$PATH_PROFILE_FILE" "$found_dir")"
+                    persist_path "$found_dir" "$path_files"
+                    say_what_path_reaches "$found_dir" "$path_files" 1
                 fi
                 ;;
         esac
@@ -1143,24 +1291,30 @@ process_name_for() {
 # `pgrep -x` is the first and the exact one: a native binary's `comm` is its own
 # name, and a match on that can name no stranger's process.
 #
-# npm installs the other kind, and the process the kernel then holds is called
-# `node`. `@openai/codex` declares its `codex` command as `bin/codex.js`, that
-# file opens with `#!/usr/bin/env node`, and the launcher's path is the
-# argument; the platform binary started under it is called `codex-x86_64-un...`,
-# which is `comm` cut at the fifteen characters it holds. `pgrep -x codex`
-# matches neither, so a machine with codex open in the next window was told
-# there was nothing to restart, the operator restarted nothing, and the MCP
-# registration this run had just written was read by no session.
+# A CLI that npm installs as a node script is the other kind: the process the
+# kernel holds for it is called `node`, and the launcher's path is the argument.
+# Missed, it stays open in the next window while its operator is told there is
+# nothing to restart, and the MCP registration this run just wrote is read by
+# no session.
 #
 # The second question therefore reads command lines, anchored so that it stays a
 # question about which program is running rather than about which words appear
 # in an argument: the name has to begin a path segment and end its argument or
 # the line, optionally through the `.js` npm's launcher carries. So
 # `/usr/local/bin/codex` and `.../@openai/codex/bin/codex.js` match, while a dev
-# server under node, the native child called `codex-x86_64-...`, and this
-# script's own `--agent codex` do not. A false alarm costs an operator a restart
-# of something that was never ours, in the one part of the transcript that asks
-# them to act.
+# server under node and this script's own `--agent codex` do not. A false alarm
+# costs an operator a restart of something that was never ours, in the one part
+# of the transcript that asks them to act.
+#
+# A running codex is answered by the first question. `@openai/codex` 0.145.0
+# declares its `codex` command as `bin/codex.js`, which opens with
+# `#!/usr/bin/env node`, and that launcher runs the platform binary the package
+# vendors as its child, whose `comm` is `codex` in full: the table recorded with
+# the package installed by `npm install -g` is in
+# tests/fixtures/npm_agent_cli_process_table_recordings.json. The binary is the
+# process to name: the launcher forwards SIGINT, SIGTERM and SIGHUP to it and
+# exits whenever the binary ends, while an end of the launcher reaches the
+# binary only through that forwarding, which a SIGKILL skips.
 running_pid() {
     if have pgrep; then
         running_exact=$(pgrep -x "$1" 2>/dev/null | head -n 1)
@@ -1259,7 +1413,7 @@ else
     PACKAGE_MANAGER="uv"
 fi
 
-# Step 3: say where it landed, and edit nobody's shell profile.
+# Step 3: say where it landed, and put it on PATH for the shells to come.
 report_path
 
 # Refuse to run the machine half against a copy this run could not prove is the

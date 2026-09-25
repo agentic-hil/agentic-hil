@@ -24,7 +24,9 @@ configuration are what the rest of this suite already uses.
 
 from __future__ import annotations
 
+import argparse
 import contextlib
+import dataclasses
 import inspect
 import io
 import json
@@ -34,6 +36,7 @@ import sys
 from collections.abc import Callable
 from importlib import resources
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 from conftest import FAKE_OPENOCD, write_authoritative_config
@@ -685,12 +688,9 @@ EXIT_CODES: list[tuple[str, list[str], int, Callable[[pytest.MonkeyPatch, Path],
     ("adopt-hardware refused for a missing toolchain", ["adopt-hardware", "--dry-run"], 1, None),
     ("doctor over a bound bench", ["doctor"], 0, _bound_bench),
     ("skill-install", ["skill-install", "--agent", "codex"], 0, _registered_agent_host),
-    ("skill-install of an agent this program does not know", ["skill-install", "--agent", "nonsense"], 1, None),
     ("setup", ["setup", "--agent", "claude-code"], 0, _registered_agent_host),
-    ("setup of an agent this program does not know", ["setup", "--agent", "nonsense"], 1, None),
-    ("agent-install of an agent this program does not know", ["agent-install", "--agent", "nonsense"], 1, None),
-    ("uninstall of an agent this program does not know", ["uninstall", "--agent", "nonsense"], 1, None),
-    ("upgrade of an agent this program does not know", ["upgrade", "--agent", "nonsense"], 1, None),
+    # An `--agent` that names no agent is a parse error (#550), exit 2 with no
+    # document to parse; the `--agent` tests at the end of this file pin it.
 ]
 
 
@@ -934,3 +934,330 @@ def test_uninstall_renders_every_section_from_a_recorded_result() -> None:
     assert "opencode" in out[out.index("Not fully taken back") :]
     assert "uv tool uninstall agentic-hil" in flat
     assert "Next step" in out
+
+
+# ---------------------------------------------------------------------------
+# #550: every `--agent` names the agents it takes, and the one it takes when it
+# is left out.
+
+# Every command with an `--agent` option, and what it reaches the command as
+# when it is left out: `init` then names no agent, and `upgrade` and `uninstall`
+# act on every agent this installation set up.
+AGENT_COMMANDS = ("init", "skill-install", "agent-install", "setup", "upgrade", "uninstall")
+OMITTED_AGENT: dict[str, object] = {"init": None, "skill-install": "opencode", "agent-install": "claude-code", "setup": "claude-code", "upgrade": [], "uninstall": []}
+
+
+def _run(argv: list[str]) -> tuple[int | str | None, str, str]:
+    """`_shell` for a command line argparse may end: the exit status the process
+    gets and both streams, whether the entrypoint returned or exited."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            code: int | str | None = cli.entrypoint(argv)
+        except SystemExit as stop:
+            code = stop.code
+    return code, out.getvalue(), err.getvalue()
+
+
+def _dispatched(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> argparse.Namespace:
+    """The options a command line reaches the command with. The command does not run."""
+    seen: list[argparse.Namespace] = []
+
+    def recorded(args: argparse.Namespace) -> dict:
+        seen.append(args)
+        return {"ok": True, "summary": "recorded"}
+
+    monkeypatch.setattr(cli, "dispatch", recorded)
+    code, out, err = _run([*argv, "--json"])
+    assert code == 0, f"`{' '.join(argv)}` exited {code}:\n{out}\n{err}"
+    assert len(seen) == 1
+    return seen[0]
+
+
+def _parse_error(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> tuple[int | str | None, str, str]:
+    """A command line that has to stop in argparse. Reaching the command fails the test."""
+
+    def reached(args: argparse.Namespace) -> None:
+        pytest.fail(f"`{' '.join(argv)}` reached the command: it was not refused at parsing")
+
+    monkeypatch.setattr(cli, "dispatch", reached)
+    return _run(argv)
+
+
+def _agent_option_help(command: str) -> str:
+    """What `agentic-hil <command> --help` prints for `--agent`, reflowed: the
+    option as the help spells it, then its help text. Printed for a terminal
+    wide enough that argparse wraps nothing, since it breaks a line at a
+    hyphen as readily as at a blank, `claude-` on one line and `code` on the
+    next."""
+    with pytest.MonkeyPatch.context() as terminal:
+        terminal.setenv("COLUMNS", "1000")
+        code, out, err = _run([command, "--help"])
+    assert code == 0, err
+    lines = out.splitlines()
+    start = next(index for index, line in enumerate(lines) if line.lstrip().startswith("--agent"))
+    margin = len(lines[start]) - len(lines[start].lstrip())
+    block = [lines[start]]
+    for line in lines[start + 1 :]:
+        if not line.strip() or len(line) - len(line.lstrip()) <= margin:
+            break
+        block.append(line)
+    return _reflowed("\n".join(block))
+
+
+def _printed_choices(option_help: str) -> list[str] | None:
+    """The accepted values argparse prints in braces after the option, in its order."""
+    printed = re.match(r"--agent \{([^}]*)\}", option_help)
+    return None if printed is None else printed.group(1).split(",")
+
+
+def _help_text(option_help: str) -> str:
+    """The option's help, without the option and what it prints for the value."""
+    return re.sub(r"^--agent (\{[^}]*\}|\S+) ?", "", option_help)
+
+
+def test_every_agent_option_the_cli_has_is_one_these_tests_cover() -> None:
+    """The tests below run over `AGENT_COMMANDS`; a command that grows an
+    `--agent` of its own belongs in it."""
+    parser = cli.build_parser()
+    subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+    with_agent = [name for name, subparser in subparsers.choices.items() if any("--agent" in action.option_strings for action in subparser._actions)]
+
+    assert sorted(with_agent) == sorted(AGENT_COMMANDS)
+
+
+@pytest.mark.parametrize("command", ["setup", "agent-install"])
+def test_setup_and_agent_install_help_name_the_agents_the_default_and_what_leaving_it_out_does(command: str) -> None:
+    """The issue as it was met: `setup --help` listed `--agent AGENT` with no
+    help, no accepted values and no default, and a reader who left it out got
+    `claude-code` registered without the help having said so. What settles it,
+    for `setup` and `agent-install` alike: the choices, `(default: claude-code)`,
+    and one sentence in the voice of the one `init --agent` has (it opens in
+    lower case and stays one sentence) saying what the option registers and
+    that leaving it out registers the default."""
+    option_help = _agent_option_help(command)
+    sentence = _help_text(option_help).replace("(default: claude-code)", "").strip()
+
+    assert sentence, f"`{command} --help` prints `{option_help}` and nothing about it"
+    assert _printed_choices(option_help) == cli.supported_skill_agents(), option_help
+    assert "(default: claude-code)" in option_help, option_help
+    assert sentence[0].islower(), sentence
+    assert not re.search(r"\. [A-Z]", sentence), f"more than one sentence: {sentence}"
+    assert "regist" in sentence, f"does not say what the option registers: {sentence}"
+    assert any(word in sentence for word in ("omit", "without", "left out", "not given", "unless")), f"does not say what leaving it out does: {sentence}"
+
+
+@pytest.mark.parametrize("command", AGENT_COMMANDS)
+def test_every_agent_option_prints_the_agents_the_install_code_knows(command: str) -> None:
+    """Decided with the issue: `choices` on every `--agent`, from `KNOWN_AGENTS`,
+    the one list each of these commands resolves an agent name against, so
+    `--help` prints the accepted values. It is the same list for all six: no
+    command knows an agent another one does not."""
+    option_help = _agent_option_help(command)
+
+    assert _printed_choices(option_help) == cli.supported_skill_agents(), option_help
+
+
+def test_every_agent_option_reads_its_choices_from_that_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not from a copy of it: a hand-written list agrees with `KNOWN_AGENTS`
+    today and stops agreeing the day an agent is added there. One is added
+    here, and every `--agent` has to offer it, and `skill_agents`, which the
+    commands set an agent up from, has to know it too."""
+    known = cli.KNOWN_AGENTS
+    added = dataclasses.replace(known[0], id="example-agent", display_name="Example Agent", aliases=("example-agent",))
+    monkeypatch.setattr(cli, "KNOWN_AGENTS", (*known, added))
+
+    for command in AGENT_COMMANDS:
+        assert _printed_choices(_agent_option_help(command)) == [*(agent.id for agent in known), "example-agent"], command
+    assert [agent.id for agent in cli.skill_agents()] == [*(agent.id for agent in known), "example-agent"]
+
+
+@pytest.mark.parametrize("command", [command for command in AGENT_COMMANDS if isinstance(OMITTED_AGENT[command], str)])
+def test_every_agent_option_with_a_default_agent_prints_it(command: str) -> None:
+    """Decided with the issue: every such option shows its default in the help,
+    and the default stays what it is today: `claude-code` for `setup` and
+    `agent-install`, `opencode` for `skill-install`."""
+    option_help = _agent_option_help(command)
+
+    assert f"(default: {OMITTED_AGENT[command]})" in option_help, option_help
+
+
+@pytest.mark.parametrize("command", [command for command in AGENT_COMMANDS if not isinstance(OMITTED_AGENT[command], str)])
+def test_an_agent_option_whose_absence_names_no_single_agent_prints_no_default(command: str) -> None:
+    """`init` without `--agent` asks no agent for anything, and `upgrade` and
+    `uninstall` without one act on every agent this installation set up; their
+    help sentences say so. A `(default: None)` or `(default: [])` printed after
+    them would contradict the sentence it stands beside."""
+    option_help = _agent_option_help(command)
+
+    assert "(default:" not in option_help, option_help
+
+
+@pytest.mark.parametrize("command", AGENT_COMMANDS)
+def test_an_omitted_agent_reaches_every_command_as_it_does_today(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+    """Decided with the issue: the defaults stay where they are. A default that
+    follows the agents the installer found is a separate change."""
+    assert _dispatched(monkeypatch, [command]).agent == OMITTED_AGENT[command]
+
+
+@pytest.mark.parametrize("command", ["agent-install", "setup"])
+def test_an_omitted_agent_still_registers_claude_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+    """The half of the issue that is true today and has to stay true: without
+    `--agent`, `agent-install` and `setup` register Claude Code, its skill and
+    its MCP server, and no other agent."""
+    workspace = _generated_bench(tmp_path, monkeypatch)
+    _registered_agent_host(monkeypatch, workspace)
+
+    code, out, err = _run([command, "--json"])
+
+    assert code == 0, f"{out}\n{err}"
+    assert "agentic-hil" in json.loads((Path.home() / ".claude.json").read_text(encoding="utf-8"))["mcpServers"]
+    assert [agent.id for agent in cli.skill_agents() if Path(agent.default_target_path).is_file()] == ["claude-code"]
+
+
+@pytest.mark.parametrize("command", AGENT_COMMANDS)
+def test_a_wrong_agent_is_refused_at_parsing_with_the_accepted_values(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+    """Decided with the issue: a value that is no agent never reaches the
+    command, and the refusal names the value and every agent that would have
+    been accepted. `skill-install` is asked without `--target`, the one way it
+    refuses an agent it does not know today."""
+    code, out, err = _parse_error(monkeypatch, [command, "--agent", "not-an-agent"])
+    error = err.rstrip("\n").rpartition("\n")[2]
+
+    assert code == 2
+    assert out == ""
+    assert error.startswith(f"agentic-hil {command}: error: argument --agent"), err
+    assert "not-an-agent" in error
+    for agent in cli.supported_skill_agents():
+        assert agent in error, error
+
+
+@pytest.mark.parametrize("json_flag", [[], ["--json"]], ids=["rendered", "json"])
+@pytest.mark.parametrize("command", AGENT_COMMANDS)
+def test_a_refused_agent_is_reported_the_way_every_other_parse_error_is(monkeypatch: pytest.MonkeyPatch, command: str, json_flag: list[str]) -> None:
+    """Decided with the issue: no second error path. A parse error in this CLI
+    is argparse's own: the command's usage and one `error:` line on stderr,
+    nothing on stdout, exit 2, and `--json` changes none of it, because it is
+    read only once the command line has parsed. The neighbour it is held to is
+    the parse error the same option already has, a missing value."""
+    missing = _parse_error(monkeypatch, [command, *json_flag, "--agent"])
+    refused = _parse_error(monkeypatch, [command, *json_flag, "--agent", "not-an-agent"])
+    usage, marker, error = refused[2].partition(f"agentic-hil {command}: error: ")
+
+    assert refused[0] == missing[0] == 2
+    assert refused[1] == missing[1] == ""
+    assert marker, refused[2]
+    assert usage == missing[2].partition(marker)[0]
+    assert error.startswith("argument --agent: "), error
+
+
+@pytest.mark.parametrize("command", AGENT_COMMANDS)
+def test_every_spelling_an_agent_option_accepts_today_still_reaches_that_agent(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+    """Decided with the issue: a value outside the list that a command accepts
+    today keeps working. All six resolve `--agent` through
+    `resolve_skill_agent`, which takes each agent's aliases in any case, with
+    `_` for `-` and with blanks around them: `claude` among them, which both
+    installers pass on as the operator typed it and the plugin skill publishes
+    as `agentic-hil setup --agent claude`."""
+    for agent in cli.skill_agents():
+        for alias in agent.aliases:
+            for spelling in (alias, alias.upper(), alias.replace("-", "_"), f" {alias} "):
+                value = _dispatched(monkeypatch, [command, "--agent", spelling]).agent
+                named = value[0] if isinstance(value, list) else value
+                resolved = cli.resolve_skill_agent(named)
+                assert resolved is not None and resolved.id == agent.id, f"`{command} --agent {spelling!r}` reached the command as {value!r}"
+
+
+def test_skill_install_with_a_target_still_takes_an_agent_the_list_does_not_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other value outside the list a command accepts today: `skill-install`
+    with `--target` writes the skill for any agent name to the path it is
+    given. That keeps working; an agent it does not know is refused only
+    without a target."""
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "elsewhere" / "skills" / "agentic-hil" / "SKILL.md"
+
+    code, out, err = _run(["skill-install", "--agent", "my-agent", "--target", str(target), "--json"])
+
+    assert code == 0, f"{out}\n{err}"
+    assert json.loads(out)["agent"] == "my-agent"
+    assert target.is_file()
+
+
+def test_an_agent_named_by_an_alias_is_reported_as_it_was_typed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The choices check a name and pass it on untouched. `setup --agent claude`
+    reports `agent` as `claude`, and so does the `requested_agent` of its skill
+    step and of `skill-install --agent claude`, beside the `claude-code` that
+    `skill-install` resolved it to: the fields every caller of these documents
+    already reads, byte for byte what they carried before `--agent` had
+    choices. A parser that rewrote the name into its id on the way in would
+    change all three."""
+    workspace = _generated_bench(tmp_path, monkeypatch)
+    _registered_agent_host(monkeypatch, workspace)
+
+    code, out, err = _run(["setup", "--agent", "claude", "--json"])
+
+    assert code == 0, f"{out}\n{err}"
+    set_up = json.loads(out)
+    assert set_up["agent"] == "claude"
+    assert set_up["steps"]["skill_install"]["requested_agent"] == "claude"
+
+    code, out, err = _run(["skill-install", "--agent", "claude", "--json"])
+
+    assert code == 0, f"{out}\n{err}"
+    installed = json.loads(out)
+    assert (installed["agent"], installed["requested_agent"]) == ("claude-code", "claude")
+
+
+def _without_a_home_directory(no_home: pytest.MonkeyPatch) -> None:
+    """Takes the home directory away the way a machine can lack one: none of
+    the variables `Path.home()` reads is set, and on POSIX, where it then asks
+    the password database, the user has no entry there either. What fails is
+    the standard library's own lookup with its own `RuntimeError`, and that is
+    asserted here, so a platform that finds a home some other way fails this
+    helper instead of passing the tests that use it."""
+    for variable in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
+        no_home.delenv(variable, raising=False)
+    if sys.platform != "win32":
+        import pwd
+
+        def no_entry(uid: int) -> NoReturn:
+            raise KeyError(f"getpwuid(): uid not found: {uid}")
+
+        no_home.setattr(pwd, "getpwuid", no_entry)
+    with pytest.raises(RuntimeError, match="Could not determine home directory"):
+        Path.home()
+
+
+@pytest.mark.parametrize("command", AGENT_COMMANDS)
+def test_every_agent_option_prints_its_agents_where_no_home_directory_can_be_found(command: str) -> None:
+    """`--help` needs no home directory, and it needed none before `--agent`
+    had choices: the choices are the agents' names, and a name does not depend
+    on where its agent keeps the skill. An account with no home directory, a
+    service or a container user, still gets the help, choices included, and
+    exit 0."""
+    agents = cli.supported_skill_agents()
+    with pytest.MonkeyPatch.context() as no_home:
+        _without_a_home_directory(no_home)
+        option_help = _agent_option_help(command)
+
+    assert _printed_choices(option_help) == agents, option_help
+
+
+@pytest.mark.parametrize("command", AGENT_COMMANDS)
+def test_a_wrong_agent_is_refused_at_parsing_where_no_home_directory_can_be_found(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+    """Nor does checking a name against them: without a home directory a wrong
+    `--agent` is still the usage error it is everywhere else, argparse's
+    `invalid choice` line naming the value and every agent, exit 2 and nothing
+    on stdout, not a traceback. `skill-install` is asked without `--target`,
+    where it checks the name once the rest of the line has parsed."""
+    agents = cli.supported_skill_agents()
+    with pytest.MonkeyPatch.context() as no_home:
+        _without_a_home_directory(no_home)
+        code, out, err = _parse_error(monkeypatch, [command, "--agent", "nonsense"])
+    error = err.rstrip("\n").rpartition("\n")[2]
+
+    assert code == 2, err
+    assert out == ""
+    assert error.startswith(f"agentic-hil {command}: error: argument --agent: invalid choice: 'nonsense'"), err
+    for agent in agents:
+        assert agent in error, error

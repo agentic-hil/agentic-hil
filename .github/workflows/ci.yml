@@ -33,9 +33,13 @@ jobs:
     # fourth was cancelled at 25 minutes with every test that had run green, and
     # the next run cancelled a different leg the same way. A Linux leg of that
     # same suite is about five and a half minutes, so the four is the platform's
-    # own cost rather than one slow machine, and #536 is where that is being
-    # answered. This limit is margin for a slow runner rather than a deadline a
-    # slow runner beats, and a leg that reaches it is a hang and not a queue.
+    # own cost rather than one slow machine. Every leg prints its thirty slowest
+    # tests, so a slow leg's log says where its time went (#536). `Run tests`
+    # has a limit of its own, five minutes below this one, so a suite that runs
+    # too long is stopped in that step rather than with the whole job, and the
+    # step after it names the tests the suite was stopped in. Both limits are
+    # margin for a slow runner rather than deadlines a slow runner beats, and a
+    # leg that reaches one is a hang and not a queue.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -90,8 +94,39 @@ jobs:
       # count is named here rather than in `addopts`, so a bare `pytest` in a
       # checkout is still one process and a failure can be read without a worker
       # id in front of it.
+      #
+      # `--durations=30` ends every leg with its thirty slowest tests, and there
+      # is no `-q`, under which xdist stops naming how many workers it started.
+      # The step's own limit comes from the Windows legs of ten runs between
+      # 2026-09-16 and 2026-09-24 and the leg before them that the job's limit
+      # cancelled. This step took 25m48s at the slowest, and 40 minutes is about
+      # half as much again. The steps before it took up to 1m14s, and 2m13s on
+      # the cancelled leg, 1m37s of which was installing the dependencies; the
+      # steps after it took up to 37s. A suite that passed in the full forty
+      # minutes would still end the job by about 42m50s, and after one that ran
+      # out of time only the step below and the post steps run, in the 2m47s
+      # the five minutes leave after the slowest steps before it. The variable
+      # names a directory outside the checkout, where the suite keeps the ledger
+      # that step reads, and is set on this step alone, so no other session
+      # keeps one.
       - name: Run tests
-        run: pytest -n auto
+        timeout-minutes: 40
+        env:
+          AGENTIC_HIL_TEST_LEDGER: ${{ runner.temp }}/suite-ledger
+        run: pytest -n auto --durations=30
+
+      # A suite stopped from outside prints no summary, so a leg that ran out of
+      # time names no test: its log ends in a row of dots. This reads the ledger
+      # `Run tests` kept and turns it into an error annotation and a job summary
+      # naming each test a worker started and never finished, and below them
+      # each test that had failed or ended in an error before that. A session
+      # that finished on its own terms, however red, has had pytest name its
+      # failures, and a leg that failed before `Run tests` has no ledger; for
+      # either this adds nothing. `failure()` and not `always()`, because a run
+      # a newer push cancels has not run out of time.
+      - name: Name the tests the suite was stopped in
+        if: failure()
+        run: python tests/suite_ledger.py "${{ runner.temp }}/suite-ledger"
 
       - name: Check package build
         run: python -m build

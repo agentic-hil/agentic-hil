@@ -56,7 +56,12 @@ FROM python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e18
 # itself reads a link's control mode from (it looks in /sbin and /usr/sbin,
 # where this package installs), and can-utils is `candump`, the observer with
 # no stake in the answer that reads a frame off the interface after the
-# product says it sent one. Nothing else: an image that grew a toolchain
+# product says it sent one. zsh is here because step 3 of install.sh writes a
+# startup file for it, and one test starts it for real to see which of its
+# instances reads that file, as it does bash. fish is not, although step 3
+# writes one for it too: Debian's fish depends on python3, and a second
+# interpreter on /usr/bin would take away the premise of the route test that
+# finds none there. Nothing else: an image that grew a toolchain
 # would be an image whose results depend on which toolchain.
 #
 # The virtual CAN interface itself is not made here: a container cannot load
@@ -64,7 +69,7 @@ FROM python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e18
 # `--cap-add NET_ADMIN`. Without both, the CAN tests skip naming that reason,
 # and the job that runs this tier counts the skip as a failure.
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes openocd ca-certificates procps curl socat iproute2 can-utils \
+    && apt-get install --no-install-recommends --yes openocd ca-certificates procps curl socat iproute2 can-utils zsh \
     && rm -rf /var/lib/apt/lists/*
 
 # The tools the tier drives, from a lock file of their own, with their hashes.

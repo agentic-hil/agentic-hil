@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, COMMAND_TIMEOUT_S, Bench, child_command
 
@@ -225,10 +226,10 @@ class McpServer:
             with contextlib.suppress(OSError):
                 self.process.stdin.close()
         try:
-            return self.process.wait(timeout=timeout_s)
+            return self.process.wait(timeout=scaled_time_bound(timeout_s))
         except subprocess.TimeoutExpired:
             self.process.kill()
-            return self.process.wait(timeout=timeout_s)
+            return self.process.wait(timeout=scaled_time_bound(timeout_s))
 
 
 def workspace_image(bench: Bench, firmware: Path) -> str:
@@ -320,7 +321,9 @@ def test_the_schema_offers_exactly_the_modes_this_file_drives_on_the_board(mcp_s
     assert start["inputSchema"]["properties"]["mode"]["default"] == "attach", start["inputSchema"]
 
 
-def test_an_attach_session_halts_the_core_and_writes_no_flash(mcp_servers, bench: Bench, firmware: Path) -> None:
+def test_an_attach_session_halts_the_core_and_writes_no_flash(
+    mcp_servers, bench: Bench, gdb: None, firmware: Path
+) -> None:
     """Attach is the mode that must not touch the board's flash.
 
     It connects to a running target and the SWD attach stops the core, and that
@@ -351,7 +354,7 @@ def test_an_attach_session_halts_the_core_and_writes_no_flash(mcp_servers, bench
 
 
 def test_a_reset_halt_session_resets_the_target_before_it_halts_and_still_writes_no_flash(
-    mcp_servers, bench: Bench, firmware: Path
+    mcp_servers, bench: Bench, gdb: None, firmware: Path
 ) -> None:
     """reset_halt has to be a different thing from attach on the real board.
 
@@ -379,7 +382,7 @@ def test_a_reset_halt_session_resets_the_target_before_it_halts_and_still_writes
 
 
 def test_a_load_session_downloads_the_built_image_and_says_the_load_committed(
-    mcp_servers, bench: Bench, firmware: Path
+    mcp_servers, bench: Bench, gdb: None, firmware: Path
 ) -> None:
     """The one mode that writes the board, and the field that says whether it did.
 
@@ -412,7 +415,7 @@ def test_a_load_session_downloads_the_built_image_and_says_the_load_committed(
 
 
 def test_a_second_start_while_a_session_is_open_is_refused_and_leaves_the_first_running(
-    mcp_servers, bench: Bench, firmware: Path
+    mcp_servers, bench: Bench, gdb: None, firmware: Path
 ) -> None:
     """One probe, one board, one session, and the refusal must not cost the first one.
 
@@ -481,7 +484,7 @@ def test_the_status_and_the_stop_reason_of_a_server_that_never_started_a_session
 
 
 def test_stopping_a_session_twice_is_a_success_both_times_and_the_second_holds_nothing(
-    mcp_servers, bench: Bench, firmware: Path
+    mcp_servers, bench: Bench, gdb: None, firmware: Path
 ) -> None:
     """Containment has to be free to repeat, and the repeat must claim nothing.
 
@@ -624,7 +627,7 @@ def test_a_start_from_a_file_named_elf_that_is_not_one_is_refused_on_its_content
 
 
 def test_the_session_log_is_reported_inside_the_workspace_and_the_file_is_there(
-    mcp_servers, bench: Bench, firmware: Path
+    mcp_servers, bench: Bench, gdb: None, firmware: Path
 ) -> None:
     """The evidence a reviewer with no access to this bench opens afterwards.
 
@@ -656,7 +659,7 @@ def test_the_session_log_is_reported_inside_the_workspace_and_the_file_is_there(
 
 
 def test_the_stop_reason_read_agrees_with_what_the_session_start_reported(
-    mcp_servers, bench: Bench, firmware: Path
+    mcp_servers, bench: Bench, gdb: None, firmware: Path
 ) -> None:
     """Two surfaces, one fact, before anything has been resumed or halted.
 
@@ -692,7 +695,7 @@ def test_the_stop_reason_read_agrees_with_what_the_session_start_reported(
 
 
 def test_resuming_is_refused_while_allow_debug_execution_is_closed_and_the_grant_line_reopens_it(
-    mcp_servers, bench: Bench, firmware: Path
+    mcp_servers, bench: Bench, gdb: None, firmware: Path
 ) -> None:
     """The one permission that lifts the core off a halt, and the refusal an agent relays.
 
@@ -763,7 +766,7 @@ def test_resuming_is_refused_while_allow_debug_execution_is_closed_and_the_grant
 
 
 def test_a_server_that_ends_with_a_session_open_hands_the_board_to_the_next_one(
-    mcp_servers, bench: Bench, firmware: Path
+    mcp_servers, bench: Bench, gdb: None, firmware: Path
 ) -> None:
     """An agent that walks away mid session must not take the bench with it.
 
