@@ -84,6 +84,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, COMMAND_TIMEOUT_S, Bench, BoardImages, child_command, isolated_environment
 
@@ -116,7 +117,7 @@ ANSWER_TIMEOUT_S = 5.0
 # A reset through the probe and the peer's boot line after it.
 BOOT_TIMEOUT_S = 15.0
 REPLY_TIMEOUT_S = 300.0
-SHUTDOWN_TIMEOUT_S = 60.0
+SHUTDOWN_TIMEOUT_S = scaled_time_bound(60.0)
 # The bridge's idle window after stdin closes, as the container gives it.
 EOF_IDLE_S = 3.0
 MCP_PROTOCOL_VERSION = "2025-06-18"

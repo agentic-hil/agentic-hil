@@ -43,6 +43,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from support import scaled_time_bound
 
 from .conftest import (
     BENCH_ONLY,
@@ -65,7 +66,7 @@ READ_SLICE_S = 0.5
 
 # A flash or a probe read through OpenOCD is the slow case.
 REPLY_TIMEOUT_S = 300.0
-SHUTDOWN_TIMEOUT_S = 120.0
+SHUTDOWN_TIMEOUT_S = scaled_time_bound(120.0)
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
 

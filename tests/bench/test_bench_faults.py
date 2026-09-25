@@ -47,6 +47,7 @@ from contextlib import suppress
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, DEMO_IMAGE, Bench, BoardImages, child_command
 
@@ -58,7 +59,7 @@ MCP_PROTOCOL_VERSION = "2025-06-18"
 # case, and a wedged server has to fail the test rather than hold the session.
 REPLY_TIMEOUT_S = 300.0
 START_SESSION_TIMEOUT_S = 240.0
-SHUTDOWN_TIMEOUT_S = 60.0
+SHUTDOWN_TIMEOUT_S = scaled_time_bound(60.0)
 
 # One `com_read` pass inside the accumulating reads below.
 READ_SLICE_S = 0.5

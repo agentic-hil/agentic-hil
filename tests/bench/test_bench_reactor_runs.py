@@ -44,6 +44,7 @@ from xml.etree import ElementTree
 
 import pytest
 import yaml
+from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, COMMAND_TIMEOUT_S, Bench, child_command
 
@@ -54,7 +55,7 @@ pytestmark = [pytest.mark.bench, BENCH_ONLY]
 # for their reason: no timeout plugin is configured in this repository, so an
 # unbounded read would run the job to its ceiling instead of failing a test.
 HANDSHAKE_TIMEOUT_S = 60.0
-SHUTDOWN_TIMEOUT_S = 60.0
+SHUTDOWN_TIMEOUT_S = scaled_time_bound(60.0)
 
 # What a teardown swallows on its way to giving the bench back. `pytest.fail`
 # raises an outcome exception that does not derive from `Exception`, so a
@@ -1122,7 +1123,7 @@ def test_a_run_stopped_inside_a_repeat_block_leaves_a_junit_document_with_the_st
         status, stopped = bench.document("test-reactor-stop", "--run", handle)
         assert status == 0, stopped
         assert stopped["stop_requested"] is True, stopped
-        returncode = process.wait(timeout=REACH_S)
+        returncode = process.wait(timeout=scaled_time_bound(REACH_S))
     finally:
         if process.poll() is None:
             if handle is not None:
