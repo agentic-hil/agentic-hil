@@ -66,8 +66,9 @@ the user already belongs to. And Docker recreates a device node in the container
 with its owner, group and mode and without its ACL, so a node this user can open
 only through an ACL is refused with the owner, group and mode that fell short.
 Rootless Docker and Docker Desktop keep the container in a user namespace or a
-virtual machine of their own, where the nodes are not the host's: neither runs
-the tier, and both build the image.
+virtual machine of their own, where the nodes are not the host's. Neither is
+supported for a run, and the runner does not tell them apart from a Docker that
+is; both build the image.
 
 ## Run it
 
