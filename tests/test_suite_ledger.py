@@ -406,14 +406,19 @@ def test_never_reached():
     )
 
 
+@pytest.mark.parametrize("arguments", [(), ("-n", "1")], ids=["alone", "in-a-worker"])
 def test_a_test_interrupted_in_the_middle_is_named_with_its_worker(
-    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: tuple[str, ...]
 ) -> None:
     """A session interrupted with a test half run, the way Ctrl+C interrupts one.
 
     pytest still runs its own session teardown after an interrupt, so this
     ledger can say how its session ended, and what it says is that the session
     did not finish: the test that was running is named just as a killed one is.
+
+    In a worker the interrupt is the worker's, and xdist ends the session with
+    an exception of its own, the kind it also ends one with when `--maxfail`
+    stops it. The session is still an interrupted one, because its worker was.
     """
     ledger = pytester.path / "ledger"
     monkeypatch.setenv(LEDGER_VARIABLE, str(ledger))
@@ -432,7 +437,7 @@ def test_never_reached():
 """
     )
 
-    result = run_session(pytester)
+    result = run_session(pytester, *arguments)
 
     lines = per_test_lines(ledger_files(ledger))
     assert events_of(lines, "test_finishes_before_the_interrupt") == ["start", "finish"], (lines, transcript(result))
