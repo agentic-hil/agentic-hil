@@ -345,16 +345,22 @@ def a_frame_at_the_far_end(bus: object, timeout_s: float = WIRE_TIMEOUT_S) -> tu
 
 
 @contextmanager
-def flooding(bus: object, frames: list[tuple[int, bytes, dict]], *, gap_s: float = 0.001) -> Iterator[None]:
+def flooding(bus: object, frames: list[tuple[int, bytes, dict]], *, gap_s: float = 0.001, after: tuple[int, bytes] | None = None) -> Iterator[None]:
     """Keep sending frames from the far end for as long as the block runs.
 
     A background sender, so a read-until-match or a drain that cannot keep up has
     a bus that keeps carrying traffic under it. Each entry is `(id, data, kwargs)`
     where kwargs is forwarded to `send_from_far_end` (for example `extended`).
+    With `after`, an `(id, data)` frame, it starts only once the far end has read
+    that frame, so the flood begins at a point the other side marks on the bus
+    rather than whenever the block is entered (#540).
     """
     stop = threading.Event()
 
     def pump() -> None:
+        while after is not None and not stop.is_set():
+            if a_frame_at_the_far_end(bus, timeout_s=0.05) == after:
+                break
         while not stop.is_set():
             for frame_id, data, kwargs in frames:
                 if stop.is_set():
@@ -1138,21 +1144,27 @@ def recording_the_bus(channel: str) -> Iterator[list[str]]:
 
 
 def run_the_comparator_plan_under_a_flood(tmp_path: Path, vcan: str) -> subprocess.CompletedProcess[str]:
-    """The comparator test's run: a plan reading for the extended 0x123 while the far end floods both frame types."""
+    """The comparator test's run: a plan reading for the extended 0x123 while the far end floods both frame types.
+
+    The flood waits for the marker the plan sends right after `can_open`, so the
+    session opens on a quiet bus and its pre-session drain has no flood to race (#540).
+    """
+    marker_id, marker_data = SESSION_OPEN_MARKER
     project, config = can_project(tmp_path, bus_entry("bus", vcan))
     plan = project / "extended.yaml"
     plan.write_text(
-        """version: 3
+        f"""version: 3
 name: extended
 steps:
-  - {device: bus, action: can_open}
-  - {device: bus, action: can_read, comparator: {id: "0x123", extended: true, equals: "5a"}, timeout_s: 4}
-  - {device: bus, action: can_close}
+  - {{device: bus, action: can_open}}
+  - {{device: bus, action: can_send, frame_id: "{marker_id:#x}", data_hex: "{marker_data.hex()}"}}
+  - {{device: bus, action: can_read, comparator: {{id: "0x123", extended: true, equals: "5a"}}, timeout_s: 4}}
+  - {{device: bus, action: can_close}}
 """,
         encoding="utf-8",
     )
 
-    with far_end(vcan) as peer, flooding(peer, COMPARATOR_FLOOD):
+    with far_end(vcan) as peer, flooding(peer, COMPARATOR_FLOOD, after=SESSION_OPEN_MARKER):
         return reactor(project, config, plan, "--json")
 
 
@@ -1169,7 +1181,7 @@ def test_a_comparator_only_matches_the_frame_type_it_asked_for(tmp_path: Path, v
     assert ran.returncode == 0, ran.stdout + ran.stderr
     result = json.loads(ran.stdout)
     assert result["ok"] is True, result
-    matched = result["steps"][1]["result"]
+    matched = result["steps"][2]["result"]
     assert matched["frame"]["extended"] is True, matched
     assert matched["frame"]["id_hex"] == "0x123" and matched["frame"]["data_hex"] == "5a", matched
 
@@ -1199,6 +1211,8 @@ def test_the_comparator_flood_waits_for_the_session_to_open(tmp_path: Path, vcan
 
     marker = candump_frame(*SESSION_OPEN_MARKER)
     flood = {candump_frame(frame_id, data, **options) for frame_id, data, options in COMPARATOR_FLOOD}
+    # The order is candump's queue. The far end floods only once handed the marker, in the kernel pass that hands it to
+    # candump too, so a flood frame gets ahead only if that pass stalls between its two deliveries (a preempted CPU).
     opened = recorded.index(marker) if marker in recorded else len(recorded)
     early = sum(frame in flood for frame in recorded[:opened])
     assert early == 0, f"{early} flood frame(s) reached {vcan} ahead of the session's marker {marker}{'' if marker in recorded else ', which never came'}; the bus began {recorded[:6]}"
