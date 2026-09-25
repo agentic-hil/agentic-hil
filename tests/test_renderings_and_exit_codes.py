@@ -1178,3 +1178,28 @@ def test_skill_install_with_a_target_still_takes_an_agent_the_list_does_not_name
     assert code == 0, f"{out}\n{err}"
     assert json.loads(out)["agent"] == "my-agent"
     assert target.is_file()
+
+
+def test_an_agent_named_by_an_alias_is_reported_as_it_was_typed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The choices check a name and pass it on untouched. `setup --agent claude`
+    reports `agent` as `claude`, and so does the `requested_agent` of its skill
+    step and of `skill-install --agent claude`, beside the `claude-code` that
+    `skill-install` resolved it to: the fields every caller of these documents
+    already reads, byte for byte what they carried before `--agent` had
+    choices. A parser that rewrote the name into its id on the way in would
+    change all three."""
+    workspace = _generated_bench(tmp_path, monkeypatch)
+    _registered_agent_host(monkeypatch, workspace)
+
+    code, out, err = _run(["setup", "--agent", "claude", "--json"])
+
+    assert code == 0, f"{out}\n{err}"
+    set_up = json.loads(out)
+    assert set_up["agent"] == "claude"
+    assert set_up["steps"]["skill_install"]["requested_agent"] == "claude"
+
+    code, out, err = _run(["skill-install", "--agent", "claude", "--json"])
+
+    assert code == 0, f"{out}\n{err}"
+    installed = json.loads(out)
+    assert (installed["agent"], installed["requested_agent"]) == ("claude-code", "claude")

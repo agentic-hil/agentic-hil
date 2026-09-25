@@ -8,10 +8,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, suppress
 from dataclasses import asdict, dataclass
 from importlib import resources
 from pathlib import Path, PurePath
+from typing import Any
 
 import yaml
 
@@ -398,15 +400,87 @@ def result_succeeded(result: JsonObject) -> bool:
     return conclusive_success(result)
 
 
+class AgentChoices:
+    """The values an `--agent` option accepts: the agents `skill_agents` knows.
+
+    Iterated, it gives their ids, which is what `--help` prints and what a
+    refusal lists. A name is in it when `resolve_skill_agent` resolves it, so
+    every spelling that reached an agent before (an alias, another case, `_` for
+    `-`, blanks around it) still parses, and reaches the command exactly as it
+    was typed. Both are read from `skill_agents` whenever argparse asks, so an
+    agent added there is offered by every `--agent` at once.
+    """
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(supported_skill_agents())
+
+    def __contains__(self, name: object) -> bool:
+        return isinstance(name, str) and resolve_skill_agent(name) is not None
+
+
+class AnyAgentChoices(AgentChoices):
+    """`skill-install --agent`: the same agents printed, and any name taken.
+
+    With `--target` that command writes the skill for an agent it does not know
+    to the path it is given, so whether a name is refused depends on an option
+    that may come after it on the command line. `refuse_an_unknown_agent_without_a_target`
+    decides it once the line has been read whole.
+    """
+
+    def __contains__(self, name: object) -> bool:
+        return isinstance(name, str)
+
+
+class SubcommandParser(argparse.ArgumentParser):
+    """The parser of every subcommand: argparse's own, plus a `check_parsed` it
+    runs once it has read the command line whole, for a check that an option's
+    `choices` cannot make because it depends on another option."""
+
+    def __init__(self, *, check_parsed: Callable[[argparse.ArgumentParser, argparse.Namespace], None] | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.check_parsed = check_parsed
+
+    def parse_known_args(self, args: Sequence[str] | None = None, namespace: argparse.Namespace | None = None) -> tuple[argparse.Namespace, list[str]]:
+        parsed, extras = super().parse_known_args(args, namespace)
+        if self.check_parsed is not None:
+            self.check_parsed(self, parsed)
+        return parsed, extras
+
+
+def add_agent_option(parser: argparse.ArgumentParser, choices: AgentChoices, **options: Any) -> None:
+    """Add `--agent` to one command, accepting `choices`.
+
+    They are set on the option after `add_argument`, which formats the option
+    once on the spot and would read the agents there: `skill_agents` reads the
+    home directory, and every command builds this parser, `--version` included.
+    Only printing the option or checking a name given to it reads them.
+    """
+    parser.add_argument("--agent", **options).choices = choices
+
+
+def refuse_an_unknown_agent_without_a_target(parser: argparse.ArgumentParser, parsed: argparse.Namespace) -> None:
+    """`skill-install` without `--target` writes to the agent's own skill
+    directory, so it refuses an agent that has none the way every other
+    `--agent` refuses one: argparse's own `invalid choice`, from this command's
+    parser, with its usage and exit status 2. An empty name is left to
+    `install_skill`, which takes it for the default."""
+    if parsed.target is not None or not parsed.agent:
+        return
+    try:
+        parser._check_value(argparse.Action(["--agent"], "agent", choices=AgentChoices()), parsed.agent)
+    except argparse.ArgumentError as refused:
+        parser.error(str(refused))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentic-hil", description="Agentic Hardware-in-the-Loop (Agentic HIL) local MCP stdio server")
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--json", action="store_true", help=JSON_FLAG_HELP)
-    subparsers = parser.add_subparsers(dest="command")
+    subparsers = parser.add_subparsers(dest="command", parser_class=SubcommandParser)
 
     init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted but the two flashing is interlocked against, and verify it with doctor. A config that is already there is kept, unchanged, and only the steps that do not touch it run")
     init_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
-    init_parser.add_argument("--agent", default=None, help="also ask this agent to refuse its own write tools on the config and the state root; on a config that is already there, adding or refreshing those rules is the whole of what this command does")
+    add_agent_option(init_parser, AgentChoices(), default=None, help="also ask this agent to refuse its own write tools on the config and the state root; on a config that is already there, adding or refreshing those rules is the whole of what this command does")
     init_parser.add_argument(
         "--force",
         action="store_true",
@@ -548,21 +622,21 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_config_parser.add_argument("--output", default=None)
     mcp_config_parser.add_argument("--force", action="store_true")
 
-    skill_parser = subparsers.add_parser("skill-install", help="install/update the Agentic HIL agent setup skill")
-    skill_parser.add_argument("--agent", default="opencode")
+    skill_parser = subparsers.add_parser("skill-install", help="install/update the Agentic HIL agent setup skill", check_parsed=refuse_an_unknown_agent_without_a_target)
+    add_agent_option(skill_parser, AnyAgentChoices(), default="opencode", help="(default: %(default)s)")
     skill_parser.add_argument("--target", default=None)
     skill_parser.add_argument("--force", action="store_true")
 
     agent_install_parser = subparsers.add_parser("agent-install", help="user half, once per user and agent: install the agent skill and register the MCP server at user level; needs no workspace and no config")
-    agent_install_parser.add_argument("--agent", default="claude-code")
+    add_agent_option(agent_install_parser, AgentChoices(), default="claude-code", help="install the skill for this agent and register the MCP server with it at user level; without --agent, the default agent is the one registered (default: %(default)s)")
     agent_install_parser.add_argument("--force", action="store_true")
 
     setup_parser = subparsers.add_parser("setup", help="first run in one command: agent-install (user half) then init (project half)")
-    setup_parser.add_argument("--agent", default="claude-code")
+    add_agent_option(setup_parser, AgentChoices(), default="claude-code", help="install the skill for this agent, register the MCP server with it at user level and ask it to refuse its own write tools on this project's config and state root; without --agent, the default agent is the one registered (default: %(default)s)")
     setup_parser.add_argument("--force", action="store_true")
 
     upgrade_parser = subparsers.add_parser("upgrade", help="upgrade this Agentic HIL installation and refresh the agent skills and MCP registrations it wrote")
-    upgrade_parser.add_argument("--agent", action="append", default=[], help="refresh only this agent, instead of every agent this installation had already set up; repeat for multiple agents. An agent that has neither a skill nor a registration is never installed for.")
+    add_agent_option(upgrade_parser, AgentChoices(), action="append", default=[], help="refresh only this agent, instead of every agent this installation had already set up; repeat for multiple agents. An agent that has neither a skill nor a registration is never installed for.")
 
     uninstall_parser = subparsers.add_parser(
         "uninstall",
@@ -574,7 +648,7 @@ def build_parser() -> argparse.ArgumentParser:
         # root by hand instead.
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    uninstall_parser.add_argument("--agent", action="append", default=[], help="take back only this agent's half, instead of every agent this installation set up; repeat for multiple agents. An agent that has nothing installed is reported and left alone.")
+    add_agent_option(uninstall_parser, AgentChoices(), action="append", default=[], help="take back only this agent's half, instead of every agent this installation set up; repeat for multiple agents. An agent that has nothing installed is reported and left alone.")
 
     # `--json` on every subcommand as well as on the parser, so both
     # `agentic-hil --json init` and the `agentic-hil init --json` everybody
