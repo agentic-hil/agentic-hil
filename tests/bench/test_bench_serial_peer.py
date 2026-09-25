@@ -44,7 +44,8 @@ test outside this file meets it. Each test starts from a reset over the peer's
 own control line; a peer that does not answer it (left at another rate by a
 test that failed half way) is restarted through `reset_target` and asked again.
 What a test quarantined is cleared through `agentic-hil recover` afterwards,
-under every configuration the test ran against.
+under every configuration the test ran against, and the test fails for having
+needed it.
 
 What is not here, and why:
 
@@ -355,25 +356,33 @@ def cli(bench: Bench, config: Path, *arguments: str) -> tuple[int, dict]:
 
 
 def quarantine_left(bench: Bench, config: Path) -> str | None:
-    """Whatever the bench holds under one configuration, signed off through `recover`; why not, or None.
+    """What a test left the bench holding under one configuration, cleared through `recover`; None when it was free.
 
-    Per configuration because a server started against a copy files its
-    ownership state under a project key of its own, derived from the copy's
-    path. Both questions are asked, `blocked` and `incident_stands`, because a
-    bench can hold a standing incident without being blocked.
+    A test here that leaves a quarantine behind has gone wrong. It is cleared,
+    so the next test starts clean, and it is reported, so the test fails for
+    having needed it: clearing without failing would hide the reason, as the
+    tier's other modules say. Per configuration because a server started
+    against a copy files its ownership state under a project key of its own,
+    derived from the copy's path. Both questions are asked, `blocked` and
+    `incident_stands`, because a bench can hold a standing incident without
+    being blocked.
     """
     _, status = cli(bench, config, "lease-status")
     if not status.get("blocked") and not status.get("incident_stands"):
         return None
+    left = (
+        f"the test left the bench held under {config.name}: cleanup_reasons {status.get('cleanup_reasons')}, "
+        f"incident_stands {status.get('incident_stands')}"
+    )
     quarantine = status.get("quarantine_id")
     if not isinstance(quarantine, str) or not quarantine:
-        return f"the bench is not free and names no quarantine to clear: {status.get('cleanup_reasons')}"
+        return f"{left}; it names no quarantine to clear"
     _, recovered = cli(bench, config, "recover", "--confirm-safe-state", "--quarantine-id", quarantine)
     if recovered.get("error_type") == "config_changed":
         _, recovered = cli(bench, config, "recover", "--confirm-safe-state", "--quarantine-id", quarantine, "--accept-config-change")
     if recovered.get("ok") is not True:
-        return f"a quarantine this module raised could not be cleared: {recovered}"
-    return None
+        return f"{left}; `recover` did not clear it: {recovered}"
+    return f"{left}; `recover` cleared it so the next test starts clean"
 
 
 @dataclass(frozen=True)
@@ -644,7 +653,7 @@ def settled_at(server: Server, port: str, buffered: int, overflow: int) -> dict:
 
 @pytest.fixture(autouse=True)
 def bench_is_left_clear(bench: Bench) -> Iterator[None]:
-    """Whatever a test here quarantined under the session's configuration, cleared through `recover`."""
+    """Whatever a test here quarantined under the session's configuration, cleared through `recover` and failed for."""
     yield
     left = quarantine_left(bench, bench.config)
     assert left is None, left
