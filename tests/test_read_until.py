@@ -1005,10 +1005,11 @@ SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
 
 @pytest.mark.parametrize(("tool", "argument"), [("com_read", "until"), ("can_read", "until_id")])
 def test_the_read_descriptions_gain_one_sentence_and_the_arguments_describe_themselves(tool: str, argument: str) -> None:
-    """Each description keeps what it says today and gains one sentence saying
-    the call can wait instead of being polled. The new argument describes
-    itself in under 200 characters, and `until_id` says the extended flag is
-    not compared."""
+    """Each description keeps what it says today and gains one sentence, of at
+    most 130 characters because every tool description shares one budget,
+    saying the call can wait instead of being polled. The new argument
+    describes itself in under 200 characters, and `until_id` says the extended
+    flag is not compared."""
     entry = next(item for item in MCP_TOOLS if item["name"] == tool)
     today = SENTENCE_BREAK.split(TODAY_DESCRIPTIONS[tool])
     sentences = SENTENCE_BREAK.split(entry["description"].strip())
@@ -1016,6 +1017,7 @@ def test_the_read_descriptions_gain_one_sentence_and_the_arguments_describe_them
 
     assert all(sentence in sentences for sentence in today), entry["description"]
     assert len(added) == 1, added
+    assert len(added[0]) <= 130, added
     assert re.search(r"wait|until", added[0], re.IGNORECASE), added
     described = entry["inputSchema"]["properties"].get(argument, {}).get("description")
     assert isinstance(described, str) and described, entry["inputSchema"]
