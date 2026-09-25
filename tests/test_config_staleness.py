@@ -516,6 +516,50 @@ def test_bytes_that_are_no_longer_utf8_are_unreadable_rather_than_changed(tmp_pa
         load_authoritative_config(workspace)
 
 
+def test_a_file_that_will_not_open_is_made_readable_before_the_server_is_restarted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The order of repair, said by the answer that meets an unreadable file.
+
+    A restart reads the file again, so one asked for while the file will not
+    open is a restart that cannot come up. The step says which comes first and
+    why the other order fails, as the step for a file that is gone does."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+        path.write_bytes(path.read_bytes() + b'\ncomment: "\xff\xfe"\n')
+        answered = tools.call("com_ports_list")
+    finally:
+        tools.close()
+
+    status = answered["config_status"]
+    assert status["state"] == STATE_UNREADABLE
+    assert status["error_type"] == "config_unreadable"
+    step = next(step for step in status["remediation"] if "restart" in step)
+    assert step.index("readable again") < step.index("restart"), step
+    assert "restart before the file is readable again" in step, step
+
+
+def test_a_file_that_is_gone_is_put_back_before_the_server_is_restarted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same order for a file that is gone, which its answer already says.
+
+    There is nothing to restart onto until the file is back, so the step asks
+    for the file first and the restart after, and says why the other order
+    fails."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+        path.unlink()
+        answered = tools.call("com_ports_list")
+    finally:
+        tools.close()
+
+    status = answered["config_status"]
+    assert status["state"] == STATE_MISSING
+    assert status["error_type"] == "config_file_not_found"
+    step = next(step for step in status["remediation"] if "restart" in step)
+    assert step.index("put the file back") < step.index("restart"), step
+    assert "restart before the file is back" in step, step
+
+
 # ---------------------------------------------------------------------------
 # What is deliberately not done.
 

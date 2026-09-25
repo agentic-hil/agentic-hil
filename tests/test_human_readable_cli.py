@@ -869,6 +869,35 @@ def test_a_tool_name_inside_a_longer_word_is_not_rewritten() -> None:
     assert "Call `agentic-hil debugger-probes`." in out
 
 
+# The catalogue entries whose way forward is adoption, each with the command a
+# person meets it from. Both surfaces make that move, under their own names.
+_ADOPTION_REFUSALS = {
+    "com_port_identity_mismatch": "test-reactor",
+    "com_port_not_bound": "test-reactor",
+    "probe_inventory_incomplete": "init",
+    "test_config_invalid": "test-reactor",
+}
+
+
+@pytest.mark.parametrize(("error_type", "command"), sorted(_ADOPTION_REFUSALS.items()))
+def test_an_adoption_step_names_the_tool_to_the_agent_and_the_command_at_a_shell(error_type: str, command: str) -> None:
+    """The entry is written for the reader it reaches most, an agent over MCP.
+
+    It sent that reader to `agentic-hil adopt-hardware`, a command at a shell,
+    for the move `project_config_adopt_hardware` makes over MCP, and the
+    server's instructions send an agent to these tools before any shell. The
+    command line renders the tool as the command, so a person who typed one
+    still reads the command."""
+    refusal = {"ok": False, "error_type": error_type, "summary": "Refused.", **remediation_fields(error_type)}
+    over_mcp = " ".join([*refusal["remediation"], *refusal.get("do_not", [])])
+    assert "project_config_adopt_hardware" in over_mcp
+    assert "agentic-hil adopt-hardware" not in over_mcp
+
+    at_a_shell = _reflowed(_rendered(refusal, command))
+    assert "agentic-hil adopt-hardware" in at_a_shell
+    assert "project_config_adopt_hardware" not in at_a_shell
+
+
 # ---------------------------------------------------------------------------
 # The host's serial ports, of which a Linux host has three dozen.
 
