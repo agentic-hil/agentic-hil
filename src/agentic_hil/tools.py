@@ -831,7 +831,14 @@ class AgenticHILToolService:
             "run_started_at": declaration.get("run_started_at"),
             "aborted": recovery is not None,
         }
-        return {**result, "run": run} if recovery is None else {**result, "run": run, "recovery": recovery}
+        if recovery is None:
+            return {**result, "run": run}
+        # The same narrowing the stand-down makes, for the incident the run's own
+        # teardown settled instead: the bench is not held for it any more, so the
+        # one field that says it is stops saying it. `cleanup_required` and the
+        # reasons stay, because what the call could not confirm is unchanged.
+        settled = recovery.get("incident_resolved") is True and result.get("quarantined") is True
+        return {**result, "run": run, "recovery": recovery, **({"quarantined": False} if settled else {})}
 
     def _end_implicit_run(self) -> bool:
         """Close the implicit run, never raising over the call's own answer."""

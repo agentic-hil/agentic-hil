@@ -225,6 +225,11 @@ def test_a_bare_flash_that_fails_aborts_into_a_recovery_action(tmp_path: Path) -
         assert recovery["safe_state_predicate"] == "reset_halt", recovery
         assert recovery["incident_resolved"] is True, recovery
         assert recovery["resolved_reason"] == FLASH_REASON, recovery
+        # The run's own teardown settled the incident, so the bench is not held
+        # for it and the result stops saying so. What the call could not confirm
+        # is still said: the reason stays for the caller to read.
+        assert result["quarantined"] is False, result
+        assert FLASH_REASON in result["cleanup_reasons"], result
         # The claim is about the board, so it is read off the board's own log.
         assert "reset_target:halt" in backend.calls, backend.calls
         assert backend.calls.index("flash_firmware") < backend.calls.index("reset_target:halt")
