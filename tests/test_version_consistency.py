@@ -359,6 +359,15 @@ def test_the_copied_tree_is_a_fair_starting_point(tree: Path) -> None:
             lambda text, version: text.replace(f'"expected_version": "{version}"', '"expected_version": "9.9.9"'),
             "evals/install/README.md",
         ),
+        # The recorded command surface speaks for the release the CI examples pin,
+        # so it tracks that release like they do, and a release stamp that moves
+        # the pin is refused until the surface is recorded again (#525).
+        (
+            "tests/fixtures/published_cli_surface.json",
+            RELEASE,
+            lambda text, version: text.replace(f'"version": "{version}"', '"version": "9.9.9"'),
+            "tests/fixtures/published_cli_surface.json",
+        ),
     ],
 )
 @pytest.mark.parametrize("shape", ["released_tree", "development_tree"])
