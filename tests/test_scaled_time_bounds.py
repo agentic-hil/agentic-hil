@@ -884,7 +884,8 @@ BASE_EXPRESSIONS = {
 
 # And the numbers those names stand for, at the value they already had, in the
 # file that stated them. `timeout_s` is a poll helper's parameter rather than a
-# constant, so its default is what is pinned.
+# constant, so its default is what is pinned. So is the `timeout` default of the
+# two script runners, which take the factor where they hand it to the child.
 BASE_CONSTANTS = {
     "bench/test_bench_coordination.py": ("REFUSAL_CEILING_S = 30.0", "ASKED_WAIT_S = 3.0"),
     "test_can_broker_deadline.py": ("GRACE_CEILING_S = 3.0", "REAL_ATTACH_DEADLINE_S = 0.5"),
@@ -897,6 +898,8 @@ BASE_CONSTANTS = {
     "test_debugger_processes.py": ("CALL_CEILING_S = 15.0", "EMPTIED_GROUP_CEILING_S = 4.0"),
     "test_pyocd_without_a_probe.py": ("CONFIGURED_TIMEOUT_S = 5",),
     "test_run_lifecycle.py": ("timeout_s: float = 60.0",),
+    "test_install_scripts.py": ("timeout: float = 180",),
+    "test_windows_install_eval_scripts.py": ("timeout: int = 180",),
 }
 
 
@@ -1149,6 +1152,12 @@ def goes_through_the_helper(bound: str) -> bool:
     """The verdict the assertion walk gives a ceiling spelled `bound`."""
     split = split_helper_call(bound)
     return split is not None and UNIT_CONVERSION.match(split[1]) is not None
+
+
+def ceiling_takes_the_factor(entry: Comparison, walk: TimeoutWalk) -> bool:
+    """The verdict the assertion walk gives a ceiling in a file under the
+    walk's root."""
+    return goes_through_the_helper(entry.bound)
 
 
 @dataclass(frozen=True)
@@ -1729,26 +1738,138 @@ MIRRORED_BOUNDS = (
 
 def test_a_local_or_computed_budget_gets_the_verdict_the_assertion_walk_gives(tmp_path: Path) -> None:
     """The policy mirrored, not loosened: a name standing for a scaled module
-    constant is the one addition, and only where it stands alone."""
+    constant is the one addition, and only where it stands alone. A call of a
+    function that returns a helper call and does nothing else is accepted by
+    both walks."""
     lines = [
         "from support import scaled_time_bound",
         "",
         "CHILD_TIMEOUT_S = scaled_time_bound(30)",
         "",
         "",
-        "def sample(child, budget, timeout_s, slow, wait_bound, LONG_S, SHORT_S) -> None:",
+        "def wait_bound() -> float:",
+        "    return scaled_time_bound(30)",
+        "",
+        "",
+        "def sample(child, budget, timeout_s, slow, LONG_S, SHORT_S) -> None:",
     ]
     for bound in MIRRORED_BOUNDS:
         lines.append(f"    assert elapsed < {bound}, 'a ceiling'")
         lines.append(f"    child.wait(timeout={bound})")
     write_sources(tmp_path, {"mirror/test_mirror.py": lines})
+    walk = TimeoutWalk(tmp_path)
 
     ceilings = comparisons_in("\n".join(lines), tmp_path / "mirror" / "test_mirror.py")
-    by_the_assertion_walk = [entry.through_the_helper and UNIT_CONVERSION.match(entry.outside_the_helper) is not None for entry in ceilings]
+    by_the_assertion_walk = [ceiling_takes_the_factor(entry, walk) for entry in ceilings]
     by_the_timeout_walk = [site.takes_the_factor for site in timeout_sites_under(tmp_path)]
 
     assert by_the_timeout_walk == by_the_assertion_walk, list(zip(MIRRORED_BOUNDS, by_the_timeout_walk, strict=False))
-    assert by_the_assertion_walk == [bound == "scaled_time_bound(30) * 1000" for bound in MIRRORED_BOUNDS]
+    assert by_the_assertion_walk == [bound in ("scaled_time_bound(30) * 1000", "wait_bound()") for bound in MIRRORED_BOUNDS]
+
+
+# The constant rule spelled as a function, beside each way a function can fail
+# to be it. Each call is written once as a ceiling and once as a budget, for the
+# reason the mirrored bounds above are.
+FUNCTION_TIER_CONFTEST = [
+    "from support import scaled_time_bound",
+    "",
+    "",
+    "def install_bound() -> float:",
+    "    return scaled_time_bound(600.0)",
+]
+
+FUNCTION_DEFINITIONS = [
+    "import functools",
+    "",
+    "from support import scaled_time_bound",
+    "",
+    "from . import conftest",
+    "from .conftest import install_bound",
+    "",
+    "WAIT_TIMEOUT_S = 5.0",
+    "",
+    "",
+    "def wait_bound() -> float:",
+    '    """The module\'s one wait ceiling."""',
+    "    return scaled_time_bound(WAIT_TIMEOUT_S)",
+    "",
+    "",
+    "def wait_bound_ms() -> float:",
+    "    return scaled_time_bound(WAIT_TIMEOUT_S) * 1000",
+    "",
+    "",
+    "def bound_for(timeout_s: float = WAIT_TIMEOUT_S) -> float:",
+    "    return scaled_time_bound(timeout_s)",
+    "",
+    "",
+    "def logged_bound() -> float:",
+    '    print("waiting")',
+    "    return scaled_time_bound(WAIT_TIMEOUT_S)",
+    "",
+    "",
+    "def bare_bound() -> float:",
+    "    return WAIT_TIMEOUT_S",
+    "",
+    "",
+    "def padded_bound() -> float:",
+    "    return scaled_time_bound(WAIT_TIMEOUT_S) + 1.0",
+    "",
+    "",
+    "@functools.cache",
+    "def cached_bound() -> float:",
+    "    return scaled_time_bound(WAIT_TIMEOUT_S)",
+    "",
+    "",
+    "async def awaited_bound() -> float:",
+    "    return scaled_time_bound(WAIT_TIMEOUT_S)",
+    "",
+    "",
+    "def shadowed_bound() -> float:",
+    "    return scaled_time_bound(WAIT_TIMEOUT_S)",
+    "",
+    "",
+    "def sample(child, shadowed_bound) -> None:",
+]
+
+# Each call, with the verdict both walks owe it.
+FUNCTION_BOUNDS = {
+    "wait_bound()": True,
+    "wait_bound_ms()": True,
+    "install_bound()": True,
+    "conftest.install_bound()": True,
+    "wait_bound": False,
+    "bound_for()": False,
+    "bound_for(WAIT_TIMEOUT_S)": False,
+    "logged_bound()": False,
+    "bare_bound()": False,
+    "padded_bound()": False,
+    "cached_bound()": False,
+    "awaited_bound()": False,
+    "shadowed_bound()": False,
+}
+
+
+def test_a_function_that_only_returns_a_scaled_bound_takes_the_factor_in_both_walks(tmp_path: Path) -> None:
+    """The constant rule spelled as a function. A call with no arguments of a
+    module-level function that has no parameters, and whose body, a docstring
+    aside, is one `return` of a helper call, takes the factor in both walks, in
+    its own file or through an import. A parameter, another statement, a return
+    of anything else, a decorator or a coroutine is refused, and so is a local
+    that shares the function's name, and the function itself uncalled."""
+    lines = list(FUNCTION_DEFINITIONS)
+    for bound in FUNCTION_BOUNDS:
+        lines.append(f"    assert elapsed < {bound}, 'a ceiling'")
+        lines.append(f"    child.wait(timeout={bound})")
+    write_sources(tmp_path, {"functions/conftest.py": FUNCTION_TIER_CONFTEST, "functions/test_functions.py": lines})
+    walk = TimeoutWalk(tmp_path)
+
+    ceilings = comparisons_in("\n".join(lines), tmp_path / "functions" / "test_functions.py")
+    by_the_assertion_walk = [ceiling_takes_the_factor(entry, walk) for entry in ceilings]
+    by_the_timeout_walk = [site.takes_the_factor for site in timeout_sites_under(tmp_path)]
+
+    expected = list(FUNCTION_BOUNDS.values())
+    assert by_the_timeout_walk == expected, list(zip(FUNCTION_BOUNDS, by_the_timeout_walk, strict=False))
+    assert by_the_assertion_walk == expected, list(zip(FUNCTION_BOUNDS, by_the_assertion_walk, strict=False))
 
 
 MARKER_SAMPLE = [
