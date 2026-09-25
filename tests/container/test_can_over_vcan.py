@@ -64,7 +64,7 @@ PEER_SCRIPT = Path(__file__).with_name("can_peer.py")
 # by BUS_TIMEOUT_S below, which is far inside this.
 ANSWER_TIMEOUT_S = 60.0
 # How long the far end waits for a frame the product said it sent.
-WIRE_TIMEOUT_S = 5.0
+WIRE_TIMEOUT_S = scaled_time_bound(5.0)
 # The bus entry's own `timeout_s`, which bounds every read's wait.
 BUS_TIMEOUT_S = 2.0
 # Slack for a wait that is measured against the clock: scheduling, the pipe,
@@ -103,7 +103,7 @@ def ip_command() -> str:
 
 
 def ip_link(*arguments: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([ip_command(), "link", *arguments], capture_output=True, text=True, timeout=30, check=False)
+    return subprocess.run([ip_command(), "link", *arguments], capture_output=True, text=True, timeout=scaled_time_bound(30), check=False)
 
 
 def observer_is_bound(channel: str, seconds: float) -> bool:
@@ -295,10 +295,10 @@ class LiveServer:
         assert self.process.stdin is not None
         self.process.stdin.close()
         try:
-            self.process.wait(timeout=30)
+            self.process.wait(timeout=scaled_time_bound(30))
         except subprocess.TimeoutExpired:
             self.process.kill()
-            self.process.wait(timeout=30)
+            self.process.wait(timeout=scaled_time_bound(30))
 
 
 @contextmanager
@@ -398,10 +398,10 @@ def scripted_peer(channel: str, ready: Path, *replies: str) -> Iterator[subproce
         if peer.poll() is None:
             peer.terminate()
         try:
-            peer.wait(timeout=10)
+            peer.wait(timeout=scaled_time_bound(10))
         except subprocess.TimeoutExpired:
             peer.kill()
-            peer.wait(timeout=10)
+            peer.wait(timeout=scaled_time_bound(10))
 
 
 def reactor(project: Path, config: Path, plan: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -570,7 +570,7 @@ def test_a_frame_the_product_sent_is_what_candump_reads_off_the_interface(tmp_pa
         finally:
             if observer.poll() is None:
                 observer.kill()
-                observer.wait(timeout=10)
+                observer.wait(timeout=scaled_time_bound(10))
 
     assert observer.returncode == 0, stderr
     lines = stdout.strip().splitlines()

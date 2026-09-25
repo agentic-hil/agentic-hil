@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from .conftest import (
     CONTAINER_ONLY,
@@ -77,7 +78,7 @@ def a_project(tmp_path: Path, pair: PtyPair) -> tuple[Path, Path, Path]:
 
 
 def stty_speed(device: Path) -> str:
-    read = subprocess.run(["stty", "-F", str(device), "speed"], capture_output=True, text=True, timeout=30, check=False)
+    read = subprocess.run(["stty", "-F", str(device), "speed"], capture_output=True, text=True, timeout=scaled_time_bound(30), check=False)
     assert read.returncode == 0, read.stderr
     return read.stdout.strip()
 

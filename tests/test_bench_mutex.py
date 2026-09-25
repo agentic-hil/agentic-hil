@@ -244,7 +244,7 @@ coordinator.close()
         assert result["side_effect_committed"] is False
     finally:
         publish_atomically(str(stop), "stop")
-        child.wait(timeout=20)
+        child.wait(timeout=scaled_time_bound(20))
 
 
 def test_a_killed_run_frees_its_devices_without_operator_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -274,11 +274,11 @@ time.sleep(600)
         assert wait_for_file(ready, child), "child did not open its run"
         # Killed outright: no finally, no release, no chance to write anything.
         os.kill(holder_pid(ready), getattr(signal, "SIGKILL", signal.SIGTERM))
-        child.wait(timeout=20)
+        child.wait(timeout=scaled_time_bound(20))
     finally:
         if child.poll() is None:
             child.kill()
-            child.wait(timeout=20)
+            child.wait(timeout=scaled_time_bound(20))
 
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "parent-state"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "parent-state"))

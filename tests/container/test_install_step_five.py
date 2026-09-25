@@ -54,6 +54,7 @@ import time
 from pathlib import Path, PurePosixPath
 
 import pytest
+from support import scaled_time_bound
 
 from .conftest import CONTAINER_ONLY, INSTALL_TIMEOUT_S, REPOSITORY_ROOT
 
@@ -249,7 +250,7 @@ class Machine:
                     process.wait(timeout=30)
             if process.poll() is None:
                 process.kill()
-            process.wait(timeout=30)
+            process.wait(timeout=scaled_time_bound(30))
 
 
 @pytest.fixture

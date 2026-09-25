@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 from conftest import write_config
+from support import scaled_time_bound
 
 from agentic_hil.config import load_config
 from agentic_hil.stdio import run_stdio_server
@@ -204,7 +205,7 @@ def test_the_shipped_server_round_trips_a_non_ascii_value_through_real_byte_pipe
         capture_output=True,
         cwd=tmp_path,
         env=child_environment(),
-        timeout=180,
+        timeout=scaled_time_bound(180),
         check=False,
     )
 

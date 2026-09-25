@@ -34,6 +34,7 @@ import venv
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 import agentic_hil
 from agentic_hil.process import filetime_epoch_seconds, process_working_directory, snapshot_process_images
@@ -97,7 +98,7 @@ def test_a_windows_host_reads_its_own_child_out_of_the_toolhelp_snapshot() -> No
         assert process_working_directory(child.pid) is None
     finally:
         child.kill()
-        child.wait(timeout=30)
+        child.wait(timeout=scaled_time_bound(30))
 
 
 def a_scratch_installation(tmp_path: Path) -> Path:
@@ -163,7 +164,7 @@ def test_a_windows_upgrade_names_a_server_out_of_its_installation_and_never_itse
             [launcher, "-c", ASK_FROM_INSIDE],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=scaled_time_bound(120),
             env={**os.environ, "PYTHONPATH": os.pathsep.join([str(Path(agentic_hil.__file__).resolve().parents[1]), sysconfig.get_path("purelib")])},
             check=False,
         )
@@ -193,4 +194,4 @@ def test_a_windows_upgrade_names_a_server_out_of_its_installation_and_never_itse
         assert answer["launcher_pid"] not in {holder["pid"] for holder in holders}, answer
     finally:
         server.kill()
-        server.wait(timeout=30)
+        server.wait(timeout=scaled_time_bound(30))

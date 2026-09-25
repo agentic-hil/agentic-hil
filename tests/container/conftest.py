@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import IO
 
 import pytest
+from support import scaled_time_bound
 
 # What says a run means to be in the image this tier is published with. Set by
 # the Dockerfile and by the job that runs it. It says what a run intends and
@@ -97,8 +98,8 @@ RECORDED_EXCLUDE_NEWER = "2026-01-01T00:00:00Z"
 
 # How long a child of these tests may take before it is a failure rather than a
 # slow machine. Generous: an install resolves a dependency set over the network.
-INSTALL_TIMEOUT_S = 600.0
-COMMAND_TIMEOUT_S = 300.0
+INSTALL_TIMEOUT_S = scaled_time_bound(600.0)
+COMMAND_TIMEOUT_S = scaled_time_bound(300.0)
 
 
 def why_this_run_is_not_in_the_image() -> str | None:
@@ -607,7 +608,7 @@ class PtyPair:
         """
         if self.socat.poll() is None:
             self.socat.kill()
-        self.socat.wait(timeout=30)
+        self.socat.wait(timeout=scaled_time_bound(30))
         for stream in (self.socat.stdout, self.socat.stderr):
             if stream is not None:
                 stream.close()
@@ -712,10 +713,10 @@ class Responder:
         if self.process.poll() is None:
             self.process.terminate()
             try:
-                self.process.wait(timeout=10)
+                self.process.wait(timeout=scaled_time_bound(10))
             except subprocess.TimeoutExpired:
                 self.process.kill()
-                self.process.wait(timeout=10)
+                self.process.wait(timeout=scaled_time_bound(10))
         if self.process.stderr is not None:
             self.process.stderr.close()
         return self.received()
@@ -817,10 +818,10 @@ class LiveServer:
         """End the server by closing its stdin, and return what it wrote to stderr."""
         if self.process.poll() is None:
             try:
-                _stdout, stderr = self.process.communicate(timeout=timeout_s)
+                _stdout, stderr = self.process.communicate(timeout=scaled_time_bound(timeout_s))
             except subprocess.TimeoutExpired:
                 self.process.kill()
-                _stdout, stderr = self.process.communicate(timeout=timeout_s)
+                _stdout, stderr = self.process.communicate(timeout=scaled_time_bound(timeout_s))
         else:
             stderr = self.process.stderr.read() if self.process.stderr is not None else ""
         return stderr or ""
@@ -828,7 +829,7 @@ class LiveServer:
     def kill(self) -> None:
         if self.process.poll() is None:
             self.process.kill()
-            self.process.wait(timeout=30)
+            self.process.wait(timeout=scaled_time_bound(30))
 
 
 def run_cli(project: Path, config: Path | None, *arguments: str, stdin: bytes | None = None, environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:

@@ -60,6 +60,7 @@ from typing import IO, Any
 
 import pytest
 import yaml
+from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, COMMAND_TIMEOUT_S, Bench, child_command, isolated_environment
 
@@ -308,10 +309,10 @@ class Server:
             # still be holding is owed to the next test rather than to this one's
             # patience.
             try:
-                self.process.wait(SERVER_KILL_TIMEOUT_S if self._unresponsive else SERVER_EXIT_TIMEOUT_S)
+                self.process.wait(scaled_time_bound(SERVER_KILL_TIMEOUT_S if self._unresponsive else SERVER_EXIT_TIMEOUT_S))
             except subprocess.TimeoutExpired:
                 self.process.kill()
-                self.process.wait(SERVER_KILL_TIMEOUT_S)
+                self.process.wait(scaled_time_bound(SERVER_KILL_TIMEOUT_S))
         if self.process.stdout is not None:
             self.process.stdout.close()
         self._stderr.close()

@@ -34,6 +34,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from agentic_hil.process import filetime_epoch_seconds, snapshot_process_images
 
@@ -71,7 +72,7 @@ def start_time_ps_reports(pid: int) -> float:
         capture_output=True,
         text=True,
         env={**os.environ, "TZ": "UTC", "LC_ALL": "C"},
-        timeout=30,
+        timeout=scaled_time_bound(30),
         check=False,
     )
     assert reported.returncode == 0, f"ps could not read pid {pid}: {reported.stderr}"
@@ -113,7 +114,7 @@ def test_a_real_childs_start_time_and_launch_are_read_out_of_procfs(tmp_path: Pa
         assert entry.virtual_env == environment, entry
     finally:
         child.kill()
-        child.wait(timeout=30)
+        child.wait(timeout=scaled_time_bound(30))
 
 
 def test_a_server_started_from_the_installation_is_named_under_restart_required_by(uv_tool: UvTool, wheelhouse: Wheelhouse, tmp_path: Path) -> None:
@@ -178,7 +179,7 @@ def test_a_server_started_from_the_installation_is_named_under_restart_required_
         assert str(server.pid) in result["restart_notice"], result["restart_notice"]
     finally:
         server.kill()
-        server.wait(timeout=30)
+        server.wait(timeout=scaled_time_bound(30))
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +262,7 @@ def test_a_child_started_by_the_environments_own_python_is_named_by_the_path_it_
         assert os.getpid() not in {holder["pid"] for holder in holders}, holders
     finally:
         child.kill()
-        child.wait(timeout=30)
+        child.wait(timeout=scaled_time_bound(30))
 
 
 def test_a_child_started_from_an_activated_environment_is_named_by_virtual_env_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -307,6 +308,6 @@ def test_a_child_started_from_an_activated_environment_is_named_by_virtual_env_a
         assert holders[0]["working_directory"] == str(project), holders[0]
     finally:
         activated.kill()
-        activated.wait(timeout=30)
+        activated.wait(timeout=scaled_time_bound(30))
         unrelated.kill()
-        unrelated.wait(timeout=30)
+        unrelated.wait(timeout=scaled_time_bound(30))

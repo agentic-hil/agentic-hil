@@ -311,7 +311,7 @@ def test_stdin_reader_stops_without_external_input_on_windows() -> None:
     release = threading.Event()
 
     def close_the_write_end_late() -> None:
-        release.wait(5.0)
+        release.wait(scaled_time_bound(5.0))
         with suppress(OSError):
             os.close(write_fd)
 
@@ -391,7 +391,7 @@ def test_com_stdio_ends_a_failed_session_without_waiting_on_stdin(tmp_path: Path
     release = threading.Event()
 
     def close_the_write_end_late() -> None:
-        release.wait(5.0)
+        release.wait(scaled_time_bound(5.0))
         with suppress(OSError):
             os.close(write_fd)
 

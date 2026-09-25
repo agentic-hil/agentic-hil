@@ -35,6 +35,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SHELL_SCRIPT = REPOSITORY_ROOT / "install.sh"
@@ -42,10 +43,10 @@ POWERSHELL_SCRIPT = REPOSITORY_ROOT / "install.ps1"
 
 # Windows PowerShell 5.1 takes seconds to start, and the shared runners are
 # slower still. The budget bounds a hang, not a slow start.
-SCRIPT_TIMEOUT_S = 180
+SCRIPT_TIMEOUT_S = scaled_time_bound(180)
 # A healthy daemon answers in milliseconds. One that spends the whole budget is
 # a machine these tests skip on, not fail on.
-DOCKER_PROBE_TIMEOUT_S = 10
+DOCKER_PROBE_TIMEOUT_S = scaled_time_bound(10)
 CONTAINER_TIMEOUT_S = 600
 CONTAINER_IMAGE = "python:3.12"
 
@@ -3467,7 +3468,7 @@ def test_the_one_liner_installs_the_machine_half_in_a_fresh_container() -> None:
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=CONTAINER_TIMEOUT_S,
+        timeout=scaled_time_bound(CONTAINER_TIMEOUT_S),
         check=False,
     )
 
@@ -3878,7 +3879,7 @@ class _WindowsBench:
             **extra,
         }
 
-    def run(self, *arguments: str, manager_bin_on_path: bool = True, timeout: float = SCRIPT_TIMEOUT_S, **extra: str) -> tuple[subprocess.CompletedProcess[str], str]:
+    def run(self, *arguments: str, manager_bin_on_path: bool = True, timeout: float = 180, **extra: str) -> tuple[subprocess.CompletedProcess[str], str]:
         # -NoPath on every run from here. Everything else this bench fakes lives
         # in tmp_path, but the Path step 3 writes is the one belonging to the
         # account running the suite, and there is no second one to hand it. What
@@ -3893,7 +3894,7 @@ class _WindowsBench:
             encoding="utf-8",
             errors="replace",
             env=self.environment(manager_bin_on_path=manager_bin_on_path, **extra),
-            timeout=timeout,
+            timeout=scaled_time_bound(timeout),
             check=False,
         )
         return result, f"{result.stdout}{result.stderr}"
@@ -5087,7 +5088,7 @@ def real_uv_on_windows(tmp_path_factory: pytest.TempPathFactory) -> Path:
         [sys.executable, "-m", "pip", "download", "--quiet", "--disable-pip-version-check", "--no-deps", "--only-binary=:all:", "--dest", str(into), "uv"],
         capture_output=True,
         text=True,
-        timeout=CONTAINER_TIMEOUT_S,
+        timeout=scaled_time_bound(CONTAINER_TIMEOUT_S),
         check=False,
     )
     if downloaded.returncode != 0:
@@ -5132,7 +5133,7 @@ class _RealUvWindowsBench:
         return environment
 
     def uv(self, *arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run([str(self.uv_bin / "uv.exe"), *arguments], capture_output=True, text=True, env=self.environment(tool_bin_on_path=False), timeout=CONTAINER_TIMEOUT_S, check=False)
+        return subprocess.run([str(self.uv_bin / "uv.exe"), *arguments], capture_output=True, text=True, env=self.environment(tool_bin_on_path=False), timeout=scaled_time_bound(CONTAINER_TIMEOUT_S), check=False)
 
     def run(self, *arguments: str, tool_bin_on_path: bool) -> tuple[subprocess.CompletedProcess[str], str]:
         # -NoPath for the same reason as the bench above: this one reaches the
@@ -5146,7 +5147,7 @@ class _RealUvWindowsBench:
             encoding="utf-8",
             errors="replace",
             env=self.environment(tool_bin_on_path=tool_bin_on_path),
-            timeout=CONTAINER_TIMEOUT_S,
+            timeout=scaled_time_bound(CONTAINER_TIMEOUT_S),
             check=False,
         )
         return result, f"{result.stdout}{result.stderr}"

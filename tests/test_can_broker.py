@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 from conftest import write_authoritative_config, write_config
+from support import scaled_time_bound
 
 from agentic_hil import canbroker
 from agentic_hil.can import CanBusService
@@ -296,7 +297,7 @@ def reaped_brokers(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[subprocess.
         if child.poll() is None:
             child.terminate()
         try:
-            child.wait(timeout=15)
+            child.wait(timeout=scaled_time_bound(15))
         except subprocess.TimeoutExpired:
             child.kill()
 
@@ -343,7 +344,7 @@ def test_broker_starts_on_first_attach_and_exits_on_last_detach(tmp_path: Path, 
     # Not "eventually gone": reaped, with a status. A broker that is still alive
     # after the last participant left is the orphan the automatic lifecycle
     # exists to prevent, and wait() is what proves it is not one.
-    assert alpha.broker_process.wait(timeout=30) == canbroker.BROKER_EXIT_OK
+    assert alpha.broker_process.wait(timeout=scaled_time_bound(30)) == canbroker.BROKER_EXIT_OK
     assert not descriptor_path(bus_key, lock_root).exists()
     assert not authkey_path(bus_key, lock_root).exists()
 
@@ -361,7 +362,7 @@ def test_broker_holds_the_machine_wide_bus_lock_for_its_lifetime(tmp_path: Path,
         assert busy.value.result["holder"]["pid"] == alpha.broker_pid
     finally:
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
     # And the lock is genuinely gone once the broker is, so the next single-owner
     # run on this bench is not blocked by a bus nobody is on.
     freed = BenchMutex(frontend="single-owner")
@@ -397,7 +398,7 @@ def test_counter_mismatch_is_refused_at_attach_naming_both_values(tmp_path: Path
             connection.close()
     finally:
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
     assert refusal["ok"] is False
     assert refusal["error_type"] == "can_broker_counter_mismatch"
     assert refusal["broker_counter"] == descriptor.counter
@@ -417,7 +418,7 @@ def test_counter_increments_on_every_attach(tmp_path: Path, monkeypatch: pytest.
             beta.detach()
     finally:
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 def test_protocol_digest_mismatch_refuses_across_releases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
@@ -429,7 +430,7 @@ def test_protocol_digest_mismatch_refuses_across_releases(tmp_path: Path, monkey
             attach_participant(config, "bench", "beta", allow_start=False, start_timeout_s=5.0)
     finally:
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
     assert refusal.value.result["error_type"] == "can_broker_protocol_mismatch"
     assert refusal.value.result["broker_protocol_digest"] != refusal.value.result["client_protocol_digest"]
 
@@ -452,7 +453,7 @@ def test_authkey_handshake_refuses_a_client_with_the_wrong_key(tmp_path: Path, m
         assert alpha.status()["ok"] is True
     finally:
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 class _ImpostorListener:
@@ -577,7 +578,7 @@ def test_participant_name_collision_is_refused_and_distinct_names_run_in_paralle
             beta.detach()
     finally:
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 LISTEN_ONLY_SHARES = (
@@ -608,7 +609,7 @@ def test_listen_only_and_transmitting_participants_cannot_coexist(tmp_path: Path
         assert result["listen_only_proof"] != "controller"
     finally:
         writer.detach()
-        writer.broker_process.wait(timeout=30)
+        writer.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 def test_a_transmitting_participant_cannot_join_a_listen_only_sniffer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
@@ -623,7 +624,7 @@ def test_a_transmitting_participant_cannot_join_a_listen_only_sniffer(tmp_path: 
         assert refusal.value.result["conflicting_participants"] == ["sniffer"]
     finally:
         sniffer.detach()
-        sniffer.broker_process.wait(timeout=30)
+        sniffer.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 def test_a_listen_only_bus_refuses_a_participant_that_may_transmit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
@@ -636,7 +637,7 @@ def test_a_listen_only_bus_refuses_a_participant_that_may_transmit(tmp_path: Pat
         assert refusal.value.result["listen_only"] is True
     finally:
         sniffer.detach()
-        sniffer.broker_process.wait(timeout=30)
+        sniffer.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 def test_service_listen_only_opens_the_adapter_without_controller_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -692,7 +693,7 @@ def test_a_bus_incident_aborts_every_participant_and_gates_the_bus(tmp_path: Pat
     finally:
         beta.detach()
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 def test_a_participant_scoped_failure_aborts_only_that_participant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
@@ -726,7 +727,7 @@ def test_a_participant_scoped_failure_aborts_only_that_participant(tmp_path: Pat
     finally:
         beta.detach()
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 def _inprocess_broker(tmp_path: Path, config, *, bus_id: str = "bench", names=("alpha", "beta")):
@@ -780,7 +781,7 @@ def test_a_returned_send_failure_gates_the_bus_and_aborts_every_participant(tmp_
     finally:
         beta.detach()
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 def test_a_raised_send_gates_the_bus_and_aborts_every_participant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -942,7 +943,7 @@ def test_a_sent_frame_is_attributable_in_both_logs(tmp_path: Path, monkeypatch: 
     finally:
         beta.detach()
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
 
     bus_tx = [line for line in bus_lines if line.get("seq") == sequence]
     assert len(bus_tx) == 1
@@ -978,7 +979,7 @@ def test_a_participant_may_not_send_outside_its_own_view(tmp_path: Path, monkeyp
         assert refused["error_type"] == "can_participant_filter_violation"
     finally:
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 def test_the_authkey_is_absent_from_every_result_report_and_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
@@ -1006,7 +1007,7 @@ def test_the_authkey_is_absent_from_every_result_report_and_log(tmp_path: Path, 
     own_log = Path(alpha.log_path).read_text(encoding="utf-8")
     descriptor_text = descriptor_path(bus_key, lock_root).read_text(encoding="utf-8")
     results.append(alpha.detach())
-    alpha.broker_process.wait(timeout=30)
+    alpha.broker_process.wait(timeout=scaled_time_bound(30))
 
     serialized = json.dumps(results, default=str) + bus_log + own_log + descriptor_text
     assert key.hex() not in serialized.lower()
@@ -1065,7 +1066,7 @@ def test_a_killed_broker_leaves_a_corpse_that_the_next_attach_replaces(tmp_path:
         assert beta.status()["ok"] is True
     finally:
         beta.detach()
-        beta.broker_process.wait(timeout=30)
+        beta.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 def test_a_broker_that_nobody_attaches_to_does_not_sit_on_the_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
@@ -1166,7 +1167,7 @@ def test_a_long_tmpdir_still_yields_a_bindable_broker_endpoint(tmp_path: Path, m
         assert read_descriptor(bus_key, lock_root).endpoint == address
     finally:
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 def test_a_client_that_cannot_derive_an_address_still_attaches_to_a_published_broker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
@@ -1232,7 +1233,7 @@ def test_a_client_that_cannot_derive_an_address_still_attaches_to_a_published_br
             beta.detach()
     finally:
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 # ---------------------------------------------------------------------------
@@ -1268,7 +1269,7 @@ def test_a_view_for_standard_frames_neither_sends_nor_receives_its_extended_twin
         assert received["frames_read"] == 0, "an extended 0x123 is not the standard 0x123 this view carries"
     finally:
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 def test_an_extended_view_carries_the_extended_frame_its_number_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
@@ -1293,7 +1294,7 @@ def test_an_extended_view_carries_the_extended_frame_its_number_names(tmp_path: 
         assert received["frames"][0]["extended"] is True
     finally:
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 # ---------------------------------------------------------------------------
@@ -1339,7 +1340,7 @@ def test_an_idle_participants_receive_queue_is_bounded_while_another_reads(tmp_p
     finally:
         beta.detach()
         alpha.detach()
-        alpha.broker_process.wait(timeout=30)
+        alpha.broker_process.wait(timeout=scaled_time_bound(30))
 
 
 # ---------------------------------------------------------------------------

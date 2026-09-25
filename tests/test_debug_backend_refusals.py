@@ -361,7 +361,7 @@ def test_doctor_reports_the_classified_version_failure_and_exits_one(tmp_path: P
     config = config_for(workspace, "openocd", FAKE_TRANSCRIPT, config_path=tmp_path / "config" / "config.yaml")
     environment = {**os.environ, "AGENTIC_HIL_CONFIG": str(config.config_path)}
 
-    answered = subprocess.run([sys.executable, "-m", "agentic_hil", "doctor", "--json"], capture_output=True, text=True, cwd=str(workspace), env=environment, timeout=120, check=False)
+    answered = subprocess.run([sys.executable, "-m", "agentic_hil", "doctor", "--json"], capture_output=True, text=True, cwd=str(workspace), env=environment, timeout=scaled_time_bound(120), check=False)
 
     assert answered.returncode == 1, answered.stdout + answered.stderr
     assert answered.stdout.strip(), f"doctor --json wrote no document on stdout; stderr was:\n{answered.stderr}"

@@ -27,6 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import write_authoritative_config, write_config
+from support import scaled_time_bound
 from test_can_frame_and_routing import RecordingBus, fake_can_module
 from test_implicit_single_action_run import DEVICE, PORT_ID, FakeBackend, FakeSerialHandle, config_for
 
@@ -505,7 +506,7 @@ def run_child(cwd: Path, stdin: bytes) -> subprocess.CompletedProcess[bytes]:
         capture_output=True,
         cwd=str(cwd),
         env=dict(os.environ),
-        timeout=180,
+        timeout=scaled_time_bound(180),
         check=False,
     )
 

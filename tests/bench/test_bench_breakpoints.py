@@ -55,6 +55,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, Bench, child_command
 
@@ -90,7 +91,7 @@ CALL_TIMEOUT_S = 90.0
 # target, each of them bounded by the configured debugger timeout rather than by
 # anything here, so this has to sit above that budget rather than inside it.
 START_SESSION_TIMEOUT_S = 240.0
-SERVER_EXIT_TIMEOUT_S = 30.0
+SERVER_EXIT_TIMEOUT_S = scaled_time_bound(30.0)
 
 # What a resume is given. The long one is for a breakpoint that will be reached
 # in microseconds and only needs room for the round trip; the short one is for

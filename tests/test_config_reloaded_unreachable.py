@@ -49,6 +49,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from conftest import write_authoritative_config
+from support import scaled_time_bound
 
 from agentic_hil.config import load_authoritative_config
 from agentic_hil.configreload import (
@@ -760,7 +761,7 @@ def tracked_files() -> list[str]:
             ["git", "-C", str(REPOSITORY_ROOT), "ls-files", "-z"],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=scaled_time_bound(60),
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as error:  # pragma: no cover - needs a host without git

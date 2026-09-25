@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from support import PUBLISH_ATOMICALLY_SOURCE, published, read_when_published
+from support import PUBLISH_ATOMICALLY_SOURCE, published, read_when_published, scaled_time_bound
 
 from evals.install import refresh_login
 from evals.install.credentials import (
@@ -1972,14 +1972,14 @@ def _run_until_stopped_by(tmp_path: Path, sig: int) -> tuple[subprocess.Popen[by
         # To the entrypoint alone, as a stop or a Ctrl-C reaching this process
         # would arrive -- not the whole group, which the loop child is also in.
         process.send_signal(sig)
-        process.wait(timeout=30)
+        process.wait(timeout=scaled_time_bound(30))
     finally:
         # Kill the whole group, so a run left blocked by a broken handler -- or
         # the loop child a working one already killed -- does not outlive the test.
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(process.pid, signal.SIGKILL)
         if process.poll() is None:
-            process.wait(timeout=10)
+            process.wait(timeout=scaled_time_bound(10))
 
     output = log.read_text(encoding="utf-8", errors="replace")
     return process, output, home / "staged" / "codex-auth"
@@ -5778,7 +5778,7 @@ def test_terminate_tree_kills_a_child_that_outlived_its_reaped_group_leader(tmp_
     # is gone, so os.getpgid(leader_pid) now raises ProcessLookupError -- the lookup
     # the old code returned early on -- while its child lives on in the group whose
     # id is the leader's pid, which the kernel keeps reserved while a member remains.
-    process.wait(timeout=30)
+    process.wait(timeout=scaled_time_bound(30))
     child_pid = int(read_when_published(child_pid_file))
     assert _pid_alive(child_pid), "the child must outlive its leader for this test to mean anything"
     with pytest.raises(ProcessLookupError):
@@ -5872,7 +5872,7 @@ def test_terminate_tree_takes_an_empty_group_over_a_kill_that_could_not_be_deliv
     the reaper has been past and the group is empty. Empty is the same positive
     confirmation the delivered path returns on, so this returns."""
     process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
-    process.wait(timeout=30)
+    process.wait(timeout=scaled_time_bound(30))
     attempted: list[int] = []
 
     def killpg_as_macos_answered(pgid: int, sig: int) -> None:
@@ -6826,7 +6826,7 @@ def test_run_agent_reports_a_job_it_could_not_empty_over_the_failure_that_reache
         # The root died with the job; something detached in it did not, which is
         # the case the kernel's count reports and this stands in for.
         process.kill()
-        process.wait(timeout=10)
+        process.wait(timeout=scaled_time_bound(10))
         raise agent_review_loop.CleanupUnconfirmed(f"job {job} still had a member")
 
     monkeypatch.setattr(agent_review_loop, "_confirm_job_empty", refuse_to_confirm)

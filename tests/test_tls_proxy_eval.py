@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from support import scaled_time_bound
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 EVAL_DIRECTORY = REPOSITORY_ROOT / "evals" / "tls_proxy"
@@ -42,12 +43,12 @@ README = EVAL_DIRECTORY / "README.md"
 OPT_IN_VARIABLE = "AGENTIC_HIL_TLS_PROXY_EVAL"
 IMAGE = os.environ.get("AGENTIC_HIL_TLS_PROXY_EVAL_IMAGE", "agentic-hil-tls-proxy-eval:local")
 
-SCRIPT_TIMEOUT_S = 180
-DOCKER_PROBE_TIMEOUT_S = 10
+SCRIPT_TIMEOUT_S = scaled_time_bound(180)
+DOCKER_PROBE_TIMEOUT_S = scaled_time_bound(10)
 # The build pulls a base image and Astral's uv; the run installs two releases of
 # this package from the live index through a proxy that re-encrypts every byte.
-BUILD_TIMEOUT_S = 1800
-CONTAINER_TIMEOUT_S = 1800
+BUILD_TIMEOUT_S = scaled_time_bound(1800)
+CONTAINER_TIMEOUT_S = scaled_time_bound(1800)
 
 # Every spelling of "stop checking the certificate" that the tools in this image
 # understand. None of them may appear in either file: the eval's whole claim is

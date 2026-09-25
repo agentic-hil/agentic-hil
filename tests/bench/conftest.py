@@ -70,6 +70,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 # What says this run is on a bench. Set by the operator, or by the battery in
 # `tools/bench_battery.py`, and by nothing that runs unattended.
@@ -126,8 +127,8 @@ OPERATOR_HOME = str(Path.home())
 
 # Long enough for a flash and a boot on a slow link, short enough that a wedged
 # probe fails the run rather than holding it.
-COMMAND_TIMEOUT_S = 600.0
-BUILD_TIMEOUT_S = 900.0
+COMMAND_TIMEOUT_S = scaled_time_bound(600.0)
+BUILD_TIMEOUT_S = scaled_time_bound(900.0)
 
 
 def _why_this_is_not_a_bench() -> str | None:

@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, COMMAND_TIMEOUT_S, Bench, child_command
 
@@ -225,10 +226,10 @@ class McpServer:
             with contextlib.suppress(OSError):
                 self.process.stdin.close()
         try:
-            return self.process.wait(timeout=timeout_s)
+            return self.process.wait(timeout=scaled_time_bound(timeout_s))
         except subprocess.TimeoutExpired:
             self.process.kill()
-            return self.process.wait(timeout=timeout_s)
+            return self.process.wait(timeout=scaled_time_bound(timeout_s))
 
 
 def workspace_image(bench: Bench, firmware: Path) -> str:

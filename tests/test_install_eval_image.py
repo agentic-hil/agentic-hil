@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 IMAGE = os.environ.get("AGENTIC_HIL_EVAL_IMAGE", "agentic-hil-install-eval:local")
 BUILD_HINT = f"build it with: python -m evals.install build --image {IMAGE}"
@@ -43,7 +44,7 @@ def _built_at(docker: str) -> datetime | None:
             [docker, "image", "inspect", "--format", "{{.Created}}", IMAGE],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=scaled_time_bound(10),
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -72,7 +73,7 @@ def _in_image(*arguments: str) -> subprocess.CompletedProcess[str]:
         [docker, "run", "--rm", "--network", "none", "--entrypoint", "/bin/bash", IMAGE, *arguments],
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=scaled_time_bound(180),
         check=False,
     )
 

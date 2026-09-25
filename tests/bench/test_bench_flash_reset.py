@@ -45,6 +45,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, COMMAND_TIMEOUT_S, Bench, child_command, debugger_capture, failure_worded_lines
 
@@ -186,10 +187,10 @@ class MCPServer:
             with contextlib.suppress(OSError):
                 process.stdin.close()
         try:
-            process.wait(timeout=30)
+            process.wait(timeout=scaled_time_bound(30))
         except subprocess.TimeoutExpired:
             process.kill()
-            process.wait(timeout=30)
+            process.wait(timeout=scaled_time_bound(30))
         for thread in self._threads:
             thread.join(timeout=5)
 

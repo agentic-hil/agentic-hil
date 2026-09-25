@@ -26,6 +26,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -71,7 +72,7 @@ def tracked_files() -> list[str]:
             ["git", "-C", str(REPOSITORY_ROOT), "ls-files", "-z"],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=scaled_time_bound(60),
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as error:  # pragma: no cover - needs a host without git

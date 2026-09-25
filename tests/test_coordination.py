@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from conftest import DEFAULT_TEST_PERMISSIONS, write_config
-from support import PUBLISH_ATOMICALLY_SOURCE, publish_atomically, published
+from support import PUBLISH_ATOMICALLY_SOURCE, publish_atomically, published, scaled_time_bound
 
 from agentic_hil import process as process_module
 from agentic_hil import tools as tools_module
@@ -144,7 +144,7 @@ coordinator.close()
         assert excinfo.value.result["error_type"] == "resource_busy"
     finally:
         publish_atomically(str(stop), "stop")
-        child.wait(timeout=10)
+        child.wait(timeout=scaled_time_bound(10))
 
 
 def wait_for_file(path: Path, child: subprocess.Popen, timeout_s: float = 10) -> bool:
@@ -362,7 +362,7 @@ time.sleep(60)
         assert wait_for_file(marker, child), "child did not acquire lease"
     finally:
         child.kill()
-        child.wait(timeout=10)
+        child.wait(timeout=scaled_time_bound(10))
 
     config = load_config(str(config_path))
     coordinator = HardwareCoordinator(config, "recovery")

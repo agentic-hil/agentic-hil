@@ -32,7 +32,13 @@ from conftest import (
     write_config,
 )
 from fixtures import fake_openocd
-from support import PUBLISH_ATOMICALLY_SOURCE, publish_atomically, read_when_published, trusted_launcher
+from support import (
+    PUBLISH_ATOMICALLY_SOURCE,
+    publish_atomically,
+    read_when_published,
+    scaled_time_bound,
+    trusted_launcher,
+)
 
 from agentic_hil import __version__
 from agentic_hil import process as process_module
@@ -10976,7 +10982,7 @@ publish_atomically(sys.argv[1], str(descendant.pid))
     )
     child = spawn_managed_process([sys.executable, "-c", code, str(pid_file)])
     try:
-        child.wait(timeout=5)
+        child.wait(timeout=scaled_time_bound(5))
         descendant_pid = int(read_when_published(pid_file))
 
         terminate_process_tree(child, 1.0)
@@ -11007,7 +11013,7 @@ def test_process_cleanup_takes_an_empty_group_over_a_signal_it_could_not_deliver
     this returns and the record is forgotten.
     """
     child = spawn_managed_process([sys.executable, "-c", "pass"])
-    child.wait(timeout=30)
+    child.wait(timeout=scaled_time_bound(30))
     attempted: list[int] = []
 
     def killpg_as_macos_answered(pgid: int, sig: int) -> None:
@@ -11068,7 +11074,7 @@ def test_process_cleanup_takes_an_already_gone_group_that_answers_esrch(monkeypa
     anything else would break every teardown of a child that exited on its own.
     """
     child = spawn_managed_process([sys.executable, "-c", "pass"])
-    child.wait(timeout=30)
+    child.wait(timeout=scaled_time_bound(30))
 
     def killpg_as_linux_answered(pgid: int, sig: int) -> None:
         assert pgid == child.pid
@@ -11093,7 +11099,7 @@ publish_atomically(sys.argv[1], str(descendant.pid))
 """
     )
     child = spawn_managed_process([sys.executable, "-c", code, str(pid_file)])
-    child.wait(timeout=5)
+    child.wait(timeout=scaled_time_bound(5))
     descendant_pid = int(read_when_published(pid_file))
 
     terminate_process_tree(child, 1.0)
@@ -11120,7 +11126,7 @@ def test_windows_managed_spawn_holds_child_until_contained_then_runs_it(tmp_path
     monkeypatch.setattr("agentic_hil.process._create_windows_kill_job", watched)
     child = spawn_managed_process([sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('started')", str(marker)])
     try:
-        child.wait(timeout=5)
+        child.wait(timeout=scaled_time_bound(5))
         assert frozen_at_containment == [True]
         assert marker.read_text(encoding="utf-8") == "started"
         terminate_process_tree(child, 1.0)
@@ -11209,7 +11215,7 @@ def grandchild_pid_after_spawner_exit(function: str, pid_file: Path) -> int:
     # Only the tail is formatted: the publisher's source carries braces of its own.
     source = PUBLISH_ATOMICALLY_SOURCE + SPAWNER_SOURCE.format(function=function)
     spawner = subprocess.Popen([sys.executable, "-c", source, str(pid_file)])
-    assert spawner.wait(timeout=60) == 0
+    assert spawner.wait(timeout=scaled_time_bound(60)) == 0
     return int(read_when_published(pid_file))
 
 
@@ -11244,7 +11250,7 @@ def test_managed_spawn_hands_back_a_child_that_is_already_running(tmp_path: Path
     """
     marker = tmp_path / "ran"
     child = spawn_managed_process([sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('ran')", str(marker)])
-    assert child.wait(timeout=10) == 0
+    assert child.wait(timeout=scaled_time_bound(10)) == 0
     assert marker.read_text(encoding="utf-8") == "ran"
     terminate_process_tree(child, 5.0)
 
@@ -11282,7 +11288,7 @@ def test_registration_refuses_a_child_it_did_not_spawn() -> None:
             process_module._register_process_group(child)
     finally:
         child.kill()
-        child.wait(timeout=5)
+        child.wait(timeout=scaled_time_bound(5))
 
 
 @pytest.mark.parametrize("function", ["spawn_managed_process", "spawn_detached_process"])
