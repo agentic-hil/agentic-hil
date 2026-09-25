@@ -177,6 +177,9 @@ def test_a_server_installed_without_the_can_extra_answers_can_backend_not_availa
     absent = subprocess.run([str(uv_tool.interpreter), "-c", "import can"], capture_output=True, text=True, timeout=scaled_time_bound(60), check=False)
     assert absent.returncode != 0, "python-can is installed in an environment that asked for no CAN extra"
     assert "ModuleNotFoundError" in absent.stderr, absent.stderr
+    # The last line of that traceback is the import error's own line, which the
+    # refusal carries as `backend_error` (#569).
+    raised = absent.stderr.strip().splitlines()[-1]
 
     project, config = can_project(tmp_path, peak_bus("can0"))
     with LiveServer(config, project, command=[str(uv_tool.launcher), "mcp-stdio"], environment=uv_tool.environment()) as server:
@@ -185,7 +188,8 @@ def test_a_server_installed_without_the_can_extra_answers_can_backend_not_availa
 
     assert refused["ok"] is False, refused
     assert refused["error_type"] == "can_backend_not_available", refused
-    assert refused["summary"] == "python-can is not installed. Install agentic-hil[can] to use direct CAN adapters.", refused
+    assert refused["summary"] == "python-can is not installed or could not be imported. Install agentic-hil[can] to use direct CAN adapters.", refused
+    assert refused.get("backend_error") == raised, refused
     assert refused["side_effect_committed"] is False, refused
     assert refused["adapter"] == "peak", refused
     assert refused["bus_id"] == BUS, refused

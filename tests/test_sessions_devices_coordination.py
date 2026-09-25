@@ -179,7 +179,7 @@ def test_can_session_start_without_python_can_and_with_a_peak_channel_of_neither
         without_backend = service.call("can_session_start", {"bus_id": BUS_ID})
         assert without_backend["ok"] is False, without_backend
         assert without_backend["error_type"] == "can_backend_not_available", without_backend
-        assert without_backend["summary"] == "python-can is not installed. Install agentic-hil[can] to use direct CAN adapters.", without_backend
+        assert without_backend["summary"] == "python-can is not installed or could not be imported. Install agentic-hil[can] to use direct CAN adapters.", without_backend
         assert without_backend["side_effect_committed"] is False, without_backend
 
         # With python-can present, a channel of neither shape on a Linux host
@@ -904,7 +904,7 @@ def test_missing_optional_extras_refuse_by_their_own_names(tmp_path: Path, monke
         service.close()
     assert refused["ok"] is False, refused
     assert refused["error_type"] == "can_backend_not_available", refused
-    assert refused["summary"] == "python-can is not installed. Install agentic-hil[can] to use direct CAN adapters.", refused
+    assert refused["summary"] == "python-can is not installed or could not be imported. Install agentic-hil[can] to use direct CAN adapters.", refused
     assert refused["side_effect_committed"] is False, refused
     assert refused["adapter"] == "peak", refused
 
