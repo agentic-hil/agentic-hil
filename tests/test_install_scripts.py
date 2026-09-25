@@ -5069,6 +5069,11 @@ def _receipt_document(path: Path) -> dict:
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
+def _uv_wheel_download(into: Path) -> list[str]:
+    """The command `real_uv_on_windows` runs to fetch the uv wheel into `into`."""
+    return [sys.executable, "-m", "pip", "download", "--quiet", "--disable-pip-version-check", "--no-deps", "--only-binary=:all:", "--dest", str(into), "uv"]
+
+
 @pytest.fixture(scope="session")
 def real_uv_on_windows(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """`uv.exe` out of the uv wheel the index serves, once per session.
@@ -5085,7 +5090,7 @@ def real_uv_on_windows(tmp_path_factory: pytest.TempPathFactory) -> Path:
         pytest.skip("install.ps1 runs under Windows PowerShell 5.1, which exists on Windows alone")
     into = tmp_path_factory.mktemp("real-uv")
     downloaded = subprocess.run(
-        [sys.executable, "-m", "pip", "download", "--quiet", "--disable-pip-version-check", "--no-deps", "--only-binary=:all:", "--dest", str(into), "uv"],
+        _uv_wheel_download(into),
         capture_output=True,
         text=True,
         timeout=scaled_time_bound(CONTAINER_TIMEOUT_S),
@@ -5106,6 +5111,23 @@ def real_uv_on_windows(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(scope="session")
 def real_uv_cache(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tmp_path_factory.mktemp("real-uv-cache")
+
+
+def test_the_uv_wheel_download_keeps_pips_cache_in_the_fixtures_own_scratch_space(tmp_path: Path) -> None:
+    """pip's cache goes where the download goes, and the command line says so (#544).
+
+    Left to find its own cache, pip on Windows asks the shell for Local AppData,
+    and the shell answers out of USERPROFILE. A session fixture runs with the
+    environment the tests before it left, and one of them can have left
+    USERPROFILE on a sandbox home that no longer exists: the lookup then fails,
+    pip falls back to a cache under the working directory, and a full run left
+    18 MB of it in the repository root. A cache named on the command line needs
+    no lookup, and it goes away with the rest of the fixture's scratch space.
+    """
+    command = _uv_wheel_download(tmp_path)
+
+    assert "--cache-dir" in command, command
+    assert command[command.index("--cache-dir") + 1] == str(tmp_path / "pip-cache"), command
 
 
 class _RealUvWindowsBench:
