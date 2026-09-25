@@ -49,8 +49,8 @@ a new terminal window and its login file (the first of `~/.bash_profile`,
 `~/.bash_login` and `~/.profile` that exists, or a new `~/.profile`) in the
 login shell an ssh session or a console starts, so the line goes in both. The
 transcript names each file, a second run finds the line and adds nothing, and a
-run over an install that put the line in `~/.bashrc` alone, as 0.21.5 did, adds
-it to the login file even from a shell that already has the directory. Step 3
+run over an earlier install that put the line in `~/.bashrc` alone adds it to
+the login file even from a shell that already has the directory. Step 3
 also prints the line for a shell that is already open, which read its files
 before the line was there, and the full path to call the command by in a
 non-interactive shell, such as `ssh host 'agentic-hil doctor'`, a cron job or a

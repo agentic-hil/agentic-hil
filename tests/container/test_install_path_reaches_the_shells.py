@@ -1,8 +1,8 @@
 """Where the real shells find the command after install.sh's step 3 (#548).
 
-Release 0.21.5, on Ubuntu 24.04 in a fresh home with bash as the account's
-shell, wrote its PATH line into `~/.bashrc` alone and said the next shell would
-find the command. The next login shell did not. As a login shell bash reads the
+The release before #548, on Ubuntu 24.04 in a fresh home with bash as the
+account's shell, wrote its PATH line into `~/.bashrc` alone and said the next
+shell would find the command. The next login shell did not. As a login shell bash reads the
 first of `~/.bash_profile`, `~/.bash_login` and `~/.profile` that exists and no
 other startup file of the account's, and it reaches `~/.bashrc` only through a
 `~/.profile` that sources it. `/etc/skel/.profile` carries that bridge, so an
