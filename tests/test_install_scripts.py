@@ -4412,6 +4412,223 @@ def test_step_five_says_there_is_nothing_to_restart_when_only_an_unrelated_node_
 
 
 # ---------------------------------------------------------------------------
+# Step 5 of install.sh against the process tables of real npm-installed agent
+# CLIs (#518). The tables were recorded in a container, each CLI installed from
+# its official package and sitting at its first prompt, and the matcher is run
+# against them here through a `pgrep` that answers from the recording. What it
+# is held to is what the kernel published, not a description of it.
+NPM_AGENT_CLI_RECORDINGS = REPOSITORY_ROOT / "tests" / "fixtures" / "npm_agent_cli_process_table_recordings.json"
+# The functions step 5 goes through from an agent id to a PID, in the order the
+# script defines them, taken out of the script verbatim. A helper added on that
+# path has to be added here too, or the harness fails on a name it does not
+# know rather than on an assertion.
+_STEP_FIVE_MATCHER_FUNCTIONS = ("have", "process_name_for", "running_pid")
+# The other programs a Linux machine answers "what is running" with. The replay
+# holds no answer for them, so each is shadowed by one that writes down what it
+# was asked and refuses: a matcher that reached for one fails naming it, rather
+# than reading the table of whatever machine runs these tests.
+_TABLE_READERS_NOT_REPLAYED = ("ps", "pidof")
+
+
+def _npm_agent_cli_tables() -> dict:
+    return json.loads(NPM_AGENT_CLI_RECORDINGS.read_text(encoding="utf-8"))["tables"]
+
+
+def _shell_function(source: str, name: str) -> str:
+    """One `name() { ... }` of install.sh, closed at the first `}` in column 0."""
+    found = re.search(rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+    assert found is not None, f"install.sh defines no {name}"
+    return found.group(0)
+
+
+def _pgrep_replaying(listing: Path, refused: Path) -> str:
+    """A `pgrep` answering from a recorded table, for the two questions the recording asked.
+
+    `-x NAME` is matched against each process's `comm` and `-f PATTERN` against
+    its arguments joined by single spaces, both as extended regular expressions
+    and the way pgrep matches them: the whole name for `-x`, anywhere in the line
+    for `-f`. Matching PIDs come out one per line in ascending order, with status
+    0 for a match and 1 for none. Anything else it is asked is written to
+    `refused` and answered with status 2, because the recording holds no answer
+    to it.
+    """
+    return (
+        f"listing='{listing}'\n"
+        f"refused='{refused}'\n"
+        'if [ "$#" -ne 2 ]; then echo "pgrep $*" >> "$refused"; exit 2; fi\n'
+        'case "$1" in\n'
+        "  -x) field=comm ;;\n"
+        "  -f) field=args ;;\n"
+        '  *) echo "pgrep $*" >> "$refused"; exit 2 ;;\n'
+        "esac\n"
+        "pattern=$2\n"
+        "status=1\n"
+        "while IFS='\t' read -r pid ppid comm args; do\n"
+        '  if [ "$field" = comm ]; then\n'
+        '    printf \'%s\\n\' "$comm" | grep -Eqx -e "$pattern" || continue\n'
+        "  else\n"
+        '    printf \'%s\\n\' "$args" | grep -Eq -e "$pattern" || continue\n'
+        "  fi\n"
+        '  echo "$pid"\n'
+        "  status=0\n"
+        'done < "$listing"\n'
+        'exit "$status"\n'
+    )
+
+
+def _replayed_table(tmp_path: Path, table: dict) -> tuple[Path, Path]:
+    """One recorded table as a directory to put first on PATH, and the file its refusals land in."""
+    replay = tmp_path / "replayed-process-table"
+    replay.mkdir()
+    listing = tmp_path / "recorded-processes"
+    refused = tmp_path / "asked-of-the-replay-and-refused"
+    rows = []
+    for process in sorted(table["processes"], key=lambda process: process["pid"]):
+        joined = " ".join(process["argv"])
+        # The recording read each command line twice: `tr` turned every NUL
+        # into a space, the last one included, and `argv` is the same bytes
+        # split at the NULs. The two have to agree before either is replayed.
+        assert process["cmdline"] == f"{joined} ", f"the recording's two readings of pid {process['pid']} disagree"
+        rows.append(f"{process['pid']}\t{process['ppid']}\t{process['comm']}\t{joined}\n")
+    listing.write_bytes("".join(rows).encode("utf-8"))
+    _stub_executable(replay / "pgrep", _pgrep_replaying(listing, refused))
+    for reader in _TABLE_READERS_NOT_REPLAYED:
+        _stub_executable(replay / reader, f'echo "{reader} $*" >> "{refused}"\nexit 2\n')
+    return replay, refused
+
+
+def _refused_by_the_replay(refused: Path) -> str:
+    return refused.read_text(encoding="utf-8") if refused.is_file() else ""
+
+
+def _step_five_names(tmp_path: Path, table: dict, agent_id: str) -> str:
+    """The PID step 5 of install.sh finds for `agent_id`, with a recorded table as the machine's own.
+
+    The matcher's functions run out of the script verbatim, under the script's
+    own `set -eu`, followed by the two lines step 5 runs for each agent it
+    configured. The replay comes first on PATH and the system directories after
+    it, so the recorded table is the only one the matcher can read, and the text
+    tools it calls on the way are the machine's own.
+    """
+    replay, refused = _replayed_table(tmp_path, table)
+    functions = "".join(_shell_function(_shell_source(), name) for name in _STEP_FIVE_MATCHER_FUNCTIONS)
+    harness = tmp_path / "step-five-matcher.sh"
+    harness.write_bytes(f'set -eu\n{functions}process=$(process_name_for "$1")\nrunning_pid "$process"\n'.encode())
+    result = subprocess.run(
+        [_posix_shell(), str(harness), agent_id],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={"PATH": f"{replay}:/usr/bin:/bin"},
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+    asked = _refused_by_the_replay(refused)
+    assert asked == "", f"the matcher asked for something the recording holds no answer to:\n{asked}"
+    return result.stdout.strip()
+
+
+@pytest.mark.parametrize("recorded", ["codex_and_opencode", "claude"])
+def test_the_replayed_pgrep_answers_what_pgrep_answered_in_the_recording(tmp_path: Path, recorded: str) -> None:
+    """The replay the two tests below read through, held to the recording's own pgrep.
+
+    While each table stood, the recording asked the real pgrep both of step 5's
+    questions for all three names. The replay has to give every one of those
+    answers back line for line and with the same status, or what the tests below
+    measure is the replay and not the matcher.
+    """
+    if os.name != "posix":
+        pytest.skip("install.sh's matcher is replayed on the POSIX half")
+    table = _npm_agent_cli_tables()[recorded]
+    replay, refused = _replayed_table(tmp_path, table)
+
+    mismatched = []
+    for asked in table["pgrep"]:
+        answered = subprocess.run(
+            [_posix_shell(), str(replay / "pgrep"), *asked["argv"][1:]],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env={"PATH": "/usr/bin:/bin"},
+            timeout=SCRIPT_TIMEOUT_S,
+            check=False,
+        )
+        if (answered.stdout, answered.returncode) != (asked["stdout"], asked["returncode"]):
+            mismatched.append(
+                f"{' '.join(asked['argv'])}: recorded {asked['stdout']!r} with status {asked['returncode']}, "
+                f"replayed {answered.stdout!r} with status {answered.returncode} {answered.stderr}"
+            )
+
+    assert _refused_by_the_replay(refused) == "", _refused_by_the_replay(refused)
+    assert mismatched == [], "\n".join(mismatched)
+
+
+@pytest.mark.parametrize(
+    ("recorded", "agent_id", "cli"),
+    [
+        pytest.param("codex_and_opencode", "codex", "codex", id="codex"),
+        pytest.param("codex_and_opencode", "opencode", "opencode", id="opencode"),
+        pytest.param("claude", "claude-code", "claude", id="claude-code"),
+    ],
+)
+def test_step_five_names_the_process_each_recorded_agent_cli_was_started_as(
+    tmp_path: Path, recorded: str, agent_id: str, cli: str
+) -> None:
+    """The PID step 5 prints for a running agent CLI is the process its operator started.
+
+    For codex that is the node launcher, `node /usr/local/bin/codex`, and not
+    the platform binary it starts under itself: the launcher is what an operator
+    quits, and the binary goes with it. The binary is in the recorded table
+    because it is in every real one, and its `comm` is `codex` in full, which is
+    the very word `pgrep -x codex` asks for. Claude Code and opencode are one
+    process each at the recorded versions, so for them the process started and
+    the process named are the same one.
+    """
+    if os.name != "posix":
+        pytest.skip("install.sh's matcher is replayed on the POSIX half")
+    table = _npm_agent_cli_tables()[recorded]
+    by_pid = {str(process["pid"]): process for process in table["processes"]}
+    started = str(table["started"][cli])
+
+    named = _step_five_names(tmp_path, table, agent_id)
+
+    found = by_pid.get(named)
+    described = f"{named} (`{found['comm']}`, {' '.join(found['argv'])}, child of {found['ppid']})" if found else repr(named)
+    assert named == started, (
+        f"step 5 named {described} for {agent_id}, and {cli} was started as {started} ({' '.join(by_pid[started]['argv'])})"
+    )
+
+
+@pytest.mark.parametrize(
+    ("recorded", "agent_id"),
+    [
+        pytest.param("codex_and_opencode", "claude-code", id="claude-code-exited-at-start"),
+        pytest.param("claude", "codex", id="codex-never-started"),
+        pytest.param("claude", "opencode", id="opencode-never-started"),
+    ],
+)
+def test_step_five_names_no_process_for_a_recorded_agent_cli_that_is_not_in_the_table(
+    tmp_path: Path, recorded: str, agent_id: str
+) -> None:
+    """An agent CLI missing from the table gets no PID, whatever else carries its name.
+
+    In the first table claude had exited at start, and what is left of it is
+    the `sh -c` that started it, with `exec claude` and `/tmp/claude.screen` on
+    its command line. That is not claude running, and a PID for it would ask an
+    operator to quit a process that was never theirs. In the second table codex
+    and opencode were never started, and step 5 has nothing to name for them.
+    """
+    if os.name != "posix":
+        pytest.skip("install.sh's matcher is replayed on the POSIX half")
+    table = _npm_agent_cli_tables()[recorded]
+
+    assert _step_five_names(tmp_path, table, agent_id) == ""
+
+
+# ---------------------------------------------------------------------------
 # The routes and refusals no run had executed (#507): step 2 on a machine with
 # nothing, its fetch failure, the digest abort against the real hashing tools,
 # the virtualenv interpreter, step 4 with no agent CLI, and the spellings the
