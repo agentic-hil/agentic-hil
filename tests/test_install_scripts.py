@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from support import scaled_time_bound
+from support import publish_atomically, scaled_time_bound
 
 import agentic_hil.cli
 
@@ -4532,12 +4532,12 @@ STEP_FIVE_AGENT = "opencode"
 # without it and answering that no agent CLI is running, which is the one
 # sentence these two tests exist to tell apart.
 LINGER_S = SCRIPT_TIMEOUT_S + 60
-# The machine's process table is the one thing the two tests below share, and
+# The machine's process table is the one thing the tests below share, and
 # they are the only tests in this suite that share anything. Step 5 reads the
 # whole of it, which is its job: an operator's agent CLI is wherever they
 # started it, and a scan narrowed to the test's own directory would be a scan
-# the real thing could hide from. So the test that plants a node process named
-# like an agent CLI and the test that asserts none is running cannot run at the
+# the real thing could hide from. So a test that plants a process shaped like
+# an agent CLI and the test that asserts none is running cannot run at the
 # same time, or the second one reads the first one's child and is told a restart
 # is required. One group name, written here once and carried by every party, and
 # `--dist loadgroup` in pyproject.toml's addopts, which is what makes a group
@@ -4600,24 +4600,86 @@ def _a_process_that_lingers(node: Path, script: Path, *arguments: str) -> subpro
     return started
 
 
+def _an_agent_cli_as_recorded(prefix: Path) -> subprocess.Popen[bytes]:
+    """One real process in the shape the recordings found `STEP_FIVE_AGENT` in at its first prompt.
+
+    On Windows that is the process `opencode.cmd` started on the cmd route:
+    `opencode.exe` under npm's prefix, whose ProcessName is `opencode`, with
+    the command line cmd gave it, the doubled backslash and the trailing spaces
+    included. On Linux it is a process whose `comm` is `opencode` and whose
+    only argument is `opencode`. `prefix` stands where the recorded npm prefix
+    stood, so the path is this test's own and the rest is what was recorded.
+
+    The program is this interpreter under the recorded name, reading its script
+    from a stdin nobody writes to: it does nothing, waits until it is killed,
+    and ends by itself if the test that started it dies, because its stdin
+    closes with it. On Windows it is a copy with its runtime beside it, for the
+    reasons `_a_node_shaped_interpreter` gives; on Linux a symbolic link, since
+    the kernel takes `comm` from the name a program was started by rather than
+    from the file the link reaches.
+    """
+    if os.name == "nt":
+        recorded = _recorded_windows_agent_cli(STEP_FIVE_AGENT)
+        executable = Path(recorded["ExecutablePath"].replace(RECORDED_WINDOWS_NPM_PREFIX, str(prefix)))
+        command_line = recorded["CommandLine"].replace(RECORDED_WINDOWS_NPM_PREFIX, str(prefix))
+        beside = Path(sys.base_prefix)
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(beside / "python.exe", executable)
+        for library in beside.glob("*.dll"):
+            shutil.copy2(library, executable.parent / library.name)
+        (executable.parent / "pyvenv.cfg").write_text(
+            f"home = {beside}\ninclude-system-site-packages = false\n",
+            encoding="utf-8",
+        )
+        # A string, so Windows is handed the recorded command line as it stands
+        # rather than one rebuilt from a list.
+        started = subprocess.Popen(
+            command_line,
+            executable=str(executable),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        recorded = _recorded_linux_agent_cli(STEP_FIVE_AGENT)
+        bin_directory = prefix / "bin"
+        bin_directory.mkdir(parents=True, exist_ok=True)
+        executable = bin_directory / recorded["comm"]
+        executable.symlink_to(Path(sys.executable).resolve())
+        started = subprocess.Popen(
+            recorded["argv"],
+            executable=str(executable),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={**os.environ, "PATH": f"{bin_directory}{os.pathsep}{os.environ.get('PATH', '')}"},
+        )
+    time.sleep(0.5)
+    if started.poll() is not None:
+        started.stdin.close()
+        raise AssertionError(f"the stand-in for {STEP_FIVE_AGENT} at {executable} exited with {started.returncode} as it started")
+    return started
+
+
 @WINDOWS_ONLY
 @pytest.mark.xdist_group(STEP_FIVE_PROCESS_TABLE_GROUP)
 def test_step_five_names_the_npm_installed_agent_cli_and_not_the_node_beside_it(tmp_path: Path) -> None:
     """install.ps1's restart block against the real process table, with a real pair of children.
 
-    `Get-Process -Name opencode` answers nothing for an npm installation,
-    because the process Windows knows is `node`, and step 5 then told an
-    operator with the CLI open in front of them that nothing needed restarting.
-    The MCP registration it just wrote is read at session start, so that
-    operator's next question reaches a session that never loaded it.
+    An operator with the CLI open in front of them who is told that nothing
+    needs restarting restarts nothing, and the MCP registration step 4 just
+    wrote is read at session start, so their next question reaches a session
+    that never loaded it.
 
-    Two processes run for this: one node whose command line names the CLI, and
-    one node running something else entirely, with the CLI's name sitting in
-    an argument of its own. The first has to be named with its PID, and the
-    second may not appear at all, because a block that names a stranger's
-    process is worse than one that names nothing: it asks an operator to quit
-    whatever else they had running. The name in that argument is what says the
-    match is on the program being run and not on the words on the line.
+    Two processes run for this: one in the shape the Windows recording found
+    opencode in at its first prompt, `opencode.exe` under npm's prefix with the
+    command line its shim gave it, and one node running something else
+    entirely, with the CLI's name sitting in an argument of its own. The first
+    has to be named with its PID, and the second may not appear at all,
+    because a block that names a stranger's process is worse than one that
+    names nothing: it asks an operator to quit whatever else they had running.
+    The name in that argument is what says the match is on the program being
+    run and not on the words on the line.
 
     Everything the run touches is this test's own: its home, its manager bin,
     its tool directory and its two children, and this machine's own
@@ -4636,7 +4698,7 @@ def test_step_five_names_the_npm_installed_agent_cli_and_not_the_node_beside_it(
     children: list[subprocess.Popen[bytes]] = []
 
     try:
-        started = _a_process_that_lingers(node, node.parent / f"{STEP_FIVE_AGENT}.js")
+        started = _an_agent_cli_as_recorded(tmp_path / "npm")
         children.append(started)
         unrelated = _a_process_that_lingers(node, node.parent / "some-other-tool.js", "--report", STEP_FIVE_AGENT)
         children.append(unrelated)
@@ -4651,6 +4713,8 @@ def test_step_five_names_the_npm_installed_agent_cli_and_not_the_node_beside_it(
         for child in children:
             child.kill()
             child.wait(timeout=SCRIPT_TIMEOUT_S)
+            if child.stdin is not None:
+                child.stdin.close()
 
     assert outlived_the_run == (None, None), f"a planted child exited before step 5 read the process table: {outlived_the_run}\n{transcript}"
     assert result.returncode == 0, transcript
@@ -4712,6 +4776,134 @@ def test_step_five_says_there_is_nothing_to_restart_when_only_an_unrelated_node_
 
 
 # ---------------------------------------------------------------------------
+# Step 5's matcher against this machine's own process table, on both
+# platforms. Two sessions of this suite on one machine share that table, and
+# no scheduler inside either of them can see the other (#567).
+# tests/test_process_table_grouping.py shows it by starting two sessions of the
+# test below at once with this variable naming one directory, where each
+# session says what it planted, what step 5 named and when its stand-in was
+# gone. Unset, as in every other run, the test plants, asks and ends without
+# waiting for anybody.
+PROCESS_TABLE_MEETING = "AGENTIC_HIL_TEST_PROCESS_TABLE_MEETING"
+# How long a session that has planted waits for the other one to plant before
+# it asks alone. The two are started in the same moment and differ by their
+# startup, so this bounds that difference and nothing step 5 does.
+PROCESS_TABLE_MEETING_WAIT_S = 10.0
+
+
+def _meeting_marks(meeting: Path, stage: str) -> dict[int, dict]:
+    """What each session in a meeting has said at one stage, by the PID of the stand-in it planted."""
+    said = {}
+    for mark in meeting.glob(f"*.{stage}"):
+        stand_in = mark.name[: -len(stage) - 1]
+        if not stand_in.isdigit():
+            continue
+        try:
+            said[int(stand_in)] = json.loads(mark.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # Being renamed into place on Windows: not said yet.
+            continue
+    return said
+
+
+def _say_in_the_meeting(meeting: Path, stand_in: int, stage: str, **said: object) -> None:
+    publish_atomically(str(meeting / f"{stand_in}.{stage}"), json.dumps(said))
+
+
+def _wait_in_the_meeting(until: Callable[[], bool]) -> None:
+    deadline = time.monotonic() + scaled_time_bound(PROCESS_TABLE_MEETING_WAIT_S)
+    while not until() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+def _step_five_names_on_this_machine(tmp_path: Path, agent_id: str) -> str:
+    """The PID step 5's matcher finds for `agent_id` in this machine's own process table.
+
+    The matcher of the script this platform runs, taken out of it verbatim the
+    way the replays below take it: install.ps1's in Windows PowerShell on
+    Windows, install.sh's under `sh` elsewhere. Nothing is shadowed, so what it
+    reads is the table the operating system publishes now.
+    """
+    if os.name == "nt":
+        return _windows_step_five_names_with(tmp_path, agent_id, prelude="")
+    functions = "".join(_shell_function(_shell_source(), name) for name in _STEP_FIVE_MATCHER_FUNCTIONS)
+    harness = tmp_path / "step-five-matcher.sh"
+    harness.write_bytes(f'set -eu\n{functions}process=$(process_name_for "$1")\nrunning_pid "$process"\n'.encode())
+    result = subprocess.run(
+        [_posix_shell(), str(harness), agent_id],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+    return result.stdout.strip()
+
+
+def _skip_where_no_stand_in_can_be_planted() -> None:
+    """Skip where `_an_agent_cli_as_recorded` has no recorded shape to give its process, or step 5 no way to read it."""
+    if sys.platform == "darwin":
+        pytest.skip("the agent CLIs' process tables were recorded on Windows and Linux, and none gives a stand-in its shape on macOS")
+    if os.name != "nt" and shutil.which("pgrep") is None:
+        pytest.skip("no pgrep on this machine, which is what step 5 of install.sh reads the process table with")
+
+
+@pytest.mark.xdist_group(STEP_FIVE_PROCESS_TABLE_GROUP)
+def test_step_five_names_the_agent_cli_this_test_started_in_the_real_process_table(tmp_path: Path) -> None:
+    """Step 5's matcher against the machine's own table, with one process of this test's in it.
+
+    The replays below hold the matcher to tables a recording published. This
+    holds it to the table the operating system publishes now, on either
+    platform: `opencode` in the shape its recording found it in, and the
+    matcher asked for it by the name step 5 asks with. It has to answer with the
+    PID of the process this test started.
+
+    It is also where two sessions meet (#567). With the meeting variable set, a
+    session that has planted waits for the other one to plant too, and keeps
+    its stand-in until the other one has asked, so both stand-ins are in the
+    table for both questions unless something keeps the two sessions apart.
+    """
+    _skip_where_no_stand_in_can_be_planted()
+    meeting_directory = os.environ.get(PROCESS_TABLE_MEETING, "")
+    meeting = Path(meeting_directory) if meeting_directory else None
+    # Read before this test's stand-in exists, so a stand-in listed here was
+    # gone before this one started.
+    gone_before = sorted(_meeting_marks(meeting, "done")) if meeting is not None else []
+    stand_in = _an_agent_cli_as_recorded(tmp_path / "npm")
+    peers: list[int] = []
+
+    try:
+        if meeting is not None:
+            _say_in_the_meeting(meeting, stand_in.pid, "planted", gone_before_it_started=gone_before)
+            _wait_in_the_meeting(lambda: len(_meeting_marks(meeting, "planted")) > 1 or bool(_meeting_marks(meeting, "done")))
+        named = _step_five_names_on_this_machine(tmp_path, STEP_FIVE_AGENT)
+        # Read before the kill below: a stand-in that went early leaves the
+        # matcher nothing of this test's to find, which is a failure of the
+        # planting and not of the matcher.
+        outlived_the_question = stand_in.poll()
+        if meeting is not None:
+            _say_in_the_meeting(meeting, stand_in.pid, "asked", named=named)
+            _wait_in_the_meeting(
+                lambda: set(_meeting_marks(meeting, "planted")) <= set(_meeting_marks(meeting, "asked")) | set(_meeting_marks(meeting, "done"))
+            )
+            peers = sorted(set(_meeting_marks(meeting, "planted")) - {stand_in.pid})
+    finally:
+        stand_in.kill()
+        stand_in.wait(timeout=SCRIPT_TIMEOUT_S)
+        stand_in.stdin.close()
+        if meeting is not None:
+            _say_in_the_meeting(meeting, stand_in.pid, "done")
+
+    assert outlived_the_question is None, f"the stand-in exited with {outlived_the_question} before the matcher read the process table"
+    whose = ", the stand-in another session planted into the same table" if named.isdigit() and int(named) in peers else ""
+    assert named == str(stand_in.pid), (
+        f"step 5 named {named or 'no process'} for {STEP_FIVE_AGENT}, and the process this test started is {stand_in.pid}{whose}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Step 5 of install.sh against the process tables of real npm-installed agent
 # CLIs (#518). The tables were recorded in a container, each CLI installed from
 # its official package and sitting at its first prompt, and the matcher is run
@@ -4732,6 +4924,15 @@ _TABLE_READERS_NOT_REPLAYED = ("ps", "pidof")
 
 def _npm_agent_cli_tables() -> dict:
     return json.loads(NPM_AGENT_CLI_RECORDINGS.read_text(encoding="utf-8"))["tables"]
+
+
+def _recorded_linux_agent_cli(cli: str) -> dict:
+    """The process `cli` was started as in the recording, which has to be one process and not a tree."""
+    table = _npm_agent_cli_tables()["codex_and_opencode"]
+    started = table["started"][cli]
+    children = [process["pid"] for process in table["processes"] if process["ppid"] == started]
+    assert children == [], f"the recording's {cli} started {children} in turn, and one stand-in is not that"
+    return next(process for process in table["processes"] if process["pid"] == started)
 
 
 def _shell_function(source: str, name: str) -> str:
@@ -4939,6 +5140,271 @@ def test_step_five_names_no_process_for_a_recorded_agent_cli_that_is_not_in_the_
     table = _npm_agent_cli_tables()[recorded]
 
     assert _step_five_names(tmp_path, table, agent_id) == ""
+
+
+# ---------------------------------------------------------------------------
+# Step 5 of install.ps1 against the process tables of the same three CLIs on
+# Windows (#518). Each was installed from its official package into a private
+# npm prefix and started through the shim npm wrote, once from cmd and once
+# from Windows PowerShell, and each table was read while the CLIs sat at their
+# first prompt and again once they had exited. The matcher runs against them
+# here with `Get-Process` and `Get-CimInstance` answering from the recording.
+# PowerShell finds a function before a cmdlet of the same name, so the
+# script's own functions are pointed at a recorded table without a seam of
+# their own.
+NPM_AGENT_CLI_WINDOWS_RECORDINGS = REPOSITORY_ROOT / "tests" / "fixtures" / "npm_agent_cli_windows_process_table_recordings.json"
+# How the recording writes the private npm prefix it installed into.
+RECORDED_WINDOWS_NPM_PREFIX = "C:\\Users\\alice\\AppData\\Roaming\\npm"
+# The functions step 5 goes through from an agent id to a PID, and the two
+# lines it runs them with for each agent it configured, all taken out of the
+# script verbatim.
+_WINDOWS_STEP_FIVE_MATCHER_FUNCTIONS = ("Get-ProcessNameForAgent", "Get-RunningAgentProcessId")
+_WINDOWS_STEP_FIVE_LINES = (
+    "$processName = Get-ProcessNameForAgent $agentId",
+    "$agentProcessId = Get-RunningAgentProcessId -ProcessName $processName",
+)
+# The other commands a Windows machine answers "what is running" with. Each is
+# shadowed by one that writes down what it was asked and refuses, as on Linux.
+# What no function can shadow is .NET's own enumeration: a matcher that went to
+# `[System.Diagnostics.Process]::GetProcesses()` would read this machine's
+# table instead, and the assertions below would be about that one.
+_WINDOWS_TABLE_READERS_NOT_REPLAYED = ("Get-WmiObject", "tasklist", "wmic")
+
+
+def _npm_agent_cli_windows_tables() -> dict:
+    return json.loads(NPM_AGENT_CLI_WINDOWS_RECORDINGS.read_text(encoding="utf-8"))["tables"]
+
+
+def _recorded_windows_agent_cli(cli: str) -> dict:
+    """The process `cli`'s shim started on the cmd route, which has to be one process and not a tree."""
+    table = _npm_agent_cli_windows_tables()["cmd_running"]
+    started = table["started"][cli]
+    children = [process["ProcessId"] for process in table["processes"] if process["ParentProcessId"] == started]
+    assert children == [], f"the recording's {cli} started {children} in turn, and one stand-in is not that"
+    return next(process for process in table["processes"] if process["ProcessId"] == started)
+
+
+def _windows_replayed_table(tmp_path: Path, table: dict) -> tuple[str, Path]:
+    """One recorded table as PowerShell to put in front of the matcher, and the file its refusals land in.
+
+    `Get-Process -Name NAME` answers with the rows whose ProcessName is NAME,
+    matched the way the cmdlet matches it (case-insensitive, wildcards
+    allowed) and in PID order, which is the order the cmdlet gives processes
+    of one name. `Get-CimInstance -ClassName Win32_Process` answers with every
+    row. Anything else either of them is asked, and anything the other
+    readers are asked, is written to the file and refused, because the
+    recording holds no answer to it.
+    """
+    rows = tmp_path / "recorded-processes.json"
+    refused = tmp_path / "asked-of-the-replay-and-refused"
+    rows.write_text(json.dumps({"processes": table["processes"]}), encoding="utf-8")
+    prelude = (
+        f"$recordedProcesses = @((Get-Content -Raw -Encoding UTF8 -LiteralPath '{rows}' | ConvertFrom-Json).processes)\n"
+        f"$refused = '{refused}'\n"
+        "function Deny-UnrecordedQuestion {\n"
+        "    param([string]$Question)\n"
+        "    Add-Content -LiteralPath $refused -Value $Question -Encoding utf8\n"
+        '    throw "the recording holds no answer to: $Question"\n'
+        "}\n"
+        "function Get-Process {\n"
+        "    $name = $null\n"
+        "    for ($i = 0; $i -lt $args.Count; $i += 2) {\n"
+        "        $option = ([string]$args[$i]).TrimEnd(':')\n"
+        "        if ($i + 1 -ge $args.Count) { Deny-UnrecordedQuestion \"Get-Process $args\" }\n"
+        "        elseif ($option -eq '-Name') { $name = [string]$args[$i + 1] }\n"
+        "        elseif ($option -ne '-ErrorAction') { Deny-UnrecordedQuestion \"Get-Process $args\" }\n"
+        "    }\n"
+        "    if ($null -eq $name) { Deny-UnrecordedQuestion \"Get-Process $args\" }\n"
+        "    $recordedProcesses | Where-Object { $_.ProcessName -like $name } | Sort-Object { [int]$_.ProcessId } | ForEach-Object {\n"
+        "        [pscustomobject]@{ Id = [int]$_.ProcessId; ProcessName = $_.ProcessName }\n"
+        "    }\n"
+        "}\n"
+        "function Get-CimInstance {\n"
+        "    $class = $null\n"
+        "    for ($i = 0; $i -lt $args.Count; $i += 2) {\n"
+        "        $option = ([string]$args[$i]).TrimEnd(':')\n"
+        "        if ($i + 1 -ge $args.Count) { Deny-UnrecordedQuestion \"Get-CimInstance $args\" }\n"
+        "        elseif ($option -eq '-ClassName') { $class = [string]$args[$i + 1] }\n"
+        "        elseif ($option -ne '-ErrorAction') { Deny-UnrecordedQuestion \"Get-CimInstance $args\" }\n"
+        "    }\n"
+        "    if ($class -ne 'Win32_Process') { Deny-UnrecordedQuestion \"Get-CimInstance $args\" }\n"
+        "    $recordedProcesses | ForEach-Object {\n"
+        "        [pscustomobject]@{\n"
+        "            ProcessId = [uint32]$_.ProcessId\n"
+        "            ParentProcessId = [uint32]$_.ParentProcessId\n"
+        "            Name = $_.Name\n"
+        "            ExecutablePath = $_.ExecutablePath\n"
+        "            CommandLine = $_.CommandLine\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+    for reader in _WINDOWS_TABLE_READERS_NOT_REPLAYED:
+        prelude += f'function {reader} {{ Deny-UnrecordedQuestion "{reader} $args" }}\n'
+    return prelude, refused
+
+
+def _windows_refused_by_the_replay(refused: Path) -> str:
+    # Windows PowerShell 5.1 starts a file it writes as utf8 with a byte order mark.
+    return refused.read_text(encoding="utf-8-sig") if refused.is_file() else ""
+
+
+def _windows_step_five_names_with(tmp_path: Path, agent_id: str, prelude: str) -> str:
+    """The PID step 5 of install.ps1 finds for `agent_id`, with `prelude` run first.
+
+    The matcher's functions run out of the script verbatim, under the script's
+    own `$ErrorActionPreference`, followed by the two lines step 5 runs for
+    each agent it configured. Those two are asserted to be in the script as
+    they are written here, so the harness cannot keep asking a question step 5
+    stopped asking.
+    """
+    source = _powershell_source()
+    in_the_script = {line.strip() for line in source.splitlines()}
+    missing = [line for line in _WINDOWS_STEP_FIVE_LINES if line not in in_the_script]
+    assert missing == [], f"step 5 of install.ps1 no longer runs {missing}"
+    functions = "".join(_powershell_function(source, name) for name in _WINDOWS_STEP_FIVE_MATCHER_FUNCTIONS)
+    harness = tmp_path / "step-five-matcher.ps1"
+    harness.write_text(
+        "param([string]$agentId)\n"
+        "$ErrorActionPreference = 'Stop'\n"
+        f"{prelude}{functions}"
+        + "".join(f"{line}\n" for line in _WINDOWS_STEP_FIVE_LINES)
+        + "if ($null -ne $agentProcessId) { Write-Output $agentProcessId }\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [_windows_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), agent_id],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+    return result.stdout.strip()
+
+
+def _windows_step_five_names(tmp_path: Path, table: dict, agent_id: str) -> str:
+    """The PID step 5 of install.ps1 finds for `agent_id`, with a recorded table as the machine's own."""
+    prelude, refused = _windows_replayed_table(tmp_path, table)
+    named = _windows_step_five_names_with(tmp_path, agent_id, prelude)
+    asked = _windows_refused_by_the_replay(refused)
+    assert asked == "", f"the matcher asked for something the recording holds no answer to:\n{asked}"
+    return named
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("recorded", ["cmd_running", "cmd_after", "powershell_running", "powershell_after"])
+def test_the_replayed_windows_table_answers_what_windows_answered_in_the_recording(tmp_path: Path, recorded: str) -> None:
+    """The replay the two tests below read through, held to what Windows answered while each table stood.
+
+    The recording asked both of step 5's questions for all three names over
+    the table's own rows: `Get-Process` for the name, and the command lines
+    in PID order against the pattern step 5 builds. The replay has to give
+    every one of those answers back, or what the tests below measure is the
+    replay and not the matcher.
+    """
+    table = _npm_agent_cli_windows_tables()[recorded]
+    prelude, refused = _windows_replayed_table(tmp_path, table)
+    questions = ""
+    for number, asked in enumerate(table["asked"]):
+        if asked["question"].startswith("Get-Process -Name "):
+            name = asked["question"].removeprefix("Get-Process -Name ")
+            answer = f"@(Get-Process -Name '{name}' -ErrorAction SilentlyContinue | ForEach-Object {{ $_.Id }})"
+        else:
+            assert asked["question"] == "Win32_Process CommandLine -match", asked
+            pattern = asked["pattern"].replace("'", "''")
+            answer = (
+                "@(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Sort-Object ProcessId"
+                f" | Where-Object {{ $_.CommandLine -and $_.CommandLine -match '{pattern}' }} | ForEach-Object {{ $_.ProcessId }})"
+            )
+        questions += f"Write-Output ('{number}:' + ({answer} -join ','))\n"
+    harness = tmp_path / "replayed-questions.ps1"
+    harness.write_text(f"$ErrorActionPreference = 'Stop'\n{prelude}{questions}", encoding="utf-8")
+
+    result = subprocess.run(
+        [_windows_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+    assert _windows_refused_by_the_replay(refused) == "", _windows_refused_by_the_replay(refused)
+    replayed = dict(line.split(":", 1) for line in result.stdout.splitlines() if line.strip())
+    mismatched = [
+        f"{asked['question']} {asked.get('pattern', '')}: recorded {asked['ids']}, replayed {replayed.get(str(number))!r}"
+        for number, asked in enumerate(table["asked"])
+        if replayed.get(str(number)) != ",".join(str(pid) for pid in asked["ids"])
+    ]
+    assert mismatched == [], "\n".join(mismatched)
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("route", ["cmd", "powershell"])
+@pytest.mark.parametrize(
+    ("agent_id", "cli", "started_by_a_node_launcher"),
+    [
+        pytest.param("claude-code", "claude", False, id="claude-code"),
+        pytest.param("codex", "codex", True, id="codex"),
+        pytest.param("opencode", "opencode", False, id="opencode"),
+    ],
+)
+def test_step_five_on_windows_names_the_process_whose_name_is_the_agent_cli_name(
+    tmp_path: Path, route: str, agent_id: str, cli: str, started_by_a_node_launcher: bool
+) -> None:
+    """Step 5 on Windows names a running agent CLI by the one process whose ProcessName is the command's name.
+
+    Claude Code and opencode are native executables at the recorded versions,
+    and the shim starts them itself, so the process started and the process
+    named are one. For codex the shim starts node on `bin/codex.js`, and that
+    launcher starts `codex.exe`: the process to name is `codex.exe`, the one
+    process called codex, and not the node beside it or the shell and the
+    console below both. When the recording stopped `codex.exe` alone, its node
+    exited by itself, so a restart of the one named is a restart of both.
+    """
+    table = _npm_agent_cli_windows_tables()[f"{route}_running"]
+    by_pid = {process["ProcessId"]: process for process in table["processes"]}
+    started = by_pid[table["started"][cli]]
+    called_by_its_name = [process for process in table["processes"] if process["ProcessName"] == cli]
+    assert len(called_by_its_name) == 1, f"the recording holds {len(called_by_its_name)} processes called {cli}"
+    anchor = called_by_its_name[0]
+    if started_by_a_node_launcher:
+        assert started["ProcessName"] == "node" and anchor["ParentProcessId"] == started["ProcessId"], (
+            f"the process called {cli} is not the child of the node launcher that was started: {anchor}, started {started}"
+        )
+    else:
+        assert anchor is started, f"the process called {cli} is not the one that was started: {anchor}, started {started}"
+
+    named = _windows_step_five_names(tmp_path, table, agent_id)
+
+    found = by_pid.get(int(named)) if named.isdigit() else None
+    described = f"{named} ({found['Name']}, {found['CommandLine']!r}, child of {found['ParentProcessId']})" if found else repr(named)
+    assert named == str(anchor["ProcessId"]), (
+        f"step 5 named {described} for {agent_id}, and the one process called {cli} is {anchor['ProcessId']} "
+        f"({anchor['CommandLine']!r}, child of {anchor['ParentProcessId']})"
+    )
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("route", ["cmd", "powershell"])
+@pytest.mark.parametrize("agent_id", ["claude-code", "codex", "opencode"])
+def test_step_five_on_windows_names_no_process_once_the_agent_cli_has_exited(tmp_path: Path, route: str, agent_id: str) -> None:
+    """With only the consoles and their shells left, step 5 names nothing.
+
+    Each of them still carries the CLI's name: `cmd.exe /k opencode`,
+    `powershell.exe -NoProfile -NoExit -Command opencode`, and the conhost
+    above each repeating the line it was started with. None of them is the
+    CLI running, and a PID for one would ask an operator to close the window
+    they started it from.
+    """
+    table = _npm_agent_cli_windows_tables()[f"{route}_after"]
+
+    assert _windows_step_five_names(tmp_path, table, agent_id) == ""
 
 
 # ---------------------------------------------------------------------------

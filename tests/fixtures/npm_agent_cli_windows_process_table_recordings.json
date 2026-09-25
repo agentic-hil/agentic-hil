@@ -1,0 +1,588 @@
+{
+  "what": "The process table entries of the three agent CLIs step 5 of install.ps1 looks for, each installed with `npm install -g` from its official package at the version the agent registration job pins (evals/install/container/package.json), each started through the shim npm wrote for it in a console of its own, and each left running at its first prompt: never logged in, never given a key, never sent a prompt. npm writes one shim per shell, so there are two routes: `cmd.exe /k <name>` runs `<name>.cmd` and `powershell.exe -NoProfile -NoExit -Command <name>` runs `<name>.ps1`. For every process each console holds: ProcessId, ParentProcessId, Name, ExecutablePath and CommandLine as Win32_Process reports them, and the ProcessName Get-Process reports, read once while the CLIs wait at their prompts (`running`) and once more after only what each shim started was stopped, with every console and its shell still open (`after`). Recorded so the matcher's tests replay what Windows published rather than a stand-in written from a description of it (#518). Claude Code and opencode start no node at these versions: the shim runs the package's own `bin` executable, a hard link of the platform binary, so each is one process whose ProcessName is the command's own name. The codex shim starts node with `codex.js`, and the platform binary that starts in turn is `codex.exe`, whose ProcessName is `codex` in full. npm's global prefix and the home directory are written here as those of a user called alice, see `how`.",
+  "recorded_on": "2026-09-25",
+  "os": {
+    "caption": "Microsoft Windows 11 Pro",
+    "version": "10.0.26200",
+    "build": "26200",
+    "architecture": "64-Bit"
+  },
+  "tool_versions": {
+    "node": "v24.18.0",
+    "npm": "11.16.0, the npm installed with node",
+    "powershell": "Windows PowerShell 5.1.26100.9444, edition Desktop"
+  },
+  "how": [
+    "Before anything was set up, in the account's own Windows PowerShell: `node --version`, `$PSVersionTable.PSEdition`, `$PSVersionTable.PSVersion.ToString()`, `(Get-Command node).Source` and `(Get-Command npm).Source` (`C:\\Program Files\\nodejs\\node.exe` and `C:\\Program Files\\nodejs\\npm.ps1`), `(Get-Command git).Source`, `Get-ExecutionPolicy -List`, `Get-CimInstance -ClassName Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber, OSArchitecture`, the names (not the values) of the account's environment variables and of its file system drives, the DelegationConsole and DelegationTerminal values under `HKCU:\\Console\\%%Startup` (neither is set, so a conhost started directly stays its console's host), the machine's and the user's PSModulePath, and whether the account's Documents folder holds a `WindowsPowerShell` directory (it does not). `npm --version` and `npm config get prefix` ran there as well; they answer for the account's own npm and its configuration, not for the npm the recording used, and are not kept. The npm that ran every install is the one installed with node, `C:\\Program Files\\nodejs\\npm.cmd`: `node 'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js' --version` prints 11.16.0, and its update notice during the installs names the same version. `Get-ExecutionPolicy -List` answered Bypass at Process and at LocalMachine and Undefined at MachinePolicy, UserPolicy and CurrentUser, read in the account's shell and not in the recording's shells. PowerShell keeps the Process scope in the PSExecutionPolicyPreference variable, which the recording's environment did not keep (see the next entry), so the shells that ran the `.ps1` shims ran them under LocalMachine's Bypass.",
+    "Every install and every start ran in a process environment that holds nothing of the account's own: of the account's variables only Windows' system ones were kept (ALLUSERSPROFILE, CommonProgramFiles, CommonProgramFiles(x86), CommonProgramW6432, ComSpec, NUMBER_OF_PROCESSORS, OS, PATHEXT, PROCESSOR_ARCHITECTURE, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION, ProgramData, ProgramFiles, ProgramFiles(x86), ProgramW6432, PUBLIC, SystemDrive, SystemRoot, windir). Set in their place: USERPROFILE and HOME to a private, empty home directory, HOMEDRIVE and HOMEPATH to match, APPDATA `<home>\\AppData\\Roaming`, LOCALAPPDATA `<home>\\AppData\\Local`, TEMP and TMP `<home>\\AppData\\Local\\Temp`, XDG_CONFIG_HOME `<home>\\.config`, XDG_DATA_HOME `<home>\\.local\\share`, XDG_CACHE_HOME `<home>\\.cache`, XDG_STATE_HOME `<home>\\.local\\state`, CODEX_HOME `<home>\\.codex`, CLAUDE_CONFIG_DIR `<home>\\.claude`, NPM_CONFIG_PREFIX and NPM_CONFIG_CACHE to a private prefix and cache, DISABLE_AUTOUPDATER=1, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1, PSModulePath `C:\\Program Files\\WindowsPowerShell\\Modules;C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\Modules`, and PATH `<prefix>;C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd;C:\\WINDOWS\\System32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem;C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0`. Before anything started, two files were written into the private home: `.codex\\config.toml` holding `cli_auth_credentials_store = \"file\"` and `check_for_update_on_startup = false`, and `.config\\opencode\\opencode.json` holding `{\"autoupdate\": false}`.",
+    "`& 'C:\\Program Files\\nodejs\\npm.cmd' install -g --prefix <prefix> --cache <cache> --no-fund --no-audit <package>@<version>` for each of the three packages below, in the order they are listed. Each exited 0 (added 2, 2 and 3 packages). npm warned that the postinstall scripts of @anthropic-ai/claude-code (`node install.cjs`) and of opencode-ai (`node ./postinstall.mjs`) are not covered by allowScripts, and both ran all the same: `fsutil hardlink list` names each package's `bin` executable as a hard link of its platform package's binary. npm wrote the three shims per package into the prefix itself, the `packages` entries list them with the line in each that starts the CLI. What the installs wrote was read with `Get-ChildItem -Recurse -Force` over the prefix, `fsutil hardlink list` on the two `bin` executables, and `Get-Content` of the six shims, the three packages' package.json, codex's `bin\\codex.js`, and its platform package's package.json and `vendor\\x86_64-pc-windows-msvc\\codex-package.json`; the same files were read again, unchanged, while this file was assembled.",
+    "Each route started its three consoles from one Windows PowerShell with that environment in place: `Start-Process -FilePath C:\\WINDOWS\\System32\\conhost.exe -ArgumentList '<line>' -WorkingDirectory <dir> -PassThru`, where `<line>` is the `line` each table's `consoles` names and `<dir>` an empty directory under C:\\Users\\Public outside any repository, made for the recording and removed afterwards, still empty. It is there because `Test-Path` found some of CLAUDE.md, AGENTS.md, CLAUDE.local.md, opencode.json, opencode.jsonc, .opencode, .claude, .codex, .git and .agents in the directories above the private home and none in C:\\Users\\Public, C:\\Users or C:\\, and the CLIs read such files from the directories above the one they start in. claude, codex and opencode in that order, two seconds apart, then 45 seconds of waiting before the `running` table was read. Every console is a window of its own with its own conhost, the conhost's CommandLine holds the line, and the shell resolved the name to npm's shim itself: `.cmd` through PATHEXT, `.ps1` as PowerShell's command lookup. The command lines show which shim ran: the `.cmd` shims write `\"%dp0%\\node_modules\\...\"`, which is where the doubled backslash after the prefix comes from, and the spaces an empty `%*` leaves at the end, while the `.ps1` shims hand node the path as `$basedir/node_modules/...` and native executables the path PowerShell resolved.",
+    "Reading a table: from each conhost the recording started, the tree below it was walked with `Get-CimInstance -ClassName Win32_Process -Filter \"ProcessId=<id>\"` and `-Filter \"ParentProcessId=<id>\"`, counting a child only when its CreationDate is not before its parent's, because Windows keeps a dead parent's PID in ParentProcessId and reuses PIDs. Kept for every row: ProcessId, ParentProcessId, Name, ExecutablePath and CommandLine, and ProcessName from `Get-Process -Id <the table's ProcessIds>`. The creation times were read for the walk and are not kept. Nothing outside those trees was read: the PowerShell that started the consoles is every conhost's parent and is not a row.",
+    "`asked`: step 5 asks the whole machine `Get-Process -Name <name>` and then `Get-CimInstance -ClassName Win32_Process` for a CommandLine matching `[\\\\/]<name>(\\.js)?([\"' ]|$)`. Asking the machine would have read processes the recording did not start, so both questions were answered over the table's own rows instead: `Get-Process -Id <the table's ProcessIds>` kept where ProcessName is `<name>`, and the table's rows in ProcessId order kept where CommandLine `-match` the pattern step 5 builds, which `pattern` holds. `ids` lists every row that answers.",
+    "While each table was read, each console's text was read as well, from a process without a console of its own that attached to it and read the visible screen buffer with ReadConsoleOutputCharacterW, which writes nothing: while `running` was read, on both routes Claude Code sat at its theme picker, codex at its sign-in choice and opencode at its input line. The screen text is not kept. No key was sent to any console.",
+    "Then only what each shim started was stopped, with whatever it had started in turn, deepest first, each by PID with `Stop-Process -Id <id> -Force` and only while that PID still had the creation time read: the PIDs each `after` table's `stopped` lists. Codex's node exited by itself once codex.exe was stopped. Five seconds later every console was read again the same way, its shell still running: that is `after`.",
+    "Last, each console's remaining tree was stopped the same way, by PID (the shells, each conhost closing with its shell), and two seconds later every PID in both tables was looked up once more: none was still there with the creation time read.",
+    "Before the recording, starting a console, walking its tree and stopping it were tried on `conhost.exe cmd.exe /k echo recording-probe` in the same directory, and then once more with its screen read, each time stopped by PID the same way. The cmd route was recorded twice: the first run, by an earlier version of the reading script that read only the `running` table, was replaced by the run kept here.",
+    "In this file the private prefix is written as `C:\\Users\\alice\\AppData\\Roaming\\npm`, the global prefix npm uses for a user called alice, and the private home as `C:\\Users\\alice`, wherever either appeared. Everything else is as recorded, the doubled backslash and the trailing spaces included."
+  ],
+  "packages": {
+    "claude": {
+      "package": "@anthropic-ai/claude-code",
+      "version": "2.1.218",
+      "installed_with": "npm install -g --prefix <prefix> --cache <cache> --no-fund --no-audit @anthropic-ai/claude-code@2.1.218",
+      "platform_package": "@anthropic-ai/claude-code-win32-x64@2.1.218",
+      "shims": [
+        "C:\\Users\\alice\\AppData\\Roaming\\npm\\claude",
+        "C:\\Users\\alice\\AppData\\Roaming\\npm\\claude.cmd",
+        "C:\\Users\\alice\\AppData\\Roaming\\npm\\claude.ps1"
+      ],
+      "shim_lines": {
+        "claude.cmd": "\"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe\"   %*",
+        "claude.ps1": "& \"$basedir/node_modules/@anthropic-ai/claude-code/bin/claude.exe\"   $args"
+      },
+      "bin": "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe",
+      "bin_is_a_hard_link_of": "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\node_modules\\@anthropic-ai\\claude-code-win32-x64\\claude.exe"
+    },
+    "codex": {
+      "package": "@openai/codex",
+      "version": "0.145.0",
+      "installed_with": "npm install -g --prefix <prefix> --cache <cache> --no-fund --no-audit @openai/codex@0.145.0",
+      "platform_package": "@openai/codex-win32-x64@npm:@openai/codex@0.145.0-win32-x64",
+      "shims": [
+        "C:\\Users\\alice\\AppData\\Roaming\\npm\\codex",
+        "C:\\Users\\alice\\AppData\\Roaming\\npm\\codex.cmd",
+        "C:\\Users\\alice\\AppData\\Roaming\\npm\\codex.ps1"
+      ],
+      "shim_lines": {
+        "codex.cmd": "\"%_prog%\"  \"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js\" %*",
+        "codex.ps1": "& \"node$exe\"  \"$basedir/node_modules/@openai/codex/bin/codex.js\" $args"
+      },
+      "bin": "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js",
+      "bin_first_line": "#!/usr/bin/env node",
+      "platform_binary": "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe"
+    },
+    "opencode": {
+      "package": "opencode-ai",
+      "version": "1.18.3",
+      "installed_with": "npm install -g --prefix <prefix> --cache <cache> --no-fund --no-audit opencode-ai@1.18.3",
+      "platform_package": "opencode-windows-x64@1.18.3, with opencode-windows-x64-baseline@1.18.3 installed beside it",
+      "shims": [
+        "C:\\Users\\alice\\AppData\\Roaming\\npm\\opencode",
+        "C:\\Users\\alice\\AppData\\Roaming\\npm\\opencode.cmd",
+        "C:\\Users\\alice\\AppData\\Roaming\\npm\\opencode.ps1"
+      ],
+      "shim_lines": {
+        "opencode.cmd": "\"%dp0%\\node_modules\\opencode-ai\\bin\\opencode.exe\"   %*",
+        "opencode.ps1": "& \"$basedir/node_modules/opencode-ai/bin/opencode.exe\"   $args"
+      },
+      "bin": "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode.exe",
+      "bin_is_a_hard_link_of": "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\node_modules\\opencode-windows-x64\\bin\\opencode.exe"
+    }
+  },
+  "tables": {
+    "cmd_running": {
+      "consoles": {
+        "claude": {
+          "line": "cmd.exe /k claude",
+          "conhost": 16792,
+          "shell": 33504
+        },
+        "codex": {
+          "line": "cmd.exe /k codex",
+          "conhost": 26628,
+          "shell": 33040
+        },
+        "opencode": {
+          "line": "cmd.exe /k opencode",
+          "conhost": 6904,
+          "shell": 32580
+        }
+      },
+      "started": {
+        "claude": 9196,
+        "codex": 31376,
+        "opencode": 32328
+      },
+      "processes": [
+        {
+          "ProcessId": 6904,
+          "ParentProcessId": 8760,
+          "Name": "conhost.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\conhost.exe",
+          "CommandLine": "\"C:\\WINDOWS\\System32\\conhost.exe\" cmd.exe /k opencode ",
+          "ProcessName": "conhost"
+        },
+        {
+          "ProcessId": 9196,
+          "ParentProcessId": 33504,
+          "Name": "claude.exe",
+          "ExecutablePath": "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe",
+          "CommandLine": "\"C:\\Users\\alice\\AppData\\Roaming\\npm\\\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe\"    ",
+          "ProcessName": "claude"
+        },
+        {
+          "ProcessId": 16792,
+          "ParentProcessId": 8760,
+          "Name": "conhost.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\conhost.exe",
+          "CommandLine": "\"C:\\WINDOWS\\System32\\conhost.exe\" cmd.exe /k claude ",
+          "ProcessName": "conhost"
+        },
+        {
+          "ProcessId": 22448,
+          "ParentProcessId": 31376,
+          "Name": "codex.exe",
+          "ExecutablePath": "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe",
+          "CommandLine": "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe",
+          "ProcessName": "codex"
+        },
+        {
+          "ProcessId": 26628,
+          "ParentProcessId": 8760,
+          "Name": "conhost.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\conhost.exe",
+          "CommandLine": "\"C:\\WINDOWS\\System32\\conhost.exe\" cmd.exe /k codex ",
+          "ProcessName": "conhost"
+        },
+        {
+          "ProcessId": 31376,
+          "ParentProcessId": 33040,
+          "Name": "node.exe",
+          "ExecutablePath": "C:\\Program Files\\nodejs\\node.exe",
+          "CommandLine": "\"node\"   \"C:\\Users\\alice\\AppData\\Roaming\\npm\\\\node_modules\\@openai\\codex\\bin\\codex.js\" ",
+          "ProcessName": "node"
+        },
+        {
+          "ProcessId": 32328,
+          "ParentProcessId": 32580,
+          "Name": "opencode.exe",
+          "ExecutablePath": "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode.exe",
+          "CommandLine": "\"C:\\Users\\alice\\AppData\\Roaming\\npm\\\\node_modules\\opencode-ai\\bin\\opencode.exe\"    ",
+          "ProcessName": "opencode"
+        },
+        {
+          "ProcessId": 32580,
+          "ParentProcessId": 6904,
+          "Name": "cmd.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\cmd.exe",
+          "CommandLine": "cmd.exe /k opencode",
+          "ProcessName": "cmd"
+        },
+        {
+          "ProcessId": 33040,
+          "ParentProcessId": 26628,
+          "Name": "cmd.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\cmd.exe",
+          "CommandLine": "cmd.exe /k codex",
+          "ProcessName": "cmd"
+        },
+        {
+          "ProcessId": 33504,
+          "ParentProcessId": 16792,
+          "Name": "cmd.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\cmd.exe",
+          "CommandLine": "cmd.exe /k claude",
+          "ProcessName": "cmd"
+        }
+      ],
+      "asked": [
+        {
+          "question": "Get-Process -Name claude",
+          "ids": [
+            9196
+          ]
+        },
+        {
+          "question": "Win32_Process CommandLine -match",
+          "pattern": "[\\\\/]claude(\\.js)?([\"' ]|$)",
+          "ids": []
+        },
+        {
+          "question": "Get-Process -Name codex",
+          "ids": [
+            22448
+          ]
+        },
+        {
+          "question": "Win32_Process CommandLine -match",
+          "pattern": "[\\\\/]codex(\\.js)?([\"' ]|$)",
+          "ids": [
+            31376
+          ]
+        },
+        {
+          "question": "Get-Process -Name opencode",
+          "ids": [
+            32328
+          ]
+        },
+        {
+          "question": "Win32_Process CommandLine -match",
+          "pattern": "[\\\\/]opencode(\\.js)?([\"' ]|$)",
+          "ids": []
+        }
+      ]
+    },
+    "cmd_after": {
+      "consoles": {
+        "claude": {
+          "line": "cmd.exe /k claude",
+          "conhost": 16792,
+          "shell": 33504
+        },
+        "codex": {
+          "line": "cmd.exe /k codex",
+          "conhost": 26628,
+          "shell": 33040
+        },
+        "opencode": {
+          "line": "cmd.exe /k opencode",
+          "conhost": 6904,
+          "shell": 32580
+        }
+      },
+      "stopped": {
+        "claude": [
+          9196
+        ],
+        "codex": [
+          22448
+        ],
+        "opencode": [
+          32328
+        ]
+      },
+      "processes": [
+        {
+          "ProcessId": 6904,
+          "ParentProcessId": 8760,
+          "Name": "conhost.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\conhost.exe",
+          "CommandLine": "\"C:\\WINDOWS\\System32\\conhost.exe\" cmd.exe /k opencode ",
+          "ProcessName": "conhost"
+        },
+        {
+          "ProcessId": 16792,
+          "ParentProcessId": 8760,
+          "Name": "conhost.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\conhost.exe",
+          "CommandLine": "\"C:\\WINDOWS\\System32\\conhost.exe\" cmd.exe /k claude ",
+          "ProcessName": "conhost"
+        },
+        {
+          "ProcessId": 26628,
+          "ParentProcessId": 8760,
+          "Name": "conhost.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\conhost.exe",
+          "CommandLine": "\"C:\\WINDOWS\\System32\\conhost.exe\" cmd.exe /k codex ",
+          "ProcessName": "conhost"
+        },
+        {
+          "ProcessId": 32580,
+          "ParentProcessId": 6904,
+          "Name": "cmd.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\cmd.exe",
+          "CommandLine": "cmd.exe /k opencode",
+          "ProcessName": "cmd"
+        },
+        {
+          "ProcessId": 33040,
+          "ParentProcessId": 26628,
+          "Name": "cmd.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\cmd.exe",
+          "CommandLine": "cmd.exe /k codex",
+          "ProcessName": "cmd"
+        },
+        {
+          "ProcessId": 33504,
+          "ParentProcessId": 16792,
+          "Name": "cmd.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\cmd.exe",
+          "CommandLine": "cmd.exe /k claude",
+          "ProcessName": "cmd"
+        }
+      ],
+      "asked": [
+        {
+          "question": "Get-Process -Name claude",
+          "ids": []
+        },
+        {
+          "question": "Win32_Process CommandLine -match",
+          "pattern": "[\\\\/]claude(\\.js)?([\"' ]|$)",
+          "ids": []
+        },
+        {
+          "question": "Get-Process -Name codex",
+          "ids": []
+        },
+        {
+          "question": "Win32_Process CommandLine -match",
+          "pattern": "[\\\\/]codex(\\.js)?([\"' ]|$)",
+          "ids": []
+        },
+        {
+          "question": "Get-Process -Name opencode",
+          "ids": []
+        },
+        {
+          "question": "Win32_Process CommandLine -match",
+          "pattern": "[\\\\/]opencode(\\.js)?([\"' ]|$)",
+          "ids": []
+        }
+      ]
+    },
+    "powershell_running": {
+      "consoles": {
+        "claude": {
+          "line": "powershell.exe -NoProfile -NoExit -Command claude",
+          "conhost": 27724,
+          "shell": 35396
+        },
+        "codex": {
+          "line": "powershell.exe -NoProfile -NoExit -Command codex",
+          "conhost": 30032,
+          "shell": 30540
+        },
+        "opencode": {
+          "line": "powershell.exe -NoProfile -NoExit -Command opencode",
+          "conhost": 23100,
+          "shell": 21120
+        }
+      },
+      "started": {
+        "claude": 29856,
+        "codex": 31212,
+        "opencode": 28824
+      },
+      "processes": [
+        {
+          "ProcessId": 21120,
+          "ParentProcessId": 23100,
+          "Name": "powershell.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+          "CommandLine": "powershell.exe -NoProfile -NoExit -Command opencode",
+          "ProcessName": "powershell"
+        },
+        {
+          "ProcessId": 22540,
+          "ParentProcessId": 31212,
+          "Name": "codex.exe",
+          "ExecutablePath": "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe",
+          "CommandLine": "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe",
+          "ProcessName": "codex"
+        },
+        {
+          "ProcessId": 23100,
+          "ParentProcessId": 9856,
+          "Name": "conhost.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\conhost.exe",
+          "CommandLine": "\"C:\\WINDOWS\\System32\\conhost.exe\" powershell.exe -NoProfile -NoExit -Command opencode ",
+          "ProcessName": "conhost"
+        },
+        {
+          "ProcessId": 27724,
+          "ParentProcessId": 9856,
+          "Name": "conhost.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\conhost.exe",
+          "CommandLine": "\"C:\\WINDOWS\\System32\\conhost.exe\" powershell.exe -NoProfile -NoExit -Command claude ",
+          "ProcessName": "conhost"
+        },
+        {
+          "ProcessId": 28824,
+          "ParentProcessId": 21120,
+          "Name": "opencode.exe",
+          "ExecutablePath": "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode.exe",
+          "CommandLine": "\"C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode.exe\"",
+          "ProcessName": "opencode"
+        },
+        {
+          "ProcessId": 29856,
+          "ParentProcessId": 35396,
+          "Name": "claude.exe",
+          "ExecutablePath": "C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe",
+          "CommandLine": "\"C:\\Users\\alice\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe\"",
+          "ProcessName": "claude"
+        },
+        {
+          "ProcessId": 30032,
+          "ParentProcessId": 9856,
+          "Name": "conhost.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\conhost.exe",
+          "CommandLine": "\"C:\\WINDOWS\\System32\\conhost.exe\" powershell.exe -NoProfile -NoExit -Command codex ",
+          "ProcessName": "conhost"
+        },
+        {
+          "ProcessId": 30540,
+          "ParentProcessId": 30032,
+          "Name": "powershell.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+          "CommandLine": "powershell.exe -NoProfile -NoExit -Command codex",
+          "ProcessName": "powershell"
+        },
+        {
+          "ProcessId": 31212,
+          "ParentProcessId": 30540,
+          "Name": "node.exe",
+          "ExecutablePath": "C:\\Program Files\\nodejs\\node.exe",
+          "CommandLine": "\"C:\\Program Files\\nodejs\\node.exe\" C:\\Users\\alice\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js ",
+          "ProcessName": "node"
+        },
+        {
+          "ProcessId": 35396,
+          "ParentProcessId": 27724,
+          "Name": "powershell.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+          "CommandLine": "powershell.exe -NoProfile -NoExit -Command claude",
+          "ProcessName": "powershell"
+        }
+      ],
+      "asked": [
+        {
+          "question": "Get-Process -Name claude",
+          "ids": [
+            29856
+          ]
+        },
+        {
+          "question": "Win32_Process CommandLine -match",
+          "pattern": "[\\\\/]claude(\\.js)?([\"' ]|$)",
+          "ids": []
+        },
+        {
+          "question": "Get-Process -Name codex",
+          "ids": [
+            22540
+          ]
+        },
+        {
+          "question": "Win32_Process CommandLine -match",
+          "pattern": "[\\\\/]codex(\\.js)?([\"' ]|$)",
+          "ids": [
+            31212
+          ]
+        },
+        {
+          "question": "Get-Process -Name opencode",
+          "ids": [
+            28824
+          ]
+        },
+        {
+          "question": "Win32_Process CommandLine -match",
+          "pattern": "[\\\\/]opencode(\\.js)?([\"' ]|$)",
+          "ids": []
+        }
+      ]
+    },
+    "powershell_after": {
+      "consoles": {
+        "claude": {
+          "line": "powershell.exe -NoProfile -NoExit -Command claude",
+          "conhost": 27724,
+          "shell": 35396
+        },
+        "codex": {
+          "line": "powershell.exe -NoProfile -NoExit -Command codex",
+          "conhost": 30032,
+          "shell": 30540
+        },
+        "opencode": {
+          "line": "powershell.exe -NoProfile -NoExit -Command opencode",
+          "conhost": 23100,
+          "shell": 21120
+        }
+      },
+      "stopped": {
+        "claude": [
+          29856
+        ],
+        "codex": [
+          22540
+        ],
+        "opencode": [
+          28824
+        ]
+      },
+      "processes": [
+        {
+          "ProcessId": 21120,
+          "ParentProcessId": 23100,
+          "Name": "powershell.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+          "CommandLine": "powershell.exe -NoProfile -NoExit -Command opencode",
+          "ProcessName": "powershell"
+        },
+        {
+          "ProcessId": 23100,
+          "ParentProcessId": 9856,
+          "Name": "conhost.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\conhost.exe",
+          "CommandLine": "\"C:\\WINDOWS\\System32\\conhost.exe\" powershell.exe -NoProfile -NoExit -Command opencode ",
+          "ProcessName": "conhost"
+        },
+        {
+          "ProcessId": 27724,
+          "ParentProcessId": 9856,
+          "Name": "conhost.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\conhost.exe",
+          "CommandLine": "\"C:\\WINDOWS\\System32\\conhost.exe\" powershell.exe -NoProfile -NoExit -Command claude ",
+          "ProcessName": "conhost"
+        },
+        {
+          "ProcessId": 30032,
+          "ParentProcessId": 9856,
+          "Name": "conhost.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\conhost.exe",
+          "CommandLine": "\"C:\\WINDOWS\\System32\\conhost.exe\" powershell.exe -NoProfile -NoExit -Command codex ",
+          "ProcessName": "conhost"
+        },
+        {
+          "ProcessId": 30540,
+          "ParentProcessId": 30032,
+          "Name": "powershell.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+          "CommandLine": "powershell.exe -NoProfile -NoExit -Command codex",
+          "ProcessName": "powershell"
+        },
+        {
+          "ProcessId": 35396,
+          "ParentProcessId": 27724,
+          "Name": "powershell.exe",
+          "ExecutablePath": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+          "CommandLine": "powershell.exe -NoProfile -NoExit -Command claude",
+          "ProcessName": "powershell"
+        }
+      ],
+      "asked": [
+        {
+          "question": "Get-Process -Name claude",
+          "ids": []
+        },
+        {
+          "question": "Win32_Process CommandLine -match",
+          "pattern": "[\\\\/]claude(\\.js)?([\"' ]|$)",
+          "ids": []
+        },
+        {
+          "question": "Get-Process -Name codex",
+          "ids": []
+        },
+        {
+          "question": "Win32_Process CommandLine -match",
+          "pattern": "[\\\\/]codex(\\.js)?([\"' ]|$)",
+          "ids": []
+        },
+        {
+          "question": "Get-Process -Name opencode",
+          "ids": []
+        },
+        {
+          "question": "Win32_Process CommandLine -match",
+          "pattern": "[\\\\/]opencode(\\.js)?([\"' ]|$)",
+          "ids": []
+        }
+      ]
+    }
+  }
+}
