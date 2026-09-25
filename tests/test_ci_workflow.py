@@ -118,6 +118,138 @@ def test_the_matrix_limit_stays_above_what_a_slow_windows_leg_takes() -> None:
     assert job["timeout-minutes"] >= 40, job["timeout-minutes"]
 
 
+# What `Run tests` leaves behind for the step after it, and what reads it (#536).
+LEDGER_VARIABLE = "AGENTIC_HIL_TEST_LEDGER"
+LEDGER_READER = "tests/suite_ledger.py"
+
+# The Windows legs of ten runs between 2026-09-16 and 2026-09-24, and the leg
+# before them that the job's limit cancelled, read step by step. `Run tests` took
+# 25m48s at the slowest. The steps before it took up to 1m14s, and 2m13s on the
+# cancelled leg, where installing the dependencies alone took 1m37s; the steps
+# after it took up to 37s, and after a `Run tests` that fails only the ledger's
+# reader and the post steps run. So five minutes between the two limits is
+# about twice what the steps around the suite have been seen to take, and the
+# suite's own limit starts well above the slowest suite anybody has measured.
+SUITE_STEP_FLOOR_MINUTES = 35
+ROOM_AROUND_THE_SUITE_MINUTES = 5
+
+
+def matrix_steps() -> list[dict]:
+    """The matrix job's steps, parsed, in the order the runner takes them."""
+    return workflow_document(WORKFLOW)["jobs"]["test"]["steps"]
+
+
+def option_value(command: list[str], option: str) -> str | None:
+    """What a command line gives one long option, in either spelling, or None."""
+    for index, argument in enumerate(command):
+        if argument == option:
+            return command[index + 1] if index + 1 < len(command) else ""
+        if argument.startswith(f"{option}="):
+            return argument.split("=", 1)[1]
+    return None
+
+
+def test_every_leg_prints_its_slowest_tests() -> None:
+    """Where a leg's time goes is printed by the leg itself.
+
+    A Windows leg costs about four times a Linux one on the same commit, and a
+    green log said nothing about where that goes: dots, a count and a total.
+    Thirty is the list #536 asked every leg for. `--durations=0` would print
+    every test, four and a half thousand lines that bury the thirty that matter.
+    """
+    command = hosted_step("Run tests")
+
+    assert option_value(command, "--durations") == "30", command
+
+
+def test_every_leg_names_its_worker_count() -> None:
+    """pytest-xdist names the workers it started only at the default verbosity.
+
+    A leg's log says `created: 2/2 workers` and `2 workers [4572 items]` before
+    the first dot, which is what tells a slow leg from one that had fewer cores.
+    Under `-q` the same place says `bringing up nodes...` with no count in it, so
+    the step passes no quiet flag.
+    """
+    command = hosted_step("Run tests")
+
+    quiet = [argument for argument in command if argument == "--quiet" or re.fullmatch(r"-q+", argument)]
+    assert quiet == [], command
+
+
+def test_a_leg_runs_out_of_time_inside_run_tests_with_room_left_after_it() -> None:
+    """The suite has a limit of its own, below the job's, so the job outlives it.
+
+    A leg that reached the job's limit was cancelled whole: `Run tests` ended in
+    `The operation was canceled.`, every step after it was skipped, and nothing
+    was left running that could say which tests had been going. A limit on the
+    step ends the step instead, and the job carries on to the step that reads
+    the ledger. So the step's limit sits below the job's by the time the steps
+    around the suite take, and above the slowest `Run tests` measured by a
+    margin; both are floors, for the reason the job's limit is one.
+    """
+    job = workflow_document(WORKFLOW)["jobs"]["test"]
+    run_tests = [step for step in job["steps"] if step.get("name") == "Run tests"]
+    assert len(run_tests) == 1, run_tests
+    step_limit = run_tests[0].get("timeout-minutes")
+
+    assert isinstance(step_limit, int), run_tests[0]
+    assert step_limit >= SUITE_STEP_FLOOR_MINUTES, step_limit
+    assert job["timeout-minutes"] - step_limit >= ROOM_AROUND_THE_SUITE_MINUTES, (job["timeout-minutes"], step_limit)
+
+
+def test_the_ledger_is_kept_for_run_tests_alone() -> None:
+    """The variable reaches the one session whose tests it records.
+
+    Set on the job or the workflow, it would also reach the build and the
+    collection out of the source distribution, and a ledger that a collection
+    wrote beside the suite's would be read as part of the suite. It names a
+    directory under the runner's temporary root, outside the checkout, so
+    nothing a later step builds or collects can pick it up.
+    """
+    workflow = workflow_document(WORKFLOW)
+    carriers = [
+        (job_name, step.get("name"))
+        for job_name, job in workflow["jobs"].items()
+        for step in job.get("steps", [])
+        if LEDGER_VARIABLE in (step.get("env") or {})
+    ]
+
+    assert carriers == [("test", "Run tests")], carriers
+    assert LEDGER_VARIABLE not in (workflow.get("env") or {})
+    for job_name, job in workflow["jobs"].items():
+        assert LEDGER_VARIABLE not in (job.get("env") or {}), job_name
+        for step in job.get("steps", []):
+            assert LEDGER_VARIABLE not in step.get("run", ""), (job_name, step.get("name"))
+    run_tests = [step for step in matrix_steps() if step.get("name") == "Run tests"][0]
+    assert "runner.temp" in str(run_tests["env"][LEDGER_VARIABLE]), run_tests["env"]
+
+
+def test_the_ledger_is_read_after_run_tests_fails() -> None:
+    """The step that names the tests a leg ran out of time on runs on a failure.
+
+    The runner skips a step with no condition once an earlier step has failed,
+    and a `Run tests` that runs out of its own time has failed, so the reader
+    carries `failure()`. It does not carry `always()` or `cancelled()`: a push
+    that supersedes a run cancels it, which is not a leg running out of time,
+    and a reader running then would say it was. The directory reaches it on its
+    command line, because the variable belongs to `Run tests` alone.
+    """
+    steps = matrix_steps()
+    names = [step.get("name") for step in steps]
+    run_tests = names.index("Run tests")
+    readers = [index for index, step in enumerate(steps) if LEDGER_READER in step.get("run", "")]
+
+    assert len(readers) == 1, names
+    reader = steps[readers[0]]
+    assert readers[0] > run_tests, names
+    condition = str(reader.get("if", ""))
+    assert "failure()" in condition, reader
+    assert "always()" not in condition and "cancelled()" not in condition, reader
+    ledger = str((steps[run_tests].get("env") or {}).get(LEDGER_VARIABLE, ""))
+    assert ledger, steps[run_tests]
+    assert ledger in reader["run"], reader
+
+
 def test_the_source_distribution_is_still_only_collected() -> None:
     """That step asks whether pytest can find its way through what the sdist ships.
 
