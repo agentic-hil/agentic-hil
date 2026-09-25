@@ -22,7 +22,7 @@ distribution for the reason it excludes the other two.
 
 from __future__ import annotations
 
-import argparse
+import json
 import re
 import sys
 from collections.abc import Iterable
@@ -31,16 +31,20 @@ from pathlib import Path
 import pytest
 import yaml
 
-from agentic_hil.cli import build_parser
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from check_version_consistency import anticipated_release, locations  # noqa: E402
+from check_version_consistency import locations  # noqa: E402
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 GITHUB_EXAMPLE = REPOSITORY_ROOT / "examples" / "ci" / "github-actions.yml"
 GITLAB_EXAMPLE = REPOSITORY_ROOT / "examples" / "ci" / "gitlab-ci.yml"
 PAGE = REPOSITORY_ROOT / "docs" / "ci-examples.md"
+CHANGELOG = REPOSITORY_ROOT / "CHANGELOG.md"
+# The argparse surface of the release the examples pin, recorded from that
+# release as the package index serves it.
+RECORDING = REPOSITORY_ROOT / "tests" / "fixtures" / "published_cli_surface.json"
+# `## [X.Y.Z] - YYYY-MM-DD`: a release with the date it was published.
+DATED_RELEASE_HEADING = re.compile(r"^## \[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}\s*$", re.MULTILINE)
 
 # The label pair the trust rule names: the machine is a bench, and this is which
 # board it holds.
@@ -125,13 +129,54 @@ def unpinned_actions(workflow: dict) -> list[str]:
 INVOKED_SUBCOMMAND = re.compile(r"\bagentic-hil\s+([a-z][a-z-]*)")
 
 
-def cli_subcommands() -> set[str]:
-    """Every subcommand `build_parser` defines, read off the parser it builds."""
-    parser = build_parser()
-    for action in parser._actions:
-        if isinstance(action, argparse._SubParsersAction):
-            return set(action.choices)
-    raise AssertionError("build_parser defines no subparsers")
+def newest_published_release(changelog: str) -> str:
+    """The newest release CHANGELOG.md gives a date: the newest one the package index carries."""
+    found = DATED_RELEASE_HEADING.search(changelog)
+    assert found is not None, "CHANGELOG.md dates no release"
+    return found.group(1)
+
+
+def recorded_surface() -> dict:
+    """The committed recording of the pinned release's command surface."""
+    assert RECORDING.is_file(), (
+        f"{RECORDING.relative_to(REPOSITORY_ROOT).as_posix()} does not exist: nothing records the command "
+        "surface of the release the examples pin"
+    )
+    return json.loads(RECORDING.read_text(encoding="utf-8"))
+
+
+def synthetic_recording(version: str, subcommands: Iterable[str]) -> dict:
+    """A recording in the committed file's shape, with made-up content."""
+    return {
+        "version": version,
+        "source": "Made up for a test; no release was installed.",
+        "surface": {
+            "options": ["--help", "--version", "-h"],
+            "positionals": [],
+            "subcommands": {
+                name: {"options": ["--help", "-h"], "positionals": [], "subcommands": {}} for name in subcommands
+            },
+        },
+    }
+
+
+def surface_problems(recording: dict, pin: str, invoked: Iterable[str]) -> list[str]:
+    """Every way a recorded command surface fails to vouch for the examples' pin.
+
+    The recording is the argparse tree of one published release. It speaks for
+    the pin only when it is that release, and a copied example runs only when
+    every subcommand it invokes is in that tree.
+    """
+    recorded = recording.get("version")
+    found = []
+    if recorded != pin:
+        found.append(f"the recorded command surface is agentic-hil {recorded}, but the examples pin {pin}")
+    defined = set(recording.get("surface", {}).get("subcommands", {}))
+    for command in sorted(set(invoked) - defined):
+        found.append(
+            f"the examples invoke `agentic-hil {command}`, which the recorded {recorded} surface does not define"
+        )
+    return found
 
 
 def invoked_subcommands(commands: Iterable[str]) -> set[str]:
@@ -182,23 +227,23 @@ def test_both_examples_parse_into_the_jobs_they_promise() -> None:
     assert GITLAB["stages"] == ["check-plan", "hardware"]
 
 
-def test_the_pinned_version_is_the_release_the_examples_are_written_for() -> None:
-    """One number, in three files, equal to the release this tree builds toward.
+def test_the_pinned_version_is_the_newest_published_release() -> None:
+    """One number, in three files, equal to the newest release the package index carries.
 
-    Not the previous release: the examples invoke `check-plan` and `run-evidence`,
-    which this tree adds, so a pin to the last release would name a distribution
-    that rejects both commands at argument parsing. The anticipated release is the
-    one that first exposes them and the code the examples were tested against, and
-    on a release commit it is that release itself. A range or a `latest` here
-    would mean the hosted job and the bench were checking different code.
+    Not the release this tree builds toward: between releases the index does not
+    carry that one, so a reader who copied either file got a pipeline whose first
+    job stopped at the install with a resolver error (#525). The newest release
+    CHANGELOG.md dates is on the index, and on a release commit it is that
+    release itself. A range or a `latest` here would mean the board-free job and
+    the bench were checking different code.
     """
-    anticipated = anticipated_release(REPOSITORY_ROOT)
+    published = newest_published_release(CHANGELOG.read_text(encoding="utf-8"))
 
-    assert GITHUB["env"]["AGENTIC_HIL_VERSION"] == anticipated
-    assert GITLAB["variables"]["AGENTIC_HIL_VERSION"] == anticipated
+    assert GITHUB["env"]["AGENTIC_HIL_VERSION"] == published
+    assert GITLAB["variables"]["AGENTIC_HIL_VERSION"] == published
     # The page prints the same line a reader copies, so the two cannot drift
     # apart while both still look right on their own.
-    assert f'AGENTIC_HIL_VERSION: "{anticipated}"' in PAGE.read_text(encoding="utf-8")
+    assert f'AGENTIC_HIL_VERSION: "{published}"' in PAGE.read_text(encoding="utf-8")
 
 
 def test_a_release_stamps_the_examples_along_with_everything_else() -> None:
@@ -206,17 +251,17 @@ def test_a_release_stamps_the_examples_along_with_everything_else() -> None:
 
     Without an entry here the examples would be the one place the release moves
     past, and `uncovered_files` would only say so until somebody excused it. The
-    three files track the anticipated release rather than the last one, so on a
-    release commit -- where the anticipated release is the release being cut --
-    they are stamped along with every other position.
+    three files state the newest published release, as every other release
+    position does, so the release stamp moves them and the development bump
+    leaves them where the index can serve them.
     """
-    anticipated = anticipated_release(REPOSITORY_ROOT)
+    published = newest_published_release(CHANGELOG.read_text(encoding="utf-8"))
     covered = {location.path: location for location in locations(REPOSITORY_ROOT)}
 
     for relative in ("examples/ci/github-actions.yml", "examples/ci/gitlab-ci.yml", "docs/ci-examples.md"):
         assert relative in covered, relative
         assert covered[relative].versions, relative
-        assert set(covered[relative].versions) == {anticipated}, covered[relative]
+        assert set(covered[relative].versions) == {published}, covered[relative]
 
 
 def test_the_github_hardware_job_refuses_a_hosted_runner() -> None:
@@ -386,32 +431,23 @@ def test_the_check_plan_job_is_the_board_free_path_and_touches_no_bench() -> Non
     assert "agentic-hil test-reactor" not in gitlab_board_free
 
 
-def test_every_command_the_examples_invoke_is_one_this_build_defines() -> None:
-    """No example invokes an `agentic-hil` subcommand this checkout's parser lacks.
+def test_every_command_the_examples_invoke_is_one_the_pinned_release_defines() -> None:
+    """No example invokes an `agentic-hil` subcommand the pinned release lacks.
 
-    What this test inspects is `build_parser` in this source tree, not an
-    installed distribution: reaching for the pinned artifact would need the
-    network and a published release, and this pin names one that does not exist
-    on the index until the release is cut. So the guarantee is stated in two
-    parts. Directly, it catches an example that invokes a subcommand this build
-    does not define, a typo or a command that was renamed or removed. By
-    extension it stands in for the pinned distribution, and only because the pin
-    is the anticipated release: the examples ship in the release they pin, so a
-    reader who has that release has this tree's CLI, and on a release commit the
-    anticipated release is the release being cut and this checkout is exactly it.
-    The bug this guards against was real: the examples added `check-plan` and
-    `run-evidence` while the pin still named the release before the one that
-    introduced them, so an isolated install of that release rejected both at
-    argument parsing. Verifying the published artifact's own CLI is a
-    release-time step the publish workflow now performs: its
-    `verify-published-examples` job installs the exact pinned distribution from
-    PyPI and runs `tools/verify_published_examples.py`, which asserts the
-    installed CLI reports that version and answers every command the examples
-    invoke (`tests/test_verify_published_examples.py` covers that tool). That is
-    the download-and-inspect no hermetic unit test can do; what this test does is
-    hold this checkout -- which the pin equals at release -- to defining them.
+    The pin names a published release, so this checkout's parser no longer
+    stands in for it: between releases this tree may define a command the
+    release a reader installs does not. What the examples are held to is a
+    committed recording of that release's own argparse tree, taken from the
+    distribution the package index serves and carrying the version it was taken
+    from, which has to be the pin. The cost is the one #525 accepted: a release
+    that adds a command the examples demonstrate has to ship before the examples
+    can show it, which delays a demonstration rather than shipping a file that
+    cannot run. The publish workflow's `verify-published-examples` job stays the
+    alarm after an upload: it installs the exact pinned distribution and asks its
+    CLI to answer for every command the examples invoke.
     """
-    available = cli_subcommands()
+    recording = recorded_surface()
+    pin = GITHUB["env"]["AGENTIC_HIL_VERSION"]
     invoked = invoked_subcommands(
         [
             *github_commands(GITHUB, "hardware"),
@@ -424,22 +460,68 @@ def test_every_command_the_examples_invoke_is_one_this_build_defines() -> None:
     # The evidence flow the examples exist to show; a check that stopped finding
     # these would be finding nothing.
     assert {"doctor", "test-reactor", "check-plan", "run-evidence"} <= invoked
-    unknown = invoked - available
-    assert not unknown, f"the examples invoke commands this build does not define: {sorted(unknown)}"
-    # The pin equal to the anticipated release is what lets `available`, the
-    # commands of this checkout, stand in for the commands the pinned
-    # distribution will expose once the release it names is published.
-    assert GITHUB["env"]["AGENTIC_HIL_VERSION"] == anticipated_release(REPOSITORY_ROOT)
-    assert GITLAB["variables"]["AGENTIC_HIL_VERSION"] == anticipated_release(REPOSITORY_ROOT)
+    assert GITLAB["variables"]["AGENTIC_HIL_VERSION"] == pin
+    assert surface_problems(recording, pin, invoked) == []
+
+
+def test_the_recording_names_its_release_and_where_it_came_from() -> None:
+    """A recording that cannot say what it recorded is a list somebody typed."""
+    recording = recorded_surface()
+
+    assert recording["version"] == newest_published_release(CHANGELOG.read_text(encoding="utf-8"))
+    assert isinstance(recording["source"], str)
+    assert recording["source"].strip()
+    assert recording["surface"]["subcommands"], "the recording holds no subcommands"
 
 
 def test_an_invented_subcommand_would_be_caught() -> None:
     """The predicate has to be able to fail, or the test above proves nothing."""
-    available = cli_subcommands()
+    recording = synthetic_recording("1.2.3", ["doctor"])
     invoked = invoked_subcommands(["agentic-hil doctor", "agentic-hil not-a-real-command"])
 
+    found = surface_problems(recording, "1.2.3", invoked)
+
     assert {"doctor", "not-a-real-command"} <= invoked
-    assert invoked - available == {"not-a-real-command"}
+    assert len(found) == 1, found
+    assert "`agentic-hil not-a-real-command`" in found[0]
+
+
+def test_a_command_the_pinned_release_does_not_ship_yet_is_refused() -> None:
+    """A command the pinned release lacks is refused, so the demonstration waits for the release.
+
+    A recording of a release from before `check-plan` and `run-evidence` shipped
+    refuses the examples as they stand, naming both.
+    """
+    recording = synthetic_recording("1.2.3", ["doctor", "test-reactor"])
+    invoked = invoked_subcommands(
+        [
+            *github_commands(GITHUB, "hardware"),
+            *github_commands(GITHUB, "check-plan"),
+            *gitlab_commands(GITLAB, "hardware"),
+            *gitlab_commands(GITLAB, "check-plan"),
+        ]
+    )
+
+    found = surface_problems(recording, "1.2.3", invoked)
+
+    assert len(found) == 2, found
+    assert "`agentic-hil check-plan`" in found[0]
+    assert "`agentic-hil run-evidence`" in found[1]
+
+
+def test_a_recording_of_another_release_than_the_pin_is_refused() -> None:
+    """A surface speaks for the release it was taken from and for no other.
+
+    A release stamp that moved the pin without recording the new release again
+    would leave the examples held to the commands of the release before.
+    """
+    recording = synthetic_recording("1.2.3", ["doctor", "test-reactor", "check-plan", "run-evidence"])
+
+    found = surface_problems(recording, "1.2.4", {"doctor"})
+
+    assert len(found) == 1, found
+    assert "1.2.3" in found[0]
+    assert "1.2.4" in found[0]
 
 
 @pytest.mark.parametrize(
