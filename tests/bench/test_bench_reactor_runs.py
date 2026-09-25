@@ -1046,6 +1046,119 @@ def test_a_red_plan_leaves_a_junit_document_with_its_failure_its_skipped_steps_a
     assert cli_handles(bench) == before, "a refused detached start left a run record behind"
 
 
+def test_a_run_stopped_inside_a_repeat_block_leaves_a_junit_document_with_the_steps_it_ran_passing_and_the_rest_skipped(bench: Bench, tmp_path: Path) -> None:
+    """`--junit-xml` on a synchronous run another command stops while it is inside a `repeat` block.
+
+    The synchronous run is registered under a handle like a detached one, so it is
+    found in the listing by its plan's name, watched from a second command until
+    its block is on the second iteration, and stopped from a third. The run it
+    was started as then answers the way a stopped run does, `ok: false` with
+    `run_stopped` after step 2, and writes the document it was asked for.
+
+    The spec maps that document: a run stopped on request keeps the steps it ran
+    as passes and marks the rest `<skipped>` with the stop as the reason, because
+    a stop is not a failure and nothing is invented to make it look like one. So
+    the block the stop landed in, every iteration of which passed on the board,
+    is a passing case, and the close it never reached is skipped.
+    """
+    port = bench.com_port_name()
+    name = "reactor-runs-stopped-junit"
+    plan = write_plan(
+        bench,
+        name,
+        4,
+        [
+            {"device": port, "action": "uart_open", "clear_buffer": True},
+            {
+                "action": "repeat",
+                "count": REPEAT_COUNT,
+                "steps": [
+                    {"device": bench.debugger_name(), "action": "reset", "mode": "run"},
+                    {"device": port, "action": "uart_read", "comparator": {"pattern": BANNER_PATTERN}, "timeout_s": BANNER_TIMEOUT_S},
+                    {"device": port, "action": "delay", "duration_ms": REPEAT_DELAY_MS},
+                ],
+            },
+            {"device": port, "action": "uart_close"},
+        ],
+    )
+    junit = JUNIT_DIRECTORY / "reactor-runs-stopped.xml"
+    (bench.project / junit).unlink(missing_ok=True)
+    a_free_bench(bench)
+    before = set(cli_handles(bench))
+    output = tmp_path / "stdout.json"
+    errors = tmp_path / "stderr.txt"
+    with output.open("w", encoding="utf-8") as stdout, errors.open("w", encoding="utf-8") as stderr:
+        process = subprocess.Popen(
+            child_command("test-reactor", "--test-config", plan, "--junit-xml", str(junit), "--json"),
+            cwd=str(bench.project),
+            env=bench.environment(),
+            stdout=stdout,
+            stderr=stderr,
+            text=True,
+        )
+    handle: str | None = None
+    try:
+
+        def registered() -> dict:
+            _, listing = bench.document("test-reactor-status")
+            fresh = [entry for entry in listing.get("runs") or [] if entry.get("run") not in before and entry.get("name") == name]
+            return fresh[0] if fresh else {}
+
+        entry = poll(registered, lambda answer: bool(answer) or process.poll() is not None, "the synchronous run being registered under a handle")
+        assert entry, f"the synchronous run ended (exit {process.poll()}) without a handle in the listing:\n{errors.read_text(encoding='utf-8')[-1500:]}"
+        handle = entry["run"]
+        assert isinstance(handle, str) and RUN_HANDLE.match(handle), entry
+
+        working = poll(
+            lambda: cli_status(bench, handle),
+            lambda answer: answer.get("state") not in ("starting", "running") or (answer.get("progress") or {}).get("iteration", 0) >= 2,
+            "the synchronous run reaching the second iteration of its repeat block",
+        )
+        assert working["state"] == "running", working
+        assert working["detached"] is False, working
+
+        status, stopped = bench.document("test-reactor-stop", "--run", handle)
+        assert status == 0, stopped
+        assert stopped["stop_requested"] is True, stopped
+        returncode = process.wait(timeout=REACH_S)
+    finally:
+        if process.poll() is None:
+            if handle is not None:
+                with suppress(*TEARDOWN_FAULTS):
+                    bench.run("test-reactor-stop", "--run", handle)
+            try:
+                process.wait(timeout=SHUTDOWN_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=SHUTDOWN_TIMEOUT_S)
+
+    printed = output.read_text(encoding="utf-8")
+    assert printed.strip(), f"the stopped run printed no document (exit {returncode}):\n{errors.read_text(encoding='utf-8')[-1500:]}"
+    report = json.loads(printed)
+    assert returncode == 1, report
+    assert report["run"] == handle, report
+    assert report["ok"] is False, report
+    assert report["stopped"] is True, report
+    assert report["stopped_after_step"] == 2, report
+    assert report["error_type"] == "run_stopped", report
+    assert "failed_step" not in report, report
+    assert [record["action"] for record in report["steps"]] == ["uart_open", "repeat"], report["steps"]
+    for iteration in report["steps"][1]["iterations"]:
+        for nested in iteration["steps"]:
+            assert nested["result"]["ok"] is True, nested
+    assert (bench.project / report["junit_xml"]).resolve() == (bench.project / junit).resolve(), report["junit_xml"]
+
+    suite = junit_suite(bench.project / junit)
+    cases = suite.findall("testcase")
+    assert [case.get("name") for case in cases] == [f"1.{port}.uart_open", "2.-.repeat", f"3.{port}.uart_close"], [case.get("name") for case in cases]
+    assert [[(child.tag, child.get("type")) for child in case] for case in cases[:2]] == [[], []], "a step the stopped run ran is not a passing case"
+    assert [child.tag for child in cases[2]] == ["skipped"], cases[2].get("name")
+    assert cases[2][0].get("message") == "The run was stopped on request after step 2; this step never ran.", cases[2][0].attrib
+    assert (suite.get("name"), suite.get("tests"), suite.get("failures"), suite.get("errors"), suite.get("skipped")) == (name, "3", "0", "0", "1"), suite.attrib
+
+    a_free_bench(bench)
+
+
 def walked(document: object, key: str = "") -> Iterator[tuple[str, object]]:
     """Every scalar in a document, with the field it sits under (a list's items under the list's field)."""
     if isinstance(document, dict):
