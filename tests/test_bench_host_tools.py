@@ -36,7 +36,8 @@ import pytest
 from conftest import FAKE_GDB, write_config
 from support import scaled_time_bound
 
-from agentic_hil.config import GDB_AUTODETECT_CANDIDATES
+from agentic_hil.backends.gdbdebug import no_gdb_on_this_bench
+from agentic_hil.config import GDB_AUTODETECT_CANDIDATES, ConfigError, load_authoritative_config
 from tests.bench import conftest as bench_tier
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -51,22 +52,29 @@ HALVES = ("hardware tests", "build half", "debug half")
 CROSS_DEBUGGER = "arm-none-eabi-gdb"
 BUILD_TOOL = "cmake"
 
-# One inner run is a pytest start, one child resolving the debugger and six
+# The first line of the skip the tier's `firmware` fixture raises for a build
+# that ran and failed, and a stand-in for the build's own output after it. A
+# build that fails on a host with every tool is not a missing host tool.
+DID_NOT_BUILD = "the demo firmware did not build here: cmake --build --preset Debug"
+BUILD_OUTPUT = "the build's own output follows the first line here"
+
+# One inner run is a pytest start, one child resolving the debugger and seven
 # empty tests. The ceiling is there for a run that hangs, not to time one.
 INNER_RUN_TIMEOUT_S = 120.0
 
 # The tests of the small module below, by the half each one belongs to.
 HARDWARE_TESTS = ["test_hardware_probe_answers", "test_hardware_board_resets"]
-BUILD_TESTS = ["test_build_firmware_flashes"]
+BUILD_TESTS = ["test_build_firmware_flashes", "test_build_firmware_answers_after_reset"]
 DEBUG_TESTS = ["test_debug_session_stops_at_main", "test_debug_breakpoint_is_hit", "test_debug_symbol_is_read"]
 ALL_TESTS = HARDWARE_TESTS + BUILD_TESTS + DEBUG_TESTS
 
 # A module in the tier's shape. Its `bench` stands in for the tier's own, with a
 # probe that answers or with none, its `firmware` for a build and a flash that
-# need no toolchain and no board, where the run asks for that, and its `probe`
-# for the first thing a real test does with the hardware: the log it writes is
-# how the test outside sees which tests got that far. `gdb` is not defined here.
-# It comes from the tier's conftest, loaded as a plugin, as in the real tier.
+# need no toolchain and no board, or for a build that failed, where the run asks
+# for that, and its `probe` for the first thing a real test does with the
+# hardware: the log it writes is how the test outside sees which tests got that
+# far. `gdb` is not defined here. It comes from the tier's conftest, loaded as a
+# plugin, as in the real tier.
 TINY_TIER = '''
 """The bench tier's shape, with the hardware replaced by fakes."""
 
@@ -98,6 +106,8 @@ if SETTINGS["fake_firmware"]:
 
     @pytest.fixture(scope="session")
     def firmware(bench):
+        if SETTINGS["build_failure"] is not None:
+            pytest.skip(SETTINGS["build_failure"])
         return bench.project / "build" / "Debug" / "nucleo-f446re_demo.elf"
 
 
@@ -116,6 +126,10 @@ def test_hardware_board_resets(bench, probe):
 
 
 def test_build_firmware_flashes(firmware, probe):
+    pass
+
+
+def test_build_firmware_answers_after_reset(firmware, probe):
     pass
 
 
@@ -183,6 +197,14 @@ def what_the_check_says(bench: bench_tier.Bench) -> str | None:
         pytest.fail(f"the check skipped the test that asked it instead of answering: {skipped}", pytrace=False)
 
 
+def the_products_refusal_of(bench: bench_tier.Bench, monkeypatch: pytest.MonkeyPatch) -> ConfigError:
+    """What the product says of this bench's configuration, loaded the way its server loads it."""
+    monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(bench.config))
+    with pytest.raises(ConfigError) as refused:
+        load_authoritative_config(bench.project)
+    return refused.value
+
+
 def spellings(path: Path) -> set[str]:
     """The ways a sentence can name `path` and still be naming it."""
     resolved = path.resolve()
@@ -196,6 +218,7 @@ def a_tiny_tier(
     declared: bool = True,
     probe_attached: bool = True,
     fake_firmware: bool = True,
+    build_failure: str | None = None,
     gdb_executable: Path | None = None,
 ) -> Path:
     """The small module, its bench's configuration and the environment it runs in; returns the probe's log."""
@@ -215,6 +238,7 @@ def a_tiny_tier(
         "probe_log": str(probe_log),
         "probe_attached": probe_attached,
         "fake_firmware": fake_firmware,
+        "build_failure": build_failure,
     }
     (pytester.path / "tiny_bench.json").write_text(json.dumps(settings), encoding="utf-8")
     pytester.makepyfile(test_tiny_bench=TINY_TIER)
@@ -261,7 +285,7 @@ def ran(line: str | None) -> bool:
 
 
 def skipped_naming(line: str | None, tool: str) -> bool:
-    return line is not None and "skipped" in line and tool in line
+    return line is not None and "skipped" in line and "missing host tool" in line and tool in line
 
 
 def who_touched_the_probe(probe_log: Path) -> list[str]:
@@ -294,12 +318,21 @@ def test_the_tier_states_one_rule_for_a_missing_host_tool_and_keeps_the_hardware
 def test_a_debugger_found_nowhere_is_one_sentence_naming_it_and_where_it_was_looked_for(
     tmp_path: Path, no_host_tools: Path
 ) -> None:
-    """Nothing configured and nothing on PATH: the executable, and where it was looked for."""
+    """Nothing configured and nothing on PATH: every name, where it was looked for, and what the product says.
+
+    Every name the product looks for, out of the product's own list. A sentence
+    naming only the first would tell an operator with another of them in reach
+    that the bench needs a debugger it already has.
+    """
     why = what_the_check_says(a_configured_bench(tmp_path))
 
     assert why is not None, "a bench with no debugger anywhere was taken for one that has one"
-    assert CROSS_DEBUGGER in why, why
+    for candidate in GDB_AUTODETECT_CANDIDATES:
+        named = re.search(rf"(?<![\w-]){re.escape(candidate)}(?![\w-])", why)
+        assert named is not None, f"the sentence does not name {candidate}, which the product looks for: {why}"
     assert "PATH" in why, why
+    assert "debug.gdb_executable" in why and "not set" in why, why
+    assert no_gdb_on_this_bench("openocd")["summary"] in why, why
     assert "\n" not in why, why
 
 
@@ -323,17 +356,50 @@ def test_a_debugger_the_product_finds_under_another_name_is_not_missing(tmp_path
 
 
 def test_a_configured_debugger_that_does_not_exist_is_a_missing_host_tool_named_by_its_path(
-    tmp_path: Path, no_host_tools: Path
+    tmp_path: Path, no_host_tools: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Still a host package, and the sentence points at the configuration, which is where the cause is."""
     gone = tmp_path / "removed-toolchain" / "bin" / CROSS_DEBUGGER
+    bench = a_configured_bench(tmp_path, gdb_executable=gone)
 
-    why = what_the_check_says(a_configured_bench(tmp_path, gdb_executable=gone))
+    why = what_the_check_says(bench)
 
     assert why is not None, "a configured debugger that does not exist was taken for one that does"
     assert any(spelling in why for spelling in spellings(gone)), why
     assert "debug.gdb_executable" in why, why
+    assert the_products_refusal_of(bench, monkeypatch).summary in why, why
     assert "\n" not in why, why
+
+
+def test_a_configured_debugger_name_that_is_not_on_path_is_a_missing_host_tool_named_by_it(
+    tmp_path: Path, no_host_tools: Path
+) -> None:
+    """A bare name, which the product looks up on PATH: the sentence names it and PATH, not a file."""
+    why = what_the_check_says(a_configured_bench(tmp_path, gdb_executable=Path(CROSS_DEBUGGER)))
+
+    assert why is not None, "a configured debugger name found nowhere was taken for one that is there"
+    assert CROSS_DEBUGGER in why and "PATH" in why and "debug.gdb_executable" in why, why
+    assert "\n" not in why, why
+
+
+def test_a_configured_debugger_that_is_there_and_refused_is_a_failure_with_the_products_line(
+    tmp_path: Path, no_host_tools: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not a missing host tool: the file exists and the product refuses it for where it is."""
+    check = the_debugger_check()
+    inside = tmp_path / "project" / "toolchain" / CROSS_DEBUGGER
+    bench = a_configured_bench(tmp_path, gdb_executable=inside)
+    inside.parent.mkdir(parents=True, exist_ok=True)
+    inside.write_bytes(b"")
+    refused = the_products_refusal_of(bench, monkeypatch)
+
+    with pytest.raises(BaseException) as raised:  # noqa: B017 - a skip has to be caught here too, and then refused
+        check(bench)
+
+    assert raised.typename == "Failed", (
+        f"a debugger that is there and refused ended in {raised.typename}: {raised.value}"
+    )
+    assert refused.summary in str(raised.value), str(raised.value)
 
 
 def test_a_configured_debugger_is_never_replaced_by_one_found_on_path(tmp_path: Path, no_host_tools: Path) -> None:
@@ -458,10 +524,60 @@ def test_a_bench_without_the_build_tools_names_what_each_half_lacked(
 
     result = run_the_tiny_tier(pytester)
 
+    naming_the_build_tool = [line for line in result.outlines if line.startswith("SKIPPED") and BUILD_TOOL in line]
+    assert len(naming_the_build_tool) == 1 and naming_the_build_tool[0].startswith(f"SKIPPED [{len(BUILD_TESTS)}] "), (
+        f"the build half was not skipped as one line with one reason naming {BUILD_TOOL}: {naming_the_build_tool}"
+    )
     summary = the_tier_summary(result)
     assert summary is not None, "a bench-tier run ended with no summary saying which halves ran"
     assert skipped_naming(summary.get("build half"), BUILD_TOOL), summary
     assert skipped_naming(summary.get("debug half"), CROSS_DEBUGGER), summary
     assert ran(summary.get("hardware tests")), summary
     result.assert_outcomes(passed=len(HARDWARE_TESTS), skipped=len(BUILD_TESTS) + len(DEBUG_TESTS))
+    assert sorted(who_touched_the_probe(probe_log)) == sorted(HARDWARE_TESTS)
+
+
+def test_a_half_the_run_did_not_select_is_reported_as_not_selected(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, no_host_tools: Path
+) -> None:
+    """A `-k` that picks only the tests the probe and the board need: the other two halves neither ran nor skipped."""
+    probe_log = a_tiny_tier(pytester, monkeypatch)
+
+    result = run_the_tiny_tier(pytester, "-k", "test_hardware", "--setup-show")
+
+    result.assert_outcomes(passed=len(HARDWARE_TESTS), deselected=len(BUILD_TESTS) + len(DEBUG_TESTS))
+    summary = the_tier_summary(result)
+    assert summary is not None, "a bench-tier run ended with no summary saying which halves ran"
+    assert ran(summary.get("hardware tests")), summary
+    for half in ("build half", "debug half"):
+        line = summary.get(half)
+        assert line is not None and "not selected" in line, summary
+        assert re.search(r"\bran\b", line) is None and "skipped" not in line, summary
+    assert debugger_checks(result) == [], "a run that selected no debug test looked for a debugger"
+    assert sorted(who_touched_the_probe(probe_log)) == sorted(HARDWARE_TESTS)
+
+
+def test_a_build_that_fails_is_skipped_on_its_own_lines_and_not_as_a_missing_host_tool(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, no_host_tools: Path
+) -> None:
+    """Every tool there and the build failing: pytest's own report for that skip, and its first line in the section."""
+    probe_log = a_tiny_tier(
+        pytester, monkeypatch, build_failure=f"{DID_NOT_BUILD}\n{BUILD_OUTPUT}", gdb_executable=FAKE_GDB
+    )
+
+    result = run_the_tiny_tier(pytester)
+
+    result.assert_outcomes(passed=len(HARDWARE_TESTS), skipped=len(BUILD_TESTS) + len(DEBUG_TESTS))
+    not_built = [line for line in result.outlines if line.startswith("SKIPPED") and DID_NOT_BUILD in line]
+    assert len(not_built) == len(BUILD_TESTS) + len(DEBUG_TESTS), (
+        f"a build that failed was not reported test by test, as pytest reports a skip: {not_built}"
+    )
+    assert all(line.startswith("SKIPPED [1] ") for line in not_built), not_built
+    summary = the_tier_summary(result)
+    assert summary is not None, "a bench-tier run ended with no summary saying which halves ran"
+    assert ran(summary.get("hardware tests")), summary
+    for half in ("build half", "debug half"):
+        line = summary.get(half)
+        assert line is not None and "skipped" in line and DID_NOT_BUILD in line, summary
+        assert "missing host tool" not in line and BUILD_OUTPUT not in line, summary
     assert sorted(who_touched_the_probe(probe_log)) == sorted(HARDWARE_TESTS)
