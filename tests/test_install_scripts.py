@@ -899,6 +899,26 @@ def _session_held_to(where: str, names: Sequence[str], process: str, agents: Seq
     return problems
 
 
+def _alias_map_held_to(where: str, arms: Sequence[tuple[Sequence[str], str]], passes_through: bool, agents: Sequence[Any]) -> list[str]:
+    """A map from every name of an agent, as `normalize_agent` leaves it, to that agent's id, handing any other name back (#571)."""
+    problems = []
+    for agent in agents:
+        for name in dict.fromkeys(agentic_hil.cli.normalize_agent(alias) for alias in agent.aliases):
+            answered = _answer(arms, passes_through, name)
+            if answered != agent.id:
+                problems.append(f"{where} answers {answered!r} for {name!r}, a name of {agent.id!r} in the CLI's list")
+    for names, answer in arms:
+        for name in names:
+            agent = _named_agent(agents, name)
+            if agent is None:
+                problems.append(f"{where} names {name!r}, which is no agent's name in the CLI's list")
+            elif answer != agent.id:
+                problems.append(f"{where} answers {answer!r} for {name!r}, a name of {agent.id!r} in the CLI's list")
+    if not passes_through:
+        problems.append(f"{where} does not hand back a name that is no agent's, so agent-install cannot refuse it as it was given")
+    return problems
+
+
 def _prose_list(text: str) -> list[str]:
     """`a, b or c`, wrapped however the script wraps it, as the names it lists."""
     return re.split(r",\s*(?:or\s+|and\s+)?|\s+(?:or|and)\s+", " ".join(text.split()))
@@ -979,6 +999,7 @@ _INSTALLER_AGENT_LISTS: dict[str, Callable[[str, Sequence[Any]], list[str]]] = {
     "install.sh, the step 4 line for a PATH without an agent CLI": lambda where, agents: _commands_held_to(where, _missing_commands(_shell_source(), "install.sh"), agents),
     "install.sh, the map from agent to process in process_name_for": lambda where, agents: _process_map_held_to(where, *_shell_arms("process_name_for"), agents),
     "install.sh, the step 5 arm for a Claude Code session": lambda where, agents: _session_held_to(where, *_shell_session(), agents),
+    "install.sh, the map from an agent's name to its id in agent_id_for": lambda where, agents: _alias_map_held_to(where, *_shell_arms("agent_id_for"), agents),
     "install.ps1, the loop in step 4 that looks for agent CLIs": lambda where, agents: _commands_held_to(where, _powershell_detected_commands(), agents),
     "install.ps1, the map from command to agent in Get-AgentIdForCli": lambda where, agents: _command_map_held_to(where, *_powershell_arms("Get-AgentIdForCli"), agents),
     "install.ps1, the agent-install line step 4 prints": lambda where, agents: [problem for names in _printed_agents(_powershell_source(), "install.ps1") for problem in _ids_held_to(where, names, agents)],
@@ -986,6 +1007,7 @@ _INSTALLER_AGENT_LISTS: dict[str, Callable[[str, Sequence[Any]], list[str]]] = {
     "install.ps1, the step 4 line for a PATH without an agent CLI": lambda where, agents: _commands_held_to(where, _missing_commands(_powershell_source(), "install.ps1"), agents),
     "install.ps1, the map from agent to process in Get-ProcessNameForAgent": lambda where, agents: _process_map_held_to(where, *_powershell_arms("Get-ProcessNameForAgent"), agents),
     "install.ps1, the step 5 line for a Claude Code session": lambda where, agents: _session_held_to(where, *_powershell_session(), agents),
+    "install.ps1, the map from an agent's name to its id in Get-AgentIdForName": lambda where, agents: _alias_map_held_to(where, *_powershell_arms("Get-AgentIdForName"), agents),
 }
 
 
@@ -5227,6 +5249,218 @@ def test_step_four_still_points_a_failed_agent_install_at_the_report_above(tmp_p
     assert "refused" not in after, transcript
 
 
+# ---------------------------------------------------------------------------
+# The agent a name stands for, read once after the command line (#571).
+# `agent-install` takes every alias of an agent, in any case, with `_` for `-`
+# and blanks around it, so step 4 registered the right agent for each of them.
+# Step 5 went on from the text that was typed, and after `--agent codex-cli` it
+# looked for a process called `codex-cli`. Each installer reads the name as the
+# CLI does, once, and steps 4 and 5 work from the id it stands for.
+
+
+def _spellings_agent_install_takes(agent: Any) -> list[str]:
+    """Names the CLI reads as `agent`: each alias as listed, in capitals, with `_` for `-`, and with blanks around it."""
+    spellings: list[str] = []
+    for alias in agent.aliases:
+        for spelled in (alias, alias.upper(), alias.replace("-", "_"), f"  {alias} "):
+            if spelled not in spellings:
+                spellings.append(spelled)
+    return spellings
+
+
+# A name that is no agent's, spelled so that the CLI's normalization would change
+# it: a name handed on normalized is then told apart from one handed on as typed.
+_NO_AGENTS_NAME = "Not_An_Agent"
+
+
+def _names_and_what_the_cli_reads_them_as() -> dict[str, str]:
+    """Every spelling of every agent in the CLI's list with the id the CLI reads it as, and a name that is no agent's with itself."""
+    read = {spelled: agent.id for agent in agentic_hil.cli.KNOWN_AGENTS for spelled in _spellings_agent_install_takes(agent)}
+    for spelled, agent_id in read.items():
+        known = agentic_hil.cli.known_agent(spelled)
+        assert known is not None and known.id == agent_id, f"the CLI does not read {spelled!r} as {agent_id!r}"
+    assert agentic_hil.cli.known_agent(_NO_AGENTS_NAME) is None, f"{_NO_AGENTS_NAME!r} is an agent's name in the CLI's list"
+    read[_NO_AGENTS_NAME] = _NO_AGENTS_NAME
+    return read
+
+
+def _misread_names(script: str, output: str, asked: dict[str, str]) -> list[str]:
+    """Every name whose `name|answer` line in `output` answers something other than what the CLI reads it as."""
+    answered = dict(line.split("|", 1) for line in output.splitlines() if "|" in line)
+    return [f"{script} reads {spelled!r} as {answered.get(spelled)!r}, and the CLI reads it as {meant!r}" for spelled, meant in asked.items() if answered.get(spelled) != meant]
+
+
+def test_install_sh_reads_every_name_agent_install_takes_as_the_agent_it_stands_for(tmp_path: Path) -> None:
+    """The function install.sh reads `--agent` through, over every spelling of every agent (#571).
+
+    The spellings are made from the CLI's list and each is checked against
+    `known_agent`, so what is asked is what the issue asks: every spelling step
+    4 accepts. The answer is the agent's id, which is what steps 4 and 5 work
+    from. A name that is no agent's comes back as it was typed.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    asked = _names_and_what_the_cli_reads_them_as()
+    harness = tmp_path / "agent-id-for.sh"
+    harness.write_bytes(f'set -eu\n{_shell_function(_shell_source(), "agent_id_for")}for name in "$@"; do printf \'%s|%s\\n\' "$name" "$(agent_id_for "$name")"; done\n'.encode())
+
+    result = subprocess.run(
+        [_posix_shell(), str(harness), *asked],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={"PATH": "/usr/bin:/bin"},
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+    misread = _misread_names("install.sh", result.stdout, asked)
+    assert misread == [], "\n".join(misread)
+
+
+def test_install_ps1_reads_every_name_agent_install_takes_as_the_agent_it_stands_for(tmp_path: Path) -> None:
+    """The shell test of the same name, on the function install.ps1 reads `--agent` through (#571)."""
+    powershell = _windows_powershell()
+    asked = _names_and_what_the_cli_reads_them_as()
+    names = tmp_path / "names.json"
+    names.write_text(json.dumps(list(asked)), encoding="utf-8")
+    harness = tmp_path / "agent-id-for-name.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        f"{_powershell_function(_powershell_source(), 'Get-AgentIdForName')}"
+        f"$names = [System.IO.File]::ReadAllText('{names}') | ConvertFrom-Json\n"
+        "foreach ($name in $names) { Write-Output \"$name|$(Get-AgentIdForName $name)\" }\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+    misread = _misread_names("install.ps1", result.stdout, asked)
+    assert misread == [], "\n".join(misread)
+
+
+@pytest.mark.parametrize(
+    ("spelled", "recorded", "agent_id", "cli"),
+    [
+        pytest.param("codex-cli", "codex_and_opencode", "codex", "codex", id="codex-cli"),
+        pytest.param("openai-codex", "codex_and_opencode", "codex", "codex", id="openai-codex"),
+        pytest.param("Claude_Code", "claude", "claude-code", "claude", id="Claude_Code"),
+        pytest.param("Claude", "claude", "claude-code", "claude", id="Claude"),
+        pytest.param(" open-code ", "codex_and_opencode", "opencode", "opencode", id="open-code-between-blanks"),
+    ],
+)
+def test_step_five_names_the_running_cli_of_the_agent_the_name_stands_for(tmp_path: Path, spelled: str, recorded: str, agent_id: str, cli: str) -> None:
+    """Step 5 names the running CLI for every spelling step 4 accepts (#571).
+
+    After `--agent codex-cli` step 4 registered codex, and step 5 looked for a
+    process called `codex-cli`, found none, and told an operator whose codex
+    was open that there was nothing to restart. The whole script runs here,
+    with a recorded table as the machine's own: step 4 names the agent's id and
+    hands that id to `agent-install`, and step 5 names the one process called
+    by that agent's command, with its PID.
+    """
+    if os.name != "posix":
+        pytest.skip("install.sh's matcher is replayed on the POSIX half")
+    table = _npm_agent_cli_tables()[recorded]
+    called_by_its_name = [process for process in table["processes"] if process["comm"] == cli]
+    assert len(called_by_its_name) == 1, f"the recording holds {len(called_by_its_name)} processes called {cli}"
+    anchor = called_by_its_name[0]
+    replay, refused = _replayed_table(tmp_path, table)
+    home = tmp_path / "home"
+    project = home / "project"
+    tools = tmp_path / "tools"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    for directory in (project, tools, uv_bin):
+        directory.mkdir(parents=True)
+    marker = tmp_path / "agent-install-was-run"
+    _uv_that_installs_a_stub(tools / "uv", marker=marker)
+
+    result = _shell_run({"HOME": str(home), "PATH": f"{replay}:{tools}:/usr/bin:/bin", "UV_TOOL_BIN_DIR": str(uv_bin)}, project, "--agent", spelled)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    asked = _refused_by_the_replay(refused)
+    assert asked == "", f"the run asked for something the recording holds no answer to:\n{asked}"
+    assert f"RESTART REQUIRED: {cli} is running right now (PID {anchor['pid']})." in transcript, transcript
+    assert re.search(rf"^agentic-hil install: step 4/\d+ +agent: registering the skill and the MCP server for {re.escape(agent_id)}$", transcript, re.MULTILINE), transcript
+    assert marker.read_text(encoding="utf-8") == f"{agent_id}\n", transcript
+
+
+def test_step_five_names_the_claude_code_session_however_claude_code_was_spelled(tmp_path: Path) -> None:
+    """The Claude Code session arm answers for the agent, not for the spelling (#571).
+
+    Inside a Claude Code session with no claude process to find, step 5 names
+    the session as the one to restart, for claude-code alone. The arm compared
+    the name as typed with `claude-code` and `claude`, so after
+    `--agent Claude_Code`, which registers Claude Code, the session went
+    unnamed. The table is the recorded one in which claude exited at start.
+    """
+    if os.name != "posix":
+        pytest.skip("install.sh's matcher is replayed on the POSIX half")
+    table = _npm_agent_cli_tables()["codex_and_opencode"]
+    assert not [process for process in table["processes"] if process["comm"] == "claude"], "the recording holds a process called claude"
+    replay, refused = _replayed_table(tmp_path, table)
+    home = tmp_path / "home"
+    project = home / "project"
+    tools = tmp_path / "tools"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    for directory in (project, tools, uv_bin):
+        directory.mkdir(parents=True)
+    _uv_that_installs_a_stub(tools / "uv")
+
+    result = _shell_run(
+        {"HOME": str(home), "PATH": f"{replay}:{tools}:/usr/bin:/bin", "UV_TOOL_BIN_DIR": str(uv_bin), "CLAUDECODE": "1"}, project, "--agent", "Claude_Code"
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    asked = _refused_by_the_replay(refused)
+    assert asked == "", f"the run asked for something the recording holds no answer to:\n{asked}"
+    assert "RESTART REQUIRED: claude is running right now (PID this session)." in transcript, transcript
+
+
+def test_step_four_hands_a_name_that_is_no_agents_to_agent_install_as_it_was_typed(tmp_path: Path) -> None:
+    """A name that is no agent's goes to `agent-install` unchanged (#571).
+
+    The installer reads a name as an agent's id only where it is an agent's
+    name. Anything else reaches the CLI as it was typed, the CLI refuses it as
+    it did before, and the line after the refusal quotes the name the operator
+    gave.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    refusal = tmp_path / "refusal"
+    refusal.write_text(_agent_install_refusal(tmp_path, _NO_AGENTS_NAME), encoding="utf-8")
+    home = tmp_path / "home"
+    project = home / "project"
+    tools = tmp_path / "tools"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    for directory in (project, tools, uv_bin):
+        directory.mkdir(parents=True)
+    marker = tmp_path / "agent-install-was-run"
+    _uv_that_installs_a_stub(tools / "uv", marker=marker, agent_install=f'cat "{refusal}" >&2; exit 2')
+
+    result = _shell_run({"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin", "UV_TOOL_BIN_DIR": str(uv_bin)}, project, "--agent", _NO_AGENTS_NAME)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode != 0, transcript
+    assert marker.read_text(encoding="utf-8") == f"{_NO_AGENTS_NAME}\n", transcript
+    after = _said_after(transcript, refusal.read_text(encoding="utf-8"))
+    assert f"agentic-hil refused the agent name '{_NO_AGENTS_NAME}'" in after, transcript
+
+
 # The hashing tools install.sh reaches for, in the order it tries them, and
 # the recorded shape of one line each, taken on 2026-09-06 from the tools the
 # suite ran against (GNU coreutils 8.32 sha256sum, Perl Digest::SHA shasum
@@ -5448,6 +5682,56 @@ def test_the_powershell_step_four_still_points_a_failed_agent_install_at_the_rep
     after = _said_after(transcript, _FAILED_AGENT_INSTALL_REPORT)
     assert "agent-install failed for codex; the report above says which half" in after, transcript
     assert "refused" not in after, transcript
+
+
+@WINDOWS_ONLY
+@pytest.mark.xdist_group(STEP_FIVE_PROCESS_TABLE_GROUP)
+def test_the_powershell_step_five_names_the_running_cli_of_the_agent_the_name_stands_for(tmp_path: Path) -> None:
+    """The shell test of the same name, on the script Windows runs and against the real process table (#571).
+
+    The name is opencode's alias in capitals, with `_` for `-` and blanks
+    around it, and the process is a real child of this test's own, in npm's
+    shape. It is opencode for the reason STEP_FIVE_AGENT gives: the machine
+    running this plausibly has a claude or a codex open, and step 5 would name
+    that process rather than the test's.
+    """
+    spelled = " Open_Code "
+    known = agentic_hil.cli.known_agent(spelled)
+    assert known is not None and known.id == STEP_FIVE_AGENT, f"the CLI does not read {spelled!r} as {STEP_FIVE_AGENT!r}"
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes="99.0.0")
+    node = _a_node_shaped_interpreter(tmp_path / "npm" / "node_modules" / ".bin")
+    started = _a_process_that_lingers(node, node.parent / f"{STEP_FIVE_AGENT}.js")
+
+    try:
+        result, transcript = bench.run("--agent", spelled, "--no-can", manager_bin_on_path=False)
+        # Read before the kill below, for the reason the first planted test of
+        # step 5 gives: a child gone before step 5 read the table is a failed
+        # planting, not an answer about the block.
+        outlived_the_run = started.poll()
+    finally:
+        started.kill()
+        started.wait(timeout=SCRIPT_TIMEOUT_S)
+
+    assert outlived_the_run is None, f"the planted child exited before step 5 read the process table: {outlived_the_run}\n{transcript}"
+    assert result.returncode == 0, transcript
+    assert f"RESTART REQUIRED: {STEP_FIVE_AGENT} is running right now (PID {started.pid})." in transcript, transcript
+    assert re.search(rf"^agentic-hil install: step 4/\d+ +agent: registering the skill and the MCP server for {STEP_FIVE_AGENT}$", transcript, re.MULTILINE), transcript
+    assert f"agent: {STEP_FIVE_AGENT} {REGISTERED_LINE}" in transcript, transcript
+
+
+@WINDOWS_ONLY
+def test_the_powershell_step_four_hands_a_name_that_is_no_agents_to_agent_install_as_it_was_typed(tmp_path: Path) -> None:
+    """The shell test of the same name, on the script Windows runs (#571)."""
+    release = _powershell_release()
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes=release)
+    refusal = _agent_install_refusal(tmp_path, _NO_AGENTS_NAME)
+    _windows_launcher(bench.staging / "agentic-hil.exe", release, bench.marker, "fresh", agent_install=(2, "", refusal))
+
+    result, transcript = bench.run("--agent", _NO_AGENTS_NAME, "--no-can")
+
+    assert result.returncode != 0, transcript
+    after = _said_after(transcript, refusal)
+    assert f"agentic-hil refused the agent name '{_NO_AGENTS_NAME}'" in after, transcript
 
 
 # ---------------------------------------------------------------------------
