@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import json
+import weakref
 from typing import Any
 
 from agentic_hil import __version__
 from agentic_hil.contracts import MCP_TOOL_NAMES as MCP_TOOL_NAMES
 from agentic_hil.contracts import MCP_TOOLS as MCP_TOOLS
 from agentic_hil.contracts import invalid_argument
+from agentic_hil.knowledge import ERROR_CATALOGUE, ERROR_URI_PREFIX, read_resource, remediation_fields
 from agentic_hil.knowledge import MCP_RESOURCE_TEMPLATES as MCP_RESOURCE_TEMPLATES
 from agentic_hil.knowledge import MCP_RESOURCES as MCP_RESOURCES
-from agentic_hil.knowledge import read_resource
 from agentic_hil.redact import redact_sensitive, redact_stream_text
 from agentic_hil.report import overall_success
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
@@ -111,15 +112,163 @@ def server_instructions(tools: AgenticHILToolService | UnprovisionedToolService)
     return SERVER_INSTRUCTIONS
 
 
-def tool_result_text(payload: JsonObject) -> str:
-    """The serialized form of a tool result for the content text block.
+# The top-level pairs the text of a result leaves out, because each only
+# restates what a reader assumes when it is absent: nothing was committed or
+# started, the hardware is as it was, nothing is held, and every check passed.
+# The same field holding any other value says something and is kept, and so is
+# every field not named here, `ok` and `retry_safe` included.
+TEXT_DEFAULTS: dict[str, object] = {
+    "side_effect_committed": False,
+    "side_effect_status": "not_started",
+    "hardware_state": "unchanged",
+    "cleanup_required": False,
+    "quarantined": False,
+    "audit_ok": True,
+    "cleanup_ok": True,
+    "target_ok": True,
+    "config_stale": False,
+}
 
-    That block exists only so a host that does not read structuredContent still
-    gets the result (the MCP specification recommends servers return both). It
-    is parsed, never read as prose, so it carries no indentation: the same
-    payload without the whitespace nobody reads.
+# The top-level advice lists whose entries a session is sent once.
+# `quarantine_guidance` is not one of them: no resource serves it again, and it
+# is what a caller needs to recover the bench.
+REPEATED_ADVICE_FIELDS = ("remediation", "likely_causes")
+
+# What each tool service has sent, per advice field. One stdio loop serves one
+# service, so this is one MCP session's memory: held in this process only, gone
+# with the service, and never shared with another one.
+_SENT_ADVICE: weakref.WeakKeyDictionary[Any, dict[str, set[str]]] = weakref.WeakKeyDictionary()
+
+
+def sent_advice(tools: Any) -> dict[str, set[str]] | None:
+    """The advice entries already sent in the session ``tools`` serves, per field.
+
+    None for a service that cannot be referenced weakly, which is then sent
+    every entry every time: a memory keyed any other way could outlive the
+    service and hand a later one what an earlier session was told."""
+    try:
+        return _SENT_ADVICE.setdefault(tools, {})
+    except TypeError:
+        return None
+
+
+def tool_result_text(payload: JsonObject, sent: dict[str, set[str]] | None = None) -> str:
+    """The content text block of a tool result: a compact projection of it.
+
+    The text is what an agent host puts into the model's context, where it stays
+    for the rest of the session and is paid for again on every later request, so
+    it carries what says something and nothing else. It is one JSON object
+    without whitespace that always keeps `ok` and `tool`. A key whose value is
+    null, "", [] or {} is left out at any depth, and so is a nested object left
+    with no keys once its own empty keys are. An array keeps every element in
+    its place, an object inside one as {} when nothing of it is left. At the top
+    level, the pairs in `TEXT_DEFAULTS` are left out where they only restate
+    their default.
+
+    A top-level remediation or likely_causes entry this session was already sent
+    in the same field is left out as well, and counted under `repeated_advice`.
+    `advice_uri` names the error catalogue entry that serves the remediation left
+    out, where one does. ``sent`` is that memory, and this adds the block's
+    entries to it once the block is built, so nothing is left out within one
+    block; without it, nothing is left out at all. Advice nested deeper, such as
+    a step's own result inside a run, and `quarantine_guidance` are never left
+    out.
+
+    structuredContent stays the whole result. It is the document itself, for the
+    hosts and programs that read fields rather than the model's context, and
+    `isError` is decided from the same result; a default, an empty value and
+    advice the session already has are all still there for a reader that needs
+    them, so nothing the text leaves out is lost.
     """
-    return json.dumps(payload, separators=(",", ":"))
+    if not isinstance(payload, dict):
+        return json.dumps(payload, separators=(",", ":"))
+    text: JsonObject = {}
+    repeated: dict[str, int] = {}
+    left_out_remediation: list[Any] = []
+    taken: dict[str, list[str]] = {}
+    for key, value in payload.items():
+        if key in ("ok", "tool"):
+            text[key] = value
+            continue
+        if key in TEXT_DEFAULTS and _same(TEXT_DEFAULTS[key], value):
+            continue
+        value = _without_empty(value)
+        if _is_empty(value):
+            continue
+        if sent is not None and key in REPEATED_ADVICE_FIELDS and isinstance(value, list):
+            already = sent.get(key, set())
+            identities = [json.dumps(entry, separators=(",", ":")) for entry in value]
+            taken[key] = identities
+            kept = [entry for entry, identity in zip(value, identities, strict=True) if identity not in already]
+            if len(kept) < len(value):
+                repeated[key] = len(value) - len(kept)
+                if key == "remediation":
+                    left_out_remediation = [entry for entry, identity in zip(value, identities, strict=True) if identity in already]
+            if not kept:
+                continue
+            value = kept
+        text[key] = value
+    if repeated:
+        text["repeated_advice"] = repeated
+        uri = _advice_uri(payload, left_out_remediation)
+        if uri is not None:
+            text["advice_uri"] = uri
+    serialized = json.dumps(text, separators=(",", ":"))
+    if sent is not None:
+        for key, identities in taken.items():
+            sent.setdefault(key, set()).update(identities)
+    return serialized
+
+
+def _same(expected: object, value: object) -> bool:
+    """Equal and of the same type, so a default `false` is not matched by a `0`."""
+    return type(value) is type(expected) and value == expected
+
+
+def _is_empty(value: Any) -> bool:
+    return value is None or (isinstance(value, (str, list, tuple, dict)) and not value)
+
+
+def _without_empty(value: Any) -> Any:
+    """``value`` with every object's empty keys left out, worked from the bottom up.
+
+    An array element is never removed or replaced, because its position means
+    something: an object inside an array loses its own empty keys and stays in
+    its place, as {} when none are left."""
+    if isinstance(value, dict):
+        projected = ((key, _without_empty(child)) for key, child in value.items())
+        return {key: child for key, child in projected if not _is_empty(child)}
+    if isinstance(value, (list, tuple)):
+        return [_without_empty(child) for child in value]
+    return value
+
+
+def _advice_uri(payload: JsonObject, left_out: list[Any]) -> str | None:
+    """The URI of the catalogue entry that serves every remediation entry left out.
+
+    A result does not say which entry its advice came from, so each entry of its
+    error_type is rendered the way the services render it, with the result's own
+    permission key where the entry is written around one. The entry whose advice
+    the result carries whole is named; failing that, the first that holds every
+    entry left out. None when no entry does: the text never points at advice
+    that is not there to read."""
+    error_type = payload.get("error_type")
+    if not left_out or not isinstance(error_type, str) or not error_type:
+        return None
+    permission = payload.get("permission")
+    permission = permission if isinstance(permission, str) and permission else None
+    holding: list[str] = []
+    for key in ERROR_CATALOGUE:
+        entry_type, _, scope = key.partition(":")
+        if entry_type != error_type:
+            continue
+        advice = remediation_fields(error_type, scope or None, permission=permission)
+        steps = advice.get("remediation", [])
+        if all(entry in steps for entry in left_out):
+            if steps == payload.get("remediation") and advice.get("do_not") == payload.get("do_not"):
+                return f"{ERROR_URI_PREFIX}{key}"
+            holding.append(key)
+    return f"{ERROR_URI_PREFIX}{holding[0]}" if holding else None
 
 
 def parse_error_response() -> JsonObject:
@@ -222,21 +371,22 @@ def call_tool(params: Any, tools: AgenticHILToolService) -> JsonObject:
     params_object = params_object_or_throw(params)
     name = params_object.get("name")
     arguments = params_object.get("arguments", {})
+    sent = sent_advice(tools)
     # The envelope's own two refusals are built where every schema refusal is
     # built, so they carry the field, the validator and the catalogue's fix the
     # agent reads together on every other invalid_argument.
     if not isinstance(name, str):
-        return tool_error_result(invalid_argument("unknown", "name", "type", "tools/call requires a string name."))
+        return tool_error_result(invalid_argument("unknown", "name", "type", "tools/call requires a string name."), sent)
     if arguments is None:
         arguments = {}
     if not isinstance(arguments, dict):
-        return tool_error_result(invalid_argument(name, "$", "type", "tools/call arguments must be an object."))
+        return tool_error_result(invalid_argument(name, "$", "type", "tools/call arguments must be an object."), sent)
     result = tools.call(name, arguments)
     # Defense-in-depth: strip any secret-named field before the result is
     # serialized into the MCP content text and structuredContent. isError is
     # computed from the raw result (redaction touches no success field).
     safe_result = redact_sensitive(result)
-    return {"content": [{"type": "text", "text": tool_result_text(safe_result)}], "structuredContent": safe_result, "isError": not overall_success(result)}
+    return {"content": [{"type": "text", "text": tool_result_text(safe_result, sent)}], "structuredContent": safe_result, "isError": not overall_success(result)}
 
 
 def get_prompt(params: Any) -> JsonObject:
@@ -255,9 +405,12 @@ def params_object_or_throw(params: Any) -> JsonObject:
     raise InvalidParamsError("JSON-RPC params must be an object.")
 
 
-def tool_error_result(result: JsonObject) -> JsonObject:
-    """A refusal the envelope raised itself, in the shape of a failed tool result."""
-    return {"content": [{"type": "text", "text": tool_result_text(result)}], "structuredContent": result, "isError": True}
+def tool_error_result(result: JsonObject, sent: dict[str, set[str]] | None = None) -> JsonObject:
+    """A refusal the envelope raised itself, in the shape of a failed tool result.
+
+    Its text is projected like any tool's, against the same session's memory of
+    the advice it was sent."""
+    return {"content": [{"type": "text", "text": tool_result_text(result, sent)}], "structuredContent": result, "isError": True}
 
 
 def result_response(request_id: Any, result: JsonObject) -> JsonObject:
