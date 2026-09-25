@@ -664,6 +664,7 @@ def test_the_process_table_is_free_again_as_soon_as_its_holder_is_gone(tmp_path:
 
 
 @pytest.mark.xdist_group(SHARED_GROUP)
+@pytest.mark.usefixtures(LOCK_FIXTURE)
 def test_two_sessions_on_one_machine_never_read_each_others_agent_cli(tmp_path: Path) -> None:
     """The collision the group cannot prevent, read off two real sessions started at the same moment (#567).
 
@@ -760,6 +761,7 @@ def _without_group_suffix(reported: str) -> str:
 
 @WINDOWS_ONLY
 @pytest.mark.xdist_group(SHARED_GROUP)
+@pytest.mark.usefixtures(LOCK_FIXTURE)
 def test_two_workers_run_the_whole_group_on_one_of_them() -> None:
     """The acceptance: the marks and the scheduler together, read off a real run.
 

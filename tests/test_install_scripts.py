@@ -4530,7 +4530,7 @@ STEP_FIVE_AGENT = "opencode"
 # the lifetime is derived from the ceiling the run itself is held to rather than
 # chosen a second time. A child that goes first leaves step 5 reading a table
 # without it and answering that no agent CLI is running, which is the one
-# sentence these two tests exist to tell apart.
+# sentence the tests that plant such a child exist to tell apart.
 LINGER_S = SCRIPT_TIMEOUT_S + 60
 # The machine's process table is the one thing the tests below share, and
 # they are the only tests in this suite that share anything. Step 5 reads the
@@ -4541,7 +4541,9 @@ LINGER_S = SCRIPT_TIMEOUT_S + 60
 # same time, or the second one reads the first one's child and is told a restart
 # is required. One group name, written here once and carried by every party, and
 # `--dist loadgroup` in pyproject.toml's addopts, which is what makes a group
-# stay on one worker.
+# stay on one worker. A second run of the suite on the machine has a scheduler
+# of its own, so every party also asks for the `process_table_lock` fixture,
+# which every run on the machine takes (#567).
 STEP_FIVE_PROCESS_TABLE_GROUP = "install-step-five-process-table"
 
 
@@ -4663,6 +4665,7 @@ def _an_agent_cli_as_recorded(prefix: Path) -> subprocess.Popen[bytes]:
 
 @WINDOWS_ONLY
 @pytest.mark.xdist_group(STEP_FIVE_PROCESS_TABLE_GROUP)
+@pytest.mark.usefixtures("process_table_lock")
 def test_step_five_names_the_npm_installed_agent_cli_and_not_the_node_beside_it(tmp_path: Path) -> None:
     """install.ps1's restart block against the real process table, with a real pair of children.
 
@@ -4692,9 +4695,9 @@ def test_step_five_names_the_npm_installed_agent_cli_and_not_the_node_beside_it(
     (bench.early_bin / f"{STEP_FIVE_AGENT}.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
     node = _a_node_shaped_interpreter(tmp_path / "npm" / "node_modules" / ".bin")
     # Every child that starts is registered before the next one is attempted, so
-    # a second planting that fails cannot leave the first one alive. The other
-    # test in this group asserts that no agent CLI is running and follows this
-    # one on the same worker, and a survivor here is a process it would find.
+    # a second planting that fails cannot leave the first one alive. Another
+    # test in this group asserts that no agent CLI is running, on the same
+    # worker, and a survivor here is a process it would find.
     children: list[subprocess.Popen[bytes]] = []
 
     try:
@@ -4730,6 +4733,7 @@ def test_step_five_names_the_npm_installed_agent_cli_and_not_the_node_beside_it(
 
 @WINDOWS_ONLY
 @pytest.mark.xdist_group(STEP_FIVE_PROCESS_TABLE_GROUP)
+@pytest.mark.usefixtures("process_table_lock")
 def test_step_five_says_there_is_nothing_to_restart_when_only_an_unrelated_node_runs(tmp_path: Path) -> None:
     """The other direction, which is what a command-line matcher can get wrong.
 
@@ -4769,10 +4773,10 @@ def test_step_five_says_there_is_nothing_to_restart_when_only_an_unrelated_node_
 # it: the `irm ... | iex` form (the script arrives here as a file, and a script
 # read from a pipe binds its parameters differently); and the PEP 668 and no-pip
 # fallbacks, which reach Install-Uv and so the network. Step 5's restart block
-# is reached by the two tests above, against the real process table and two real
-# children of this test's own. The fetch route is reached by one test alone, on
-# a hosted runner, because the installer it runs edits the registry of whoever
-# runs it.
+# is reached by the two tests above and by the PowerShell test of #571 further
+# down, against the real process table and real children of their own. The
+# fetch route is reached by one test alone, on a hosted runner, because the
+# installer it runs edits the registry of whoever runs it.
 
 
 # ---------------------------------------------------------------------------
@@ -4858,6 +4862,7 @@ def _skip_where_no_stand_in_can_be_planted() -> None:
 
 
 @pytest.mark.xdist_group(STEP_FIVE_PROCESS_TABLE_GROUP)
+@pytest.mark.usefixtures("process_table_lock")
 def test_step_five_names_the_agent_cli_this_test_started_in_the_real_process_table(tmp_path: Path) -> None:
     """Step 5's matcher against the machine's own table, with one process of this test's in it.
 
@@ -6195,6 +6200,7 @@ def test_the_powershell_step_four_still_points_a_failed_agent_install_at_the_rep
 
 @WINDOWS_ONLY
 @pytest.mark.xdist_group(STEP_FIVE_PROCESS_TABLE_GROUP)
+@pytest.mark.usefixtures("process_table_lock")
 def test_the_powershell_step_five_names_the_running_cli_of_the_agent_the_name_stands_for(tmp_path: Path) -> None:
     """The shell test of the same name, on the script Windows runs and against the real process table (#571).
 

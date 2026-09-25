@@ -760,12 +760,11 @@ function Get-RunningAgentProcessId {
         process name is its own, and a match on that can name no stranger's
         process.
 
-        npm installs the other kind, and the process Windows then holds is
-        called node. An npm-installed CLI is a JavaScript launcher run by the
-        node runtime, so the only place the CLI's own name appears is the
-        command line, and a machine with the CLI open in the next window was
-        told there was nothing to restart; the operator restarted nothing, and
-        the MCP registration this run had just written was read by no session.
+        A CLI that npm installs as a JavaScript launcher is the other kind:
+        the process Windows holds for it is called node, and the launcher's
+        path is on its command line. Missed, it stays open in the next window
+        while its operator is told there is nothing to restart, and the MCP
+        registration this run just wrote is read by no session.
 
         The second question therefore reads command lines, anchored so that it
         stays a question about which program is running rather than about which
@@ -773,6 +772,15 @@ function Get-RunningAgentProcessId {
         end its argument or the line, optionally through the .js the launcher
         carries. A false alarm costs an operator a restart of something that was
         never ours, in the one part of the transcript that asks them to act.
+
+        At the recorded versions all three are answered by the first question.
+        npm's shims start Claude Code and opencode as native executables, and
+        codex's starts node on bin/codex.js, which runs the codex.exe the
+        package vendors as its child. The tables recorded with each package
+        installed by npm install -g, from cmd and from Windows PowerShell, are
+        in tests/fixtures/npm_agent_cli_windows_process_table_recordings.json.
+        codex.exe is the process to name: when the recording stopped it alone,
+        its node launcher exited by itself.
     #>
     param([string]$ProcessName)
     $exact = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue) | Select-Object -First 1

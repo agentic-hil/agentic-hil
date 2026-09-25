@@ -18,7 +18,12 @@ import yaml
 
 pytest_plugins = ["pytester", "suite_ledger"]
 
-from support import remove_trusted_launcher, scaled_time_bound, sweep_stale_launchers  # noqa: E402
+from support import (  # noqa: E402
+    hold_the_process_table,
+    remove_trusted_launcher,
+    scaled_time_bound,
+    sweep_stale_launchers,
+)
 
 # The real index reader, bound before the autouse fixture below replaces the
 # name it lives under. A test about the reader itself calls this one, and every
@@ -505,6 +510,30 @@ def _no_host_gdb(monkeypatch: pytest.MonkeyPatch) -> None:
     which is true on a firmware developer's bench and false in a CI container. A
     test that wants a GDB patches this name itself."""
     monkeypatch.setattr("agentic_hil.bootstrap.autodetected_gdb", lambda: None)
+
+
+# How long a test that reads the machine's process table waits for another run
+# of the suite to let go of it, before the runner's time scale widens it. The
+# longest hold is test_two_workers_run_the_whole_group_on_one_of_them in
+# tests/test_process_table_grouping.py, whose nested run is bounded at 900 s,
+# so a run queued behind it waits that out with room to spare.
+PROCESS_TABLE_WAIT_S = 1200
+
+
+@pytest.fixture
+def process_table_lock(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Hold the machine's process table for the test that asks, against every other run of the suite (#567).
+
+    `xdist_group` keeps the tests that plant a process shaped like an agent
+    CLI, or assert that none is running, on one worker of one run. A second
+    run on the machine, from another clone, another worktree or the same
+    checkout, has a scheduler of its own and reads the same table, so each of
+    those tests asks for this fixture by name as well. A run that finds the
+    table held waits for it, and one that waits out the bound fails the test
+    at setup naming the PID and the test holding it.
+    """
+    with hold_the_process_table(request.node.nodeid, wait_s=PROCESS_TABLE_WAIT_S):
+        yield
 
 
 def write_config(
