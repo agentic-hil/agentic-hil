@@ -7,7 +7,9 @@ machine with that board attached, and the second half holds it to the rules a
 self-hosted runner cannot recover from getting wrong: no `pull_request` trigger,
 a runner addressed by labels alone, one queue for one board, every action pinned
 by commit, every hardware action through the `agentic-hil` CLI, and evidence
-uploaded whatever the run did.
+uploaded whatever the run did. The gate in `bench-gate.yml`, which runs the
+bench tier on that board for one commit a maintainer names, is held to the same
+rules and to one of its own: the commit it names runs only inside the container.
 
 The first half:
 
@@ -670,3 +672,144 @@ def test_the_bench_run_uploads_its_evidence_whatever_the_run_did() -> None:
     assert upload[0]["if"] == "always()"
     assert upload[0]["with"]["retention-days"] == 14
     assert f"{DEMO_DIRECTORY}/artifacts/" in upload[0]["with"]["path"]
+
+
+# The gate: the bench tier, run by tools/bench_in_container.py in its image on
+# the same board, for one commit a maintainer names when starting it.
+
+GATE_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "bench-gate.yml"
+GATE_RUNNER = "tools/bench_in_container.py"
+# Where the report and the log land, as the run step says and the upload reads.
+GATE_RESULTS = "bench-results"
+
+
+def gate_job() -> dict:
+    return workflow_document(GATE_WORKFLOW)["jobs"]["bench-tier"]
+
+
+def gate_checkouts() -> list[dict]:
+    return [step for step in gate_job()["steps"] if "actions/checkout" in str(step.get("uses", ""))]
+
+
+def gate_run_step() -> dict:
+    running = [step for step in gate_job()["steps"] if "run" in step]
+    assert len(running) == 1, running
+    return running[0]
+
+
+def test_the_gate_is_started_by_hand_and_by_nothing_else() -> None:
+    """Dispatch only: no pull request, no push, no schedule, no other workflow.
+
+    The gate puts a commit's tests on the board, and which commit goes there is
+    a maintainer's decision each time, a pull request's head included. No
+    trigger may make it on a maintainer's behalf, and the nightly proof of what
+    is merged is `hardware-bench.yml`'s schedule, not this file's.
+    """
+    subscribed = triggers(workflow_document(GATE_WORKFLOW))
+
+    assert set(subscribed) == {"workflow_dispatch"}, subscribed
+    for trigger in (*UNTRUSTED_TRIGGERS, "push", "schedule"):
+        assert trigger not in subscribed, trigger
+
+
+def test_the_gate_asks_which_commit_to_run() -> None:
+    inputs = triggers(workflow_document(GATE_WORKFLOW))["workflow_dispatch"]["inputs"]
+
+    assert set(inputs) == {"ref"}, inputs
+    assert inputs["ref"]["required"] is True
+    assert inputs["ref"]["type"] == "string"
+
+
+def test_the_gate_runs_on_the_nightlys_board_and_queues_with_it() -> None:
+    """The same labels, the same repository guard, and the nightly's group.
+
+    Sharing the group is what keeps a dispatched gate from starting while the
+    nightly holds the board, and the reverse; never cancelling in progress is
+    what keeps either from being stopped half way through a flash.
+    """
+    workflow = workflow_document(GATE_WORKFLOW)
+    job = gate_job()
+
+    assert job["runs-on"] == BENCH_LABELS
+    assert " ".join(job["if"].split()) == "github.repository == 'agentic-hil/agentic-hil'"
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"]["group"] == BENCH_CONCURRENCY_GROUP
+    assert workflow["concurrency"]["cancel-in-progress"] is False
+    assert isinstance(job["timeout-minutes"], int), job
+
+
+def test_the_gate_pins_every_action_by_commit() -> None:
+    assert unpinned_actions(workflow_document(GATE_WORKFLOW)) == []
+
+
+def test_the_gate_runs_the_runner_and_nothing_else() -> None:
+    """One command: the runner, which builds the image and runs the tier in it.
+
+    Nothing on the host installs, fetches, writes a configuration or reaches a
+    debugger or a port; the product itself runs only inside the container.
+    `exec`, so the runner is the step's process and the SIGINT a cancelled run
+    sends reaches it, and not a shell that would take it and leave the
+    container running.
+    """
+    lines = run_lines(gate_job())
+
+    assert len(lines) == 1, lines
+    command = shlex.split(lines[0])
+    assert command[:2] == ["exec", "python3"], command
+    assert command[2].endswith(GATE_RUNNER), command
+    assert command[3:] == ["--output", f"../{GATE_RESULTS}"], command
+    line = lines[0]
+    assert not RAW_HARDWARE.search(line), line
+    assert not FETCH_TOOL.search(line), line
+    for word in ("pip", "agentic-hil", "podman", "docker", "sudo"):
+        assert word not in command, command
+
+
+def test_the_commit_under_test_runs_only_inside_the_container() -> None:
+    """The runner comes from the workflow's own commit; the named one is only built.
+
+    Dispatched on a pull request's head, the runner from that head would run on
+    the machine itself, as the runner's user, beside the runner's own files.
+    So the runner is checked out from the commit the workflow was dispatched
+    from, the named commit into a directory of its own, and the run step works
+    in the latter with the runner from the former: the named commit reaches the
+    machine only as the image the runner builds from it and the tier that image
+    runs.
+    """
+    checkouts = gate_checkouts()
+    assert len(checkouts) == 2, checkouts
+    harness = [step for step in checkouts if "ref" not in step.get("with", {})]
+    named = [step for step in checkouts if step.get("with", {}).get("ref") == "${{ inputs.ref }}"]
+    assert len(harness) == 1 and len(named) == 1, checkouts
+    harness_path = harness[0]["with"]["path"]
+    named_path = named[0]["with"]["path"]
+    assert harness_path != named_path
+
+    step = gate_run_step()
+    assert step["working-directory"] == named_path, step
+    command = shlex.split(run_lines(gate_job())[0])
+    assert command[2] == f"../{harness_path}/{GATE_RUNNER}", command
+
+
+def test_the_gate_keeps_the_token_out_of_both_checkouts() -> None:
+    """Neither checkout leaves the job's token in a `.git/config` a later step could read."""
+    for step in gate_checkouts():
+        assert step["with"]["persist-credentials"] is False, step
+
+
+def test_the_named_commit_never_reaches_a_shell() -> None:
+    """The ref is typed by whoever starts the gate, so it goes to the checkout
+    action as a value and is never expanded into a command line."""
+    for step in gate_job()["steps"]:
+        assert "${{" not in step.get("run", ""), step
+
+
+def test_the_gate_uploads_the_tiers_report_whatever_the_run_did() -> None:
+    """The red run's report is the one that matters most, and it is kept."""
+    upload = [step for step in gate_job()["steps"] if "upload-artifact" in str(step.get("uses", ""))]
+
+    assert len(upload) == 1, upload
+    assert upload[0]["if"] == "always()"
+    assert upload[0]["with"]["path"].strip() == f"{GATE_RESULTS}/"
+    assert upload[0]["with"]["if-no-files-found"] == "warn"
+    assert upload[0]["with"]["retention-days"] == 14

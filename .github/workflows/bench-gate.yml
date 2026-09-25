@@ -1,0 +1,110 @@
+# The bench tier on this project's own bench, for one commit a maintainer names
+# when starting it, and never on a pull request's or a push's say-so.
+#
+# The bench tier is tests/bench: the part of the suite that needs an in-circuit
+# debugger or programmer and the board behind it. tools/bench_in_container.py
+# runs it in the image tools/bench/Dockerfile builds from one commit, against
+# the board this runner holds, and reads pytest's summary line as the verdict.
+# This workflow is that command and nothing else, so the gate on a commit is the
+# same run a maintainer gets from a terminal on the machine.
+#
+# There is deliberately no `pull_request`, `pull_request_target`, `workflow_run`,
+# `push` or `schedule` trigger. Which commit goes on the board is a maintainer's
+# decision each time, a pull request's head included, and no event may make it
+# on their behalf. What is merged is proven nightly by hardware-bench.yml.
+#
+# The named commit runs only inside the container. The runner script is checked
+# out from the commit this workflow was dispatched from, a branch of this
+# repository, and the named commit into a directory of its own; the run step
+# works in the latter with the script from the former. So the named commit
+# reaches the machine as the image built from it, whose build runs that
+# commit's Dockerfile with the network a build needs, and as the tier that image
+# runs with no network, no capabilities and nothing of the machine but the
+# probe's device nodes, the machine's device-lock directory and a directory of
+# the run's own, out of which the report alone is copied. Its code never runs on
+# the machine itself, beside the runner's own files, which is what lets a
+# maintainer name the head of a pull request from a fork: that head is served
+# from this repository too. The board and its probe are that commit's to drive
+# for the length of the run, which is the decision a dispatch makes.
+#
+# The runner is addressed by its labels and by nothing else, the same three as
+# hardware-bench.yml: no host name, no user, no path and no network address
+# belongs in this file. What the operator sets up once, outside this repository,
+# is in tools/bench/README.md: a rootless container runtime and the right to
+# open the probe. This job installs nothing, upgrades nothing and writes no
+# configuration. The tier makes the configuration it runs under inside its own
+# temporary directory in the container, and the one the bench's own runs use
+# is never in reach of it.
+name: Bench gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: The commit, branch or tag whose bench tier runs on the board
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# The nightly's group, so a gate never starts while the nightly holds the board
+# and the nightly never starts while a gate does. A group keeps one pending run:
+# a second dispatch while one is waiting takes the waiting one's place, so start
+# the next gate once the last one has started. Never `cancel-in-progress: true`,
+# for hardware-bench.yml's reason: cancelling a run in the middle of a flash is
+# how a board is left half flashed.
+concurrency:
+  group: nucleo-f446re-bench
+  cancel-in-progress: false
+
+jobs:
+  bench-tier:
+    name: Run the bench tier on the board
+    # A fork inherits this file. Without this, a dispatch in a fork would queue
+    # forever against labels it has no runner for.
+    if: github.repository == 'agentic-hil/agentic-hil'
+    runs-on: [self-hosted, agentic-hil, nucleo-f446re]
+    # The tier takes minutes on the board, and a build with a cold cache adds
+    # more. The limit is margin, not an estimate.
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out the runner this workflow was dispatched with
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+
+      # The ref goes to the action as a value and never into a command line:
+      # whoever starts the gate types it.
+      - name: Check out the commit under test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          path: under-test
+          persist-credentials: false
+
+      # `exec`, so the runner script is the step's process. A cancelled or timed
+      # out run sends the step SIGINT, and the script answers it by stopping the
+      # container with SIGINT, the signal the tier tears down on and puts the
+      # demo back on the board after; a shell in between would take the signal
+      # for itself. The step is killed seconds later, which can be before that
+      # teardown is done: the container finishes it on its own, and the next
+      # run waits for it before it builds anything.
+      - name: Run the bench tier in its container
+        working-directory: under-test
+        run: exec python3 ../harness/tools/bench_in_container.py --output ../bench-results
+
+      # `if: always()` because a red or cancelled run's report is the one worth
+      # reading, and `warn` because a run that never reached pytest has already
+      # failed for a reason the step's log names. The report and the log have
+      # the probe's serial numbers and the machine's names withheld.
+      - name: Upload the tier's report and log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench-tier
+          path: bench-results/
+          if-no-files-found: warn
+          retention-days: 14
