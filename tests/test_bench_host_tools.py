@@ -243,7 +243,10 @@ def a_tiny_tier(
     (pytester.path / "tiny_bench.json").write_text(json.dumps(settings), encoding="utf-8")
     pytester.makepyfile(test_tiny_bench=TINY_TIER)
     pytester.makeini(TINY_TIER_INI)
-    monkeypatch.setenv("PYTHONPATH", str(REPOSITORY_ROOT), prepend=os.pathsep)
+    # The repository root makes the tier's conftest importable as a plugin, and
+    # the tests directory is where that conftest imports `support` from, which
+    # a real run reaches through the suite's own conftest.
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(REPOSITORY_ROOT), str(REPOSITORY_ROOT / "tests"))), prepend=os.pathsep)
     if declared:
         monkeypatch.setenv(bench_tier.BENCH_ENV, "1")
     else:
