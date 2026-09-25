@@ -24,7 +24,9 @@ Four things are held:
   tier put the demo back first, and a container that outlives the run keeping
   the machine held.
 
-The last section holds the image to what the runner relies on.
+The last section holds the image to what the runner relies on, and the page
+the runner's refusals and the gate send people to, to what they send them
+there for.
 """
 
 from __future__ import annotations
@@ -51,6 +53,7 @@ import run_lock  # noqa: E402
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = REPOSITORY_ROOT / "tools" / "bench" / "Dockerfile"
 IGNORE_FILE = REPOSITORY_ROOT / "tools" / "bench" / "Dockerfile.dockerignore"
+README = REPOSITORY_ROOT / "tools" / "bench" / "README.md"
 
 # A probe serial, a host name, a home and a user that belong to no machine. What
 # they stand for is exactly what must never reach a log somebody else can read.
@@ -1223,3 +1226,33 @@ def test_the_build_context_is_an_allowlist_of_what_the_tier_reads() -> None:
     assert ignore[0] == "**", ignore
     admitted = {line.lstrip("!") for line in ignore if line.startswith("!")}
     assert {"pyproject.toml", "src", "tests", "requirements", "examples/nucleo-f446re_demo"} <= admitted, admitted
+
+
+def test_the_page_the_refusals_point_at_says_what_the_machine_provides_once() -> None:
+    """Every refusal about the machine, and the gate's header, name one page.
+
+    Whoever meets one of them goes there for the pieces a run relies on: the
+    runtime and the OCI runtime that keeps the user's groups, the user's own id
+    ranges and linger, the rights to the probe's nodes, the check that builds
+    without a board, and the gate that runs it all on one.
+    """
+    page = README.read_text(encoding="utf-8")
+    runner = (REPOSITORY_ROOT / "tools" / "bench_in_container.py").read_text(encoding="utf-8")
+    gate = (REPOSITORY_ROOT / ".github" / "workflows" / "bench-gate.yml").read_text(encoding="utf-8")
+
+    assert "tools/bench/README.md" in runner and "tools/bench/README.md" in gate
+    for needed in (
+        "podman",
+        "crun",
+        "keep-groups",
+        "uidmap",
+        "slirp4netns",
+        "/etc/subuid",
+        "/etc/subgid",
+        "enable-linger",
+        "/dev/bus/usb",
+        "--build-only",
+        "--runtime docker",
+        "bench-gate.yml",
+    ):
+        assert needed in page, f"tools/bench/README.md does not say {needed!r}"
