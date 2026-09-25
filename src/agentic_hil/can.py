@@ -1451,8 +1451,10 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "config_invalid", "field": f"can_buses.{bus_id}.channel", "summary": "PEAK adapter on Linux expects a SocketCAN-style interface name such as can0.", "side_effect_committed": False}
     try:
         import can
-    except ImportError:
-        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_backend_not_available", "summary": "python-can is not installed. Install agentic-hil[can] to use direct CAN adapters.", "side_effect_committed": False, **can_likely_causes("can_backend_not_available")}
+    except ImportError as error:
+        # The import's own line, with its type, is what tells a missing package
+        # from a blocked module or a python-can failing inside its own imports.
+        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_backend_not_available", "summary": "python-can is not installed or could not be imported. Install agentic-hil[can] to use direct CAN adapters.", "backend_error": f"{type(error).__name__}: {error}", "side_effect_committed": False, **can_likely_causes("can_backend_not_available")}
 
     def open_failure(error: BaseException) -> JsonObject:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error), **can_likely_causes("can_adapter_open_failed")}
