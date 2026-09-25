@@ -691,7 +691,7 @@ def test_describe_set_and_reload_answer_by_the_hold_while_a_com_session_reads_th
     accept_every_write_once_the_hold_is_gone(server, surface)
 
 
-def test_describe_set_and_reload_answer_by_the_hold_while_a_debug_session_holds_the_core(bench: Bench, firmware: Path, surfaces: Surfaces) -> None:
+def test_describe_set_and_reload_answer_by_the_hold_while_a_debug_session_holds_the_core(bench: Bench, gdb: None, firmware: Path, surfaces: Surfaces) -> None:
     """An open debug session holds the probe; the same refusals, and the core stays halted through them.
 
     The demo's millisecond counter is read through the session before and after
@@ -820,7 +820,7 @@ def test_project_config_adopt_hardware_over_mcp_puts_back_the_port_and_the_reloa
 
 
 def test_adoption_is_refused_by_the_hold_while_a_session_holds_the_board_and_says_how_to_end_it(
-    bench: Bench, firmware: Path, surfaces: Surfaces
+    bench: Bench, gdb: None, firmware: Path, surfaces: Surfaces
 ) -> None:
     """`project_config_adopt_hardware` under an open COM session and an open debug session.
 
@@ -1043,7 +1043,7 @@ def upgrade_refused_by_the_hold(server: Server, surface: Surface, stop_call: str
 
 @pytest.mark.skipif(os.name == "nt", reason="on Windows server_upgrade answers upgrade_cli_only_on_host before it reads the bench")
 def test_server_upgrade_is_refused_while_a_session_or_a_declared_run_holds_the_board_and_installs_nothing(
-    bench: Bench, firmware: Path, surfaces: Surfaces, tmp_path: Path
+    bench: Bench, gdb: None, firmware: Path, surfaces: Surfaces, tmp_path: Path
 ) -> None:
     """An open COM session, a debug session and a declared run each refuse `server_upgrade` by name.
 
