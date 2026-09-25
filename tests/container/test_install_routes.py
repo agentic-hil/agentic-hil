@@ -16,9 +16,10 @@ else's program, and both were wrong:
 * Astral's installer edits `~/.profile` and `~/.bashrc`, and creates `~/.zshrc`,
   unless `UV_NO_MODIFY_PATH` is set, and install.sh never set it. The five lines
   at the top of the script, which a stranger reads before piping it into a
-  shell, account for one line in one file, and three files edited on the way to
-  installing uv is not that. What step 3 writes itself is that one line, for the
-  directory it installed the command into rather than for uv's own.
+  shell, account for one line in each startup file the shell reads, and three
+  files edited on the way to installing uv, whatever the shell, is not that.
+  What step 3 writes itself is that line, for the directory it installed the
+  command into rather than for uv's own.
 
 Both routes run here against the real tools: the real pip and the real uv in
 this image, and the pinned Astral installer fetched from astral.sh and checked
