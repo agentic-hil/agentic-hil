@@ -119,18 +119,30 @@ Pinned:
 
 Not pinned, deliberately:
 
-- the distribution's OpenOCD, `procps`, `curl`, `socat` and `zsh`, which are
-  the debugger backend, the second opinion on a process's start time, what
-  install.sh fetches the pinned uv installer with, what makes the
-  pseudo-terminal pair the serial tests open through the real pyserial (one
-  end is the configured COM port, the other is held by the scripted peer in
-  `tests/container/pty_responder.py`, whose answers are the test's own input),
-  and the shell whose startup file step 3 of install.sh writes, started for
+- the distribution's OpenOCD (`openocd`), the debugger backend the no-probe
+  tests drive;
+- `ca-certificates`, which is what lets uv and the release-index read verify
+  anything they fetch over HTTPS;
+- `procps`, whose `ps -o lstart` is the second opinion on a process's start
+  time, from a program with no stake in the answer;
+- `curl`, what install.sh fetches the pinned uv installer with;
+- `socat`, what makes the pseudo-terminal pair the serial tests open through
+  the real pyserial (one end is the configured COM port, the other is held by
+  the scripted peer in `tests/container/pty_responder.py`, whose answers are
+  the test's own input);
+- `iproute2`, whose `ip link add ... type vcan` makes the virtual CAN
+  interface the CAN tests bind the product's SocketCAN transport to, and whose
+  `ip -details -json link show` is how the product itself reads a link's
+  control mode;
+- `can-utils`, whose `candump -L` reads a frame off that interface after the
+  product says it sent one, the observer with no stake in the answer;
+- `zsh`, the shell whose startup file step 3 of install.sh writes, started for
   real to see which of its instances reads it.
-  The mirror drops superseded package versions, so a version pin here without
-  a snapshot mirror would turn a stable job red days later for a reason
-  nothing in the change under it can explain. What fixes the versions a build
-  gets is the base digest above.
+
+The mirror drops superseded package versions, so a version pin on any of them
+without a snapshot mirror would turn a stable job red days later for a reason
+nothing in the change under it can explain. What fixes the versions a build
+gets is the base digest above.
 
 Set by the image, which is not the same as pinned:
 
