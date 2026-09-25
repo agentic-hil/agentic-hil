@@ -53,9 +53,11 @@ pyOCD.
 
 from __future__ import annotations
 
+import ast
+import functools
 import importlib
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -647,7 +649,7 @@ EXEMPT_BOUNDS = {
 }
 
 
-def is_exempt(entry: Comparison) -> bool:
+def is_exempt(entry: Comparison | TimeoutSite) -> bool:
     return any(needle in entry.statement for needle in EXEMPT_BOUNDS.get(entry.name, ()))
 
 
@@ -776,6 +778,12 @@ def test_no_floor_in_the_suite_takes_the_factor() -> None:
     )
 
 
+# What may stand after the helper call in a bound. Spelled once, because the
+# timeout walk at the end of this file gives a timeout the verdict this gives a
+# ceiling.
+UNIT_CONVERSION = re.compile(r"^(?:[*/]\s*[0-9][0-9_.]*)?$")
+
+
 def test_nothing_outside_a_helper_call_is_part_of_a_bound() -> None:
     """What may stand after the call is a unit conversion, and nothing else.
 
@@ -783,8 +791,7 @@ def test_nothing_outside_a_helper_call_is_part_of_a_bound() -> None:
     milliseconds. `scaled_time_bound(A) + B` is half a bound, and it is the
     shape a sweep produces when it wraps the first name it meets.
     """
-    conversion = re.compile(r"^(?:[*/]\s*[0-9][0-9_.]*)?$")
-    outside = [entry for entry in suite_ceilings() if not conversion.match(entry.outside_the_helper)]
+    outside = [entry for entry in suite_ceilings() if not UNIT_CONVERSION.match(entry.outside_the_helper)]
 
     assert not outside, "bounds with something other than a unit conversion outside the factor:\n" + "\n".join(
         f"  {entry.where}: {entry.bound}" for entry in outside
@@ -801,6 +808,7 @@ def test_every_exemption_still_names_one_comparison_the_walk_finds() -> None:
         if not (TESTS / name).is_file():
             continue
         statements = [entry.statement for entry in suite_comparisons() if entry.name == name]
+        statements += [site.statement for site in suite_timeout_sites() if site.name == name]
         for needle in needles:
             matching = [statement for statement in statements if needle in statement]
             assert len(matching) == 1, f"{name}: {len(matching)} comparisons carry {needle!r}, not one"
@@ -1102,3 +1110,787 @@ def test_the_helper_ships_where_the_container_tier_can_import_it() -> None:
     assert "recursive-include tests *.py" in text, text
     excluded = [line for line in text.splitlines() if line.startswith(("exclude ", "prune ")) and "support" in line]
     assert not excluded, excluded
+
+
+# ---------------------------------------------------------------------------
+# #533: the same rule for a budget a test hands to a call as its `timeout`.
+#
+# The walk above reads assertions, so a wall-clock budget written as a keyword
+# never reaches it. `subprocess.run(..., timeout=30)` bounds this host's speed
+# exactly as `assert elapsed < 30` does, and a loaded host turns it red the same
+# way, with TimeoutExpired where the other raises AssertionError. A keyword, and
+# the module-level definition of a name standing in one, are not things a
+# physical line can be trusted to show, so this second walk reads the parse
+# tree, where a string or a comment is not code in the first place.
+#
+# It reads, anywhere under `tests/`: the `timeout` keyword of `subprocess.run`,
+# `call`, `check_call` and `check_output`, under whatever name the module or the
+# function was imported as; the `timeout` keyword or the first positional
+# argument of any `.wait(...)`, whatever the receiver, because an `Event.wait(5)`
+# spends this host's time as much as a child's wait does; the `timeout` keyword
+# of any `.communicate(...)`; and the budget of a `pytest.mark.timeout` marker.
+# Every other keyword on those calls is an input the test chose for the product
+# (`timeout_s`, `wait_s`, `start_timeout_s`, a bus timeout) and is not read.
+#
+# A budget takes the factor when it is a helper call with nothing but a unit
+# conversion after it, `None`, or a name (or a module's attribute) whose
+# module-level definition is such a call, an import from another file of the
+# suite followed to that definition. A constant is therefore scaled once where it
+# is defined, not at each use. A local, a parameter or any other expression gets
+# the verdict the assertion walk gives the same text. A timeout that is itself
+# the subject of a test, a child that outlives it on purpose, is registered in
+# EXEMPT_BOUNDS by a substring of its call, with its reason, the way a product
+# envelope is.
+
+SUBPROCESS_CALLS = ("run", "call", "check_call", "check_output")
+
+
+def goes_through_the_helper(bound: str) -> bool:
+    """The verdict the assertion walk gives a ceiling spelled `bound`."""
+    split = split_helper_call(bound)
+    return split is not None and UNIT_CONVERSION.match(split[1]) is not None
+
+
+@dataclass(frozen=True)
+class TimeoutSite:
+    """One budget a test hands to a subprocess call, a wait or a timeout marker.
+
+    The budget and the definitions behind it are held in the parser's own
+    spelling, so a comment inside a wrapped expression, or where its lines
+    break, cannot change the verdict on it.
+    """
+
+    name: str
+    number: int
+    callee: str
+    value: str
+    by_keyword: bool
+    statement: str
+    definitions: tuple[str, ...]
+
+    @property
+    def where(self) -> str:
+        return f"{self.name}:{self.number}"
+
+    @property
+    def spelled(self) -> str:
+        call = f"{self.callee}(timeout={self.value})" if self.by_keyword else f"{self.callee}({self.value})"
+        return f"{call}, defined as {' and '.join(self.definitions)}" if self.definitions else call
+
+    @property
+    def takes_the_factor(self) -> bool:
+        """A helper call, `None`, or a name every module-level definition of
+        which is a helper call. `None` is no budget at all, so there is nothing
+        for a factor to widen."""
+        if self.value == "None" or goes_through_the_helper(self.value):
+            return True
+        return bool(self.definitions) and all(goes_through_the_helper(text) for text in self.definitions)
+
+
+def dotted_name(node: ast.expr) -> str | None:
+    """`a.b.c` for a chain of attributes over a name, and None for anything else."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    return ".".join([node.id, *reversed(parts)])
+
+
+def call_spellings(imports: Iterable[ast.Import | ast.ImportFrom]) -> dict[str, str]:
+    """Each spelling under which a file reaches a subprocess call or the timeout
+    marker, mapped to the call it reaches.
+
+    Handed every import in the file at any depth, so a function that imports
+    `subprocess` for itself is read like a module that imports it at the top.
+    """
+    spellings: dict[str, str] = {}
+    for node in imports:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "subprocess":
+                    spellings.update({f"{alias.asname or alias.name}.{call}": f"subprocess.{call}" for call in SUBPROCESS_CALLS})
+                elif alias.name == "pytest":
+                    spellings[f"{alias.asname or alias.name}.mark.timeout"] = "pytest.mark.timeout"
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            for alias in node.names:
+                if node.module == "subprocess" and alias.name in SUBPROCESS_CALLS:
+                    spellings[alias.asname or alias.name] = f"subprocess.{alias.name}"
+                elif node.module == "pytest" and alias.name == "mark":
+                    spellings[f"{alias.asname or alias.name}.timeout"] = "pytest.mark.timeout"
+    return spellings
+
+
+def budget_of(call: ast.Call, spellings: dict[str, str]) -> tuple[ast.expr, bool] | None:
+    """The budget a call is handed and whether it came by keyword, or None when
+    the call is none of the shapes read or is handed no budget."""
+    dotted = dotted_name(call.func)
+    if dotted is not None and dotted in spellings:
+        shape = spellings[dotted]
+    elif isinstance(call.func, ast.Attribute) and call.func.attr in ("wait", "communicate"):
+        shape = f".{call.func.attr}"
+    else:
+        return None
+    for keyword in call.keywords:
+        if keyword.arg == "timeout":
+            return keyword.value, True
+    if shape in (".wait", "pytest.mark.timeout") and call.args and not isinstance(call.args[0], ast.Starred):
+        return call.args[0], False
+    return None
+
+
+def source_of(lines: list[str], node: ast.AST) -> str:
+    """The text of `node` as the file spells it, its lines joined with single
+    spaces the way the assertion walk joins a wrapped assertion. A registration
+    is matched against this, so it can be copied out of the file.
+
+    Offsets are counted in UTF-8 bytes, which is how the parser reports them.
+    """
+    encoded = [line.encode("utf-8") for line in lines[node.lineno - 1 : node.end_lineno]]
+    encoded[-1] = encoded[-1][: node.end_col_offset]
+    encoded[0] = encoded[0][node.col_offset :]
+    return " ".join(text for text in (piece.decode("utf-8").strip() for piece in encoded) if text)
+
+
+def first_line(lines: list[str], statement: ast.stmt) -> str:
+    return lines[statement.lineno - 1].strip()
+
+
+def module_scope_statements(body: list[ast.stmt]) -> list[ast.stmt]:
+    """Every statement that runs in the module's own scope: the top level and
+    whatever an `if`, `try`, `with`, loop or `match` there holds, but nothing
+    inside a function or a class."""
+    found: list[ast.stmt] = []
+    for statement in body:
+        found.append(statement)
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            found += module_scope_statements(getattr(statement, field, []))
+        for nested in (*getattr(statement, "handlers", []), *getattr(statement, "cases", [])):
+            found += module_scope_statements(nested.body)
+    return found
+
+
+def names_bound_by(statement: ast.stmt) -> set[str]:
+    """The names one statement binds where it runs. The statements nested in its
+    body are read on their own."""
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {statement.name}
+    if isinstance(statement, (ast.Import, ast.ImportFrom)):
+        return {alias.asname or alias.name.split(".")[0] for alias in statement.names if alias.name != "*"}
+    targets: list[ast.expr] = []
+    if isinstance(statement, ast.Assign):
+        targets = statement.targets
+    elif isinstance(statement, (ast.AugAssign, ast.For, ast.AsyncFor)) or (
+        isinstance(statement, ast.AnnAssign) and statement.value is not None
+    ):
+        targets = [statement.target]
+    elif isinstance(statement, (ast.With, ast.AsyncWith)):
+        targets = [item.optional_vars for item in statement.items if item.optional_vars is not None]
+    return {node.id for target in targets for node in ast.walk(target) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
+
+
+def names_a_function_binds(function: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> frozenset[str]:
+    """Every name local to a function: its parameters and everything its body
+    binds.
+
+    Read over the whole body, nested functions included, and without honouring
+    `global`, which can only make a name local that is not. A local is judged
+    like any other expression, so the error is on the strict side.
+    """
+    arguments = function.args
+    names = {argument.arg for argument in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
+    names.update(argument.arg for argument in (arguments.vararg, arguments.kwarg) if argument is not None)
+    for statement in function.body if isinstance(function.body, list) else [function.body]:
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                names.add(node.id)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                names.add(node.name)
+            elif isinstance(node, ast.stmt):
+                names.update(names_bound_by(node))
+    return frozenset(names)
+
+
+class TimeoutWalk:
+    """The budgets handed to the calls read, in every Python file under a root.
+
+    The root is `tests/` for the pin, and a directory of synthetic sources for
+    the tests that pin the walk itself.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root.resolve()
+        self.parsed: dict[Path, tuple[ast.Module, list[str]]] = {}
+        self.bound: dict[Path, dict[str, list[ast.stmt]]] = {}
+        self.function_locals: dict[ast.AST, frozenset[str]] = {}
+
+    def module(self, path: Path) -> tuple[ast.Module, list[str]]:
+        """A file's parse tree and lines. A byte order mark is not code, and a
+        file that does not parse fails the walk by name instead of going unread."""
+        if path not in self.parsed:
+            text = path.read_text(encoding="utf-8-sig")
+            self.parsed[path] = (ast.parse(text, filename=str(path)), text.split("\n"))
+        return self.parsed[path]
+
+    def bindings(self, path: Path) -> dict[str, list[ast.stmt]]:
+        """Each name bound in a file's module scope, with the statements binding it."""
+        if path not in self.bound:
+            bound: dict[str, list[ast.stmt]] = {}
+            for statement in module_scope_statements(self.module(path)[0].body):
+                for name in names_bound_by(statement):
+                    bound.setdefault(name, []).append(statement)
+            self.bound[path] = bound
+        return self.bound[path]
+
+    def locals_of(self, function: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> frozenset[str]:
+        if function not in self.function_locals:
+            self.function_locals[function] = names_a_function_binds(function)
+        return self.function_locals[function]
+
+    def module_file(self, importer: Path, dotted: str, level: int) -> Path | None:
+        """The file under the root an import names, or None for a module elsewhere.
+
+        A relative import counts from the importing file's package. An absolute
+        one is looked for from the root, which is on the path the way `tests/` is
+        when the suite runs, and from above it when it names the root itself
+        (`from tests.container.conftest import ...`).
+        """
+        parts = dotted.split(".")
+        if level:
+            bases = [importer.parents[level - 1]]
+        elif parts[0] == self.root.name:
+            bases = [self.root, self.root.parent]
+        else:
+            bases = [self.root]
+        for base in bases:
+            for candidate in (base.joinpath(*parts[:-1], f"{parts[-1]}.py"), base.joinpath(*parts, "__init__.py")):
+                if candidate.is_file() and candidate.resolve().is_relative_to(self.root):
+                    return candidate.resolve()
+        return None
+
+    def definitions(self, path: Path, name: str, seen: frozenset[tuple[Path, str]] = frozenset()) -> tuple[str, ...]:
+        """The text of every module-level definition of `name` in `path`, an
+        import from another file under the root followed to the definition there.
+
+        A binding that is not an assignment, and an import that cannot be
+        followed, comes back as its own first line, which no helper call
+        starts, so it is refused rather than guessed at.
+        """
+        if (path, name) in seen:
+            return ()
+        lines = self.module(path)[1]
+        texts: list[str] = []
+        for statement in self.bindings(path).get(name, []):
+            targets = statement.targets if isinstance(statement, ast.Assign) else [getattr(statement, "target", None)]
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)) and statement.value is not None and any(isinstance(target, ast.Name) and target.id == name for target in targets):
+                texts.append(ast.unparse(statement.value))
+            elif isinstance(statement, ast.ImportFrom) and statement.module:
+                imported = next(alias.name for alias in statement.names if (alias.asname or alias.name) == name)
+                target = self.module_file(path, statement.module, statement.level)
+                followed = self.definitions(target, imported, seen | {(path, name)}) if target else ()
+                texts.extend(followed or [first_line(lines, statement)])
+            else:
+                texts.append(first_line(lines, statement))
+        return tuple(texts)
+
+    def attribute_definitions(self, path: Path, module: str, attribute: str) -> tuple[str, ...]:
+        """The definitions of `module.attribute`, when `module` is bound once in
+        the file, by an import of a file under the root."""
+        statements = self.bindings(path).get(module, [])
+        if len(statements) != 1:
+            return ()
+        statement = statements[0]
+        target: Path | None = None
+        if isinstance(statement, ast.Import):
+            target = next((self.module_file(path, alias.name, 0) for alias in statement.names if (alias.asname or alias.name) == module), None)
+        elif isinstance(statement, ast.ImportFrom):
+            target = next(
+                (
+                    self.module_file(path, f"{statement.module}.{alias.name}" if statement.module else alias.name, statement.level)
+                    for alias in statement.names
+                    if (alias.asname or alias.name) == module
+                ),
+                None,
+            )
+        return self.definitions(target, attribute) if target else ()
+
+    def resolved(self, path: Path, value: ast.expr, functions: tuple[ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda, ...]) -> tuple[str, ...]:
+        """The module-level definitions behind a budget that is a name or a
+        module's attribute. A local or a parameter has none, whatever it is
+        called, and neither has any other expression."""
+        base = value.value if isinstance(value, ast.Attribute) else value
+        if not isinstance(base, ast.Name) or any(base.id in self.locals_of(function) for function in functions):
+            return ()
+        if isinstance(value, ast.Attribute):
+            return self.attribute_definitions(path, base.id, value.attr)
+        return self.definitions(path, base.id)
+
+    def sites_in(self, path: Path) -> list[TimeoutSite]:
+        tree, lines = self.module(path)
+        imports: list[ast.Import | ast.ImportFrom] = []
+        calls: list[tuple[ast.Call, tuple[ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda, ...]]] = []
+        pending: list[tuple[ast.AST, tuple[ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda, ...]]] = [(tree, ())]
+        while pending:
+            node, functions = pending.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                # Decorators and defaults are evaluated where the function is
+                # defined, and the body in a scope of its own.
+                outer = [*getattr(node, "decorator_list", []), *node.args.defaults, *node.args.kw_defaults]
+                pending.extend((expression, functions) for expression in outer if expression is not None)
+                body = node.body if isinstance(node.body, list) else [node.body]
+                pending.extend((statement, (*functions, node)) for statement in body)
+                continue
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                imports.append(node)
+            elif isinstance(node, ast.Call):
+                calls.append((node, functions))
+            pending.extend((child, functions) for child in ast.iter_child_nodes(node))
+        # A call is judged once every import is known, since one below it in
+        # the file can still name what it reaches.
+        spellings = call_spellings(imports)
+        found: list[tuple[int, int, TimeoutSite]] = []
+        for node, functions in calls:
+            if (budget := budget_of(node, spellings)) is None:
+                continue
+            value, by_keyword = budget
+            site = TimeoutSite(
+                name=path.relative_to(self.root).as_posix(),
+                number=value.lineno,
+                callee=source_of(lines, node.func),
+                value=ast.unparse(value),
+                by_keyword=by_keyword,
+                statement=source_of(lines, node),
+                definitions=self.resolved(path, value, functions),
+            )
+            found.append((value.lineno, value.col_offset, site))
+        return [site for _, _, site in sorted(found, key=lambda entry: entry[:2])]
+
+    def sites(self) -> list[TimeoutSite]:
+        return [site for path in sorted(self.root.rglob("*.py")) for site in self.sites_in(path)]
+
+
+def timeout_sites_under(root: Path) -> list[TimeoutSite]:
+    """Every budget handed to a call the walk reads, in every Python file under `root`."""
+    return TimeoutWalk(root).sites()
+
+
+@functools.cache
+def suite_timeout_sites() -> tuple[TimeoutSite, ...]:
+    """The suite's own sites, read once per process, because the whole tree is parsed."""
+    return tuple(timeout_sites_under(TESTS))
+
+
+def refused_timeouts(sites: Iterable[TimeoutSite]) -> list[TimeoutSite]:
+    return [site for site in sites if not site.takes_the_factor and not is_exempt(site)]
+
+
+def write_sources(root: Path, sources: dict[str, list[str]], encoding: str = "utf-8") -> None:
+    """Lay out synthetic files under `root`, each written from a list of lines
+    for the reason SCANNER_SAMPLE is."""
+    for name, lines in sources.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n", encoding=encoding)
+
+
+def marked(lines: list[str], marker: str) -> list[int]:
+    """The numbers of the lines in a sample whose trailing comment is `marker`."""
+    return [number for number, line in enumerate(lines, start=1) if line.endswith(f"# {marker}")]
+
+
+# One of each call shape the issue names, under each way of importing it, and in
+# each place a test puts one.
+SHAPES_SAMPLE = [
+    "import subprocess",
+    "import subprocess as sp",
+    "from subprocess import check_output as output_of",
+    "from subprocess import run",
+    "",
+    'subprocess.run(["true"], timeout=30)  # refused',
+    "",
+    "",
+    "def test_every_shape(child, event) -> None:",
+    '    subprocess.call(["true"], timeout=31)  # refused',
+    '    subprocess.check_call(["true"], timeout=32)  # refused',
+    '    subprocess.check_output(["true"], timeout=33)  # refused',
+    '    sp.run(["true"], timeout=34)  # refused',
+    '    run(["true"], timeout=35)  # refused',
+    '    output_of(["true"], timeout=36)  # refused',
+    "    child.wait(timeout=15)  # refused",
+    "    child.wait(16)  # refused",
+    "    event.wait(timeout=5)  # refused",
+    '    subprocess.Popen(["true"]).wait(timeout=17)  # refused',
+    "    child.communicate(timeout=10)  # refused",
+    '    child.communicate(b"input", timeout=11)  # refused',
+    "    subprocess.run(",
+    '        ["true"],',
+    "        capture_output=True,",
+    "        timeout=37,  # refused",
+    "    )",
+    "",
+    "",
+    "class Holder:",
+    "    def stop(self) -> None:",
+    "        self.process.wait(18)  # refused",
+    "",
+    "",
+    "async def test_in_a_coroutine(child) -> None:",
+    "    child.wait(timeout=19)  # refused",
+    "",
+    "",
+    "def test_in_a_helper(child) -> None:",
+    "    def stop() -> None:",
+    "        child.wait(timeout=20)  # refused",
+    "",
+    "    stop()",
+    "    closing = lambda: child.communicate(timeout=21)  # refused",
+    "    closing()",
+]
+
+
+def test_each_call_shape_with_a_bare_budget_is_refused_by_file_and_line(tmp_path: Path) -> None:
+    """Every shape the issue names, however it was imported, wherever a test
+    puts it: module level, a test, a method, a coroutine, a nested helper and a
+    lambda. The receiver of a wait is not typed, so an event's wait is read like
+    a child's. The line named is the one the budget stands on."""
+    write_sources(tmp_path, {"sample/test_shapes.py": SHAPES_SAMPLE})
+
+    refused = refused_timeouts(timeout_sites_under(tmp_path))
+
+    expected = marked(SHAPES_SAMPLE, "refused")
+    assert len(expected) == 18
+    assert [site.where for site in refused] == [f"sample/test_shapes.py:{number}" for number in expected], [
+        site.spelled for site in refused
+    ]
+
+
+ACCEPTED_ROOT_CONFTEST = [
+    "from support import scaled_time_bound",
+    "",
+    "INSTALL_TIMEOUT_S = scaled_time_bound(600.0)",
+]
+
+ACCEPTED_TIER_CONFTEST = [
+    "from support import scaled_time_bound",
+    "",
+    "COMMAND_TIMEOUT_S = scaled_time_bound(300.0)",
+]
+
+ACCEPTED_SAMPLE = [
+    "import subprocess",
+    "",
+    "from conftest import INSTALL_TIMEOUT_S",
+    "from support import scaled_time_bound",
+    "",
+    "from . import conftest",
+    "from .conftest import COMMAND_TIMEOUT_S",
+    "",
+    "CHILD_TIMEOUT_S = scaled_time_bound(30)",
+    "",
+    "",
+    "def test_accepted(child, event) -> None:",
+    '    subprocess.run(["true"], timeout=scaled_time_bound(30))  # accepted',
+    "    child.wait(scaled_time_bound(15))  # accepted",
+    "    child.communicate(timeout=None)  # accepted",
+    "    event.wait(timeout=CHILD_TIMEOUT_S)  # accepted",
+    '    subprocess.check_call(["true"], timeout=COMMAND_TIMEOUT_S)  # accepted',
+    "    child.wait(timeout=conftest.COMMAND_TIMEOUT_S)  # accepted",
+    '    subprocess.run(["true"], timeout=INSTALL_TIMEOUT_S)  # accepted',
+    "    child.wait(",
+    "        timeout=scaled_time_bound(  # accepted",
+    "            30,",
+    "        ),",
+    "    )",
+]
+
+
+def test_each_accepted_form_of_a_budget_passes(tmp_path: Path) -> None:
+    """A helper call, `None`, and a name or a module's attribute defined as a
+    helper call, in this file or in a conftest reached the way each tier imports
+    its own. A helper call wrapped over lines reads like one that is not."""
+    write_sources(
+        tmp_path,
+        {
+            "conftest.py": ACCEPTED_ROOT_CONFTEST,
+            "accepted/conftest.py": ACCEPTED_TIER_CONFTEST,
+            "accepted/test_accepted.py": ACCEPTED_SAMPLE,
+        },
+    )
+
+    found = timeout_sites_under(tmp_path)
+
+    assert [site.where for site in found] == [f"accepted/test_accepted.py:{number}" for number in marked(ACCEPTED_SAMPLE, "accepted")]
+    assert not refused_timeouts(found), [site.spelled for site in refused_timeouts(found)]
+
+
+REGISTERED_SAMPLE = [
+    "import subprocess",
+    "",
+    "import pytest",
+    "",
+    "OUTLIVED_TIMEOUT_S = 0.5",
+    "",
+    "",
+    "def test_a_child_that_outlives_its_budget(child) -> None:",
+    "    with pytest.raises(subprocess.TimeoutExpired):",
+    '        subprocess.run(["sleep", "60"], timeout=OUTLIVED_TIMEOUT_S)  # registered',
+    "    child.wait(timeout=30)  # refused",
+]
+
+
+def test_a_deliberate_timeout_is_registered_the_way_a_product_envelope_is(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A budget that is itself the question, a child that outlives it on
+    purpose, is named in EXEMPT_BOUNDS by a substring of its call and passes.
+    Scaling it would change what the test asks. The file's other budgets are
+    still read."""
+    write_sources(tmp_path, {"registered/test_registered.py": REGISTERED_SAMPLE})
+    sites = timeout_sites_under(tmp_path)
+    registered, refused = marked(REGISTERED_SAMPLE, "registered"), marked(REGISTERED_SAMPLE, "refused")
+
+    assert [site.number for site in refused_timeouts(sites)] == registered + refused
+
+    needle = "timeout=OUTLIVED_TIMEOUT_S"
+    monkeypatch.setitem(EXEMPT_BOUNDS, "registered/test_registered.py", (needle,))
+
+    assert [site.number for site in sites if needle in site.statement] == registered
+    assert [site.number for site in refused_timeouts(sites)] == refused
+
+
+CONSTANTS_TIER_CONFTEST = [
+    "INSTALL_TIMEOUT_S = 600.0",
+]
+
+CONSTANTS_SAMPLE = [
+    "import subprocess",
+    "",
+    "from support import scaled_time_bound",
+    "",
+    "from .conftest import INSTALL_TIMEOUT_S",
+    "",
+    "CHILD_TIMEOUT_S = scaled_time_bound(30)",
+    "BARE_TIMEOUT_S = 30",
+    "",
+    "",
+    "def test_constants(child) -> None:",
+    "    child.wait(timeout=CHILD_TIMEOUT_S)  # accepted",
+    "    child.wait(CHILD_TIMEOUT_S)  # accepted",
+    "    child.wait(timeout=BARE_TIMEOUT_S)  # refused",
+    '    subprocess.run(["true"], timeout=INSTALL_TIMEOUT_S)  # refused',
+    "",
+    "",
+    "def test_a_parameter_is_not_the_constant(child, CHILD_TIMEOUT_S=30) -> None:",
+    "    child.wait(timeout=CHILD_TIMEOUT_S)  # refused",
+    "",
+    "",
+    "def test_a_local_is_not_the_constant(child) -> None:",
+    "    CHILD_TIMEOUT_S = 30",
+    "    child.wait(timeout=CHILD_TIMEOUT_S)  # refused",
+]
+
+
+def test_a_module_constant_is_judged_once_at_its_definition(tmp_path: Path) -> None:
+    """`CHILD_TIMEOUT_S = scaled_time_bound(30)` scales every use of the name,
+    and a constant defined as a bare number is refused at each use, the line a
+    reader converting it is sent to, with the definition named beside it. An
+    import is followed to the file that defines the constant. A parameter or a
+    local that shares the constant's name is not the constant."""
+    write_sources(tmp_path, {"constants/conftest.py": CONSTANTS_TIER_CONFTEST, "constants/test_constants.py": CONSTANTS_SAMPLE})
+
+    found = timeout_sites_under(tmp_path)
+
+    accepted, refused = marked(CONSTANTS_SAMPLE, "accepted"), marked(CONSTANTS_SAMPLE, "refused")
+    assert [site.number for site in found] == sorted(accepted + refused)
+    assert [site.number for site in refused_timeouts(found)] == refused
+    by_line = {site.number: site for site in found}
+    assert by_line[12].definitions == ("scaled_time_bound(30)",)
+    assert by_line[14].definitions == ("30",)
+    assert by_line[15].definitions == ("600.0",)
+    assert by_line[19].definitions == by_line[24].definitions == ()
+
+
+# Locals and computed expressions, each written once as a ceiling and once as a
+# budget, so the two walks are asked about the same text.
+MIRRORED_BOUNDS = (
+    "30",
+    "budget",
+    "timeout_s",
+    "2 * CHILD_TIMEOUT_S",
+    "scaled_time_bound(30) * 1000",
+    "scaled_time_bound(30) + 5",
+    "5 + scaled_time_bound(30)",
+    "scaled_time_bound(LONG_S) if slow else scaled_time_bound(SHORT_S)",
+    "max(scaled_time_bound(30), 1.0)",
+    "wait_bound()",
+)
+
+
+def test_a_local_or_computed_budget_gets_the_verdict_the_assertion_walk_gives(tmp_path: Path) -> None:
+    """The policy mirrored, not loosened: a name standing for a scaled module
+    constant is the one addition, and only where it stands alone."""
+    lines = [
+        "from support import scaled_time_bound",
+        "",
+        "CHILD_TIMEOUT_S = scaled_time_bound(30)",
+        "",
+        "",
+        "def sample(child, budget, timeout_s, slow, wait_bound, LONG_S, SHORT_S) -> None:",
+    ]
+    for bound in MIRRORED_BOUNDS:
+        lines.append(f"    assert elapsed < {bound}, 'a ceiling'")
+        lines.append(f"    child.wait(timeout={bound})")
+    write_sources(tmp_path, {"mirror/test_mirror.py": lines})
+
+    ceilings = comparisons_in("\n".join(lines), tmp_path / "mirror" / "test_mirror.py")
+    by_the_assertion_walk = [entry.through_the_helper and UNIT_CONVERSION.match(entry.outside_the_helper) is not None for entry in ceilings]
+    by_the_timeout_walk = [site.takes_the_factor for site in timeout_sites_under(tmp_path)]
+
+    assert by_the_timeout_walk == by_the_assertion_walk, list(zip(MIRRORED_BOUNDS, by_the_timeout_walk, strict=False))
+    assert by_the_assertion_walk == [bound == "scaled_time_bound(30) * 1000" for bound in MIRRORED_BOUNDS]
+
+
+MARKER_SAMPLE = [
+    "import pytest",
+    "from pytest import mark",
+    "from support import scaled_time_bound",
+    "",
+    "pytestmark = pytest.mark.timeout(3)  # refused",
+    "",
+    "",
+    "@pytest.mark.timeout(3)  # refused",
+    "def test_positional() -> None:",
+    "    pass",
+    "",
+    "",
+    "@pytest.mark.timeout(timeout=4)  # refused",
+    "def test_keyword() -> None:",
+    "    pass",
+    "",
+    "",
+    "@mark.timeout(5)  # refused",
+    "def test_imported_mark() -> None:",
+    "    pass",
+    "",
+    "",
+    "@pytest.mark.timeout(scaled_time_bound(3))  # accepted",
+    "def test_scaled() -> None:",
+    "    pass",
+]
+
+
+def test_a_bare_number_in_a_pytest_timeout_marker_is_refused(tmp_path: Path) -> None:
+    """None exist in the suite. The rule stands anyway, on the same grounds: the
+    marker's budget is this host's time like any other."""
+    write_sources(tmp_path, {"marker/test_marker.py": MARKER_SAMPLE})
+
+    found = timeout_sites_under(tmp_path)
+
+    refused = marked(MARKER_SAMPLE, "refused")
+    assert [site.number for site in found] == sorted(refused + marked(MARKER_SAMPLE, "accepted"))
+    assert [site.number for site in refused_timeouts(found)] == refused
+
+
+INPUTS_SAMPLE = [
+    "import subprocess",
+    "",
+    "",
+    "def test_inputs(service, session, bus, child, config) -> None:",
+    "    service.wait(timeout_s=4.0)",
+    "    session.wait(wait_s=2.0, interval_ms=50)",
+    '    attach_participant(config, "bench", "alpha", start_timeout_s=4.0)',
+    "    bus.recv(timeout=0.5)",
+    '    subprocess.run(["true"], env={"TIMEOUT": "30"})',
+    '    subprocess.Popen(["true"], text=True)',
+    "    child.wait()",
+    '    child.communicate(b"input")',
+    "    child.wait(timeout=12)  # read",
+]
+
+
+def test_no_keyword_but_timeout_is_read_on_those_calls(tmp_path: Path) -> None:
+    """A number the test hands the product as an input stays the test's choice:
+    `timeout_s`, `wait_s`, `interval_ms`, `start_timeout_s` and a bus's own
+    timeout are not read, nor is the input a child is handed. The last line is
+    the control that shows the walk was reading."""
+    write_sources(tmp_path, {"inputs/test_inputs.py": INPUTS_SAMPLE})
+
+    found = timeout_sites_under(tmp_path)
+
+    assert [site.number for site in found] == marked(INPUTS_SAMPLE, "read"), [site.spelled for site in found]
+
+
+PROSE_SAMPLE = [
+    "import subprocess",
+    "",
+    'CHILD = """',
+    "import subprocess",
+    'subprocess.run(["true"], timeout=30)',
+    '"""',
+    "",
+    "",
+    "def test_prose(child) -> None:",
+    '    """Calls `child.wait(timeout=30)` and never `subprocess.run(timeout=5)`."""',
+    "    # child.wait(timeout=30)",
+    '    said = "child.communicate(timeout=10)"',
+    '    raw = b"child.wait(5)"',
+    '    noted = f"{said} child.wait(timeout=30)"',
+    "    child.wait(timeout=None)  # not child.wait(timeout=30)  # read",
+    '    subprocess.run(["python", "-c", "import time; time.sleep(1)"], check=False)',
+]
+
+
+def test_strings_and_comments_are_not_read_as_budgets(tmp_path: Path) -> None:
+    """A child's script, a docstring, a comment and a message are not code, and
+    nothing in them is a budget; the one real call beside them is read."""
+    write_sources(tmp_path, {"prose/test_prose.py": PROSE_SAMPLE})
+
+    found = timeout_sites_under(tmp_path)
+
+    assert [(site.number, site.value) for site in found] == [(number, "None") for number in marked(PROSE_SAMPLE, "read")]
+    assert not refused_timeouts(found)
+
+
+def test_a_file_that_opens_with_a_byte_order_mark_is_read_like_any_other(tmp_path: Path) -> None:
+    """Two files of the suite start with one, and the parser refuses the
+    character when it is read as plain UTF-8, so a walk that did that would lose
+    exactly those files."""
+    lines = ["import subprocess", "", "", "def test_marked() -> None:", '    subprocess.run(["true"], timeout=30)  # refused']
+    write_sources(tmp_path, {"bom/test_bom.py": lines}, encoding="utf-8-sig")
+
+    assert (tmp_path / "bom" / "test_bom.py").read_bytes().startswith(b"\xef\xbb\xbf")
+    assert [site.where for site in refused_timeouts(timeout_sites_under(tmp_path))] == ["bom/test_bom.py:5"]
+
+
+def test_a_file_that_does_not_parse_fails_the_walk_by_name(tmp_path: Path) -> None:
+    """Never a file skipped in silence: a tree the walk could not read is a tree
+    it cannot vouch for."""
+    write_sources(tmp_path, {"broken/test_broken.py": ["def test_broken(:", "    pass"]})
+
+    with pytest.raises(SyntaxError) as refused:
+        timeout_sites_under(tmp_path)
+
+    assert str(refused.value.filename).endswith("test_broken.py"), refused.value
+
+
+def test_the_timeout_walk_reads_every_tier_the_suite_has() -> None:
+    """The plain tier, the container tier and the bench tier, all of them."""
+    tiers = {site.name.split("/")[0] if "/" in site.name else "tests" for site in suite_timeout_sites()}
+
+    assert {"tests", "container", "bench"} <= tiers, sorted(tiers)
+
+
+def test_every_budget_the_suite_hands_a_call_takes_the_factor() -> None:
+    """The pin the issue asks for: no timeout on a child, a wait or a marker
+    that a loaded host cannot be granted slack on.
+
+    The failure lists each by file and line with the call as it is spelled and
+    the definition behind a constant, because the reader is deciding what to
+    change.
+    """
+    offenders = refused_timeouts(suite_timeout_sites())
+
+    assert not offenders, f"{len(offenders)} timeouts a loaded host cannot be granted any slack on:\n" + "\n".join(
+        f"  {site.where}: {site.spelled}" for site in offenders
+    )
