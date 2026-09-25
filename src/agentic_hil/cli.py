@@ -3390,7 +3390,21 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narro
         else:
             next_steps.append(f"{confirmed}No host COM ports detected. Connect USB serial hardware and run: agentic-hil com-ports")
     else:
-        next_steps.append(f"{confirmed}COM port discovery failed. Run: agentic-hil com-ports after checking the pyserial installation.")
+        # The item that says the listing failed also says how, with the error
+        # whole: the discovery carries it as `backend_error`, and neither the init
+        # nor the setup screen prints `available_com_ports`. An OS error raised
+        # while listing means pyserial was imported, so what to do follows the
+        # causes that result names; only a pyserial that could not be imported is
+        # sent to its installation. A Windows error is the system's own sentence
+        # and brings its own full stop.
+        error = str(available_com_ports.get("backend_error") or "")
+        failed = f"COM port discovery failed: {error}" if error else "COM port discovery failed"
+        stop = "" if failed.endswith(".") else "."
+        if available_com_ports.get("error_type") == "com_port_discovery_failed":
+            advice = "Run: agentic-hil com-ports again once the USB serial devices have settled."
+        else:
+            advice = "Run: agentic-hil com-ports after checking the pyserial installation."
+        next_steps.append(f"{confirmed}{failed}{stop} {advice}")
     next_steps.extend(
         [
             "For CAN access, add a named bus under can_buses.",
