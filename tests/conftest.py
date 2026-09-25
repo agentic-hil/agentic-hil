@@ -299,10 +299,11 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         return
     # The finish is listed with this environment rather than the one the tests
     # leave behind. `--exclude-standard` reads the global excludes file, which
-    # git finds through HOME, USERPROFILE and XDG_CONFIG_HOME, and a test that
-    # sets one of those through `monkeypatch` can leave the sandbox's value in
-    # place for the rest of the session: listed that way, every file the
-    # developer ignores globally would count as new.
+    # git finds through HOME, USERPROFILE and XDG_CONFIG_HOME, and a test or
+    # fixture that changes one of those without putting it back, by writing
+    # `os.environ` directly, leaves its value in place for the rest of the
+    # session: listed that way, every file the developer ignores globally
+    # would count as new.
     environment = dict(os.environ)
     try:
         session.config.stash[_TREE_AT_START] = (git, environment, _untracked_files(git, environment))
@@ -377,9 +378,11 @@ def isolated_config_environment(
     # it, this redirect included; one test did exactly that, and the CLI calls
     # that followed installed into and then uninstalled from the developer's real
     # profile (#270). An instance the fixture owns is out of reach of anything a
-    # test does to its own, and the finalizer registered for it runs after the
-    # test's monkeypatch has already rolled its own changes back onto these
-    # values, so the environment still unwinds in the order it was built.
+    # test does to its own. The test's own is the `monkeypatch` below, which
+    # depends on this fixture, so pytest rolls the test's changes back onto
+    # these values before the finalizer registered for this instance runs, and
+    # the environment unwinds in the order it was built whatever the fixtures
+    # are called (#563).
     isolation = pytest.MonkeyPatch()
     request.addfinalizer(isolation.undo)
     home_root.mkdir(parents=True)
@@ -421,6 +424,34 @@ def isolated_config_environment(
     isolation.setenv("LINES", "24")
     isolation.delenv("AGENTIC_HIL_CONFIG", raising=False)
     return config_root
+
+
+@pytest.fixture
+def monkeypatch(isolated_config_environment: Path, monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+    """pytest's own `monkeypatch`, set up after the sandbox and undone before it, whoever asks for it.
+
+    A change made through `monkeypatch` records the value it replaced, and for
+    every variable the isolation redirects that value is the sandbox's, so the
+    change has to be undone before the isolation is, or it puts the sandbox
+    back after the isolation has restored the session. Without this fixture it
+    was not: pytest sets a conftest's autouse fixtures up in the order their
+    names sort, three of them take `monkeypatch` and sort ahead of the
+    isolation, and the instance they share with the test was therefore created
+    first and undone last. Every variable a test moved through it stayed on its
+    deleted sandbox for the session fixtures, module fixtures and hooks after
+    it on that worker, and a developer's own AGENTIC_HIL_CONFIG was gone for
+    the rest of the session (#563).
+
+    Depending on the isolation makes the order a matter of dependency instead
+    of names. pytest resolves a fixture's name for the test that needs it, so
+    this is the `monkeypatch` every requester under tests/ receives, the test
+    itself, an autouse fixture or pytester alike, and asking for its own name
+    reaches pytest's instance one level up. A fixture is set up after the
+    fixtures it depends on and torn down before them, so this one is created
+    once the sandbox is in place and undone while it still is, whatever any
+    fixture is called.
+    """
+    return monkeypatch
 
 
 @pytest.fixture(autouse=True)

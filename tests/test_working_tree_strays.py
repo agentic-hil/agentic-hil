@@ -331,13 +331,13 @@ def test_a_globally_ignored_path_stays_ignored_when_a_test_moved_home(pytester: 
     """The finish is read the way the start was, whatever a test left in the environment.
 
     `--exclude-standard` includes the developer's global excludes file, which
-    git finds through HOME, USERPROFILE and XDG_CONFIG_HOME, and a test that
-    sets one of those through `monkeypatch` leaves the sandbox's value behind
-    when it ends (the same leak that sent pip's cache into the repository root).
-    Read with the environment a test left, the finish would list every globally
-    ignored file as new and blame a test for the developer's own editor files.
-    So the premise is shown first, with git itself, and then the run: only the
-    file a test wrote is named.
+    git finds through HOME, USERPROFILE and XDG_CONFIG_HOME, and a test or
+    fixture that changes one of those without putting it back leaves its value
+    behind for the rest of the session, as the session fixture in this tree
+    does by writing `os.environ` directly. Read with the environment a test
+    left, the finish would list every globally ignored file as new and blame a
+    test for the developer's own editor files. So the premise is shown first,
+    with git itself, and then the run: only the file a test wrote is named.
     """
     global_config = pytester.path / "global-config"
     (global_config / "git").mkdir(parents=True)
