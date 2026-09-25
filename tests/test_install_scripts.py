@@ -5070,8 +5070,14 @@ def _receipt_document(path: Path) -> dict:
 
 
 def _uv_wheel_download(into: Path) -> list[str]:
-    """The command `real_uv_on_windows` runs to fetch the uv wheel into `into`."""
-    return [sys.executable, "-m", "pip", "download", "--quiet", "--disable-pip-version-check", "--no-deps", "--only-binary=:all:", "--dest", str(into), "uv"]
+    """The command `real_uv_on_windows` runs to fetch the uv wheel into `into`.
+
+    pip's cache is named, and kept inside `into`: left to find its own, pip on
+    Windows asks the shell, which answers out of USERPROFILE, and a USERPROFILE
+    an earlier test left on a deleted sandbox home sent the cache into the
+    working directory, which is the repository root (#544).
+    """
+    return [sys.executable, "-m", "pip", "download", "--quiet", "--disable-pip-version-check", "--no-deps", "--only-binary=:all:", "--dest", str(into), "--cache-dir", str(into / "pip-cache"), "uv"]
 
 
 @pytest.fixture(scope="session")
