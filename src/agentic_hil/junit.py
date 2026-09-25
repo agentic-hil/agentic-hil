@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from xml.etree import ElementTree
 
-from agentic_hil.test_reactor import result_error_type, result_failed, step_results
+from agentic_hil.test_reactor import RUN_STOPPED_ERROR, result_error_type, result_failed, step_results
 from agentic_hil.types import JsonObject
 
 if TYPE_CHECKING:
@@ -174,7 +174,7 @@ def junit_xml_document(result: JsonObject, *, plan_steps: Sequence[TestStep] = (
         if elapsed is not None:
             measured.append(elapsed)
             case.set("time", _format_seconds(elapsed))
-        if result_failed(step_result):
+        if result_failed(step_result) and not _ended_by_the_stop(result, step_result):
             failures += 1
             failure = ElementTree.SubElement(
                 case,
@@ -284,6 +284,16 @@ def run_refusal(result: JsonObject) -> JsonObject | None:
         return None
     detail = result.get("validation_error")
     return detail if isinstance(detail, dict) else result
+
+
+def _ended_by_the_stop(result: JsonObject, step_result: JsonObject) -> bool:
+    """Whether a step's `ok: false` is the run's own stop and nothing else.
+
+    A stop is read between the steps a block runs as well, and a block it lands
+    in ends with `run_stopped` as its own result. Every step the block ran
+    passed, or the run would have failed there instead, so the design's rule
+    for a stopped run holds for it: a step the run ran is a pass."""
+    return result.get("stopped") is True and result_error_type(step_result) == RUN_STOPPED_ERROR
 
 
 def _skip_message(result: JsonObject, *, refused: bool) -> str:
