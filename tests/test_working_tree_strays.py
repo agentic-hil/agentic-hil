@@ -164,9 +164,9 @@ def test_that_runs_a_session_of_its_own_tree():
 
 
 def a_tree_running_the_suites_conftest(tree: Path, test_module: str, *, gitignore: str = GITIGNORE) -> Path:
-    """The suite's conftest and the module it imports, one test module, and nothing else."""
+    """The suite's conftest with the module it imports and the plugin it loads, one test module, and nothing else."""
     (tree / "tests").mkdir(parents=True)
-    for name in ("conftest.py", "support.py"):
+    for name in ("conftest.py", "support.py", "suite_ledger.py"):
         shutil.copyfile(HERE / name, tree / "tests" / name)
     (tree / "tests" / "test_inner.py").write_text(test_module, encoding="utf-8")
     (tree / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
