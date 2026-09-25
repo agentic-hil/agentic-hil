@@ -995,8 +995,9 @@ class AgenticHILToolService:
         because of that split: a boolean is a flag the caller sets for itself,
         which is why `confirm_safe_state` does not exist here and will not, while
         a sentence about a bench is something the caller has to have been given.
-        Nothing here can verify it was; the tool's own description says outright
-        that inventing one writes a false ledger record with the agent named as
+        Nothing here can verify it was; the tool's own description forbids
+        inventing one, the refusal that asks for one says that doing so writes
+        a false ledger record with the agent named as
         actor, and the ledger keeps `operator_statement_via_agent` distinct from
         an operator's own `operator_confirmation` so the two are never read as
         the same evidence afterwards. The operator's command line stays in every

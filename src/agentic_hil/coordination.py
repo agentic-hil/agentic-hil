@@ -1924,6 +1924,7 @@ class HardwareCoordinator:
                         "current_config_sha256": self.config_sha256,
                         "override": "accept_config_change (CLI: --accept-config-change)",
                         "quarantine_id": quarantine_id,
+                        **remediation_fields("config_changed"),
                     }
                 resources = [item for item in record.get("resources", []) if isinstance(item, str)]
                 if len(resources) != len(set(resources)):

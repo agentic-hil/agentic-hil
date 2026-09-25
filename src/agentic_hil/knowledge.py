@@ -606,6 +606,21 @@ _CONFIG_MISSING_REPORT_AND_ASK = (
     "missing."
 )
 
+# The two steps out of a `config_changed` refusal, named for the same reason: it
+# reaches an agent through `hardware_recover` and a person through `agentic-hil
+# recover`, and each reader's first move is on their own surface. The override
+# is the operator's acceptance of a change they have reviewed, so neither step
+# hands it over ready-made: over MCP it is passed once they have confirmed, and
+# at a shell they add it to their own line themselves.
+_CONFIG_CHANGED_MCP_ROUTE = (
+    "Over MCP, show the operator both digests, `recorded_config_sha256` and `current_config_sha256`; once they have "
+    "reviewed the change between them and confirm it, call `hardware_recover` again with `accept_config_change: true`."
+)
+_CONFIG_CHANGED_SHELL_ROUTE = (
+    "At a shell, the operator adds `--accept-config-change` to their own `agentic-hil recover` line, and only after "
+    "reviewing both digests: the flag is their acceptance of the change, so no command handed to them carries it."
+)
+
 # The one remediation step that is a pointer rather than an instruction. It is
 # worth its place only where the field it points at exists, and a plan refusal
 # that carries no `validation_error.next_step` printed it anyway, telling the
@@ -1232,6 +1247,16 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not clear the state files under `state_root` by hand, and do not ask the operator to. The routes "
             "above are the supported ones and they keep the ledger line saying who cleared what, and on what.",
         ),
+    ),
+    "config_changed": ErrorRemedy(
+        meaning=(
+            "The authoritative configuration changed after this incident was recorded: `recorded_config_sha256` is the "
+            "digest it was recorded under and `current_config_sha256` the one this server holds now. The recorded "
+            "configuration defined the resources, permissions and limits the incident happened under; clearing it "
+            "under another one would clear an incident nobody has assessed against the change, so nothing was cleared."
+        ),
+        remediation=(_CONFIG_CHANGED_MCP_ROUTE, _CONFIG_CHANGED_SHELL_ROUTE),
+        cli_remediation=(_CONFIG_CHANGED_SHELL_ROUTE, _CONFIG_CHANGED_MCP_ROUTE),
     ),
     CONFIG_WIDENING_ERROR: ErrorRemedy(
         meaning=(

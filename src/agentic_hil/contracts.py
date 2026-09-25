@@ -78,7 +78,7 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "probe_target", "description": "Probe the configured embedded target through the configured debugger. Use this instead of openocd, pyocd, or gdb.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     {"name": "artifact_upload", "description": "Upload a local or base64-encoded firmware artifact into the configured Agentic HIL artifact store.", "inputSchema": object_schema({"image_path": NONEMPTY_STRING, "filename": NONEMPTY_STRING, "data_base64": NONEMPTY_STRING}, one_of=[{"required": ["image_path"]}, {"required": ["filename", "data_base64"]}])},
     {"name": "flash_firmware", "description": "Flash a validated firmware artifact. Provide exactly one of image_path or artifact_id. Use this instead of openocd, st-flash, or pyocd flash.", "inputSchema": object_schema({"image_path": NONEMPTY_STRING, "artifact_id": NONEMPTY_STRING, "reset_after_flash": {"type": "boolean", "default": False}}, one_of=[{"required": ["image_path"]}, {"required": ["artifact_id"]}])},
-    {"name": "reset_target", "description": "Reset the configured target through the configured debugger. Use this instead of st-util, openocd, or a raw gdb reset.", "inputSchema": object_schema({"mode": {"type": "string", "enum": ["run", "halt", "init"], "default": "run", "description": "How the target is left afterwards. 'run' resets and lets the target execute. 'halt' leaves the core stopped. 'init' additionally runs the target's reset-init event script (clock tree, wait states, watchdog) and is OpenOCD-only: the stlink and pyocd backends refuse it with not_supported rather than halting and calling that init."}})},
+    {"name": "reset_target", "description": "Reset the configured target through the configured debugger. Use this instead of st-util, openocd, or a raw gdb reset.", "inputSchema": object_schema({"mode": {"type": "string", "enum": ["run", "halt", "init"], "default": "run", "description": "How the target is left: 'run' executes, 'halt' stops the core, 'init' also runs the reset-init script (clock tree, wait states, watchdog) and is OpenOCD-only: other backends answer not_supported."}})},
     {"name": "debug_start_session", "description": "Start a typed debug session for a validated ELF artifact.", "inputSchema": object_schema({"image_path": NONEMPTY_STRING, "artifact_id": NONEMPTY_STRING, "mode": {"type": "string", "enum": ["attach", "reset_halt", "load"], "default": "attach"}, "timeout_s": TIMEOUT}, one_of=[{"required": ["image_path"]}, {"required": ["artifact_id"]}])},
     {"name": "debug_stop_session", "description": "Stop the active typed debug session.", "inputSchema": object_schema({"timeout_s": TIMEOUT})},
     {"name": "debug_get_session_status", "description": "Return active debug-session status.", "inputSchema": EMPTY_OBJECT_SCHEMA},
@@ -89,7 +89,7 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "debug_halt", "description": "Halt the target in the active debug session.", "inputSchema": object_schema({"timeout_s": TIMEOUT})},
     {"name": "debug_get_stop_reason", "description": "Return the last structured stop reason.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     {"name": "debug_symbol_info", "description": "Resolve an allowed debug symbol.", "inputSchema": object_schema({"symbol": SYMBOL_NAME}, required=["symbol"])},
-    {"name": "debug_symbol_value", "description": "Read an allowed symbol's current bytes out of target memory and return them, as hex in memory order and, at 1, 2, 4 or 8 bytes, as an unsigned and a signed integer read in the byte order the firmware image declares. Use this instead of reading a variable through a raw gdb print.", "inputSchema": object_schema({"symbol": SYMBOL_NAME}, required=["symbol"])},
+    {"name": "debug_symbol_value", "description": "Read an allowed symbol's bytes from target memory, as hex and as integers. Use this instead of a raw gdb print.", "inputSchema": object_schema({"symbol": SYMBOL_NAME}, required=["symbol"])},
     {"name": "debug_dump_symbol_ihex", "description": "Read an allowed symbol from target memory and write Intel HEX.", "inputSchema": object_schema({"symbol": SYMBOL_NAME, "output_path": NONEMPTY_STRING}, required=["symbol", "output_path"])},
     {"name": "get_last_report", "description": "Return the most recent structured Agentic HIL report.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     {"name": "classify_last_error", "description": "Classify the most recent Agentic HIL/debugger failure.", "inputSchema": EMPTY_OBJECT_SCHEMA},
@@ -98,19 +98,17 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "com_session_stop", "description": "Stop a configured COM port session.", "inputSchema": object_schema({"port_id": NONEMPTY_STRING}, required=["port_id"])},
     {"name": "com_write", "description": "Write text or hex stimulus to an active COM port session.", "inputSchema": object_schema({"port_id": NONEMPTY_STRING, "text": {"type": "string"}, "hex": {"type": "string"}}, required=["port_id"], one_of=[{"required": ["text"]}, {"required": ["hex"]}])},
     {"name": "com_read", "description": "Read buffered feedback from an active COM port session. Use this instead of screen, minicom, or picocom.", "inputSchema": object_schema({"port_id": NONEMPTY_STRING, "max_bytes": {"type": "integer", "minimum": 1}, "wait_timeout_s": TIMEOUT}, required=["port_id"])},
-    {"name": "can_buses_list", "description": "List configured named CAN buses and active session status, with listen_only and the evidence that would back it on each adapter (listen_only_enforcement). Use this instead of ip link or candump on a SocketCAN interface.", "inputSchema": EMPTY_OBJECT_SCHEMA},
-    {"name": "can_session_start", "description": "Open a configured CAN bus session. A bus configured listen_only refuses rather than opening when the adapter cannot be held to it.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING, "clear_rx_queue": {"type": "boolean", "default": True}}, required=["bus_id"])},
+    {"name": "can_buses_list", "description": "List configured CAN buses with session status and listen_only evidence. Use this instead of ip link or candump.", "inputSchema": EMPTY_OBJECT_SCHEMA},
+    {"name": "can_session_start", "description": "Open a configured CAN bus session.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING, "clear_rx_queue": {"type": "boolean", "default": True}}, required=["bus_id"])},
     {"name": "can_session_stop", "description": "Stop a configured CAN bus session.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING}, required=["bus_id"])},
     {"name": "can_send", "description": "Send one classic CAN frame on an active configured CAN bus session. Use this instead of cansend.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING, "frame_id": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string", "pattern": r"^(?:0[xX][0-9A-Fa-f]+|[0-9]+)$"}]}, "extended": {"type": "boolean", "default": False}, "rtr": {"type": "boolean", "default": False}, "data_hex": {"type": "string", "default": ""}}, required=["bus_id", "frame_id"])},
     {"name": "can_read", "description": "Read CAN frames from an active configured CAN bus session. Use this instead of candump.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING, "max_frames": {"type": "integer", "minimum": 1}, "wait_timeout_s": TIMEOUT}, required=["bus_id"])},
     {
         "name": "bench_run_start",
         "description": (
-            "Declare a multi-step run and lock every device it names for the whole run, not for one call. "
-            "Call this before a sequence like flash, reset, read: without it each call takes and releases its own "
-            "device, and between two calls the board is free for anything else on this machine. Declared devices "
-            "are held until bench_run_stop, the only devices this run may touch, and a device already held fails "
-            "the call immediately naming its holder."
+            "Declare a run that holds the devices a sequence like flash, reset, read needs until bench_run_stop; "
+            "without one the board is free between calls. The run may touch only those devices. A single call, or "
+            "flash_firmware with capture, needs no declared run."
         ),
         "inputSchema": object_schema(
             {
@@ -123,12 +121,12 @@ MCP_TOOLS: list[JsonObject] = [
     },
     {
         "name": "bench_run_stop",
-        "description": "End the declared run and release every device it held. Always call this when the run is finished; it is safe to call when no run is open.",
+        "description": "End the declared run and release its devices. Always call it when the run is finished; safe with no run open.",
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
     {
         "name": "bench_run_status",
-        "description": "Report whether a run is open on this server, which devices it declared, and since when. Read this if you are not sure whether you still hold the bench.",
+        "description": "Report whether a run is open here and what it declared; read it when unsure whether you still hold the bench.",
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
     # The plan is the declaration, so this tool takes no devices and no steps:
@@ -139,34 +137,21 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "test_reactor_run",
         "description": (
-            "Run this project's declarative test plan against the bench. Use this instead of `agentic-hil test-reactor` "
-            "at a shell. The plan is a reviewed file of ordered steps: it is validated in full before the first hardware "
-            "action, the run holds every device the plan names from before its first step to after its last, each step is "
-            "judged by the same permission the matching tool is judged by, and a step reaching for a device the plan did "
-            "not declare is refused. test_config_path selects another plan, workspace-relative or absolute, and must "
-            "resolve inside workspace_root; without it the project's default plan runs. detach: true runs the plan in its "
-            "own process and answers at once with a run handle to ask test_reactor_status about and test_reactor_stop to "
-            "end, which is what an hours-long endurance plan wants; the default runs the plan to its end and answers with "
-            "the whole result and the path of the report it wrote."
+            "Run this project's declarative test plan instead of `agentic-hil test-reactor`; read "
+            "agentic-hil://reference/test-plan before writing one. test_config_path picks another plan inside "
+            "workspace_root; detach: true, for long plans, answers at once with a run handle for test_reactor_status "
+            "and test_reactor_stop."
         ),
         "inputSchema": object_schema({"test_config_path": NONEMPTY_STRING, "detach": {"type": "boolean", "default": False}}),
     },
     {
         "name": "test_reactor_status",
-        "description": (
-            "Say what a test run handle is doing: running and which step it is on, finished or stopped with its verdict "
-            "and its report path, or its worker gone. Without run, list the runs this bench still has records of."
-        ),
+        "description": "Say what a test run is doing; without run, list this bench's runs.",
         "inputSchema": object_schema({"run": NONEMPTY_STRING}),
     },
     {
         "name": "test_reactor_stop",
-        "description": (
-            "Ask a test run to end after the step it is in, close its devices in the usual order and write its report. "
-            "Cooperative and nothing else: this leaves a request the run reads between its steps, so a run cannot be left "
-            "half way through a step by whoever asked it to stop. A run that had already ended is answered as such and "
-            "nothing is asked of it."
-        ),
+        "description": "Ask a test run to stop after its current step.",
         "inputSchema": object_schema({"run": NONEMPTY_STRING}, required=["run"]),
     },
     # Two optional arguments, and their types are the contract. There is no
@@ -189,22 +174,9 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "hardware_recover",
         "description": (
-            "Clear this bench's quarantine. A quarantine is the audit halt: the evidence chain for this bench "
-            "could not be written or read, and no hardware action rebuilds a record that was never written. Every "
-            "other incident settles itself at the next contact and holds nothing, so on a bench with nothing "
-            "standing this answers ok with nothing_to_recover: true and changes nothing. Of what does stand, a "
-            "reason that names no hardware contact still clears with no argument. Anything else needs "
-            "operator_statement: ask the operator in chat what state the bench is in, then pass back what they "
-            "answered, in their words. It is written verbatim "
-            "to the recovery ledger as their statement, relayed by you. Never write one you were not given: a "
-            "ledger line that reflects no actual operator utterance is a false record with you recorded as the "
-            "actor; when you have nobody to ask, relay the `agentic-hil recover --confirm-safe-state "
-            "--quarantine-id <id>` line the refusal hands you and let them run it themselves. A refusal with "
-            "error_type config_changed means the authoritative configuration was edited after the incident was "
-            "recorded: show the operator the two digests on the result, and once they confirm the delta is "
-            "understood, call again with accept_config_change: true (the operator's own line takes "
-            "--accept-config-change instead). Needs permissions.allow_recover for the one route that clears "
-            "something. Use this instead of deleting the server's state files, which is never the fix."
+            "Clear this bench's quarantine instead of deleting state files. A reason naming no hardware contact needs "
+            "no argument; any other needs operator_statement: ask the operator in chat and pass their answer verbatim, "
+            "never one they did not give."
         ),
         "inputSchema": object_schema(
             {
@@ -213,10 +185,9 @@ MCP_TOOLS: list[JsonObject] = [
                     "type": "boolean",
                     "default": False,
                     "description": (
-                        "Accept that the authoritative configuration changed after the incident was recorded. Only "
-                        "after the operator has reviewed the delta between the two digests the config_changed "
-                        "refusal reports; it is written to the recovery ledger as config_change_accepted beside "
-                        "both of them."
+                        "Only after the operator has reviewed the two digests a config_changed refusal reports: "
+                        "accepts that the configuration changed after the incident. Recorded in the ledger beside "
+                        "both digests."
                     ),
                 },
             }
@@ -227,16 +198,14 @@ MCP_TOOLS: list[JsonObject] = [
     # machine: a workspace_root argument would let a caller provision a project
     # this server was never pointed at, and a content argument would let it
     # decide its own permissions.
-    {"name": "project_config_create", "description": "Generate this workspace's Agentic HIL configuration from attached hardware when it has none yet. Takes no arguments. Every permission in the generated file is true (flashing, reset, COM and CAN writes, and all three permissions.allow_config_* grants) except allow_raw_debugger_commands and allow_mass_erase, which are false: either one being true refuses flash_firmware on that probe, and neither is a tool you have here. The bench is workable from that file without anybody editing YAML, flashing included. Report what it granted and ask the operator which of it this bench should not have; do not ask for those two to be turned on, because that is the one change that stops flashing. Regenerating an existing configuration needs allow_config_write and carries over the permissions of the configuration this server loaded at startup, for the entries that are still in it; an entry the regeneration discovers for the first time arrives at those same defaults, and a workspace whose configuration is gone gets a file at those defaults. Because this server does not reload, a narrowing you made with project_config_set in this session is not in what it loaded and a regeneration now puts that permission back. Regenerating is the operator's call, not a way to narrow or to re-open. Use this instead of writing a configuration by hand when a tool reports config_file_not_found.", "inputSchema": EMPTY_OBJECT_SCHEMA},
+    {"name": "project_config_create", "description": "Generate this workspace's configuration from attached hardware instead of writing one by hand: every permission true except allow_raw_debugger_commands and allow_mass_erase, which it writes false. Never ask for those two to be turned on. Regenerating is the operator's call, not a way to narrow or re-open.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     # Reading is free, so this takes no arguments either: it answers for the one
     # configuration this server is bound to, in the state it is in.
     {
         "name": "project_config_describe",
         "description": (
-            "Report which keys of this project's configuration you may change right now, which you may not, and which "
-            "permission would open a locked one, for this configuration in this state, not in general. Also carries "
-            "each key's current value and the value shape the shipped schema declares for it. Read this before "
-            "project_config_set instead of guessing a key and being refused."
+            "List the configuration keys you may change and the permission that opens each locked one; read it before "
+            "project_config_set instead of guessing."
         ),
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
@@ -248,12 +217,9 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "project_config_set",
         "description": (
-            "Change named keys of this project's configuration, field-wise. Two separate permissions gate it: "
-            "allow_config_description_write for what the bench is (target, probe id, port device and baudrate, CAN bus "
-            "settings) and allow_config_permissions_write for every permission key (each permissions: block, and the "
-            "two grants that sit directly on a section, artifacts.allow_upload and debug.allow_all_symbols). Values are scalars checked "
-            "against the shipped schema; the changed file is validated before it replaces the working one, and a write "
-            "is refused while a run holds hardware. Use this instead of editing the configuration file yourself."
+            "Change named configuration keys instead of editing the configuration file yourself. "
+            "allow_config_description_write gates the device description, allow_config_permissions_write the "
+            "permissions, which can only be narrowed."
         ),
         "inputSchema": object_schema(
             {
@@ -281,16 +247,13 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "project_config_adopt_hardware",
         "description": (
-            "Read the attached probe and carry its identity into this project's configuration: probe id, the backend's "
-            "executable, the detected controller, and the probe's own COM device. Use this when a configuration was "
-            "written before the board was plugged in and holds placeholders, instead of printing values for a person to "
-            "retype. Returns the plan by default and writes only with apply:true, through project_config_set and its "
-            "permissions. A key that already holds a value nobody generated is reported, never overwritten."
+            "Fill this configuration's hardware placeholders from the attached probe instead of printing values for a "
+            "person to retype; writes only with apply: true."
         ),
         "inputSchema": object_schema(
             {
                 "apply": {"type": "boolean", "default": False, "description": "Write the plan. Without it the call reads hardware and the configuration and changes nothing."},
-                "probe_id": {**NONEMPTY_STRING, "description": "Which attached probe this is about. Needed when more than one is attached, and on a host without STM32CubeProgrammer, where probes are read from the USB serial inventory that cannot rule out a VCP-less ST-LINK/V2 beside the one it saw; it selects among the attached probes and never adds one."},
+                "probe_id": {**NONEMPTY_STRING, "description": "Which attached probe this is about. Needed when more than one is attached; it selects among the attached probes and never adds one."},
                 "debugger_id": {**NONEMPTY_STRING, "description": "Which configured debugger entry receives the values. Only needed when the configuration declares more than one."},
                 "com_port_id": {**NONEMPTY_STRING, "description": "Which com_ports entry receives the discovered device. Created with every permission false if it does not exist."},
             }
@@ -304,15 +267,8 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "project_config_reload_description",
         "description": (
-            "Re-read this bench's device description from the authoritative configuration without restarting the "
-            "server: target, debuggers, com_ports and can_buses, minus every permissions: block. Call this when a "
-            "board was plugged in and written into the file after this server started, instead of asking the operator "
-            "for a restart. Permissions are not re-read at all, in either direction: a device this server has never "
-            "seen arrives with no grant, so it can be probed and read and cannot be flashed, reset, mass-erased or "
-            "written to until an operator restarts the server. Everything outside those four sections (version, "
-            "workspace_root, state_root, debug, artifacts, validation, recovery, reports, logs, and the project "
-            "permissions) still needs a restart, and the result names them. Refused while a run, a session or an "
-            "unresolved incident holds this bench, and when the file is missing, unreadable or does not load."
+            "Re-read target, debuggers, com_ports and can_buses (never permissions) from the configuration file after a "
+            "board was added, instead of asking for a restart."
         ),
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
@@ -328,15 +284,8 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "server_upgrade",
         "description": (
-            "Replace this Agentic HIL installation with the newest release, gated by permissions.allow_upgrade. Takes "
-            "no arguments: it can only lift to the latest release, never to a version you name, so it cannot be used "
-            "to install a build that reads this bench's permissions differently. It replaces the package on disk and "
-            "does not change the code this server is running. A successful call answers upgraded_on_disk with "
-            "previous_version, version, running_version and restart_required: true, and the operator restarting the "
-            "MCP server is what loads it; the agentic-hil command line reads the new code straight away. Refused "
-            "while a run or a session holds this bench, and refused on Windows, where the files of a running process "
-            "are locked and only `agentic-hil upgrade` at a shell can replace them. Use this instead of running uv, "
-            "pipx or pip yourself."
+            "Upgrade this installation on disk to the newest release instead of running uv, pipx or pip; takes no "
+            "arguments, never a version you name."
         ),
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
@@ -360,8 +309,8 @@ MCP_TOOLS: list[JsonObject] = [
 # appearance: `project_config_reload_description` sits beside
 # `project_config_set` and `project_config_create`, which do write, so a host
 # blocked the one call that re-reads the file and the operator reconnected twice
-# instead. The description says the reload writes nothing, in
-# prose, in the middle of a paragraph, not in the field a machine reads.
+# instead. The description says the reload re-reads the file, in prose, not in
+# the field a machine reads.
 #
 # Three rules govern what may be written here, and two definitions decide the
 # hard cases.
