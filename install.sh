@@ -1143,24 +1143,30 @@ process_name_for() {
 # `pgrep -x` is the first and the exact one: a native binary's `comm` is its own
 # name, and a match on that can name no stranger's process.
 #
-# npm installs the other kind, and the process the kernel then holds is called
-# `node`. `@openai/codex` declares its `codex` command as `bin/codex.js`, that
-# file opens with `#!/usr/bin/env node`, and the launcher's path is the
-# argument; the platform binary started under it is called `codex-x86_64-un...`,
-# which is `comm` cut at the fifteen characters it holds. `pgrep -x codex`
-# matches neither, so a machine with codex open in the next window was told
-# there was nothing to restart, the operator restarted nothing, and the MCP
-# registration this run had just written was read by no session.
+# A CLI that npm installs as a node script is the other kind: the process the
+# kernel holds for it is called `node`, and the launcher's path is the argument.
+# Missed, it stays open in the next window while its operator is told there is
+# nothing to restart, and the MCP registration this run just wrote is read by
+# no session.
 #
 # The second question therefore reads command lines, anchored so that it stays a
 # question about which program is running rather than about which words appear
 # in an argument: the name has to begin a path segment and end its argument or
 # the line, optionally through the `.js` npm's launcher carries. So
 # `/usr/local/bin/codex` and `.../@openai/codex/bin/codex.js` match, while a dev
-# server under node, the native child called `codex-x86_64-...`, and this
-# script's own `--agent codex` do not. A false alarm costs an operator a restart
-# of something that was never ours, in the one part of the transcript that asks
-# them to act.
+# server under node and this script's own `--agent codex` do not. A false alarm
+# costs an operator a restart of something that was never ours, in the one part
+# of the transcript that asks them to act.
+#
+# A running codex is answered by the first question. `@openai/codex` 0.145.0
+# declares its `codex` command as `bin/codex.js`, which opens with
+# `#!/usr/bin/env node`, and that launcher runs the platform binary the package
+# vendors as its child, whose `comm` is `codex` in full: the table recorded with
+# the package installed by `npm install -g` is in
+# tests/fixtures/npm_agent_cli_process_table_recordings.json. The binary is the
+# process to name: the launcher forwards SIGINT, SIGTERM and SIGHUP to it and
+# exits whenever the binary ends, while an end of the launcher reaches the
+# binary only through that forwarding, which a SIGKILL skips.
 running_pid() {
     if have pgrep; then
         running_exact=$(pgrep -x "$1" 2>/dev/null | head -n 1)
