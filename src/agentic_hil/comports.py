@@ -65,12 +65,15 @@ from agentic_hil.types import (
 def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
     try:
         from serial.tools import list_ports
-    except ImportError:
+    except ImportError as error:
+        # The import's own line, with its type, is what tells a missing package
+        # from a blocked module or a pyserial failing inside its own imports.
         return {
             "ok": False,
             "tool": tool,
             "error_type": "serial_backend_not_available",
             "summary": "pyserial is not installed or could not be imported.",
+            "backend_error": f"{type(error).__name__}: {error}",
             "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"],
         }
     try:
@@ -507,7 +510,9 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
         # the refusal is retry-safe: install the backend and call again.
         identity["status"] = "backend_unavailable"
         identity["summary"] = "Host serial ports could not be enumerated, so this port's identity was not verified."
-        identity["backend_error"] = str(available.get("summary", ""))
+        # The inventory's own line where it has one, a failed import and an OS
+        # error from the enumeration alike; its summary only where it has none.
+        identity["backend_error"] = str(available.get("backend_error") or available.get("summary", ""))
         return _identity_unverified(tool, port_id, port, expectation, identity)
 
     ports = [entry for entry in available.get("ports", []) if isinstance(entry, dict)]
@@ -1271,8 +1276,8 @@ class ComPortService:
         """
         try:
             import serial
-        except ImportError:
-            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"], "side_effect_committed": False}
+        except ImportError as error:
+            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "backend_error": f"{type(error).__name__}: {error}", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"], "side_effect_committed": False}
 
         def open_failure(error: BaseException) -> JsonObject:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": open_failure_causes(error)}

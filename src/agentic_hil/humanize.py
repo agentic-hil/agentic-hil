@@ -1718,7 +1718,9 @@ def render_debugger_probes(result: JsonObject) -> list[str]:
         body.extend(_bullets([", ".join(f"{key} {_scalar(value)}" for key, value in probe.items() if _renderable_scalar(value)) for probe in found], indent=_INDENT * 2))
         error_type = _error_type(entry)
         if error_type:
-            body.extend(_fields([("error_type", error_type)], indent=_INDENT * 2))
+            # The entry's own error line with its type, which is what tells one
+            # failure from another where the summaries read the same (#568).
+            body.extend(_fields([("error_type", error_type), ("backend_error", entry.get("backend_error"))], indent=_INDENT * 2))
             remedy, _ = _remediation(entry)
             body.extend(_numbered(remedy, indent=_INDENT * 2))
         lines.extend(_section(name, body))
