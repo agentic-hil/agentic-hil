@@ -115,6 +115,29 @@ def test_that_leaves_a_file_behind():
     (TREE / "stray.txt").write_text("left behind", encoding="utf-8")
 """
 
+WRITES_INTO_ITS_TMP_PATH_AND_LEAVES_A_FILE_BEHIND = """
+from pathlib import Path
+
+TREE = Path(__file__).resolve().parents[1]
+
+
+def test_that_writes_into_its_tmp_path_and_leaves_a_file_behind(tmp_path):
+    (tmp_path / "scratch.txt").write_text("mine", encoding="utf-8")
+    (TREE / "stray.txt").write_text("left behind", encoding="utf-8")
+"""
+
+# Git reads the repository's config on every call, so a config it cannot parse
+# stops the next call dead, the finish listing among them.
+LEAVES_THE_REPOSITORY_UNREADABLE = """
+from pathlib import Path
+
+TREE = Path(__file__).resolve().parents[1]
+
+
+def test_that_leaves_the_repository_unreadable():
+    (TREE / ".git" / "config").write_text("[core", encoding="utf-8")
+"""
+
 
 def a_tree_running_the_suites_conftest(tree: Path, test_module: str, *, gitignore: str = GITIGNORE) -> Path:
     """The suite's conftest and the module it imports, one test module, and nothing else."""
@@ -141,6 +164,25 @@ def git(where: Path, *args: str, **environment: str) -> str:
     )
     assert done.returncode == 0, f"git {' '.join(args)} failed in {where}: {done.stderr.strip()}"
     return done.stdout
+
+
+def gits_own_error(where: Path, *args: str) -> str:
+    """The line git ends on when `git args` fails in `where`: its error, word for word, in whatever language it speaks here."""
+    clean = {name: value for name, value in os.environ.items() if not name.upper().startswith("GIT_")}
+    done = subprocess.run(
+        ["git", *args],
+        cwd=where,
+        env=clean,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=scaled_time_bound(GIT_CALL_S),
+        check=False,
+    )
+    said = done.stderr.strip().splitlines()
+    assert done.returncode != 0 and said, f"git {' '.join(args)} was meant to fail in {where} and exited {done.returncode}: {done.stdout}"
+    return said[-1]
 
 
 def a_checkout(tree: Path) -> Path:
@@ -291,6 +333,30 @@ def test_a_globally_ignored_path_stays_ignored_when_a_test_moved_home(pytester: 
 
 
 @needs_git
+def test_pytests_own_basetemp_in_the_tree_is_not_reported(pytester: pytest.Pytester) -> None:
+    """A `--basetemp` inside the checkout is pytest's scratch space, not a stray.
+
+    Pointing `--basetemp` into the clone is what a developer does to keep
+    scratch paths short under the Windows path limit, and `tests/conftest.py`
+    names it as a practice the suite has to live with. Every `tmp_path` of such
+    a run lies inside the tree, untracked and not ignored, so a check that
+    listed it would fail every one of those runs with the run's own scratch
+    files. pytest's own basetemp is therefore left out when it lies inside the
+    repository, and a file a test left beside it is still named.
+    """
+    tree = a_checkout(a_tree_running_the_suites_conftest(pytester.path / "tree", WRITES_INTO_ITS_TMP_PATH_AND_LEAVES_A_FILE_BEHIND))
+
+    result = run_the_suite(pytester, tree, f"--basetemp={tree / 'inner-basetemp'}")
+
+    output = everything_it_said(result)
+    assert list((tree / "inner-basetemp").rglob("scratch.txt")), f"the run's tmp_path was not inside the tree:\n{output}"
+    assert result.ret == pytest.ExitCode.TESTS_FAILED, output
+    assert "stray.txt" in output, output
+    assert "inner-basetemp" not in output, output
+    assert "scratch.txt" not in output, output
+
+
+@needs_git
 @pytest.mark.parametrize("where", ["no-repo", "nested"])
 def test_outside_a_checkout_of_its_own_the_check_stays_silent(pytester: pytest.Pytester, where: str) -> None:
     """A tree that is not the root of a git checkout has no before and after to compare.
@@ -328,6 +394,30 @@ def test_without_git_on_path_the_check_stays_silent(pytester: pytest.Pytester) -
 
     assert_it_said_nothing_but_its_result(result, passed=1)
     assert (tree / "stray.txt").is_file()
+
+
+@needs_git
+def test_git_failing_at_the_finish_says_so_in_one_line(pytester: pytest.Pytester) -> None:
+    """A tree git cannot read at the end is named in one line, and the run keeps its status.
+
+    The start was listed, so this run was meant to be checked, and the finish
+    cannot be. Saying nothing would pass a run nobody checked, and failing it
+    would charge git's trouble to the tests. So the status stays what the tests
+    made it, and one line says the tree was not checked, carrying git's own
+    error as git wrote it. The test breaks git through the file system alone,
+    before the finish listing runs, so nothing here depends on timing.
+    """
+    tree = a_checkout(a_tree_running_the_suites_conftest(pytester.path / "tree", LEAVES_THE_REPOSITORY_UNREADABLE))
+
+    result = run_the_suite(pytester, tree)
+
+    error = gits_own_error(tree, "ls-files", "--others", "--exclude-standard")
+    output = everything_it_said(result)
+    assert result.ret == pytest.ExitCode.OK, output
+    result.assert_outcomes(passed=1)
+    said = [line for line in output.splitlines() if line.strip()]
+    assert len(said) == 3, output
+    assert len([line for line in said if error in line]) == 1, f"no line carries git's own error {error!r}:\n{output}"
 
 
 @needs_git
