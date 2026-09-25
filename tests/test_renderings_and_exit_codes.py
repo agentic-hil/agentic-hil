@@ -36,6 +36,7 @@ import sys
 from collections.abc import Callable
 from importlib import resources
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 from conftest import FAKE_OPENOCD, write_authoritative_config
@@ -1048,7 +1049,7 @@ def test_setup_and_agent_install_help_name_the_agents_the_default_and_what_leavi
 
 @pytest.mark.parametrize("command", AGENT_COMMANDS)
 def test_every_agent_option_prints_the_agents_the_install_code_knows(command: str) -> None:
-    """Decided with the issue: `choices` on every `--agent`, from `skill_agents`,
+    """Decided with the issue: `choices` on every `--agent`, from `KNOWN_AGENTS`,
     the one list each of these commands resolves an agent name against, so
     `--help` prints the accepted values. It is the same list for all six: no
     command knows an agent another one does not."""
@@ -1058,15 +1059,17 @@ def test_every_agent_option_prints_the_agents_the_install_code_knows(command: st
 
 
 def test_every_agent_option_reads_its_choices_from_that_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Not from a copy of it: a hand-written list agrees with `skill_agents`
+    """Not from a copy of it: a hand-written list agrees with `KNOWN_AGENTS`
     today and stops agreeing the day an agent is added there. One is added
-    here, and every `--agent` has to offer it."""
-    known = cli.skill_agents()
+    here, and every `--agent` has to offer it, and `skill_agents`, which the
+    commands set an agent up from, has to know it too."""
+    known = cli.KNOWN_AGENTS
     added = dataclasses.replace(known[0], id="example-agent", display_name="Example Agent", aliases=("example-agent",))
-    monkeypatch.setattr(cli, "skill_agents", lambda: [*known, added])
+    monkeypatch.setattr(cli, "KNOWN_AGENTS", (*known, added))
 
     for command in AGENT_COMMANDS:
         assert _printed_choices(_agent_option_help(command)) == [*(agent.id for agent in known), "example-agent"], command
+    assert [agent.id for agent in cli.skill_agents()] == [*(agent.id for agent in known), "example-agent"]
 
 
 @pytest.mark.parametrize("command", [command for command in AGENT_COMMANDS if isinstance(OMITTED_AGENT[command], str)])
@@ -1203,3 +1206,58 @@ def test_an_agent_named_by_an_alias_is_reported_as_it_was_typed(tmp_path: Path, 
     assert code == 0, f"{out}\n{err}"
     installed = json.loads(out)
     assert (installed["agent"], installed["requested_agent"]) == ("claude-code", "claude")
+
+
+def _without_a_home_directory(no_home: pytest.MonkeyPatch) -> None:
+    """Takes the home directory away the way a machine can lack one: none of
+    the variables `Path.home()` reads is set, and on POSIX, where it then asks
+    the password database, the user has no entry there either. What fails is
+    the standard library's own lookup with its own `RuntimeError`, and that is
+    asserted here, so a platform that finds a home some other way fails this
+    helper instead of passing the tests that use it."""
+    for variable in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
+        no_home.delenv(variable, raising=False)
+    if sys.platform != "win32":
+        import pwd
+
+        def no_entry(uid: int) -> NoReturn:
+            raise KeyError(f"getpwuid(): uid not found: {uid}")
+
+        no_home.setattr(pwd, "getpwuid", no_entry)
+    with pytest.raises(RuntimeError, match="Could not determine home directory"):
+        Path.home()
+
+
+@pytest.mark.parametrize("command", AGENT_COMMANDS)
+def test_every_agent_option_prints_its_agents_where_no_home_directory_can_be_found(command: str) -> None:
+    """`--help` needs no home directory, and it needed none before `--agent`
+    had choices: the choices are the agents' names, and a name does not depend
+    on where its agent keeps the skill. An account with no home directory, a
+    service or a container user, still gets the help, choices included, and
+    exit 0."""
+    agents = cli.supported_skill_agents()
+    with pytest.MonkeyPatch.context() as no_home:
+        _without_a_home_directory(no_home)
+        option_help = _agent_option_help(command)
+
+    assert _printed_choices(option_help) == agents, option_help
+
+
+@pytest.mark.parametrize("command", AGENT_COMMANDS)
+def test_a_wrong_agent_is_refused_at_parsing_where_no_home_directory_can_be_found(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+    """Nor does checking a name against them: without a home directory a wrong
+    `--agent` is still the usage error it is everywhere else, argparse's
+    `invalid choice` line naming the value and every agent, exit 2 and nothing
+    on stdout, not a traceback. `skill-install` is asked without `--target`,
+    where it checks the name once the rest of the line has parsed."""
+    agents = cli.supported_skill_agents()
+    with pytest.MonkeyPatch.context() as no_home:
+        _without_a_home_directory(no_home)
+        code, out, err = _parse_error(monkeypatch, [command, "--agent", "nonsense"])
+    error = err.rstrip("\n").rpartition("\n")[2]
+
+    assert code == 2, err
+    assert out == ""
+    assert error.startswith(f"agentic-hil {command}: error: argument --agent: invalid choice: 'nonsense'"), err
+    for agent in agents:
+        assert agent in error, error
