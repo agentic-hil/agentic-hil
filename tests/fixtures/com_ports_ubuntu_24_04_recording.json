@@ -1,0 +1,218 @@
+{
+  "what": "The host serial-port inventory `agentic-hil init` and `agentic-hil setup` build their COM-port advice from, on the kind of host #549 was reported on: a stock Ubuntu 24.04 lists its 32 legacy `/dev/ttyS*` ports first, with no USB identity, and the one port a board is on, the on-board debugger's virtual COM port, last. Recorded rather than typed, so the order the advice samples from and the fields it tells a USB port by are the host's own.",
+  "recorded_on": "2026-09-25",
+  "how": "agentic-hil 0.21.4 `agentic-hil com-ports --json` on a stock Ubuntu 24.04 host (kernel 6.8), pyserial 3.5, one Nucleo-F446RE attached through its on-board debugger, recorded 2026-09-25. The probe serial is replaced by the suite's synthetic serial 066BFF505050505050505050; nothing else is changed.",
+  "recording": {
+    "ok": true,
+    "tool": "com_ports_available",
+    "ports": [
+      {
+        "device": "/dev/ttyS31",
+        "name": "ttyS31",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS30",
+        "name": "ttyS30",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS29",
+        "name": "ttyS29",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS28",
+        "name": "ttyS28",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS27",
+        "name": "ttyS27",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS26",
+        "name": "ttyS26",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS25",
+        "name": "ttyS25",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS24",
+        "name": "ttyS24",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS23",
+        "name": "ttyS23",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS22",
+        "name": "ttyS22",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS21",
+        "name": "ttyS21",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS20",
+        "name": "ttyS20",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS19",
+        "name": "ttyS19",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS18",
+        "name": "ttyS18",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS17",
+        "name": "ttyS17",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS16",
+        "name": "ttyS16",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS15",
+        "name": "ttyS15",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS14",
+        "name": "ttyS14",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS13",
+        "name": "ttyS13",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS12",
+        "name": "ttyS12",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS11",
+        "name": "ttyS11",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS10",
+        "name": "ttyS10",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS9",
+        "name": "ttyS9",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS8",
+        "name": "ttyS8",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS7",
+        "name": "ttyS7",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS6",
+        "name": "ttyS6",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS5",
+        "name": "ttyS5",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS4",
+        "name": "ttyS4",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS3",
+        "name": "ttyS3",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS2",
+        "name": "ttyS2",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS1",
+        "name": "ttyS1",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyS0",
+        "name": "ttyS0",
+        "description": "n/a",
+        "hwid": "n/a"
+      },
+      {
+        "device": "/dev/ttyACM0",
+        "name": "ttyACM0",
+        "description": "STM32 STLink - ST-Link VCP Ctrl",
+        "hwid": "USB VID:PID=0483:374B SER=066BFF505050505050505050 LOCATION=2-2:1.2",
+        "manufacturer": "STMicroelectronics",
+        "product": "STM32 STLink",
+        "interface": "ST-Link VCP Ctrl",
+        "location": "2-2:1.2",
+        "serial_number": "066BFF505050505050505050",
+        "vid": 1155,
+        "pid": 14155,
+        "stable_device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066BFF505050505050505050-if02"
+      }
+    ],
+    "summary": "33 available COM port(s)."
+  }
+}
