@@ -686,20 +686,15 @@ def test_the_written_down_meaning_claims_a_restart_answer_only_where_there_is_on
     field any more. That is only safe while nothing a caller reads promises it
     is there: a description or a catalogue entry that names a value for a
     refusal would be read as the contract, and the result would be the one that
-    looked wrong. So the tool description names the field for the successful
-    call and not in the half that lists what is refused, and the catalogue
-    entries for the three refusals state no value for it at all. They may still
-    point at `restart_required_by` on the *command line's* result, which is a
-    different surface and does read the table; what they may not do is claim
-    anything about this refusal's own."""
+    looked wrong. So the tool description does not name the field at all: the
+    successful call's own result carries it and asks for the restart, which the
+    swap test above holds. The catalogue entries for the three refusals state
+    no value for it either. They may still point at `restart_required_by` on
+    the *command line's* result, which is a different surface and does read the
+    table; what they may not do is claim anything about this refusal's own."""
     description = next(str(tool["description"]) for tool in MCP_TOOLS if tool["name"] == SERVER_UPGRADE)
-    successful, refused = description.split("Refused ", maxsplit=1)
 
-    # By the field it names and not by the value it quotes: what a successful
-    # call carries there is the process table's answer, and the sentence that
-    # says `true` is a separate imprecision this test must not freeze.
-    assert "restart_required" in successful
-    assert "restart_required" not in refused, refused
+    assert "restart_required" not in description, description
     for scope in ("permission_denied:allow_upgrade", "upgrade_in_open_run", "upgrade_cli_only_on_host"):
         remedy = ERROR_CATALOGUE[scope]
         written = " ".join((remedy.meaning, *remedy.remediation, *remedy.do_not, *remedy.cli_remediation))

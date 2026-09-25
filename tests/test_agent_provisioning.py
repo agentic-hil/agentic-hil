@@ -1619,12 +1619,13 @@ def test_a_narrowing_and_a_regeneration_in_one_session_put_the_loaded_grant_back
 def test_every_live_contract_says_regeneration_carries_the_loaded_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """"The permissions already on disk" was a promise this path does not keep.
 
-    Each of these is served to a caller before or during the call, and each said
-    a regeneration carries the permissions on disk over, which a caller can only
+    Each of these is served to a caller around the call, and each said a
+    regeneration carries the permissions on disk over, which a caller can only
     read as "my narrowing survives this". It does not; the loaded configuration
     is what is carried. Every one of them has to say the true thing, because a
     caller that believes the false one regenerates to refresh a probe id and
-    reopens the bench."""
+    reopens the bench. The tool description no longer explains it at all: the
+    regeneration's own answer does, and the description must not say otherwise."""
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
     service = UnprovisionedToolService(workspace)
@@ -1632,16 +1633,26 @@ def test_every_live_contract_says_regeneration_carries_the_loaded_state(tmp_path
         created = service.call(PROJECT_CONFIG_CREATE)
     finally:
         service.close()
+    header = Path(created["path"]).read_text(encoding="utf-8")
+
+    attached_hardware(monkeypatch)
+    reopened = UnprovisionedToolService(workspace)
+    try:
+        regenerated = reopened.call(PROJECT_CONFIG_CREATE)
+    finally:
+        reopened.close()
 
     description = next(str(tool["description"]) for tool in MCP_TOOLS if tool["name"] == PROJECT_CONFIG_CREATE)
+    assert "permissions already on disk" not in description
+    assert "permissions on disk over" not in description
     schema = config_schema()["properties"]["permissions"]
     served = {
-        "tool description": description,
+        "regeneration result": " ".join([regenerated["summary"], *regenerated["next_steps"]]),
         "config-shape resource": read_resource(CONFIG_SHAPE_URI)["text"],
         "permissions schema": schema["description"],
         "allow_config_write schema": schema["properties"]["allow_config_write"]["description"],
         "provenance schema": config_schema()["properties"]["provenance"]["properties"]["created_by"]["description"],
-        "generated header": Path(created["path"]).read_text(encoding="utf-8"),
+        "generated header": header,
     }
     for name, text in served.items():
         assert "loaded" in text, f"{name} must say the carried permissions are the loaded ones"
