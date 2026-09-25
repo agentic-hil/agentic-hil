@@ -315,6 +315,30 @@ def test_a_declared_port_refused_for_its_identity_names_the_import_error(
     assert result["identity"].get("backend_error") == raised, result
 
 
+def test_a_declared_port_refused_for_an_inventory_os_error_names_that_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The identity block carries the inventory's own `backend_error` whenever
+    the inventory has one, not only for an import that failed: pyserial imported
+    and its port enumeration raised an OS error, which the inventory reports as
+    `com_port_discovery_failed` with the error's line."""
+    config = _com_config(tmp_path / "workspace", serial_number=DECLARED_SERIAL)
+
+    def enumeration_raises() -> list[object]:
+        raise OSError("the port enumeration's own error line")
+
+    monkeypatch.setattr("serial.tools.list_ports.comports", enumeration_raises)
+    inventory = list_available_com_ports()
+    assert inventory["error_type"] == "com_port_discovery_failed", inventory
+    assert inventory["backend_error"] == "the port enumeration's own error line", inventory
+
+    result = _session_start(config)
+
+    assert result["error_type"] == COM_PORT_IDENTITY_UNVERIFIED, result
+    assert result["identity"]["status"] == "backend_unavailable", result
+    assert result["identity"].get("backend_error") == inventory["backend_error"], result
+
+
 def test_the_configured_port_listing_nests_the_import_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`com_ports_list` carries the host inventory whole, failure included."""
     config = _com_config(tmp_path / "workspace")
