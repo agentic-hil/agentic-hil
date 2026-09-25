@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-pytest_plugins = ["pytester"]
+pytest_plugins = ["pytester", "suite_ledger"]
 
 from support import remove_trusted_launcher, sweep_stale_launchers  # noqa: E402
 
