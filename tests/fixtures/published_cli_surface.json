@@ -1,0 +1,291 @@
+{
+  "what": "The argparse command surface of the agentic-hil release the shipped CI examples pin: every subcommand, with its option strings and positional names and without help text. tests/test_ci_examples.py refuses an example that invokes a subcommand this surface does not define, and tools/record_cli_surface.py takes it.",
+  "version": "0.21.5",
+  "source": "Installed agentic-hil==0.21.5 from https://pypi.org/simple/ into a throwaway virtual environment and walked its parser with tools/record_cli_surface.py.",
+  "recorded_on": "2026-09-25",
+  "surface": {
+    "options": [
+      "--help",
+      "--json",
+      "--version",
+      "-h"
+    ],
+    "positionals": [],
+    "subcommands": {
+      "adopt-hardware": {
+        "options": [
+          "--com-port",
+          "--debugger",
+          "--dry-run",
+          "--help",
+          "--json",
+          "--probe-id",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "agent-install": {
+        "options": [
+          "--agent",
+          "--force",
+          "--help",
+          "--json",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "check-plan": {
+        "options": [
+          "--help",
+          "--json",
+          "--strict",
+          "-h"
+        ],
+        "positionals": [
+          "plans"
+        ],
+        "subcommands": {}
+      },
+      "com-ports": {
+        "options": [
+          "--help",
+          "--json",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "com-stdio": {
+        "options": [
+          "--config",
+          "--eof-idle-timeout-s",
+          "--help",
+          "--json",
+          "--max-read-bytes",
+          "--port",
+          "--read-wait-timeout-s",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "config-reload": {
+        "options": [
+          "--config",
+          "--help",
+          "--json",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "debugger-probes": {
+        "options": [
+          "--help",
+          "--json",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "doctor": {
+        "options": [
+          "--config",
+          "--help",
+          "--json",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "grant": {
+        "options": [
+          "--help",
+          "--json",
+          "-h"
+        ],
+        "positionals": [
+          "keys"
+        ],
+        "subcommands": {}
+      },
+      "init": {
+        "options": [
+          "--agent",
+          "--config",
+          "--force",
+          "--help",
+          "--json",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "lease-status": {
+        "options": [
+          "--help",
+          "--json",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "mcp-config": {
+        "options": [
+          "--force",
+          "--help",
+          "--json",
+          "--output",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "mcp-stdio": {
+        "options": [
+          "--config",
+          "--help",
+          "--json",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "recover": {
+        "options": [
+          "--accept-config-change",
+          "--confirm-safe-state",
+          "--help",
+          "--json",
+          "--quarantine-id",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "revoke": {
+        "options": [
+          "--help",
+          "--json",
+          "-h"
+        ],
+        "positionals": [
+          "keys"
+        ],
+        "subcommands": {}
+      },
+      "run-evidence": {
+        "options": [
+          "--help",
+          "--json",
+          "--out",
+          "--report",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "schema": {
+        "options": [
+          "--force",
+          "--help",
+          "--json",
+          "--output",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "setup": {
+        "options": [
+          "--agent",
+          "--force",
+          "--help",
+          "--json",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "skill-install": {
+        "options": [
+          "--agent",
+          "--force",
+          "--help",
+          "--json",
+          "--target",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "test-reactor": {
+        "options": [
+          "--detach",
+          "--help",
+          "--json",
+          "--junit-xml",
+          "--run-handle",
+          "--test-config",
+          "--wait-s",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "test-reactor-status": {
+        "options": [
+          "--help",
+          "--json",
+          "--run",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "test-reactor-stop": {
+        "options": [
+          "--help",
+          "--json",
+          "--run",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "test-schema": {
+        "options": [
+          "--force",
+          "--help",
+          "--json",
+          "--output",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "uninstall": {
+        "options": [
+          "--agent",
+          "--help",
+          "--json",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      },
+      "upgrade": {
+        "options": [
+          "--agent",
+          "--help",
+          "--json",
+          "-h"
+        ],
+        "positionals": [],
+        "subcommands": {}
+      }
+    }
+  }
+}

@@ -2,21 +2,21 @@
 exposes every command they invoke.
 
 `examples/ci/github-actions.yml` and `examples/ci/gitlab-ci.yml` pin
-`AGENTIC_HIL_VERSION` to the release this tree builds toward: the release that
-first exposes the `check-plan` and `run-evidence` commands the examples invoke.
-`tests/test_ci_examples.py` proves, against this checkout's `build_parser`, that
-the examples invoke only commands the code defines and that the pin equals that
-anticipated release. What a hermetic unit test cannot do is reach the published
-distribution: it has no network, and between releases the pin names a release
-that is not on the index yet.
+`AGENTIC_HIL_VERSION` to the newest published release, so a copied example
+installs on the day it is copied (#525). `tests/test_ci_examples.py` proves that
+the pin equals the newest release CHANGELOG.md dates and that the examples
+invoke only commands a committed recording of that release's command surface
+defines. On a release commit that recording is taken from the stamped tree,
+before the release exists on the index. What a hermetic unit test cannot do is
+reach the published distribution: it has no network.
 
-This is the other half, and it can run only at the one moment the pin is a real
-distribution: after the release job has published to PyPI. It reads the exact
-string a reader copies out of the examples, confirms both examples agree on it
-and that it is the release this tree builds toward, then -- given an
-`agentic-hil` installed from exactly that pin -- confirms the installed CLI
-reports that version and answers `--help` for every command the examples invoke.
-The development checkout stops standing in for the published artifact; the
+This is the other half, run after the release job has published to PyPI, which
+on a release commit is the first moment the pinned release exists on the index
+at all. It reads the exact string a reader copies out of the examples, confirms
+both examples agree on it and that it is the newest published release, then --
+given an `agentic-hil` installed from exactly that pin -- confirms the installed
+CLI reports that version and answers `--help` for every command the examples
+invoke. The recording stops standing in for the published artifact; the
 artifact answers for itself. See docs/release-strategy.md, "Verifying the CI
 example pin after publication".
 
@@ -33,15 +33,14 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from check_version_consistency import anticipated_release
+from check_version_consistency import release_version
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 # The commands the shipped examples invoke, so a copied example needs the pinned
-# distribution to expose every one of them. `check-plan` and `run-evidence` are
-# the two this tree added; `doctor` and `test-reactor` predate them. Held
-# identical to the set tests/test_ci_examples.py asserts the examples invoke, so
-# a command added to an example without being added here is caught there first.
+# distribution to expose every one of them. Held identical to the set
+# tests/test_ci_examples.py asserts the examples invoke, so a command added to an
+# example without being added here is caught there first.
 REQUIRED_COMMANDS = ("doctor", "test-reactor", "check-plan", "run-evidence")
 
 EXAMPLES = ("examples/ci/github-actions.yml", "examples/ci/gitlab-ci.yml")
@@ -60,8 +59,8 @@ def _default_run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
 def example_pin(root: Path) -> str:
     """The one `AGENTIC_HIL_VERSION` both examples carry, or a SystemExit.
 
-    Both examples have to agree, and the value has to be the release this tree
-    builds toward, because the install this verifies uses that one string and a
+    Both examples have to agree, and the value has to be the newest published
+    release, because the install this verifies uses that one string and a
     reader copies whichever file is theirs. tests/test_ci_examples.py holds the
     same two equalities against the checkout; restating them here keeps the tool
     honest when it is run by hand, and it is what turns "a version" into "the
@@ -76,11 +75,9 @@ def example_pin(root: Path) -> str:
     if len(pins) != 1:
         raise SystemExit(f"the CI examples disagree on AGENTIC_HIL_VERSION: {sorted(pins)}")
     pin = pins.pop()
-    anticipated = anticipated_release(root)
-    if pin != anticipated:
-        raise SystemExit(
-            f"the CI examples pin agentic-hil=={pin}, but the release this tree builds toward is {anticipated}"
-        )
+    published = release_version(root)
+    if pin != published:
+        raise SystemExit(f"the CI examples pin agentic-hil=={pin}, but the newest published release is {published}")
     return pin
 
 
@@ -95,9 +92,9 @@ def cli_problems(
     The version has to be exactly the pin -- an install that resolved to anything
     else is not the artifact the examples name -- and every command the examples
     invoke has to answer `--help`, which argparse exits non-zero for a subcommand
-    it does not define. That is the whole gap this closes: the release before the
-    one these examples pin rejected `check-plan` and `run-evidence` at argument
-    parsing, and nothing here reached a published distribution to see it.
+    it does not define. That is the whole gap this closes: a distribution that
+    rejects a command the examples invoke fails at argument parsing, and nothing
+    else here reaches a published distribution to see it.
     """
     found: list[str] = []
     reported = run([executable, "--version"])
