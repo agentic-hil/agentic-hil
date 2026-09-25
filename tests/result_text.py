@@ -3,17 +3,18 @@
 A result goes out twice. `structuredContent` is the whole document, for the
 hosts and programs that read it. The content text block is what an agent host
 puts into the model's context, so it is a compact projection of the same
-document: a key whose value is null, "", [] or {} is left out at any depth, nine
-top-level fields are left out where they only restate their default, and an
-advice entry the server already sent in this session is left out, counted under
-`repeated_advice`, with `advice_uri` naming the catalogue entry that serves it
-whole.
+document: a key whose value is null, "", [] or {} is left out at any depth, and
+so is a nested object left with no keys once its own empty keys are; nine
+top-level fields are left out where they only restate their default; and a
+top-level remediation or likely_causes entry the server already sent in this
+session is left out, counted under `repeated_advice`, with `advice_uri` naming
+the catalogue entry that serves it whole.
 
 Which advice a live server has already sent depends on everything earlier in
 the session, which the tiers that drive one do not track call by call. So this
 check is exact about everything else and tolerant about exactly that: each
-advice list in the text is the document's list with some entries left out and
-the rest in their order, and the number left out is the number
+top-level advice list in the text is the document's list with some entries left
+out and the rest in their order, and the number left out is the number
 `repeated_advice` gives.
 """
 
@@ -37,8 +38,9 @@ DEFAULTS: dict[str, object] = {
     "config_stale": False,
 }
 
-# The lists whose entries a session is sent once.
-ADVICE_FIELDS = ("remediation", "likely_causes", "quarantine_guidance")
+# The top-level lists whose entries a session is sent once. `quarantine_guidance`
+# is not one of them: no resource serves it again, so it is always sent whole.
+ADVICE_FIELDS = ("remediation", "likely_causes")
 
 ERRORS_URI_PREFIX = "agentic-hil://reference/errors/"
 
@@ -68,31 +70,29 @@ def vanishes(value: Any) -> bool:
 def projects(value: Any, sent: Any) -> bool:
     """Whether ``sent`` is ``value`` with its empty keys left out, at any depth.
 
-    Two things the rule leaves open are accepted either way: an object left with
-    no keys may be sent as {} or left out with its key, and an object inside an
-    array may be sent as it is or with its own empty keys left out."""
+    A key is left out when its value is empty, or is an object with no keys left
+    once its own empty keys are. An array keeps every element in its place: an
+    object inside one has its own empty keys left out and is sent as {} when none
+    are left, and any other element is sent as it is."""
     if isinstance(value, dict):
         if not isinstance(sent, dict) or not set(sent) <= set(value):
             return False
         for key, child in value.items():
-            if is_empty(child):
+            if is_empty(child) or vanishes(child):
                 if key in sent:
                     return False
-            elif key not in sent:
-                if not vanishes(child):
-                    return False
-            elif not projects(child, sent[key]):
+            elif key not in sent or not projects(child, sent[key]):
                 return False
         return True
     if isinstance(value, list):
-        return isinstance(sent, list) and len(sent) == len(value) and all(same(child, other) or projects(child, other) for child, other in zip(value, sent, strict=True))
+        return isinstance(sent, list) and len(sent) == len(value) and all(projects(child, other) for child, other in zip(value, sent, strict=True))
     return same(value, sent)
 
 
 def in_order(kept: list, entries: list) -> bool:
     """Whether ``kept`` is ``entries`` with some of them left out and the rest in their order."""
     remaining = iter(entries)
-    return all(any(same(entry, candidate) or projects(entry, candidate) for entry in remaining) for candidate in kept)
+    return all(any(projects(entry, candidate) for entry in remaining) for candidate in kept)
 
 
 def text_document(result: dict) -> dict:
@@ -130,7 +130,7 @@ def assert_text_projects(result: dict) -> dict:
     for key, value in document.items():
         if key in ("ok", "tool"):
             continue
-        if is_empty(value) or is_default(key, value):
+        if is_empty(value) or is_default(key, value) or vanishes(value):
             assert key not in sent, f"`{key}` is empty or restates its default and is still in the text: {text}"
         elif key in ADVICE_FIELDS and isinstance(value, list):
             kept = sent.get(key, [])
@@ -138,10 +138,8 @@ def assert_text_projects(result: dict) -> dict:
             assert in_order(kept, value), f"`{key}` in the text is the document's entries, some left out, in their order: {text}"
             left_out = len(value) - len(kept)
             assert left_out == repeated.get(key, 0), f"`{key}` left {left_out} entries out and `repeated_advice` counts {repeated.get(key, 0)}: {text}"
-        elif key in sent:
-            assert projects(value, sent[key]), f"`{key}` is the document's value with its empty keys left out: {text}"
         else:
-            assert vanishes(value), f"`{key}` was left out of the text: {text}"
+            assert key in sent and projects(value, sent[key]), f"`{key}` is the document's value with its empty keys left out: {text}"
     if "advice_uri" in sent:
         uri = sent["advice_uri"]
         entry = f"{ERRORS_URI_PREFIX}{document.get('error_type')}"

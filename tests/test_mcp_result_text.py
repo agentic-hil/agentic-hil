@@ -4,9 +4,10 @@ A result goes out twice: whole as `structuredContent`, and as the JSON text an
 agent host puts into the model's context, where it stays for the rest of the
 session and is paid for again on every later request. The text leaves out keys
 whose value is empty, the nine top-level fields that only restate their default,
-and advice the same server session was already sent. `structuredContent` stays
-whole and `isError` is computed as it always was, so every test here also holds
-the structured half to the result the tool service answered.
+and remediation and likely causes the same server session was already sent.
+`structuredContent` stays whole and `isError` is computed as it always was, so
+every test here also holds the structured half to the result the tool service
+answered.
 
 The results are built, so each rule is pinned on its own, and the stdio loop
 serves them: one loop is one MCP session, which is what the advice memory
@@ -110,8 +111,8 @@ def permission_refusal() -> dict:
 def test_empty_values_are_left_out_at_every_depth_and_array_elements_are_kept() -> None:
     """A key whose value is null, "", [] or {} is left out of the text, at the
     top level and in nested objects at any depth. Elements inside an array are
-    kept as they are, null and empty ones included, because their position
-    means something. `0` and `false` are values, not empty ones."""
+    never removed, null and empty ones included, because their position means
+    something. `0` and `false` are values, not empty ones."""
     built = {
         "ok": True,
         "tool": "com_read",
@@ -146,6 +147,40 @@ def test_empty_values_are_left_out_at_every_depth_and_array_elements_are_kept() 
         "positions": [None, "", [], {}, 0, False],
         "count": 0,
         "complete": False,
+    }, result
+    assert_text_projects(result)
+
+
+def test_objects_inside_arrays_lose_their_empty_keys_and_keep_their_place() -> None:
+    """An object inside an array has its own empty keys left out like any other
+    object, and stays in its place as {} when none are left: an array element is
+    never removed or replaced. A nested object that is not an array element and
+    has no keys left once its own empty keys are left out goes with its key,
+    worked from the bottom up."""
+    built = {
+        "ok": True,
+        "tool": "com_read",
+        "summary": "Read 2 chunks.",
+        "chunks": [
+            {"offset": 0, "text": "ab", "error": None, "tags": []},
+            {"note": None, "extra": {}},
+            [{"inner": None, "kept": 1}, {"gone": ""}],
+            None,
+        ],
+        "status": {"warning": None, "detail": {"reason": "", "hints": [], "origin": {"device": None}}},
+        "window": {"start": 0, "detail": {"reason": None}},
+    }
+
+    (result,) = one_session(built)
+
+    assert result["structuredContent"] == built, result
+    assert result["isError"] is False, result
+    assert text_document(result) == {
+        "ok": True,
+        "tool": "com_read",
+        "summary": "Read 2 chunks.",
+        "chunks": [{"offset": 0, "text": "ab"}, {}, [{"kept": 1}, {}], None],
+        "window": {"start": 0},
     }, result
     assert_text_projects(result)
 
@@ -320,6 +355,45 @@ def test_an_entry_changed_by_one_character_is_sent() -> None:
         assert_text_projects(result)
 
 
+def test_an_entry_counts_as_sent_only_in_the_field_that_sent_it() -> None:
+    """What was sent is remembered per field. An entry the session was sent as
+    remediation is sent again when it arrives as a likely cause, and from then
+    on it counts as sent in both fields."""
+    entry = "debug probe or target is stuck"
+    base = {"ok": False, "tool": "reset_target", "error_type": "timeout", "summary": "Debugger command timed out."}
+    as_remediation = {**base, "remediation": [entry]}
+    as_cause = {**base, "likely_causes": [entry]}
+    as_both = {**base, "likely_causes": [entry], "remediation": [entry]}
+
+    results = one_session(as_remediation, as_cause, as_both)
+
+    assert [result["structuredContent"] for result in results] == [as_remediation, as_cause, as_both], results
+    assert [result["isError"] for result in results] == [True, True, True], results
+    assert text_document(results[0]) == as_remediation, results[0]
+    assert text_document(results[1]) == as_cause, results[1]
+    assert text_document(results[2]) == {**base, "repeated_advice": {"likely_causes": 1, "remediation": 1}}, results[2]
+    for result in results:
+        assert_text_projects(result)
+
+
+def test_an_entry_twice_in_one_list_is_sent_twice() -> None:
+    """Nothing is left out within one text block: the session takes a block's
+    entries once the block is built. A remediation holding the same entry twice
+    sends it twice, and the next time both count as sent."""
+    step = "Power-cycle the board and probe it again."
+    built = {"ok": False, "tool": "reset_target", "error_type": "timeout", "summary": "Debugger command timed out.", "remediation": [step, step]}
+
+    first, second = one_session(built, built)
+
+    for result in (first, second):
+        assert result["structuredContent"] == built, result
+        assert result["isError"] is True, result
+    assert text_document(first) == built, first
+    assert text_document(second) == {**without(built, "remediation"), "repeated_advice": {"remediation": 2}}, second
+    for result in (first, second):
+        assert_text_projects(result)
+
+
 def test_advice_left_out_names_the_scoped_entry_it_came_from() -> None:
     """likely_causes are advice as well. An OpenOCD target_not_detected carries
     the backend's likely causes and the remediation of the catalogue entry
@@ -389,6 +463,46 @@ def test_the_exclusive_refusal_names_its_own_scoped_entry() -> None:
     assert [step.replace(PERMISSION_KEY_PLACEHOLDER, blocking) for step in entry["remediation"]] == built["remediation"], entry
 
 
+@pytest.mark.parametrize("key", list(ERROR_CATALOGUE))
+def test_every_catalogue_entry_is_named_by_the_advice_it_left_out(key: str) -> None:
+    """Every catalogue entry, scoped and unscoped. A result carries the entry's
+    advice the way the services attach it, with the permission key an entry
+    written around one is filled with, and is sent twice in one session. The
+    second text leaves the remediation out and `advice_uri` names this entry,
+    which serves every entry left out once its placeholder holds the result's
+    key."""
+    error_type, _, scope = key.partition(":")
+    permission = None if remediation_fields(error_type, scope or None) else FLASH_PERMISSION
+    built = {
+        "ok": False,
+        "tool": "probe_target",
+        "error_type": error_type,
+        "summary": f"Refused as {key}.",
+        **(permission_denied_fields(permission) if permission else {}),
+        **remediation_fields(error_type, scope or None, permission=permission),
+    }
+    assert built["remediation"], built
+
+    first, second = one_session(built, built)
+
+    for result in (first, second):
+        assert result["structuredContent"] == built, result
+        assert result["isError"] is True, result
+    assert text_document(first) == built, first
+    sent = text_document(second)
+    assert sent == {
+        **without(built, "remediation"),
+        "repeated_advice": {"remediation": len(built["remediation"])},
+        "advice_uri": ERRORS + key,
+    }, second
+    served = served_entry(sent["advice_uri"])["remediation"]
+    if permission:
+        served = [step.replace(PERMISSION_KEY_PLACEHOLDER, permission) for step in served]
+    assert [step for step in built["remediation"] if step not in served] == [], (served, second)
+    for result in (first, second):
+        assert_text_projects(result)
+
+
 def test_advice_without_a_catalogue_entry_is_counted_and_names_no_uri() -> None:
     """An error_type the catalogue has no entry for still has its repeated
     likely_causes left out and counted, and its text carries no `advice_uri`:
@@ -417,8 +531,35 @@ def test_advice_without_a_catalogue_entry_is_counted_and_names_no_uri() -> None:
         assert_text_projects(result)
 
 
+def test_advice_nested_in_a_result_is_sent_as_it_is() -> None:
+    """Only the top-level advice lists are sent once. A run carries each step's
+    result under `steps`, and a refusal nested there keeps its remediation
+    whole however often the session has seen it. Nested advice is not what the
+    session remembers either: the same refusal at the top level after it still
+    sends its remediation whole."""
+    refusal = permission_refusal()
+    run = {
+        "ok": False,
+        "tool": "test_reactor",
+        "name": "smoke",
+        "steps": [{"index": 0, "action": "flash_firmware", "result": permission_refusal()}],
+        "summary": "Test reactor sequence failed.",
+        "failed_step": 0,
+        "step_error_type": "permission_denied",
+        "error_type": "permission_denied",
+    }
+
+    results = one_session(run, refusal, run)
+
+    assert [result["structuredContent"] for result in results] == [run, refusal, run], results
+    assert [result["isError"] for result in results] == [True, True, True], results
+    for result, built in zip(results, (run, refusal, run), strict=True):
+        assert text_document(result) == built, result
+        assert_text_projects(result)
+
+
 def quarantined_refusal(*reasons: str) -> dict:
-    """The refusal a quarantined bench answers with, and the guidance a result carries for each of its reasons."""
+    """The refusal a quarantined bench answers with: the catalogue's remediation, and the guidance a result carries for each of its reasons."""
     return attach_quarantine_guidance(
         {
             "ok": False,
@@ -430,19 +571,22 @@ def quarantined_refusal(*reasons: str) -> dict:
             "retry_safe": False,
             "cleanup_reasons": sorted(reasons),
             "quarantine_id": "q-1",
+            **remediation_fields("resource_quarantined"),
         }
     )
 
 
-def test_quarantine_guidance_already_sent_is_left_out_reason_by_reason() -> None:
-    """quarantine_guidance is advice per reason. A later quarantined result that
-    names a reason the session was already given guidance for sends only the
-    guidance for its new reason. The reasons themselves, `quarantined` and
-    `cleanup_required` are kept."""
+def test_quarantine_guidance_is_sent_whole_every_time() -> None:
+    """No resource serves the guidance for a quarantine reason, and it is what a
+    caller needs to recover the bench, so it is never left out: a later
+    quarantined result sends the guidance for every reason it names, the one
+    the session was already given included. The remediation beside it is
+    advice like any other, left out when repeated, counted, and named by the
+    catalogue entry that serves it."""
     first = quarantined_refusal("debugger_result_unconfirmed")
     second = quarantined_refusal("debugger_result_unconfirmed", "com_write_effect_unconfirmed")
     assert len(second["quarantine_guidance"]) == 2 and first["quarantine_guidance"][0] in second["quarantine_guidance"], second
-    new_guidance = [entry for entry in second["quarantine_guidance"] if entry["reason"] == "com_write_effect_unconfirmed"]
+    assert first["remediation"] and first["remediation"] == second["remediation"], second
 
     results = one_session(first, second)
 
@@ -450,11 +594,11 @@ def test_quarantine_guidance_already_sent_is_left_out_reason_by_reason() -> None
     assert [result["isError"] for result in results] == [True, True], results
     assert text_document(results[0]) == first, results[0]
     assert text_document(results[1]) == {
-        **without(second, "quarantine_guidance"),
-        "quarantine_guidance": new_guidance,
-        "repeated_advice": {"quarantine_guidance": 1},
+        **without(second, "remediation"),
+        "repeated_advice": {"remediation": len(second["remediation"])},
         "advice_uri": ERRORS + "resource_quarantined",
     }, results[1]
+    assert text_document(results[1])["quarantine_guidance"] == second["quarantine_guidance"], results[1]
     for result in results:
         assert_text_projects(result)
 
