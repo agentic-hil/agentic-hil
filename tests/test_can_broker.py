@@ -1817,6 +1817,29 @@ def test_the_rule_refuses_a_narrow_or_unreadable_bound_and_accepts_a_widened_one
     assert "bare number" in by_test["test_a_wide_bare_number"].refused
 
 
+def test_a_file_that_opens_with_a_byte_order_mark_is_walked_like_any_other(tmp_path: Path) -> None:
+    """Two files of the suite start with one, and the parser refuses the
+    character in text read as plain UTF-8, so a walk that read them that way
+    would never judge an attach written in either."""
+    path = tmp_path / "test_marked.py"
+    path.write_text("\n".join(["def test_marked(config):", "    attach_participant(config, 'bench', 'alpha', start_timeout_s=4.0)"]), encoding="utf-8-sig")
+
+    assert path.read_bytes().startswith(b"\xef\xbb\xbf")
+    assert [(call.line, call.test, call.base) for call in spawning_start_bounds(path)] == [(2, "test_marked", 4.0)]
+
+
+def test_a_file_that_does_not_parse_fails_the_walk_by_name(tmp_path: Path) -> None:
+    """Never a file skipped in silence: an attach in a file the walk could not
+    read is an attach the rule never judged."""
+    path = tmp_path / "test_broken.py"
+    path.write_text("def test_broken(:\n    pass\n", encoding="utf-8")
+
+    with pytest.raises(SyntaxError) as refused:
+        spawning_start_bounds(path)
+
+    assert refused.value.filename == str(path), refused.value
+
+
 def test_no_attach_that_may_start_a_broker_narrows_the_start_below_what_a_start_costs() -> None:
     """A number here is a deadline on a machine, and the machine is not the test's.
 
