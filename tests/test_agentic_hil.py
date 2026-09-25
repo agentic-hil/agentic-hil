@@ -8425,7 +8425,10 @@ def test_initialize_carries_the_one_thing_said_before_the_agent_decides(tmp_path
 
     Measured: a small model ran st-flash before calling a single tool here, so
     nothing this server says at call time could have reached it. initialize is
-    the only moment that precedes the decision.
+    the only moment that precedes the decision. It is also what an agent host
+    puts into the system prompt of every request of every session this server
+    is registered in, so it carries what has to precede that decision, in
+    1,800 characters at most.
     """
     # In tmp_path rather than the working directory: this wrote a configuration
     # into the clone, which is one fixed path two concurrent runs of this module
@@ -8436,12 +8439,105 @@ def test_initialize_carries_the_one_thing_said_before_the_agent_decides(tmp_path
     )
     instructions = response["result"]["instructions"]
 
-    for raw in ("openocd", "pyocd", "st-flash", "candump", "Makefile", "/dev/tty*"):
+    for raw in ("openocd", "pyocd", "st-flash", "st-info", "st-util", "JLinkExe", "gdb", "screen", "minicom", "picocom", "cansend", "candump", "Makefile", "/dev/tty*", "COM*", "SocketCAN"):
         assert raw in instructions, raw
     assert "permission_denied" in instructions
     assert "before reaching for a shell" in instructions
     # The observed worst case: a model that granted itself the permission.
     assert "Never edit the authoritative configuration" in instructions
+    assert len(instructions) <= 1800, len(instructions)
+
+
+def test_the_instructions_say_what_precedes_the_first_call_in_that_order(tmp_path: Path) -> None:
+    """Seven things, each read between its own name and the next one's.
+
+    Where every request that touches the board goes, what never stands in for
+    it, what a refusal means, how the configuration changes, which calls make a
+    bench cycle short, how to read a result that leaves its defaults out, and
+    where the facts about this server are published. Each part is found by the
+    name it cannot be said without, so a sentence that drifted into another
+    part's place, or a part that went missing, fails here by its name.
+    """
+    tools = AgenticHILToolService(load_config(str(write_config(tmp_path / "workspace"))))
+    try:
+        response = handle_mcp_message(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": MCP_PROTOCOL_VERSION}},
+            tools,
+        )
+    finally:
+        tools.close()
+    instructions = str(response["result"]["instructions"])
+
+    starts = {part: instructions.find(name) for part, name in (("b", "openocd"), ("c", "permission_denied"), ("d", "project_config_describe"), ("e", "flash_firmware"), ("f", "side_effect_status"), ("g", "resources/list"))}
+    assert -1 not in starts.values(), starts
+    assert list(starts.values()) == sorted(starts.values()), starts
+    bounds = [0, *starts.values(), len(instructions)]
+    part = dict(zip("abcdefg", (instructions[start:end] for start, end in zip(bounds[:-1], bounds[1:], strict=True)), strict=True))
+
+    def says_in_order(text: str, *anchors: str) -> None:
+        at = 0
+        for anchor in anchors:
+            found = text.find(anchor, at)
+            assert found >= 0, f"{anchor!r} does not follow {text[:at][-60:]!r} in {text!r}"
+            at = found + len(anchor)
+
+    # a. Every request that touches the board is answered through these tools.
+    for touches in ("flashing", "resetting", "probing", "debugging", "UART or CAN traffic", "firmware artifacts", "test reports"):
+        assert touches in part["a"], touches
+    assert "before reaching for a shell" in part["a"]
+    # b. What never stands in for them, and why.
+    for raw in ("openocd", "pyocd", "st-flash", "st-info", "st-util", "JLinkExe", "gdb", "screen", "minicom", "picocom", "cansend", "candump", "Makefile", "/dev/tty*", "COM*", "SocketCAN"):
+        assert raw in part["b"], raw
+    says_in_order(part["b"], "bypass the policy", "audit")
+    # c. A refusal is the answer, and the file that grants is the operator's.
+    says_in_order(part["c"], "permission_denied", "report", "stop", "Never edit the authoritative configuration", "operator", "another way")
+    # d. The configuration changes through two calls and through nothing else.
+    says_in_order(part["d"], "project_config_describe", "project_config_set", "own file tools")
+    # e. The calls that make a bench cycle one round trip, each with its argument.
+    says_in_order(part["e"], "flash_firmware", "reset_after_flash", "capture", "UART output", "one call", "com_read", "until", "can_read", "until_id", "poll", "bench_run_start", "bench_run_stop", "test_reactor_run")
+    # f. What a field left out means, and where advice already given is read again.
+    says_in_order(part["f"], "side_effect_status", "not_started", "cleanup_required", "quarantined", "false", "audit_ok", "cleanup_ok", "target_ok", "true", "hardware_state", "unchanged", "already received", "advice_uri")
+    # g. Where the facts about this server are, and what they stand in for.
+    says_in_order(part["g"], "resources/list", "agentic-hil://reference/", "source", "installed package")
+
+
+def test_the_instructions_leave_each_situation_to_the_result_that_meets_it(tmp_path: Path) -> None:
+    """A stale file, a missing one and a refused widening each arrive with a result.
+
+    That result carries the catalogue entry for it at the moment it applies.
+    Said at initialize as well, each is paid for in every request of every
+    session, including all the sessions that never meet it.
+    """
+    tools = AgenticHILToolService(load_config(str(write_config(tmp_path / "workspace"))))
+    try:
+        response = handle_mcp_message(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": MCP_PROTOCOL_VERSION}},
+            tools,
+        )
+    finally:
+        tools.close()
+    instructions = str(response["result"]["instructions"])
+
+    for situation in ("config_stale", "config_file_not_found", "permission_widening_denied"):
+        assert situation not in instructions, situation
+
+
+def test_what_left_the_instructions_is_still_read_before_the_call_it_is_about() -> None:
+    """Three paragraphs initialize no longer carries, where a caller now meets them.
+
+    Each was dropped because the tool it is about says it in the description
+    every host lists before the first call. Pinned by the names a rewording of
+    those descriptions cannot do without, and nothing more.
+    """
+    described = {str(tool["name"]): str(tool["description"]) for tool in MCP_TOOLS}
+
+    # A configuration written before the board was attached holds placeholders.
+    assert "placeholder" in described["project_config_adopt_hardware"]
+    # A sequence of calls holds its devices only while it is declared.
+    assert "bench_run_stop" in described["bench_run_start"]
+    # A plan can run detached, and two further calls read and end it.
+    for name in ("detach", "test_reactor_status", "test_reactor_stop"):
+        assert name in described["test_reactor_run"], name
 
 
 def test_a_refusal_says_what_to_do_and_what_not_to_do() -> None:

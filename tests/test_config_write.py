@@ -35,11 +35,12 @@ from agentic_hil.configwrite import (
     permission_surface,
     project_config_set,
 )
-from agentic_hil.contracts import TOOL_SCHEMAS
+from agentic_hil.contracts import MCP_TOOLS, TOOL_SCHEMAS
 from agentic_hil.knowledge import (
     CONFIG_DESCRIPTION_RIGHT,
     CONFIG_KEY_RULES,
     CONFIG_PERMISSIONS_RIGHT,
+    CONFIG_REOPEN_COMMAND,
     CONFIG_SHAPE_URI,
     CONFIG_WRITE_RIGHT,
     DEBUGGER_FIELD_MATRIX,
@@ -53,7 +54,7 @@ from agentic_hil.knowledge import (
     remediation_fields,
     resolve_config_key,
 )
-from agentic_hil.mcp import handle_mcp_message
+from agentic_hil.mcp import MCP_PROTOCOL_VERSION, handle_mcp_message
 from agentic_hil.tools import AgenticHILToolService
 
 COM_PORTS = 'com_ports:\n  dut_uart:\n    device: "COM9"\n    baudrate: 115200\n'
@@ -1545,20 +1546,33 @@ def test_a_gdb_inside_the_workspace_is_refused_like_every_other_executable(tmp_p
     assert path.read_bytes() == before, "nothing changed"
 
 
-def test_the_server_says_before_the_first_call_that_this_is_the_way_to_change_a_config() -> None:
+def test_the_server_says_before_the_first_call_that_this_is_the_way_to_change_a_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A refusal arrives after the decision to reach for a file tool.
 
     `initialize` is the only moment that precedes it, which is why the two calls
-    and the two permissions are named there and not only in a resource."""
-    from agentic_hil.mcp import SERVER_INSTRUCTIONS
+    are named there. The two permissions that gate them are named where the
+    calls are: in the description of the call they gate, which every host lists
+    before the first call, and in the answer of the call that says what is open,
+    which also names the reference that explains the shape of a key."""
+    workspace, _ = bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+        response = handle_mcp_message({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": MCP_PROTOCOL_VERSION}}, tools)
+        described = tools.call(PROJECT_CONFIG_DESCRIBE)
+    finally:
+        tools.close()
+    instructions = str(response["result"]["instructions"])
 
-    assert PROJECT_CONFIG_DESCRIBE in SERVER_INSTRUCTIONS
-    assert PROJECT_CONFIG_SET in SERVER_INSTRUCTIONS
-    assert CONFIG_DESCRIPTION_RIGHT in SERVER_INSTRUCTIONS
-    assert CONFIG_PERMISSIONS_RIGHT in SERVER_INSTRUCTIONS
-    assert CONFIG_SHAPE_URI in SERVER_INSTRUCTIONS
+    assert PROJECT_CONFIG_DESCRIBE in instructions
+    assert PROJECT_CONFIG_SET in instructions
+    assert "own file tools" in instructions
     # And the older rule it must not contradict.
-    assert "Never edit the authoritative configuration" in SERVER_INSTRUCTIONS
+    assert "Never edit the authoritative configuration" in instructions
+    setter = next(str(tool["description"]) for tool in MCP_TOOLS if tool["name"] == PROJECT_CONFIG_SET)
+    assert CONFIG_DESCRIPTION_RIGHT in setter
+    assert CONFIG_PERMISSIONS_RIGHT in setter
+    assert [right["permission"] for right in described["rights"]] == [CONFIG_DESCRIPTION_RIGHT, CONFIG_PERMISSIONS_RIGHT]
+    assert described["reference"] == CONFIG_SHAPE_URI
 
 
 def test_setup_still_denies_the_agents_own_file_tools_on_the_configuration(tmp_path: Path) -> None:
@@ -1623,6 +1637,32 @@ def test_a_permission_already_true_cannot_be_sent_true_again(tmp_path: Path, mon
     assert "as the request spelled them" in meaning
     assert "would have moved nothing" in meaning
     assert refused["remediation"] == remediation_fields("permission_widening_denied")["remediation"]
+
+
+def test_a_refused_widening_says_which_way_permissions_move_and_who_moves_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one-way rule, said to the caller that just tried the other way.
+
+    It stood in the server instructions, where every session paid for it and
+    none needed it until this refusal. It travels with the refusal now, whole:
+    a narrowing is made on the operator's word, the way back is a person's
+    regeneration, and deleting or moving the file to get a different one is
+    not a way round it."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_PERMISSIONS_RIGHT: True})
+    before = path.read_bytes()
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.permissions.allow_flash", True)))
+    finally:
+        tools.close()
+
+    assert refused["error_type"] == "permission_widening_denied"
+    assert path.read_bytes() == before
+    advice = [*refused["remediation"], *refused["do_not"]]
+    assert any("operator's word" in step for step in advice), advice
+    assert any("delete" in step and "move" in step for step in refused["do_not"]), refused["do_not"]
+    # What the entry already said, and keeps saying.
+    assert any("a moment ago" in step for step in refused["do_not"]), refused["do_not"]
+    assert any(CONFIG_REOPEN_COMMAND in step for step in refused["remediation"]), refused["remediation"]
 
 
 def test_the_false_only_rule_does_not_reach_the_command_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
