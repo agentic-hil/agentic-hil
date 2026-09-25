@@ -18,7 +18,10 @@ are the ones the commands build on it.
 from __future__ import annotations
 
 import copy
+import errno
 import json
+import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -355,3 +358,134 @@ def test_a_refusal_that_carries_the_discovery_prints_the_paragraph_once(monkeypa
     out = _flat(render_result(refusal, "adopt-hardware"))
 
     assert out.count(_flat(discovery["probe_inventory_note"])) == 1, out
+
+
+# ---------------------------------------------------------------------------
+# A failed listing, named on the screen.
+#
+# The COM-port item said that discovery failed and nothing about how. The error
+# the serial backend raised is in the document, as `backend_error` under
+# `available_com_ports`, and neither screen prints that field, so the one line
+# that decides what to do next never reached the person reading them.
+
+# What to do about a listing the serial backend could not finish. pyserial was
+# imported to raise the error, so its installation is not the question; the
+# causes the result names are the error itself and a USB serial device that
+# changed state while the host listed it.
+LISTING_ADVICE = "Run: agentic-hil com-ports again once the USB serial devices have settled."
+
+
+def _device_gone() -> OSError:
+    """What a USB serial device that went away mid-listing raises, in the
+    platform's own words: the errno and the C library's text for it. No host has
+    been recorded failing a listing."""
+    return OSError(errno.ENODEV, os.strerror(errno.ENODEV))
+
+
+def _a_failed_listing(monkeypatch: pytest.MonkeyPatch, error: OSError) -> JsonObject:
+    """The product's own document for a host listing that raised `error`."""
+
+    def comports(*args: object, **kwargs: object) -> list[object]:
+        raise error
+
+    with monkeypatch.context() as patch:
+        patch.setattr("serial.tools.list_ports.comports", comports)
+        failed = list_available_com_ports()
+    assert failed["error_type"] == "com_port_discovery_failed", failed
+    assert failed["backend_error"] == str(error), failed
+    return failed
+
+
+def _the_advice_listing_fails(monkeypatch: pytest.MonkeyPatch) -> JsonObject:
+    """The listing the COM-port advice is built from fails, and discovery's own
+    reading of the recorded host stands, so the file binds what it bound."""
+    failed = _a_failed_listing(monkeypatch, _device_gone())
+    monkeypatch.setattr(
+        "agentic_hil.cli.list_available_com_ports", lambda tool="com_ports_available": copy.deepcopy(failed)
+    )
+    return failed
+
+
+def _run(command: str, monkeypatch: pytest.MonkeyPatch) -> JsonObject:
+    if command == "setup":
+        _setup_harness(monkeypatch)
+        return cli.setup_project(agent="claude-code")
+    return cli.init_project()
+
+
+def _screen_items(out: str) -> list[str]:
+    """Every numbered item on a rendered screen, each as it was printed."""
+    items: list[list[str]] = []
+    hanging = ""
+    for line in out.splitlines():
+        head = re.match(r"\s*\d+\. ", line)
+        if head:
+            items.append([line])
+            hanging = " " * head.end()
+        elif items and hanging and line.startswith(hanging) and line[len(hanging) : len(hanging) + 1].strip():
+            items[-1].append(line)
+        else:
+            hanging = ""
+    return ["\n".join(item) for item in items]
+
+
+@pytest.mark.parametrize("bound", [True, False], ids=["bound", "nothing-bound"])
+@pytest.mark.parametrize("command", ["init", "setup"])
+def test_a_failed_listing_is_named_in_the_item_that_says_it_failed(
+    command: str, bound: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The screen names the error the discovery reported, whole, in the item
+    that says what to do about it, after the bound entry's confirmation when the
+    file binds one.
+
+    With the toolchain found, the file binds `dut_uart` to the debugger's port;
+    without it, the profile's `dut_uart` is declared with no device."""
+    _starter_workspace(tmp_path, monkeypatch)
+    _the_recorded_host(monkeypatch, openocd=bound)
+    failed = _the_advice_listing_fails(monkeypatch)
+
+    out = render_result(_run(command, monkeypatch), command)
+
+    printed = [item for item in _screen_items(out) if "COM port discovery failed" in _flat(item)]
+    assert len(printed) == 1, out
+    number, said = _flat(printed[0]).split(". ", 1)
+    assert failed["backend_error"] in said, printed[0]
+    expected = f"COM port discovery failed: {failed['backend_error']}. {LISTING_ADVICE}"
+    assert number.isdigit()
+    assert said == (f"com_ports.dut_uart is bound to {BY_ID_PATH}. {expected}" if bound else expected)
+
+
+@pytest.mark.parametrize("command", ["init", "setup"])
+def test_the_document_keeps_the_failed_listing_as_the_discovery_returned_it(
+    command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The error was never missing from the document: `available_com_ports` is
+    the discovery's own result, its `backend_error` and `likely_causes` in it."""
+    _starter_workspace(tmp_path, monkeypatch)
+    _the_recorded_host(monkeypatch)
+    failed = _the_advice_listing_fails(monkeypatch)
+
+    result = _run(command, monkeypatch)
+
+    assert result["steps"]["config"]["available_com_ports"] == failed
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="ctypes.WinError, which pyserial raises when a listing fails, is Windows-only"
+)
+def test_a_windows_error_ends_its_own_sentence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """pyserial fails a Windows listing with `ctypes.WinError()`, whose text is
+    the system's own sentence with its full stop: here ERROR_GEN_FAILURE, a
+    device attached to the system that is not functioning. The item names it
+    whole and does not end it twice."""
+    import ctypes
+
+    error = ctypes.WinError(31)
+    assert str(error).endswith("."), str(error)
+    failed = _a_failed_listing(monkeypatch, error)
+
+    steps = cli.init_next_steps(failed, tmp_path / "config.yaml")
+
+    assert [step for step in steps if "COM port discovery failed" in step] == [
+        f"COM port discovery failed: {error} {LISTING_ADVICE}"
+    ]
