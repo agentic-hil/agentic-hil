@@ -588,8 +588,10 @@ _CONFIG_MISSING_SHELL_ROUTE = (
 )
 _CONFIG_MISSING_WHAT_IT_WRITES = (
     "Over MCP, `project_config_create` writes every permission true except `allow_raw_debugger_commands` and "
-    "`allow_mass_erase`, which it writes false so that flashing works, so the bench is workable from the file it "
-    "produces without anyone editing YAML; over that route the two flash interlocks are false by construction. "
+    "`allow_mass_erase`, which it writes false so that flashing works. That grants flashing, reset, COM and CAN "
+    "writes, artifact upload, unrestricted symbol access and all three `permissions.allow_config_*` grants, so the "
+    "bench is workable from the file it produces without anyone editing YAML; over that route the two flash "
+    "interlocks are false by construction. "
     "`agentic-hil init` instead starts from the project's `agentic-hil.config.example.yaml` and honours whatever "
     "permission that file names, so it can hand back a deliberately narrower bench, or a wider one where that file "
     "opens a flash interlock: the interlocks come back false only when the example leaves them so. Read the "
@@ -634,6 +636,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "and nothing more: not what the file now contains, and not what a restart onto it would produce."
         ),
         remediation=(
+            "`config_status.state` says which of three this is, and each asks for something different: `changed` means "
+            "the file on disk differs from the one this server loaded, and the steps below are for that; `missing` "
+            "means the file is gone, so it has to be restored before there is anything to restart onto; `unreadable` "
+            "means it is there and will not open, so it has to be made readable first.",
             "If what changed is the description of the bench (`target`, a `debuggers`, `com_ports` or `can_buses` "
             "entry, a probe id, a COM device, a baudrate), call `project_config_reload_description`. It re-reads those "
             "four sections and clears this, without a restart and without touching a single permission. Its result "
@@ -660,6 +666,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "states is adopted by a restart and by nothing on this surface.",
             "Do not try to make the server pick the file up by editing it again, by deleting it, or by calling a "
             "configuration write tool. Those two calls are the whole of what rebinds a running server.",
+            "Do not ask for a restart on `missing` or `unreadable` before the file has been restored or made readable: "
+            "a restart reads the file too, and until it can there is nothing to restart onto.",
         ),
     ),
     f"config_file_not_found:{CONFIG_RUNNING_SERVER_SCOPE}": ErrorRemedy(
@@ -692,8 +700,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         remediation=(
             "Report `config_status.backend_error`: it names what the read failed on (a permission on the file or a "
             "directory above it, a path component that is no longer a directory, bytes that are no longer UTF-8).",
-            "Ask the operator to make the file readable again and restart the MCP server, so that what is enforced and "
-            "what can be read are the same document.",
+            "Ask the operator to make the file readable again and only then restart the MCP server, so that what is "
+            "enforced and what can be read are the same document. A restart before the file is readable again cannot "
+            "succeed: startup has to read it too.",
         ),
         do_not=(
             "Do not treat an unreadable file as an unchanged one and carry on as if the answers were current.",
@@ -1240,7 +1249,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "If the intent was to narrow the bench, re-send the call with `false` values only; a call that mixes the "
-            "two is refused for the widening and loses the narrowing with it.",
+            "two is refused for the widening and loses the narrowing with it. Narrowing is the one direction open "
+            "here, and it is made on the operator's word.",
             "If a permission really has to come back, that is a person's decision at the command line: "
             "`{grant_command} <key>` opens that one permission in the file as it stands, and `{reopen_command}` "
             "regenerates the configuration from attached hardware at the generated defaults again. Report which "
@@ -1256,6 +1266,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "lands here.",
             "Do not carry out the action the permission would have allowed by another route. A debugger, serial device "
             "or CAN adapter driven outside Agentic HIL defeats the policy this refusal enforces.",
+            "Do not delete or move the configuration to get a different one: a regeneration over the gap undoes every "
+            "narrowing in it, which is this same widening by another route.",
         ),
     ),
     "debugger_not_executable": ErrorRemedy(
@@ -1521,7 +1533,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Read `expected_device` when it is present: the board this entry names is still attached, under that name, "
-            "and the entry is simply out of date. `agentic-hil adopt-hardware` rewrites it from the attached hardware.",
+            "and the entry is simply out of date. `project_config_adopt_hardware` rewrites it from the attached "
+            "hardware.",
             "Without `expected_device` the named board is not attached at all. Plug it in, or work on the board that is "
             "there by naming its own entry.",
             "On Linux, prefer `/dev/serial/by-id/usb-<vendor>_<product>_<serial>-ifNN` for `device`. udev builds that "
@@ -1576,7 +1589,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "mistake that was not there."
         ),
         remediation=(
-            "Plug the board in and run `agentic-hil adopt-hardware`. It fills `com_ports.<name>.device` in "
+            "Plug the board in and run `project_config_adopt_hardware`. It fills `com_ports.<name>.device` in "
             "from the attached hardware, together with the serial number and USB ids that make the name checkable, "
             "and it fills in the probe and the toolchain path in the same call.",
             "If the port is not the probe's own virtual COM port, run `agentic-hil com-ports` to see what this host "
@@ -1633,7 +1646,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "A step naming a device the configuration does not declare is corrected in the plan: `device:` has to be "
             "one of the names the refusal lists under the `configured_*` key for that kind.",
             "A declared entry with no hardware behind it is filled in rather than argued with. With the board "
-            "attached, `agentic-hil adopt-hardware` fills a declared debugger or COM-port entry's hardware in; "
+            "attached, `project_config_adopt_hardware` fills a declared debugger or COM-port entry's hardware in; "
             "adoption has no CAN half, so a `can_buses` entry's adapter and channel are written by hand.",
             "Only where the section is empty because `agentic-hil init` ran with no bench attached does the file need "
             "writing again: `agentic-hil init --force` from the project root writes it from the project profile and "
@@ -2064,8 +2077,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "inventory then shows is bound on its own, with the incomplete count recorded on the entry it writes. "
             "`agentic-hil debugger-probes` and `agentic-hil com-ports` show what this host can currently see.",
             "Where the bench has a probe this inventory cannot reach, name the intended board's serial instead: "
-            "`agentic-hil adopt-hardware --probe-id <serial>` binds it, on a workspace that already has a "
-            "configuration for adoption to fill.",
+            "`project_config_adopt_hardware` given it as `probe_id` (`--probe-id <serial>` at a shell) binds it, on a "
+            "workspace that already has a configuration for adoption to fill.",
             "Or install STM32CubeProgrammer for an authoritative count: its own listing reads the serial off the probe "
             "directly rather than through a virtual COM port, so it sees a VCP-less ST-LINK/V2 the inventory cannot, "
             "then run the generation again.",

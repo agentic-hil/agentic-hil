@@ -12,7 +12,7 @@ from agentic_hil.knowledge import MCP_RESOURCES as MCP_RESOURCES
 from agentic_hil.knowledge import read_resource
 from agentic_hil.redact import redact_sensitive, redact_stream_text
 from agentic_hil.report import overall_success
-from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 from agentic_hil.types import JsonObject
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
@@ -22,88 +22,47 @@ SUPPORTED_MCP_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 # the agent decides anything. A refusal and a skill both arrive too late for a
 # caller that reaches for a shell first: measured, a small model ran st-flash
 # before it had called a single tool here.
+#
+# It is also what an agent host puts into the system prompt of every request of
+# every session this server is registered in, whether or not that session ever
+# touches a board, so it holds at most 1,800 characters: what has to precede a
+# first call and nothing else. A stale file, a missing one and a refused
+# widening are each said by the result that meets them, with its catalogue
+# entry, to the session that meets them.
 SERVER_INSTRUCTIONS = (
-    "This project's hardware is reachable only through these tools. Every request that would touch the "
-    "target board (flashing, resetting, probing, debugging, UART or CAN traffic, "
-    "firmware artifacts, test reports) is answered by calling one of them, before reaching for a "
-    "shell.\n"
-    "Never substitute openocd, pyocd, st-flash, st-info, st-util, JLinkExe, gdb, screen, minicom, "
-    "picocom, cansend or candump, a Makefile target that runs one of them, or direct access to "
-    "/dev/tty*, COM* or a SocketCAN interface. Those bypass the policy these tools enforce, and the "
-    "operator cannot see or audit what they did.\n"
-    "A sequence that spans several calls (flash, then reset, then read) is declared once with "
-    "bench_run_start and closed with bench_run_stop. Without that declaration each call holds its device "
-    "only for its own duration and the board is free in between; with it, the devices you named are yours "
-    "for the whole run and are the only ones the run may touch.\n"
-    "A whole test plan runs through test_reactor_run, which drives the reactor `agentic-hil test-reactor` "
-    "drives, with the same preflight, the same locks held for the whole plan, the same permission per step "
-    "and the same report, so a plan is never a reason to reach for a shell; with detach: true it answers at once "
-    "with a handle that test_reactor_status reads and test_reactor_stop ends.\n"
-    "A permission_denied result is the answer to the request, not an obstacle: report it, name the "
-    "permission that is denied, and stop. Never edit the authoritative configuration to grant "
-    "yourself a permission (it belongs to the operator) and never carry out the action another way.\n"
-    "Changing the configuration also goes through these tools, never through your own file tools. "
-    "project_config_describe says which keys you may change in this state and which permission would "
-    "open a locked one; project_config_set then sets named keys with scalar values. Two permissions "
-    "gate it: allow_config_description_write for what the bench is (target, probe_id, port device and "
-    "baudrate, CAN bus settings) and allow_config_permissions_write for every permission key, which is "
-    "each permissions: block plus the two grants that sit directly on a section, artifacts.allow_upload "
-    "and debug.allow_all_symbols. Read "
-    "agentic-hil://reference/config-shape before guessing a key.\n"
-    "If the configuration holds placeholders because the board was plugged in after it was written "
-    "(probe_id: null, executable: null, controller: unknown-controller), call "
-    "project_config_adopt_hardware instead of printing values for a person to retype. It reads the "
-    "attached probe, fills in only the identity keys that are still unset, reports any key that already "
-    "holds somebody's value rather than replacing it, and writes only with apply: true.\n"
-    "This server parses that configuration once, at startup, and does not reload it while it runs. A result carrying "
-    "config_stale: true says the file is no longer the one it is enforcing: the backend it names and the permissions "
-    "it enforces are not the ones in the file now. config_status.description_source says which document they are: "
-    "`startup` for all of it, or `description_reload` when a project_config_reload_description has since moved the "
-    "devices and the backend onto a newer document while the permissions stayed the startup ones. What to do about it is decided by "
-    "config_status.state and is not the same for all three: `changed`: the file on disk differs from the one this "
-    "server loaded; `missing`: the file is gone, so it has to be "
-    "restored before there is anything to restart onto; `unreadable`: it is there and will not open, so it has to be "
-    "made readable first. Never ask for a restart on `missing` or `unreadable` before the file has been restored or "
-    "made readable. The status compares two digests and claims nothing beyond that: it does not say what the file "
-    "now contains, and it does not promise a restart will succeed.\n"
-    "On `changed` there are two ways forward and they cover different halves of the file. If what moved is the "
-    "description of the bench (target, a debuggers/com_ports/can_buses entry, a probe id, a COM device, a baudrate), "
-    "call project_config_reload_description. It takes no arguments, re-reads exactly those four sections, and clears "
-    "the staleness for them without a restart. It re-reads no permission at all, in either direction: a device this "
-    "server has never seen arrives with no grant, so you can probe and read it and cannot flash, reset, mass-erase or "
-    "write to it until an operator restarts the server, and the result says so. Everything else (every permission, "
-    "version, workspace_root, state_root, debug, artifacts, validation, recovery, reports, logs) is adopted by a "
-    "restart and by nothing else, so for those ask the operator to restart the MCP server once (the one the agent "
-    "host started for this workspace, not the agentic-hil command line, which reads the file fresh every time and is "
-    "already current) and report the startup error if it does not come back, because the file it found is then the "
-    "thing to repair. Those two are the whole of it: do not try to make the server pick a change up by editing the "
-    "file again or by calling a configuration write tool.\n"
-    "If a tool answers config_file_not_found, this project has no configuration yet: call "
-    "project_config_create. It takes no arguments, generates the file from the hardware attached to "
-    "this machine, and every permission in it is true (flashing, reset, COM and CAN writes, artifact "
-    "upload, unrestricted symbol access, and all three permissions.allow_config_* grants) except "
-    "allow_raw_debugger_commands and allow_mass_erase, which are false. Those two are not capabilities "
-    "you are missing: there is no tool here for either, and while either is true flash_firmware on that "
-    "probe is refused. The bench is workable from that file without anybody editing YAML, flashing "
-    "included. Report where it is and what it granted, and ask the operator which permissions this "
-    "bench should not have. Never ask for those two to be turned on.\n"
-    "Permissions move one way here. project_config_set writes false into a permission and never any "
-    "other value: not true into one you never touched, and not into one you set to false a moment "
-    "earlier; a call that tries is refused as permission_widening_denied. So you can narrow this bench "
-    "on the operator's word and can never widen it. Setting "
-    "permissions.allow_config_permissions_write: false is the last permission change that tool can "
-    "make; the result of that call says so. Regenerating is the operator's, with `agentic-hil init "
-    "--force`; never delete or move a configuration to get a different one.\n"
-    "Facts about this server are published as resources; read them instead of its source code or its "
-    "installed package. resources/list carries agentic-hil://reference/debugger-backends (which config "
-    "field each debugger backend requires, discovers, or ignores), .../target-support (which field "
-    "names the target, which values are known good), .../errors (every error_type with its fix), "
-    ".../platform-paths (where each file lives on each platform), .../lease-lifecycle, "
-    ".../config-schema, .../config-shape (what a configuration looks like and how to change it), "
-    ".../test-plan (where a plan lives, how its path resolves, which version admits which step, every "
-    "step with its keys, the comparators, and two plans that run) and .../test-plan-schema (the plan "
-    "schema itself). Read .../test-plan before writing a test plan; the format is published there and "
-    "nowhere a shell has to go looking for it."
+    "This project's target board is reachable only through these tools. Every request that touches it (flashing, "
+    "resetting, probing, debugging, UART or CAN traffic, firmware artifacts, test reports) is answered by calling "
+    "them, before reaching for a shell.\n"
+    "Never substitute openocd, pyocd, st-flash, st-info, st-util, JLinkExe, gdb, screen, minicom, picocom, cansend, "
+    "candump, a Makefile target that runs one of them, or direct access to /dev/tty*, COM* or a SocketCAN interface: "
+    "they bypass the policy these tools enforce, and the operator cannot audit them.\n"
+    "A permission_denied result is the answer: report the denied permission and stop. Never edit the authoritative "
+    "configuration to grant yourself a permission (it belongs to the operator), and never carry out the action "
+    "another way.\n"
+    "The configuration changes only through project_config_describe and project_config_set, never through your own "
+    "file tools.\n"
+    "flash_firmware with reset_after_flash and capture flashes, resets and returns the UART output in one call; "
+    "com_read waits for a pattern with until and can_read for a frame with until_id, so neither needs polling. "
+    "bench_run_start and bench_run_stop are for a longer sequence driven call by call; a whole test plan runs "
+    "through test_reactor_run.\n"
+    "Result text leaves out fields at their default: an absent side_effect_status is not_started, absent "
+    "cleanup_required and quarantined are false, absent audit_ok, cleanup_ok and target_ok are true, an absent "
+    "hardware_state is unchanged. Catalogue advice this session already received is left out too; advice_uri says "
+    "where to read it again.\n"
+    "Facts about this server are published as resources (resources/list, agentic-hil://reference/...); read them "
+    "instead of its source or its installed package."
+)
+
+# What a server with no configuration to bind says instead, in 500 characters at
+# most. It is registered at user scope as often as not, so every request in every
+# project without a board pays for this text. What a session needs once a
+# configuration exists arrives with the result that created it and with each
+# refusal after that.
+UNPROVISIONED_SERVER_INSTRUCTIONS = (
+    "This project has no Agentic HIL configuration yet. A request that touches a target board starts with "
+    "project_config_create and then goes through these tools, before reaching for a shell. Never substitute openocd, "
+    "pyocd, st-flash, JLinkExe, gdb, screen, minicom, candump, a Makefile target that runs one of them, or direct "
+    "/dev/tty* or COM* access."
 )
 
 JSONRPC_PARSE_ERROR = -32700
@@ -138,6 +97,18 @@ Safety rules:
 """
 
 MCP_PROMPTS = [{"name": "agentic_hil_embedded_workflow", "description": "Safe workflow for using Agentic HIL hardware tools from an AI agent."}]
+
+
+def server_instructions(tools: AgenticHILToolService | UnprovisionedToolService) -> str:
+    """The instructions `initialize` sends, chosen by whether there is a configuration to serve.
+
+    Asked of the service rather than of the file: an unprovisioned server binds
+    the moment a configuration loads, so one whose file was written between its
+    start and the host's first message answers every call as a configured server
+    and introduces itself as one."""
+    if isinstance(tools, UnprovisionedToolService) and tools.config is None:
+        return UNPROVISIONED_SERVER_INSTRUCTIONS
+    return SERVER_INSTRUCTIONS
 
 
 def tool_result_text(payload: JsonObject) -> str:
@@ -212,7 +183,7 @@ def handle_method(request_id: Any, method: str, params: Any, tools: AgenticHILTo
         params_object = params_object_or_throw(params)
         requested_version = params_object.get("protocolVersion")
         negotiated_version = requested_version if requested_version in SUPPORTED_MCP_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSION
-        return result_response(request_id, {"protocolVersion": negotiated_version, "capabilities": {"tools": {"listChanged": False}, "prompts": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}}, "serverInfo": {"name": "agentic-hil", "version": __version__}, "instructions": SERVER_INSTRUCTIONS})
+        return result_response(request_id, {"protocolVersion": negotiated_version, "capabilities": {"tools": {"listChanged": False}, "prompts": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}}, "serverInfo": {"name": "agentic-hil", "version": __version__}, "instructions": server_instructions(tools)})
     if method == "ping":
         return result_response(request_id, {})
     if method == "tools/list":

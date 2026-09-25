@@ -2494,7 +2494,7 @@ def test_the_incomplete_inventory_error_is_in_the_reference_contract() -> None:
     assert "one visible ST-Link is bound" in entry["meaning"]
     assert "ambiguous_hardware" in entry["meaning"]
     fix = " ".join(entry["remediation"])
-    assert "adopt-hardware --probe-id" in fix
+    assert "project_config_adopt_hardware" in fix and "--probe-id <serial>" in fix
     assert "STM32CubeProgrammer" in fix
     assert any("adapter_not_found" in step or "absent bench" in step for step in entry["do_not"])
     assert any("a rule against binding a single probe" in step for step in entry["do_not"])
