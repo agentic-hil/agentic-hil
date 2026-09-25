@@ -23,6 +23,15 @@ board. The container reads its peer's record file. A board keeps no file, so
 test began (a `Tally`), and the claim that the peer saw exactly `b"PING\\r\\n"`
 is the claim that both agree with those six bytes.
 
+A plan that fails is the exception. The product ends a failed run with a
+recovery action, which under the default policy resets the target into halt
+(`docs/test-plan-contract.md`, `TROUBLESHOOTING.md`), and any reset zeroes the
+peer's count. So the twins of the failing plans take what the plan wrote from
+the session log its open named, and what the board received from the answer
+the report quotes, which the peer gives only to the exact line. The peer's
+silence afterwards is the board's side of the report's reset into halt, and
+the peer is then started again through `reset_target`.
+
 Everything goes through the product, the peer's own settings included: a
 control line is a `com_write` over a session that a separate
 `agentic-hil mcp-stdio` opens for it, and its answer is a `com_read`. The line
@@ -522,11 +531,12 @@ class Peer:
         except PeerSilent:
             if server is not None:
                 raise
-            self._reboot()
+            self.restart()
             answers = self.exchange([(RESET_LINE, "reset")])
         assert answers == ["@peer ok reset"], answers
 
-    def _reboot(self) -> None:
+    def restart(self) -> None:
+        """The board reset into run through the probe, and the peer's boot line read after it."""
         server = self._server()
         opened = server.tool("com_session_start", port_id=self.port, clear_buffer=True)
         assert opened["ok"] is True, opened
@@ -592,6 +602,32 @@ def last_report(bench: Bench) -> dict:
 
 def log_entries(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def written(bench: Bench, report: dict) -> bytes:
+    """Every byte the plan's session wrote, from the session log its `uart_open` named."""
+    entries = log_entries(bench.project / report["steps"][0]["result"]["session"]["log_path"])
+    return b"".join(bytes.fromhex(entry["hex"]) for entry in entries if entry.get("direction") == "tx")
+
+
+def halted_by_recovery(report: dict, port: str, peer: Peer) -> None:
+    """The failed run's recovery as the report states it and as the board shows it, then the peer running again.
+
+    A failed run ends in a recovery action: under the default policy, which
+    the tier's configuration leaves in place, a reset into halt and a re-read
+    of the probe. A halted peer answers nothing, and that silence is the
+    board's side of the report's claim. The peer is then reset into run
+    through the probe, so the next test meets it running.
+    """
+    recovery = report["recovery"]
+    assert recovery["attempted"] is True, recovery
+    assert recovery["outcome"] == "recovered", recovery
+    assert recovery["devices"] == [port], recovery
+    assert recovery["auto_recover_policy"] == "reset_halt", recovery
+    assert "reset_halt" in recovery["actions"], recovery
+    with pytest.raises(PeerSilent):
+        peer.received()
+    peer.restart()
 
 
 def settled_at(server: Server, port: str, buffered: int, overflow: int) -> dict:
@@ -1078,7 +1114,7 @@ def test_a_plan_whose_claim_the_peer_does_not_meet_is_headed_failed(bench: Bench
     The port answered, the answer was not the claimed one, and the rendering's
     first line says `Failed:` and the comparator's own error type, never the
     word reserved for a call that never happened. What the port did say is in
-    the rendering.
+    the rendering. The run's recovery halted the board, as a failed run's does.
     """
     peer.start_responder(VERSION_LINE)
 
@@ -1098,7 +1134,8 @@ def test_a_plan_whose_claim_the_peer_does_not_meet_is_headed_failed(bench: Bench
     assert failed["error_type"] == "comparator_unmet", failed
     assert "v1.2.3" in json.dumps(failed), failed
 
-    assert peer.received() == Tally.of(b"VERSION\r\n")
+    assert written(bench, report) == b"VERSION\r\n"
+    halted_by_recovery(report, port, peer)
 
 
 # ---------------------------------------------------------------------------
@@ -1332,7 +1369,8 @@ def test_a_range_claim_the_captured_value_falls_outside_is_headed_failed_with_th
     assert failed["received_tail"]["text"].endswith("COUNT=42\r\n"), failed
     assert failed["summary"] == "No value captured from the COM port output fell inside the expected range before this step's timeout.", failed
 
-    assert peer.received() == Tally.of(b"COUNT\r\n")
+    assert written(bench, report) == b"COUNT\r\n"
+    halted_by_recovery(report, port, peer)
 
 
 def test_an_expectation_the_line_never_meets_is_a_failed_step_that_waited_its_timeout_and_quotes_the_line(bench: Bench, peer: Peer, port: str) -> None:
@@ -1358,7 +1396,8 @@ def test_an_expectation_the_line_never_meets_is_a_failed_step_that_waited_its_ti
     assert failed["received_tail_truncated"] is False, failed
     assert failed["summary"] == "Expected text did not appear on the COM port before this step's timeout.", failed
 
-    assert peer.received() == Tally.of(b"PING\r\n")
+    assert written(bench, report) == b"PING\r\n"
+    halted_by_recovery(report, port, peer)
 
 
 def test_a_version_2_plan_waits_for_a_pattern_the_line_says_on_its_own(bench: Bench, peer: Peer, port: str) -> None:
