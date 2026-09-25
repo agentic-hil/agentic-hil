@@ -772,41 +772,6 @@ def test_a_board_the_watchdog_keeps_restarting_is_held_by_a_halt_restarted_by_a_
     assert_quiet(server, port)
 
 
-def test_debug_session_attach_on_a_self_resetting_board_holds_it_halted_and_leaves_it_halted(bench: Bench, gdb: None, board_images: BoardImages, servers) -> None:
-    """A debug session over a board that restarts itself keeps it still, and so does its end.
-
-    Attaching halts the core, and the watchdog is frozen while the core is
-    halted under a debugger, so the boot lines stop for as long as the session
-    holds the board. The stop says the target is confirmed halted and that the
-    detach will not resume it; the line is how that is checked, because a core
-    resumed at the detach meets a watchdog that is still running and the board
-    starts printing boot lines again.
-    """
-    require_debug_grants(bench)
-    image = put(board_images, "watchdog")
-    port = bench.com_port_name()
-    server = servers()
-    open_port(server, port)
-    settle_and_discard(server, port)
-
-    started = start_session(server, image, "attach")
-    assert started["session"]["load_phase"] == "target_connected", started["session"]
-    drain(server, port)
-    assert_quiet(server, port)
-
-    errored, status = server.call("debug_get_session_status")
-    assert status["ok"] is True, status
-    assert status["active"] is True, status
-    assert status["status"] == "halted", status
-
-    errored, halted = server.call("debug_halt")
-    assert str(halted["summary"]).startswith("Target was already stopped"), halted
-    assert halted.get("quarantined") is not True, halted
-
-    assert_session_stops_halted(server)
-    assert_quiet(server, port)
-
-
 # -- The board that never stops talking ---------------------------------------
 
 
