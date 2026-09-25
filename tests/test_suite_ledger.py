@@ -8,17 +8,20 @@ that step and the step after it still runs; this file pins what that step has
 to go on and what it says.
 
 The suite keeps a ledger while it runs: one line when a test starts and one when
-it finishes, one file per xdist worker, each line on disk before the next thing
-happens, so a process killed in the middle of a test leaves that test's start
-behind. It is written only when `AGENTIC_HIL_TEST_LEDGER` names a directory,
-which `ci.yml` sets for `Run tests` and for nothing else.
+it finishes, saying how it ended, one file per xdist worker, each line on disk
+before the next thing happens, so a process killed in the middle of a test
+leaves that test's start behind. It is written only when
+`AGENTIC_HIL_TEST_LEDGER` names a directory, which `ci.yml` sets for `Run tests`
+and for nothing else.
 
 `tests/suite_ledger.py`, run as a script with that directory, is the reader. A
 ledger whose session did not finish on its own terms, because it was killed or
 interrupted, becomes an error annotation and a job summary naming every test
-that had started and not finished, with its worker. A session that did finish,
-however badly, has had pytest name its failures already, and the reader adds
-nothing to it.
+that had started and not finished, with its worker, and below them every test
+that had finished failed or with an error before the end: the leg's log shows
+those as an `F` or an `E` in a row of dots and never says which test it was. A
+session that did finish, however badly, has had pytest name its failures
+already, and the reader adds nothing to it.
 
 Every session below is a real one in a subprocess: what is pinned is what a
 process leaves on disk when it dies, and a session inside this process would
@@ -110,6 +113,11 @@ def events_of(lines: list[dict], name: str) -> list[str]:
     return [line["event"] for line in lines if line["nodeid"].endswith(f"::{name}")]
 
 
+def outcomes_of(lines: list[dict], name: str) -> list[object]:
+    """How each finish line for the test function `name` says it ended."""
+    return [line.get("outcome") for line in lines if line["event"] == "finish" and line["nodeid"].endswith(f"::{name}")]
+
+
 def write_ledger(directory: Path, name: str, lines: list[dict]) -> Path:
     """One worker's file, written the way the plugin writes one: a JSON object a line."""
     directory.mkdir(parents=True, exist_ok=True)
@@ -124,8 +132,8 @@ def started(nodeid: str, worker: str) -> dict:
     return {"event": "start", "nodeid": nodeid, "worker": worker}
 
 
-def finished(nodeid: str, worker: str) -> dict:
-    return {"event": "finish", "nodeid": nodeid, "worker": worker}
+def finished(nodeid: str, worker: str, outcome: str = "passed") -> dict:
+    return {"event": "finish", "nodeid": nodeid, "worker": worker, "outcome": outcome}
 
 
 def read_ledger(directory: Path, summary: Path) -> subprocess.CompletedProcess[str]:
@@ -171,6 +179,27 @@ def assert_named(
             assert [other for other in workers - {worker} if other in line] == [], (nodeid, line)
     for name in unnamed:
         assert name not in annotation and name not in written, (name, annotation, written)
+
+
+def assert_listed_below(
+    completed: subprocess.CompletedProcess[str], summary: Path, unfinished: tuple[str, ...], red: dict[str, str]
+) -> None:
+    """The tests in `red` come after every test in `unfinished`, each with how it ended.
+
+    Below them in the annotation and in the job summary, so the list of what was
+    running when the leg stopped reads first and the one of what went red before
+    that is a list of its own. A summary line naming a test in `red` says
+    whether it failed or ended in an error.
+    """
+    annotation = "\n".join(line for line in completed.stdout.splitlines() if line.startswith("::error"))
+    written = summary_of(summary)
+    for text in (annotation, written):
+        last_unfinished = max(text.rindex(nodeid) for nodeid in unfinished)
+        for nodeid in red:
+            assert text.index(nodeid) > last_unfinished, (nodeid, text)
+    for nodeid, outcome in red.items():
+        lines = [line for line in written.splitlines() if nodeid in line]
+        assert lines and all(outcome in line for line in lines), (nodeid, outcome, written)
 
 
 def assert_nothing_added(completed: subprocess.CompletedProcess[str], summary: Path) -> None:
@@ -234,6 +263,70 @@ def test_skipped():
     workers = {line.get("worker") for line in lines}
     assert len(workers) == 1 and all(isinstance(worker, str) and worker for worker in workers), lines
     result.assert_outcomes(passed=1, failed=1, skipped=1)
+
+
+def test_a_finish_line_says_how_its_test_ended(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> None:
+    """In the words pytest's own summary uses.
+
+    A test whose own code went wrong failed, and one whose fixture went wrong
+    ended in an error, in its setup or in its teardown after a call that
+    passed. Those two are what a leg that runs out of time names below the
+    tests it was running.
+    """
+    ledger = pytester.path / "ledger"
+    monkeypatch.setenv(LEDGER_VARIABLE, str(ledger))
+    pytester.makepyfile(
+        test_endings="""
+import pytest
+
+
+@pytest.fixture
+def breaks_in_setup():
+    raise RuntimeError("broken on the way in")
+
+
+@pytest.fixture
+def breaks_in_teardown():
+    yield
+    raise RuntimeError("broken on the way out")
+
+
+def test_passes():
+    pass
+
+
+def test_fails():
+    assert False
+
+
+def test_setup_breaks(breaks_in_setup):
+    pass
+
+
+def test_teardown_breaks(breaks_in_teardown):
+    pass
+
+
+@pytest.mark.skip(reason="skipped on purpose")
+def test_skipped():
+    pass
+"""
+    )
+
+    result = run_session(pytester)
+
+    lines = per_test_lines(ledger_files(ledger))
+    expected = {
+        "test_passes": "passed",
+        "test_fails": "failed",
+        "test_setup_breaks": "error",
+        "test_teardown_breaks": "error",
+        "test_skipped": "skipped",
+    }
+    assert {name: outcomes_of(lines, name) for name in expected} == {
+        name: [outcome] for name, outcome in expected.items()
+    }, (lines, transcript(result))
+    result.assert_outcomes(passed=2, failed=1, errors=2, skipped=1)
 
 
 def test_each_xdist_worker_keeps_a_file_of_its_own(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -358,6 +451,82 @@ def test_never_reached():
     )
 
 
+def test_a_test_that_went_red_before_the_kill_is_named_below_the_one_cut_off(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The `F` a killed leg's row of dots shows, and never names.
+
+    pytest names a failure in the summary it prints at the end of a session,
+    and a session that is killed prints none, so a test that failed before the
+    kill is named by the reader or by nobody. It is named below the test that
+    was cut off, with its worker and how it ended; a test that passed before
+    the kill is not named at all.
+    """
+    ledger = pytester.path / "ledger"
+    monkeypatch.setenv(LEDGER_VARIABLE, str(ledger))
+    pytester.makepyfile(
+        test_red_before_the_kill="""
+import os
+
+import pytest
+
+
+@pytest.fixture
+def breaks_in_setup():
+    raise RuntimeError("broken on the way in")
+
+
+def test_assertion_that_does_not_hold():
+    assert False
+
+
+def test_with_a_broken_fixture(breaks_in_setup):
+    pass
+
+
+def test_passes_before_the_kill():
+    pass
+
+
+def test_killed_in_the_middle():
+    os._exit(1)
+
+
+def test_never_reached():
+    pass
+"""
+    )
+
+    result = run_session(pytester)
+
+    lines = per_test_lines(ledger_files(ledger))
+    killed = [line for line in lines if line["nodeid"].endswith("::test_killed_in_the_middle")]
+    assert [line["event"] for line in killed] == ["start"], (lines, transcript(result))
+    endings = {"test_assertion_that_does_not_hold": "failed", "test_with_a_broken_fixture": "error"}
+    red = {
+        line["nodeid"]: line["worker"]
+        for line in lines
+        if line["event"] == "finish" and line["nodeid"].rpartition("::")[2] in endings
+    }
+    assert len(red) == 2, (lines, transcript(result))
+    summary = tmp_path / "summary.md"
+
+    completed = read_ledger(ledger, summary)
+
+    assert_named(
+        completed,
+        summary,
+        {killed[0]["nodeid"]: killed[0]["worker"], **red},
+        ("test_passes_before_the_kill", "test_never_reached"),
+    )
+    assert_listed_below(
+        completed,
+        summary,
+        (killed[0]["nodeid"],),
+        {nodeid: endings[nodeid.rpartition("::")[2]] for nodeid in red},
+    )
+
+
 def test_a_leg_whose_tests_failed_gets_nothing_added(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -369,7 +538,9 @@ def test_a_leg_whose_tests_failed_gets_nothing_added(
 
     result = run_session(pytester)
 
-    assert events_of(per_test_lines(ledger_files(ledger)), "test_fails") == ["start", "finish"], transcript(result)
+    lines = per_test_lines(ledger_files(ledger))
+    assert events_of(lines, "test_fails") == ["start", "finish"], transcript(result)
+    assert outcomes_of(lines, "test_fails") == ["failed"], lines
     result.assert_outcomes(passed=1, failed=1)
     summary = tmp_path / "summary.md"
     assert_nothing_added(read_ledger(ledger, summary), summary)
@@ -540,6 +711,61 @@ def test_every_test_a_leg_was_running_is_named_with_its_worker(tmp_path: Path) -
         summary,
         {"tests/test_alpha.py::test_cut_off_first": "gw0", "tests/test_beta.py::test_cut_off_second": "gw1"},
         ("test_done_first", "test_done_second"),
+    )
+
+
+def test_every_test_that_went_red_before_the_end_is_listed_below_the_ones_cut_off(tmp_path: Path) -> None:
+    """Two workers cut off, each after a test that failed or ended in an error.
+
+    Both go below the two that were running, each with its own worker, and the
+    tests that passed or were skipped before the end are not named.
+    """
+    ledger = tmp_path / "ledger"
+    write_ledger(
+        ledger,
+        "gw0.jsonl",
+        [
+            started("tests/test_iota.py::test_done_first", "gw0"),
+            finished("tests/test_iota.py::test_done_first", "gw0"),
+            started("tests/test_iota.py::test_assertion_that_did_not_hold", "gw0"),
+            finished("tests/test_iota.py::test_assertion_that_did_not_hold", "gw0", "failed"),
+            started("tests/test_iota.py::test_cut_off_first", "gw0"),
+        ],
+    )
+    write_ledger(
+        ledger,
+        "gw1.jsonl",
+        [
+            started("tests/test_kappa.py::test_with_a_broken_fixture", "gw1"),
+            finished("tests/test_kappa.py::test_with_a_broken_fixture", "gw1", "error"),
+            started("tests/test_kappa.py::test_left_out_on_purpose", "gw1"),
+            finished("tests/test_kappa.py::test_left_out_on_purpose", "gw1", "skipped"),
+            started("tests/test_kappa.py::test_cut_off_second", "gw1"),
+        ],
+    )
+    summary = tmp_path / "summary.md"
+
+    completed = read_ledger(ledger, summary)
+
+    assert_named(
+        completed,
+        summary,
+        {
+            "tests/test_iota.py::test_cut_off_first": "gw0",
+            "tests/test_kappa.py::test_cut_off_second": "gw1",
+            "tests/test_iota.py::test_assertion_that_did_not_hold": "gw0",
+            "tests/test_kappa.py::test_with_a_broken_fixture": "gw1",
+        },
+        ("test_done_first", "test_left_out_on_purpose"),
+    )
+    assert_listed_below(
+        completed,
+        summary,
+        ("tests/test_iota.py::test_cut_off_first", "tests/test_kappa.py::test_cut_off_second"),
+        {
+            "tests/test_iota.py::test_assertion_that_did_not_hold": "failed",
+            "tests/test_kappa.py::test_with_a_broken_fixture": "error",
+        },
     )
 
 
