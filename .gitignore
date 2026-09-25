@@ -10,6 +10,9 @@ build/
 dist/
 .venv/
 .agentic-hil/
+# Where tools/bench_in_container.py writes a run's JUnit report and log by
+# default: evidence of one run on one board, not content.
+bench-results/
 # Redirected APPDATA/LOCALAPPDATA for a local test run; environment, not content.
 .testenv/
 # Never committed anywhere, including the plugin: a portable plugin cannot embed

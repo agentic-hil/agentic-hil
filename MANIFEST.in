@@ -36,6 +36,9 @@ exclude tests/test_shipped_profiles.py
 exclude tests/test_verify_published_examples.py
 exclude tests/test_record_cli_surface.py
 exclude tests/test_ci_linux.py
+# The bench tier's runner is `tools/bench_in_container.py`, and its test imports
+# it and reads the image under `tools/bench/`, none of which ships.
+exclude tests/test_bench_in_container.py
 exclude tests/test_agent_registration_gate.py
 # The battery is `tools/bench_battery.py`, so its test imports out of the same
 # directory and cannot collect from a distribution that does not carry it.
