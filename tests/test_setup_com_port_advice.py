@@ -20,6 +20,7 @@ from __future__ import annotations
 import copy
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,7 @@ from support import trusted_launcher
 from agentic_hil import cli
 from agentic_hil.adopt import PROJECT_CONFIG_ADOPT, _release_refusal
 from agentic_hil.bootstrap import PROJECT_PROFILE, discover_attached_hardware
+from agentic_hil.comports import list_available_com_ports
 from agentic_hil.config import load_authoritative_config
 from agentic_hil.humanize import render_result
 from agentic_hil.types import JsonObject, com_port_is_unbound
@@ -173,6 +175,100 @@ def test_a_declared_port_with_no_device_is_asked_for_with_the_usb_port_first(
         f"Detected COM ports: {KERNEL_NAME}, /dev/ttyS31, /dev/ttyS30, /dev/ttyS29, /dev/ttyS28, and 28 more."
     ), asking[0]
     assert "Add the DUT UART under com_ports" in asking[0], asking[0]
+
+
+# ---------------------------------------------------------------------------
+# The bound port at its edges, driven through the entries the file binds.
+
+
+def _confirming_item(steps: list[str]) -> str:
+    """The one next step that says what the file binds, which then asks for nothing."""
+    confirming = [step for step in steps if "is bound to" in step]
+    assert len(confirming) == 1, steps
+    assert not any("Add the DUT UART" in step for step in steps), steps
+    return confirming[0]
+
+
+def test_a_port_bound_by_its_kernel_name_is_confirmed_and_left_out_of_the_others(tmp_path: Path) -> None:
+    """The debugger's port bound by the name the host lists it under rather
+    than by its stable path: the same port, and the same answer."""
+    steps = cli.init_next_steps(
+        copy.deepcopy(RECORDED_INVENTORY), tmp_path / "config.yaml", bound_com_ports={"dut_uart": KERNEL_NAME}
+    )
+
+    assert _confirming_item(steps) == (
+        f"com_ports.dut_uart is bound to {KERNEL_NAME}. "
+        "Other COM ports detected: /dev/ttyS31, /dev/ttyS30, /dev/ttyS29, /dev/ttyS28, /dev/ttyS27, and 27 more."
+    )
+
+
+def test_two_bound_entries_are_confirmed_one_clause_each_and_both_left_out(tmp_path: Path) -> None:
+    """A second entry bound to one of the legacy ports, which on some hosts is
+    a real UART: each entry is named with its device, and neither port is
+    counted among the others."""
+    steps = cli.init_next_steps(
+        copy.deepcopy(RECORDED_INVENTORY),
+        tmp_path / "config.yaml",
+        bound_com_ports={"dut_uart": BY_ID_PATH, "console": "/dev/ttyS0"},
+    )
+
+    assert _confirming_item(steps) == (
+        f"com_ports.dut_uart is bound to {BY_ID_PATH}. com_ports.console is bound to /dev/ttyS0. "
+        "Other COM ports detected: /dev/ttyS31, /dev/ttyS30, /dev/ttyS29, /dev/ttyS28, /dev/ttyS27, and 26 more."
+    )
+
+
+def test_a_bound_device_the_host_does_not_list_is_confirmed_without_claiming_it_is_there(tmp_path: Path) -> None:
+    """The file names the device and the host does not list it.
+
+    The entry is confirmed, because the file binds it, and nothing says the
+    device is attached: every port the host lists is named or counted, none is
+    set aside as the bound one, and none is called other than it."""
+    steps = cli.init_next_steps(
+        copy.deepcopy(RECORDED_INVENTORY), tmp_path / "config.yaml", bound_com_ports={"dut_uart": "/dev/ttyUSB0"}
+    )
+
+    assert _confirming_item(steps) == (
+        "com_ports.dut_uart is bound to /dev/ttyUSB0. "
+        f"Detected COM ports: {KERNEL_NAME}, /dev/ttyS31, /dev/ttyS30, /dev/ttyS29, /dev/ttyS28, and 28 more."
+    )
+
+
+def test_a_failed_or_empty_inventory_is_still_said_beside_the_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bound entry does not stand in for what the host said about its ports.
+
+    The failure is the product's own document for a pyserial it cannot
+    import; the empty inventory is the recording with its ports taken out."""
+    monkeypatch.setitem(sys.modules, "serial.tools", None)
+    failed = list_available_com_ports()
+    assert failed["ok"] is False, failed
+    empty = {**copy.deepcopy(RECORDED_INVENTORY), "ports": [], "summary": "0 available COM port(s)."}
+    bound = {"dut_uart": BY_ID_PATH}
+
+    assert _confirming_item(cli.init_next_steps(failed, tmp_path / "config.yaml", bound_com_ports=bound)) == (
+        f"com_ports.dut_uart is bound to {BY_ID_PATH}. "
+        "COM port discovery failed. Run: agentic-hil com-ports after checking the pyserial installation."
+    )
+    assert _confirming_item(cli.init_next_steps(empty, tmp_path / "config.yaml", bound_com_ports=bound)) == (
+        f"com_ports.dut_uart is bound to {BY_ID_PATH}. "
+        "No host COM ports detected. Connect USB serial hardware and run: agentic-hil com-ports"
+    )
+
+
+def test_the_bound_port_alone_leaves_no_other_port_to_name(tmp_path: Path) -> None:
+    """The recording with only the debugger's port left in it."""
+    ports = [port for port in RECORDED_INVENTORY["ports"] if port["device"] == KERNEL_NAME]
+    only_the_board = {
+        **copy.deepcopy(RECORDED_INVENTORY),
+        "ports": copy.deepcopy(ports),
+        "summary": "1 available COM port(s).",
+    }
+
+    steps = cli.init_next_steps(only_the_board, tmp_path / "config.yaml", bound_com_ports={"dut_uart": BY_ID_PATH})
+
+    assert _confirming_item(steps) == f"com_ports.dut_uart is bound to {BY_ID_PATH}. No other COM ports detected."
 
 
 # ---------------------------------------------------------------------------
