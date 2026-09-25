@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import hashlib
+import inspect
 import json
 import os
 import posixpath
@@ -6147,6 +6149,28 @@ def test_register_agent_mcp_writes_for_exactly_the_agents_of_the_clis_list() -> 
     agents = cli_module.supported_skill_agents()
     problems = [f"MCP_CONFIG_WRITERS in cli.py has no writer for {agent!r}, an agent in the CLI's list" for agent in agents if agent not in writers]
     problems += [f"MCP_CONFIG_WRITERS in cli.py has a writer for {agent!r}, which is no agent in the CLI's list" for agent in writers if agent not in agents]
+    assert not problems, "\n".join(problems)
+
+
+def _agent_mcp_config_path_agents() -> list[str]:
+    """The agents `_agent_mcp_config_path` has a path for, read from the table it keeps (#565)."""
+    from agentic_hil import cli as cli_module
+
+    tables = [node for node in ast.walk(ast.parse(inspect.getsource(cli_module._agent_mcp_config_path))) if isinstance(node, ast.Dict)]
+    assert len(tables) == 1, f"_agent_mcp_config_path in cli.py keeps {len(tables)} tables, not one table of paths by agent"
+    keys = tables[0].keys
+    assert all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in keys), "_agent_mcp_config_path in cli.py keys its table by something other than agent names written out"
+    return [key.value for key in keys]
+
+
+def test_agent_mcp_config_path_has_a_path_for_exactly_the_agents_of_the_clis_list() -> None:
+    """The MCP config path `register_agent_mcp` takes its lock on is kept in a second table by agent, held to the CLI's list the same way (#565)."""
+    from agentic_hil import cli as cli_module
+
+    paths = _agent_mcp_config_path_agents()
+    agents = cli_module.supported_skill_agents()
+    problems = [f"_agent_mcp_config_path in cli.py has no path for {agent!r}, an agent in the CLI's list" for agent in agents if agent not in paths]
+    problems += [f"_agent_mcp_config_path in cli.py has a path for {agent!r}, which is no agent in the CLI's list" for agent in paths if agent not in agents]
     assert not problems, "\n".join(problems)
 
 
