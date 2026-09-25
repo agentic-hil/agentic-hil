@@ -89,6 +89,13 @@ AN_ERASE_TOOL_WOULD_BE_CALLED = "mass_erase"
 # its claim is asking it to grade itself.
 OPENOCD_FLASH_CONFIRMED = "AGENTIC_HIL_RESULT:flash_firmware:ok"
 
+# What the demo prints once at boot, from the comparator of its plan's read step
+# in examples/nucleo-f446re_demo/testconfig.yaml, and how long a capture waits
+# for it once the flash has ended: long enough for a reset and a boot banner on
+# a slow link.
+BOOT_BANNER = "Hello World"
+BOOT_BANNER_TIMEOUT_S = 15.0
+
 
 class ServerGone(AssertionError):
     """The MCP server stopped answering, reported with what it last said.
@@ -806,6 +813,38 @@ def test_a_flash_outside_a_declared_run_hands_the_bench_back_when_the_call_retur
         assert_flash_holds(flashed)
         status_code, status = bench.document("lease-status")
 
+    assert status_code == 0, status
+    assert status["bench_held"] is False, status
+    assert status["held_devices"] == [], status
+    assert status["blocked"] is False, status
+    assert status["incident_stands"] is False, status
+
+
+def test_a_flash_with_capture_returns_the_boot_banner_of_the_image_it_flashed_and_hands_the_line_back(bench: Bench, firmware: Path, mcp) -> None:
+    """One call flashes, resets and hands over what the new image said at boot.
+
+    Catches a capture that opened the line after the reset, which would miss a
+    banner the image prints once, at the start of its boot; one that answered
+    before the banner arrived; and one whose port session or lease outlived the
+    call, which would leave the line held against the next session on this
+    bench. The server is still running when the lease is asked about, as in the
+    test above, so a hold that outlives the call is visible here.
+    """
+    image = firmware.relative_to(bench.project).as_posix()
+    port = bench.com_port_name()
+
+    with mcp() as server:
+        result = server.call("flash_firmware", {"image_path": image, "reset_after_flash": True, "capture": {"port_id": port, "until": BOOT_BANNER, "wait_timeout_s": BOOT_BANNER_TIMEOUT_S}})
+        status_code, status = bench.document("lease-status")
+
+    assert_flash_holds(result)
+    assert result["reset_after_flash"] is True, result
+    assert result["run"]["implicit"] is True, result
+    capture = result["capture"]
+    assert capture["port_id"] == port, capture
+    assert capture["until_matched"] is True, capture
+    assert capture["matched"] == BOOT_BANNER, capture
+    assert capture["data"]["text"].endswith(BOOT_BANNER), capture
     assert status_code == 0, status
     assert status["bench_held"] is False, status
     assert status["held_devices"] == [], status
