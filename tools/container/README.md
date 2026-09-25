@@ -119,12 +119,14 @@ Pinned:
 
 Not pinned, deliberately:
 
-- the distribution's OpenOCD, `procps`, `curl` and `socat`, which are the
-  debugger backend, the second opinion on a process's start time, what
-  install.sh fetches the pinned uv installer with, and what makes the
+- the distribution's OpenOCD, `procps`, `curl`, `socat` and `zsh`, which are
+  the debugger backend, the second opinion on a process's start time, what
+  install.sh fetches the pinned uv installer with, what makes the
   pseudo-terminal pair the serial tests open through the real pyserial (one
   end is the configured COM port, the other is held by the scripted peer in
-  `tests/container/pty_responder.py`, whose answers are the test's own input).
+  `tests/container/pty_responder.py`, whose answers are the test's own input),
+  and the shell whose startup file step 3 of install.sh writes, started for
+  real to see which of its instances reads it.
   The mirror drops superseded package versions, so a version pin here without
   a snapshot mirror would turn a stable job red days later for a reason
   nothing in the change under it can explain. What fixes the versions a build
