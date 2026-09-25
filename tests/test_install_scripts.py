@@ -402,9 +402,19 @@ def test_neither_script_writes_a_project_configuration() -> None:
         assert "no project configuration" in source, name
 
 
+def _opening_comment_block(source: str) -> str:
+    """Every line from the top of a script up to the first that is neither its shebang nor a comment."""
+    block = []
+    for line in source.splitlines():
+        if not line.startswith("#"):
+            break
+        block.append(line)
+    return "\n".join(block)
+
+
 def test_both_scripts_open_with_the_five_lines_that_say_what_they_touch() -> None:
     for name, source in _both_sources().items():
-        header = "\n".join(source.splitlines()[:8])
+        header = _opening_comment_block(source)
         assert "What this script touches, and nothing else" in header, name
         for claim in ("user-local", "skill", "MCP registration", "repository", "administrator rights"):
             assert claim in header, f"{name} header does not mention {claim}"
@@ -5301,9 +5311,11 @@ def test_the_two_pages_that_already_describe_the_restart_keep_describing_it() ->
 # ---------------------------------------------------------------------------
 # Step 3 puts the directory the command landed in on the PATH of the shells
 # that come after the run, which the one line in the README leaves no room to
-# do by hand. The edit is one line in one file on POSIX and the account's own
-# Path value on Windows, it happens only on the branch that already says the
-# directory is missing, and --no-path leaves both alone.
+# do by hand. The edit is one line in each startup file the shell reads on
+# POSIX, which is one file for every shell but bash on Linux (#548, below), and
+# the account's own Path value on Windows; it happens only on the branch that
+# already says the directory is missing, but for the one bash account below
+# that the release before #548 left half done, and --no-path leaves both alone.
 
 
 def test_the_shell_installer_adds_one_line_to_one_profile_and_a_second_run_adds_nothing(tmp_path: Path) -> None:
@@ -5446,29 +5458,49 @@ def _what_step_three_said(transcript: str) -> str:
     return "\n".join(lines[starts[0] : ends[0] if ends else None])
 
 
+def _assert_step_three_says_what_misses_it(said: str, user_bin: Path, *, over_ssh: bool) -> str:
+    """The one sentence about the shells that may read none of the files step 3 named, and what works there (#548).
+
+    A shell that is not interactive may read none of these files, and that is
+    where `ssh host 'agentic-hil doctor'`, a cron job and a CI step run their
+    commands. "May", because bash reads `~/.bashrc` for a command ssh hands it
+    where it was built to, and the `~/.bashrc` Debian seeds a new account with
+    returns for such a shell before a line appended to it, which the container
+    tier shows. So the sentence names the remedy there, the command's full path
+    or the line.
+    fish reads its `conf.d` in every instance, ssh commands included, so its
+    sentence names cron and CI and not ssh, and its remedy is the full path
+    alone: cron and CI run a POSIX shell, where `fish_add_path` means nothing.
+    Returns the sentence.
+    """
+    sentences = [text for text in said.splitlines() if "cron job" in text]
+    assert len(sentences) == 1, said
+    sentence = sentences[0]
+    rest = sentence.replace(str(user_bin), "")
+    assert "CI step" in sentence, sentence
+    assert f"{user_bin}/agentic-hil" in sentence, sentence
+    if over_ssh:
+        assert "non-interactive" in rest, sentence
+        assert "ssh host 'agentic-hil doctor'" in rest, sentence
+        assert re.search(r"\bmay\b", rest), sentence
+    else:
+        assert "ssh" not in rest, sentence
+        assert "fish_add_path" not in rest, sentence
+        assert re.search(r"\bline\b", rest) is None, sentence
+    return sentence
+
+
 def _assert_step_three_hands_over_the_line_and_says_what_misses_it(said: str, line: str, user_bin: Path, *, over_ssh: bool) -> None:
     """What follows every file step 3 wrote or found, whatever the shell (#548).
 
     The shell the reader started the installer from read its startup files
     before any of them was touched, and the installer ran as its child, so that
     shell does not have the directory: the line is printed for it, on a line of
-    its own so it can be copied whole. And a shell that is not interactive reads
-    none of these files, which is where `ssh host 'agentic-hil doctor'`, a cron
-    job and a CI step run their commands, so one sentence says so and names the
-    remedy there, the command's full path or that line. fish reads its `conf.d`
-    in every instance, so its sentence names cron and CI and not ssh.
+    its own so it can be copied whole. And a shell that is not interactive may
+    read none of these files, which one sentence says, with what works there.
     """
     assert line in [text.strip() for text in said.splitlines()], said
-    sentences = [text for text in said.splitlines() if "cron job" in text]
-    assert len(sentences) == 1, said
-    sentence = sentences[0]
-    assert "CI step" in sentence, sentence
-    assert f"{user_bin}/agentic-hil" in sentence, sentence
-    if over_ssh:
-        assert "non-interactive" in sentence, sentence
-        assert "ssh host 'agentic-hil doctor'" in sentence, sentence
-    else:
-        assert "ssh" not in sentence.replace(str(user_bin), ""), sentence
+    _assert_step_three_says_what_misses_it(said, user_bin, over_ssh=over_ssh)
 
 
 def test_bash_on_linux_puts_the_line_in_bashrc_and_in_a_profile_it_creates_when_no_login_file_exists(tmp_path: Path) -> None:
@@ -5608,15 +5640,112 @@ def test_a_bashrc_that_already_names_the_directory_still_gets_its_login_file(tmp
     assert str(profile) in said, said
 
 
+# What the release before #548 appended to a startup file, its marker line and
+# the line itself, for a directory spelled `{bin}`.
+_THE_BLOCK_0_21_5_WROTE = '\n# added by the agentic-hil installer: the directory it installed the command in\nexport PATH="{bin}:$PATH"\n'
+
+
+@pytest.mark.parametrize(("present", "chosen"), [((), ".profile"), ((".bash_profile",), ".bash_profile")], ids=["no-login-file", "bash-profile"])
+def test_the_account_the_release_before_left_half_done_gets_its_login_half_with_the_directory_already_on_path(tmp_path: Path, present: tuple[str, ...], chosen: str) -> None:
+    """The one account whose directory is already on PATH and still gets a line.
+
+    The release before #548 put its line in `~/.bashrc` alone, so an interactive
+    shell of the account has the directory, and a reader who runs the installer
+    again from one is told, truly, that it is on PATH. Before #548 step 3
+    stopped there and wrote nothing, which left every bash login shell of that
+    account where the issue found it. The installer's own marker line with that
+    directory under it is what tells this line from one the operator wrote, so
+    this account gets the login half, in the file a first run would choose, and
+    `~/.bashrc` is left byte for byte. Step 3 names both files and the shells
+    they reach. It prints no line for a shell already open, because the one that
+    started this run has the directory, and it keeps the sentence about the
+    shells that may read none of it, with no line there to point at.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, home, user_bin = _a_machine_whose_shell_is(tmp_path)
+    env["PATH"] = f"{user_bin}:{env['PATH']}"
+    line = f'export PATH="{user_bin}:$PATH"'
+    bashrc = home / ".bashrc"
+    bashrc.write_text("# the operator's own bashrc\nalias ll='ls -l'\n" + _THE_BLOCK_0_21_5_WROTE.format(bin=user_bin), encoding="utf-8")
+    kept = bashrc.read_bytes()
+    for name in present:
+        (home / name).write_text(f"# the operator's own {name}, which does not read ~/.bashrc\nexport EDITOR=vi\n", encoding="utf-8")
+    before = _text_of(home / chosen)
+
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert f"PATH: agentic-hil is installed in {user_bin}, already on your PATH" in transcript, transcript
+    assert bashrc.read_bytes() == kept, bashrc.read_text(encoding="utf-8")
+    login_file = home / chosen
+    written = _text_of(login_file)
+    assert written.startswith(before), written
+    assert written.count(line) == 1, f"{chosen}:\n{written}\n{transcript}"
+    for name in (".bash_profile", ".bash_login", ".profile"):
+        if name != chosen and name not in present:
+            assert not (home / name).exists(), f"{name} was created, and bash reads {chosen}:\n{transcript}"
+    said = _what_step_three_said(transcript)
+    assert f"PATH: {bashrc} already names that directory" in said, said
+    assert f"PATH: added one line to {login_file}" in said, said
+    assert "bash login shells" in said, said
+    assert line not in [text.strip() for text in said.splitlines()], said
+    sentence = _assert_step_three_says_what_misses_it(said, user_bin, over_ssh=True)
+    assert re.search(r"\bline\b", sentence.replace(str(user_bin), "")) is None, sentence
+
+
+@pytest.mark.parametrize(
+    ("shell", "files", "arguments"),
+    [
+        ("/bin/bash", {}, ()),
+        ("/bin/bash", {".bashrc": '# the operator\'s own line\nexport PATH="{bin}:$PATH"\n'}, ()),
+        ("/bin/bash", {".bashrc": 'export PATH="{bin}:$PATH"\n' + _THE_BLOCK_0_21_5_WROTE.format(bin="/opt/elsewhere/bin")}, ()),
+        ("/bin/bash", {".bashrc": _THE_BLOCK_0_21_5_WROTE, ".profile": _THE_BLOCK_0_21_5_WROTE}, ()),
+        ("/bin/bash", {".bashrc": _THE_BLOCK_0_21_5_WROTE}, ("--no-path",)),
+        ("/bin/zsh", {".bashrc": _THE_BLOCK_0_21_5_WROTE}, ()),
+    ],
+    ids=["no-startup-file", "the-operators-own-line", "the-marker-over-another-directory", "the-login-file-names-it-too", "no-path", "zsh-since"],
+)
+def test_every_other_account_with_the_directory_already_on_path_gets_nothing_written(tmp_path: Path, shell: str, files: dict[str, str], arguments: tuple[str, ...]) -> None:
+    """Already on PATH still writes nothing and prints nothing to paste, but for the account above (#548).
+
+    A directory the operator put on PATH themselves, in whatever file, is
+    theirs to place; the installer's marker over another directory says nothing
+    about this one; a login file that already names it has its half;
+    `--no-path` touches nothing; and an account that has run zsh since reads
+    neither `~/.bashrc` nor a bash login file.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, home, user_bin = _a_machine_whose_shell_is(tmp_path, shell)
+    env["PATH"] = f"{user_bin}:{env['PATH']}"
+    for name, text in files.items():
+        (home / name).write_text(text.format(bin=user_bin), encoding="utf-8")
+    watched = (*_BASH_STARTUP_FILES, ".zshrc", ".config/fish/conf.d/agentic-hil.fish")
+    before = {name: _text_of(home / name) if (home / name).exists() else None for name in watched}
+
+    result = _install_on(env, project, *arguments)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert f"PATH: agentic-hil is installed in {user_bin}, already on your PATH" in transcript, transcript
+    assert "export PATH=" not in transcript, transcript
+    after = {name: _text_of(home / name) if (home / name).exists() else None for name in watched}
+    assert after == before, f"{after}\n{transcript}"
+
+
 def test_step_three_on_linux_bash_names_both_files_the_shells_they_reach_and_the_shells_they_miss(tmp_path: Path) -> None:
     """What the reader is told, which is where #548 started.
 
     "the next shell you open finds the command" held for a new terminal window
     on a desktop and not for the login shell an ssh session starts, nor for
-    `ssh host 'agentic-hil doctor'`, a cron job or a CI step, which read no
-    startup file of the account's at all. Step 3 names both files and the shells
+    `ssh host 'agentic-hil doctor'`, a cron job or a CI step, which may read
+    none of the account's startup files. Step 3 names both files and the shells
     they reach, prints the line for the shell that is already open, and says in
-    one sentence which shells read none of it and what to do there.
+    one sentence which shells may read none of it and what to do there.
     """
     if os.name != "posix":
         pytest.skip("the shell install flow is exercised on the POSIX half")
@@ -5653,7 +5782,7 @@ def test_every_other_shell_keeps_its_one_file_and_step_three_names_the_shells_it
     reads its `conf.d` in every instance; and a shell this script does not know
     gets `~/.profile`, which login shells read. What changes for them is what
     step 3 says (#548): the shells the file reaches instead of "the next shell
-    you open", the line for the shell already open, and what reads none of it.
+    you open", the line for the shell already open, and what may read none of it.
     """
     if os.name != "posix":
         pytest.skip("the shell install flow is exercised on the POSIX half")
@@ -5741,7 +5870,7 @@ def test_the_header_promises_one_line_in_each_startup_file_the_shell_reads() -> 
     files, bash on Linux, and the header is what a stranger reads before piping
     this script into a shell.
     """
-    header = " ".join(line.lstrip("#").strip() for line in _shell_source().splitlines()[:8])
+    header = " ".join(line.lstrip("#").strip() for line in _opening_comment_block(_shell_source()).splitlines())
     assert "in one file" not in header, header
     for claim in ("each startup file your shell reads", "two for bash on Linux", "named as it is written", "skipped by --no-path"):
         assert claim in header, f"the install.sh header does not say {claim!r}: {header}"
