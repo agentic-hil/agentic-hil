@@ -1239,6 +1239,14 @@ def pyocd_hertz(value: str) -> int:
     return int(float(match.group(1)) * {"": 1, "k": 1_000, "m": 1_000_000}[match.group(2)])
 
 
+def hertz_as_written(hertz: int) -> str:
+    """A clock the way the catalogue's sentences write one: 1000000 as `1 MHz`, 400000 as `400 kHz`."""
+    for factor, unit in ((1_000_000, "MHz"), (1_000, "kHz")):
+        if hertz % factor == 0:
+            return f"{hertz // factor} {unit}"
+    return f"{hertz} Hz"
+
+
 def test_the_erase_method_the_pyocd_flash_steps_offer_is_not_pyocds_recorded_default() -> None:
     """An erase method offered "against the default" has to be something other than the default."""
     recorded = json.loads(FLASH_TOOL_HELP_RECORDINGS.read_text(encoding="utf-8"))["tools"]["pyocd"]
@@ -1262,6 +1270,12 @@ def test_the_clock_the_pyocd_flash_steps_offer_as_slower_is_below_pyocds_recorde
     assert offered, steps
     for value in offered:
         assert pyocd_hertz(value) < frequency["default"], (value, pyocd_hertz(value), frequency["default"])
+
+    # The sentence names the clock the failed run used, so it has to be the
+    # recorded default: a re-recording that finds another one fails here rather
+    # than leaving the sentence stale.
+    named = f"default of {hertz_as_written(frequency['default'])}"
+    assert named in steps, (named, steps)
 
 
 # The two shapes a pyOCD read fails in, both classified `memory_read_failed` and
