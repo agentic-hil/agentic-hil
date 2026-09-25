@@ -5123,12 +5123,14 @@ def test_the_uv_wheel_download_keeps_pips_cache_in_the_fixtures_own_scratch_spac
     """pip's cache goes where the download goes, and the command line says so (#544).
 
     Left to find its own cache, pip on Windows asks the shell for Local AppData,
-    and the shell answers out of USERPROFILE. A session fixture runs with the
-    environment the tests before it left, and one of them can have left
-    USERPROFILE on a sandbox home that no longer exists: the lookup then fails,
-    pip falls back to a cache under the working directory, and a full run left
-    18 MB of it in the repository root. A cache named on the command line needs
-    no lookup, and it goes away with the rest of the fixture's scratch space.
+    and the shell answers out of USERPROFILE. Before #563 a session fixture
+    could run with a USERPROFILE an earlier test had left on a sandbox home
+    that no longer existed: the lookup failed, pip fell back to a cache under
+    the working directory, and a full run left 18 MB of it in the repository
+    root. With the session's own USERPROFILE the lookup now finds the
+    developer's own pip cache, which a test run should not fill either. A
+    cache named on the command line needs no lookup, and it goes away with the
+    rest of the fixture's scratch space.
     """
     command = _uv_wheel_download(tmp_path)
 

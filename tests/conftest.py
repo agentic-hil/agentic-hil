@@ -299,11 +299,12 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         return
     # The finish is listed with this environment rather than the one the tests
     # leave behind. `--exclude-standard` reads the global excludes file, which
-    # git finds through HOME, USERPROFILE and XDG_CONFIG_HOME, and a test or
-    # fixture that changes one of those without putting it back, by writing
-    # `os.environ` directly, leaves its value in place for the rest of the
-    # session: listed that way, every file the developer ignores globally
-    # would count as new.
+    # git finds through HOME, USERPROFILE and XDG_CONFIG_HOME. A test's
+    # isolation puts those back when the test ends, even after a direct write,
+    # but a fixture or hook that changes one of them outside a test's
+    # isolation, by writing `os.environ` directly, leaves its value in place
+    # for the rest of the session: listed that way, every file the developer
+    # ignores globally would count as new.
     environment = dict(os.environ)
     try:
         session.config.stash[_TREE_AT_START] = (git, environment, _untracked_files(git, environment))
