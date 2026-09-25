@@ -27,7 +27,7 @@ from agentic_hil.bootstrap import (
     enumerate_attached_probes,
     load_project_profile,
 )
-from agentic_hil.comports import list_available_com_ports, port_identity_fields
+from agentic_hil.comports import list_available_com_ports, port_identity_fields, port_names_device
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
     ADOPT_HARDWARE_COMMAND,
@@ -89,7 +89,7 @@ from agentic_hil.coordination import (
     standing_foreign_incidents,
 )
 from agentic_hil.devices import config_devices
-from agentic_hil.humanize import JSON_FLAG_HELP, PROTOCOL_COMMANDS, render_result, write_rendered
+from agentic_hil.humanize import JSON_FLAG_HELP, PROTOCOL_COMMANDS, render_result, split_by_usb_identity, write_rendered
 from agentic_hil.junit import detached_junit_refusal, write_refusal_junit_xml
 from agentic_hil.knowledge import (
     CONFIG_GRANT_COMMAND,
@@ -2906,6 +2906,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         narrowed=sorted(narrowed),
         opened_interlocks=opened,
         drives_hardware=any(debugger_drives_hardware(written, entry) for entry in written.debuggers.values()),
+        bound_com_ports={name: port.device for name, port in written.com_ports.items() if not com_port_is_unbound(port)},
     )
     if not discovered:
         # The placeholders are a finding, not a default. An operator who is not
@@ -3297,7 +3298,7 @@ def _init_granted_clause(narrowed: list[str], opened_interlocks: list[str]) -> s
     return f"{base}, and {len(narrowed)} {'permission' if len(narrowed) == 1 else 'permissions'} the project profile set to false"
 
 
-def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, opened_interlocks: list[str] | None = None, drives_hardware: bool = True) -> list[str]:
+def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, opened_interlocks: list[str] | None = None, drives_hardware: bool = True, bound_com_ports: dict[str, str] | None = None) -> list[str]:
     narrowed = narrowed or []
     opened_interlocks = opened_interlocks or []
     granted_prefix = (
@@ -3357,16 +3358,39 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narro
         "turning one on costs you flashing and buys nothing.",
         "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (on an OpenOCD bench the ids come from this host's USB serial inventory, which reaches an ST-Link and no other adapter: for one of those, read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
     ])
+    # A port the file binds is confirmed rather than asked for, and is not named
+    # again among the others. The file `init` wrote on a stock Ubuntu bound
+    # `com_ports.dut_uart` to the debugger's `/dev/serial/by-id/` path, and this
+    # step went on to ask for the DUT UART to be added (#549). The inventory lists
+    # that port by its kernel name with the stable path beside it, so either one
+    # is the bound port, by the test the port's identity check finds it with
+    # (`comports.port_names_device`). Nothing here says a bound device is
+    # present: the file names it, and the inventory may not list it.
+    bound = {name: device for name, device in (bound_com_ports or {}).items() if device}
+    confirmed = "".join(f"com_ports.{name} is bound to {device}. " for name, device in bound.items())
     if available_com_ports.get("ok"):
         ports = available_com_ports.get("ports", [])
-        if ports:
-            devices = ", ".join(str(port.get("device", "")) for port in ports[:5])
-            suffix = "" if len(ports) <= 5 else f", and {len(ports) - 5} more"
+        others = [port for port in ports if not any(port_names_device(port, device) for device in bound.values())]
+        # The ports somebody plugged in first, then the ones the kernel declares
+        # whether anything is attached or not: that host lists 32 legacy ports
+        # ahead of the one USB port a board is on, and the sample of five never
+        # reached it. Both groups stay in the sample and the count, each in the
+        # host's order, because on some hosts a legacy port is a real UART.
+        identified, plain = split_by_usb_identity(others)
+        others = [*identified, *plain]
+        devices = ", ".join(str(port.get("device", "")) for port in others[:5])
+        suffix = "" if len(others) <= 5 else f", and {len(others) - 5} more"
+        if bound and others:
+            label = "Other COM ports detected" if len(others) < len(ports) else "Detected COM ports"
+            next_steps.append(f"{confirmed}{label}: {devices}{suffix}.")
+        elif bound and ports:
+            next_steps.append(f"{confirmed}No other COM ports detected.")
+        elif ports:
             next_steps.append(f"Detected COM ports: {devices}{suffix}. Add the DUT UART under com_ports if serial feedback is needed.")
         else:
-            next_steps.append("No host COM ports detected. Connect USB serial hardware and run: agentic-hil com-ports")
+            next_steps.append(f"{confirmed}No host COM ports detected. Connect USB serial hardware and run: agentic-hil com-ports")
     else:
-        next_steps.append("COM port discovery failed. Run: agentic-hil com-ports after checking the pyserial installation.")
+        next_steps.append(f"{confirmed}COM port discovery failed. Run: agentic-hil com-ports after checking the pyserial installation.")
     next_steps.extend(
         [
             "For CAN access, add a named bus under can_buses.",
