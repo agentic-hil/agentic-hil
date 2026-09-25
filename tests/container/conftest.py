@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import IO
 
 import pytest
+from result_text import assert_text_projects
 from support import scaled_time_bound
 
 # What says a run means to be in the image this tier is published with. Set by
@@ -751,8 +752,8 @@ class LiveServer:
     Started by absolute interpreter in the project directory with the
     configuration named through ``AGENTIC_HIL_CONFIG``, exactly the way an
     agent host starts one. ``call`` is a ``tools/call`` and returns the
-    ``structuredContent`` document, which is the same document the server puts
-    in the content text and what a caller reads.
+    ``structuredContent`` document, which is the whole result and what a caller
+    reads; the content text carries the compact projection of it.
     """
 
     def __init__(self, config: Path, project: Path, *, command: list[str] | None = None, environment: dict[str, str] | None = None):
@@ -809,9 +810,9 @@ class LiveServer:
         assert "result" in answered, answered
         result = answered["result"]
         document = result["structuredContent"]
-        # The content text is the same document, which a host that reads no
-        # structuredContent parses; held to it here so the two cannot drift.
-        assert json.loads(result["content"][0]["text"]) == document, result
+        # The content text is the projection of that document a host that reads
+        # no structuredContent parses; held to it here so the two cannot drift.
+        assert_text_projects(result)
         return document
 
     def close(self, timeout_s: float = 30.0) -> str:
