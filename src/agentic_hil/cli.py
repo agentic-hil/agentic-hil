@@ -253,15 +253,22 @@ class FileSnapshot:
 @dataclass(frozen=True)
 class KnownAgent:
     """An agent this program sets up, as it is on every machine: its id, the
-    name it is shown by, every spelling that names it, where under the home
-    directory it keeps its skills, and how it finds an installed skill.
+    command its CLI is found by on PATH, the name it is shown by, every
+    spelling that names it, where under the home directory it keeps its
+    skills, and how it finds an installed skill.
 
     Nothing here is read from the machine, so a command line can be parsed,
     `--help` printed and an `--agent` name checked where no home directory can
     be found. `skill_agents` adds the home directory for the commands that
-    write or read a skill."""
+    write or read a skill.
+
+    `command` is what install.sh and install.ps1 look for on PATH in step 4
+    (`claude` for `claude-code`). The installers are not Python and cannot read
+    this table, so the agent lists they write out by hand are held to it by
+    tests/test_install_scripts.py instead."""
 
     id: str
+    command: str
     display_name: str
     aliases: tuple[str, ...]
     skills_directory: tuple[str, ...]
@@ -269,9 +276,9 @@ class KnownAgent:
 
 
 KNOWN_AGENTS = (
-    KnownAgent("opencode", "opencode", ("opencode", "open-code"), (".config", "opencode", "skills"), "skills-directory"),
-    KnownAgent("claude-code", "Claude Code", ("claude-code", "claude", "claude_code"), (".claude", "skills"), "skills-directory"),
-    KnownAgent("codex", "Codex", ("codex", "codex-cli", "openai-codex"), (".codex", "skills"), "agents-md"),
+    KnownAgent("opencode", "opencode", "opencode", ("opencode", "open-code"), (".config", "opencode", "skills"), "skills-directory"),
+    KnownAgent("claude-code", "claude", "Claude Code", ("claude-code", "claude", "claude_code"), (".claude", "skills"), "skills-directory"),
+    KnownAgent("codex", "codex", "Codex", ("codex", "codex-cli", "openai-codex"), (".codex", "skills"), "agents-md"),
 )
 
 
@@ -4564,19 +4571,13 @@ def register_agent_mcp(agent: str | None = None, force: bool = False, *, command
     requested = agent or "claude-code"
     resolved = resolve_skill_agent(requested)
     agent_id = resolved.id if resolved else normalize_agent(requested)
-    if agent_id not in {"claude-code", "codex", "opencode"}:
+    if agent_id not in MCP_CONFIG_WRITERS:
         return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know this agent's MCP config format.", "agent": agent_id, "allowed_agents": supported_skill_agents()}
     command = mcp_server_command() if command is None else _trusted_mcp_command(command)
     if not _locked:
         with secure_user_file_lock(_agent_mcp_config_path(agent_id)):
             return register_agent_mcp(agent, force, command=command, _locked=True)
-    if agent_id == "claude-code":
-        return _register_claude_mcp(command, force)
-    if agent_id == "codex":
-        return _register_codex_mcp(command, force)
-    if agent_id == "opencode":
-        return _register_opencode_mcp(command, force)
-    raise AssertionError(f"unhandled supported agent: {agent_id}")
+    return MCP_CONFIG_WRITERS[agent_id](command, force)
 
 
 def _parse_toml(text: str) -> tuple[dict | None, str | None]:
@@ -4770,6 +4771,17 @@ def _register_claude_mcp(command: str, force: bool) -> JsonObject:
     servers["agentic-hil"] = desired_entry
     secure_atomic_write_text(path, json.dumps(data, indent=2) + "\n")
     return {"ok": True, "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "migrated": kind in {"legacy", "managed"}, "summary": "Registered agentic-hil MCP server in ~/.claude.json (user scope)."}
+
+
+# The agents `register_agent_mcp` registers with, each by the function that
+# writes its MCP config. The check and the dispatch both read this one table, so
+# an agent that passes the check is an agent there is a writer for. Its keys are
+# the agents of `KNOWN_AGENTS`, which tests/test_agentic_hil.py holds them to.
+MCP_CONFIG_WRITERS: dict[str, Callable[[str, bool], JsonObject]] = {
+    "opencode": _register_opencode_mcp,
+    "claude-code": _register_claude_mcp,
+    "codex": _register_codex_mcp,
+}
 
 
 def _load_json_object(path: Path) -> dict | None:
