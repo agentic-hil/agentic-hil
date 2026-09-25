@@ -149,6 +149,80 @@ def rename_target(name: str) -> Callable[[dict], None]:
     return change
 
 
+def without(keys: list[str]) -> Callable[[dict], None]:
+    """An edit that removes dotted keys, the way a hand-trimmed file lacks them."""
+
+    def change(document: dict) -> None:
+        for key in keys:
+            *parents, leaf = key.split(".")
+            holder = document
+            for part in parents:
+                holder = holder[part]
+            del holder[leaf]
+
+    return change
+
+
+def value_at(document: dict, key: str) -> object:
+    holder: object = document
+    for part in key.split("."):
+        assert isinstance(holder, dict) and part in holder, f"`{key}` is not in the configuration"
+        holder = holder[part]
+    return holder
+
+
+def banner_plan(bench: Bench, name: str) -> str:
+    """The demo's own claim as a plan of its own: open the port clean, reset, read the banner."""
+    plan = bench.project / f"{name}.yaml"
+    plan.write_text(
+        chr(10).join([
+            "version: 3",
+            f"name: {name}",
+            "steps:",
+            f"  - device: {bench.com_port_name()}",
+            "    action: uart_open",
+            "    clear_buffer: true",
+            f"  - device: {bench.debugger_name()}",
+            "    action: reset",
+            "    mode: run",
+            f"  - device: {bench.com_port_name()}",
+            "    action: uart_read",
+            "    comparator:",
+            f'      equals: "{BANNER}"',
+            "    timeout_s: 5",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    return plan.name
+
+
+def removable_keys(planned: dict) -> list[str]:
+    """What an adoption found already current, less the keys that decide which board is read.
+
+    The probe serial selects the probe a read talks to, so it stays; a debugger's
+    own target block is a statement about the part and is left too. Everything
+    else that matched the attached hardware is what a trimmed file lacks and an
+    adoption has to put back.
+    """
+    probe_key = f"debuggers.{planned['debugger_id']}.probe_id"
+    removable = sorted(row["key"] for row in planned["already_current"] if row["key"] != probe_key and ".target." not in row["key"])
+    assert f"com_ports.{planned['com_port_id']}.device" in removable, planned
+    return removable
+
+
+def kept_controller(planned: dict, configured: str) -> str:
+    """The controller row adoption keeps (#442): both values, the configured one kept, and why."""
+    kept = {row["key"]: row for row in planned["kept"]}
+    assert "target.controller" in kept, planned
+    row = kept["target.controller"]
+    assert row["configured_value"] == configured, row
+    discovered = row["discovered_value"]
+    assert isinstance(discovered, str) and discovered and discovered != configured, row
+    assert row["reason"], row
+    return discovered
+
+
 class Server:
     """One `agentic-hil mcp-stdio` child, driven as an agent host drives it.
 
@@ -384,8 +458,10 @@ def assert_refused_by_the_hold(refused: dict, error_type: str, stop_call: str) -
     assert refused["ok"] is False, refused
     assert refused["error_type"] == error_type, refused
     assert refused["open_holds"], refused
-    assert stop_call in json.dumps(refused["remediation"]), refused
-    assert refused["do_not"], refused
+    # The errors resource promises the remediation a failing result carries
+    # inline, and it is the half that names the call which ends the hold.
+    assert stop_call in json.dumps(refused.get("remediation")), refused
+    assert refused.get("do_not"), refused
     assert refused["retry_safe"] is True, refused
     assert refused["side_effect_committed"] is False, refused
     assert refused["side_effect_status"] == "not_started", refused
@@ -632,3 +708,109 @@ def test_describe_set_and_reload_answer_by_the_hold_while_a_debug_session_holds_
     surfaces.end_debugging(server)
 
     accept_every_write_once_the_hold_is_gone(server, surface)
+
+
+def test_adopt_hardware_on_the_command_line_puts_back_what_a_trimmed_file_lacks_and_keeps_the_controller(
+    bench: Bench, firmware: Path, surfaces: Surfaces
+) -> None:
+    """The write path of `adopt-hardware`, against the probe and the port actually attached.
+
+    The dry run keeps the configured controller beside the family name the board
+    reports, in the document and in the rendering an operator reads (#442). An
+    apply over a file that already matches writes nothing. A copy with every
+    matching key removed but the probe serial gets exactly those keys back, with
+    the provenance of the command line, the controller still the configured one,
+    and the session's own file untouched; the demo's banner then passes through
+    the copy.
+    """
+    surface = variant(bench, "adopt-on-the-command-line")
+    session_file = hashlib.sha256(bench.config.read_bytes()).hexdigest()
+    configured = surface.configuration()["target"]["controller"]
+
+    status, planned = surface.document("adopt-hardware", "--dry-run")
+    assert status == 0, planned
+    assert planned["ok"] is True and planned["applied"] is False, planned
+    discovered = kept_controller(planned, configured)
+    rendered = " ".join(surface.run("adopt-hardware", "--dry-run").stdout.split())
+    assert "Left alone, because somebody set them" in rendered, rendered
+    assert f"target.controller configured {configured}, attached {discovered}, adoption keeps {configured}" in rendered, rendered
+
+    # Whatever the file still needed, once; then an apply with nothing to carry.
+    status, settled = surface.document("adopt-hardware")
+    assert status == 0 and settled["ok"] is True, settled
+    matching = surface.digest()
+    status, again = surface.document("adopt-hardware")
+    assert status == 0, again
+    assert again["ok"] is True and again["applied"] is False and again["carried"] == [], again
+    assert again["summary"].endswith("Nothing was written."), again
+    assert surface.digest() == matching
+
+    removed = removable_keys(again)
+    settled_values = {key: value_at(surface.configuration(), key) for key in removed}
+    rewrite(surface.config, without(removed))
+
+    status, adopted = surface.document("adopt-hardware")
+    assert status == 0, adopted
+    assert adopted["ok"] is True and adopted["applied"] is True, adopted
+    assert sorted(row["key"] for row in adopted["carried"]) == removed, adopted
+    assert all(row["previous_value"] is None for row in adopted["carried"]), adopted
+    assert f"debuggers.{adopted['debugger_id']}.probe_id" in {row["key"] for row in adopted["already_current"]}, adopted
+    kept_controller(adopted, configured)
+    assert adopted["created_entries"] == [] and adopted["permissions_changed"] == [], adopted
+    assert adopted["reload_required"] is True, adopted
+    assert adopted["provenance"]["last_modified_via"] == "cli:adopt-hardware", adopted
+    assert adopted["provenance"]["last_modified_by"] == "cli", adopted
+    assert adopted["provenance"]["last_modified_keys"] == removed, adopted
+    written = surface.configuration()
+    assert {key: value_at(written, key) for key in removed} == settled_values, "adoption put back other values than the attached hardware matched before"
+    assert written["target"]["controller"] == configured
+    assert hashlib.sha256(bench.config.read_bytes()).hexdigest() == session_file, "the session's own configuration was written"
+
+    status, report = surface.document("test-reactor", "--test-config", banner_plan(bench, "banner-after-adoption-on-the-command-line"))
+    assert status == 0, report
+    assert report["ok"] is True, report
+
+
+def test_project_config_adopt_hardware_over_mcp_puts_back_the_port_and_the_reloaded_server_reads_the_board(
+    bench: Bench, firmware: Path, surfaces: Surfaces
+) -> None:
+    """The MCP door of the same write, into a file whose port was unbound when the server started.
+
+    The server starts on a trimmed copy, so the port it loaded names no device.
+    `project_config_adopt_hardware` with `apply` fills the keys in from the
+    attached bench, under the agent's provenance, keeping the controller; the
+    description reload adopts the port, and a COM session through it reads the
+    banner the board prints after a reset.
+    """
+    surface = variant(bench, "adopt-over-mcp")
+    configured = surface.configuration()["target"]["controller"]
+    status, planned = surface.document("adopt-hardware", "--dry-run")
+    assert status == 0 and planned["ok"] is True, planned
+    removed = removable_keys(planned)
+    port = planned["com_port_id"]
+    expected = sorted({*removed, *(row["key"] for row in planned["carried"])})
+    rewrite(surface.config, without(removed))
+
+    server = surfaces.start(surface)
+    adopted = server.call("project_config_adopt_hardware", {"apply": True})
+    assert adopted["ok"] is True and adopted["applied"] is True, adopted
+    assert sorted(row["key"] for row in adopted["carried"]) == expected, adopted
+    assert f"debuggers.{adopted['debugger_id']}.probe_id" in {row["key"] for row in adopted["already_current"]}, adopted
+    kept_controller(adopted, configured)
+    assert adopted["created_entries"] == [] and adopted["permissions_changed"] == [], adopted
+    assert adopted["reload_required"] is True, adopted
+    assert adopted["provenance"]["last_modified_via"] == "mcp:project_config_adopt_hardware", adopted
+    assert adopted["provenance"]["last_modified_by"] == "agent", adopted
+    assert adopted["provenance"]["last_modified_keys"] == expected, adopted
+    assert surface.configuration()["target"]["controller"] == configured
+
+    reloaded = server.call("project_config_reload_description")
+    assert reloaded["ok"] is True, reloaded
+    assert any(path.startswith(f"com_ports.{port}.") for path in reloaded["description_changes"]), reloaded
+    assert reloaded["permission_differences"] == [], reloaded
+
+    opened = server.call("com_session_start", {"port_id": port, "clear_buffer": True})
+    assert opened["ok"] is True, opened
+    assert BANNER in banner_after_reset(server, port)
+    stopped = server.call("com_session_stop", {"port_id": port})
+    assert stopped["ok"] is True, stopped
