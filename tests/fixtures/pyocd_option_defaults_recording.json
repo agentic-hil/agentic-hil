@@ -1,0 +1,30 @@
+{
+  "what": "The SWD/JTAG clock pyOCD runs at when neither its command line nor a configuration file sets one, recorded so a remediation step that offers a slower clock is held to the clock the flash already ran at and not to what somebody remembered of it (#516). The pyOCD backend passes the probe and the target type to `pyocd flash` and no clock of its own, so a flash through it runs at this default. `pyocd flash --help` documents the grammar `--frequency` accepts and names no default for it; `json --features` lists every option pyOCD knows with its default. The run touched no probe: it prints and exits.",
+  "recorded_on": "2026-09-25",
+  "version": "0.45.1",
+  "argv": [
+    "pyocd",
+    "json",
+    "--features"
+  ],
+  "returncode": 0,
+  "how": "pyOCD 0.45.1 as the container test image installs it (tools/container/Dockerfile, python:3.12-slim, the version held in requirements/container.in), no probe attached. The run printed a JSON document of 25794 bytes on stdout, 1 feature and 84 options, and nothing on stderr. Kept here are the document's version fields and the one option the test reads, `frequency`, as pyOCD printed them; the other options and the feature are left out.",
+  "output": {
+    "pyocd_version": "0.45.1",
+    "version": {
+      "major": 1,
+      "minor": 1
+    },
+    "status": 0,
+    "options": [
+      {
+        "name": "frequency",
+        "default": 1000000,
+        "description": "SWD/JTAG frequency in Hertz.",
+        "type": [
+          "int"
+        ]
+      }
+    ]
+  }
+}
