@@ -756,7 +756,8 @@ def test_every_wall_clock_ceiling_in_the_suite_is_taken_through_the_helper() -> 
     The failure lists the offenders by file and line, because the reader is
     somebody deciding what to change, not somebody deciding whether to rerun.
     """
-    offenders = [entry for entry in suite_ceilings() if not entry.through_the_helper]
+    walk = TimeoutWalk(TESTS)
+    offenders = [entry for entry in suite_ceilings() if not entry.through_the_helper and not ceiling_takes_the_factor(entry, walk)]
 
     assert not offenders, "wall-clock ceilings a loaded host cannot be granted any slack on:\n" + "\n".join(
         f"  {entry.where}: {entry.statement}" for entry in offenders
@@ -1139,7 +1140,10 @@ def test_the_helper_ships_where_the_container_tier_can_import_it() -> None:
 # conversion after it, `None`, or a name (or a module's attribute) whose
 # module-level definition is such a call, an import from another file of the
 # suite followed to that definition. A constant is therefore scaled once where it
-# is defined, not at each use. A local, a parameter or any other expression gets
+# is defined, not at each use. The same rule spelled as a function is a call with
+# no arguments of a module-level function that has no parameters and whose body,
+# a docstring aside, is one `return` of such a call, and the assertion walk
+# accepts that call as well. A local, a parameter or any other expression gets
 # the verdict the assertion walk gives the same text. A timeout that is itself
 # the subject of a test, a child that outlives it on purpose, is registered in
 # EXEMPT_BOUNDS by a substring of its call, with its reason, the way a product
@@ -1156,8 +1160,19 @@ def goes_through_the_helper(bound: str) -> bool:
 
 def ceiling_takes_the_factor(entry: Comparison, walk: TimeoutWalk) -> bool:
     """The verdict the assertion walk gives a ceiling in a file under the
-    walk's root."""
-    return goes_through_the_helper(entry.bound)
+    walk's root: a helper call with at most a unit conversion after it, or a
+    call of a function that only returns one, read the way the timeout walk
+    reads the same call, with the locals of the function the ceiling is in."""
+    if goes_through_the_helper(entry.bound):
+        return True
+    try:
+        bound = ast.parse(entry.bound, mode="eval").body
+    except SyntaxError:
+        return False
+    if not isinstance(bound, ast.Call):
+        return False
+    definitions = walk.resolved(entry.path, bound, walk.enclosing_functions(entry.path, entry.number))
+    return bool(definitions) and all(goes_through_the_helper(text) for text in definitions)
 
 
 @dataclass(frozen=True)
@@ -1188,9 +1203,9 @@ class TimeoutSite:
 
     @property
     def takes_the_factor(self) -> bool:
-        """A helper call, `None`, or a name every module-level definition of
-        which is a helper call. `None` is no budget at all, so there is nothing
-        for a factor to widen."""
+        """A helper call, `None`, a name every module-level definition of which
+        is a helper call, or a call of a function that only returns one. `None`
+        is no budget at all, so there is nothing for a factor to widen."""
         if self.value == "None" or goes_through_the_helper(self.value):
             return True
         return bool(self.definitions) and all(goes_through_the_helper(text) for text in self.definitions)
@@ -1323,6 +1338,22 @@ def names_a_function_binds(function: ast.FunctionDef | ast.AsyncFunctionDef | as
     return frozenset(names)
 
 
+def returned_by(statement: ast.stmt) -> ast.expr | None:
+    """What a function returns when it is the constant rule spelled as a
+    function: no parameters, no decorator, not a coroutine, and a body that, a
+    docstring aside, is one `return` of a value. None for any other statement.
+    """
+    if not isinstance(statement, ast.FunctionDef) or statement.decorator_list:
+        return None
+    arguments = statement.args
+    if arguments.posonlyargs or arguments.args or arguments.kwonlyargs or arguments.vararg or arguments.kwarg:
+        return None
+    body = statement.body[1:] if ast.get_docstring(statement, clean=False) is not None else statement.body
+    if len(body) != 1 or not isinstance(body[0], ast.Return) or body[0].value is None:
+        return None
+    return body[0].value
+
+
 class TimeoutWalk:
     """The budgets handed to the calls read, in every Python file under a root.
 
@@ -1380,13 +1411,15 @@ class TimeoutWalk:
                     return candidate.resolve()
         return None
 
-    def definitions(self, path: Path, name: str, seen: frozenset[tuple[Path, str]] = frozenset()) -> tuple[str, ...]:
+    def definitions(self, path: Path, name: str, seen: frozenset[tuple[Path, str]] = frozenset(), called: bool = False) -> tuple[str, ...]:
         """The text of every module-level definition of `name` in `path`, an
         import from another file under the root followed to the definition there.
+        For a name the budget `called`, the definition is what the function
+        returns, when it is a function `returned_by` reads.
 
-        A binding that is not an assignment, and an import that cannot be
-        followed, comes back as its own first line, which no helper call
-        starts, so it is refused rather than guessed at.
+        Any other binding, and an import that cannot be followed, comes back as
+        its own first line, which no helper call starts, so it is refused rather
+        than guessed at.
         """
         if (path, name) in seen:
             return ()
@@ -1394,18 +1427,20 @@ class TimeoutWalk:
         texts: list[str] = []
         for statement in self.bindings(path).get(name, []):
             targets = statement.targets if isinstance(statement, ast.Assign) else [getattr(statement, "target", None)]
-            if isinstance(statement, (ast.Assign, ast.AnnAssign)) and statement.value is not None and any(isinstance(target, ast.Name) and target.id == name for target in targets):
+            if called and (returned := returned_by(statement)) is not None:
+                texts.append(ast.unparse(returned))
+            elif not called and isinstance(statement, (ast.Assign, ast.AnnAssign)) and statement.value is not None and any(isinstance(target, ast.Name) and target.id == name for target in targets):
                 texts.append(ast.unparse(statement.value))
             elif isinstance(statement, ast.ImportFrom) and statement.module:
                 imported = next(alias.name for alias in statement.names if (alias.asname or alias.name) == name)
                 target = self.module_file(path, statement.module, statement.level)
-                followed = self.definitions(target, imported, seen | {(path, name)}) if target else ()
+                followed = self.definitions(target, imported, seen | {(path, name)}, called) if target else ()
                 texts.extend(followed or [first_line(lines, statement)])
             else:
                 texts.append(first_line(lines, statement))
         return tuple(texts)
 
-    def attribute_definitions(self, path: Path, module: str, attribute: str) -> tuple[str, ...]:
+    def attribute_definitions(self, path: Path, module: str, attribute: str, called: bool = False) -> tuple[str, ...]:
         """The definitions of `module.attribute`, when `module` is bound once in
         the file, by an import of a file under the root."""
         statements = self.bindings(path).get(module, [])
@@ -1424,18 +1459,30 @@ class TimeoutWalk:
                 ),
                 None,
             )
-        return self.definitions(target, attribute) if target else ()
+        return self.definitions(target, attribute, called=called) if target else ()
 
     def resolved(self, path: Path, value: ast.expr, functions: tuple[ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda, ...]) -> tuple[str, ...]:
         """The module-level definitions behind a budget that is a name or a
-        module's attribute. A local or a parameter has none, whatever it is
-        called, and neither has any other expression."""
-        base = value.value if isinstance(value, ast.Attribute) else value
+        module's attribute, or a call of one with no arguments. A local or a
+        parameter has none, whatever its name, and neither has any other
+        expression."""
+        called = isinstance(value, ast.Call) and not value.args and not value.keywords
+        named = value.func if isinstance(value, ast.Call) and called else value
+        base = named.value if isinstance(named, ast.Attribute) else named
         if not isinstance(base, ast.Name) or any(base.id in self.locals_of(function) for function in functions):
             return ()
-        if isinstance(value, ast.Attribute):
-            return self.attribute_definitions(path, base.id, value.attr)
-        return self.definitions(path, base.id)
+        if isinstance(named, ast.Attribute):
+            return self.attribute_definitions(path, base.id, named.attr, called)
+        return self.definitions(path, base.id, called=called)
+
+    def enclosing_functions(self, path: Path, number: int) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...]:
+        """The functions whose bodies hold line `number` of a file, so a ceiling
+        there is read with the locals a budget there is read with."""
+        return tuple(
+            node
+            for node in ast.walk(self.module(path)[0])
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.body[0].lineno <= number <= (node.end_lineno or 0)
+        )
 
     def sites_in(self, path: Path) -> list[TimeoutSite]:
         tree, lines = self.module(path)
