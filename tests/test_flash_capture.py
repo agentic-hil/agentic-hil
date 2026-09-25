@@ -481,6 +481,7 @@ def test_an_until_entry_the_port_cannot_encode_is_refused_by_name_and_nothing_is
         assert result["error_type"] == "invalid_argument", result
         assert entry in json.dumps(result, ensure_ascii=False), result
         assert backend.calls == [], backend.calls
+        assert board.constructed == 0
         assert_bench_free(service)
     finally:
         service.close()
@@ -489,7 +490,8 @@ def test_an_until_entry_the_port_cannot_encode_is_refused_by_name_and_nothing_is
 def test_a_wait_longer_than_the_cap_is_capped_rather_than_refused(tmp_path: Path, board: Board) -> None:
     """`com_read` caps its wait at 60 s instead of refusing a longer one, and the
     capture takes the same rule: two minutes asked for is the cap, not an error
-    to reword."""
+    to reword. The report records the wait in force, so the cap is read there
+    without waiting it out."""
     config = config_for(tmp_path)
     service, backend = service_for(config, board)
     try:
@@ -498,6 +500,7 @@ def test_a_wait_longer_than_the_cap_is_capped_rather_than_refused(tmp_path: Path
         assert result["ok"] is True, result
         assert capture_of(result)["until_matched"] is True, result
         assert backend.calls == ["flash_firmware"], backend.calls
+        assert service.call("get_last_report")["report"]["capture"]["until_wait_s"] == 60.0
         assert_bench_free(service)
     finally:
         service.close()
@@ -802,6 +805,32 @@ def test_without_a_wait_the_capture_waits_the_default_rather_than_not_at_all(tmp
 
         assert result["ok"] is True, result
         assert capture_of(result)["until_matched"] is True, result
+        assert service.call("get_last_report")["report"]["capture"]["until_wait_s"] == 10.0
+    finally:
+        service.close()
+
+
+def test_without_until_the_capture_reads_until_max_bytes_and_the_report_keeps_the_default_wait(tmp_path: Path, board: Board) -> None:
+    """With nothing to match, the capture answers when `max_bytes` are buffered
+    or the wait is over, not at the first fragment of a banner. The wait in
+    force is in the report for every capture, `until` or not; the answer does
+    not repeat it."""
+    config = config_for(tmp_path)
+    service, backend = service_for(config, board)
+    try:
+        started = time.monotonic()
+        result = service.call("flash_firmware", flash_args(tmp_path, max_bytes=len(BANNER)))
+        elapsed = time.monotonic() - started
+
+        assert result["ok"] is True, result
+        capture = capture_of(result)
+        assert capture["data"] == data_result(BANNER, "utf-8"), capture
+        assert "until_wait_s" not in capture, capture
+        assert elapsed < scaled_time_bound(4.0), elapsed
+        report = service.call("get_last_report")["report"]
+        assert report["capture"]["until_wait_s"] == 10.0, report["capture"]
+        assert "until" not in report["capture"], report["capture"]
+        assert_bench_free(service)
     finally:
         service.close()
 
@@ -908,7 +937,7 @@ def test_a_match_returns_the_boot_output_up_to_the_match_and_the_log_that_holds_
         assert capture["data"] == data_result(BANNER, "utf-8"), capture
         assert capture["until_matched"] is True, capture
         assert capture["matched"] == READY, capture
-        assert capture.get("truncated") is not True, capture
+        assert set(capture) == {"port_id", "bytes_read", "data", "until_matched", "matched", "overflow_bytes", "log_path"}, capture
         assert capture["overflow_bytes"] == 0, capture
         assert received(config, capture["log_path"]) == BANNER, capture
         assert backend.calls == ["flash_firmware"], backend.calls
@@ -991,6 +1020,8 @@ def test_bytes_the_buffer_had_to_drop_are_counted_and_still_in_the_log(tmp_path:
         assert capture["overflow_bytes"] == 36, capture
         assert capture["bytes_read"] == 64, capture
         assert capture["data"] == data_result(payload[36:], "utf-8"), capture
+        # Dropped is not left unread: every byte still buffered was returned.
+        assert "truncated" not in capture, capture
         assert received(config, capture["log_path"]) == payload, capture
     finally:
         service.close()
@@ -1011,7 +1042,7 @@ def test_an_until_not_seen_by_the_deadline_is_not_a_failure(tmp_path: Path, boar
         assert overall_success(result) is True, result
         capture = capture_of(result)
         assert capture["until_matched"] is False, capture
-        assert capture.get("matched") is None, capture
+        assert "matched" not in capture, capture
         assert capture["data"] == data_result(BANNER, "utf-8"), capture
         assert elapsed >= 0.5
         assert_bench_free(service)
@@ -1087,7 +1118,9 @@ def test_a_read_that_fails_after_a_good_flash_keeps_every_field_of_the_flash(tmp
         assert result["side_effect_status"] == "committed", result
         capture = capture_of(result)
         assert capture["data"] == data_result(partial, "utf-8"), capture
-        assert "device disconnected" in json.dumps(capture), capture
+        assert capture["reader_error"]["error_type"] == "serial_read_failed", capture
+        assert "device disconnected" in capture["reader_error"]["backend_error"], capture
+        assert "device disconnected" in result["summary"], result
         assert elapsed < scaled_time_bound(4.0), elapsed
         assert_bench_free(service)
     finally:
@@ -1095,6 +1128,8 @@ def test_a_read_that_fails_after_a_good_flash_keeps_every_field_of_the_flash(tmp
 
 
 def test_a_reader_that_dies_before_any_byte_still_keeps_the_flash_and_the_reason(tmp_path: Path, board: Board) -> None:
+    """The reader's own error, not `session_not_active`: that answer tells a
+    caller to start a session, and this session was the call's own."""
     config = config_for(tmp_path)
     service, backend = service_for(config, board, banner=b"", die_after_banner=True)
     try:
@@ -1103,12 +1138,14 @@ def test_a_reader_that_dies_before_any_byte_still_keeps_the_flash_and_the_reason
         elapsed = time.monotonic() - started
 
         assert result["ok"] is False, result
-        assert result["error_type"] in {"serial_read_failed", "session_not_active"}, result
+        assert result["error_type"] == "serial_read_failed", result
         assert result["side_effect_status"] == "committed", result
         assert result["success_confirmed"] is True, result
         capture = capture_of(result)
-        assert capture.get("bytes_read", 0) == 0, capture
-        assert "device disconnected" in json.dumps(capture), capture
+        assert capture["bytes_read"] == 0, capture
+        assert capture["reader_error"]["error_type"] == "serial_read_failed", capture
+        assert "device disconnected" in capture["reader_error"]["backend_error"], capture
+        assert "device disconnected" in result["summary"], result
         assert elapsed < scaled_time_bound(4.0), elapsed
         assert_bench_free(service)
     finally:
@@ -1159,6 +1196,7 @@ def test_a_session_stop_that_fails_is_reported_as_com_session_stop_reports_it(tm
     without unsaying the flash or the capture that did happen."""
     config = config_for(tmp_path)
     service, backend = service_for(config, board)
+    port = com_resource(config, PORT_ID)
     try:
         assert service.call("com_session_start", {"port_id": PORT_ID})["ok"] is True
         board.close_failures = 1
@@ -1172,19 +1210,46 @@ def test_a_session_stop_that_fails_is_reported_as_com_session_stop_reports_it(tm
         assert result["ok"] is False, result
         assert overall_success(result) is False, result
         assert result["error_type"] == reference["error_type"], (result, reference)
-        # Merged, not copied: the stop's own answer is in the result, and
-        # whatever else the call knows may add to it but never take it away.
-        if reference.get("cleanup_required") is True:
-            assert result.get("cleanup_required") is True, (result, reference)
-        assert set(reference.get("cleanup_reasons") or []) <= set(result.get("cleanup_reasons") or []), (result, reference)
-        assert "port busy during close" in json.dumps(result), result
+        # What the stop reports, merged as it reports it: the probe settled
+        # cleanly, so the port's answer is the whole of it.
+        assert result["cleanup_required"] == reference["cleanup_required"], (result, reference)
+        assert result["quarantined"] == reference["quarantined"], (result, reference)
+        assert set(reference["cleanup_reasons"]) <= set(result["cleanup_reasons"]), (result, reference)
+        assert "port busy during close" in result["summary"], result
         assert result["side_effect_status"] == "committed", result
         assert result["success_confirmed"] is True, result
         assert capture_of(result)["data"] == data_result(BANNER, "utf-8"), result
+        # Where the call leaves the bench: the run is over and the probe given
+        # back, and the session stays registered, its lease holding the port,
+        # until a stop confirms, exactly as after a failed `com_session_stop`.
+        assert PORT_ID in service.com_ports.sessions, sorted(service.com_ports.sessions)
+        status = service.call("bench_run_status")
+        assert status["run_active"] is False, status
+        assert status["held_devices"] == [port], status
+        assert service.coordinator.status()["blocked"] is False
+        assert service.call("com_session_stop", {"port_id": PORT_ID})["ok"] is True
+        assert_bench_free(service)
     finally:
         service.close()
-    assert service.com_ports.sessions == {}, sorted(service.com_ports.sessions)
-    assert service.coordinator.bench.held_resources() == frozenset()
+
+
+@pytest.mark.parametrize("first", ["flash", "read"])
+def test_a_stop_that_fails_after_another_failure_keeps_the_first_error_and_the_stops_line(tmp_path: Path, board: Board, first: str) -> None:
+    """Two failures in one call: the first one's error stands, and the stop's
+    reasons and its error line are merged beside it, never dropped."""
+    config = config_for(tmp_path)
+    options: dict[str, object] = {"unconfirmed": True} if first == "flash" else {"banner": b"", "die_after_banner": True}
+    service, backend = service_for(config, board, **options)
+    board.close_failures = 1
+    try:
+        result = service.call("flash_firmware", flash_args(tmp_path, until=READY, wait_timeout_s=12))
+
+        assert result["ok"] is False, result
+        assert result["error_type"] == ("flash_failed" if first == "flash" else "serial_read_failed"), result
+        assert "port busy during close" in result["cleanup_error"], result
+        assert "com_cleanup_unconfirmed" in result["cleanup_reasons"], result
+    finally:
+        service.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1210,7 +1275,9 @@ def test_the_report_carries_the_capture_and_the_session_is_audited_as_a_started_
         capture = capture_of(result)
         report = service.call("get_last_report")["report"]
         assert report["tool"] == "flash_firmware", report
-        assert report["capture"] == capture, report
+        # The report also keeps what the call waited for and for how long; the
+        # answer does not repeat either, as `com_read`'s does not.
+        assert report["capture"] == {**capture, "until": [READY], "until_wait_s": 10.0}, report
         assert capture["log_path"] != pair_log, capture
         pair_entries = session_log(config, pair_log)
         capture_entries = session_log(config, capture["log_path"])
@@ -1299,6 +1366,7 @@ def test_one_tools_call_flashes_resets_and_returns_the_boot_output(tmp_path: Pat
         assert answer["isError"] is False, answer
         structured = answer["structuredContent"]
         assert structured["ok"] is True, structured
+        assert set(structured["capture"]) == {"port_id", "bytes_read", "data", "until_matched", "matched", "overflow_bytes", "log_path"}, structured
         assert structured["capture"]["until_matched"] is True, structured
         assert structured["capture"]["data"] == data_result(BANNER, "utf-8"), structured
         assert backend.calls == ["flash_firmware"], backend.calls
