@@ -848,26 +848,28 @@ def test_a_worker_killed_mid_run_is_named_gone_refuses_a_stop_and_leaves_a_bench
     assert incident["ok"] is True, incident
     # The device locks are operating system locks, and the process is gone.
     assert incident["bench_held"] is False, incident
-    if incident["blocked"]:
-        assert incident["cleanup_required"] is True, incident
-        quarantine_id = incident["quarantine_id"]
-        assert isinstance(quarantine_id, str) and quarantine_id.strip(), incident
-        assert "owner_process_exited_without_release" in incident["cleanup_reasons"], incident
-        assert incident["quarantine_guidance"], incident
-        stands = incident["incident_stands"]
-        assert isinstance(stands, bool), incident
-        status, recovered = bench.document("recover", "--confirm-safe-state", "--quarantine-id", quarantine_id)
-        assert status == 0, recovered
-        assert recovered["ok"] is True, recovered
-        assert recovered["tool"] == "hardware_recover", recovered
-        if stands:
-            assert recovered["was_quarantined"] is True, recovered
-        else:
-            assert recovered["nothing_to_recover"] is True, recovered
-            assert recovered["was_quarantined"] is False, recovered
-            assert "audit halt" in recovered["summary"], recovered["summary"]
+    # The run had reset the board and read its port before it was killed, so
+    # it is not a dead owner that provably made no contact: the bench names a
+    # quarantine id for `recover`, as the status's next step says it does.
+    assert "released_dead_owner" not in incident, incident
+    assert incident["blocked"] is True, incident
+    assert incident["cleanup_required"] is True, incident
+    quarantine_id = incident["quarantine_id"]
+    assert isinstance(quarantine_id, str) and quarantine_id.strip(), incident
+    assert "owner_process_exited_without_release" in incident["cleanup_reasons"], incident
+    assert incident["quarantine_guidance"], incident
+    stands = incident["incident_stands"]
+    assert isinstance(stands, bool), incident
+    status, recovered = bench.document("recover", "--confirm-safe-state", "--quarantine-id", quarantine_id)
+    assert status == 0, recovered
+    assert recovered["ok"] is True, recovered
+    assert recovered["tool"] == "hardware_recover", recovered
+    if stands:
+        assert recovered["was_quarantined"] is True, recovered
     else:
-        assert incident.get("released_dead_owner"), f"a dead owner the bench did not quarantine has to be released by name: {incident}"
+        assert recovered["nothing_to_recover"] is True, recovered
+        assert recovered["was_quarantined"] is False, recovered
+        assert "audit halt" in recovered["summary"], recovered["summary"]
 
     heir = McpServer.launch(bench)
     try:
