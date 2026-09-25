@@ -93,7 +93,14 @@ from agentic_hil.config import (
     user_state_root,
 )
 from agentic_hil.gdbmi import intel_hex_record
-from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
+from agentic_hil.mcp import (
+    MCP_PROTOCOL_VERSION,
+    MCP_TOOL_NAMES,
+    MCP_TOOLS,
+    SERVER_INSTRUCTIONS,
+    UNPROVISIONED_SERVER_INSTRUCTIONS,
+    handle_mcp_message,
+)
 from agentic_hil.process import ProcessImage, spawn_managed_process, terminate_process_tree
 from agentic_hil.report import logs_directory
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
@@ -8499,6 +8506,26 @@ def test_the_instructions_say_what_precedes_the_first_call_in_that_order(tmp_pat
     says_in_order(part["f"], "side_effect_status", "not_started", "cleanup_required", "quarantined", "false", "audit_ok", "cleanup_ok", "target_ok", "true", "hardware_state", "unchanged", "already received", "advice_uri")
     # g. Where the facts about this server are, and what they stand in for.
     says_in_order(part["g"], "resources/list", "agentic-hil://reference/", "source", "installed package")
+
+
+def test_every_name_the_instructions_give_is_one_the_server_has() -> None:
+    """The instructions are read before any schema, so their names are called as written.
+
+    They name tools and arguments in plain words. A tool or an argument renamed
+    later would leave them sending every session to one that no longer exists,
+    and nothing else would notice: the schemas are right, only the text is old.
+    """
+    schemas = {str(tool["name"]): set(tool["inputSchema"].get("properties", {})) for tool in MCP_TOOLS}
+    arguments = set().union(*schemas.values())
+    # Named to be read in a result, not to be called.
+    result_words = {"permission_denied", "side_effect_status", "not_started", "side_effect_committed", "cleanup_required", "audit_ok", "cleanup_ok", "target_ok", "hardware_state", "advice_uri"}
+
+    for text in (SERVER_INSTRUCTIONS, UNPROVISIONED_SERVER_INSTRUCTIONS):
+        for word in re.findall(r"\b[a-z]+(?:_[a-z]+)+\b", text):
+            assert word in schemas or word in arguments or word in result_words, word
+    # One-word arguments the pattern above cannot tell from prose.
+    for tool, argument in (("flash_firmware", "reset_after_flash"), ("flash_firmware", "capture"), ("com_read", "until"), ("can_read", "until_id")):
+        assert argument in schemas[tool], (tool, argument)
 
 
 def test_the_instructions_leave_each_situation_to_the_result_that_meets_it(tmp_path: Path) -> None:
