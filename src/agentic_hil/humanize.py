@@ -1639,6 +1639,8 @@ def render_adopt_hardware(result: JsonObject) -> list[str]:
         body = []
         for item in unavailable:
             body.extend(_bullets([f"{item.get('key', 'key')}: {_summary(item) or item.get('reason', 'not answerable from what is attached')}"]))
+            # The line of a listing that failed, which says what to fix (#570).
+            body.extend(_fields([("backend_error", item.get("backend_error"))], indent=_INDENT * 2))
         lines.extend(_section("Could not be answered from what is attached", body))
     created = _strings(result.get("created_entries"))
     if created:
