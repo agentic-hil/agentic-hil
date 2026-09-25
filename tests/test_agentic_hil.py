@@ -14,6 +14,7 @@ import sys
 import sysconfig
 import tempfile
 import time
+from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
@@ -6127,6 +6128,72 @@ def test_register_agent_mcp_claude_writes_user_json(tmp_path: Path, monkeypatch:
     assert data["mcpServers"]["agentic-hil"]["command"] == command
     assert data["mcpServers"]["agentic-hil"]["args"] == ["mcp-stdio"]
     assert not (tmp_path / ".mcp.json").exists()
+
+
+def _mcp_config_writers() -> Mapping[str, object]:
+    """The one mapping `register_agent_mcp` takes its agents from and dispatches through (#565)."""
+    from agentic_hil import cli as cli_module
+
+    writers = getattr(cli_module, "MCP_CONFIG_WRITERS", None)
+    assert isinstance(writers, Mapping), "agentic_hil.cli has no MCP_CONFIG_WRITERS mapping: register_agent_mcp names its agents in a set literal and dispatches through an if-chain"
+    return writers
+
+
+def test_register_agent_mcp_writes_for_exactly_the_agents_of_the_clis_list() -> None:
+    """The agents with an MCP config writer are the CLI's agents, no more and no fewer (#565)."""
+    from agentic_hil import cli as cli_module
+
+    writers = _mcp_config_writers()
+    agents = cli_module.supported_skill_agents()
+    problems = [f"MCP_CONFIG_WRITERS in cli.py has no writer for {agent!r}, an agent in the CLI's list" for agent in agents if agent not in writers]
+    problems += [f"MCP_CONFIG_WRITERS in cli.py has a writer for {agent!r}, which is no agent in the CLI's list" for agent in writers if agent not in agents]
+    assert not problems, "\n".join(problems)
+
+
+def test_register_agent_mcp_checks_and_dispatches_through_the_one_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mapping is both the check and the dispatch, not a third copy beside them (#565).
+
+    A writer put into it is the one called, with the launcher and the force
+    flag; an agent taken out of it is refused as an agent without an MCP config
+    format, before anything is written.
+    """
+    from agentic_hil import cli as cli_module
+
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    trusted = _trusted_test_mcp_command(monkeypatch)
+    writers = _mcp_config_writers()
+    calls = []
+
+    def recorded(command: str, force: bool) -> dict:
+        calls.append((command, force))
+        return {"ok": True, "summary": "recorded"}
+
+    monkeypatch.setattr(cli_module, "MCP_CONFIG_WRITERS", {**writers, "codex": recorded})
+    assert register_agent_mcp("codex", force=True) == {"ok": True, "summary": "recorded"}
+    assert calls == [(trusted, True)]
+    assert not (home / ".codex" / "config.toml").exists()
+
+    monkeypatch.setattr(cli_module, "MCP_CONFIG_WRITERS", {agent: writer for agent, writer in writers.items() if agent != "opencode"})
+    refused = register_agent_mcp("opencode")
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "unsupported_agent", refused
+    assert refused["agent"] == "opencode", refused
+    assert not (home / ".config" / "opencode" / "opencode.json").exists()
+
+
+def test_register_agent_mcp_refuses_an_agent_it_does_not_know_as_it_always_has() -> None:
+    """The refusal reads as it did before the mapping (#565): the same fields and words, the name as normalized."""
+    from agentic_hil import cli as cli_module
+
+    for requested in ("not-an-agent", " Not_An_Agent "):
+        assert register_agent_mcp(requested) == {
+            "ok": False,
+            "error_type": "unsupported_agent",
+            "summary": "Agentic HIL does not know this agent's MCP config format.",
+            "agent": "not-an-agent",
+            "allowed_agents": cli_module.supported_skill_agents(),
+        }
 
 
 HOST_GUIDE = Path(__file__).resolve().parents[1] / "docs" / "mcp-hosts.md"

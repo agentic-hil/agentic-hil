@@ -20,6 +20,7 @@ where the interpreter or the daemon is missing, and say what would have run it.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import io
 import json
@@ -31,11 +32,14 @@ import subprocess
 import sys
 import time
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 from support import scaled_time_bound
+
+import agentic_hil.cli
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SHELL_SCRIPT = REPOSITORY_ROOT / "install.sh"
@@ -760,6 +764,267 @@ def test_step_four_reports_a_result_and_does_not_stream_the_agent_install_report
     assert "Invoke-Captured -File $AgenticHilCmd" in powershell, "install.ps1 streams the report instead of capturing it"
     assert "Invoke-Checked -File $AgenticHilCmd" not in powershell
     assert '"ok": true' not in powershell, "install.ps1 still matches a document it is no longer handed"
+
+
+def _comment_above(source: str, line: str) -> str:
+    """The comment directly above `line` of a script, as the prose it reads as."""
+    lines = source.split("\n")
+    end = lines.index(line)
+    start = end
+    while start > 0 and lines[start - 1].startswith("#"):
+        start -= 1
+    return " ".join(" ".join(text.lstrip("#") for text in lines[start:end]).split())
+
+
+def test_register_agent_is_described_once_and_by_what_it_reads() -> None:
+    """install.sh describes `register_agent` once, and by the verdict it reads (#566).
+
+    Two comment blocks stood above the function, each opening with the same
+    sentence, and the first still said the top-level "ok" of the report was
+    read at its own indentation. The function reads the exit status and nothing
+    else, which is what the second block says.
+    """
+    described = _comment_above(_shell_source(), "register_agent() {")
+    assert described.count("One agent registered, reported as a result rather than as a document.") == 1, described
+    assert 'The top-level "ok" is read at its own indentation' not in described, described
+    assert "The verdict is the exit status" in described, described
+
+
+# ---------------------------------------------------------------------------
+# Every agent list the installers spell out by hand, held to the CLI's (#565).
+# `agentic-hil --help` offers `{opencode,claude-code,codex}` out of
+# `KNOWN_AGENTS`, and an installer needs one more fact per agent: the command
+# that agent's CLI is found by on PATH, `claude` for `claude-code`. That fact
+# belongs in the same table, beside the name, so that one place names the
+# agents. Each check reads its list out of the script as it stands and compares
+# it with the table it is handed, which is also how every check is shown to go
+# red on a changed copy of the table without an edit to the product.
+
+
+@dataclasses.dataclass(frozen=True)
+class _CopiedAgent:
+    """An agent in a changed copy of the CLI's list, with the fields the checks read."""
+
+    id: str
+    aliases: tuple[str, ...]
+    command: str | None
+
+
+def _agent_command(agent: Any) -> str | None:
+    """The command an agent of the CLI's list is found by on PATH, or None where the list records none."""
+    return getattr(agent, "command", None)
+
+
+def _named_agent(agents: Sequence[Any], name: str) -> Any | None:
+    """The agent of `agents` a name stands for, in every spelling `known_agent` takes."""
+    normalized = agentic_hil.cli.normalize_agent(name)
+    return next((agent for agent in agents if normalized in {agentic_hil.cli.normalize_agent(alias) for alias in agent.aliases}), None)
+
+
+def _unrecorded_commands(where: str, agents: Sequence[Any]) -> list[str]:
+    return [f"{where} cannot be held to the CLI's list, which records no command on PATH for {agent.id!r}" for agent in agents if not _agent_command(agent)]
+
+
+def _ids_held_to(where: str, written: Sequence[str], agents: Sequence[Any]) -> list[str]:
+    ids = [agent.id for agent in agents]
+    return [f"{where} leaves out {agent_id!r}, an agent in the CLI's list" for agent_id in ids if agent_id not in written] + [
+        f"{where} names {name!r}, which is no agent in the CLI's list" for name in written if name not in ids
+    ]
+
+
+def _commands_held_to(where: str, written: Sequence[str], agents: Sequence[Any]) -> list[str]:
+    if unrecorded := _unrecorded_commands(where, agents):
+        return unrecorded
+    commands = {_agent_command(agent): agent.id for agent in agents}
+    return [f"{where} leaves out {command!r}, the command of {agent_id!r} in the CLI's list" for command, agent_id in commands.items() if command not in written] + [
+        f"{where} names {name!r}, which is no agent's command in the CLI's list" for name in written if name not in commands
+    ]
+
+
+def _answer(arms: Sequence[tuple[Sequence[str], str]], passes_through: bool, value: str | None) -> str | None:
+    """What a chain of `case` arms or `if` lines answers for `value`: the first arm naming it, else the value itself where the chain hands it back."""
+    return next((answer for names, answer in arms if value in names), value if passes_through else None)
+
+
+def _command_map_held_to(where: str, arms: Sequence[tuple[Sequence[str], str]], passes_through: bool, agents: Sequence[Any]) -> list[str]:
+    """A map from the command found on PATH to the agent registered for it."""
+    if unrecorded := _unrecorded_commands(where, agents):
+        return unrecorded
+    problems = []
+    for agent in agents:
+        answered = _answer(arms, passes_through, _agent_command(agent))
+        if answered != agent.id:
+            problems.append(f"{where} answers {answered!r} for {_agent_command(agent)!r}, the command of {agent.id!r} in the CLI's list")
+    commands = [_agent_command(agent) for agent in agents]
+    problems += [f"{where} names {name!r}, which is no agent's command in the CLI's list" for names, _ in arms for name in names if name not in commands]
+    return problems
+
+
+def _process_map_held_to(where: str, arms: Sequence[tuple[Sequence[str], str]], passes_through: bool, agents: Sequence[Any]) -> list[str]:
+    """A map from an agent's name to the process step 5 looks for."""
+    if unrecorded := _unrecorded_commands(where, agents):
+        return unrecorded
+    problems = []
+    for agent in agents:
+        answered = _answer(arms, passes_through, agent.id)
+        if answered != _agent_command(agent):
+            problems.append(f"{where} answers {answered!r} for {agent.id!r}, whose command in the CLI's list is {_agent_command(agent)!r}")
+    for names, answer in arms:
+        for name in names:
+            agent = _named_agent(agents, name)
+            if agent is None:
+                problems.append(f"{where} names {name!r}, which is no agent in the CLI's list")
+            elif name != agent.id and answer != _agent_command(agent):
+                problems.append(f"{where} answers {answer!r} for {name!r}, a name of {agent.id!r}, whose command in the CLI's list is {_agent_command(agent)!r}")
+    return problems
+
+
+def _session_held_to(where: str, names: Sequence[str], process: str, agents: Sequence[Any]) -> list[str]:
+    """The agent step 5 speaks for inside a Claude Code session: named by the CLI's names, its id among them, its command the process."""
+    if unrecorded := _unrecorded_commands(where, agents):
+        return unrecorded
+    problems = []
+    named = {}
+    for name in names:
+        agent = _named_agent(agents, name)
+        if agent is None:
+            problems.append(f"{where} names {name!r}, which is no agent in the CLI's list")
+        else:
+            named[agent.id] = agent
+    for agent_id, agent in named.items():
+        if agent_id not in names:
+            problems.append(f"{where} leaves out {agent_id!r}, the CLI's name for the agent it looks for")
+        if process != _agent_command(agent):
+            problems.append(f"{where} names the process {process!r}, but the command of {agent_id!r} in the CLI's list is {_agent_command(agent)!r}")
+    return problems
+
+
+def _prose_list(text: str) -> list[str]:
+    """`a, b or c`, wrapped however the script wraps it, as the names it lists."""
+    return re.split(r",\s*(?:or\s+|and\s+)?|\s+(?:or|and)\s+", " ".join(text.split()))
+
+
+def _shell_detected_commands() -> list[str]:
+    found = re.search(r"^\s*for cli in ([^;\n]+); do$", _shell_function(_shell_source(), "detect_agents"), re.MULTILINE)
+    assert found is not None, "install.sh: detect_agents has no `for cli in ...; do` loop"
+    return found.group(1).split()
+
+
+def _powershell_detected_commands() -> list[str]:
+    found = re.search(r"foreach \(\$cli in @\(([^)]*)\)\)", _powershell_source())
+    assert found is not None, "install.ps1: step 4 has no `foreach ($cli in @(...))` loop"
+    return re.findall(r"'([^']+)'", found.group(1))
+
+
+def _shell_arms(name: str) -> tuple[list[tuple[list[str], str]], bool]:
+    """The `case` arms of an install.sh function that prints one name per arm, and whether its `*` arm prints back what it was given."""
+    arms = []
+    passes_through = False
+    for patterns, answer in re.findall(r"^\s*([^()\n]+?)\)\s*printf '%s(?:\\n)?' \"([^\"]*)\" ;;$", _shell_function(_shell_source(), name), re.MULTILINE):
+        names = [pattern.strip() for pattern in patterns.split("|")]
+        if names == ["*"]:
+            passes_through = answer.startswith("$")
+        else:
+            arms.append((names, answer))
+    assert arms, f"install.sh: {name} has no `case` arm that prints a name"
+    return arms, passes_through
+
+
+def _powershell_arms(name: str) -> tuple[list[tuple[list[str], str]], bool]:
+    """The `if (...) { return '...' }` lines of an install.ps1 function, and whether it ends by returning what it was given."""
+    function = _powershell_function(_powershell_source(), name)
+    arms = [(re.findall(r"-eq '([^']+)'", condition), answer) for condition, answer in re.findall(r"^\s*if \(([^)]*)\) \{ return '([^']*)' \}$", function, re.MULTILINE)]
+    assert arms, f"install.ps1: {name} has no `if (...) {{ return '...' }}` line"
+    return arms, re.search(r"^\s*return \$\w+$", function, re.MULTILINE) is not None
+
+
+def _printed_agents(source: str, script: str) -> list[list[str]]:
+    """The agents of every `agent-install --agent <a|b|c>` line the script prints, one list per line."""
+    printed = re.findall(r"agent-install --agent <([^>]+)>", source)
+    assert printed, f"{script} prints no `agent-install --agent <...>` line"
+    return [names.split("|") for names in printed]
+
+
+def _usage_agents(source: str, script: str) -> list[str]:
+    found = re.search(r"Register for this agent only: (.+?)\.", source, re.DOTALL)
+    assert found is not None, f"{script}'s usage text lists no agents for --agent"
+    return _prose_list(found.group(1))
+
+
+def _missing_commands(source: str, script: str) -> list[str]:
+    found = re.search(r"agent: no (.+?) CLI on this PATH", source)
+    assert found is not None, f"{script}'s step 4 has no line for a PATH without an agent CLI"
+    return _prose_list(found.group(1))
+
+
+def _shell_session() -> tuple[list[str], str]:
+    found = re.search(r'case "\$agent_id" in\n\s*([^)\n]+)\)\n\s*RUNNING_NAME="([^"]+)"', _shell_source())
+    assert found is not None, 'install.sh: step 5 has no `case "$agent_id"` arm for a Claude Code session'
+    return [name.strip() for name in found.group(1).split("|")], found.group(2)
+
+
+def _powershell_session() -> tuple[list[str], str]:
+    found = re.search(r"if \(((?:\$agentId -eq '[^']+'(?: -or )?)+)\) \{\n\s*\$running \+= \[pscustomobject\]@\{ Name = '([^']+)'", _powershell_source())
+    assert found is not None, "install.ps1: step 5 has no `if ($agentId -eq ...)` line for a Claude Code session"
+    return re.findall(r"-eq '([^']+)'", found.group(1)), found.group(2)
+
+
+# Each list, named by its file and what it is, and the check that holds it to a
+# list of agents.
+_INSTALLER_AGENT_LISTS: dict[str, Callable[[str, Sequence[Any]], list[str]]] = {
+    "install.sh, the loop in detect_agents": lambda where, agents: _commands_held_to(where, _shell_detected_commands(), agents),
+    "install.sh, the map from command to agent in detect_agents": lambda where, agents: _command_map_held_to(where, *_shell_arms("detect_agents"), agents),
+    "install.sh, the agent-install line step 4 prints": lambda where, agents: [problem for names in _printed_agents(_shell_source(), "install.sh") for problem in _ids_held_to(where, names, agents)],
+    "install.sh, the usage text of --agent": lambda where, agents: _ids_held_to(where, _usage_agents(_shell_source(), "install.sh"), agents),
+    "install.sh, the step 4 line for a PATH without an agent CLI": lambda where, agents: _commands_held_to(where, _missing_commands(_shell_source(), "install.sh"), agents),
+    "install.sh, the map from agent to process in process_name_for": lambda where, agents: _process_map_held_to(where, *_shell_arms("process_name_for"), agents),
+    "install.sh, the step 5 arm for a Claude Code session": lambda where, agents: _session_held_to(where, *_shell_session(), agents),
+    "install.ps1, the loop in step 4 that looks for agent CLIs": lambda where, agents: _commands_held_to(where, _powershell_detected_commands(), agents),
+    "install.ps1, the map from command to agent in Get-AgentIdForCli": lambda where, agents: _command_map_held_to(where, *_powershell_arms("Get-AgentIdForCli"), agents),
+    "install.ps1, the agent-install line step 4 prints": lambda where, agents: [problem for names in _printed_agents(_powershell_source(), "install.ps1") for problem in _ids_held_to(where, names, agents)],
+    "install.ps1, the usage text of --agent": lambda where, agents: _ids_held_to(where, _usage_agents(_powershell_source(), "install.ps1"), agents),
+    "install.ps1, the step 4 line for a PATH without an agent CLI": lambda where, agents: _commands_held_to(where, _missing_commands(_powershell_source(), "install.ps1"), agents),
+    "install.ps1, the map from agent to process in Get-ProcessNameForAgent": lambda where, agents: _process_map_held_to(where, *_powershell_arms("Get-ProcessNameForAgent"), agents),
+    "install.ps1, the step 5 line for a Claude Code session": lambda where, agents: _session_held_to(where, *_powershell_session(), agents),
+}
+
+
+@pytest.mark.parametrize("where", list(_INSTALLER_AGENT_LISTS))
+def test_each_agent_list_an_installer_spells_out_is_the_clis(where: str) -> None:
+    """Every agent list either installer writes by hand says what the CLI's list says (#565).
+
+    The CLI's list is `KNOWN_AGENTS`, the one `--help` prints as the choices of
+    every `--agent`. An agent added there, renamed or given another command
+    turns each list below that no longer matches it red, by file, by list and
+    by the name that differs, instead of an installer that detects, prints or
+    looks for agents the CLI does not have.
+    """
+    problems = _INSTALLER_AGENT_LISTS[where](where, agentic_hil.cli.KNOWN_AGENTS)
+    assert not problems, "\n".join(problems)
+
+
+@pytest.mark.parametrize("where", list(_INSTALLER_AGENT_LISTS))
+def test_each_agent_list_check_goes_red_on_a_changed_copy_of_the_clis_list(where: str) -> None:
+    """Each check above fails on a list that differs, and says where and in which name.
+
+    The copy is the CLI's list without the agents whose command is not their
+    name, `claude-code` today, and with one added whose command is not its name
+    either, so every list an installer writes out differs from it in at least
+    one name. Nothing in the product is edited for it. Every message names the
+    file and the list, and each names a name the copy changed, never one it
+    kept.
+    """
+    kept = [agent for agent in agentic_hil.cli.KNOWN_AGENTS if _agent_command(agent) == agent.id]
+    dropped = [agent for agent in agentic_hil.cli.KNOWN_AGENTS if agent not in kept]
+    added = _CopiedAgent("example-agent", ("example-agent",), "example-cli")
+    changed = {*(name for agent in dropped for name in (*agent.aliases, _agent_command(agent)) if name), added.id, added.command}
+
+    problems = _INSTALLER_AGENT_LISTS[where](where, [*kept, added])
+
+    assert problems, f"{where} still passes on a list without {[agent.id for agent in dropped]} and with {added.id!r}"
+    for problem in problems:
+        assert problem.startswith(where), problem
+        assert any(repr(name) in problem for name in changed), f"{problem}\nnames none of {sorted(changed)}"
 
 
 def test_neither_script_asks_agent_install_for_a_rendering_it_gets_anyway() -> None:
@@ -3682,7 +3947,7 @@ def _powershell_release() -> str:
     return found.group(1)
 
 
-def _windows_launcher(path: Path, version: str, marker: Path | None = None, answers: str = "fresh") -> None:
+def _windows_launcher(path: Path, version: str, marker: Path | None = None, answers: str = "fresh", agent_install: tuple[int, str, str] = (0, "", "")) -> None:
     """A real `agentic-hil.exe` answering `version`, built the way pip builds one.
 
     pip's console-script launcher is a small executable followed by a shebang
@@ -3690,17 +3955,19 @@ def _windows_launcher(path: Path, version: str, marker: Path | None = None, answ
     with this interpreter on the shebang and a `__main__` of the test's own,
     give install.ps1 the `.exe` it looks for by that name: `Get-Command`, the
     call operator and `Test-Path` all see an executable, and `--version` and
-    `agent-install` answer what the test decided.
+    `agent-install` answer what the test decided. `agent_install` is the exit
+    status, stdout and stderr of the latter.
     """
     from pip._vendor import distlib
 
     stub = {"AMD64": "t64.exe", "ARM64": "t64-arm.exe", "x86": "t32.exe"}[platform.machine()]
     launcher = (Path(distlib.__file__).parent / stub).read_bytes()
+    status, stdout, stderr = agent_install
     body = (
         "import sys\n"
         "from pathlib import Path\n"
         f"if '--version' in sys.argv:\n    print({version!r})\n    raise SystemExit(0)\n"
-        f"if 'agent-install' in sys.argv:\n    Path({str(marker)!r}).write_text({answers!r}, encoding='utf-8')\n    raise SystemExit(0)\n"
+        f"if 'agent-install' in sys.argv:\n    Path({str(marker)!r}).write_text({answers!r}, encoding='utf-8')\n    sys.stdout.write({stdout!r})\n    sys.stderr.write({stderr!r})\n    raise SystemExit({status})\n"
         "raise SystemExit(0)\n"
     )
     archive = io.BytesIO()
@@ -4659,12 +4926,13 @@ def test_step_five_names_no_process_for_a_recorded_agent_cli_that_is_not_in_the_
 # PowerShell script refused.
 
 
-def _uv_that_installs_a_stub(path: Path, *, marker: Path | None = None, version: str = "9.9.9") -> None:
+def _uv_that_installs_a_stub(path: Path, *, marker: Path | None = None, version: str = "9.9.9", agent_install: str = "echo registered") -> None:
     """A `uv` that answers `tool dir --bin` and writes a stub `agentic-hil` on `tool install`.
 
     The stub answers `--version` and accepts `agent-install`, recording the
     agent it was asked for in `marker` where one is given. The manager is not
     what the tests below are about; step 2 has to end for steps 3 to 5 to run.
+    What `agent-install` then does is `agent_install`, a line of shell.
     """
     record = f'echo "\\$3" >> "{marker}"; ' if marker is not None else ""
     _stub_executable(
@@ -4679,7 +4947,7 @@ def _uv_that_installs_a_stub(path: Path, *, marker: Path | None = None, version:
         "#!/bin/sh\n"
         'case "\\$1" in\n'
         f'  --version) echo "{version}" ;;\n'
-        f"  agent-install) {record}echo registered ;;\n"
+        f"  agent-install) {record}{agent_install} ;;\n"
         "esac\n"
         "exit 0\n"
         "STUB\n"
@@ -4857,6 +5125,106 @@ def test_no_agent_cli_on_path_prints_the_agent_install_line_and_writes_nothing(t
     for written in (home / ".claude.json", home / ".codex" / "config.toml", home / ".config" / "opencode" / "opencode.json"):
         assert not written.exists(), f"{written} was written:\n{transcript}"
     assert "nothing to restart" in transcript, transcript
+
+
+def _agent_install_refusal(tmp_path: Path, name: str) -> str:
+    """What this checkout's `agentic-hil agent-install` says to an agent name it refuses.
+
+    Its usage and argparse's `invalid choice` line, on stderr, with exit status
+    2 and nothing on stdout. Taken from the CLI itself when the test runs, so a
+    stand-in replays the refusal an installer meets rather than one written from
+    memory.
+    """
+    refused = subprocess.run(
+        [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", name],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+    assert refused.returncode == 2, refused
+    assert refused.stdout == "", refused
+    assert f"invalid choice: {name!r}" in refused.stderr, refused
+    return refused.stderr
+
+
+def _said_after(transcript: str, said: str) -> str:
+    """The transcript after every line of `said`, each found in it in order."""
+    position = 0
+    for line in said.splitlines():
+        if line.strip():
+            found = transcript.find(line.strip(), position)
+            assert found >= 0, f"{line.strip()!r} is missing from the transcript, or out of order:\n{transcript}"
+            position = found + len(line.strip())
+    return transcript[position:]
+
+
+# What a failed `agent-install` prints, as far as the installers go: text they
+# show whole and never read, so these words are the test's own.
+_FAILED_AGENT_INSTALL_REPORT = "skill: written\nMCP server: not registered, the agent's config could not be parsed\n"
+
+
+def test_step_four_shows_a_refused_agent_name_and_says_agentic_hil_refused_it(tmp_path: Path) -> None:
+    """A name `agent-install` refuses is not a half that failed (#566).
+
+    `agent-install` refuses a name it does not know while parsing its command
+    line: its usage, argparse's `invalid choice` line, exit status 2, and
+    nothing written. The installer printed that and then said the report above
+    named the half that failed, when there was no report and no half had run.
+    The refusal stays on the screen whole, and after it the installer says in
+    its own sentence that agentic-hil refused the name, and nothing of a report.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    refusal = tmp_path / "refusal"
+    refusal.write_text(_agent_install_refusal(tmp_path, "not-an-agent"), encoding="utf-8")
+    home = tmp_path / "home"
+    project = home / "project"
+    tools = tmp_path / "tools"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    for directory in (project, tools, uv_bin):
+        directory.mkdir(parents=True)
+    _uv_that_installs_a_stub(tools / "uv", agent_install=f'cat "{refusal}" >&2; exit 2')
+
+    result = _shell_run({"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin", "UV_TOOL_BIN_DIR": str(uv_bin)}, project, "--agent", "not-an-agent")
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode != 0, transcript
+    after = _said_after(transcript, refusal.read_text(encoding="utf-8"))
+    assert "agentic-hil refused the agent name 'not-an-agent'" in after, transcript
+    assert not re.search(r"\b(report|half|halves)\b", after, re.IGNORECASE), transcript
+
+
+def test_step_four_still_points_a_failed_agent_install_at_the_report_above(tmp_path: Path) -> None:
+    """Any other failure keeps the sentence it had (#566): the report, then which half.
+
+    Every status but 0 and 2 is `agent-install` having run and failed, and its
+    report is then the diagnosis.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    report = tmp_path / "report"
+    report.write_text(_FAILED_AGENT_INSTALL_REPORT, encoding="utf-8")
+    home = tmp_path / "home"
+    project = home / "project"
+    tools = tmp_path / "tools"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    for directory in (project, tools, uv_bin):
+        directory.mkdir(parents=True)
+    _uv_that_installs_a_stub(tools / "uv", agent_install=f'cat "{report}"; exit 1')
+
+    result = _shell_run({"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin", "UV_TOOL_BIN_DIR": str(uv_bin)}, project, "--agent", "codex")
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode != 0, transcript
+    after = _said_after(transcript, _FAILED_AGENT_INSTALL_REPORT)
+    assert "agent-install failed for codex; the report above says which half" in after, transcript
+    assert "refused" not in after, transcript
 
 
 # The hashing tools install.sh reaches for, in the order it tries them, and
@@ -5049,6 +5417,37 @@ def test_the_powershell_step_four_with_no_agent_cli_prints_the_agent_install_lin
     for written in (bench.home / ".claude.json", bench.home / ".codex" / "config.toml"):
         assert not written.exists(), f"{written} was written:\n{transcript}"
     assert "nothing to restart" in transcript, transcript
+
+
+@WINDOWS_ONLY
+def test_the_powershell_step_four_shows_a_refused_agent_name_and_says_agentic_hil_refused_it(tmp_path: Path) -> None:
+    """The shell test of the same name, on the script Windows runs (#566)."""
+    release = _powershell_release()
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes=release)
+    refusal = _agent_install_refusal(tmp_path, "not-an-agent")
+    _windows_launcher(bench.staging / "agentic-hil.exe", release, bench.marker, "fresh", agent_install=(2, "", refusal))
+
+    result, transcript = bench.run("--agent=not-an-agent", "--no-can")
+
+    assert result.returncode != 0, transcript
+    after = _said_after(transcript, refusal)
+    assert "agentic-hil refused the agent name 'not-an-agent'" in after, transcript
+    assert not re.search(r"\b(report|half|halves)\b", after, re.IGNORECASE), transcript
+
+
+@WINDOWS_ONLY
+def test_the_powershell_step_four_still_points_a_failed_agent_install_at_the_report_above(tmp_path: Path) -> None:
+    """The shell test of the same name, on the script Windows runs (#566)."""
+    release = _powershell_release()
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes=release)
+    _windows_launcher(bench.staging / "agentic-hil.exe", release, bench.marker, "fresh", agent_install=(1, _FAILED_AGENT_INSTALL_REPORT, ""))
+
+    result, transcript = bench.run("--agent=codex", "--no-can")
+
+    assert result.returncode != 0, transcript
+    after = _said_after(transcript, _FAILED_AGENT_INSTALL_REPORT)
+    assert "agent-install failed for codex; the report above says which half" in after, transcript
+    assert "refused" not in after, transcript
 
 
 # ---------------------------------------------------------------------------
