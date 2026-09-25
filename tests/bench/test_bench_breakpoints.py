@@ -284,7 +284,7 @@ def server(bench: Bench) -> Iterator[McpServer]:
 
 
 @pytest.fixture()
-def session(server: McpServer, bench: Bench, firmware: Path) -> Iterator[McpServer]:
+def session(server: McpServer, bench: Bench, gdb: None, firmware: Path) -> Iterator[McpServer]:
     """A debug session on the demo ELF, reset and halted, closed in teardown.
 
     `reset_halt` rather than `attach`, so every test starts at the reset vector

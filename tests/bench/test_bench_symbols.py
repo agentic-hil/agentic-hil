@@ -416,7 +416,7 @@ class BenchSymbols:
 
 
 @pytest.fixture
-def symbols(bench: Bench, firmware: Path) -> Iterator[BenchSymbols]:
+def symbols(bench: Bench, gdb: None, firmware: Path) -> Iterator[BenchSymbols]:
     """One test's servers and sessions, closed whether the test passed or failed."""
     manager = BenchSymbols(bench, firmware.relative_to(bench.project).as_posix())
     try:
