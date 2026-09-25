@@ -250,13 +250,36 @@ class FileSnapshot:
             return None
 
 
+@dataclass(frozen=True)
+class KnownAgent:
+    """An agent this program sets up, as it is on every machine: its id, the
+    name it is shown by, every spelling that names it, where under the home
+    directory it keeps its skills, and how it finds an installed skill.
+
+    Nothing here is read from the machine, so a command line can be parsed,
+    `--help` printed and an `--agent` name checked where no home directory can
+    be found. `skill_agents` adds the home directory for the commands that
+    write or read a skill."""
+
+    id: str
+    display_name: str
+    aliases: tuple[str, ...]
+    skills_directory: tuple[str, ...]
+    registration: str
+
+
+KNOWN_AGENTS = (
+    KnownAgent("opencode", "opencode", ("opencode", "open-code"), (".config", "opencode", "skills"), "skills-directory"),
+    KnownAgent("claude-code", "Claude Code", ("claude-code", "claude", "claude_code"), (".claude", "skills"), "skills-directory"),
+    KnownAgent("codex", "Codex", ("codex", "codex-cli", "openai-codex"), (".codex", "skills"), "agents-md"),
+)
+
+
 def skill_agents() -> list[SkillAgent]:
+    """`KNOWN_AGENTS`, each with the path of its skill in this user's home
+    directory: the one part of an agent that is read from the machine."""
     home = Path.home()
-    return [
-        SkillAgent("opencode", "opencode", ("opencode", "open-code"), str(home / ".config" / "opencode" / "skills" / SKILL_NAME / SKILL_FILE), "skills-directory"),
-        SkillAgent("claude-code", "Claude Code", ("claude-code", "claude", "claude_code"), str(home / ".claude" / "skills" / SKILL_NAME / SKILL_FILE), "skills-directory"),
-        SkillAgent("codex", "Codex", ("codex", "codex-cli", "openai-codex"), str(home / ".codex" / "skills" / SKILL_NAME / SKILL_FILE), "agents-md"),
-    ]
+    return [SkillAgent(agent.id, agent.display_name, agent.aliases, str(home.joinpath(*agent.skills_directory, SKILL_NAME, SKILL_FILE)), agent.registration) for agent in KNOWN_AGENTS]
 
 
 def entrypoint(argv: list[str] | None = None) -> int:
@@ -401,21 +424,23 @@ def result_succeeded(result: JsonObject) -> bool:
 
 
 class AgentChoices:
-    """The values an `--agent` option accepts: the agents `skill_agents` knows.
+    """The values an `--agent` option accepts: the agents in `KNOWN_AGENTS`.
 
     Iterated, it gives their ids, which is what `--help` prints and what a
-    refusal lists. A name is in it when `resolve_skill_agent` resolves it, so
-    every spelling that reached an agent before (an alias, another case, `_` for
+    refusal lists. A name is in it when `known_agent` finds it, so every
+    spelling that reached an agent before (an alias, another case, `_` for
     `-`, blanks around it) still parses, and reaches the command exactly as it
-    was typed. Both are read from `skill_agents` whenever argparse asks, so an
-    agent added there is offered by every `--agent` at once.
+    was typed. Both are read from `KNOWN_AGENTS` whenever argparse asks, so an
+    agent added there is offered by every `--agent` at once, and neither reads
+    the home directory, so a machine without one still gets its help and its
+    usage errors.
     """
 
     def __iter__(self) -> Iterator[str]:
         return iter(supported_skill_agents())
 
     def __contains__(self, name: object) -> bool:
-        return isinstance(name, str) and resolve_skill_agent(name) is not None
+        return isinstance(name, str) and known_agent(name) is not None
 
 
 class AnyAgentChoices(AgentChoices):
@@ -447,17 +472,6 @@ class SubcommandParser(argparse.ArgumentParser):
         return parsed, extras
 
 
-def add_agent_option(parser: argparse.ArgumentParser, choices: AgentChoices, **options: Any) -> None:
-    """Add `--agent` to one command, accepting `choices`.
-
-    They are set on the option after `add_argument`, which formats the option
-    once on the spot and would read the agents there: `skill_agents` reads the
-    home directory, and every command builds this parser, `--version` included.
-    Only printing the option or checking a name given to it reads them.
-    """
-    parser.add_argument("--agent", **options).choices = choices
-
-
 def refuse_an_unknown_agent_without_a_target(parser: argparse.ArgumentParser, parsed: argparse.Namespace) -> None:
     """`skill-install` without `--target` writes to the agent's own skill
     directory, so it refuses an agent that has none the way every other
@@ -480,7 +494,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted but the two flashing is interlocked against, and verify it with doctor. A config that is already there is kept, unchanged, and only the steps that do not touch it run")
     init_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
-    add_agent_option(init_parser, AgentChoices(), default=None, help="also ask this agent to refuse its own write tools on the config and the state root; on a config that is already there, adding or refreshing those rules is the whole of what this command does")
+    init_parser.add_argument("--agent", choices=AgentChoices(), default=None, help="also ask this agent to refuse its own write tools on the config and the state root; on a config that is already there, adding or refreshing those rules is the whole of what this command does")
     init_parser.add_argument(
         "--force",
         action="store_true",
@@ -623,20 +637,20 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_config_parser.add_argument("--force", action="store_true")
 
     skill_parser = subparsers.add_parser("skill-install", help="install/update the Agentic HIL agent setup skill", check_parsed=refuse_an_unknown_agent_without_a_target)
-    add_agent_option(skill_parser, AnyAgentChoices(), default="opencode", help="(default: %(default)s)")
+    skill_parser.add_argument("--agent", choices=AnyAgentChoices(), default="opencode", help="(default: %(default)s)")
     skill_parser.add_argument("--target", default=None)
     skill_parser.add_argument("--force", action="store_true")
 
     agent_install_parser = subparsers.add_parser("agent-install", help="user half, once per user and agent: install the agent skill and register the MCP server at user level; needs no workspace and no config")
-    add_agent_option(agent_install_parser, AgentChoices(), default="claude-code", help="install the skill for this agent and register the MCP server with it at user level; without --agent, the default agent is the one registered (default: %(default)s)")
+    agent_install_parser.add_argument("--agent", choices=AgentChoices(), default="claude-code", help="install the skill for this agent and register the MCP server with it at user level; without --agent, the default agent is the one registered (default: %(default)s)")
     agent_install_parser.add_argument("--force", action="store_true")
 
     setup_parser = subparsers.add_parser("setup", help="first run in one command: agent-install (user half) then init (project half)")
-    add_agent_option(setup_parser, AgentChoices(), default="claude-code", help="install the skill for this agent, register the MCP server with it at user level and ask it to refuse its own write tools on this project's config and state root; without --agent, the default agent is the one registered (default: %(default)s)")
+    setup_parser.add_argument("--agent", choices=AgentChoices(), default="claude-code", help="install the skill for this agent, register the MCP server with it at user level and ask it to refuse its own write tools on this project's config and state root; without --agent, the default agent is the one registered (default: %(default)s)")
     setup_parser.add_argument("--force", action="store_true")
 
     upgrade_parser = subparsers.add_parser("upgrade", help="upgrade this Agentic HIL installation and refresh the agent skills and MCP registrations it wrote")
-    add_agent_option(upgrade_parser, AgentChoices(), action="append", default=[], help="refresh only this agent, instead of every agent this installation had already set up; repeat for multiple agents. An agent that has neither a skill nor a registration is never installed for.")
+    upgrade_parser.add_argument("--agent", choices=AgentChoices(), action="append", default=[], help="refresh only this agent, instead of every agent this installation had already set up; repeat for multiple agents. An agent that has neither a skill nor a registration is never installed for.")
 
     uninstall_parser = subparsers.add_parser(
         "uninstall",
@@ -648,7 +662,7 @@ def build_parser() -> argparse.ArgumentParser:
         # root by hand instead.
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    add_agent_option(uninstall_parser, AgentChoices(), action="append", default=[], help="take back only this agent's half, instead of every agent this installation set up; repeat for multiple agents. An agent that has nothing installed is reported and left alone.")
+    uninstall_parser.add_argument("--agent", choices=AgentChoices(), action="append", default=[], help="take back only this agent's half, instead of every agent this installation set up; repeat for multiple agents. An agent that has nothing installed is reported and left alone.")
 
     # `--json` on every subcommand as well as on the parser, so both
     # `agentic-hil --json init` and the `agentic-hil init --json` everybody
@@ -5711,13 +5725,21 @@ def normalize_agent(agent: str) -> str:
     return agent.strip().lower().replace("_", "-")
 
 
-def resolve_skill_agent(agent: str) -> SkillAgent | None:
+def known_agent(agent: str) -> KnownAgent | None:
+    """The agent in `KNOWN_AGENTS` a name stands for: any of its aliases, in
+    any case, with `_` for `-` and blanks around it. It reads nothing from the
+    machine, which is what lets parsing ask it."""
     normalized = normalize_agent(agent)
-    return next((candidate for candidate in skill_agents() if normalized in {normalize_agent(alias) for alias in candidate.aliases}), None)
+    return next((candidate for candidate in KNOWN_AGENTS if normalized in {normalize_agent(alias) for alias in candidate.aliases}), None)
+
+
+def resolve_skill_agent(agent: str) -> SkillAgent | None:
+    known = known_agent(agent)
+    return None if known is None else next((candidate for candidate in skill_agents() if candidate.id == known.id), None)
 
 
 def supported_skill_agents() -> list[str]:
-    return [agent.id for agent in skill_agents()]
+    return [agent.id for agent in KNOWN_AGENTS]
 
 
 def register_skill(agent: SkillAgent | None, target_path: str, version: str, requested_agent: str) -> JsonObject | None:
