@@ -814,3 +814,45 @@ def test_project_config_adopt_hardware_over_mcp_puts_back_the_port_and_the_reloa
     assert BANNER in banner_after_reset(server, port)
     stopped = server.call("com_session_stop", {"port_id": port})
     assert stopped["ok"] is True, stopped
+
+
+def test_adoption_is_refused_by_the_hold_while_a_session_holds_the_board_and_says_how_to_end_it(
+    bench: Bench, firmware: Path, surfaces: Surfaces
+) -> None:
+    """`project_config_adopt_hardware` under an open COM session and an open debug session.
+
+    Adoption reads the board before it writes, so a hold refuses it before
+    discovery, dry run and apply alike, with the same refusal every other
+    configuration write gives under a hold: the holds, the ordered remediation
+    naming the call that ends this one, and the wrong fix to avoid. The command
+    line, a second process, meets the lease the debug session holds. Nothing is
+    written, the line keeps reading and the core stays halted.
+    """
+    surface = variant(bench, "adopt-under-a-hold")
+    port = bench.com_port_name()
+    server = surfaces.start(surface)
+    left = surface.digest()
+
+    opened = server.call("com_session_start", {"port_id": port, "clear_buffer": True})
+    assert opened["ok"] is True, opened
+    for arguments in ({}, {"apply": True}):
+        refused = server.call("project_config_adopt_hardware", arguments)
+        assert_refused_by_the_hold(refused, "config_write_in_open_run", "com_session_stop")
+    assert surface.digest() == left
+    assert BANNER in banner_after_reset(server, port), "the COM session stopped reading the board after adoption was refused"
+    stopped = server.call("com_session_stop", {"port_id": port})
+    assert stopped["ok"] is True, stopped
+
+    surfaces.debug(server, firmware.relative_to(bench.project).as_posix())
+    halted_at = counter(server)
+    for arguments in ({}, {"apply": True}):
+        refused = server.call("project_config_adopt_hardware", arguments)
+        assert_refused_by_the_hold(refused, "config_write_in_open_run", "debug_stop_session")
+    status, refused = surface.document("adopt-hardware")
+    assert status != 0, refused
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] in {"resource_busy", "device_busy"}, refused
+    assert refused["side_effect_committed"] is False, refused
+    assert counter(server) == halted_at, "the core moved while the debug session held it"
+    assert surface.digest() == left
+    surfaces.end_debugging(server)
