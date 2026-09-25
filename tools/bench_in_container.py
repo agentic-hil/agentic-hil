@@ -17,8 +17,11 @@ A run, in order:
   as the context's ignore file. Uncommitted changes are named, and are not what
   runs;
 * runs the tier in a container that gets the probe's device nodes, the
-  machine's device locks and a directory for its report, and nothing else of
-  the machine: no network, no capabilities, no host process table;
+  machine's device locks and a directory of the run's own for its report, and
+  nothing else of the machine: no network, no capabilities, no host process
+  table;
+* copies the report alone out of that directory, as a regular file and without
+  following a link, into the output directory, which the container never sees;
 * reads pytest's summary line as the verdict.
 
 The container runtime. Rootless Podman is preferred, Docker is accepted, and
@@ -174,6 +177,10 @@ CONTAINER_SERIAL_BY_ID = "/dev/serial/by-id"
 RESULTS = "/results"
 REPORT_NAME = "bench-junit.xml"
 LOG_NAME = "bench-tier.log"
+# The most this reads of a report out of the tier's directory. The whole tier's
+# JUnit report is a few hundred kilobytes; this is a ceiling on what a directory
+# the tier writes can make this process hold, not an estimate.
+REPORT_LIMIT_BYTES = 64 * 1024 * 1024
 
 # Written into the image by tools/bench/Dockerfile and by nothing else, and
 # printed before pytest starts. A run whose output lacks it did not run in the
@@ -183,8 +190,8 @@ MARKER_TEXT = "The bench tier runs here. Written by tools/bench/Dockerfile."
 
 DEFAULT_PYTEST_ARGS = ("tests/bench", "-v")
 # Always passed, ahead of the selection: no cache written into the image's
-# tree, the JUnit report where the output directory is mounted, and the reason
-# for every skip in the summary, because a skip is what fails this tier.
+# tree, the JUnit report in the tier's own directory, and the reason for every
+# skip in the summary, because a skip is what fails this tier.
 FIXED_PYTEST_ARGS = ("-p", "no:cacheprovider", f"--junitxml={RESULTS}/{REPORT_NAME}", "-ra")
 # `"$@"` rather than the arguments pasted into the text, so each stays one
 # argument; `exec`, so the stop signal tini forwards reaches pytest itself.
@@ -893,7 +900,7 @@ def tier_command(
     name: str,
     devices: Devices,
     locks: Path,
-    output: Path,
+    results: Path,
     stable_names: Path | None,
     pytest_args: list[str],
 ) -> list[str]:
@@ -926,7 +933,7 @@ def tier_command(
             command += ["--group-add", str(group)]
     for node in devices.nodes:
         command += ["--device", node]
-    command += ["-v", f"{locks}:{CONTAINER_LOCKS}", "-v", f"{output}:{RESULTS}"]
+    command += ["-v", f"{locks}:{CONTAINER_LOCKS}", "-v", f"{results}:{RESULTS}"]
     if stable_names is not None:
         command += ["-v", f"{stable_names}:{CONTAINER_SERIAL_BY_ID}:ro"]
     for key, value in ENVIRONMENT.items():
@@ -1030,28 +1037,67 @@ def run_tier(runtime: str, name: str, command: list[str], log_path: Path, redact
     return returncode, "".join(captured), interrupted
 
 
-def redact_report(path: Path, redact: Redactor, voice: Voice) -> None:
-    """Withhold in the JUnit report what is withheld everywhere else, or remove it."""
+def read_what_the_tier_wrote(path: Path) -> bytes:
+    """A regular file out of the tier's directory, read as the tier left it.
+
+    Opened without following a link, so a link there never has this process read
+    a file of the machine, and without waiting for a writer, so a pipe there
+    never holds the run. Anything but a regular file, or one larger than any
+    report, raises.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(path, flags)
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"{path.name} is not a regular file")
+        chunks: list[bytes] = []
+        size = 0
+        while chunk := os.read(descriptor, 1 << 20):
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > REPORT_LIMIT_BYTES:
+                raise OSError(f"{path.name} is larger than the {REPORT_LIMIT_BYTES} bytes a report is read up to")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def collect_report(source: Path, destination: Path, redact: Redactor, voice: Voice) -> None:
+    """Copy the tier's JUnit report out of its directory, withheld like everything else.
+
+    The destination is in the output directory, which the container never sees,
+    and is written by this process alone, so what a gate uploads from there is
+    what this wrote. Nothing else in the tier's directory is read.
+    """
+    try:
+        text = read_what_the_tier_wrote(source).decode("utf-8", errors="replace")
     except FileNotFoundError:
         return
     except OSError as error:
-        voice(f"the JUnit report {path} could not be read to withhold what it names: {error}")
-        text = None
+        voice(f"the tier's JUnit report was not copied out: {error}")
+        return
     try:
-        if text is not None:
-            redacted = redact(text)
-            if redacted != text:
-                path.write_text(redacted, encoding="utf-8")
-            return
+        destination.write_text(redact(text), encoding="utf-8")
     except OSError as error:
-        voice(f"the JUnit report {path} could not be rewritten: {error}")
-    try:
-        path.unlink()
-        voice(f"removed {path} rather than leave a report that names this machine")
-    except OSError as error:
-        voice(f"{path} could not be removed either ({error}); do not publish it")
+        voice(f"the tier's JUnit report was not copied out: {error}")
+        with suppress(OSError):
+            destination.unlink()
+
+
+def remove_tree(path: Path) -> None:
+    """Remove the run's staging, whatever modes the tier left on its own directory.
+
+    A directory the tier took every permission from would otherwise stay behind
+    in the machine's temporary directory. Links are never followed: a link's
+    mode is not changed and its target is not removed.
+    """
+    for directory, subdirectories, _ in os.walk(path):
+        for name in subdirectories:
+            entry = os.path.join(directory, name)
+            if not os.path.islink(entry):
+                with suppress(OSError):
+                    os.chmod(entry, 0o700)
+    shutil.rmtree(path, ignore_errors=True)
 
 
 # The verdict.
@@ -1201,15 +1247,19 @@ def main(argv: list[str] | None = None) -> int:
         voice.withhold(devices.serial_numbers)
         check_access(runtime, devices)
         stable_names = stage_stable_names(devices.serial_ports, workdir / "by-id")
+        # The one directory the tier writes to, and it is the run's own: the
+        # output directory, which a gate uploads, is never mounted.
+        results = workdir / "results"
+        results.mkdir(mode=0o700)
         name = f"{CONTAINER_PREFIX}{secrets.token_hex(4)}"
-        command = tier_command(runtime, image_id, name, devices, locks, output, stable_names, pytest_args)
+        command = tier_command(runtime, image_id, name, devices, locks, results, stable_names, pytest_args)
         voice(f"$ {shlex.join(command)}")
         returncode, printed, interrupted = run_tier(runtime, name, command, output / LOG_NAME, voice.redact, voice, signals)
         # What follows decides what is published and whether the machine is
         # handed on, and a second interrupt must not cut it short.
         signals.hold_off()
         state = confirm_removed(runtime, name)
-        redact_report(output / REPORT_NAME, voice.redact, voice)
+        collect_report(results / REPORT_NAME, output / REPORT_NAME, voice.redact, voice)
         if interrupted:
             status, verdict = EXIT_INTERRUPTED, "interrupted: the run was stopped before the tier finished, so there is no verdict"
         else:
@@ -1241,7 +1291,7 @@ def main(argv: list[str] | None = None) -> int:
         left_behind = LeftBehind(runtime, [(name, state)])
     finally:
         signals.restore()
-        shutil.rmtree(workdir, ignore_errors=True)
+        remove_tree(workdir)
         if left_behind is None:
             lock.release()
         else:

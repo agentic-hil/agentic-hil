@@ -395,11 +395,78 @@ def test_the_tier_finds_the_machines_device_locks_under_its_own_home(machine: Si
     assert "AGENTIC_HIL_BENCH=1" in environment
 
 
-def test_the_report_directory_is_the_one_mount_the_tier_writes_its_evidence_to(machine: SimpleNamespace) -> None:
+def test_the_tier_writes_its_report_into_a_directory_of_the_runs_own(machine: SimpleNamespace) -> None:
+    """Never into the output directory, which is what a gate uploads.
+
+    Whatever the tier leaves in its own directory is the tier's, and the gate
+    may be running a commit nobody has merged. The report alone is copied out,
+    by this process, into an output directory the container never sees; the
+    rest goes with the run's staging.
+    """
+    seen: list[Path] = []
+
+    def write(command: list[str]) -> None:
+        results = Path(mounted_at(command, bench_in_container.RESULTS))
+        seen.append(results)
+        (results / bench_in_container.REPORT_NAME).write_text("<testsuites/>", encoding="utf-8")
+        (results / "left-by-the-tier.txt").write_text("not evidence\n", encoding="utf-8")
+
+    machine.runtime.during_run = write
+
     assert run(machine) == 0
 
-    assert mounted_at(machine.runtime.tier, bench_in_container.RESULTS) == str(machine.output.resolve())
+    output = machine.output.resolve()
+    assert seen[0] != output and output not in seen[0].parents
+    assert not seen[0].exists()
+    assert sorted(entry.name for entry in output.iterdir()) == sorted([bench_in_container.REPORT_NAME, bench_in_container.LOG_NAME])
+    assert (output / bench_in_container.REPORT_NAME).read_text(encoding="utf-8") == "<testsuites/>"
     assert f"--junitxml={bench_in_container.RESULTS}/{bench_in_container.REPORT_NAME}" in pytest_arguments(machine.runtime.tier)
+
+
+@pytest.mark.parametrize("kind", ["link", "pipe", "directory"])
+def test_what_the_tier_leaves_in_place_of_its_report_is_never_followed(
+    machine: SimpleNamespace, tmp_path: Path, capsys: pytest.CaptureFixture, kind: str
+) -> None:
+    """A link there would have this process read and rewrite a file of the
+    machine and the upload publish it; a pipe would block the run forever. Only
+    a regular file is copied out, and nothing it names is followed."""
+    if kind in ("link", "pipe") and os.name == "nt":
+        pytest.skip("links and pipes in the tier's directory are a POSIX layout")
+    of_the_machine = tmp_path / "of-the-machine"
+    of_the_machine.write_text(f"{HOST_NAME} {HOME}\n", encoding="utf-8")
+
+    def plant(command: list[str]) -> None:
+        report = Path(mounted_at(command, bench_in_container.RESULTS)) / bench_in_container.REPORT_NAME
+        if kind == "link":
+            report.symlink_to(of_the_machine)
+        elif kind == "pipe":
+            os.mkfifo(report)
+        else:
+            report.mkdir()
+
+    machine.runtime.during_run = plant
+
+    assert run(machine) == 0
+
+    assert not (machine.output / bench_in_container.REPORT_NAME).exists()
+    assert of_the_machine.read_text(encoding="utf-8") == f"{HOST_NAME} {HOME}\n"
+    assert "report was not copied out" in capsys.readouterr().err
+
+
+def test_a_report_larger_than_any_report_is_not_copied_out(
+    machine: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.setattr(bench_in_container, "REPORT_LIMIT_BYTES", 16)
+
+    def write(command: list[str]) -> None:
+        (Path(mounted_at(command, bench_in_container.RESULTS)) / bench_in_container.REPORT_NAME).write_text("x" * 100, encoding="utf-8")
+
+    machine.runtime.during_run = write
+
+    assert run(machine) == 0
+
+    assert not (machine.output / bench_in_container.REPORT_NAME).exists()
+    assert "report was not copied out" in capsys.readouterr().err
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the links under /dev/serial/by-id are symbolic links, a POSIX layout")
