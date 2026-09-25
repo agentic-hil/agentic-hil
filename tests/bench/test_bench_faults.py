@@ -35,8 +35,10 @@ out of the product's answers and only checked for presence.
 from __future__ import annotations
 
 import json
+import os
 import queue
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -93,6 +95,15 @@ ENTRY_FUNCTION = "main"
 WATCHDOG_RACE_ATTEMPTS = 3
 
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+# How the product tells OpenOCD what to write (a Tcl double-quoted word), and
+# where a Linux host says which process has which file open.
+PROGRAM_COMMAND = re.compile(r'program "((?:[^"\\]|\\.)*)"')
+PROC = Path("/proc")
+# The erase of the first sector alone takes a quarter of a second, and the
+# image is open for all of it, so a poll this fine cannot miss the window.
+KILL_POLL_S = 0.01
+FLASH_UNCONFIRMED = "debugger_result_unconfirmed"
 
 
 class Server:
@@ -984,3 +995,195 @@ def test_the_declared_plan_over_a_board_with_the_wrong_banner_is_red_on_every_su
     assert f"## Agentic HIL: {plan_name}" in job, job
     assert "**Outcome:** failure" in job, job
     assert "### Step 4 failed: `comparator_unmet`" in job, job
+
+
+# -- The flash that never finished --------------------------------------------
+
+
+def process_stat(pid: int) -> tuple[int, int] | None:
+    """(parent, start time) of one process, from /proc; None once it is gone."""
+    try:
+        stat = (PROC / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # The command name sits in parentheses and may itself hold spaces and parentheses.
+    fields = stat[stat.rindex(")") + 2 :].split()
+    return int(fields[1]), int(fields[19])
+
+
+def descendants(root: int) -> set[int]:
+    """Every process below `root`: the product's own children, and theirs."""
+    parents: dict[int, int] = {}
+    for entry in PROC.iterdir():
+        if entry.name.isdigit():
+            stat = process_stat(int(entry.name))
+            if stat is not None:
+                parents[int(entry.name)] = stat[0]
+    found: set[int] = set()
+    frontier = {root}
+    while frontier:
+        frontier = {pid for pid, parent in parents.items() if parent in frontier} - found
+        found |= frontier
+    return found
+
+
+def programmed_image(pid: int) -> str | None:
+    """The image a debugger process was told to program, read off its own command line."""
+    try:
+        arguments = (PROC / str(pid) / "cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    for argument in arguments:
+        match = PROGRAM_COMMAND.search(argument.decode("utf-8", errors="replace"))
+        if match is not None:
+            return re.sub(r"\\(.)", r"\1", match.group(1))
+    return None
+
+
+def holds_open(pid: int, path: str) -> bool:
+    try:
+        descriptors = list((PROC / str(pid) / "fd").iterdir())
+    except OSError:
+        return False
+    for descriptor in descriptors:
+        with suppress(OSError):
+            if os.readlink(descriptor) == path:
+                return True
+    return False
+
+
+def kill_the_flash_while_it_writes(server: Server, image: Path, finished: threading.Event) -> None:
+    """SIGKILL the debugger process this test's own server started, while it has the image open.
+
+    The process is looked for only among the server's descendants and only by
+    the image it was told to program. That is the product's private staged
+    copy of the image, which keeps the image's file name, so the name is what
+    is matched and the path the process itself was given is what is watched.
+    It is killed only while it holds that file open, which OpenOCD does from
+    before the erase to the end of the write: so the flash dies with the old
+    image gone and the new one not complete. No other process on the host is
+    signalled.
+    """
+    seen: set[str] = set()
+    while not finished.is_set():
+        for pid in descendants(server.pid):
+            named = programmed_image(pid)
+            if named is None or Path(named).name != image.name:
+                continue
+            programmed = os.path.realpath(named)
+            seen.add(programmed)
+            identity = process_stat(pid)
+            while identity is not None and not finished.is_set():
+                # Still the same process, and still this server's, at the moment of the kill.
+                if holds_open(pid, programmed) and process_stat(pid) == identity and pid in descendants(server.pid):
+                    os.kill(pid, signal.SIGKILL)
+                    return
+                time.sleep(KILL_POLL_S)
+                if process_stat(pid) != identity:
+                    identity = None
+        time.sleep(KILL_POLL_S)
+    raise AssertionError(
+        "the flash finished before its debugger process was seen holding the image open, so nothing was aborted; "
+        + (f"a process below the server was told to program {len(seen)} such file(s) and never held one open" if seen else "no process below the server was seen programming it")
+    )
+
+
+def test_a_flash_killed_mid_write_is_recovered_by_the_product_and_a_second_flash_brings_the_demo_back(
+    bench: Bench, board_images: BoardImages, servers
+) -> None:
+    """The debugger dies with the flash half written, and the product's own answer brings the board back.
+
+    Last in this module on purpose: it is the one test here that leaves the
+    board without a whole image, for as long as the recovery and the second
+    flash take. The kill is the only thing done outside the product, and it
+    lands on the product's own child (see `kill_the_flash_while_it_writes`).
+
+    What is asserted is the documented answer, in order. The call fails, as the
+    single-action run it is, and that run aborts into the recovery action:
+    reap, reset into halt where the policy allows it, re-read the probe. The
+    flash is left unconfirmed and the result carries that reason, but the bench
+    is not held for it: `quarantined: true` means a broken evidence chain and
+    nothing else, and a bare call's incident is over when its call is. So the
+    lease status reads a free bench, both recovery routes answer that there is
+    nothing to recover, `classify_last_error` names this flash, and a second
+    flash, accepted without any recovery step, puts the demo back, which its
+    banner proves.
+    """
+    if backend_type(bench) != "openocd":
+        pytest.skip("the kill is aimed at OpenOCD's own `program` command, and this bench's debugger is not OpenOCD")
+    if not (PROC / "self" / "fd").is_dir():
+        pytest.skip("finding the product's own debugger process needs /proc")
+    # From the erase on, the board holds no whole image until the demo is back.
+    board_images.displaced = True
+    server = servers()
+
+    answers: dict = {}
+    finished = threading.Event()
+
+    def flash() -> None:
+        try:
+            answers["flash"] = server.call("flash_firmware", {"image_path": DEMO_IMAGE.as_posix(), "reset_after_flash": True})
+        except BaseException as error:  # handed to the test's own thread below
+            answers["error"] = error
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=flash, daemon=True)
+    worker.start()
+    try:
+        kill_the_flash_while_it_writes(server, bench.project / DEMO_IMAGE, finished)
+    finally:
+        worker.join(REPLY_TIMEOUT_S)
+    assert not worker.is_alive(), f"flash_firmware did not answer within {REPLY_TIMEOUT_S}s of its debugger being killed"
+    if "error" in answers:
+        raise answers["error"]
+    errored, aborted = answers["flash"]
+
+    assert errored is True, aborted
+    assert aborted["ok"] is False, aborted
+    assert aborted["tool"] == "flash_firmware", aborted
+    assert isinstance(aborted.get("error_type"), str) and aborted["error_type"], aborted
+    # Killed, not timed out: the answer has to be about the process that died.
+    assert aborted["error_type"] != "timeout", aborted
+    assert FLASH_UNCONFIRMED in aborted["cleanup_reasons"], aborted
+    run = aborted["run"]
+    assert run["implicit"] is True, run
+    assert run["aborted"] is True, run
+    recovery = aborted["recovery"]
+    assert recovery["attempted"] is True, recovery
+    if recovery["auto_recover_policy"] == "reset_halt":
+        assert recovery["actions"] == ["reap_processes", "reset_halt", "probe_target"], recovery
+        assert recovery["safe_state_predicate"] == "reset_halt", recovery
+        assert recovery["outcome"] == "recovered", recovery
+        assert recovery["incident_resolved"] is True, recovery
+        assert recovery["resolved_reason"] == FLASH_UNCONFIRMED, recovery
+    assert aborted["quarantined"] is False, aborted
+
+    errored, classified = server.call("classify_last_error")
+    assert classified["ok"] is True, classified
+    assert classified["source_tool"] == "flash_firmware", classified
+    assert classified["error_type"] == (aborted.get("target_error_type") or aborted["error_type"]), classified
+
+    _, status = bench.document("lease-status")
+    assert status["blocked"] is False, status
+    assert status["incident_stands"] is False, status
+    assert status["auto_recoverable"] is False, status
+    assert status["bench_held"] is False, status
+
+    quarantine = str(recovery.get("resolved_quarantine_id") or "none")
+    code, recovered = bench.document("recover", "--confirm-safe-state", "--quarantine-id", quarantine)
+    assert code == 0, recovered
+    assert recovered["ok"] is True, recovered
+    assert recovered["nothing_to_recover"] is True, recovered
+    assert recovered["was_quarantined"] is False, recovered
+
+    errored, answered = server.call("hardware_recover")
+    assert errored is False, answered
+    assert answered["ok"] is True, answered
+    assert answered["nothing_to_recover"] is True, answered
+    assert answered["was_quarantined"] is False, answered
+
+    port = bench.com_port_name()
+    open_port(server, port)
+    settle_and_discard(server, port)
+    flash_the_demo_over(server, port)
