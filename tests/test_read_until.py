@@ -827,6 +827,21 @@ def test_can_read_until_id_without_wait_timeout_reads_on_past_quiet_reads(tmp_pa
 
 
 @pytest.mark.parametrize("kind", ADAPTER_KINDS)
+def test_can_read_until_id_without_a_wait_still_reads_the_frames_already_queued(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
+    """A deadline ends the waiting, not the reading of what is already there:
+    with no wait, the call still goes through the queued frames to the match,
+    as a read without `until_id` drains the queue. The fake bridge answers each
+    read with one script entry, so there each queued frame is an entry of its own."""
+    queued = {"python-can": [[A, B, MATCH, C]], "bridge": [[A], [B], [MATCH], [C]]}[kind]
+    with can_session(tmp_path, monkeypatch, kind, queued) as rig:
+        result = can_read(rig, until_id=MATCH_ID, wait_timeout_s=0)
+
+    assert result["ok"] is True, result
+    assert result["until_matched"] is True, result
+    assert frame_ids(result) == [A["id"], B["id"], MATCH_ID], result
+
+
+@pytest.mark.parametrize("kind", ADAPTER_KINDS)
 def test_can_read_without_until_id_keeps_todays_single_read_and_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
     """Without `until_id` nothing changes: one adapter read answers the call,
     with exactly the keys it carries today, and the next read's frames wait

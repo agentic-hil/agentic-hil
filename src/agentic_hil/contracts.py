@@ -8,12 +8,21 @@ from jsonschema import Draft202012Validator
 
 from agentic_hil.config import format_field_path
 from agentic_hil.knowledge import remediation_fields
+from agentic_hil.readuntil import CAN_ID_MAX, UNTIL_MAX_CHARACTERS, UNTIL_MAX_ENTRIES
 from agentic_hil.types import JsonObject
 
 EMPTY_OBJECT_SCHEMA: JsonObject = {"type": "object", "properties": {}, "additionalProperties": False}
 NONEMPTY_STRING: JsonObject = {"type": "string", "minLength": 1}
 SYMBOL_NAME: JsonObject = {"type": "string", "pattern": r"^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$"}
 TIMEOUT: JsonObject = {"type": "number", "minimum": 0}
+# What a read waits for: one text or arbitration id, or a short list of them.
+# The limits are the ones `readuntil` checks, which a caller outside these
+# schemas goes through as well, together with the check no schema can make:
+# that each text can be encoded in the port's own encoding.
+UNTIL_TEXT: JsonObject = {"type": "string", "minLength": 1, "maxLength": UNTIL_MAX_CHARACTERS}
+UNTIL: JsonObject = {"oneOf": [UNTIL_TEXT, {"type": "array", "minItems": 1, "maxItems": UNTIL_MAX_ENTRIES, "items": UNTIL_TEXT}]}
+UNTIL_CAN_ID: JsonObject = {"type": "integer", "minimum": 0, "maximum": CAN_ID_MAX}
+UNTIL_ID: JsonObject = {"oneOf": [UNTIL_CAN_ID, {"type": "array", "minItems": 1, "maxItems": UNTIL_MAX_ENTRIES, "items": UNTIL_CAN_ID}]}
 BREAKPOINT_LOCATION: JsonObject = {
     "oneOf": [
         {"type": "string", "pattern": r"^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$"},
@@ -97,12 +106,12 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "com_session_start", "description": "Open a configured COM port and start a background feedback session.", "inputSchema": object_schema({"port_id": NONEMPTY_STRING, "clear_buffer": {"type": "boolean", "default": True}}, required=["port_id"])},
     {"name": "com_session_stop", "description": "Stop a configured COM port session.", "inputSchema": object_schema({"port_id": NONEMPTY_STRING}, required=["port_id"])},
     {"name": "com_write", "description": "Write text or hex stimulus to an active COM port session.", "inputSchema": object_schema({"port_id": NONEMPTY_STRING, "text": {"type": "string"}, "hex": {"type": "string"}}, required=["port_id"], one_of=[{"required": ["text"]}, {"required": ["hex"]}])},
-    {"name": "com_read", "description": "Read buffered feedback from an active COM port session. Use this instead of screen, minicom, or picocom.", "inputSchema": object_schema({"port_id": NONEMPTY_STRING, "max_bytes": {"type": "integer", "minimum": 1}, "wait_timeout_s": TIMEOUT}, required=["port_id"])},
+    {"name": "com_read", "description": "Read buffered feedback from an active COM port session. Use this instead of screen, minicom, or picocom. With until, one call waits for a pattern such as PASS instead of polling.", "inputSchema": object_schema({"port_id": NONEMPTY_STRING, "max_bytes": {"type": "integer", "minimum": 1}, "wait_timeout_s": TIMEOUT, "until": {**UNTIL, "description": "Text to wait for, or up to 8 texts, matched as bytes in the port's encoding. Returns the feedback through the first match and leaves the rest buffered. Waits 10 s by default."}}, required=["port_id"])},
     {"name": "can_buses_list", "description": "List configured CAN buses with session status and listen_only evidence. Use this instead of ip link or candump.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     {"name": "can_session_start", "description": "Open a configured CAN bus session.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING, "clear_rx_queue": {"type": "boolean", "default": True}}, required=["bus_id"])},
     {"name": "can_session_stop", "description": "Stop a configured CAN bus session.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING}, required=["bus_id"])},
     {"name": "can_send", "description": "Send one classic CAN frame on an active configured CAN bus session. Use this instead of cansend.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING, "frame_id": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string", "pattern": r"^(?:0[xX][0-9A-Fa-f]+|[0-9]+)$"}]}, "extended": {"type": "boolean", "default": False}, "rtr": {"type": "boolean", "default": False}, "data_hex": {"type": "string", "default": ""}}, required=["bus_id", "frame_id"])},
-    {"name": "can_read", "description": "Read CAN frames from an active configured CAN bus session. Use this instead of candump.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING, "max_frames": {"type": "integer", "minimum": 1}, "wait_timeout_s": TIMEOUT}, required=["bus_id"])},
+    {"name": "can_read", "description": "Read CAN frames from an active configured CAN bus session. Use this instead of candump. With until_id, one call waits for a frame id instead of polling.", "inputSchema": object_schema({"bus_id": NONEMPTY_STRING, "max_frames": {"type": "integer", "minimum": 1}, "wait_timeout_s": TIMEOUT, "until_id": {**UNTIL_ID, "description": "Arbitration id to wait for, or up to 8 ids. Returns the frames read through the first match. Only the numeric id is compared, not the extended flag. Waits 10 s by default."}}, required=["bus_id"])},
     {
         "name": "bench_run_start",
         "description": (

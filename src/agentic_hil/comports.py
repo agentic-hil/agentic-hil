@@ -31,6 +31,7 @@ from agentic_hil.provisional import (
     discharge_provisional_handle,
     register_provisional_handle,
 )
+from agentic_hil.readuntil import find_until, until_patterns, until_wait_s
 from agentic_hil.report import (
     ContactMarker,
     append_jsonl,
@@ -1162,10 +1163,15 @@ class ComPortService:
             return mark_audit_failure(result, audit_error)
         return result
 
-    def read(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object = 0.0) -> JsonObject:
-        return self._write_report(self.read_bytes(port_id, max_bytes, wait_timeout_s, "com_read"))
+    def read(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object | None = None, until: object | None = None) -> JsonObject:
+        written = self._write_report(self.read_bytes(port_id, max_bytes, wait_timeout_s, "com_read", until=until))
+        if until is None:
+            return written
+        # The report keeps what the call waited for and for how long. The answer
+        # does not repeat either to the caller that asked for them.
+        return {key: value for key, value in written.items() if key not in {"until", "until_wait_s"}}
 
-    def read_bytes(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object = 0.0, tool: str = "com_read") -> JsonObject:
+    def read_bytes(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object | None = None, tool: str = "com_read", *, until: object | None = None) -> JsonObject:
         port = self._configured_port(port_id, tool)
         if not port["ok"]:
             return port
@@ -1195,13 +1201,18 @@ class ComPortService:
                 return session_result
         try:
             parsed_max_bytes = session.port_config.max_buffer_bytes if max_bytes is None else int(max_bytes)
-            parsed_wait_timeout_s = float(wait_timeout_s)
+            parsed_wait_timeout_s = 0.0 if wait_timeout_s is None else float(wait_timeout_s)
         except (TypeError, ValueError):
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "max_bytes must be an integer and wait_timeout_s must be a number."}
         if parsed_max_bytes < 1:
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "max_bytes must be at least 1."}
         if not math.isfinite(parsed_wait_timeout_s):
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "wait_timeout_s must be finite."}
+        if until is not None:
+            patterns = until_patterns(until, session.port_config.encoding, tool=tool)
+            if not patterns["ok"]:
+                return {**patterns, "port_id": port_id}
+            return self._read_until(session, port_id, tool, parsed_max_bytes, until_wait_s(None if wait_timeout_s is None else parsed_wait_timeout_s), patterns)
         deadline = time.monotonic() + max(0.0, min(parsed_wait_timeout_s, 60.0))
         while self._session_is_active(session):
             with session.lock:
@@ -1229,6 +1240,61 @@ class ComPortService:
         if session.reader_error:
             result["reader_error"] = session.reader_error
         return result
+
+    def _read_until(self, session: ComPortSession, port_id: str, tool: str, max_bytes: int, wait_s: float, until: JsonObject) -> JsonObject:
+        # Waits until the first max_bytes buffered bytes hold an until entry or
+        # are full without one, the reader stops, or the wait runs out. The
+        # buffer is searched as the port's bytes, so a match split across two
+        # reader chunks is found like any other, and it is searched again only
+        # once the reader has added to it. What follows the match stays
+        # buffered for the next read.
+        patterns = until["patterns"]
+        deadline = time.monotonic() + wait_s
+        searched: tuple[int, int] | None = None
+        while self._session_is_active(session):
+            with session.lock:
+                state = (len(session.buffer), session.overflow_bytes)
+                head = bytes(session.buffer[:max_bytes]) if state != searched else None
+            if head is not None:
+                searched = state
+                if len(head) >= max_bytes or find_until(head, patterns) is not None:
+                    break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        with session.lock:
+            head = bytes(session.buffer[:max_bytes])
+            found = find_until(head, patterns)
+            data = head if found is None else head[: found[0]]
+            del session.buffer[: len(data)]
+            remaining = len(session.buffer)
+        # Not repeated to the caller: `read` keeps these for the report only.
+        waited: JsonObject = {"until": until["entries"], "until_wait_s": wait_s}
+        if not data and session.reader_error is not None:
+            # The same refusal a read without until gives here, and for the same
+            # reason: a reader that stopped with nothing buffered is a failed
+            # read, not a pattern that did not appear.
+            failure = self._active_session(port_id, tool)
+            if not failure["ok"]:
+                return {**failure, **waited}
+        if found is not None:
+            summary = "Feedback read from COM port through the first until match."
+        elif len(data) >= max_bytes:
+            summary = f"max_bytes ({max_bytes}) was reached before an until match; any match lies beyond it."
+        elif session.reader_error is not None:
+            summary = "The COM port reader stopped before an until entry was seen; the feedback it buffered is returned."
+        elif not self._session_is_active(session):
+            summary = "The COM port session stopped before an until entry was seen."
+        elif data:
+            summary = f"No until entry was seen within {wait_s:g} s; the feedback buffered so far is returned."
+        else:
+            summary = f"No until entry was seen within {wait_s:g} s, and no COM port feedback was available."
+        result: JsonObject = {"ok": True, "tool": tool, "port_id": port_id, "bytes_read": len(data), "buffer_remaining_bytes": remaining, "overflow_bytes": session.overflow_bytes, "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": summary, "until_matched": found is not None}
+        if found is not None:
+            result["matched"] = until["entries"][found[1]]
+        if session.reader_error:
+            result["reader_error"] = session.reader_error
+        return {**result, **waited}
 
     def close(self) -> None:
         errors: list[tuple[str, BaseException]] = []
