@@ -1673,10 +1673,7 @@ def spawning_start_bounds_in(text: str, path: Path) -> list[AttachCall]:
     under the rule rather than a proof of it, and the behavioural test in
     `test_sessions_devices_coordination.py` is what actually pins the refusal.
     """
-    try:
-        tree = ast.parse(text, filename=str(path))
-    except SyntaxError:  # pragma: no cover  (no such file in this tree)
-        return []
+    tree = ast.parse(text, filename=str(path))
     constants = _module_constants(tree)
     found: list[AttachCall] = []
 
@@ -1709,7 +1706,7 @@ def spawning_start_bounds_in(text: str, path: Path) -> list[AttachCall]:
 
 
 def spawning_start_bounds(path: Path) -> list[AttachCall]:
-    return spawning_start_bounds_in(path.read_text(encoding="utf-8"), path)
+    return spawning_start_bounds_in(path.read_text(encoding="utf-8-sig"), path)
 
 
 def suite_start_bounds() -> list[AttachCall]:
