@@ -93,6 +93,15 @@ STOP_SESSION_TIMEOUT_CAP_S = 5.0
 CLOSE_SESSION_TIMEOUT_S = 1.0
 INITIAL_STOP_POLL_TIMEOUT_S = 0.05
 OUTPUT_TAIL_CHARS = 65536
+# An attach over a board that resets itself can lose the race against the reset
+# while GDB connects (#575): the debug server drops the connection it was just
+# handed, and GDB answers `-target-select` with this. Until its connect holds,
+# an attach has done nothing to the target that a new start does not redo: the
+# debug server halted the core, and the dropped connection may have let it run
+# again. So the start connects again with a new server and a new GDB, at most
+# this many times in all, and names every connect it retried.
+ATTACH_CONNECT_ATTEMPTS = 3
+DROPPED_CONNECT_PREFIX = "Remote communication error.  Target disconnected"
 # Keyed by (halt unconfirmed, detach-guard unconfirmed). A retry that could not
 # gather new evidence reports both as unconfirmed even when only one was the
 # original cause, so the phrasing has to make sense for that combination too,
@@ -197,6 +206,41 @@ class GdbDebugSessions:
         timeout = self.config.debugger.timeout_s if timeout_s is None else min(self.config.debugger.timeout_s, max(0.1, timeout_s))
         started_at = utc_now_iso()
         start = time.perf_counter()
+        retried_connects: list[JsonObject] = []
+        dropped_session: GdbDebugSession | None = None
+        while True:
+            try:
+                result = self._start_attempt(tool, artifact, mode, resolved_server, resolved_gdb, timeout, started_at, start)
+            except BaseException:
+                # Interrupted after a dropped connect, the start leaves the
+                # target as unknown as that connect did.
+                if dropped_session is not None and self.session is None:
+                    self.session = dropped_session
+                raise
+            dropped = self._dropped_connect(mode, result)
+            if dropped is None or len(retried_connects) + 1 >= ATTACH_CONNECT_ATTEMPTS:
+                break
+            retried_connects.append(dropped)
+            # Its processes are gone, and the next start owns the target.
+            dropped_session = self.session
+            self.session = None
+        if retried_connects:
+            result["retried_connects"] = retried_connects
+            if result.get("ok") is True:
+                dropped_what = "the first connect" if len(retried_connects) == 1 else f"the first {len(retried_connects)} connects"
+                result["summary"] = f"{result['summary']} The debug server dropped {dropped_what}, and the start connected again."
+            elif result.get("side_effect_status") not in {"unknown", "partial"}:
+                # This start never reached the target, but the dropped connect
+                # did, and nothing since has settled what it left there.
+                for field in ("side_effect_committed", "target_contacted"):
+                    result.pop(field, None)
+                result.update({"side_effect_status": "unknown", "retry_safe": False, "target_state": "unknown", "hardware_state": "unknown", "cleanup_required": True})
+                result["summary"] = f"{result['summary']} An earlier connect of this start was dropped by the debug server, so the target state is unknown."
+                if self.session is None:
+                    self.session = dropped_session
+        return self._report(result)
+
+    def _start_attempt(self, tool: str, artifact: JsonObject, mode: str, resolved_server: JsonObject, resolved_gdb: JsonObject, timeout: float, started_at: str, start: float) -> JsonObject:
         reservation = reserve_tcp_port()
         gdb_port = reservation.port
         try:
@@ -225,7 +269,7 @@ class GdbDebugSessions:
             # nothing was started that could have touched the target. Marked as
             # such so the failed call refuses instead of quarantining a board
             # it provably never reached.
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debugger_not_found", "summary": "Debug server process could not be started.", "backend_error": str(error), "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True})
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debugger_not_found", "summary": "Debug server process could not be started.", "backend_error": str(error), "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
 
         session = GdbDebugSession(f"debug-{timestamp_for_filename()}", artifact, mode, gdb_port, server, server_args, log_path)
         session.load_phase = "server_spawned"
@@ -250,7 +294,7 @@ class GdbDebugSessions:
                 if result.get("cleanup_required") is True:
                     session.status = "cleanup_required"
                     self.session = session
-            return self._report(result)
+            return result
 
         if not wait_for_tcp_port(gdb_port, timeout, server):
             failure = self._start_failure(session, tool, started_at, start, timed_out=server.poll() is None)
@@ -265,7 +309,7 @@ class GdbDebugSessions:
                     session.status = "cleanup_required"
                 else:
                     self.session = None
-            return self._report(failure)
+            return failure
         session.load_phase = "server_ready"
 
         try:
@@ -288,7 +332,7 @@ class GdbDebugSessions:
                 if result.get("cleanup_required") is True:
                     session.status = "cleanup_required"
                     self.session = session
-            return self._report(result)
+            return result
         initialized = self._initialize_gdb(session, timeout)
         if not initialized["ok"]:
             cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
@@ -305,7 +349,7 @@ class GdbDebugSessions:
                 else:
                     result["cleanup_required"] = True
                     session.status = "cleanup_required"
-            return self._report(result)
+            return result
 
         session.status = "halted"
         self._refresh_session_stop(session, INITIAL_STOP_POLL_TIMEOUT_S)
@@ -325,7 +369,7 @@ class GdbDebugSessions:
             "summary": "Debug session started and target is halted.",
         }
         result.update(target_stop_fields(session.stop_reason))
-        return self._report(result)
+        return result
 
     def stop_session(self, timeout_s: float | None = None) -> JsonObject:
         tool = "debug_stop_session"
@@ -869,6 +913,28 @@ class GdbDebugSessions:
                 return {**self._gdb_failure("debug_start_session", session, reset.error_message, reset.timed_out, response=reset), **self._startup_effect_fields(session, reset.timed_out)}
             session.load_phase = "post_load_reset_confirmed"
         return {"ok": True, "load_phase": session.load_phase, "firmware_load_status": session.firmware_load_status}
+
+    def _dropped_connect(self, mode: str, result: JsonObject) -> JsonObject | None:
+        """What a start attempt left to name, when it lost its connect to the debug server and may connect again (#575).
+
+        Only an attach connects again, as nothing it did yet is left for the
+        next start to undo. Only a connect GDB saw dropped, never one it waited
+        out: a connect that never answered is not known to be over. And only
+        once the attempt's processes are confirmed gone, so the next start is
+        the only one talking to the target.
+        """
+        if (
+            mode != "attach"
+            or result.get("ok") is not False
+            or result.get("load_phase") != "target_connect_started"
+            or result.get("error_type") != "debugger_error"
+            or result.get("cleanup_confirmed") is not True
+            or "cleanup_error" in result
+            or self._audit_broken is not None
+            or not str(result.get("summary", "")).startswith(DROPPED_CONNECT_PREFIX)
+        ):
+            return None
+        return {"backend_error": result["summary"], "log_path": result["log_path"]}
 
     def _startup_effect_fields(self, session: GdbDebugSession, timed_out: bool = False) -> JsonObject:
         fields: JsonObject = {"load_phase": session.load_phase, "firmware_load_status": session.firmware_load_status}
