@@ -2593,8 +2593,10 @@ def implicit_run_resources(config: AgenticHILConfig, name: str, args: JsonObject
         capture = args.get("capture") if name == "flash_firmware" else None
         if isinstance(capture, dict):
             # A capture leases its port inside the call, beside the probe, so the
-            # call's own run declares both.
-            return [*debugger_effect_resources(config), *uart_device(config, str(capture.get("port_id", ""))).lock_keys]
+            # call's own run declares both: the port by the key a run declares
+            # it under, while the capture's lease also takes the name the port
+            # resolves to on the host.
+            return [*debugger_effect_resources(config), *uart_device(config, str(capture.get("port_id", ""))).declared_keys]
         return list(debugger_effect_resources(config))
     if name == "com_write":
         return [uart_device(config, str(args.get("port_id", "")))]

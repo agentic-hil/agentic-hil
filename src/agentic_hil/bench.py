@@ -386,12 +386,17 @@ class BenchMutex:
         deadline = time.monotonic() + validated_wait(wait_s)
         with self._guard:
             taken: list[str] = []
+            counted: list[str] = []
             try:
                 for resource in wanted:
                     if self._take(resource, deadline, stop_requested):
                         taken.append(resource)
+                    counted.append(resource)
             except BaseException:
-                for resource in reversed(taken):
+                # Every hold this call counted goes back, a device this owner
+                # already held included: `_take` counted that one once more, and
+                # a refused call has no release to come that would count it down.
+                for resource in reversed(counted):
                     self._drop(resource)
                 raise
             return taken

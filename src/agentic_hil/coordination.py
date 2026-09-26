@@ -14,6 +14,7 @@ from agentic_hil.bench import (
     DeviceBusyError,
     DeviceWaitStoppedError,
     _LifetimeLock,
+    fold_resource_name,
     is_physical_resource,
     physical_resources,
     utc_now_iso,
@@ -34,6 +35,7 @@ from agentic_hil.devices import (
     DeviceSet,
     UartDevice,
     config_devices,
+    declared_keys,
     lock_keys,
 )
 from agentic_hil.knowledge import attach_quarantine_guidance, recovery_operator_command, remediation_fields
@@ -593,6 +595,11 @@ class HardwareCoordinator:
         # rather than bare resource names. Only for reporting: the lock is on the
         # key, and two entries naming one unit share it.
         self.declared_devices: DeviceSet = DeviceSet()
+        # Every name the run took: its declaration, plus the name a device read
+        # from the host when the run began (see `UartDevice.lock_keys`). Kept
+        # rather than asked again at the end, since the host's answer can change
+        # meanwhile, and a run gives back exactly what it took.
+        self.run_holds: list[str] = []
         self.run_label: str | None = None
         self.run_started_at: str | None = None
         self.leases: dict[str, HardwareLease] = {}
@@ -738,7 +745,7 @@ class HardwareCoordinator:
                     }
                 )
             device_set = resources if isinstance(resources, DeviceSet) else DeviceSet.of(objects)
-            declared = physical_resources(lock_keys(given))
+            declared = physical_resources(declared_keys(given))
             # Before the empty check, so a device that resolved to an unlockable
             # key is named as such instead of read as "you declared nothing".
             try:
@@ -757,11 +764,14 @@ class HardwareCoordinator:
                 # one outcome worse than refusing the run. The branch is total
                 # because the mixed form was refused above: a declaration is
                 # either all devices, in which case the set is every one of them,
-                # or all names, in which case there is no set to take.
+                # or all names, in which case there is no set to take. Either way
+                # `held` is the list the mutex was handed, which is what end_run
+                # gives back.
                 if device_set:
-                    device_set.acquire(self.bench, wait_s=wait_s, stop_requested=stop_requested)
+                    held = device_set.acquire(self.bench, wait_s=wait_s, stop_requested=stop_requested)
                 else:
                     self.bench.acquire(declared, wait_s=wait_s, stop_requested=stop_requested)
+                    held = declared
             except (DeviceBusyError, DeviceWaitStoppedError) as error:
                 raise CoordinationError({**error.result, "declared_devices": declared}) from error
             except DeviceError as error:
@@ -770,11 +780,12 @@ class HardwareCoordinator:
                 raise CoordinationError({"ok": False, "error_type": error.error_type, "summary": error.summary, **error.details}) from error
             self.declared_resources = frozenset(declared)
             self.declared_devices = device_set
+            self.run_holds = held
             self.run_label = label
             self.run_started_at = utc_now_iso()
             self.bench.owner = replace(self.bench.owner, label=label)
             self.bench.heartbeat()
-            reclaimed = [detail for detail in (self.bench.reclaimed(resource) for resource in declared) if detail is not None]
+            reclaimed = [detail for detail in (self.bench.reclaimed(resource) for resource in held) if detail is not None]
             result: JsonObject = {
                 "ok": True,
                 "tool": "bench_run_start",
@@ -796,14 +807,16 @@ class HardwareCoordinator:
     def end_run(self) -> JsonObject:
         with self._guard:
             declared = sorted(self.declared_resources or ())
+            held = self.run_holds
             was_active = self.run_active
             self.declared_resources = None
             self.declared_devices = DeviceSet()
+            self.run_holds = []
             self.run_label = None
             self.run_started_at = None
             self.bench.owner = replace(self.bench.owner, label=None)
-            if declared:
-                self.bench.release(declared)
+            if held:
+                self.bench.release(held)
             # A lease still open (a COM or CAN session the run left running)
             # keeps its own hold on the device, so ending the run here does not
             # pull a board out from under a live session. Say so rather than
@@ -873,9 +886,14 @@ class HardwareCoordinator:
         normalized = sorted(set(resource for resource in lock_keys(resources) if resource))
         if not normalized:
             raise ValueError("At least one physical resource is required.")
+        # A run's declaration is checked against each device's own key and each
+        # name folded as it came, not against every name taken below: one of
+        # those is read from the host, and a link's node can appear after the
+        # run began (see `UartDevice.lock_keys`). The lease still takes them all.
+        claimed = sorted({item.lock_key if isinstance(item, Device) else fold_resource_name(item) for item in resources if isinstance(item, Device) or (isinstance(item, str) and item)})
         with self._guard:
             self._require_open()
-            undeclared = self._undeclared(normalized)
+            undeclared = self._undeclared(claimed)
             if undeclared:
                 raise CoordinationError(
                     {
@@ -2069,6 +2087,7 @@ class HardwareCoordinator:
             # waiting for the operating system to reap the process.
             self.declared_resources = None
             self.declared_devices = DeviceSet()
+            self.run_holds = []
             self.run_label = None
             self.run_started_at = None
             self.bench.release_all()

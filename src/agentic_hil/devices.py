@@ -28,6 +28,7 @@ free-form so a device kind can grow a tool without a new plumbing path.
 """
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import ClassVar, Protocol
@@ -144,17 +145,38 @@ class Device:
         """Every machine-wide name that must be held to hold this unit.
 
         ``lock_key`` is the one canonical identity: what a set dedups on, what a
-        refusal names, what config validation mirrors. This is the set the mutex
-        actually takes, and for most devices it is just that one key. It is more
-        than one only where a single physical unit answers to two names that no
-        other owner can be made to agree on from its own side: a debugger known by
-        both an operator ``resource_id`` and a probe serial, so that a first
-        `init` in another workspace (which can derive the serial from enumeration
-        but not the operator's alias) still collides on the serial, and an
-        executable-identified debugger, which must also hold the legacy
-        ``probe:<path>`` an unupgraded process or a raw caller still takes. See
-        ``DebuggerDevice.lock_keys``."""
+        call inside a run is checked against, what config validation mirrors.
+        This is the set the mutex actually takes, and for most devices it is just
+        that one key; a `device_busy` refusal names whichever of them collided.
+        It is more than one only where a single physical unit answers to two
+        names that no other owner can be made to agree on from its own side: a
+        debugger known by both an operator ``resource_id`` and a probe serial, so
+        that a first `init` in another workspace (which can derive the serial
+        from enumeration but not the operator's alias) still collides on the
+        serial; an executable-identified debugger, which must also hold the
+        legacy ``probe:<path>`` an unupgraded process or a raw caller still takes
+        (see ``DebuggerDevice.lock_keys``); and a serial port named by its
+        device, which also holds the spelling the host resolves that name to (see
+        ``UartDevice.lock_keys``).
+
+        Two of these names come from the host rather than from the file. The
+        executable is resolved on the host once, when the configuration loads
+        (``config.configured_executable``), and stays fixed from then on. A serial
+        port's resolved spelling is the second, and it is read every time it is
+        asked for, because the node behind a link is the host's to give and can
+        appear after a run began. That name is held and never declared: a run's
+        declaration is what every later call is checked against, and a name that
+        changes when a board is plugged in would turn the run's own device into
+        an undeclared one. ``declared_keys`` is the declared part."""
         return (self.lock_key,)
+
+    @property
+    def declared_keys(self) -> tuple[str, ...]:
+        """The names a run holding this device declares.
+
+        Every lock key but one the device reads from the host each time it is
+        asked; see ``lock_keys``."""
+        return self.lock_keys
 
     @property
     def identity_source(self) -> str:
@@ -367,6 +389,36 @@ class DebuggerDevice(Device):
         }
 
 
+# The Windows device namespace, in which `\\.\COM7` opens what `COM7` opens.
+_WINDOWS_DEVICE_NAMESPACE = "\\\\.\\"
+
+
+def _host_device_name(device: str) -> str:
+    """The spelling the host itself gives a configured serial device name.
+
+    On POSIX an absolute name is resolved through its links, not strictly, so a
+    ``/dev/serial/by-id`` or ``/dev/serial/by-path`` link comes out as the kernel
+    node it leads to, and a link that is not there yet comes out as itself. A
+    relative name, or one of pyserial's URL handlers (``socket://``,
+    ``rfc2217://``), is left as written: neither is a path to resolve.
+
+    On Windows the name is folded the way the host folds it and one leading
+    ``\\\\.\\`` is dropped, the prefix pyserial itself puts in front of a port
+    above COM8. There only the string is looked at, and on neither platform is
+    anything asked of the device itself."""
+    if os.name == "nt":
+        folded = fold_device_path(device)
+        return folded[len(_WINDOWS_DEVICE_NAMESPACE) :] if folded.startswith(_WINDOWS_DEVICE_NAMESPACE) else folded
+    if not os.path.isabs(device):
+        return device
+    try:
+        return os.path.realpath(device)
+    except ValueError:
+        # A name the host cannot look up at all (an embedded NUL) has no other
+        # spelling to find.
+        return device
+
+
 @dataclass(frozen=True)
 class UartDevice(Device):
     """A configured serial line.
@@ -431,6 +483,32 @@ class UartDevice(Device):
         return f"com:{fold_device_path(self.port.device)}"
 
     @property
+    def lock_keys(self) -> tuple[str, ...]:
+        """The configured key, and beside it the host's own spelling of the port.
+
+        One port answers to several device names: a ``/dev/serial/by-id`` or
+        ``/dev/serial/by-path`` link and the kernel node it leads to on POSIX,
+        ``\\\\.\\COM7`` and ``COM7`` on Windows. Two owners that configured two of
+        them derived two keys, and each opened the one port believing it was its
+        own. An entry named by its device therefore also holds ``com:`` plus the
+        name ``_host_device_name`` gives it, which every spelling of one port
+        shares, so two owners collide there whichever spelling each wrote.
+
+        Read afresh each time and never declared; see ``Device.lock_keys``. An
+        entry identified by ``resource_id`` or by its adapter's serial already
+        names the hardware, and an unbound entry names no device, so each keeps
+        its one key."""
+        if self.port.resource_id or self.port.serial_number or com_port_is_unbound(self.port):
+            return (self.lock_key,)
+        resolved = f"com:{_host_device_name(self.port.device)}"
+        return (self.lock_key,) if resolved == self.lock_key else (self.lock_key, resolved)
+
+    @property
+    def declared_keys(self) -> tuple[str, ...]:
+        # The configured key alone: the resolved spelling is held, not declared.
+        return (self.lock_key,)
+
+    @property
     def identity_source(self) -> str:
         """Which key of this entry says which hardware it is.
 
@@ -465,11 +543,14 @@ class UartDevice(Device):
         ``/dev/ttyACM0``) is an enumeration order.
 
         The key is deliberately *not* rewritten to the hardware behind such a
-        name. A lock key is a pure function of the configuration, asked on hosts
+        name. ``lock_key`` is a pure function of the configuration, asked on hosts
         where nothing is attached; deriving it from what is currently enumerated
         would make one entry's key change as boards come and go, which is a worse
-        failure than the one being fixed. The entry says what it knows, and this
-        says when that is not enough.
+        failure than the one being fixed. What the host says only ever goes
+        beside it: ``lock_keys`` adds the name a link resolves to, which can add
+        a collision and never removes one, and which does not make a kernel name
+        follow the board either, since ``/dev/ttyACM0`` resolves to itself. The
+        entry says what it knows, and this says when that is not enough.
 
         An entry identified by `vid`/`pid` is not silent and not sound either:
         it names a type, the lock still follows the kernel name, and saying so is
@@ -576,9 +657,15 @@ class DeviceSet:
         Taking them here one device at a time would rebuild both, worse, and a
         partially acquired set is exactly what must never escape.
         ``stop_requested`` is handed through unchanged: a wait it ends is ended
-        by the mutex, with the same unwind."""
+        by the mutex, with the same unwind.
+
+        Returns every name it holds the set under, asked once. A UART's resolved
+        spelling is the host's and can change between two askings, so a caller
+        gives back this list rather than asking ``lock_keys`` again."""
         self.require_lockable()
-        return bench.acquire(self.lock_keys, wait_s=wait_s, stop_requested=stop_requested)
+        held = self.lock_keys
+        bench.acquire(held, wait_s=wait_s, stop_requested=stop_requested)
+        return held
 
     def unlockable_keys(self) -> list[str]:
         """Keys the machine-wide mutex would ignore rather than lock.
@@ -760,6 +847,21 @@ def lock_keys(resources: Iterable[object]) -> list[str]:
             # so a lease taken on a device holds the same second id a run holding
             # the same device does.
             keys.extend(item.lock_keys)
+        elif isinstance(item, str):
+            keys.append(fold_resource_name(item))
+    return keys
+
+
+def declared_keys(resources: Iterable[object]) -> list[str]:
+    """What a run declares, from the same mix ``lock_keys`` takes.
+
+    Each device's ``declared_keys`` rather than every lock key it holds, so a
+    name the device reads from the host is held without being declared. A name
+    is folded exactly as ``lock_keys`` folds it."""
+    keys: list[str] = []
+    for item in resources:
+        if isinstance(item, Device):
+            keys.extend(item.declared_keys)
         elif isinstance(item, str):
             keys.append(fold_resource_name(item))
     return keys

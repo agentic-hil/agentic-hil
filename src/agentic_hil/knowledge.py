@@ -4647,6 +4647,8 @@ One case is outside this: a server process left running with its stdin never clo
 
 The lock is keyed on the hardware, not on the name of the config entry. Two entries that describe one physical unit (a debug probe and its virtual COM port sharing a `resource_id`, or the same serial device configured twice) resolve to one lock key and are taken once. Declaring both is not an error and does not double-lock anything.
 
+One serial device written down two ways is one port as well. An entry that names it through a link such as `/dev/serial/by-id/...` is also held under the node the link leads to, looked up each time the port is taken, and on Windows an entry naming `\\\\.\\COM7` is also held under `COM7`. A workspace that wrote the other spelling is refused with `device_busy`, naming the holder.
+
 The one identity that is *not* hardware-derived: a debugger entry with neither `resource_id` nor `probe_id` falls back to the backend toolchain. Two boards driven by the same backend would then share one lock, and one board reached through two backends would take two. `bench_run_start` returns a `warnings` entry when a declared device is in that state; the fix is a `probe_id`, or a `resource_id` shared by every entry naming that unit.
 
 Reading can still perturb a target: an SWD attach halts the core, a CAN controller outside `listen_only` sends dominant ACK bits, opening a serial port raises DTR on boards that wire it to reset. That is why the passive modes stay available: `can_buses.<name>.listen_only: true` and `com_ports.<name>.assert_dtr: false` / `assert_rts: false` are how a target is observed provably undisturbed. They are no longer a precondition for access; they are the way to prove a reading did not touch anything.
