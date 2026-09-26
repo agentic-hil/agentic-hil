@@ -4169,6 +4169,35 @@ raise SystemExit(0)
 '''
 
 
+def _run_installer(command: list[str], timeout_s: float, **options: Any) -> subprocess.CompletedProcess[str]:
+    """One installer run, its output captured as text.
+
+    A run that outlives `timeout_s` fails with everything it printed up to then,
+    so the log says which step it stopped in (#572). `TimeoutExpired` carries
+    that output, as bytes on POSIX whatever `text` says, and prints only the
+    command and the bound."""
+    try:
+        return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_s, check=False, **options)
+    except subprocess.TimeoutExpired as expired:
+        printed = "".join(part.decode("utf-8", "replace") if isinstance(part, bytes) else part for part in (expired.stdout, expired.stderr) if part)
+        pytest.fail(f"{subprocess.list2cmdline(command)} did not finish in {timeout_s:.0f} s. What it printed up to then:\n\n{printed or '(nothing)'}")
+
+
+def test_an_installer_run_that_outlives_its_bound_fails_with_what_it_printed() -> None:
+    """A run that times out says which step the installer stopped in (#572).
+
+    `subprocess.run` hands the output so far to the `TimeoutExpired` it raises,
+    and the exception prints only the command and the bound, so the log of a
+    run that hung could not say where. A child that says which step it is in
+    and then waits stands in for the installer."""
+    step = "Step 5 of 5: looking for running agent CLIs"
+    command = [sys.executable, "-u", "-c", f"print({step!r}); import time; time.sleep(60)"]
+
+    with pytest.raises(pytest.fail.Exception) as failed:
+        _run_installer(command, 2.0)
+
+    assert step in str(failed.value), failed.value
+
 class _WindowsBench:
     """One Windows machine for install.ps1: a stub manager on PATH and a bin of its own.
 
@@ -4276,16 +4305,11 @@ class _WindowsBench:
         # the write itself does is held by
         # test_the_windows_path_write_keeps_the_kind_and_repeats_into_nothing,
         # which drives that function against a scratch key of its own.
-        result = subprocess.run(
+        result = _run_installer(
             [_windows_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(POWERSHELL_SCRIPT), "-NoPath", *arguments],
+            scaled_time_bound(timeout),
             cwd=str(self.project),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             env=self.environment(manager_bin_on_path=manager_bin_on_path, **extra),
-            timeout=scaled_time_bound(timeout),
-            check=False,
         )
         return result, f"{result.stdout}{result.stderr}"
 
