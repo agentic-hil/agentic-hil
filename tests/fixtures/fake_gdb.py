@@ -163,6 +163,16 @@ MEMORY_READ_HANGS = "memory_read_hangs"
 MEMORY_READ_WITHOUT_CONTENTS = "memory_read_without_contents"
 MEMORY_READ_SHORT = "memory_read_short"
 MEMORY_READ_REFUSAL = "Cannot access memory at address 0x20000080"
+# A connect the debug server drops (#575). On the bench, an attach over the
+# watchdog image lost the race against the board's own reset in two of six
+# starts, and `-target-select` answered with the line below. `connect_dropped_once`
+# drops the first connect of a test and lets every later one through, and
+# `connect_always_dropped` drops every one. A start that connects again runs a
+# new GDB, so the connects are counted in a file beside the image, the one path
+# every GDB of the test is handed before its first connect.
+CONNECT_DROPPED_ONCE = "connect_dropped_once"
+CONNECT_ALWAYS_DROPPED = "connect_always_dropped"
+CONNECT_DROPPED_MESSAGE = "Remote communication error.  Target disconnected: Connection reset by peer."
 
 
 def emit(line: str) -> None:
@@ -268,6 +278,18 @@ def read_memory(token: str, address_text: str, length_text: str) -> None:
     emit(f'{token}^done,memory=[{{begin="{hex(address)}",offset="0x0",end="{hex(address + length)}",contents="{contents}"}}]')
 
 
+def connect_dropped(image: Path | None) -> bool:
+    """Whether the debug server drops this connect."""
+    if has_behavior(CONNECT_ALWAYS_DROPPED):
+        return True
+    if not has_behavior(CONNECT_DROPPED_ONCE) or image is None:
+        return False
+    counter = image.with_name(image.name + ".connects")
+    seen = int(counter.read_text(encoding="ascii")) if counter.exists() else 0
+    counter.write_text(str(seen + 1), encoding="ascii")
+    return seen == 0
+
+
 def batch_query(args: list[str]) -> int:
     """`--batch -nx -q -ex ... <elf>`: read the ELF's symbol table and exit.
 
@@ -313,6 +335,7 @@ def main() -> int:
     live_breakpoints: set[int] = set()
     reset_count = 0
     interrupts_lost = 0
+    image: Path | None = None
     for raw_line in sys.stdin:
         match = COMMAND_PATTERN.match(raw_line.strip())
         if match is None:
@@ -329,11 +352,15 @@ def main() -> int:
         if command.startswith("-target-select"):
             if behavior() == "target_select_timeout":
                 continue
+            if connect_dropped(image):
+                emit(f'{token}^error,msg="{CONNECT_DROPPED_MESSAGE}"')
+                continue
             emit(f"{token}^done")
             if behavior() == "stopped_on_attach_hardfault":
                 emit(HARDFAULT_STOP)
         elif command.startswith("-file-exec-and-symbols"):
             artifact_path = command[len("-file-exec-and-symbols") :].strip().strip('"').replace("\\\\", "\\")
+            image = Path(artifact_path)
             try:
                 artifact_data = Path(artifact_path).read_bytes()
                 if BEHAVIOR_MARKER in artifact_data:
