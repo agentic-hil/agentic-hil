@@ -98,6 +98,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - A `device_busy` refusal says `holder_is_this_process` only when this process holds the device's lock itself. The flag followed the pid in the holder record alone, so a device held by another process under the same pid, such as a server in another container or PID namespace sharing the lock directory, was reported as held by this process, and the caller looked for a session or a run of its own that did not exist (#583).
 
+- A call whose own incident ended before it returned no longer says `quarantined: true` while nothing holds the bench. When the recovery at the end of a call settled the incident, the result went back as the call produced it, and a timed-out `project_config_adopt_hardware` read kept sending the caller to `agentic-hil recover` after its incident was settled or stood down. `quarantined` now follows the coordinator when the call returns and stays true only when giving a lease back quarantined the bench again; a refusal built on the quarantine remediation drops that advice, gets a retry as its `next_step`, and says after its summary how the incident ended, while the reasons, their guidance and `cleanup_required` stay (#582).
+
 ## [0.21.5] - 2026-09-07
 
 ### Added
