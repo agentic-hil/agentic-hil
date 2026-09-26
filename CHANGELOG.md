@@ -100,6 +100,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - A call whose own incident ended before it returned no longer says `quarantined: true` while nothing holds the bench. When the recovery at the end of a call settled the incident, the result went back as the call produced it, and a timed-out `project_config_adopt_hardware` read kept sending the caller to `agentic-hil recover` after its incident was settled or stood down. `quarantined` now follows the coordinator when the call returns and stays true only when giving a lease back quarantined the bench again; a refusal built on the quarantine remediation drops that advice, gets a retry as its `next_step`, and says after its summary how the incident ended, while the reasons, their guidance and `cleanup_required` stay (#582).
 
+- A serial port that one workspace names by its `/dev/serial/by-id` link and another by the kernel node it leads to, or on Windows as `COM7` and `\\.\COM7`, is now one device lock. The second owner is refused `device_busy` naming the holder, where it used to meet the port's own `com_port_busy` or, between the steps of a run holding the port by the other name, open the port itself. A request refused `device_busy` on one device also gives back the extra count it had added to a device its server already held, which otherwise kept that device held until the server ended (#584).
+
 ## [0.21.5] - 2026-09-07
 
 ### Added
