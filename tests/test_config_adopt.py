@@ -1343,6 +1343,36 @@ def test_a_timed_out_adopt_read_takes_no_target_action_when_the_policy_withholds
     assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
 
 
+@pytest.mark.parametrize("policy", ["reset_halt", "off"], ids=["settled", "stood_down"])
+def test_a_timed_out_adopt_read_whose_incident_ended_neither_claims_nor_remedies_a_quarantine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str) -> None:
+    """Both endings of the incident the read raised, read off the refusal.
+
+    Under `reset_halt` the call's own recovery action settles it; under `off` it
+    is stood down. Either way the call returns with nothing holding the bench, so
+    the refusal may not say the board is held, and may not send the caller to
+    `agentic-hil recover` for an incident whose id no longer names anything.
+    What the read could not confirm stays: the reason and its guidance are still
+    the caller's to read."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    _set_auto_recover(path, policy)
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read())
+
+    tools = AgenticHILToolService(load_authoritative_config(workspace), backend=_RecoveryBackend(), frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+
+        assert refused["ok"] is False, refused
+        assert tools.coordinator.blocked is False
+        assert tools.open_hardware_holds() is None
+        assert DEBUGGER_READONLY_TARGET_STATE_REASON in refused["cleanup_reasons"]
+        assert DEBUGGER_READONLY_TARGET_STATE_REASON in [item["reason"] for item in refused["quarantine_guidance"]]
+        assert refused["quarantined"] is False, refused
+        for field in ("next_step", "remediation"):
+            assert "agentic-hil recover" not in json.dumps(refused.get(field)), (field, refused.get(field))
+    finally:
+        tools.close()
+
+
 # A second attached probe, distinct from `PROBE_SERIAL`: the board a mis-routed
 # recovery would reset and clear the incident from instead of the one that timed
 # out. `066A...` is the spare this file already uses for a two-probe bench.

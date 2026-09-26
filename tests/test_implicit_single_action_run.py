@@ -30,7 +30,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import write_config
+from conftest import DEFAULT_TEST_PERMISSIONS, write_config
 
 from agentic_hil.bench import fold_resource_name
 from agentic_hil.config import load_config
@@ -53,6 +53,9 @@ DEVICE = "/dev/ttyIMPLICITRUN0"
 FLASH_REASON = "debugger_result_unconfirmed"
 # The same for a write that failed on a port that was already open.
 WRITE_REASON = "com_write_effect_unconfirmed"
+# The same for a read the backend says never addressed the target: the one
+# reason a read-only re-read settles without resetting anything.
+READ_REASON = "debugger_readonly_result_unconfirmed"
 
 
 class FakeBackend:
@@ -312,6 +315,123 @@ def test_the_implicit_run_ends_even_when_recovery_is_withheld(tmp_path: Path) ->
         assert result["recovery"]["reason_not_attempted"] == "auto_recover_policy_off"
         assert backend.calls == ["flash_firmware"], backend.calls
         assert service.call("bench_run_status")["run_active"] is False
+    finally:
+        service.close()
+
+
+class UnconfirmedReadBackend(FakeBackend):
+    """A probe whose first read cannot say what it did, and whose re-read answers.
+
+    The failure is the backend's own claim that the target was never addressed,
+    with an effect nobody can account for: the incident a read-only re-read
+    settles, so the call's own recovery can end it without driving the board.
+    `list_probes` fails the same way, for the debugger read no run wraps. Given
+    `audit_ok=False` the read also broke its audit trail, which no re-read
+    settles."""
+
+    def __init__(self, **failure: object) -> None:
+        super().__init__()
+        self.failure = {"ok": False, "error_type": "probe_failed", "target_contacted": False, "side_effect_status": "unknown", "summary": "unconfirmed", **failure}
+        self.answered_unconfirmed = False
+
+    def probe_target(self) -> dict:
+        if self.answered_unconfirmed:
+            return super().probe_target()
+        self.answered_unconfirmed = True
+        self.calls.append("probe_target")
+        return {**self.failure, "tool": "probe_target"}
+
+    def list_probes(self) -> dict:
+        self.answered_unconfirmed = True
+        self.calls.append("list_probes")
+        return {**self.failure, "tool": "debugger_probes_list"}
+
+
+def test_a_bare_read_settled_after_its_run_withheld_recovery_is_not_quarantined(tmp_path: Path) -> None:
+    """The end of the call settles what the run's teardown was not allowed to.
+
+    The policy asks for a reset into halt and this probe does not grant
+    `allow_reset`, so the teardown takes no action at all and says so. The
+    read-only re-read at the end of the call needs no reset grant, so it runs
+    anyway, and it settles the incident. Nothing holds the bench when the call
+    returns, so the result may not say it does, exactly as when the teardown
+    itself settles it."""
+    config = load_config(str(write_config(tmp_path, auto_recover="reset_halt", permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": False})))
+    backend = UnconfirmedReadBackend()
+    service = AgenticHILToolService(config, backend=backend)
+    try:
+        result = service.call("probe_target")
+
+        assert result["ok"] is False, result
+        assert result["run"]["aborted"] is True, result
+        assert result["recovery"]["reason_not_attempted"] == "allow_reset_missing", result["recovery"]
+        # The re-read ran, drove nothing, and ended the incident: the
+        # coordinator is unblocked, and nothing was left to stand down.
+        assert backend.calls == ["probe_target", "probe_target"], backend.calls
+        assert service.coordinator.status()["blocked"] is False
+        assert "incident_stood_down" not in result, result
+        # What the read could not confirm is still said, with its guidance.
+        assert result["cleanup_reasons"] == [READ_REASON], result
+        assert [item["reason"] for item in result["quarantine_guidance"]] == [READ_REASON], result
+        # The one field that says the bench is held stops saying it.
+        assert result["quarantined"] is False, result
+        assert service.call("bench_run_start", {"devices": [{"kind": "debugger"}]})["ok"] is True
+        assert service.call("bench_run_stop")["ok"] is True
+    finally:
+        service.close()
+
+    lines = [line for line in ledger(config) if line.get("via") == "recovery_action"]
+    assert len(lines) == 1, ledger(config)
+    assert lines[0]["attestation"] == "recovery_action_verified"
+    assert lines[0]["reason"] == READ_REASON
+
+
+def test_a_probe_list_settled_by_its_own_recovery_is_not_quarantined(tmp_path: Path) -> None:
+    """The same end of the call, reached with no run around the call at all.
+
+    Probe discovery is a read, so no run wraps it and no teardown settles it:
+    the recovery at the end of the call is the only one it gets, and here it is
+    enough. The re-read answers, the incident ends with its own ledger line, and
+    the result has to say what the coordinator holds now, which is nothing."""
+    config = config_for(tmp_path)
+    backend = UnconfirmedReadBackend()
+    service = AgenticHILToolService(config, backend=backend)
+    try:
+        result = service.call("debugger_probes_list")
+
+        assert result["ok"] is False, result
+        assert "run" not in result, result
+        assert backend.calls == ["list_probes", "probe_target"], backend.calls
+        assert service.coordinator.status()["blocked"] is False
+        assert "incident_stood_down" not in result, result
+        assert result["cleanup_reasons"] == [READ_REASON], result
+        assert [item["reason"] for item in result["quarantine_guidance"]] == [READ_REASON], result
+        assert result["quarantined"] is False, result
+    finally:
+        service.close()
+
+    lines = [line for line in ledger(config) if line.get("via") == "recovery_action"]
+    assert len(lines) == 1, ledger(config)
+    assert lines[0]["reason"] == READ_REASON
+
+
+def test_a_bare_read_that_leaves_the_bench_held_still_reads_as_quarantined(tmp_path: Path) -> None:
+    """The other side of the same field, so it cannot be fixed by dropping it.
+
+    A read that also broke its audit trail names a ledger no reset or re-read
+    writes, so neither the run's teardown nor the end of the call may settle
+    it, and nothing stands it down either. The bench is held when the call
+    returns, and the result says so, with the guidance for what to check."""
+    config = config_for(tmp_path)
+    service = AgenticHILToolService(config, backend=UnconfirmedReadBackend(audit_ok=False))
+    try:
+        result = service.call("probe_target")
+
+        assert result["ok"] is False, result
+        assert service.coordinator.incident_stands is True
+        assert "incident_stood_down" not in result, result
+        assert result["quarantined"] is True, result
+        assert READ_REASON in [item["reason"] for item in result["quarantine_guidance"]], result
     finally:
         service.close()
 
