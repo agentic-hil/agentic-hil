@@ -1212,6 +1212,29 @@ def test_no_layer_installs_from_the_index_without_hashes() -> None:
             assert "--require-hashes" in line, line
 
 
+def test_the_product_is_installed_into_a_virtual_environment_inside_the_checkout() -> None:
+    """Every install goes into a virtual environment under the image's checkout, and `python` is its interpreter.
+
+    The tier asks `server_upgrade` of the product only where an upgrade taken
+    wrongly could reach nothing but the checkout, which is an installation in
+    the checkout's own virtual environment; against the image's system
+    interpreter it refuses to ask and fails. The runner starts pytest as
+    `python`, so the environment comes first on PATH.
+    """
+    lines = dockerfile().splitlines()
+    workdirs = [line.split(None, 1)[1].strip() for line in lines if line.startswith("WORKDIR ")]
+    assert workdirs, "the image sets no working directory"
+    environment = f"{workdirs[0]}/.venv"
+    created = [index for index, line in enumerate(lines) if line == f"RUN python -m venv {environment}"]
+    activated = [index for index, line in enumerate(lines) if line.startswith(f"ENV VIRTUAL_ENV={environment}")]
+    installs = [index for index, line in enumerate(lines) if "pip install" in line]
+
+    assert created and activated, f"the image does not install into {environment}"
+    assert lines[activated[0] + 1].strip() == f"PATH={environment}/bin:$PATH", lines[activated[0] + 1]
+    assert installs and created[0] < activated[0] < min(installs), "an install runs before the environment is the image's python"
+    assert "exec python -m pytest" in bench_in_container.CONTAINER_SCRIPT
+
+
 def test_the_image_carries_the_tools_the_tier_builds_and_debugs_with() -> None:
     install = next(line for line in dockerfile().splitlines() if "apt-get install" in line)
     packages = set(install.split("--yes", 1)[1].split())

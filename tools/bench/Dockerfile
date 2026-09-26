@@ -57,6 +57,18 @@ RUN apt-get update \
     && apt-get install --no-install-recommends --yes openocd gcc-arm-none-eabi libnewlib-arm-none-eabi gdb-multiarch cmake ninja-build libusb-1.0-0 tini \
     && rm -rf /var/lib/apt/lists/*
 
+# Everything below is installed into a virtual environment inside the checkout,
+# and its interpreter is the `python` every later line and the runner start. The
+# tier asks `server_upgrade` of the product only where an upgrade taken wrongly
+# could reach nothing but the checkout, which is an installation in the
+# checkout's own virtual environment; installed into the system interpreter,
+# that test refuses to ask and fails. The checkout copied over it below carries
+# no `.venv` of its own, because it comes from `git archive`.
+WORKDIR /work
+RUN python -m venv /work/.venv
+ENV VIRTUAL_ENV=/work/.venv \
+    PATH=/work/.venv/bin:$PATH
+
 # The same two locked files the container tier installs, with their hashes and
 # in the same order. `requirements/container.txt` carries pyOCD at the version
 # the rest of the suite is pinned against, the libusb binding it reaches USB
@@ -65,8 +77,6 @@ RUN apt-get update \
 # because a subset of a hashed lock is a second lock nobody regenerates.
 COPY requirements/container.txt /tmp/container.txt
 RUN python -m pip install --no-cache-dir --disable-pip-version-check --require-hashes -r /tmp/container.txt
-
-WORKDIR /work
 
 # The dependency set from the file the hosted matrix installs, with its hashes,
 # before the checkout is copied in, so that a change to a source file does not
