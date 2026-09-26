@@ -628,7 +628,9 @@ class AgenticHILToolService:
 
         The envelope keeps its reasons and its guidance: what the call could not
         confirm is exactly what the caller needs to read, and it is the same text
-        the quarantine carried. What goes is the claim that the bench is held."""
+        the quarantine carried. What goes is the claim that the bench is held,
+        and the advice only a held bench needs, whichever ending ran, unless a
+        lease given back on the way out has quarantined the bench again."""
         if not isinstance(result, dict) or self.coordinator.run_active or self._debug_lease is not None:
             # A declared run is the agent's own hold, and its teardown is where
             # the recovery belongs: resetting the board at the end of step one
@@ -696,20 +698,39 @@ class AgenticHILToolService:
                 lease.release()
         if self._quarantined_lease is not None and self._quarantined_lease.state != "active":
             self._quarantined_lease = None
-        if stood_down is None:
-            # The incident was settled by the recovery action, which wrote its own
-            # ledger line and unblocked the coordinator, so there was nothing left
-            # to stand down. The call's own result stands as it was returned.
-            return result
         # Attached while the flags still say quarantined, so the reasons keep the
         # remediation text they had; `call` re-attaching it is a no-op.
         result = attach_quarantine_guidance(result)
-        # `quarantined` and nothing else. It is the one field that says the bench
-        # is being held, and it is the one that stopped being true. Its neighbour
-        # `cleanup_required` says something the stand-down did not change: this
-        # call left work behind, a debug session to stop, a state nobody
-        # confirmed, and a caller reading a failed result still has to know it.
-        return {**result, "incident_stood_down": stood_down, **withheld, **({"quarantined": False} if result.get("quarantined") is True else {})}
+        if stood_down is not None:
+            result = {**result, "incident_stood_down": stood_down, **withheld}
+        if self.coordinator.blocked:
+            # A lease given back above, or by the recovery action, could not be
+            # released, and a release that cannot persist fails closed under an
+            # incident of its own. The bench is held again, so the claim that it
+            # is, and the advice for a held bench, stay as the call made them.
+            return result
+        # Nothing holds the bench now, whichever of the two endings ran, and
+        # `quarantined` is the field that says it is held. Its neighbour
+        # `cleanup_required` says something neither ending changed: this call
+        # left work behind, a debug session to stop, a state nobody confirmed,
+        # and a caller reading a failed result still has to know it.
+        released: JsonObject = {**result, **({"quarantined": False} if result.get("quarantined") is True else {})}
+        # A refusal built on the quarantine's own remediation sends the caller to
+        # `agentic-hil recover` with an id that no longer names anything. That
+        # advice goes, and the retry it was the precondition for is the next step.
+        advice = remediation_fields("resource_quarantined")
+        if advice and result.get("remediation") == advice["remediation"]:
+            released.pop("remediation", None)
+            if result.get("do_not") == advice.get("do_not"):
+                released.pop("do_not", None)
+            released["next_step"] = "Call this again: the incident it reported has ended, and nothing holds the bench."
+        # The summary was written for a held bench and is not rewritten here. One
+        # that says the board is quarantined is followed by how that ended.
+        summary = result.get("summary")
+        if isinstance(summary, str) and "quarantined" in summary:
+            ending = "This call's own recovery has since ended the incident" if recovered else "The incident has since been stood down"
+            released["summary"] = f"{summary} {ending}, and nothing holds the bench."
+        return released
 
     def _call_unlocked(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         if arguments is None:
