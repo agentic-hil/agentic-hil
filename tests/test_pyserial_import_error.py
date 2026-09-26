@@ -36,6 +36,9 @@ from agentic_hil.comports import COM_PORT_IDENTITY_UNVERIFIED, ComPortService, l
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import load_config
 from agentic_hil.humanize import render_result
+from agentic_hil.mcp import handle_mcp_message
+from agentic_hil.report import write_report
+from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import JsonObject
 
 # What both results keep saying, unchanged by the fix.
@@ -275,6 +278,58 @@ def test_the_session_carries_the_import_error(kind: str, tmp_path: Path, monkeyp
     assert result["side_effect_committed"] is False, result
     assert result.get("backend_error") == raised, result
 
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_classification_carries_the_import_error(kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`classify_last_error`, which an agent asks next, answers with the line
+    the failed session carried, in the document and in the text an agent host
+    puts into the model's context. Without it the classification names the
+    error type and its causes, and not the line that says which cause it is
+    (#574)."""
+    config = _com_config(tmp_path / "workspace")
+    raised = _break_pyserial(kind, tmp_path, monkeypatch, statement=SESSION_IMPORT)
+    _session_start(config)
+
+    service = AgenticHILToolService(config)
+    try:
+        response = handle_mcp_message(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "classify_last_error", "arguments": {}}}, service
+        )
+    finally:
+        service.close()
+
+    assert isinstance(response, dict), response
+    classified = response["result"]["structuredContent"]
+    assert classified["source_tool"] == "com_session_start", classified
+    assert classified["error_type"] == "serial_backend_not_available", classified
+    assert classified.get("backend_error") == raised, classified
+    assert json.loads(response["result"]["content"][0]["text"]).get("backend_error") == raised, response
+
+
+def test_a_failure_without_the_line_is_classified_without_it(tmp_path: Path) -> None:
+    """A failure that carried no line of the backend's is classified without the
+    key, not with an empty one."""
+    config = _com_config(tmp_path / "workspace")
+    write_report(
+        config,
+        {
+            "ok": False,
+            "tool": "com_session_start",
+            "port_id": PORT_ID,
+            "error_type": "serial_backend_not_available",
+            "summary": SUMMARY,
+            "likely_causes": LIKELY_CAUSES,
+        },
+    )
+
+    service = AgenticHILToolService(config)
+    try:
+        classified = service.call("classify_last_error")
+    finally:
+        service.close()
+
+    assert classified["error_type"] == "serial_backend_not_available", classified
+    assert "backend_error" not in classified, classified
 
 def test_the_three_failures_read_differently(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The issue's complaint, whole: pyserial missing, blocked, and failing
