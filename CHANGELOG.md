@@ -96,6 +96,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - A debug session started in `attach` mode connects again when the debug server drops the connection GDB was just handed. On a board that resets itself, the attach could lose the race against the reset while GDB connected, `-target-select` failed with `Remote communication error.  Target disconnected`, and the start quarantined the board although nothing had been done to it that a new start does not redo. The start now runs a new debug server and a new GDB after a connect GDB saw dropped, not one that timed out, once the dropped attempt's processes are confirmed gone, at most three times in all, and names every retried connect with its session log in `retried_connects`. A start that fails before its next connect reports the target state as unknown and keeps the board quarantined, and `reset_halt` and `load` are not connected again. (#575)
 
+- A `device_busy` refusal says `holder_is_this_process` only when this process holds the device's lock itself. The flag followed the pid in the holder record alone, so a device held by another process under the same pid, such as a server in another container or PID namespace sharing the lock directory, was reported as held by this process, and the caller looked for a session or a run of its own that did not exist (#583).
+
 ## [0.21.5] - 2026-09-07
 
 ### Added
