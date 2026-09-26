@@ -32,6 +32,7 @@ from conftest import write_config
 from support import scaled_time_bound
 from test_can_frame_and_routing import fake_can_module
 
+from agentic_hil.can import PythonCanAdapterSession
 from agentic_hil.config import load_config
 from agentic_hil.contracts import MCP_TOOLS
 from agentic_hil.mcp import handle_mcp_message
@@ -886,6 +887,24 @@ def test_can_read_until_id_waits_as_reads_each_within_the_bus_timeout(tmp_path: 
     assert frame_ids(result) == [MATCH_ID], result
     assert len(asked) >= 2, rig.bus.asked_timeouts
     assert max(asked) <= 0.2, rig.bus.asked_timeouts
+
+
+@pytest.mark.parametrize("now", [1000.016, 1234.5])
+def test_a_python_can_read_never_asks_the_bus_for_longer_than_its_wait(monkeypatch: pytest.MonkeyPatch, now: float) -> None:
+    """A read sets its deadline and then takes the time left from the same
+    monotonic clock. On Windows before Python 3.13 that clock moves in steps of
+    about 15.6 ms, so the two readings are often the same, and the time left is
+    `(now + wait) - now`, which for some readings rounds one step over the wait:
+    0.20000000000004547 for 0.2. The clock is held at two such readings here,
+    and the bus is still never asked for longer than the wait."""
+    bus = ScriptedBus()
+    session = PythonCanAdapterSession("python-can", bus, timeout_s=0.2)
+    monkeypatch.setattr("agentic_hil.can.time", SimpleNamespace(monotonic=lambda: now))
+    result = session.read(1, 0.2)
+
+    assert result["ok"] is True, result
+    assert bus.asked_timeouts, "the read never asked the bus"
+    assert max(bus.asked_timeouts) <= 0.2, bus.asked_timeouts
 
 
 @pytest.mark.parametrize(("poll_interval_ms", "most_reads"), [pytest.param(None, 60, id="default-poll-interval"), pytest.param(50, 12, id="configured-poll-interval")])

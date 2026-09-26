@@ -1055,7 +1055,10 @@ class PythonCanAdapterSession:
         deadline = time.monotonic() + wait_timeout_s
         try:
             while len(frames) < max_frames:
-                timeout = max(0.0, deadline - time.monotonic()) if wait_timeout_s > 0 and not frames else 0
+                # Held to the wait asked for: on a clock that has not moved
+                # since the deadline was set, `deadline - now` can round one
+                # step over it.
+                timeout = max(0.0, min(wait_timeout_s, deadline - time.monotonic())) if wait_timeout_s > 0 and not frames else 0
                 message = self.bus.recv(timeout=timeout)
                 if message is None:
                     break
