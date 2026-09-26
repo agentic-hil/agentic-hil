@@ -62,14 +62,20 @@ DEBUG_MODES = ["attach", "reset_halt", "load"]
 DEBUG_SYMBOL_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$")
 BREAKPOINT_FILE_PATTERN = re.compile(r"^[A-Za-z0-9_./\\:-]+$")
 MEMORY_CONTENTS_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{2})*$")
-TARGET_EXCEPTION_MARKERS = [
-    ("hardfault", "hardfault"),
-    ("hard_fault", "hardfault"),
-    ("memmanage", "memmanage"),
-    ("busfault", "busfault"),
-    ("usagefault", "usagefault"),
-    ("default_handler", "default_handler"),
+# The handlers a stop is read as a fault or a reset from (#576): the frame's
+# function is the handler or is named after it, such as the C body many fault
+# handlers hand the stacked frame to. Names are compared without case and
+# underscores, so CMSIS's HardFault_Handler and libopencm3's hard_fault_handler
+# read the same. The source path, and any other function that carries one of
+# the words, say nothing about why the core stopped.
+TARGET_EXCEPTION_HANDLERS = [
+    ("hardfaulthandler", "hardfault"),
+    ("memmanagehandler", "memmanage"),
+    ("busfaulthandler", "busfault"),
+    ("usagefaulthandler", "usagefault"),
+    ("defaulthandler", "default_handler"),
 ]
+RESET_HANDLER = "resethandler"
 SIGNAL_EXCEPTION_NAMES = {"SIGABRT", "SIGBUS", "SIGFPE", "SIGILL", "SIGSEGV"}
 ABNORMAL_STOP_REASONS = {"debugger_error", "exception", "fault", "timeout", "unexpected_breakpoint"}
 TCP_POLL_INTERVAL_S = 0.05
@@ -952,10 +958,10 @@ class GdbDebugSessions:
             return {"stop_reason": "timeout", "backend_stop_reason": "timeout"}
         if stop.error_message:
             return {"stop_reason": "debugger_error", "backend_stop_reason": stop.reason, "backend_error": stop.error_message}
-        lower = stop.line.lower()
+        handler = handler_name(mi_field(stop.line, "func"))
         backend_breakpoint_id = mi_field(stop.line, "bkptno")
         matching = next((item for item in session.breakpoints if item.get("backend_id") == backend_breakpoint_id), None) if backend_breakpoint_id is not None else None
-        exception_type = exception_type_from_stop_line(lower)
+        exception_type = exception_type_from_handler(handler)
         signal_name = mi_field(stop.line, "signal-name")
         signal_meaning = mi_field(stop.line, "signal-meaning")
         if stop.reason == "breakpoint-hit":
@@ -964,7 +970,7 @@ class GdbDebugSessions:
             stop_reason = "target_exit"
         elif exception_type is not None:
             stop_reason = "exception"
-        elif "reset_handler" in lower or "reset" in lower:
+        elif handler.startswith(RESET_HANDLER):
             stop_reason = "reset"
         elif stop.reason == "signal-received":
             if signal_name == "SIGTRAP":
@@ -1760,9 +1766,14 @@ def public_artifact(artifact: JsonObject) -> JsonObject:
     return {"source": artifact.get("source"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
 
 
-def exception_type_from_stop_line(lower_line: str) -> str | None:
-    for marker, exception_type in TARGET_EXCEPTION_MARKERS:
-        if marker in lower_line:
+def handler_name(function: str | None) -> str:
+    """A stop frame's function as TARGET_EXCEPTION_HANDLERS compares it: lower case, no underscores."""
+    return (function or "").lower().replace("_", "")
+
+
+def exception_type_from_handler(handler: str) -> str | None:
+    for name, exception_type in TARGET_EXCEPTION_HANDLERS:
+        if handler.startswith(name):
             return exception_type
     return None
 
