@@ -530,6 +530,16 @@ def test_a_new_device_still_needs_the_field_its_schema_requires(tmp_path: Path, 
 # No writing into an open run.
 
 
+# The calls that end a COM, a CAN and a debug session, each hold a run does not
+# cover and `bench_run_stop` does not end.
+SESSION_STOP_CALLS = ("com_session_stop", "can_session_stop", "debug_stop_session")
+
+
+def _steps_naming_a_stop_call(described: dict) -> list[str]:
+    """The next steps of a describe answer that name a call ending a hold."""
+    return [step for step in described["next_steps"] if "bench_run_stop" in step or any(call in step for call in SESSION_STOP_CALLS)]
+
+
 def test_a_configuration_write_is_refused_while_a_run_holds_the_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The mirror image of "a run may only touch what it declared".
 
@@ -555,7 +565,11 @@ def test_a_configuration_write_is_refused_while_a_run_holds_the_bench(tmp_path: 
         # The rights-aware answer says the same thing rather than promising a
         # write that would be refused.
         assert described["writes_blocked_by_open_run"] is True
-        assert any("bench_run_stop" in step for step in described["next_steps"])
+        assert described["open_holds"]["open_leases"] == [], described["open_holds"]
+        # A run and no session: the one call that ends what is held (#577).
+        hold_steps = _steps_naming_a_stop_call(described)
+        assert len(hold_steps) == 1 and "`bench_run_stop`" in hold_steps[0], described["next_steps"]
+        assert not any(call in hold_steps[0] for call in SESSION_STOP_CALLS), hold_steps
 
         assert tools.call("bench_run_stop")["ok"] is True
         assert tools.call(PROJECT_CONFIG_SET, changes(("target.name", "renamed")))["ok"] is True
@@ -582,6 +596,14 @@ def test_a_session_that_outlives_its_run_still_blocks_a_write(tmp_path: Path, mo
 
             refused = tools.call(PROJECT_CONFIG_SET, changes(("target.name", "renamed")))
             assert refused["error_type"] == "config_write_in_open_run"
+            # The describe answer names the calls that end a session and not
+            # `bench_run_stop`, which has no run to stop here and leaves the
+            # session holding its device (#577).
+            described = tools.call(PROJECT_CONFIG_DESCRIBE)
+            hold_steps = _steps_naming_a_stop_call(described)
+            assert len(hold_steps) == 1, described["next_steps"]
+            assert "bench_run_stop" not in hold_steps[0], hold_steps
+            assert all(f"`{call}`" in hold_steps[0] for call in SESSION_STOP_CALLS), hold_steps
         finally:
             lease.release()
         assert tools.call(PROJECT_CONFIG_SET, changes(("target.name", "renamed")))["ok"] is True
