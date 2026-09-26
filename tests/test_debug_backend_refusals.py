@@ -965,6 +965,76 @@ def test_stop_reason_mapping_from_mi_stopped_records(tmp_path: Path, line: str, 
         assert stop["breakpoint_expected"] is False, stop
 
 
+def halt_in(function: str, source: str) -> str:
+    """The record a plain halt answers with: the core interrupted in `function`, whose source is at `source`.
+
+    GDB puts the path in `file` as the debug information names it, which a
+    CMake build makes absolute, and in `fullname` always.
+    """
+    return f'*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={{addr="0x08000520",func="{function}",args=[],file="{source}",fullname="{source}",line="77"}},thread-id="1",stopped-threads="all"'
+
+
+@pytest.mark.parametrize("project", ["/home/dev/blinky", "/home/dev/hardfault-lab", "/home/dev/watchdog-reset-demo"])
+def test_a_halt_at_main_reads_halted_whatever_the_project_is_called(tmp_path: Path, project: str) -> None:
+    """Why the core stopped is not read off the source path (#576).
+
+    Two of these projects are named with a word a handler is named by. The
+    halt is the same in all three, and so is the answer.
+    """
+    stop = stop_reason_of(tmp_path, halt_in("main", f"{project}/Src/main.c"))
+
+    assert stop["stop_reason"] == "halted", stop
+    assert "exception_type" not in stop, stop
+    assert "fault_type" not in stop, stop
+
+
+@pytest.mark.parametrize("function", ["ResetTimer", "usb_reset", "trigger_hardfault", "install_default_handler"])
+def test_a_halt_in_a_function_named_with_a_handler_word_reads_halted(tmp_path: Path, function: str) -> None:
+    """A function that carries a handler's word is not that handler (#576).
+
+    A timer reset, a USB bus reset, a fault lab's own trigger before it has
+    faulted and the code that installs a default handler all run on a healthy
+    core, so a halt inside any of them is a halt.
+    """
+    stop = stop_reason_of(tmp_path, halt_in(function, "/home/dev/blinky/Src/main.c"))
+
+    assert stop["stop_reason"] == "halted", stop
+    assert "exception_type" not in stop, stop
+
+
+HANDLER_ROWS = [
+    ("HardFault_Handler", "exception", "hardfault"),
+    ("hard_fault_handler", "exception", "hardfault"),
+    ("HardFault_Handler_C", "exception", "hardfault"),
+    ("MemManage_Handler", "exception", "memmanage"),
+    ("BusFault_Handler", "exception", "busfault"),
+    ("bus_fault_handler", "exception", "busfault"),
+    ("UsageFault_Handler", "exception", "usagefault"),
+    ("Default_Handler", "exception", "default_handler"),
+    ("Reset_Handler", "reset", None),
+    ("reset_handler", "reset", None),
+]
+
+
+@pytest.mark.parametrize(("function", "stop_reason", "exception_type"), HANDLER_ROWS, ids=[row[0] for row in HANDLER_ROWS])
+def test_a_halt_in_a_handler_reads_what_the_handler_handles(tmp_path: Path, function: str, stop_reason: str, exception_type: str | None) -> None:
+    """A fault or a reset is read from the frame's function (#576).
+
+    The handlers by their CMSIS names, the same handlers by libopencm3's lower
+    case names, and a function named after a handler, such as the C body many
+    fault handlers hand the stacked frame to, which is where a core in that
+    fault loops.
+    """
+    stop = stop_reason_of(tmp_path, halt_in(function, "/home/dev/blinky/Src/handlers.c"))
+
+    assert stop["stop_reason"] == stop_reason, stop
+    if exception_type is None:
+        assert "exception_type" not in stop, stop
+    else:
+        assert stop["exception_type"] == exception_type, stop
+        assert stop["fault_type"] == exception_type, stop
+
+
 def test_the_end_of_a_step_is_not_read_as_an_error(tmp_path: Path) -> None:
     """`end-stepping-range` names no failure; the record's own reason is carried and nothing is quarantined.
 
