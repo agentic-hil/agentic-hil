@@ -1049,6 +1049,107 @@ def test_each_agent_list_check_goes_red_on_a_changed_copy_of_the_clis_list(where
         assert any(repr(name) in problem for name in changed), f"{problem}\nnames none of {sorted(changed)}"
 
 
+
+# ---------------------------------------------------------------------------
+# The agent lists outside the installers. The guides and the error catalogue
+# write `--agent <claude-code|codex|opencode>` by hand as well, the README names
+# the commands the one-line install looks for, and the quick starts follow
+# `setup --agent claude-code` with `# or: codex / opencode`. The catalogue in
+# `knowledge.py` cannot read `KNOWN_AGENTS`, because the CLI imports it, so
+# these lists are held to the CLI's here rather than derived from it.
+
+# What the lists are read from: the guides, the examples' READMEs and the
+# package. The installers are held above, and the changelog says what was true
+# when each of its entries was written.
+_DOCUMENTED_FILES = sorted(
+    path
+    for path in {
+        *(REPOSITORY_ROOT / name for name in ("README.md", "AGENTS.md", "AI_AGENT_QUICKSTART.md", "TROUBLESHOOTING.md", "SECURITY.md", "CONTRIBUTING.md")),
+        *(REPOSITORY_ROOT / "docs").glob("**/*.md"),
+        *(REPOSITORY_ROOT / "examples").glob("**/*.md"),
+        *(REPOSITORY_ROOT / "src" / "agentic_hil").glob("**/*.md"),
+        *(REPOSITORY_ROOT / "src" / "agentic_hil").glob("**/*.py"),
+    }
+    if path.is_file()
+)
+
+# The three kinds of list, each with the pattern that finds it and the check
+# that holds it. A choice list is `--agent <a|b|c>`; the one-line install's is
+# the sentence about a PATH with no agent CLI on it, wrapped however the file
+# wraps it; the quick starts' is one agent after `--agent` and the others after
+# `# or:`.
+_CHOICES_OF_AGENT = "the choices of --agent"
+_COMMANDS_LOOKED_FOR = "the commands the one-line install looks for"
+_AGENTS_OR_OTHERS = "the agent after --agent and the others after `# or:`"
+
+
+def _documented_agent_lists() -> dict[str, Callable[[str, Sequence[Any]], list[str]]]:
+    """Every agent list the files above spell out, by file, line and kind, with the check that holds it to a list of agents."""
+    lists: dict[str, Callable[[str, Sequence[Any]], list[str]]] = {}
+    for path in _DOCUMENTED_FILES:
+        text = path.read_text(encoding="utf-8")
+        name = path.relative_to(REPOSITORY_ROOT).as_posix()
+
+        def where(match: re.Match[str], kind: str, name: str = name, text: str = text) -> str:
+            return f"{name}:{text.count(chr(10), 0, match.start()) + 1}, {kind}"
+
+        for match in re.finditer(r"--agent <([^<>\s]*\|[^<>\s]*)>", text):
+            names = match.group(1).split("|")
+            lists[where(match, _CHOICES_OF_AGENT)] = lambda at, agents, names=names: _ids_held_to(at, names, agents)
+        for match in re.finditer(r"Finding no (.+?) CLI there", text, re.DOTALL):
+            commands = [command.strip("`") for command in _prose_list(match.group(1))]
+            lists[where(match, _COMMANDS_LOOKED_FOR)] = lambda at, agents, commands=commands: _commands_held_to(at, commands, agents)
+        for match in re.finditer(r"--agent ([a-z][a-z0-9-]*)[ \t]+# or: ([a-z][a-z0-9-]*(?:[ \t]*/[ \t]*[a-z][a-z0-9-]*)*)", text):
+            names = [match.group(1), *(other.strip() for other in match.group(2).split("/"))]
+            lists[where(match, _AGENTS_OR_OTHERS)] = lambda at, agents, names=names: _ids_held_to(at, names, agents)
+    return lists
+
+
+_DOCUMENTED_AGENT_LISTS = _documented_agent_lists()
+
+
+def test_each_kind_of_documented_agent_list_is_found() -> None:
+    """A pattern that stopped matching would leave its kind of list with nothing
+    to check, and the checks below would pass on nothing. Each kind is written
+    at least once today, in the README among other places."""
+    found = {where.split(", ", 1)[1] for where in _DOCUMENTED_AGENT_LISTS}
+
+    assert found == {_CHOICES_OF_AGENT, _COMMANDS_LOOKED_FOR, _AGENTS_OR_OTHERS}, sorted(_DOCUMENTED_AGENT_LISTS)
+
+
+@pytest.mark.parametrize("where", list(_DOCUMENTED_AGENT_LISTS))
+def test_each_agent_list_the_guides_and_the_catalogue_spell_out_is_the_clis(where: str) -> None:
+    """Every agent list written by hand outside the installers says what the CLI's list says.
+
+    An agent added to `KNOWN_AGENTS`, renamed or given another command turns
+    each list below that no longer matches it red, by file, by line and by the
+    name that differs, instead of a guide, a refusal or the landing page that
+    offers the agents the CLI had before.
+    """
+    problems = _DOCUMENTED_AGENT_LISTS[where](where, agentic_hil.cli.KNOWN_AGENTS)
+    assert not problems, "\n".join(problems)
+
+
+@pytest.mark.parametrize("where", list(_DOCUMENTED_AGENT_LISTS))
+def test_each_documented_agent_list_check_goes_red_on_a_changed_copy_of_the_clis_list(where: str) -> None:
+    """Each check above fails on a list that differs, and says where and in which name.
+
+    The same changed copy as for the installers' lists: the CLI's list without
+    the agents whose command is not their name, and with one added whose
+    command is not its name either. Nothing in the product is edited for it.
+    """
+    kept = [agent for agent in agentic_hil.cli.KNOWN_AGENTS if _agent_command(agent) == agent.id]
+    dropped = [agent for agent in agentic_hil.cli.KNOWN_AGENTS if agent not in kept]
+    added = _CopiedAgent("example-agent", ("example-agent",), "example-cli")
+    changed = {*(name for agent in dropped for name in (*agent.aliases, _agent_command(agent)) if name), added.id, added.command}
+
+    problems = _DOCUMENTED_AGENT_LISTS[where](where, [*kept, added])
+
+    assert problems, f"{where} still passes on a list without {[agent.id for agent in dropped]} and with {added.id!r}"
+    for problem in problems:
+        assert problem.startswith(where), problem
+        assert any(repr(name) in problem for name in changed), f"{problem}\nnames none of {sorted(changed)}"
+
 def test_neither_script_asks_agent_install_for_a_rendering_it_gets_anyway() -> None:
     """Rendering is the default, so the frontend that shows a person says nothing.
 
