@@ -1894,6 +1894,26 @@ def _entry_patterns(rights: dict[str, bool]) -> list[JsonObject]:
     return patterns
 
 
+def _open_holds_step(open_holds: JsonObject) -> str:
+    """The step for what this server holds, naming the call that ends each hold it reports (#577).
+
+    A declared run ends with `bench_run_stop`. A lease outside it is a COM, CAN
+    or debug session, which outlives `bench_run_stop` by design, and the holds do
+    not say which of the three it is, so each call is named with the session it
+    ends, as the write refusal's remediation names them. Holds that report
+    neither get every call."""
+    run = bool(open_holds.get("run_active"))
+    sessions = bool(open_holds.get("open_leases"))
+    if not run and not sessions:
+        run = sessions = True
+    ends: list[str] = []
+    if run:
+        ends.append("the declared run with `bench_run_stop`")
+    if sessions:
+        ends.append("a COM session with `com_session_stop`, a CAN session with `can_session_stop` and a debug session with `debug_stop_session`")
+    return "A run or session is holding hardware, so no configuration write is accepted until each hold is closed: " + "; ".join(ends) + "."
+
+
 def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], open_holds: JsonObject | None, status: JsonObject, *, on_disk: bool) -> list[str]:
     steps: list[str] = []
     if not on_disk:
@@ -1917,7 +1937,7 @@ def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], op
             "`artifacts.allow_upload`, keeps enforcing what startup parsed in either direction until a restart."
         )
     if open_holds:
-        steps.append("A run or session is holding hardware, so no configuration write is accepted until it is closed with `bench_run_stop`.")
+        steps.append(_open_holds_step(open_holds))
     if writable:
         steps.append("Send the keys you need as `project_config_set` changes; every value is checked against the shipped schema before anything is written.")
     if not rights[CONFIG_DESCRIPTION_RIGHT]:
