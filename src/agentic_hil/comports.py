@@ -696,6 +696,13 @@ def serial_port_busy(error: BaseException, port_id: str, port_config: ComPortCon
     }
 
 
+# How long the log writer waits for new input before it looks again whether
+# the drain has ended. The drain wakes it for every read and once more as it
+# ends, so this bounds how late an ended drain is noticed, never how late
+# input is logged.
+RECEIVED_LOG_WAIT_S = 0.05
+
+
 class ComPortSession:
     def __init__(self, port_id: str, port_config: ComPortConfig, serial_handle: object, log_path: str, lease: HardwareLease | None = None, *, start_reader: bool = True, contact: ContactMarker | None = None):
         self.port_id = port_id
@@ -721,6 +728,12 @@ class ComPortSession:
         # `append_audit` for what that buys and `ComPortService.write_bytes`
         # for why the append alone was not enough.
         self.audit_lock = threading.RLock()
+        # Input the drain has received and the log has not yet recorded, in
+        # arrival order. Filled under `lock` in the same step that buffers it,
+        # emptied by `log_received` under `audit_lock`.
+        self.received: list[bytes] = []
+        self.received_ready = threading.Event()
+        self.read_failure: JsonObject | None = None
         self.reader: threading.Thread | None = None
         self.audit_broken = False
         self.lease = lease or DetachedHardwareLease()
@@ -771,60 +784,103 @@ class ComPortSession:
             raise
 
     def _reader_loop(self) -> None:
-        while self.active:
-            try:
-                chunk = b""
+        """Log what the drain receives, for as long as it runs (#578).
+
+        Reading the port and writing its log used to be one loop, so the port
+        went unread for as long as each log line took, and every line ends in
+        an fsync. On a loaded host that stall is long enough for a board that
+        transmits without pause to fill the port's receive buffer, and what the
+        line delivered then was lost before it reached the session, where
+        `overflow_bytes` could not count it. The drain now runs on a thread of
+        its own that never waits for the log, and this thread writes what it
+        received, as one entry per batch: a batch that grows while an entry is
+        written costs one more entry, not one more fsync per read.
+
+        This thread stays the session's one reader handle. It joins the drain
+        and records the last of its input before it returns, so a caller that
+        joined `reader` knows everything received is on the log, which is what
+        `_stop_session` relies on to write its stop entry last.
+        """
+        drain = threading.Thread(target=self._drain_loop, daemon=True)
+        try:
+            drain.start()
+            logging = True
+            while logging and drain.is_alive():
+                self.received_ready.wait(RECEIVED_LOG_WAIT_S)
+                self.received_ready.clear()
+                logging = self.log_received()
+            drain.join()
+            if logging and self.log_received() and self.read_failure is not None:
+                self.append_audit({"event": "error", **self.read_failure})
+        except Exception as error:
+            self.active = False
+            if drain.is_alive():
+                drain.join()
+            self.reader_error = {"error_type": "serial_read_failed", "summary": "COM port reader failed.", "backend_error": str(error), "likely_causes": likely_causes("serial_read_failed")}
+            self.append_audit({"event": "error", **self.reader_error})
+
+    def _drain_loop(self) -> None:
+        """Read the port into the session buffer until the session ends.
+
+        Never touches the log, so nothing but the port itself paces it. Each
+        read is buffered and queued for `log_received` in one step under
+        `lock`, which is also where `overflow_bytes` counts what the buffer
+        cap drops: input can leave the buffer through a read or through that
+        cap, and either way it is on the log.
+        """
+        try:
+            while self.active:
                 with self.io_lock:
                     waiting = int(getattr(self.serial_handle, "in_waiting", 0) or 0)
                     read_size = min(max(waiting, 1), self.port_config.max_buffer_bytes, 4096)
                     data = self.serial_handle.read(read_size)
                     if data:
                         chunk = bytes(data)
-                        # Take audit_lock -- the lock the write path holds across
-                        # its send and its tx entry -- before the bytes are made
-                        # visible in the buffer and before io_lock is dropped, and
-                        # keep it held across the rx entry below. So input this
-                        # reader has buffered is on the log ahead of any write that
-                        # has not yet begun: the reader used to buffer under io_lock
-                        # and only reach for audit_lock at the append afterwards,
-                        # and a concurrent write could take audit_lock in that gap
-                        # and record its tx ahead of input already received (review
-                        # round 0, finding 3). The blocking read itself stays
-                        # outside audit_lock, so an idle read never stalls a write.
-                        self.audit_lock.acquire()
-                        try:
-                            with self.lock:
-                                self.buffer.extend(chunk)
-                                overflow = len(self.buffer) - self.port_config.max_buffer_bytes
-                                if overflow > 0:
-                                    del self.buffer[:overflow]
-                                    self.overflow_bytes += overflow
-                        except BaseException:
-                            self.audit_lock.release()
-                            raise
-                if not chunk:
+                        with self.lock:
+                            self.buffer.extend(chunk)
+                            overflow = len(self.buffer) - self.port_config.max_buffer_bytes
+                            if overflow > 0:
+                                del self.buffer[:overflow]
+                                self.overflow_bytes += overflow
+                            self.received.append(chunk)
+                        self.received_ready.set()
+                if not data:
                     time.sleep(0.01)
-                    continue
-                try:
-                    audit_error = self.append_audit({"direction": "rx", "bytes": len(chunk), "hex": chunk.hex(), "text": decode_bytes(chunk, self.port_config.encoding)})
-                finally:
-                    self.audit_lock.release()
-                if audit_error is not None:
-                    self.reader_error = {"error_type": "audit_write_failed", "summary": "COM port feedback could not be audited.", "backend_error": str(audit_error)}
-                    self.audit_broken = True
-                    self.lease.quarantine("com_reader_audit_broken", audit_error, audit_broken=True)
-                    self.active = False
-                    break
-            except Exception as error:  # serial backends raise implementation-specific exception classes
-                if self.active:
-                    self.reader_error = {
-                        "error_type": "serial_read_failed",
-                        "summary": "COM port reader failed.",
-                        "backend_error": str(error),
-                        "likely_causes": likely_causes("serial_read_failed"),
-                    }
-                    self.append_audit({"event": "error", **self.reader_error})
-                break
+        except Exception as error:  # serial backends raise implementation-specific exception classes
+            if self.active:
+                self.read_failure = {
+                    "error_type": "serial_read_failed",
+                    "summary": "COM port reader failed.",
+                    "backend_error": str(error),
+                    "likely_causes": likely_causes("serial_read_failed"),
+                }
+                self.reader_error = self.read_failure
+        finally:
+            self.received_ready.set()
+
+    def log_received(self) -> bool:
+        """Record the input received since the last entry, as one `rx` entry.
+
+        Taken under `audit_lock` from before the queue is emptied until after
+        the entry is written, so input already received is on the log ahead of
+        any write that takes the lock after it: the write path calls this
+        before it sends. Returns False once the entry could not be written; the
+        session's audit is broken then, and the session stops.
+        """
+        with self.audit_lock:
+            with self.lock:
+                chunks, self.received = self.received, []
+            if not chunks:
+                return True
+            data = b"".join(chunks)
+            audit_error = self.append_audit({"direction": "rx", "bytes": len(data), "hex": data.hex(), "text": decode_bytes(data, self.port_config.encoding)})
+        if audit_error is None:
+            return True
+        self.reader_error = {"error_type": "audit_write_failed", "summary": "COM port feedback could not be audited.", "backend_error": str(audit_error)}
+        self.audit_broken = True
+        self.lease.quarantine("com_reader_audit_broken", audit_error, audit_broken=True)
+        self.active = False
+        return False
 
 
 # A short write is retried against exactly its own remainder, and only a few
@@ -1107,6 +1163,10 @@ class ComPortService:
         # reaches its append, so a `com_read` during that window hands out
         # everything that arrived.
         with session.audit_lock:
+            # Input the drain received before this write and the log has not
+            # yet recorded goes on the log first: it arrived first (#578).
+            if not session.log_received():
+                return self._active_session(port_id, tool)
             try:
                 sent = _write_with_bounded_retry(session.serial_handle, data)
                 flush = getattr(session.serial_handle, "flush", None)

@@ -85,6 +85,8 @@ WATCHDOG_LINE = re.compile(rb"watchdog boot (\d+) cause (\w+)\n")
 FLOOD_DIGITS = 8
 FLOOD_LINE_BYTES = FLOOD_DIGITS + 1
 FLOOD_WRAP = 100_000_000
+# 115200 baud, ten bits a byte.
+FLOOD_BYTES_PER_S = 11_520
 
 # The symbols the fault image's stops are named by.
 FAULT_HANDLER = "HardFault_Handler"
@@ -819,6 +821,69 @@ def test_a_flooded_line_hands_over_exactly_the_cap_in_stream_order_and_survives_
     wait_for_buffered(server, port, 1000)
     third = read(server, port, 0.0, max_bytes=1000)
     assert flood_position(received(third)) > end, (end, third["bytes_read"])
+
+
+def test_a_flooded_line_fills_to_its_limit_counts_what_it_dropped_and_clears_only_when_asked(bench: Bench, board_images: BoardImages, servers) -> None:
+    """The buffer limit, the overflow count and `clear_buffer`, each checked against the stream itself.
+
+    Left unread, the session fills to its configured limit and then drops the
+    oldest bytes, counting them. The count is checked rather than read: the
+    first byte the next read hands over has to be exactly as far past the last
+    byte read before as the count says was dropped. A second start without
+    `clear_buffer` has to keep the buffer and the count, so the next read
+    carries on where the last one ended; a start with it has to empty both, so
+    the next read begins past everything that was buffered.
+    """
+    put(board_images, "flood")
+    port = bench.com_port_name()
+    server = servers()
+    open_port(server, port)
+    settle_and_discard(server, port)
+    limit = port_status(server, port)["max_buffer_bytes"]
+    assert isinstance(limit, int) and limit > 0, limit
+
+    wait_for_buffered(server, port, 1000)
+    before = read(server, port, 0.0, max_bytes=1000)
+    end = flood_position(received(before)) + before["bytes_read"]
+    dropped = before["overflow_bytes"]
+
+    deadline = time.monotonic() + limit / FLOOD_BYTES_PER_S * 2 + 10
+    while True:
+        status = port_status(server, port)
+        if status["overflow_bytes"] > dropped and status["rx_buffer_bytes"] == limit:
+            break
+        assert time.monotonic() < deadline, f"the session never filled to its limit of {limit} and dropped bytes: {status}"
+        time.sleep(READ_SLICE_S)
+
+    full = read(server, port, 0.0)
+    assert full["bytes_read"] == limit, (limit, full["bytes_read"])
+    assert full["overflow_bytes"] > dropped, full["overflow_bytes"]
+    assert flood_position(received(full)) == end + (full["overflow_bytes"] - dropped), (end, dropped, full["overflow_bytes"])
+    end += full["overflow_bytes"] - dropped + limit
+    dropped = full["overflow_bytes"]
+
+    wait_for_buffered(server, port, 2000)
+    errored, kept = server.call("com_session_start", {"port_id": port, "clear_buffer": False})
+    assert errored is False, kept
+    assert kept["ok"] is True, kept
+    assert kept["already_active"] is True, kept
+    assert kept["session"]["overflow_bytes"] == dropped, kept["session"]
+    assert kept["session"]["rx_buffer_bytes"] >= 2000, kept["session"]
+    carried = read(server, port, 0.0, max_bytes=1000)
+    assert carried["overflow_bytes"] == dropped, carried["overflow_bytes"]
+    assert flood_position(received(carried)) == end, (end, carried["bytes_read"])
+    end += carried["bytes_read"]
+
+    wait_for_buffered(server, port, 2000)
+    errored, cleared = server.call("com_session_start", {"port_id": port, "clear_buffer": True})
+    assert errored is False, cleared
+    assert cleared["ok"] is True, cleared
+    assert cleared["already_active"] is True, cleared
+    assert cleared["session"]["overflow_bytes"] == 0, cleared["session"]
+    wait_for_buffered(server, port, 1000)
+    fresh = read(server, port, 0.0, max_bytes=1000)
+    assert fresh["overflow_bytes"] == 0, fresh["overflow_bytes"]
+    assert flood_position(received(fresh)) >= end + 2000, (end, fresh["bytes_read"])
 
 
 # -- The board with the wrong banner ------------------------------------------
