@@ -35,7 +35,7 @@ from conftest import DEFAULT_TEST_PERMISSIONS, write_config
 from agentic_hil.bench import fold_resource_name
 from agentic_hil.config import load_config
 from agentic_hil.contracts import TOOL_ANNOTATIONS
-from agentic_hil.coordination import HardwareCoordinator
+from agentic_hil.coordination import LEASE_RELEASE_RETRY_REASON, HardwareCoordinator
 from agentic_hil.tools import (
     _READ_ONLY_HARDWARE_TOOLS,
     AgenticHILToolService,
@@ -432,6 +432,37 @@ def test_a_bare_read_that_leaves_the_bench_held_still_reads_as_quarantined(tmp_p
         assert "incident_stood_down" not in result, result
         assert result["quarantined"] is True, result
         assert READ_REASON in [item["reason"] for item in result["quarantine_guidance"]], result
+    finally:
+        service.close()
+
+
+def test_a_probe_list_whose_lease_cannot_be_given_back_still_reads_as_quarantined(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The field follows the coordinator, not which ending ran.
+
+    The re-read settles the incident the read raised, and then the lease it was
+    held on cannot be given back: a release that cannot persist its own record
+    fails closed, under a fresh incident of its own. The bench is held again
+    when the call returns, so the result has to go on saying so."""
+    config = config_for(tmp_path)
+    service = AgenticHILToolService(config, backend=UnconfirmedReadBackend())
+    original_persist = service.coordinator._persist_lease
+
+    def failing_persist(lease, state=None, incident_override=None):
+        # Only the release's durable "released" write fails; everything the
+        # recovery persists on the way there is left to run.
+        if state == "released":
+            raise OSError("injected lease-release persistence failure")
+        return original_persist(lease, state=state, incident_override=incident_override)
+
+    monkeypatch.setattr(service.coordinator, "_persist_lease", failing_persist)
+    try:
+        result = service.call("debugger_probes_list")
+
+        assert result["ok"] is False, result
+        status = service.coordinator.status()
+        assert status["blocked"] is True, status
+        assert LEASE_RELEASE_RETRY_REASON in status["cleanup_reasons"], status
+        assert result["quarantined"] is True, result
     finally:
         service.close()
 
