@@ -10740,6 +10740,88 @@ def test_the_recorded_help_of_each_flash_tool_puts_the_address_where_the_backend
     assert "--no-reset" in load_options
 
 
+# The format pyOCD is told to read an image as (#580). Validation compares an
+# extension without case, so `FIRMWARE.ELF` is an allowed ELF, while `pyocd
+# flash` given no format takes the extension as written and knows only the
+# lower-case `axf`, `bin`, `elf` and `hex` (pyocd 0.45.1,
+# `flash/file_programmer.py` lines 94 and 145): an image that passed every
+# check here stopped there with `unknown file format 'ELF'`.
+PYOCD_FORMAT_ROWS = [
+    ("firmware.elf", "elf"),
+    ("FIRMWARE.ELF", "elf"),
+    ("firmware.axf", "elf"),
+    ("FIRMWARE.HEX", "hex"),
+    ("FIRMWARE.BIN", "bin"),
+]
+
+
+def _pyocd_bench_allowing(tmp_path: Path, extensions: list[str]) -> AgenticHILToolService:
+    """A pyocd bench whose `artifacts.allowed_extensions` is `extensions`, with a flash address for a raw image."""
+    config_path = write_config(tmp_path, debugger_type="pyocd", probe_id="PYOCD123", target_type="stm32f446re", flash_address="0x08000000")
+    written = 'allowed_extensions: [".elf", ".hex", ".bin"]'
+    text = config_path.read_text(encoding="utf-8")
+    assert written in text, text
+    config_path.write_text(text.replace(written, f"allowed_extensions: {json.dumps(extensions)}"), encoding="utf-8")
+    return AgenticHILToolService(load_config(str(config_path)))
+
+
+def _firmware_named(tmp_path: Path, name: str) -> None:
+    """An image at `build/<name>` whose bytes pass the check its extension asks for."""
+    firmware = tmp_path / "build" / name
+    firmware.parent.mkdir(parents=True)
+    suffix = firmware.suffix.lower()
+    if suffix == ".hex":
+        records = [intel_hex_record(0, 0x04, bytes([0x08, 0x00])), intel_hex_record(0, 0x00, b"\x01\x02\x03\x04"), ":00000001FF"]
+        firmware.write_text("\n".join(records) + "\n", encoding="ascii")
+    elif suffix in {".elf", ".axf"}:
+        firmware.write_bytes(b"\x7fELFfake")
+    else:
+        firmware.write_bytes(b"\x01\x02\x03\x04")
+
+
+@pytest.mark.parametrize(("name", "flash_format"), PYOCD_FORMAT_ROWS)
+def test_a_pyocd_flash_names_the_format_whatever_the_case_of_the_extension(tmp_path: Path, name: str, flash_format: str) -> None:
+    """The format goes to pyOCD with `--format`, so the case of an extension no longer decides whether a flash runs, and an `.axf` stays an ELF."""
+    _firmware_named(tmp_path, name)
+    service = _pyocd_bench_allowing(tmp_path, [".elf", ".axf", ".hex", ".bin"])
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": f"build/{name}"})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    arguments = _logged_arguments(tmp_path, result)
+    subcommand = arguments.index("flash")
+    at = arguments.index("--format")
+    assert subcommand < at < len(arguments) - 2, "the format option stands after the subcommand and before the file, which is the last argument"
+    assert arguments[at + 1] == flash_format, arguments
+    assert arguments.count("--format") == 1, arguments
+    assert Path(arguments[-1]).name == name, arguments
+
+
+def test_a_pyocd_flash_refuses_an_extension_that_names_no_pyocd_format_before_pyocd_runs(tmp_path: Path) -> None:
+    """An extension the configuration allows and pyOCD cannot read is refused here, by name, and pyOCD is never started."""
+    _firmware_named(tmp_path, "firmware.srec")
+    service = _pyocd_bench_allowing(tmp_path, [".elf", ".hex", ".bin", ".srec"])
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.srec"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "invalid_argument", result
+    assert "'.srec'" in result["summary"], result
+    assert "log_path" not in result, result
+
+
+def test_every_format_a_pyocd_flash_names_is_one_the_recorded_help_offers() -> None:
+    """`pyocd flash --format` takes `bin`, `hex` or `elf`, as recorded; the rows above name nothing else."""
+    recorded = json.loads(FLASH_TOOL_HELP_RECORDINGS.read_text(encoding="utf-8"))
+    usage = recorded["tools"]["pyocd"]["help"].replace("\r\n", "\n").split("\n\n", 1)[0]
+    assert "[--format {bin,hex,elf}]" in usage, usage
+    assert {flash_format for _, flash_format in PYOCD_FORMAT_ROWS} == {"bin", "hex", "elf"}
+
+
 # What each backend puts on the wire for each mode it supports, which is the
 # only place the three can be compared. `run` and `halt` are two different
 # commands on both; `init` is OpenOCD's alone, and OPENOCD_RESET_COMMANDS above
