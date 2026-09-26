@@ -7305,3 +7305,77 @@ def test_the_windows_script_never_writes_a_path_through_the_environment_class() 
     assert "SetEnvironmentVariable" not in code, "install.ps1 writes or prints a Path edit through [Environment]"
     assert "DoNotExpandEnvironmentNames" in code, "install.ps1 reads the Path expanded"
     assert "GetValueKind('Path')" in code, "install.ps1 does not keep the kind the value already had"
+
+
+# ---------------------------------------------------------------------------
+# Temporary, for #572: where the time of the planted step 5 tests goes on the
+# hosted Windows runners, reported as one warning per test. Not for review.
+@pytest.fixture(autouse=True)
+def _time_the_planted_step_five_runs(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Any:
+    import threading
+    import warnings
+
+    if os.name != "nt" or "step_five" not in request.node.name:
+        yield
+        return
+    module = sys.modules[__name__]
+    began = time.monotonic()
+    marks: list[str] = []
+
+    def mark(what: str) -> None:
+        marks.append(f"{time.monotonic() - began:.1f} {what}")
+
+    def timed_helper(name: str, helper: Callable[..., Any]) -> Callable[..., Any]:
+        def timed(*args: Any, **kwargs: Any) -> Any:
+            start = time.monotonic()
+            try:
+                return helper(*args, **kwargs)
+            finally:
+                mark(f"{name} took {time.monotonic() - start:.1f}")
+
+        return timed
+
+    for name in ("_a_node_shaped_interpreter", "_a_process_that_lingers", "_an_agent_cli_as_recorded"):
+        monkeypatch.setattr(module, name, timed_helper(name, getattr(module, name)))
+
+    def timed_run(command: list[str], timeout_s: float, **options: Any) -> subprocess.CompletedProcess[str]:
+        start = time.monotonic()
+        mark("installer starts")
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", **options)
+        out: list[str] = []
+        err: list[str] = []
+
+        def read_out() -> None:
+            for line in proc.stdout:
+                out.append(line)
+                step = re.search(r"step (\d)/\d", line)
+                if step:
+                    mark(f"installer step {step.group(1)} at {time.monotonic() - start:.1f}")
+
+        def read_err() -> None:
+            err.append(proc.stderr.read())
+
+        readers = [threading.Thread(target=read_out, daemon=True), threading.Thread(target=read_err, daemon=True)]
+        for reader in readers:
+            reader.start()
+        try:
+            proc.wait(timeout=scaled_time_bound(timeout_s))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            for reader in readers:
+                reader.join(5)
+            pytest.fail(f"did not finish in {scaled_time_bound(timeout_s):.0f} s; marks: {marks}; printed: {''.join(out)}{''.join(err)}")
+        for reader in readers:
+            reader.join(30)
+        mark(f"installer exits {proc.returncode} after {time.monotonic() - start:.1f}")
+        return subprocess.CompletedProcess(command, proc.returncode, stdout="".join(out), stderr="".join(err))
+
+    monkeypatch.setattr(module, "_run_installer", timed_run)
+    wall = time.strftime("%H:%M:%S")
+    yield
+    if not marks:
+        return
+    mark("test body done")
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "-")
+    warnings.warn(f"#572 timing {request.node.name} on {worker} from {wall}: " + "; ".join(marks), stacklevel=1)
