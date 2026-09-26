@@ -520,7 +520,13 @@ def start_session(server: Server, image: str, mode: str) -> dict:
     errored, started = server.call("debug_start_session", {"image_path": image, "mode": mode}, START_SESSION_TIMEOUT_S)
     assert started["ok"] is True, started
     assert started["mode"] == mode, started
-    assert started["summary"] == "Debug session started and target is halted.", started
+    summary = "Debug session started and target is halted."
+    if started.get("retried_connects"):
+        # An attach whose connect the debug server dropped connected again (#575).
+        assert mode == "attach", started
+        assert str(started["summary"]).startswith(f"{summary} The debug server dropped the first"), started
+    else:
+        assert started["summary"] == summary, started
     assert started["session"]["status"] == "halted", started["session"]
     assert started["session"]["firmware_load_status"] == "not_started", started["session"]
     assert started["quarantined"] is False, started
@@ -770,6 +776,43 @@ def test_a_board_the_watchdog_keeps_restarting_is_held_by_a_halt_restarted_by_a_
     assert first_cause != "iwdg", f"every boot after a reset from the debugger named the watchdog as its cause, {WATCHDOG_RACE_ATTEMPTS} times"
 
     flash_the_demo_over(server, port)
+    assert_quiet(server, port)
+
+
+def test_debug_session_attach_on_a_self_resetting_board_holds_it_halted_and_leaves_it_halted(bench: Bench, gdb: None, board_images: BoardImages, servers) -> None:
+    """A debug session over a board that restarts itself keeps it still, and so does its end.
+
+    Attaching halts the core, and the watchdog is frozen while the core is
+    halted under a debugger, so the boot lines stop for as long as the session
+    holds the board. The board's own reset can land while the debugger
+    connects, and the start connects again when it does (#575). The stop says
+    the target is confirmed halted and that the detach will not resume it; the
+    line is how that is checked, because a core resumed at the detach meets a
+    watchdog that is still running and the board starts printing boot lines
+    again.
+    """
+    require_debug_grants(bench)
+    image = put(board_images, "watchdog")
+    port = bench.com_port_name()
+    server = servers()
+    open_port(server, port)
+    settle_and_discard(server, port)
+
+    started = start_session(server, image, "attach")
+    assert started["session"]["load_phase"] == "target_connected", started["session"]
+    drain(server, port)
+    assert_quiet(server, port)
+
+    errored, status = server.call("debug_get_session_status")
+    assert status["ok"] is True, status
+    assert status["active"] is True, status
+    assert status["status"] == "halted", status
+
+    errored, halted = server.call("debug_halt")
+    assert str(halted["summary"]).startswith("Target was already stopped"), halted
+    assert halted.get("quarantined") is not True, halted
+
+    assert_session_stops_halted(server)
     assert_quiet(server, port)
 
 
