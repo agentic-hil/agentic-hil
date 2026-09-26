@@ -263,7 +263,8 @@ def test_a_run_declared_before_its_link_appeared_is_kept_off_a_port_held_under_t
     Declared while the board is unplugged, as above. The board arrives, and a
     second workspace naming the kernel node opens a session on it before the
     link appears. The run's session through the link is refused `device_busy`,
-    naming that workspace, and never reaches the open."""
+    naming that workspace, and never reaches the open. The refusal keeps
+    nothing either: once the run ends, its owner holds no device."""
     port = FakePort()
     install_fake_serial(monkeypatch, port)
     node, link = recorded_port(tmp_path)
@@ -284,6 +285,10 @@ def test_a_run_declared_before_its_link_appeared_is_kept_off_a_port_held_under_t
         assert refused.get("error_type") == "device_busy", refused
         assert refused["holder"]["owner_id"] == holder.coordinator.bench.owner.owner_id, refused
         assert port.opens == 1
+        # The refused call counted the run's own hold once more before it met
+        # the busy node; that count goes back with the refusal.
+        assert running.call("bench_run_stop")["ok"] is True
+        assert running.call("bench_run_status")["held_devices"] == []
     finally:
         holder.close()
         running.close()

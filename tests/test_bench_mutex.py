@@ -127,6 +127,28 @@ def test_acquire_is_all_or_nothing_over_the_declared_set() -> None:
         first.release_all()
 
 
+def test_a_refused_acquire_gives_back_a_device_its_owner_already_held() -> None:
+    """All or nothing covers a device the owner held before the call.
+
+    An acquire naming a device its owner already holds counts that hold once
+    more, and the matching release counts it down again. Refused on a later
+    device, the acquire has no release to come, so the count it added goes
+    back with the refusal; kept, it outlives every release the owner makes."""
+    other = "physical:bench-board-two"
+    first = BenchMutex(frontend="first")
+    second = BenchMutex(frontend="second")
+    first.acquire([other])
+    second.acquire([BOARD])
+    try:
+        with pytest.raises(DeviceBusyError):
+            second.acquire([BOARD, other])
+        second.release([BOARD])
+        assert second.held_resources() == frozenset()
+    finally:
+        second.release_all()
+        first.release_all()
+
+
 def test_waiting_happens_only_when_it_was_asked_for_and_stays_bounded() -> None:
     first = BenchMutex(frontend="first")
     second = BenchMutex(frontend="second")
