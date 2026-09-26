@@ -27,6 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import write_authoritative_config, write_config
+from result_text import text_document
 from support import scaled_time_bound
 from test_can_frame_and_routing import RecordingBus, fake_can_module
 from test_implicit_single_action_run import DEVICE, PORT_ID, FakeBackend, FakeSerialHandle, config_for
@@ -251,7 +252,9 @@ def test_tools_call_argument_shapes() -> None:
     assert refused["isError"] is True, refused
     assert refused["structuredContent"]["error_type"] == "invalid_argument", refused
     assert refused["structuredContent"]["tool"] == "bench_run_status", refused
-    assert json.loads(refused["content"][0]["text"]) == refused["structuredContent"], refused
+    # The text is the projection of the result. Nothing in this refusal is empty
+    # or a default, and no advice was sent before it, so here that is all of it.
+    assert text_document(refused) == refused["structuredContent"], refused
 
     unknown = numeric_name["result"]
     assert unknown["isError"] is True, unknown

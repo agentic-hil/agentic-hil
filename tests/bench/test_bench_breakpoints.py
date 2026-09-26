@@ -55,6 +55,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from result_text import assert_text_projects
 from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, Bench, child_command
@@ -202,7 +203,7 @@ class McpServer:
         assert isinstance(document, dict), f"{name} answered no structuredContent: {result}"
         content = result.get("content")
         assert isinstance(content, list) and content and content[0].get("type") == "text", f"{name} answered no content block: {result}"
-        assert json.loads(content[0]["text"]) == document, f"{name} answered two different documents in one result: {result}"
+        assert_text_projects(result)
         return bool(result.get("isError")), document
 
     def try_call(self, name: str, arguments: dict | None = None) -> dict | None:

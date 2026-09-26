@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import hashlib
+import inspect
 import json
 import os
 import posixpath
@@ -14,6 +16,7 @@ import sys
 import sysconfig
 import tempfile
 import time
+from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
@@ -90,7 +93,14 @@ from agentic_hil.config import (
     user_state_root,
 )
 from agentic_hil.gdbmi import intel_hex_record
-from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
+from agentic_hil.mcp import (
+    MCP_PROTOCOL_VERSION,
+    MCP_TOOL_NAMES,
+    MCP_TOOLS,
+    SERVER_INSTRUCTIONS,
+    UNPROVISIONED_SERVER_INSTRUCTIONS,
+    handle_mcp_message,
+)
 from agentic_hil.process import ProcessImage, spawn_managed_process, terminate_process_tree
 from agentic_hil.report import logs_directory
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
@@ -6129,6 +6139,94 @@ def test_register_agent_mcp_claude_writes_user_json(tmp_path: Path, monkeypatch:
     assert not (tmp_path / ".mcp.json").exists()
 
 
+def _mcp_config_writers() -> Mapping[str, object]:
+    """The one mapping `register_agent_mcp` takes its agents from and dispatches through (#565)."""
+    from agentic_hil import cli as cli_module
+
+    writers = getattr(cli_module, "MCP_CONFIG_WRITERS", None)
+    assert isinstance(writers, Mapping), "agentic_hil.cli has no MCP_CONFIG_WRITERS mapping: register_agent_mcp names its agents in a set literal and dispatches through an if-chain"
+    return writers
+
+
+def test_register_agent_mcp_writes_for_exactly_the_agents_of_the_clis_list() -> None:
+    """The agents with an MCP config writer are the CLI's agents, no more and no fewer (#565)."""
+    from agentic_hil import cli as cli_module
+
+    writers = _mcp_config_writers()
+    agents = cli_module.supported_skill_agents()
+    problems = [f"MCP_CONFIG_WRITERS in cli.py has no writer for {agent!r}, an agent in the CLI's list" for agent in agents if agent not in writers]
+    problems += [f"MCP_CONFIG_WRITERS in cli.py has a writer for {agent!r}, which is no agent in the CLI's list" for agent in writers if agent not in agents]
+    assert not problems, "\n".join(problems)
+
+
+def _agent_mcp_config_path_agents() -> list[str]:
+    """The agents `_agent_mcp_config_path` has a path for, read from the table it keeps (#565)."""
+    from agentic_hil import cli as cli_module
+
+    tables = [node for node in ast.walk(ast.parse(inspect.getsource(cli_module._agent_mcp_config_path))) if isinstance(node, ast.Dict)]
+    assert len(tables) == 1, f"_agent_mcp_config_path in cli.py keeps {len(tables)} tables, not one table of paths by agent"
+    keys = tables[0].keys
+    assert all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in keys), "_agent_mcp_config_path in cli.py keys its table by something other than agent names written out"
+    return [key.value for key in keys]
+
+
+def test_agent_mcp_config_path_has_a_path_for_exactly_the_agents_of_the_clis_list() -> None:
+    """The MCP config path `register_agent_mcp` takes its lock on is kept in a second table by agent, held to the CLI's list the same way (#565)."""
+    from agentic_hil import cli as cli_module
+
+    paths = _agent_mcp_config_path_agents()
+    agents = cli_module.supported_skill_agents()
+    problems = [f"_agent_mcp_config_path in cli.py has no path for {agent!r}, an agent in the CLI's list" for agent in agents if agent not in paths]
+    problems += [f"_agent_mcp_config_path in cli.py has a path for {agent!r}, which is no agent in the CLI's list" for agent in paths if agent not in agents]
+    assert not problems, "\n".join(problems)
+
+
+def test_register_agent_mcp_checks_and_dispatches_through_the_one_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mapping is both the check and the dispatch, not a third copy beside them (#565).
+
+    A writer put into it is the one called, with the launcher and the force
+    flag; an agent taken out of it is refused as an agent without an MCP config
+    format, before anything is written.
+    """
+    from agentic_hil import cli as cli_module
+
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    trusted = _trusted_test_mcp_command(monkeypatch)
+    writers = _mcp_config_writers()
+    calls = []
+
+    def recorded(command: str, force: bool) -> dict:
+        calls.append((command, force))
+        return {"ok": True, "summary": "recorded"}
+
+    monkeypatch.setattr(cli_module, "MCP_CONFIG_WRITERS", {**writers, "codex": recorded})
+    assert register_agent_mcp("codex", force=True) == {"ok": True, "summary": "recorded"}
+    assert calls == [(trusted, True)]
+    assert not (home / ".codex" / "config.toml").exists()
+
+    monkeypatch.setattr(cli_module, "MCP_CONFIG_WRITERS", {agent: writer for agent, writer in writers.items() if agent != "opencode"})
+    refused = register_agent_mcp("opencode")
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "unsupported_agent", refused
+    assert refused["agent"] == "opencode", refused
+    assert not (home / ".config" / "opencode" / "opencode.json").exists()
+
+
+def test_register_agent_mcp_refuses_an_agent_it_does_not_know_as_it_always_has() -> None:
+    """The refusal reads as it did before the mapping (#565): the same fields and words, the name as normalized."""
+    from agentic_hil import cli as cli_module
+
+    for requested in ("not-an-agent", " Not_An_Agent "):
+        assert register_agent_mcp(requested) == {
+            "ok": False,
+            "error_type": "unsupported_agent",
+            "summary": "Agentic HIL does not know this agent's MCP config format.",
+            "agent": "not-an-agent",
+            "allowed_agents": cli_module.supported_skill_agents(),
+        }
+
+
 HOST_GUIDE = Path(__file__).resolve().parents[1] / "docs" / "mcp-hosts.md"
 HOST_GUIDE_COMMAND = "/absolute/path/to/persistent/agentic-hil"
 HOST_GUIDE_CWD = "/absolute/path/to/firmware-project"
@@ -8334,7 +8432,10 @@ def test_initialize_carries_the_one_thing_said_before_the_agent_decides(tmp_path
 
     Measured: a small model ran st-flash before calling a single tool here, so
     nothing this server says at call time could have reached it. initialize is
-    the only moment that precedes the decision.
+    the only moment that precedes the decision. It is also what an agent host
+    puts into the system prompt of every request of every session this server
+    is registered in, so it carries what has to precede that decision, in
+    1,800 characters at most.
     """
     # In tmp_path rather than the working directory: this wrote a configuration
     # into the clone, which is one fixed path two concurrent runs of this module
@@ -8345,12 +8446,125 @@ def test_initialize_carries_the_one_thing_said_before_the_agent_decides(tmp_path
     )
     instructions = response["result"]["instructions"]
 
-    for raw in ("openocd", "pyocd", "st-flash", "candump", "Makefile", "/dev/tty*"):
+    for raw in ("openocd", "pyocd", "st-flash", "st-info", "st-util", "JLinkExe", "gdb", "screen", "minicom", "picocom", "cansend", "candump", "Makefile", "/dev/tty*", "COM*", "SocketCAN"):
         assert raw in instructions, raw
     assert "permission_denied" in instructions
     assert "before reaching for a shell" in instructions
     # The observed worst case: a model that granted itself the permission.
     assert "Never edit the authoritative configuration" in instructions
+    assert len(instructions) <= 1800, len(instructions)
+
+
+def test_the_instructions_say_what_precedes_the_first_call_in_that_order(tmp_path: Path) -> None:
+    """Seven things, each read between its own name and the next one's.
+
+    Where every request that touches the board goes, what never stands in for
+    it, what a refusal means, how the configuration changes, which calls make a
+    bench cycle short, how to read a result that leaves its defaults out, and
+    where the facts about this server are published. Each part is found by the
+    name it cannot be said without, so a sentence that drifted into another
+    part's place, or a part that went missing, fails here by its name.
+    """
+    tools = AgenticHILToolService(load_config(str(write_config(tmp_path / "workspace"))))
+    try:
+        response = handle_mcp_message(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": MCP_PROTOCOL_VERSION}},
+            tools,
+        )
+    finally:
+        tools.close()
+    instructions = str(response["result"]["instructions"])
+
+    starts = {part: instructions.find(name) for part, name in (("b", "openocd"), ("c", "permission_denied"), ("d", "project_config_describe"), ("e", "flash_firmware"), ("f", "side_effect_status"), ("g", "resources/list"))}
+    assert -1 not in starts.values(), starts
+    assert list(starts.values()) == sorted(starts.values()), starts
+    bounds = [0, *starts.values(), len(instructions)]
+    part = dict(zip("abcdefg", (instructions[start:end] for start, end in zip(bounds[:-1], bounds[1:], strict=True)), strict=True))
+
+    def says_in_order(text: str, *anchors: str) -> None:
+        at = 0
+        for anchor in anchors:
+            found = text.find(anchor, at)
+            assert found >= 0, f"{anchor!r} does not follow {text[:at][-60:]!r} in {text!r}"
+            at = found + len(anchor)
+
+    # a. Every request that touches the board is answered through these tools.
+    for touches in ("flashing", "resetting", "probing", "debugging", "UART or CAN traffic", "firmware artifacts", "test reports"):
+        assert touches in part["a"], touches
+    assert "before reaching for a shell" in part["a"]
+    # b. What never stands in for them, and why.
+    for raw in ("openocd", "pyocd", "st-flash", "st-info", "st-util", "JLinkExe", "gdb", "screen", "minicom", "picocom", "cansend", "candump", "Makefile", "/dev/tty*", "COM*", "SocketCAN"):
+        assert raw in part["b"], raw
+    says_in_order(part["b"], "bypass the policy", "audit")
+    # c. A refusal is the answer, and the file that grants is the operator's.
+    says_in_order(part["c"], "permission_denied", "report", "stop", "Never edit the authoritative configuration", "operator", "another way")
+    # d. The configuration changes through two calls and through nothing else.
+    says_in_order(part["d"], "project_config_describe", "project_config_set", "own file tools")
+    # e. The calls that make a bench cycle one round trip, each with its argument.
+    says_in_order(part["e"], "flash_firmware", "reset_after_flash", "capture", "UART output", "one call", "com_read", "until", "can_read", "until_id", "poll", "bench_run_start", "bench_run_stop", "test_reactor_run")
+    # f. What a field left out means, and where advice already given is read again.
+    says_in_order(part["f"], "side_effect_status", "not_started", "cleanup_required", "quarantined", "false", "audit_ok", "cleanup_ok", "target_ok", "true", "hardware_state", "unchanged", "already received", "advice_uri")
+    # g. Where the facts about this server are, and what they stand in for.
+    says_in_order(part["g"], "resources/list", "agentic-hil://reference/", "source", "installed package")
+
+
+def test_every_name_the_instructions_give_is_one_the_server_has() -> None:
+    """The instructions are read before any schema, so their names are called as written.
+
+    They name tools and arguments in plain words. A tool or an argument renamed
+    later would leave them sending every session to one that no longer exists,
+    and nothing else would notice: the schemas are right, only the text is old.
+    """
+    schemas = {str(tool["name"]): set(tool["inputSchema"].get("properties", {})) for tool in MCP_TOOLS}
+    arguments = set().union(*schemas.values())
+    # Named to be read in a result, not to be called.
+    result_words = {"permission_denied", "side_effect_status", "not_started", "side_effect_committed", "cleanup_required", "audit_ok", "cleanup_ok", "target_ok", "hardware_state", "advice_uri"}
+
+    for text in (SERVER_INSTRUCTIONS, UNPROVISIONED_SERVER_INSTRUCTIONS):
+        for word in re.findall(r"\b[a-z]+(?:_[a-z]+)+\b", text):
+            assert word in schemas or word in arguments or word in result_words, word
+    # One-word arguments the pattern above cannot tell from prose.
+    for tool, argument in (("flash_firmware", "reset_after_flash"), ("flash_firmware", "capture"), ("com_read", "until"), ("can_read", "until_id")):
+        assert argument in schemas[tool], (tool, argument)
+
+
+def test_the_instructions_leave_each_situation_to_the_result_that_meets_it(tmp_path: Path) -> None:
+    """A stale file, a missing one and a refused widening each arrive with a result.
+
+    That result carries the catalogue entry for it at the moment it applies.
+    Said at initialize as well, each is paid for in every request of every
+    session, including all the sessions that never meet it.
+    """
+    tools = AgenticHILToolService(load_config(str(write_config(tmp_path / "workspace"))))
+    try:
+        response = handle_mcp_message(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": MCP_PROTOCOL_VERSION}},
+            tools,
+        )
+    finally:
+        tools.close()
+    instructions = str(response["result"]["instructions"])
+
+    for situation in ("config_stale", "config_file_not_found", "permission_widening_denied"):
+        assert situation not in instructions, situation
+
+
+def test_what_left_the_instructions_is_still_read_before_the_call_it_is_about() -> None:
+    """Three paragraphs initialize no longer carries, where a caller now meets them.
+
+    Each was dropped because the tool it is about says it in the description
+    every host lists before the first call. Pinned by the names a rewording of
+    those descriptions cannot do without, and nothing more.
+    """
+    described = {str(tool["name"]): str(tool["description"]) for tool in MCP_TOOLS}
+
+    # A configuration written before the board was attached holds placeholders.
+    assert "placeholder" in described["project_config_adopt_hardware"]
+    # A sequence of calls holds its devices only while it is declared.
+    assert "bench_run_stop" in described["bench_run_start"]
+    # A plan can run detached, and two further calls read and end it.
+    for name in ("detach", "test_reactor_status", "test_reactor_stop"):
+        assert name in described["test_reactor_run"], name
 
 
 def test_a_refusal_says_what_to_do_and_what_not_to_do() -> None:
@@ -10524,6 +10738,88 @@ def test_the_recorded_help_of_each_flash_tool_puts_the_address_where_the_backend
     assert "-a, --base-address ADDR" in load_options, load_options
     assert "Only allowed if a\n                        single binary file is being loaded." in load_options, load_options
     assert "--no-reset" in load_options
+
+
+# The format pyOCD is told to read an image as (#580). Validation compares an
+# extension without case, so `FIRMWARE.ELF` is an allowed ELF, while `pyocd
+# flash` given no format takes the extension as written and knows only the
+# lower-case `axf`, `bin`, `elf` and `hex` (pyocd 0.45.1,
+# `flash/file_programmer.py` lines 94 and 145): an image that passed every
+# check here stopped there with `unknown file format 'ELF'`.
+PYOCD_FORMAT_ROWS = [
+    ("firmware.elf", "elf"),
+    ("FIRMWARE.ELF", "elf"),
+    ("firmware.axf", "elf"),
+    ("FIRMWARE.HEX", "hex"),
+    ("FIRMWARE.BIN", "bin"),
+]
+
+
+def _pyocd_bench_allowing(tmp_path: Path, extensions: list[str]) -> AgenticHILToolService:
+    """A pyocd bench whose `artifacts.allowed_extensions` is `extensions`, with a flash address for a raw image."""
+    config_path = write_config(tmp_path, debugger_type="pyocd", probe_id="PYOCD123", target_type="stm32f446re", flash_address="0x08000000")
+    written = 'allowed_extensions: [".elf", ".hex", ".bin"]'
+    text = config_path.read_text(encoding="utf-8")
+    assert written in text, text
+    config_path.write_text(text.replace(written, f"allowed_extensions: {json.dumps(extensions)}"), encoding="utf-8")
+    return AgenticHILToolService(load_config(str(config_path)))
+
+
+def _firmware_named(tmp_path: Path, name: str) -> None:
+    """An image at `build/<name>` whose bytes pass the check its extension asks for."""
+    firmware = tmp_path / "build" / name
+    firmware.parent.mkdir(parents=True)
+    suffix = firmware.suffix.lower()
+    if suffix == ".hex":
+        records = [intel_hex_record(0, 0x04, bytes([0x08, 0x00])), intel_hex_record(0, 0x00, b"\x01\x02\x03\x04"), ":00000001FF"]
+        firmware.write_text("\n".join(records) + "\n", encoding="ascii")
+    elif suffix in {".elf", ".axf"}:
+        firmware.write_bytes(b"\x7fELFfake")
+    else:
+        firmware.write_bytes(b"\x01\x02\x03\x04")
+
+
+@pytest.mark.parametrize(("name", "flash_format"), PYOCD_FORMAT_ROWS)
+def test_a_pyocd_flash_names_the_format_whatever_the_case_of_the_extension(tmp_path: Path, name: str, flash_format: str) -> None:
+    """The format goes to pyOCD with `--format`, so the case of an extension no longer decides whether a flash runs, and an `.axf` stays an ELF."""
+    _firmware_named(tmp_path, name)
+    service = _pyocd_bench_allowing(tmp_path, [".elf", ".axf", ".hex", ".bin"])
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": f"build/{name}"})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    arguments = _logged_arguments(tmp_path, result)
+    subcommand = arguments.index("flash")
+    at = arguments.index("--format")
+    assert subcommand < at < len(arguments) - 2, "the format option stands after the subcommand and before the file, which is the last argument"
+    assert arguments[at + 1] == flash_format, arguments
+    assert arguments.count("--format") == 1, arguments
+    assert Path(arguments[-1]).name == name, arguments
+
+
+def test_a_pyocd_flash_refuses_an_extension_that_names_no_pyocd_format_before_pyocd_runs(tmp_path: Path) -> None:
+    """An extension the configuration allows and pyOCD cannot read is refused here, by name, and pyOCD is never started."""
+    _firmware_named(tmp_path, "firmware.srec")
+    service = _pyocd_bench_allowing(tmp_path, [".elf", ".hex", ".bin", ".srec"])
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.srec"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "invalid_argument", result
+    assert "'.srec'" in result["summary"], result
+    assert "log_path" not in result, result
+
+
+def test_every_format_a_pyocd_flash_names_is_one_the_recorded_help_offers() -> None:
+    """`pyocd flash --format` takes `bin`, `hex` or `elf`, as recorded; the rows above name nothing else."""
+    recorded = json.loads(FLASH_TOOL_HELP_RECORDINGS.read_text(encoding="utf-8"))
+    usage = recorded["tools"]["pyocd"]["help"].replace("\r\n", "\n").split("\n\n", 1)[0]
+    assert "[--format {bin,hex,elf}]" in usage, usage
+    assert {flash_format for _, flash_format in PYOCD_FORMAT_ROWS} == {"bin", "hex", "elf"}
 
 
 # What each backend puts on the wire for each mode it supports, which is the

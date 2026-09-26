@@ -23,8 +23,12 @@ bound it in both directions: it brings the scheduler and nothing else, so a bare
 `pytest-xdist` a plugin the checkout cannot run without, which is why the pins
 also read the declaration it depends on.
 
-Two suites started at once on one machine can still meet in the table. That is
-outside what a scheduler can promise and stays what it is.
+Two suites started at once on one machine meet in the table all the same: from
+two clones, two worktrees or one checkout run twice, each with a scheduler that
+has never heard of the other (#567). So every party also holds one lock that
+every run of the suite on the machine takes, for as long as its process lives
+and its scan runs. The pins below read the lock off the parties the way they
+read the group, and show the collision it prevents between two real sessions.
 """
 
 from __future__ import annotations
@@ -33,11 +37,18 @@ import inspect
 import os
 import re
 import shlex
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+import support
 from support import scaled_time_bound
 
 from tests import test_install_scripts as install_scripts
@@ -68,13 +79,27 @@ GROUP_CONSTANT = "STEP_FIVE_PROCESS_TABLE_GROUP"
 SHARED_GROUP = getattr(install_scripts, GROUP_CONSTANT, "install-step-five-process-table")
 
 # What makes a test a party to the shared table, read off the test's own source
-# rather than off a list somebody has to remember to extend. The first two are
+# rather than off a list somebody has to remember to extend. The first three are
 # the helpers that put an agent shaped process into the table: the interpreter
-# wearing npm's shape, and the child that lingers while the installer runs. The
-# third is the sentence step 5 prints when it found none, which is the assertion
-# a stranger's planted process turns red.
-PLANTING_HELPERS = ("_a_node_shaped_interpreter", "_a_process_that_lingers")
+# wearing npm's shape, the child that lingers while the installer runs, and the
+# process in the shape a recording found the CLI in. The fourth is the sentence
+# step 5 prints when it found none, which is the assertion a stranger's planted
+# process turns red.
+PLANTING_HELPERS = ("_a_node_shaped_interpreter", "_a_process_that_lingers", "_an_agent_cli_as_recorded")
 ABSENCE_SENTENCE = "no agent CLI of yours is running"
+# How a party takes the lock that keeps two sessions on one machine apart
+# (#567). Like GROUP_CONSTANT, these names are the shape the pins prescribe
+# beyond what the issue decided: a fixture each party asks for by name on the
+# test function itself, which holds `support.hold_the_process_table` on the one
+# path `support.PROCESS_TABLE_LOCK` names. Read through `getattr`, so a tree
+# without them fails on assertions that say so rather than on an import.
+LOCK_FIXTURE = "process_table_lock"
+LOCK_PATH = "PROCESS_TABLE_LOCK"
+LOCK_HELPER = "hold_the_process_table"
+# The install module's test that plants `opencode` in its recorded shape and
+# asks step 5's matcher for it, on either platform: what each of the two
+# sessions below runs.
+MEETING_PARTY = "test_step_five_names_the_agent_cli_this_test_started_in_the_real_process_table"
 
 WINDOWS_ONLY = pytest.mark.skipif(
     os.name != "nt",
@@ -91,6 +116,11 @@ NESTED_RUN_TIMEOUT_S = 900
 # The other nested run collects and runs one configuration pin, so it is a
 # session startup and nothing else.
 QUICK_NESTED_RUN_TIMEOUT_S = 300
+# The two sessions that meet each collect the install module and run one test,
+# which asks one Windows PowerShell or one `sh` for one PID and waits for the
+# other session at most twice. Kept apart, the second also waits for the first
+# to finish.
+MEETING_RUN_TIMEOUT_S = 300
 # A comment, in every file the caller scan reads: YAML, Python and the
 # Dockerfile all start one with `#`. Stripped before the scan looks for an
 # option, because a file that explains beside the option why it is not passed
@@ -162,6 +192,24 @@ def _group_names(function: object) -> list[str]:
         else:
             names.append(None)
     return names
+
+
+def _grouped_here() -> dict[str, object]:
+    """The tests of this module that carry the group, because the sessions they start plant into the table."""
+    return {
+        name: value
+        for name, value in globals().items()
+        if name.startswith("test_") and callable(value) and _group_names(value)
+    }
+
+
+def _takes_the_lock(function: object) -> bool:
+    """Whether a test asks for the lock's fixture itself, as a parameter or through `usefixtures` on the function."""
+    if LOCK_FIXTURE in inspect.signature(function).parameters:
+        return True
+    return any(
+        mark.name == "usefixtures" and LOCK_FIXTURE in mark.args for mark in getattr(function, "pytestmark", [])
+    )
 
 
 def _declared_group() -> str:
@@ -263,6 +311,27 @@ def test_no_other_test_in_the_install_module_is_pinned_to_that_worker() -> None:
     assert not strays, (
         "these tests carry an xdist_group mark but neither plant nor assert on an agent shaped process: "
         + ", ".join(strays)
+    )
+
+
+def test_every_party_to_the_process_table_holds_the_machine_wide_lock() -> None:
+    """The group keeps one session's parties apart, and the lock keeps two sessions' apart (#567).
+
+    `--dist loadgroup` schedules inside one session. A second session on the
+    same machine has a scheduler of its own that has never heard of the first,
+    and both read one process table. So every party holds one lock that every
+    session on the machine takes: the planters and the absence check, found the
+    way the pin above finds them, and the tests of this module whose nested
+    sessions plant the same processes.
+    """
+    here = _grouped_here()
+    assert "test_two_workers_run_the_whole_group_on_one_of_them" in here, sorted(here)
+    parties = {f"{INSTALL_MODULE_PATH}::{name}": function for name, function in _parties_to_the_process_table().items()}
+    parties.update({f"{THIS_MODULE_PATH}::{name}": function for name, function in here.items()})
+    unlocked = sorted(node_id for node_id, function in parties.items() if not _takes_the_lock(function))
+    assert not unlocked, (
+        "these tests share the machine's process table with every other run of the suite on it, and must ask for "
+        f"the `{LOCK_FIXTURE}` fixture on the test function itself: " + ", ".join(unlocked)
     )
 
 
@@ -382,6 +451,35 @@ def test_the_document_that_says_how_to_run_the_suite_says_where_the_scheduler_co
     )
 
 
+def test_the_document_that_says_how_to_run_the_suite_says_how_two_runs_share_the_process_table() -> None:
+    """CONTRIBUTING.md names the lock beside the group it completes (#567).
+
+    A second run on the machine now waits for the first run's step 5 tests,
+    and one that waits out its bound fails naming a process that is not its
+    own. Without the paragraph a contributor reads the first as a hang and the
+    second as a stranger's bug. So the paragraph that names the fixture a party
+    asks for also names the file every run takes, says that a second run
+    waits and then fails naming the PID holding it, and says the file belongs
+    to one account.
+    """
+    if not CONTRIBUTING.is_file():
+        pytest.skip("CONTRIBUTING.md is repository content and does not ship in a source distribution")
+    lock = getattr(support, LOCK_PATH, None)
+    assert isinstance(lock, Path), f"tests/support.py declares no {LOCK_PATH} ({lock!r}), so there is no file to document"
+    where = f"~/{lock.relative_to(support.REAL_HOME).as_posix()}"
+    text = CONTRIBUTING.read_text(encoding="utf-8")
+    paragraphs = [block for block in text.split("\n\n") if f"`{LOCK_FIXTURE}`" in block]
+    assert paragraphs, f"CONTRIBUTING.md never names the `{LOCK_FIXTURE}` fixture a party to the process table asks for"
+    facts = {
+        "the file every run takes": where,
+        "that a second run waits": "waits",
+        "that a run that waited out the bound fails naming the holder's PID": "PID",
+        "that the file belongs to one account": "account",
+    }
+    unsaid = [fact for fact, needle in facts.items() if not any(needle in block for block in paragraphs)]
+    assert not unsaid, f"the paragraph naming `{LOCK_FIXTURE}` does not say {', '.join(unsaid)}:\n" + "\n\n".join(paragraphs)
+
+
 def test_step_fives_scan_still_reads_the_whole_process_table() -> None:
     """The installer is not the thing that changes, and this is why.
 
@@ -401,6 +499,251 @@ def test_step_fives_scan_still_reads_the_whole_process_table() -> None:
         assert narrowing not in body, f"step 5's scan narrowed itself to {narrowing}, so a real agent CLI can hide from it"
 
 
+# Another run of the suite on this machine, as far as the lock can tell: a
+# process of its own that takes the lock at the path it is given, says the PID
+# it holds it with, and keeps it until its stdin closes. Its own PID rather
+# than the one `Popen` returns, because a virtual environment's python.exe on
+# Windows is a launcher, and it is the interpreter it starts that holds the lock.
+_HOLDER = """
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+import support
+
+with support.hold_the_process_table(sys.argv[3], wait_s=60, path=Path(sys.argv[2])):
+    support.publish_atomically(sys.argv[4], str(os.getpid()))
+    sys.stdin.read()
+"""
+
+
+def _the_lock_helper() -> Callable[..., object]:
+    helper = getattr(support, LOCK_HELPER, None)
+    assert callable(helper), (
+        f"tests/support.py offers no {LOCK_HELPER} ({helper!r}), so nothing keeps two runs of the suite on this "
+        "machine out of each other's process table"
+    )
+    return helper
+
+
+def _a_session_holding_the_table(tmp_path: Path, lock: Path, holder: str) -> tuple[subprocess.Popen[str], int]:
+    """A process of its own holding the lock at `lock` for `holder`, and the PID it holds it with."""
+    held = tmp_path / "held"
+    started = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER, str(Path(support.__file__).resolve().parent), str(lock), holder, str(held)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + scaled_time_bound(60)
+    while not support.published(held) and started.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if not support.published(held):
+        started.kill()
+        _, said = started.communicate(timeout=scaled_time_bound(60))
+        raise AssertionError(f"the process meant to hold {lock} for {holder} never said it did:\n{said}")
+    return started, int(support.read_when_published(held))
+
+
+def test_the_process_table_lock_is_one_path_for_every_session_on_the_machine(tmp_path: Path) -> None:
+    """Every run of the suite on the machine meets at one lock, named once when support is imported (#567).
+
+    Any clone, any worker, any session: so the path comes from nothing a
+    checkout, a worker or a test's sandbox decides. It is read the way
+    `support.REAL_HOME` is read, at import, before any test has moved the home
+    it lies under, and a session started from another clone as another worker
+    arrives at the same file. It lies beside the suite's other machine-wide
+    lock, the one `tools/run_lock.py` keeps in `~/.agentic-hil`.
+    """
+    lock = getattr(support, LOCK_PATH, None)
+    assert isinstance(lock, Path), (
+        f"tests/support.py declares no {LOCK_PATH} ({lock!r}), so the runs of the suite on this machine have no "
+        "one lock to meet at"
+    )
+    assert lock.is_absolute(), lock
+    assert lock.is_relative_to(support.REAL_HOME), f"{lock} is not under the home support read at import, {support.REAL_HOME}"
+    assert lock == support.REAL_HOME / ".agentic-hil" / "pytest-process-table.lock", (
+        f"{lock} is not ~/.agentic-hil/pytest-process-table.lock, beside the lock tools/run_lock.py keeps there"
+    )
+    for own in (Path(os.path.expanduser("~")), Path(tempfile.gettempdir()), tmp_path, REPOSITORY_ROOT):
+        assert not lock.is_relative_to(own), f"{lock} lies under {own}, which belongs to this test or this checkout alone"
+    another_clone = tmp_path / "another-clone" / "tests"
+    another_clone.mkdir(parents=True)
+    shutil.copy2(support.__file__, another_clone / "support.py")
+    elsewhere = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import sys; sys.path.insert(0, sys.argv[1]); import support; print(support.{LOCK_PATH})",
+            str(another_clone),
+        ],
+        cwd=another_clone,
+        env={
+            **os.environ,
+            "HOME": str(support.REAL_HOME),
+            "USERPROFILE": str(support.REAL_HOME),
+            "PYTEST_XDIST_WORKER": "gw7",
+            "PYTHONIOENCODING": "utf-8",
+        },
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=scaled_time_bound(60),
+        check=False,
+    )
+    assert elsewhere.returncode == 0, elsewhere.stderr
+    assert elsewhere.stdout.strip() == str(lock), (
+        f"a session started from another clone as another worker names {elsewhere.stdout.strip()}, and this one {lock}"
+    )
+
+
+def test_a_session_that_cannot_get_the_process_table_names_the_one_holding_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A party that waited out its bound fails saying who holds the table (#567).
+
+    Two runs on one machine now wait for each other, and a wait can end
+    without the table: the other run is stuck, or simply long. A bare timeout
+    at that point sends the reader after the wrong run, so the failure names
+    the PID holding the lock and the test or run it holds it for. The bound is
+    a base figure widened by the runner's one time scale, like every other
+    wall-clock bound in the suite.
+
+    The lock lies in a directory nobody has made yet, as `~/.agentic-hil` is on
+    a machine that has never run the product or the Linux runner, so the first
+    run to take it makes the directory.
+    """
+    hold = _the_lock_helper()
+    lock = tmp_path / "home" / ".agentic-hil" / "process-table.lock"
+    alice = "tests/test_install_scripts.py::test_alice_holds_the_table"
+    holder, holder_pid = _a_session_holding_the_table(tmp_path, lock, alice)
+    monkeypatch.setenv(support.TIME_SCALE_VARIABLE, "4")
+    try:
+        began = time.monotonic()
+        with pytest.raises((AssertionError, pytest.fail.Exception)) as refused, hold(
+            "tests/test_install_scripts.py::test_bob_waits_for_it", wait_s=0.5, path=lock
+        ):
+            pass
+        waited = time.monotonic() - began
+    finally:
+        holder.communicate(timeout=scaled_time_bound(60))
+    said = str(refused.value)
+    assert waited >= 1.9, f"the wait for the table ended after {waited:.2f}s, and 0.5s widened by a time scale of 4 is 2s"
+    assert str(holder_pid) in said and alice in said, (
+        f"a run that could not get the table was told {said!r}, which does not name its holder, PID {holder_pid} for {alice}"
+    )
+
+
+def test_the_process_table_is_free_again_as_soon_as_its_holder_is_gone(tmp_path: Path) -> None:
+    """A run that dies holding the lock does not hold it any more.
+
+    A run ended in the middle of a party, by Ctrl-C, a runner's timeout or a
+    crash, never reaches the line that lets go, and every run on the machine
+    after it would wait out its bound and fail naming a process that no longer
+    exists. So what lets go is the operating system, when the holder's process
+    ends, and the next run takes the table then.
+    """
+    hold = _the_lock_helper()
+    lock = tmp_path / "process-table.lock"
+    holder, holder_pid = _a_session_holding_the_table(tmp_path, lock, "tests/test_install_scripts.py::test_alice_holds_the_table")
+    # Ended from outside, the way a crash ends it: nothing in the holder runs after this.
+    ending = threading.Timer(1.0, os.kill, (holder_pid, getattr(signal, "SIGKILL", signal.SIGTERM)))
+    try:
+        began = time.monotonic()
+        ending.start()
+        with hold("tests/test_install_scripts.py::test_bob_waits_for_it", wait_s=30, path=lock):
+            waited = time.monotonic() - began
+    finally:
+        ending.cancel()
+        ending.join()
+        holder.communicate(timeout=scaled_time_bound(60))
+    assert waited >= 0.9, f"the table was taken {waited:.2f}s in, while the process holding it was still running"
+    assert waited < scaled_time_bound(20), f"the table was taken {waited:.1f}s in, long after the process holding it was gone"
+
+
+@pytest.mark.xdist_group(SHARED_GROUP)
+@pytest.mark.usefixtures(LOCK_FIXTURE)
+def test_two_sessions_on_one_machine_never_read_each_others_agent_cli(tmp_path: Path) -> None:
+    """The collision the group cannot prevent, read off two real sessions started at the same moment (#567).
+
+    Each session runs the install module's test that plants `opencode` in the
+    shape its recording found it in and asks step 5's matcher for it in the
+    real process table, and the two meet through a directory both write into
+    (see `PROCESS_TABLE_MEETING` there): a session that has planted waits for
+    the other one to plant before it asks, and keeps its stand-in until the
+    other one has asked. Each session has a scheduler of its own and neither
+    has heard of the other, so unless the lock keeps them apart both stand-ins
+    are in the table for both questions, and the matcher names one of them for
+    both.
+
+    This test is a party itself: the sessions it starts plant into the table
+    every run on the machine shares, so it carries the group and takes the
+    lock. They inherit this test's sandbox, and the lock they meet at lies
+    under its home, not where this test holds its own.
+    """
+    install_scripts._skip_where_no_stand_in_can_be_planted()
+    meeting = tmp_path / "meeting"
+    meeting.mkdir()
+    environment = {**os.environ, install_scripts.PROCESS_TABLE_MEETING: str(meeting)}
+    # Short names, because on Windows each session's stand-in lies under its
+    # basetemp at the depth npm's prefix gives it, and MAX_PATH counts all of it.
+    transcripts = [tmp_path / f"s{number}.txt" for number in (1, 2)]
+    sessions: list[subprocess.Popen[bytes]] = []
+    try:
+        for number, transcript in enumerate(transcripts, start=1):
+            with transcript.open("wb") as output:
+                sessions.append(
+                    subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-m",
+                            "pytest",
+                            f"{INSTALL_MODULE_PATH}::{MEETING_PARTY}",
+                            "-q",
+                            "-p",
+                            "no:cacheprovider",
+                            f"--basetemp={tmp_path / f's{number}'}",
+                        ],
+                        cwd=REPOSITORY_ROOT,
+                        env=environment,
+                        stdout=output,
+                        stderr=subprocess.STDOUT,
+                    )
+                )
+        for session in sessions:
+            session.wait(timeout=scaled_time_bound(MEETING_RUN_TIMEOUT_S))
+    finally:
+        for session in sessions:
+            if session.poll() is None:
+                session.kill()
+                session.wait(timeout=scaled_time_bound(60))
+    said = "\n".join(
+        f"--- session {number} ---\n{transcript.read_text(encoding='utf-8', errors='replace')}"
+        for number, transcript in enumerate(transcripts, start=1)
+    )
+    planted = install_scripts._meeting_marks(meeting, "planted")
+    asked = install_scripts._meeting_marks(meeting, "asked")
+    assert len(planted) == 2, f"two sessions were started and {len(planted)} of them planted a stand-in:\n{said}"
+    stand_ins = {session: marks["stand_in"] for session, marks in planted.items()}
+    crossed = sorted(
+        (stand_ins[session], answer["named"])
+        for session, answer in asked.items()
+        if answer["named"].isdigit() and int(answer["named"]) in set(stand_ins.values()) - {stand_ins[session]}
+    )
+    assert not crossed, "two sessions on one machine read each other's agent CLI: " + "; ".join(
+        f"the session that planted {mine} was told step 5 found {theirs}, which the other session planted"
+        for mine, theirs in crossed
+    )
+    assert [session.returncode for session in sessions] == [0, 0], said
+    apart = [mine for mine, marks in planted.items() if set(planted) - {mine} <= set(marks["gone_before_it_started"])]
+    assert apart, (
+        "both stand-ins were in the table at the same time, so nothing kept the two sessions apart and their answers "
+        f"were right by luck: {planted}\n{said}"
+    )
+
+
 def _without_group_suffix(reported: str) -> str:
     """The node id as it was asked for, with the group pytest-xdist appends taken off.
 
@@ -418,6 +761,7 @@ def _without_group_suffix(reported: str) -> str:
 
 @WINDOWS_ONLY
 @pytest.mark.xdist_group(SHARED_GROUP)
+@pytest.mark.usefixtures(LOCK_FIXTURE)
 def test_two_workers_run_the_whole_group_on_one_of_them() -> None:
     """The acceptance: the marks and the scheduler together, read off a real run.
 

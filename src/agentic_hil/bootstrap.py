@@ -245,6 +245,7 @@ def _usb_enumeration(available: JsonObject, timeout_s: float) -> JsonObject:
             executable=openocd,
             backend=BOOTSTRAP_FALLBACK_BACKEND,
             tools_searched=tools,
+            **({"backend_error": available["backend_error"]} if available.get("backend_error") else {}),
         )
     probe_ids = usb_stlink_probe_ids(available)
     return {

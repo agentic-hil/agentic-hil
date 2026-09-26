@@ -371,6 +371,7 @@ def test_reset_halt_policy_settles_a_failed_load_without_running_the_partial_ima
 def test_attach_target_connect_timeout_retains_quarantined_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = debug_service(tmp_path, fake_gdb_behavior="target_select_timeout")
     monkeypatch.setattr("agentic_hil.backends.gdbdebug.GDB_COMMAND_TIMEOUT_CAP_S", TIMEOUT_TEST_CAP_S)
+    recorded = record_mi_commands(monkeypatch)
     try:
         result = start_debug_session(service, mode="attach")
 
@@ -380,6 +381,126 @@ def test_attach_target_connect_timeout_retains_quarantined_lease(tmp_path: Path,
         assert result["cleanup_required"] is True
         assert result["lease_state"] == "cleanup_required"
         assert service.coordinator.blocked is True
+        # A connect that never answered is not one the debug server dropped:
+        # what it did to the target is unknown, and connecting again would not
+        # settle that (#575).
+        assert len(target_selects(recorded)) == 1, recorded
+        assert "retried_connects" not in result
+    finally:
+        with pytest.raises(RuntimeError):
+            service.close()
+        service.coordinator.close()
+
+
+# An attach over a board that resets itself can lose the race against the reset
+# while GDB connects, and the debug server then drops the connection it was just
+# handed (#575). Until its connect holds, an attach has done nothing to the
+# target but the debug server's own halt, which the next start repeats, so the
+# start connects again with a new server and a new GDB, a bounded number of
+# times, and names every connect it retried.
+CONNECT_DROPPED_MESSAGE = "Remote communication error.  Target disconnected: Connection reset by peer."
+
+
+def target_selects(recorded: list[str]) -> list[str]:
+    return [command for command in recorded if command.startswith("-target-select")]
+
+
+def test_an_attach_whose_first_connect_the_debug_server_drops_starts_on_the_next(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = debug_service(tmp_path, fake_gdb_behavior="connect_dropped_once")
+    recorded = record_mi_commands(monkeypatch)
+    try:
+        started = start_debug_session(service, mode="attach")
+
+        assert started["ok"] is True, started
+        assert started["session"]["status"] == "halted"
+        assert started["session"]["load_phase"] == "target_connected"
+        assert len(target_selects(recorded)) == 2, recorded
+        retried = started["retried_connects"]
+        assert [entry["backend_error"] for entry in retried] == [CONNECT_DROPPED_MESSAGE], retried
+        assert retried[0]["log_path"] != started["log_path"]
+        assert (Path(service.config.work_dir) / retried[0]["log_path"]).is_file(), retried
+        assert "dropped" in started["summary"], started["summary"]
+        assert started["lease_state"] == "active"
+        assert service.coordinator.blocked is False
+
+        stopped = service.call("debug_stop_session")
+        assert stopped["ok"] is True, stopped
+    finally:
+        service.close()
+
+
+def test_an_attach_the_debug_server_drops_on_every_connect_stops_at_the_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.backends.gdbdebug import ATTACH_CONNECT_ATTEMPTS
+
+    service = debug_service(tmp_path, fake_gdb_behavior="connect_always_dropped")
+    recorded = record_mi_commands(monkeypatch)
+    try:
+        result = start_debug_session(service, mode="attach")
+
+        assert result["ok"] is False
+        assert result["summary"] == CONNECT_DROPPED_MESSAGE
+        assert len(target_selects(recorded)) == ATTACH_CONNECT_ATTEMPTS, recorded
+        retried = result["retried_connects"]
+        assert [entry["backend_error"] for entry in retried] == [CONNECT_DROPPED_MESSAGE] * (ATTACH_CONNECT_ATTEMPTS - 1), retried
+        assert len({entry["log_path"] for entry in retried} | {result["log_path"]}) == ATTACH_CONNECT_ATTEMPTS
+        assert result["side_effect_status"] == "unknown"
+        assert result["cleanup_required"] is True
+        assert result["lease_state"] == "cleanup_required"
+        assert service.coordinator.blocked is True
+    finally:
+        with pytest.raises(RuntimeError):
+            service.close()
+        service.coordinator.close()
+
+
+def test_a_retried_connect_stays_unconfirmed_when_the_next_start_fails_before_it_connects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.backends import gdbdebug
+
+    service = debug_service(tmp_path, fake_gdb_behavior="connect_dropped_once")
+    real_client = gdbdebug.GdbMiClient
+    clients: list[object] = []
+
+    def second_gdb_does_not_start(*args, **kwargs):
+        clients.append(args)
+        if len(clients) == 2:
+            raise OSError("injected: the second GDB does not start")
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(gdbdebug, "GdbMiClient", second_gdb_does_not_start)
+    try:
+        result = start_debug_session(service, mode="attach")
+
+        assert result["ok"] is False
+        assert result["error_type"] == "gdb_start_failed", result
+        assert [entry["backend_error"] for entry in result["retried_connects"]] == [CONNECT_DROPPED_MESSAGE]
+        # The dropped connect's effect on the target is still unknown, and the
+        # start that failed before its own connect settled nothing about it.
+        assert result["side_effect_status"] == "unknown", result
+        assert result["retry_safe"] is False
+        assert result["cleanup_required"] is True
+        assert service.coordinator.blocked is True
+        status = service.call("debug_get_session_status")
+        assert status["status"] == "cleanup_required", status
+    finally:
+        with pytest.raises(RuntimeError):
+            service.close()
+        service.coordinator.close()
+
+
+@pytest.mark.parametrize("mode", ["reset_halt", "load"])
+def test_a_connect_the_debug_server_drops_is_connected_again_only_by_an_attach(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    # Both reset modes connect to a core the debug server halted as it left
+    # reset, before the firmware ran, so the race the retry answers does not
+    # arise there.
+    service = debug_service(tmp_path, fake_gdb_behavior="connect_dropped_once")
+    recorded = record_mi_commands(monkeypatch)
+    try:
+        result = start_debug_session(service, mode=mode)
+
+        assert result["ok"] is False
+        assert result["summary"] == CONNECT_DROPPED_MESSAGE
+        assert len(target_selects(recorded)) == 1, recorded
+        assert "retried_connects" not in result
     finally:
         with pytest.raises(RuntimeError):
             service.close()

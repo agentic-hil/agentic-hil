@@ -49,7 +49,7 @@ from agentic_hil.configwrite import PROJECT_CONFIG_DESCRIBE, PROJECT_CONFIG_SET,
 from agentic_hil.contracts import MCP_TOOL_NAMES, MCP_TOOLS, TOOL_SCHEMAS
 from agentic_hil.coordination import HardwareLease
 from agentic_hil.knowledge import CONFIG_SHAPE_URI, EXCLUSIVE_FLASH_PERMISSIONS, read_resource, safe_user_root
-from agentic_hil.mcp import SERVER_INSTRUCTIONS, handle_mcp_message
+from agentic_hil.mcp import MCP_PROTOCOL_VERSION, handle_mcp_message
 from agentic_hil.report import read_last_report
 from agentic_hil.tools import (
     PROJECT_CONFIG_CREATE,
@@ -808,6 +808,68 @@ def test_provisioning_is_reachable_over_mcp(tmp_path: Path, monkeypatch: pytest.
         service.close()
 
 
+def test_a_project_without_a_configuration_is_told_where_a_board_request_starts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What a server with nothing to bind says at initialize, in 500 characters at most.
+
+    It is registered at user scope as often as not, so this is what every
+    request of every session in a project with no board pays for: that there is
+    no configuration yet, that a request touching a board starts with
+    `project_config_create` and goes through these tools before any shell, and
+    the shell tools that never stand in for them. What the session needs once a
+    configuration exists arrives with the result that created it and with each
+    refusal after that."""
+    workspace = bench(tmp_path, monkeypatch)
+    service = UnprovisionedToolService(workspace)
+    try:
+        response = handle_mcp_message(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": MCP_PROTOCOL_VERSION}},
+            service,
+        )
+    finally:
+        service.close()
+    assert isinstance(response, dict)
+    instructions = str(response["result"]["instructions"])
+
+    assert len(instructions) <= 500, len(instructions)
+    for raw in ("openocd", "pyocd", "st-flash", "JLinkExe", "gdb", "screen", "minicom", "candump", "Makefile", "/dev/tty*", "COM*"):
+        assert raw in instructions, raw
+    # In this order: the fact, where a request that touches the board starts,
+    # and what it never reaches for instead.
+    order = [instructions.find(anchor) for anchor in ("no Agentic HIL configuration", PROJECT_CONFIG_CREATE, "before reaching for a shell", "openocd")]
+    assert -1 not in order and order == sorted(order), order
+    # Saying so is all initialize does: nothing was generated.
+    assert not project_config_path(workspace).exists()
+
+
+def test_a_server_that_finds_a_configuration_by_initialize_says_what_a_configured_one_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The short set is for a server that has nothing to bind when the host asks.
+
+    One started before a configuration was written, with the file there by the
+    time `initialize` arrives, answers every call as a configured server from
+    then on, so it introduces itself as one too."""
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    initialize = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": MCP_PROTOCOL_VERSION}}
+    service = UnprovisionedToolService(workspace)
+    try:
+        # Written between the server's start and the host's first message, by
+        # a route that is not this server's.
+        assert project_config_create(workspace, None)["ok"] is True
+        started_without = handle_mcp_message(initialize, service)
+    finally:
+        service.close()
+    configured = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    try:
+        started_with = handle_mcp_message(initialize, configured)
+    finally:
+        configured.close()
+
+    assert isinstance(started_without, dict) and isinstance(started_with, dict)
+    assert started_without["result"]["instructions"] == started_with["result"]["instructions"]
+
+
 def test_default_state_root_is_still_preferred_when_it_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The fallback is a fallback, not a relocation of every profile's state."""
     workspace = bench(tmp_path, monkeypatch)
@@ -1426,12 +1488,15 @@ def test_a_regeneration_says_which_permissions_it_did_not_grant(tmp_path: Path, 
 
 
 def test_the_live_contracts_describe_the_generation_that_actually_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The server instructions and the tool description are read before the call.
+    """The refusal that sends a caller here and the tool description are read before the call.
 
     They are the only statement about this tool most callers ever see, so a
     sentence left over from the closed default is not stale documentation: it is
     a live instruction telling a connected agent that a bench it just generated
-    grants nothing, at the moment it in fact grants flashing.
+    grants nothing, at the moment it in fact grants flashing. The server
+    instructions said it too, until what they say was cut down to what has to
+    precede a first call; the `config_file_not_found` refusal is where it is
+    read now.
 
     Since the interlock correction the same applies in the other direction, and it is the
     sharper case: a contract that still said "every permission is true" would be
@@ -1443,23 +1508,62 @@ def test_the_live_contracts_describe_the_generation_that_actually_runs(tmp_path:
     attached_hardware(monkeypatch)
     service = UnprovisionedToolService(workspace)
     try:
+        refused = service.call("probe_target")
         created = service.call(PROJECT_CONFIG_CREATE)
     finally:
         service.close()
     document = written_document(created)
     assert declared(document) - granted(document) == withheld_by_design(document)
 
+    assert refused["error_type"] == "config_file_not_found"
+    # The catalogue marks names up as code; the description does not.
+    advice = " ".join([*refused["remediation"], *refused["do_not"]]).replace("`", "")
     description = next(str(tool["description"]) for tool in MCP_TOOLS if tool["name"] == PROJECT_CONFIG_CREATE)
-    for text in (SERVER_INSTRUCTIONS, description):
-        assert "every permission in it is true" in text or "Every permission in the generated file is true" in text
+    for text in (advice, description):
+        assert "every permission true except" in text or "every permission in it is true" in text or "Every permission in the generated file is true" in text
         # Both flags named, and named as false: an agent that reads either of
         # these must not go looking for a narrowing that is already made.
-        assert "allow_raw_debugger_commands and allow_mass_erase, which are false" in text
+        assert "allow_raw_debugger_commands and allow_mass_erase, which are false" in text or "allow_raw_debugger_commands and allow_mass_erase, which it writes false" in text
         assert "every permission in it is false" not in text
         assert "every write permission in the generated file is false" not in text
     # And what the schema says a provenance record means says it too.
     provenance = config_schema()["properties"]["provenance"]["properties"]["created_by"]["description"]
     assert "every permission true except allow_raw_debugger_commands and allow_mass_erase" in provenance
+
+
+def test_a_project_without_a_configuration_learns_what_creating_one_grants_from_the_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What initialize used to tell every session, told to the session that needs it.
+
+    A tool called in a project with no configuration answers
+    `config_file_not_found`, and that refusal is where the question of what
+    `project_config_create` would grant comes up: every permission, spelled out,
+    except the two it writes false. What the instructions said about the file
+    once it exists (report where it is, never ask for those two to be turned
+    on) is about the generated file, and arrives with the result that wrote it."""
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    service = UnprovisionedToolService(workspace)
+    try:
+        refused = service.call("probe_target")
+        created = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+
+    assert refused["error_type"] == "config_file_not_found"
+    advice = " ".join([*refused["remediation"], *refused["do_not"]])
+    assert PROJECT_CONFIG_CREATE in advice
+    assert "no arguments" in advice
+    for grant in ("flashing", "reset", "COM and CAN writes", "artifact upload", "unrestricted symbol access", "allow_config_*"):
+        assert grant in advice, grant
+    for flag in EXCLUSIVE_FLASH_PERMISSIONS:
+        assert flag in advice, flag
+    assert "editing YAML" in advice
+    # And the part about the file, with the result that wrote it.
+    assert created["ok"] is True, created
+    assert any("Report where this configuration is" in step for step in created["next_steps"]), created["next_steps"]
+    assert any("Do not ask the operator to turn them on" in step for step in created["next_steps"]), created["next_steps"]
 
 
 def test_a_narrowing_and_a_regeneration_in_one_session_put_the_loaded_grant_back(
@@ -1515,12 +1619,13 @@ def test_a_narrowing_and_a_regeneration_in_one_session_put_the_loaded_grant_back
 def test_every_live_contract_says_regeneration_carries_the_loaded_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """"The permissions already on disk" was a promise this path does not keep.
 
-    Each of these is served to a caller before or during the call, and each said
-    a regeneration carries the permissions on disk over, which a caller can only
+    Each of these is served to a caller around the call, and each said a
+    regeneration carries the permissions on disk over, which a caller can only
     read as "my narrowing survives this". It does not; the loaded configuration
     is what is carried. Every one of them has to say the true thing, because a
     caller that believes the false one regenerates to refresh a probe id and
-    reopens the bench."""
+    reopens the bench. The tool description no longer explains it at all: the
+    regeneration's own answer does, and the description must not say otherwise."""
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
     service = UnprovisionedToolService(workspace)
@@ -1528,16 +1633,26 @@ def test_every_live_contract_says_regeneration_carries_the_loaded_state(tmp_path
         created = service.call(PROJECT_CONFIG_CREATE)
     finally:
         service.close()
+    header = Path(created["path"]).read_text(encoding="utf-8")
+
+    attached_hardware(monkeypatch)
+    reopened = UnprovisionedToolService(workspace)
+    try:
+        regenerated = reopened.call(PROJECT_CONFIG_CREATE)
+    finally:
+        reopened.close()
 
     description = next(str(tool["description"]) for tool in MCP_TOOLS if tool["name"] == PROJECT_CONFIG_CREATE)
+    assert "permissions already on disk" not in description
+    assert "permissions on disk over" not in description
     schema = config_schema()["properties"]["permissions"]
     served = {
-        "tool description": description,
+        "regeneration result": " ".join([regenerated["summary"], *regenerated["next_steps"]]),
         "config-shape resource": read_resource(CONFIG_SHAPE_URI)["text"],
         "permissions schema": schema["description"],
         "allow_config_write schema": schema["properties"]["allow_config_write"]["description"],
         "provenance schema": config_schema()["properties"]["provenance"]["properties"]["created_by"]["description"],
-        "generated header": Path(created["path"]).read_text(encoding="utf-8"),
+        "generated header": header,
     }
     for name, text in served.items():
         assert "loaded" in text, f"{name} must say the carried permissions are the loaded ones"

@@ -608,8 +608,24 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
     port_vid = _discovered_usb_id(matched_port, "vid") if device is not None else None
     port_pid = _discovered_usb_id(matched_port, "pid") if device is not None else None
     port_name, port_entry = _choose_com_port(document, com_port_id, port_names)
-    if device is None:
-        available = discovery.get("available_com_ports")
+    available = discovery.get("available_com_ports")
+    if device is None and isinstance(available, dict) and not available.get("ok"):
+        # The host's serial ports were never read, so nothing was found out about
+        # this board's port: saying no port carries its serial would state a
+        # finding nobody made. The listing's own line says what to fix, and there
+        # are no host ports to offer because none were read.
+        unavailable.append(
+            {
+                "key": "com_ports.<name>.device",
+                "reason": "This host's serial ports could not be listed, so discovery cannot say which device belongs to this board.",
+                "backend_error": str(available.get("backend_error") or available.get("summary", "")),
+                "next_step": (
+                    "Fix what the listing's error says and run this again, or name the device yourself with "
+                    "`project_config_set` on `com_ports.<name>.device` if you know which port it is."
+                ),
+            }
+        )
+    elif device is None:
         ports = available.get("ports") if isinstance(available, dict) else None
         unavailable.append(
             {
@@ -1616,6 +1632,7 @@ def _held_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> JsonObj
         "path": existing.config_path,
         "workspace_root": existing.workspace_root,
         "next_step": "Close the run with `bench_run_stop` and stop any open COM or CAN session, then call this again.",
+        **remediation_fields("config_write_in_open_run"),
         **NOT_STARTED,
         "retry_safe": True,
     }

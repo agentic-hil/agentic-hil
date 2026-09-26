@@ -178,6 +178,69 @@ def test_the_readme_claims_only_the_pinning_the_file_has() -> None:
     assert "requirements/dev.txt" in pinned
 
 
+# -- the distribution's packages: what the apt line installs, and what the README says of them
+
+
+UNPINNED_LEAD = "Not pinned, deliberately:"
+
+
+def apt_packages(dockerfile: str) -> set[str]:
+    """Every package an `apt-get install` in the Dockerfile names, however its lines are broken."""
+    instructions = "\n".join(line for line in dockerfile.splitlines() if not line.lstrip().startswith("#"))
+    packages: set[str] = set()
+    for command in re.split(r"&&|;|\n", instructions.replace("\\\n", " ")):
+        words = command.split()
+        if "apt-get" not in words or "install" not in words[words.index("apt-get") :]:
+            continue
+        named = words[words.index("install", words.index("apt-get")) + 1 :]
+        packages |= {word.split("=", 1)[0] for word in named if not word.startswith("-")}
+    return packages
+
+
+def unpinned_paragraph(readme: str) -> str:
+    """The README's list of what the image leaves unpinned, from its lead line to the next paragraph."""
+    assert UNPINNED_LEAD in readme, f"tools/container/README.md has no paragraph that starts {UNPINNED_LEAD!r}"
+    lines: list[str] = []
+    for line in readme.split(UNPINNED_LEAD, 1)[1].splitlines()[1:]:
+        if line and not line.startswith(("-", " ")):
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def test_the_readme_names_every_package_the_image_takes_from_the_distribution() -> None:
+    """The README says what each unpinned distribution package is there for, and the apt line is the list of them.
+
+    The apt line installed `ca-certificates`, `iproute2` and `can-utils`, and the
+    paragraph that says why each unpinned package is in the image named none of
+    the three. Held both ways: a package the apt line installs has to be named in
+    the paragraph, where the program a package is named after counts (OpenOCD is
+    `openocd`), and a package name the paragraph spells in backticks has to be on
+    the apt line, so one added to either and not the other is named here.
+    """
+    installed = apt_packages(DOCKERFILE.read_text(encoding="utf-8"))
+    paragraph = unpinned_paragraph(CONTAINER_README.read_text(encoding="utf-8"))
+    assert installed, "found no `apt-get install` in tools/container/Dockerfile"
+    assert paragraph.strip(), f"the {UNPINNED_LEAD!r} paragraph of tools/container/README.md is empty"
+
+    unnamed = sorted(
+        package
+        for package in installed
+        if re.search(rf"(?<![\w-]){re.escape(package)}(?![\w-])", paragraph, re.IGNORECASE) is None
+    )
+    spelled = {span for span in re.findall(r"`([^`]+)`", paragraph) if re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", span)}
+    problems = [
+        f"`{package}` is installed by the apt line in tools/container/Dockerfile and not named "
+        f"under {UNPINNED_LEAD!r} in tools/container/README.md, which says what each one is for"
+        for package in unnamed
+    ] + [
+        f"`{package}` is named under {UNPINNED_LEAD!r} in tools/container/README.md "
+        "and the apt line in tools/container/Dockerfile does not install it"
+        for package in sorted(spelled - installed)
+    ]
+    assert not problems, "\n".join(problems)
+
+
 # -- M2 and m12: what the job proves, and what wires it to the merge gate --
 
 

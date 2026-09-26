@@ -130,6 +130,25 @@ foreach ($token in @($Rest)) {
 }
 if ($Can) { $WithCan = $true }
 
+# The agent the name after --agent stands for. agent-install reads a name the
+# way every --agent of the CLI does: without the blanks around it, in any case,
+# with `_` for `-`, and as any of the agent's aliases. Step 4 handed the name on
+# as it was typed, so each of those spellings registered the right agent, but
+# step 5 went on from the same text and, after `--agent codex-cli`, looked for a
+# process called codex-cli (#571). The name is read here once, the way the CLI
+# reads it, and everything after the command line works from the agent's id. A
+# name that is no agent's comes back as it was typed, and agent-install refuses
+# it in its own words.
+function Get-AgentIdForName {
+    param([string]$Name)
+    $normalized = $Name.Trim().ToLowerInvariant().Replace('_', '-')
+    if ($normalized -eq 'opencode' -or $normalized -eq 'open-code') { return 'opencode' }
+    if ($normalized -eq 'claude-code' -or $normalized -eq 'claude') { return 'claude-code' }
+    if ($normalized -eq 'codex' -or $normalized -eq 'codex-cli' -or $normalized -eq 'openai-codex') { return 'codex' }
+    return $Name
+}
+if ($Agent) { $Agent = Get-AgentIdForName $Agent }
+
 if ($ShowHelp) {
     Write-Usage
     exit 0
@@ -741,12 +760,11 @@ function Get-RunningAgentProcessId {
         process name is its own, and a match on that can name no stranger's
         process.
 
-        npm installs the other kind, and the process Windows then holds is
-        called node. An npm-installed CLI is a JavaScript launcher run by the
-        node runtime, so the only place the CLI's own name appears is the
-        command line, and a machine with the CLI open in the next window was
-        told there was nothing to restart; the operator restarted nothing, and
-        the MCP registration this run had just written was read by no session.
+        A CLI that npm installs as a JavaScript launcher is the other kind:
+        the process Windows holds for it is called node, and the launcher's
+        path is on its command line. Missed, it stays open in the next window
+        while its operator is told there is nothing to restart, and the MCP
+        registration this run just wrote is read by no session.
 
         The second question therefore reads command lines, anchored so that it
         stays a question about which program is running rather than about which
@@ -754,6 +772,15 @@ function Get-RunningAgentProcessId {
         end its argument or the line, optionally through the .js the launcher
         carries. A false alarm costs an operator a restart of something that was
         never ours, in the one part of the transcript that asks them to act.
+
+        At the recorded versions all three are answered by the first question.
+        npm's shims start Claude Code and opencode as native executables, and
+        codex's starts node on bin/codex.js, which runs the codex.exe the
+        package vendors as its child. The tables recorded with each package
+        installed by npm install -g, from cmd and from Windows PowerShell, are
+        in tests/fixtures/npm_agent_cli_windows_process_table_recordings.json.
+        codex.exe is the process to name: when the recording stopped it alone,
+        its node launcher exited by itself.
     #>
     param([string]$ProcessName)
     $exact = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue) | Select-Object -First 1
@@ -1053,6 +1080,12 @@ function Register-Agent {
     # reading. It is prose now, addressed to the operator who is about to read
     # it, and a text match on prose would be a worse check than the status it was
     # doubling.
+    #
+    # Status 2 is argparse refusing the command line, and in the one this builds
+    # the only thing it can refuse is the agent name. Then nothing ran and there
+    # is no report: what was printed is the usage and the names the CLI accepts,
+    # so the line after it says the name was refused rather than send the
+    # operator after a half that failed.
     param([string]$AgentId)
     $result = Invoke-Captured -File $AgenticHilCmd -Arguments @('agent-install', '--agent', $AgentId)
     if ($result.ExitCode -eq 0) {
@@ -1060,6 +1093,9 @@ function Register-Agent {
         return
     }
     Write-Host $result.Output.TrimEnd()
+    if ($result.ExitCode -eq 2) {
+        throw "agentic-hil refused the agent name '$AgentId'"
+    }
     throw "agent-install failed for $AgentId; the report above says which half"
 }
 

@@ -31,6 +31,7 @@ from agentic_hil.provisional import (
     discharge_provisional_handle,
     register_provisional_handle,
 )
+from agentic_hil.readuntil import find_until, until_patterns, until_wait_s
 from agentic_hil.report import (
     ContactMarker,
     append_jsonl,
@@ -65,12 +66,15 @@ from agentic_hil.types import (
 def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
     try:
         from serial.tools import list_ports
-    except ImportError:
+    except ImportError as error:
+        # The import's own line, with its type, is what tells a missing package
+        # from a blocked module or a pyserial failing inside its own imports.
         return {
             "ok": False,
             "tool": tool,
             "error_type": "serial_backend_not_available",
             "summary": "pyserial is not installed or could not be imported.",
+            "backend_error": f"{type(error).__name__}: {error}",
             "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"],
         }
     try:
@@ -507,7 +511,9 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
         # the refusal is retry-safe: install the backend and call again.
         identity["status"] = "backend_unavailable"
         identity["summary"] = "Host serial ports could not be enumerated, so this port's identity was not verified."
-        identity["backend_error"] = str(available.get("summary", ""))
+        # The inventory's own line where it has one, a failed import and an OS
+        # error from the enumeration alike; its summary only where it has none.
+        identity["backend_error"] = str(available.get("backend_error") or available.get("summary", ""))
         return _identity_unverified(tool, port_id, port, expectation, identity)
 
     ports = [entry for entry in available.get("ports", []) if isinstance(entry, dict)]
@@ -690,6 +696,13 @@ def serial_port_busy(error: BaseException, port_id: str, port_config: ComPortCon
     }
 
 
+# How long the log writer waits for new input before it looks again whether
+# the drain has ended. The drain wakes it for every read and once more as it
+# ends, so this bounds how late an ended drain is noticed, never how late
+# input is logged.
+RECEIVED_LOG_WAIT_S = 0.05
+
+
 class ComPortSession:
     def __init__(self, port_id: str, port_config: ComPortConfig, serial_handle: object, log_path: str, lease: HardwareLease | None = None, *, start_reader: bool = True, contact: ContactMarker | None = None):
         self.port_id = port_id
@@ -715,6 +728,12 @@ class ComPortSession:
         # `append_audit` for what that buys and `ComPortService.write_bytes`
         # for why the append alone was not enough.
         self.audit_lock = threading.RLock()
+        # Input the drain has received and the log has not yet recorded, in
+        # arrival order. Filled under `lock` in the same step that buffers it,
+        # emptied by `log_received` under `audit_lock`.
+        self.received: list[bytes] = []
+        self.received_ready = threading.Event()
+        self.read_failure: JsonObject | None = None
         self.reader: threading.Thread | None = None
         self.audit_broken = False
         self.lease = lease or DetachedHardwareLease()
@@ -765,60 +784,103 @@ class ComPortSession:
             raise
 
     def _reader_loop(self) -> None:
-        while self.active:
-            try:
-                chunk = b""
+        """Log what the drain receives, for as long as it runs (#578).
+
+        Reading the port and writing its log used to be one loop, so the port
+        went unread for as long as each log line took, and every line ends in
+        an fsync. On a loaded host that stall is long enough for a board that
+        transmits without pause to fill the port's receive buffer, and what the
+        line delivered then was lost before it reached the session, where
+        `overflow_bytes` could not count it. The drain now runs on a thread of
+        its own that never waits for the log, and this thread writes what it
+        received, as one entry per batch: a batch that grows while an entry is
+        written costs one more entry, not one more fsync per read.
+
+        This thread stays the session's one reader handle. It joins the drain
+        and records the last of its input before it returns, so a caller that
+        joined `reader` knows everything received is on the log, which is what
+        `_stop_session` relies on to write its stop entry last.
+        """
+        drain = threading.Thread(target=self._drain_loop, daemon=True)
+        try:
+            drain.start()
+            logging = True
+            while logging and drain.is_alive():
+                self.received_ready.wait(RECEIVED_LOG_WAIT_S)
+                self.received_ready.clear()
+                logging = self.log_received()
+            drain.join()
+            if logging and self.log_received() and self.read_failure is not None:
+                self.append_audit({"event": "error", **self.read_failure})
+        except Exception as error:
+            self.active = False
+            if drain.is_alive():
+                drain.join()
+            self.reader_error = {"error_type": "serial_read_failed", "summary": "COM port reader failed.", "backend_error": str(error), "likely_causes": likely_causes("serial_read_failed")}
+            self.append_audit({"event": "error", **self.reader_error})
+
+    def _drain_loop(self) -> None:
+        """Read the port into the session buffer until the session ends.
+
+        Never touches the log, so nothing but the port itself paces it. Each
+        read is buffered and queued for `log_received` in one step under
+        `lock`, which is also where `overflow_bytes` counts what the buffer
+        cap drops: input can leave the buffer through a read or through that
+        cap, and either way it is on the log.
+        """
+        try:
+            while self.active:
                 with self.io_lock:
                     waiting = int(getattr(self.serial_handle, "in_waiting", 0) or 0)
                     read_size = min(max(waiting, 1), self.port_config.max_buffer_bytes, 4096)
                     data = self.serial_handle.read(read_size)
                     if data:
                         chunk = bytes(data)
-                        # Take audit_lock -- the lock the write path holds across
-                        # its send and its tx entry -- before the bytes are made
-                        # visible in the buffer and before io_lock is dropped, and
-                        # keep it held across the rx entry below. So input this
-                        # reader has buffered is on the log ahead of any write that
-                        # has not yet begun: the reader used to buffer under io_lock
-                        # and only reach for audit_lock at the append afterwards,
-                        # and a concurrent write could take audit_lock in that gap
-                        # and record its tx ahead of input already received (review
-                        # round 0, finding 3). The blocking read itself stays
-                        # outside audit_lock, so an idle read never stalls a write.
-                        self.audit_lock.acquire()
-                        try:
-                            with self.lock:
-                                self.buffer.extend(chunk)
-                                overflow = len(self.buffer) - self.port_config.max_buffer_bytes
-                                if overflow > 0:
-                                    del self.buffer[:overflow]
-                                    self.overflow_bytes += overflow
-                        except BaseException:
-                            self.audit_lock.release()
-                            raise
-                if not chunk:
+                        with self.lock:
+                            self.buffer.extend(chunk)
+                            overflow = len(self.buffer) - self.port_config.max_buffer_bytes
+                            if overflow > 0:
+                                del self.buffer[:overflow]
+                                self.overflow_bytes += overflow
+                            self.received.append(chunk)
+                        self.received_ready.set()
+                if not data:
                     time.sleep(0.01)
-                    continue
-                try:
-                    audit_error = self.append_audit({"direction": "rx", "bytes": len(chunk), "hex": chunk.hex(), "text": decode_bytes(chunk, self.port_config.encoding)})
-                finally:
-                    self.audit_lock.release()
-                if audit_error is not None:
-                    self.reader_error = {"error_type": "audit_write_failed", "summary": "COM port feedback could not be audited.", "backend_error": str(audit_error)}
-                    self.audit_broken = True
-                    self.lease.quarantine("com_reader_audit_broken", audit_error, audit_broken=True)
-                    self.active = False
-                    break
-            except Exception as error:  # serial backends raise implementation-specific exception classes
-                if self.active:
-                    self.reader_error = {
-                        "error_type": "serial_read_failed",
-                        "summary": "COM port reader failed.",
-                        "backend_error": str(error),
-                        "likely_causes": likely_causes("serial_read_failed"),
-                    }
-                    self.append_audit({"event": "error", **self.reader_error})
-                break
+        except Exception as error:  # serial backends raise implementation-specific exception classes
+            if self.active:
+                self.read_failure = {
+                    "error_type": "serial_read_failed",
+                    "summary": "COM port reader failed.",
+                    "backend_error": str(error),
+                    "likely_causes": likely_causes("serial_read_failed"),
+                }
+                self.reader_error = self.read_failure
+        finally:
+            self.received_ready.set()
+
+    def log_received(self) -> bool:
+        """Record the input received since the last entry, as one `rx` entry.
+
+        Taken under `audit_lock` from before the queue is emptied until after
+        the entry is written, so input already received is on the log ahead of
+        any write that takes the lock after it: the write path calls this
+        before it sends. Returns False once the entry could not be written; the
+        session's audit is broken then, and the session stops.
+        """
+        with self.audit_lock:
+            with self.lock:
+                chunks, self.received = self.received, []
+            if not chunks:
+                return True
+            data = b"".join(chunks)
+            audit_error = self.append_audit({"direction": "rx", "bytes": len(data), "hex": data.hex(), "text": decode_bytes(data, self.port_config.encoding)})
+        if audit_error is None:
+            return True
+        self.reader_error = {"error_type": "audit_write_failed", "summary": "COM port feedback could not be audited.", "backend_error": str(audit_error)}
+        self.audit_broken = True
+        self.lease.quarantine("com_reader_audit_broken", audit_error, audit_broken=True)
+        self.active = False
+        return False
 
 
 # A short write is retried against exactly its own remainder, and only a few
@@ -1101,6 +1163,10 @@ class ComPortService:
         # reaches its append, so a `com_read` during that window hands out
         # everything that arrived.
         with session.audit_lock:
+            # Input the drain received before this write and the log has not
+            # yet recorded goes on the log first: it arrived first (#578).
+            if not session.log_received():
+                return self._active_session(port_id, tool)
             try:
                 sent = _write_with_bounded_retry(session.serial_handle, data)
                 flush = getattr(session.serial_handle, "flush", None)
@@ -1157,10 +1223,15 @@ class ComPortService:
             return mark_audit_failure(result, audit_error)
         return result
 
-    def read(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object = 0.0) -> JsonObject:
-        return self._write_report(self.read_bytes(port_id, max_bytes, wait_timeout_s, "com_read"))
+    def read(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object | None = None, until: object | None = None) -> JsonObject:
+        written = self._write_report(self.read_bytes(port_id, max_bytes, wait_timeout_s, "com_read", until=until))
+        if until is None:
+            return written
+        # The report keeps what the call waited for and for how long. The answer
+        # does not repeat either to the caller that asked for them.
+        return {key: value for key, value in written.items() if key not in {"until", "until_wait_s"}}
 
-    def read_bytes(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object = 0.0, tool: str = "com_read") -> JsonObject:
+    def read_bytes(self, port_id: str, max_bytes: object | None = None, wait_timeout_s: object | None = None, tool: str = "com_read", *, until: object | None = None) -> JsonObject:
         port = self._configured_port(port_id, tool)
         if not port["ok"]:
             return port
@@ -1190,13 +1261,18 @@ class ComPortService:
                 return session_result
         try:
             parsed_max_bytes = session.port_config.max_buffer_bytes if max_bytes is None else int(max_bytes)
-            parsed_wait_timeout_s = float(wait_timeout_s)
+            parsed_wait_timeout_s = 0.0 if wait_timeout_s is None else float(wait_timeout_s)
         except (TypeError, ValueError):
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "max_bytes must be an integer and wait_timeout_s must be a number."}
         if parsed_max_bytes < 1:
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "max_bytes must be at least 1."}
         if not math.isfinite(parsed_wait_timeout_s):
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "wait_timeout_s must be finite."}
+        if until is not None:
+            patterns = until_patterns(until, session.port_config.encoding, tool=tool)
+            if not patterns["ok"]:
+                return {**patterns, "port_id": port_id}
+            return self._read_until(session, port_id, tool, parsed_max_bytes, until_wait_s(None if wait_timeout_s is None else parsed_wait_timeout_s), patterns)
         deadline = time.monotonic() + max(0.0, min(parsed_wait_timeout_s, 60.0))
         while self._session_is_active(session):
             with session.lock:
@@ -1224,6 +1300,131 @@ class ComPortService:
         if session.reader_error:
             result["reader_error"] = session.reader_error
         return result
+
+    def _read_until(self, session: ComPortSession, port_id: str, tool: str, max_bytes: int, wait_s: float, until: JsonObject) -> JsonObject:
+        # Waits until the first max_bytes buffered bytes hold an until entry or
+        # are full without one, the reader stops, or the wait runs out. The
+        # buffer is searched as the port's bytes, so a match split across two
+        # reader chunks is found like any other, and it is searched again only
+        # once the reader has added to it. What follows the match stays
+        # buffered for the next read.
+        patterns = until["patterns"]
+        deadline = time.monotonic() + wait_s
+        searched: tuple[int, int] | None = None
+        while self._session_is_active(session):
+            with session.lock:
+                state = (len(session.buffer), session.overflow_bytes)
+                head = bytes(session.buffer[:max_bytes]) if state != searched else None
+            if head is not None:
+                searched = state
+                if len(head) >= max_bytes or find_until(head, patterns) is not None:
+                    break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        with session.lock:
+            head = bytes(session.buffer[:max_bytes])
+            found = find_until(head, patterns)
+            data = head if found is None else head[: found[0]]
+            del session.buffer[: len(data)]
+            remaining = len(session.buffer)
+        # Not repeated to the caller: `read` keeps these for the report only.
+        waited: JsonObject = {"until": until["entries"], "until_wait_s": wait_s}
+        if not data and session.reader_error is not None:
+            # The same refusal a read without until gives here, and for the same
+            # reason: a reader that stopped with nothing buffered is a failed
+            # read, not a pattern that did not appear.
+            failure = self._active_session(port_id, tool)
+            if not failure["ok"]:
+                return {**failure, **waited}
+        if found is not None:
+            summary = "Feedback read from COM port through the first until match."
+        elif len(data) >= max_bytes:
+            summary = f"max_bytes ({max_bytes}) was reached before an until match; any match lies beyond it."
+        elif session.reader_error is not None:
+            summary = "The COM port reader stopped before an until entry was seen; the feedback it buffered is returned."
+        elif not self._session_is_active(session):
+            summary = "The COM port session stopped before an until entry was seen."
+        elif data:
+            summary = f"No until entry was seen within {wait_s:g} s; the feedback buffered so far is returned."
+        else:
+            summary = f"No until entry was seen within {wait_s:g} s, and no COM port feedback was available."
+        result: JsonObject = {"ok": True, "tool": tool, "port_id": port_id, "bytes_read": len(data), "buffer_remaining_bytes": remaining, "overflow_bytes": session.overflow_bytes, "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": summary, "until_matched": found is not None}
+        if found is not None:
+            result["matched"] = until["entries"][found[1]]
+        if session.reader_error:
+            result["reader_error"] = session.reader_error
+        return {**result, **waited}
+
+    def capture_check(self, capture: JsonObject, tool: str) -> JsonObject:
+        """Whether a capture of one port may start, asked before anything is touched.
+
+        A capture opens its own session around another tool's effect and reads
+        it with `com_read`'s rules, so what would refuse it is asked here, with
+        the answers `com_session_start` and `com_read` give: a port that is not
+        configured, a read permission that is off, an `until` entry the port's
+        encoding cannot carry. A port that already has a session is refused as
+        well. That session is the caller's and may hold bytes the caller has not
+        read yet, so a capture neither clears it nor reads it.
+
+        Answers the checked capture, its wait already capped, or the refusal."""
+        port_id = str(capture.get("port_id", ""))
+        port = self._configured_port(port_id, tool)
+        if not port["ok"]:
+            return port
+        port_config = port["port_config"]
+        if not self.config.com_read_allowed(port_config):
+            return self._permission_denied(tool, "Reading this COM port is disabled by the authoritative config.", port_id, "allow_read")
+        until: JsonObject | None = None
+        if capture.get("until") is not None:
+            until = until_patterns(capture["until"], port_config.encoding, tool=tool, field="capture.until")
+            if not until["ok"]:
+                return {**until, "port_id": port_id}
+        if port_id in self.sessions:
+            return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "field": "capture.port_id", "summary": f"COM port {port_id} already has a session, and a capture opens its own. Read that session with com_read or stop it with com_session_stop first."}
+        max_bytes = capture.get("max_bytes")
+        wait_timeout_s = capture.get("wait_timeout_s")
+        return {"ok": True, "port_id": port_id, "until": until, "max_bytes": port_config.max_buffer_bytes if max_bytes is None else int(max_bytes), "wait_s": until_wait_s(None if wait_timeout_s is None else float(wait_timeout_s))}
+
+    def capture_finish(self, checked: JsonObject, tool: str, *, wait: bool) -> tuple[JsonObject, JsonObject]:
+        """Read a capture's session with `com_read`'s rules, then stop it.
+
+        Answers the capture and the stop, the stop exactly as `com_session_stop`
+        answers it. The read waits only when `wait` is true: after an effect
+        that failed there is no output to wait for, and what the session had
+        already buffered is all the capture holds. Without `until` nothing can
+        match, so the read runs until `max_bytes` are buffered or the wait is
+        over rather than answering on the first fragment of a banner.
+
+        `truncated` says the session still held bytes the capture did not
+        return when it stopped; the session log has every one of them. The wait
+        and the entries waited for are carried for the report."""
+        port_id = checked["port_id"]
+        session = self.sessions[port_id]
+        until = checked["until"]
+        try:
+            read = self._read_until(session, port_id, tool, checked["max_bytes"], checked["wait_s"] if wait else 0.0, until or {"entries": [], "patterns": []})
+        except BaseException:
+            with suppress(BaseException):
+                self.session_stop(port_id)
+            raise
+        stop = self.session_stop(port_id)
+        with session.lock:
+            remaining = len(session.buffer)
+        capture: JsonObject = {"port_id": port_id, "bytes_read": read.get("bytes_read", 0), "data": read.get("data") or data_result(b"", session.port_config.encoding)}
+        if until is not None:
+            capture["until_matched"] = read.get("until_matched") is True
+            if "matched" in read:
+                capture["matched"] = read["matched"]
+        if remaining:
+            capture["truncated"] = True
+        capture.update({"overflow_bytes": session.overflow_bytes, "log_path": display_path(self.config, session.log_path)})
+        if read.get("reader_error") is not None:
+            capture["reader_error"] = read["reader_error"]
+        if until is not None:
+            capture["until"] = read["until"]
+        capture["until_wait_s"] = read["until_wait_s"]
+        return capture, stop
 
     def close(self) -> None:
         errors: list[tuple[str, BaseException]] = []
@@ -1271,8 +1472,8 @@ class ComPortService:
         """
         try:
             import serial
-        except ImportError:
-            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"], "side_effect_committed": False}
+        except ImportError as error:
+            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "backend_error": f"{type(error).__name__}: {error}", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"], "side_effect_committed": False}
 
         def open_failure(error: BaseException) -> JsonObject:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": open_failure_causes(error)}

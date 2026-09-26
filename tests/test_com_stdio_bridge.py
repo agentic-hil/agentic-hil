@@ -77,6 +77,9 @@ class RecordingComPortService:
     def __init__(self, config) -> None:
         self.events: list[tuple] = []
         self.banner_sent = False
+        # When the first read refusal went out, which is when the bridge learns
+        # that its session failed.
+        self.refused_read_at: float | None = None
 
     def session_start(self, port_id: str, clear_buffer: bool) -> dict:
         self.events.append(("session_start", port_id, clear_buffer))
@@ -88,6 +91,8 @@ class RecordingComPortService:
 
     def read_bytes(self, port_id: str, max_bytes: int, wait_timeout_s: float, tool: str) -> dict:
         if self.read_refusal:
+            if self.refused_read_at is None:
+                self.refused_read_at = time.monotonic()
             return dict(self.read_refusal)
         if self.banner and not self.banner_sent:
             self.banner_sent = True
@@ -384,6 +389,11 @@ def test_com_stdio_ends_a_failed_session_without_waiting_on_stdin(tmp_path: Path
     end the reader, or stop reporting as a cleanup failure a thread it let go
     of on purpose: either way the operator gets exit 1 inside the idle window,
     not a traceback and not a wait.
+
+    The clock starts when the refusal reaches the bridge, not when
+    `run_com_stdio` is called: before it opens the session the bridge readies the
+    audit trail, which writes and syncs files, and on a busy runner that alone
+    took longer than the bound (#581).
     """
     com_service.read_refusal = {"ok": False, "tool": "com_stdio_read", "port_id": "dut", "error_type": "serial_read_failed", "summary": "COM port read failed."}
     config = load_com_config(tmp_path)
@@ -398,18 +408,20 @@ def test_com_stdio_ends_a_failed_session_without_waiting_on_stdin(tmp_path: Path
     watchdog = threading.Thread(target=close_the_write_end_late, daemon=True)
     watchdog.start()
     try:
-        started = time.monotonic()
         try:
             code, stdout, stderr = run_bridge(config, PipeStdin(read_fd))
         except RuntimeError as error:
             pytest.fail(f"run_com_stdio raised instead of exiting 1: {error}")
-        elapsed = time.monotonic() - started
+        returned = time.monotonic()
     finally:
         release.set()
         watchdog.join(timeout=WAIT_TIMEOUT_S)
         with suppress(OSError):
             os.close(read_fd)
 
+    refused_at = com_service.instances[0].refused_read_at
+    assert refused_at is not None, "the session's read was never refused"
+    elapsed = returned - refused_at
     assert code == 1
     assert stdout == ""
     assert the_one_document_on(stderr)["error_type"] == "serial_read_failed"

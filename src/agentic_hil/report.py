@@ -874,6 +874,8 @@ def classify_failure_report(config: AgenticHILConfig, likely_causes: Callable[[s
     }
     if "backend_error_type" in report:
         result["backend_error_type"] = report["backend_error_type"]
+    if "backend_error" in report:
+        result["backend_error"] = report["backend_error"]
     if "failed_step" in report:
         result["failed_step"] = report["failed_step"]
     if "step_error_type" in report:

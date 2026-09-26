@@ -52,6 +52,7 @@ from agentic_hil.provisional import (
     discharge_provisional_handle,
     register_provisional_handle,
 )
+from agentic_hil.readuntil import until_ids, until_wait_s
 from agentic_hil.report import (
     ContactMarker,
     append_jsonl_audited,
@@ -625,7 +626,7 @@ class CanBusService:
         audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "tx", **result})
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
-    def read(self, bus_id: str, max_frames: object | None = None, wait_timeout_s: object = 0.0) -> JsonObject:
+    def read(self, bus_id: str, max_frames: object | None = None, wait_timeout_s: object | None = None, until_id: object | None = None) -> JsonObject:
         bus = self._configured_bus(bus_id, "can_read")
         if not bus["ok"]:
             return self._write_report(bus)
@@ -637,13 +638,18 @@ class CanBusService:
         session = session_result["session"]
         try:
             parsed_max_frames = session.bus_config.max_buffer_frames if max_frames is None else int(max_frames)
-            parsed_wait_timeout_s = float(wait_timeout_s)
+            parsed_wait_timeout_s = 0.0 if wait_timeout_s is None else float(wait_timeout_s)
         except (TypeError, ValueError):
             return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "error_type": "invalid_argument", "summary": "max_frames must be an integer and wait_timeout_s must be a number."})
         if parsed_max_frames < 1 or parsed_max_frames > session.bus_config.max_buffer_frames:
             return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "error_type": "invalid_argument", "summary": "max_frames must be between 1 and configured max_buffer_frames.", "max_buffer_frames": session.bus_config.max_buffer_frames})
         if not math.isfinite(parsed_wait_timeout_s):
             return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "error_type": "invalid_argument", "summary": "wait_timeout_s must be finite."})
+        if until_id is not None:
+            checked = until_ids(until_id)
+            if not checked["ok"]:
+                return self._write_report({**checked, "bus_id": bus_id})
+            return self._read_until_id(session, bus_id, parsed_max_frames, until_wait_s(None if wait_timeout_s is None else parsed_wait_timeout_s), checked["ids"])
         try:
             read = session.adapter_session.read(parsed_max_frames, max(0.0, min(parsed_wait_timeout_s, session.bus_config.timeout_s, 60.0)))
         except BaseException as error:
@@ -659,6 +665,70 @@ class CanBusService:
         if frames is None:
             return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "error_type": "can_adapter_invalid_response", "summary": "CAN adapter returned malformed frame data.", "side_effect_status": "unknown", "cleanup_required": True, **remediation_fields("can_adapter_invalid_response"), **can_likely_causes("can_adapter_invalid_response")})
         result = {"ok": True, "tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frames_read": len(frames), "frames": frames, "adapter_result": public_backend_result(read, ["frames"]), "log_path": display_path(self.config, session.log_path), "summary": "CAN frame(s) read." if frames else "No CAN frames were available."}
+        audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "rx", **result})
+        return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
+
+    def _read_until_id(self, session: CanBusSession, bus_id: str, max_frames: int, wait_s: float, ids: list[int]) -> JsonObject:
+        # One frame per adapter read, each read held to the cap a read without
+        # until_id has, until a frame with a wanted id, max_frames, or the
+        # deadline. Asking for one frame at a time takes nothing off the bus
+        # behind the match: the frames after it wait for the next call, and
+        # neither the adapters nor the bridge protocol are asked anything new.
+        wanted = set(ids)
+        bus_config = session.bus_config
+        adapter = session.adapter_session.adapter_name
+        deadline = time.monotonic() + wait_s
+        frames: list[JsonObject] = []
+        matched_id: int | None = None
+        while True:
+            started = time.monotonic()
+            read_wait = max(0.0, min(deadline - started, bus_config.timeout_s, 60.0))
+            try:
+                read = session.adapter_session.read(1, read_wait)
+            except BaseException as error:
+                session.lease.quarantine("can_read_effect_unconfirmed", error)
+                raise
+            # Frames that earlier reads of this call took off the bus are
+            # feedback the bench really produced, so a read that fails after
+            # them keeps them next to its own error.
+            kept: JsonObject = {"frames": frames, "until_matched": False} if frames else {}
+            if not read["ok"]:
+                result = {"tool": "can_read", "bus_id": bus_id, "adapter": adapter, "log_path": display_path(self.config, session.log_path), **read, **kept}
+                if result.get("side_effect_committed") is not False and result.get("side_effect_status") is None:
+                    result.update({"side_effect_status": "unknown", "cleanup_required": True})
+                audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "direction": "rx", **result})
+                return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
+            batch = normalize_received_frames(read.get("frames", []))
+            if batch is None:
+                result = {"ok": False, "tool": "can_read", "bus_id": bus_id, "adapter": adapter, "error_type": "can_adapter_invalid_response", "summary": "CAN adapter returned malformed frame data.", "side_effect_status": "unknown", "cleanup_required": True, **remediation_fields("can_adapter_invalid_response"), **can_likely_causes("can_adapter_invalid_response"), **kept}
+                audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "direction": "rx", **result}) if kept else None
+                return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
+            frames.extend(batch)
+            matched_id = next((received["id"] for received in batch if received["id"] in wanted), None)
+            if matched_id is not None or len(frames) >= max_frames:
+                break
+            if batch:
+                # Read on at once. Past the deadline a read no longer waits, so
+                # it only hands out frames that are already queued, the way a
+                # read without until_id drains the queue.
+                continue
+            if time.monotonic() >= deadline:
+                break
+            if time.monotonic() - started < read_wait:
+                # An empty answer that came back before its wait was over would
+                # otherwise be asked again at once, as fast as the adapter answers.
+                time.sleep(min(bus_config.poll_interval_ms / 1000, max(0.0, deadline - time.monotonic())))
+        if matched_id is not None:
+            summary = "CAN frame(s) read through the first frame whose id is in until_id."
+        elif len(frames) >= max_frames:
+            summary = f"max_frames ({max_frames}) was reached before a frame whose id is in until_id."
+        elif frames:
+            summary = f"No frame whose id is in until_id arrived within {wait_s:g} s; the frames read so far are returned."
+        else:
+            summary = f"No frame whose id is in until_id arrived within {wait_s:g} s, and no CAN frames were available."
+        result = {"ok": True, "tool": "can_read", "bus_id": bus_id, "adapter": adapter, "frames_read": len(frames), "frames": frames, "adapter_result": public_backend_result(read, ["frames"]), "log_path": display_path(self.config, session.log_path), "summary": summary, "until_matched": matched_id is not None}
+        if matched_id is not None:
+            result["matched_id"] = matched_id
         audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "rx", **result})
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
@@ -985,7 +1055,10 @@ class PythonCanAdapterSession:
         deadline = time.monotonic() + wait_timeout_s
         try:
             while len(frames) < max_frames:
-                timeout = max(0.0, deadline - time.monotonic()) if wait_timeout_s > 0 and not frames else 0
+                # Held to the wait asked for: on a clock that has not moved
+                # since the deadline was set, `deadline - now` can round one
+                # step over it.
+                timeout = max(0.0, min(wait_timeout_s, deadline - time.monotonic())) if wait_timeout_s > 0 and not frames else 0
                 message = self.bus.recv(timeout=timeout)
                 if message is None:
                     break
@@ -1451,8 +1524,10 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "config_invalid", "field": f"can_buses.{bus_id}.channel", "summary": "PEAK adapter on Linux expects a SocketCAN-style interface name such as can0.", "side_effect_committed": False}
     try:
         import can
-    except ImportError:
-        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_backend_not_available", "summary": "python-can is not installed. Install agentic-hil[can] to use direct CAN adapters.", "side_effect_committed": False, **can_likely_causes("can_backend_not_available")}
+    except ImportError as error:
+        # The import's own line, with its type, is what tells a missing package
+        # from a blocked module or a python-can failing inside its own imports.
+        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_backend_not_available", "summary": "python-can is not installed or could not be imported. Install agentic-hil[can] to use direct CAN adapters.", "backend_error": f"{type(error).__name__}: {error}", "side_effect_committed": False, **can_likely_causes("can_backend_not_available")}
 
     def open_failure(error: BaseException) -> JsonObject:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error), **can_likely_causes("can_adapter_open_failed")}

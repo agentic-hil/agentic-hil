@@ -354,7 +354,7 @@ Staying at `version: 2` is also an answer. Nothing about that bench changes, and
 
 Symptom: CAN tools cannot start a session, return `can_bus_not_configured`, `can_backend_not_available`, `config_invalid`, permission errors, or read no expected frames.
 
-Likely cause: the bus is not configured under `can_buses`, the wrong `bus_id` is used, sending is refused because `permissions.allow_write` is disabled (reading needs no permission, and on a version 1 file, one with no `version:` key, it still needs `permissions.allow_read`), `python-can` is not installed (`can_backend_not_available` -> install `agentic-hil[can]`), another program owns the adapter, or the `channel` value is for a different backend.
+Likely cause: the bus is not configured under `can_buses`, the wrong `bus_id` is used, sending is refused because `permissions.allow_write` is disabled (reading needs no permission, and on a version 1 file, one with no `version:` key, it still needs `permissions.allow_read`), `python-can` is not installed or cannot be imported (`can_backend_not_available`; read its `backend_error` -> install `agentic-hil[can]` or repair the installation that line names), another program owns the adapter, or the `channel` value is for a different backend.
 
 Fix: have the operator add only the approved project bus to the authoritative config and use MCP CAN tools with the configured `bus_id`. On Windows with PEAK, use `adapter: "peak"` and `channel: "PCAN_USBBUS1"`. On Linux SocketCAN, use `adapter: "socketcan"` and an interface such as `can0`; `PCAN_USBBUS*` values are Windows PCANBasic channels, not SocketCAN interface names.
 

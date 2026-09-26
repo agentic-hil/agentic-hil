@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import json
+import weakref
 from typing import Any
 
 from agentic_hil import __version__
 from agentic_hil.contracts import MCP_TOOL_NAMES as MCP_TOOL_NAMES
 from agentic_hil.contracts import MCP_TOOLS as MCP_TOOLS
 from agentic_hil.contracts import invalid_argument
+from agentic_hil.knowledge import ERROR_CATALOGUE, ERROR_URI_PREFIX, read_resource, remediation_fields
 from agentic_hil.knowledge import MCP_RESOURCE_TEMPLATES as MCP_RESOURCE_TEMPLATES
 from agentic_hil.knowledge import MCP_RESOURCES as MCP_RESOURCES
-from agentic_hil.knowledge import read_resource
 from agentic_hil.redact import redact_sensitive, redact_stream_text
 from agentic_hil.report import overall_success
-from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 from agentic_hil.types import JsonObject
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
@@ -22,88 +23,47 @@ SUPPORTED_MCP_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 # the agent decides anything. A refusal and a skill both arrive too late for a
 # caller that reaches for a shell first: measured, a small model ran st-flash
 # before it had called a single tool here.
+#
+# It is also what an agent host puts into the system prompt of every request of
+# every session this server is registered in, whether or not that session ever
+# touches a board, so it holds at most 1,800 characters: what has to precede a
+# first call and nothing else. A stale file, a missing one and a refused
+# widening are each said by the result that meets them, with its catalogue
+# entry, to the session that meets them.
 SERVER_INSTRUCTIONS = (
-    "This project's hardware is reachable only through these tools. Every request that would touch the "
-    "target board (flashing, resetting, probing, debugging, UART or CAN traffic, "
-    "firmware artifacts, test reports) is answered by calling one of them, before reaching for a "
-    "shell.\n"
-    "Never substitute openocd, pyocd, st-flash, st-info, st-util, JLinkExe, gdb, screen, minicom, "
-    "picocom, cansend or candump, a Makefile target that runs one of them, or direct access to "
-    "/dev/tty*, COM* or a SocketCAN interface. Those bypass the policy these tools enforce, and the "
-    "operator cannot see or audit what they did.\n"
-    "A sequence that spans several calls (flash, then reset, then read) is declared once with "
-    "bench_run_start and closed with bench_run_stop. Without that declaration each call holds its device "
-    "only for its own duration and the board is free in between; with it, the devices you named are yours "
-    "for the whole run and are the only ones the run may touch.\n"
-    "A whole test plan runs through test_reactor_run, which drives the reactor `agentic-hil test-reactor` "
-    "drives, with the same preflight, the same locks held for the whole plan, the same permission per step "
-    "and the same report, so a plan is never a reason to reach for a shell; with detach: true it answers at once "
-    "with a handle that test_reactor_status reads and test_reactor_stop ends.\n"
-    "A permission_denied result is the answer to the request, not an obstacle: report it, name the "
-    "permission that is denied, and stop. Never edit the authoritative configuration to grant "
-    "yourself a permission (it belongs to the operator) and never carry out the action another way.\n"
-    "Changing the configuration also goes through these tools, never through your own file tools. "
-    "project_config_describe says which keys you may change in this state and which permission would "
-    "open a locked one; project_config_set then sets named keys with scalar values. Two permissions "
-    "gate it: allow_config_description_write for what the bench is (target, probe_id, port device and "
-    "baudrate, CAN bus settings) and allow_config_permissions_write for every permission key, which is "
-    "each permissions: block plus the two grants that sit directly on a section, artifacts.allow_upload "
-    "and debug.allow_all_symbols. Read "
-    "agentic-hil://reference/config-shape before guessing a key.\n"
-    "If the configuration holds placeholders because the board was plugged in after it was written "
-    "(probe_id: null, executable: null, controller: unknown-controller), call "
-    "project_config_adopt_hardware instead of printing values for a person to retype. It reads the "
-    "attached probe, fills in only the identity keys that are still unset, reports any key that already "
-    "holds somebody's value rather than replacing it, and writes only with apply: true.\n"
-    "This server parses that configuration once, at startup, and does not reload it while it runs. A result carrying "
-    "config_stale: true says the file is no longer the one it is enforcing: the backend it names and the permissions "
-    "it enforces are not the ones in the file now. config_status.description_source says which document they are: "
-    "`startup` for all of it, or `description_reload` when a project_config_reload_description has since moved the "
-    "devices and the backend onto a newer document while the permissions stayed the startup ones. What to do about it is decided by "
-    "config_status.state and is not the same for all three: `changed`: the file on disk differs from the one this "
-    "server loaded; `missing`: the file is gone, so it has to be "
-    "restored before there is anything to restart onto; `unreadable`: it is there and will not open, so it has to be "
-    "made readable first. Never ask for a restart on `missing` or `unreadable` before the file has been restored or "
-    "made readable. The status compares two digests and claims nothing beyond that: it does not say what the file "
-    "now contains, and it does not promise a restart will succeed.\n"
-    "On `changed` there are two ways forward and they cover different halves of the file. If what moved is the "
-    "description of the bench (target, a debuggers/com_ports/can_buses entry, a probe id, a COM device, a baudrate), "
-    "call project_config_reload_description. It takes no arguments, re-reads exactly those four sections, and clears "
-    "the staleness for them without a restart. It re-reads no permission at all, in either direction: a device this "
-    "server has never seen arrives with no grant, so you can probe and read it and cannot flash, reset, mass-erase or "
-    "write to it until an operator restarts the server, and the result says so. Everything else (every permission, "
-    "version, workspace_root, state_root, debug, artifacts, validation, recovery, reports, logs) is adopted by a "
-    "restart and by nothing else, so for those ask the operator to restart the MCP server once (the one the agent "
-    "host started for this workspace, not the agentic-hil command line, which reads the file fresh every time and is "
-    "already current) and report the startup error if it does not come back, because the file it found is then the "
-    "thing to repair. Those two are the whole of it: do not try to make the server pick a change up by editing the "
-    "file again or by calling a configuration write tool.\n"
-    "If a tool answers config_file_not_found, this project has no configuration yet: call "
-    "project_config_create. It takes no arguments, generates the file from the hardware attached to "
-    "this machine, and every permission in it is true (flashing, reset, COM and CAN writes, artifact "
-    "upload, unrestricted symbol access, and all three permissions.allow_config_* grants) except "
-    "allow_raw_debugger_commands and allow_mass_erase, which are false. Those two are not capabilities "
-    "you are missing: there is no tool here for either, and while either is true flash_firmware on that "
-    "probe is refused. The bench is workable from that file without anybody editing YAML, flashing "
-    "included. Report where it is and what it granted, and ask the operator which permissions this "
-    "bench should not have. Never ask for those two to be turned on.\n"
-    "Permissions move one way here. project_config_set writes false into a permission and never any "
-    "other value: not true into one you never touched, and not into one you set to false a moment "
-    "earlier; a call that tries is refused as permission_widening_denied. So you can narrow this bench "
-    "on the operator's word and can never widen it. Setting "
-    "permissions.allow_config_permissions_write: false is the last permission change that tool can "
-    "make; the result of that call says so. Regenerating is the operator's, with `agentic-hil init "
-    "--force`; never delete or move a configuration to get a different one.\n"
-    "Facts about this server are published as resources; read them instead of its source code or its "
-    "installed package. resources/list carries agentic-hil://reference/debugger-backends (which config "
-    "field each debugger backend requires, discovers, or ignores), .../target-support (which field "
-    "names the target, which values are known good), .../errors (every error_type with its fix), "
-    ".../platform-paths (where each file lives on each platform), .../lease-lifecycle, "
-    ".../config-schema, .../config-shape (what a configuration looks like and how to change it), "
-    ".../test-plan (where a plan lives, how its path resolves, which version admits which step, every "
-    "step with its keys, the comparators, and two plans that run) and .../test-plan-schema (the plan "
-    "schema itself). Read .../test-plan before writing a test plan; the format is published there and "
-    "nowhere a shell has to go looking for it."
+    "This project's target board is reachable only through these tools. Every request that touches it (flashing, "
+    "resetting, probing, debugging, UART or CAN traffic, firmware artifacts, test reports) is answered by calling "
+    "them, before reaching for a shell.\n"
+    "Never substitute openocd, pyocd, st-flash, st-info, st-util, JLinkExe, gdb, screen, minicom, picocom, cansend, "
+    "candump, a Makefile target that runs one of them, or direct access to /dev/tty*, COM* or a SocketCAN interface: "
+    "they bypass the policy these tools enforce, and the operator cannot audit them.\n"
+    "A permission_denied result is the answer: report the denied permission and stop. Never edit the authoritative "
+    "configuration to grant yourself a permission (it belongs to the operator), and never carry out the action "
+    "another way.\n"
+    "The configuration changes only through project_config_describe and project_config_set, never through your own "
+    "file tools.\n"
+    "flash_firmware with reset_after_flash and capture flashes, resets and returns the UART output in one call; "
+    "com_read waits for a pattern with until and can_read for a frame with until_id, so neither needs polling. "
+    "bench_run_start and bench_run_stop are for a longer sequence driven call by call; a whole test plan runs "
+    "through test_reactor_run.\n"
+    "Result text leaves out empty values and fields at their default: an absent side_effect_status is not_started, "
+    "absent side_effect_committed, cleanup_required and quarantined are false, absent audit_ok, cleanup_ok and "
+    "target_ok are true, an absent hardware_state is unchanged. Catalogue advice this session already received is left out too; advice_uri says "
+    "where to read it again.\n"
+    "Facts about this server are published as resources (resources/list, agentic-hil://reference/...); read them "
+    "instead of its source or its installed package."
+)
+
+# What a server with no configuration to bind says instead, in 500 characters at
+# most. It is registered at user scope as often as not, so every request in every
+# project without a board pays for this text. What a session needs once a
+# configuration exists arrives with the result that created it and with each
+# refusal after that.
+UNPROVISIONED_SERVER_INSTRUCTIONS = (
+    "This project has no Agentic HIL configuration yet. A request that touches a target board starts with "
+    "project_config_create and then goes through these tools, before reaching for a shell. Never substitute openocd, "
+    "pyocd, st-flash, JLinkExe, gdb, screen, minicom, candump, a Makefile target that runs one of them, or direct "
+    "/dev/tty* or COM* access."
 )
 
 JSONRPC_PARSE_ERROR = -32700
@@ -140,15 +100,175 @@ Safety rules:
 MCP_PROMPTS = [{"name": "agentic_hil_embedded_workflow", "description": "Safe workflow for using Agentic HIL hardware tools from an AI agent."}]
 
 
-def tool_result_text(payload: JsonObject) -> str:
-    """The serialized form of a tool result for the content text block.
+def server_instructions(tools: AgenticHILToolService | UnprovisionedToolService) -> str:
+    """The instructions `initialize` sends, chosen by whether there is a configuration to serve.
 
-    That block exists only so a host that does not read structuredContent still
-    gets the result (the MCP specification recommends servers return both). It
-    is parsed, never read as prose, so it carries no indentation: the same
-    payload without the whitespace nobody reads.
+    Asked of the service rather than of the file: an unprovisioned server binds
+    the moment a configuration loads, so one whose file was written between its
+    start and the host's first message answers every call as a configured server
+    and introduces itself as one."""
+    if isinstance(tools, UnprovisionedToolService) and tools.config is None:
+        return UNPROVISIONED_SERVER_INSTRUCTIONS
+    return SERVER_INSTRUCTIONS
+
+
+# The top-level pairs the text of a result leaves out, because each only
+# restates what a reader assumes when it is absent: nothing was committed or
+# started, the hardware is as it was, nothing is held, and every check passed.
+# The same field holding any other value says something and is kept, and so is
+# every field not named here, `ok` and `retry_safe` included.
+TEXT_DEFAULTS: dict[str, object] = {
+    "side_effect_committed": False,
+    "side_effect_status": "not_started",
+    "hardware_state": "unchanged",
+    "cleanup_required": False,
+    "quarantined": False,
+    "audit_ok": True,
+    "cleanup_ok": True,
+    "target_ok": True,
+    "config_stale": False,
+}
+
+# The top-level advice lists whose entries a session is sent once.
+# `quarantine_guidance` is not one of them: no resource serves it again, and it
+# is what a caller needs to recover the bench.
+REPEATED_ADVICE_FIELDS = ("remediation", "likely_causes")
+
+# What each tool service has sent, per advice field. One stdio loop serves one
+# service, so this is one MCP session's memory: held in this process only, gone
+# with the service, and never shared with another one.
+_SENT_ADVICE: weakref.WeakKeyDictionary[Any, dict[str, set[str]]] = weakref.WeakKeyDictionary()
+
+
+def sent_advice(tools: Any) -> dict[str, set[str]] | None:
+    """The advice entries already sent in the session ``tools`` serves, per field.
+
+    None for a service that cannot be referenced weakly, which is then sent
+    every entry every time: a memory keyed any other way could outlive the
+    service and hand a later one what an earlier session was told."""
+    try:
+        return _SENT_ADVICE.setdefault(tools, {})
+    except TypeError:
+        return None
+
+
+def tool_result_text(payload: JsonObject, sent: dict[str, set[str]] | None = None) -> str:
+    """The content text block of a tool result: a compact projection of it.
+
+    The text is what an agent host puts into the model's context, where it stays
+    for the rest of the session and is paid for again on every later request, so
+    it carries what says something and nothing else. It is one JSON object
+    without whitespace that always keeps `ok` and `tool`. A key whose value is
+    null, "", [] or {} is left out at any depth, and so is a nested object left
+    with no keys once its own empty keys are. An array keeps every element in
+    its place, an object inside one as {} when nothing of it is left. At the top
+    level, the pairs in `TEXT_DEFAULTS` are left out where they only restate
+    their default.
+
+    A top-level remediation or likely_causes entry this session was already sent
+    in the same field is left out as well, and counted under `repeated_advice`.
+    `advice_uri` names the error catalogue entry that serves the remediation left
+    out, where one does. ``sent`` is that memory, and this adds the block's
+    entries to it once the block is built, so nothing is left out within one
+    block; without it, nothing is left out at all. Advice nested deeper, such as
+    a step's own result inside a run, and `quarantine_guidance` are never left
+    out.
+
+    structuredContent stays the whole result. It is the document itself, for the
+    hosts and programs that read fields rather than the model's context, and
+    `isError` is decided from the same result; a default, an empty value and
+    advice the session already has are all still there for a reader that needs
+    them, so nothing the text leaves out is lost.
     """
-    return json.dumps(payload, separators=(",", ":"))
+    if not isinstance(payload, dict):
+        return json.dumps(payload, separators=(",", ":"))
+    text: JsonObject = {}
+    repeated: dict[str, int] = {}
+    left_out_remediation: list[Any] = []
+    taken: dict[str, list[str]] = {}
+    for key, value in payload.items():
+        if key in ("ok", "tool"):
+            text[key] = value
+            continue
+        if key in TEXT_DEFAULTS and _same(TEXT_DEFAULTS[key], value):
+            continue
+        value = _without_empty(value)
+        if _is_empty(value):
+            continue
+        if sent is not None and key in REPEATED_ADVICE_FIELDS and isinstance(value, list):
+            already = sent.get(key, set())
+            identities = [json.dumps(entry, separators=(",", ":")) for entry in value]
+            taken[key] = identities
+            kept = [entry for entry, identity in zip(value, identities, strict=True) if identity not in already]
+            if len(kept) < len(value):
+                repeated[key] = len(value) - len(kept)
+                if key == "remediation":
+                    left_out_remediation = [entry for entry, identity in zip(value, identities, strict=True) if identity in already]
+            if not kept:
+                continue
+            value = kept
+        text[key] = value
+    if repeated:
+        text["repeated_advice"] = repeated
+        uri = _advice_uri(payload, left_out_remediation)
+        if uri is not None:
+            text["advice_uri"] = uri
+    serialized = json.dumps(text, separators=(",", ":"))
+    if sent is not None:
+        for key, identities in taken.items():
+            sent.setdefault(key, set()).update(identities)
+    return serialized
+
+
+def _same(expected: object, value: object) -> bool:
+    """Equal and of the same type, so a default `false` is not matched by a `0`."""
+    return type(value) is type(expected) and value == expected
+
+
+def _is_empty(value: Any) -> bool:
+    return value is None or (isinstance(value, (str, list, tuple, dict)) and not value)
+
+
+def _without_empty(value: Any) -> Any:
+    """``value`` with every object's empty keys left out, worked from the bottom up.
+
+    An array element is never removed or replaced, because its position means
+    something: an object inside an array loses its own empty keys and stays in
+    its place, as {} when none are left."""
+    if isinstance(value, dict):
+        projected = ((key, _without_empty(child)) for key, child in value.items())
+        return {key: child for key, child in projected if not _is_empty(child)}
+    if isinstance(value, (list, tuple)):
+        return [_without_empty(child) for child in value]
+    return value
+
+
+def _advice_uri(payload: JsonObject, left_out: list[Any]) -> str | None:
+    """The URI of the catalogue entry that serves every remediation entry left out.
+
+    A result does not say which entry its advice came from, so each entry of its
+    error_type is rendered the way the services render it, with the result's own
+    permission key where the entry is written around one. The entry whose advice
+    the result carries whole is named; failing that, the first that holds every
+    entry left out. None when no entry does: the text never points at advice
+    that is not there to read."""
+    error_type = payload.get("error_type")
+    if not left_out or not isinstance(error_type, str) or not error_type:
+        return None
+    permission = payload.get("permission")
+    permission = permission if isinstance(permission, str) and permission else None
+    holding: list[str] = []
+    for key in ERROR_CATALOGUE:
+        entry_type, _, scope = key.partition(":")
+        if entry_type != error_type:
+            continue
+        advice = remediation_fields(error_type, scope or None, permission=permission)
+        steps = advice.get("remediation", [])
+        if all(entry in steps for entry in left_out):
+            if steps == payload.get("remediation") and advice.get("do_not") == payload.get("do_not"):
+                return f"{ERROR_URI_PREFIX}{key}"
+            holding.append(key)
+    return f"{ERROR_URI_PREFIX}{holding[0]}" if holding else None
 
 
 def parse_error_response() -> JsonObject:
@@ -212,7 +332,7 @@ def handle_method(request_id: Any, method: str, params: Any, tools: AgenticHILTo
         params_object = params_object_or_throw(params)
         requested_version = params_object.get("protocolVersion")
         negotiated_version = requested_version if requested_version in SUPPORTED_MCP_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSION
-        return result_response(request_id, {"protocolVersion": negotiated_version, "capabilities": {"tools": {"listChanged": False}, "prompts": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}}, "serverInfo": {"name": "agentic-hil", "version": __version__}, "instructions": SERVER_INSTRUCTIONS})
+        return result_response(request_id, {"protocolVersion": negotiated_version, "capabilities": {"tools": {"listChanged": False}, "prompts": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}}, "serverInfo": {"name": "agentic-hil", "version": __version__}, "instructions": server_instructions(tools)})
     if method == "ping":
         return result_response(request_id, {})
     if method == "tools/list":
@@ -251,21 +371,22 @@ def call_tool(params: Any, tools: AgenticHILToolService) -> JsonObject:
     params_object = params_object_or_throw(params)
     name = params_object.get("name")
     arguments = params_object.get("arguments", {})
+    sent = sent_advice(tools)
     # The envelope's own two refusals are built where every schema refusal is
     # built, so they carry the field, the validator and the catalogue's fix the
     # agent reads together on every other invalid_argument.
     if not isinstance(name, str):
-        return tool_error_result(invalid_argument("unknown", "name", "type", "tools/call requires a string name."))
+        return tool_error_result(invalid_argument("unknown", "name", "type", "tools/call requires a string name."), sent)
     if arguments is None:
         arguments = {}
     if not isinstance(arguments, dict):
-        return tool_error_result(invalid_argument(name, "$", "type", "tools/call arguments must be an object."))
+        return tool_error_result(invalid_argument(name, "$", "type", "tools/call arguments must be an object."), sent)
     result = tools.call(name, arguments)
     # Defense-in-depth: strip any secret-named field before the result is
     # serialized into the MCP content text and structuredContent. isError is
     # computed from the raw result (redaction touches no success field).
     safe_result = redact_sensitive(result)
-    return {"content": [{"type": "text", "text": tool_result_text(safe_result)}], "structuredContent": safe_result, "isError": not overall_success(result)}
+    return {"content": [{"type": "text", "text": tool_result_text(safe_result, sent)}], "structuredContent": safe_result, "isError": not overall_success(result)}
 
 
 def get_prompt(params: Any) -> JsonObject:
@@ -284,9 +405,12 @@ def params_object_or_throw(params: Any) -> JsonObject:
     raise InvalidParamsError("JSON-RPC params must be an object.")
 
 
-def tool_error_result(result: JsonObject) -> JsonObject:
-    """A refusal the envelope raised itself, in the shape of a failed tool result."""
-    return {"content": [{"type": "text", "text": tool_result_text(result)}], "structuredContent": result, "isError": True}
+def tool_error_result(result: JsonObject, sent: dict[str, set[str]] | None = None) -> JsonObject:
+    """A refusal the envelope raised itself, in the shape of a failed tool result.
+
+    Its text is projected like any tool's, against the same session's memory of
+    the advice it was sent."""
+    return {"content": [{"type": "text", "text": tool_result_text(result, sent)}], "structuredContent": result, "isError": True}
 
 
 def result_response(request_id: Any, result: JsonObject) -> JsonObject:

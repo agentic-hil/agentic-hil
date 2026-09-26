@@ -611,14 +611,15 @@ def test_the_test_config_invalid_entry_names_the_three_answers_and_their_command
     the most to lose by guessing. The entry earns its place by separating the two
     documents a plan refusal can be about, and by naming the command for each: the
     plan is corrected against the `configured_*` list, or the configuration is
-    filled in with `adopt-hardware` or written again with `init --force`.
+    filled in with `project_config_adopt_hardware` or written again with
+    `init --force`.
     """
     entry = catalogue_entry("test_config_invalid")
     assert entry is not None
     said = json.dumps(entry)
 
     assert "`validation_error`" in said and "`next_step`" in said
-    assert "adopt-hardware" in said and "init --force" in said
+    assert "project_config_adopt_hardware" in said and "init --force" in said
     # The plan reference has to be reachable rather than named, because a reader
     # over MCP has no source tree to look the format up in.
     assert TEST_PLAN_URI in said

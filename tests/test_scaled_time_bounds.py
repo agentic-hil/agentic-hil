@@ -642,10 +642,23 @@ def walked_files() -> list[Path]:
 # product asked for and not one second this host spent; the ceiling is the
 # envelope that makes the shutdown budget a short one. A factor there would let
 # the product's own budget grow on a slow host, which is the envelope inverted.
+#
+# `bench/test_bench_reactor_runs.py` holds two more, and both are the first kind
+# of claim made on the board. The plan there asks for a delay of a minute and a
+# stop is sent while it waits. `waited["waited_ms"] < LONG_DELAY_MS` reads the
+# wait the product wrote into the delay's own result, and
+# `records[3]["elapsed_ms"] < LONG_DELAY_MS` the time the plan runner recorded
+# for that step, so both claim that the stop cut the minute short. A factor
+# would carry either ceiling past the minute the plan asked for, and a wait that
+# ran to its end would then pass the very line written to catch it.
 EXEMPT_BOUNDS = {
     "test_run_lifecycle.py": ('step["waited_ms"] < 600_000',),
     "test_sessions_devices_coordination.py": ("elapsed < BROKER_REFUSAL_CEILING_S",),
     "test_can_broker_deadline.py": ("sum(broker.waited_for) <= GRACE_CEILING_S",),
+    "bench/test_bench_reactor_runs.py": (
+        'waited["waited_ms"] < LONG_DELAY_MS',
+        'records[3]["elapsed_ms"] < LONG_DELAY_MS',
+    ),
 }
 
 
@@ -867,7 +880,7 @@ def test_every_file_still_holds_the_ceilings_it_held() -> None:
 # once here rather than being argued three times during the sweep.
 BASE_EXPRESSIONS = {
     "bench/test_bench_coordination.py": {"REFUSAL_CEILING_S": 1, "ASKED_WAIT_S + REFUSAL_CEILING_S": 1},
-    "test_can_broker_deadline.py": {"REAL_ATTACH_DEADLINE_S + GRACE_CEILING_S": 1},
+    "test_can_broker_deadline.py": {"REAL_CLOCK_BOUND_S": 1},
     "container/test_can_over_vcan.py": {"BUS_TIMEOUT_S + WAIT_SLACK_S": 1, "BUS_TIMEOUT_S + WAIT_SLACK_S + 2.0": 1},
     "container/test_debugger_processes_against_openocd.py": {"CALL_CEILING_S": 2},
     "container/test_pyocd_without_a_probe.py": {"TIMEOUT_S / 2": 1},
@@ -889,7 +902,7 @@ BASE_EXPRESSIONS = {
 # two script runners, which take the factor where they hand it to the child.
 BASE_CONSTANTS = {
     "bench/test_bench_coordination.py": ("REFUSAL_CEILING_S = 30.0", "ASKED_WAIT_S = 3.0"),
-    "test_can_broker_deadline.py": ("GRACE_CEILING_S = 3.0", "REAL_ATTACH_DEADLINE_S = 0.5"),
+    "test_can_broker_deadline.py": ("GRACE_CEILING_S = 3.0", "REAL_ATTACH_DEADLINE_S = 0.5", "REAL_CLOCK_BOUND_S = 8.0"),
     "container/test_can_over_vcan.py": ("BUS_TIMEOUT_S = 2.0", "WAIT_SLACK_S = 1.5"),
     "container/test_debugger_processes_against_openocd.py": ("CALL_CEILING_S = 15.0",),
     "container/test_pyocd_without_a_probe.py": ("TIMEOUT_S = 40",),

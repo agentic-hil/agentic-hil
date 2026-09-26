@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import inspect
+import json
 import math
 import os
 import shutil
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 # Captured before any test monkeypatches HOME.
@@ -23,6 +26,20 @@ REAL_HOME = Path(os.path.expanduser("~"))
 # `sweep_stale_launchers`).
 LAUNCHER_PREFIX = "agentic-hil-pytest-launcher-"
 LAUNCHER_ROOT = REAL_HOME / f"{LAUNCHER_PREFIX}{os.getpid()}"
+
+# The one file every run of the suite on this machine takes before a test
+# reads the machine's process table for an agent CLI (#567). `xdist_group`
+# keeps those tests on one worker of one run, and a second run, from another
+# clone, another worktree or the same checkout, has a scheduler of its own.
+# Named from the home read above, before any test has moved it, so every run
+# arrives at the same file, beside the one `tools/run_lock.py` keeps for the
+# Linux runner.
+PROCESS_TABLE_LOCK = REAL_HOME / ".agentic-hil" / "pytest-process-table.lock"
+# Windows locks a byte range, and no other handle may read a locked byte, so
+# the lock sits well past the record that names its holder: a run that waited
+# the lock out reads that record to say who holds it. POSIX `flock` takes the
+# whole file and never looks at this.
+_PROCESS_TABLE_LOCKED_BYTE = 1 << 20
 
 # Windows, where `os.kill(pid, 0)` is not a liveness probe: CPython maps every
 # signal other than the console events onto TerminateProcess, so asking that
@@ -153,6 +170,93 @@ def read_when_published(path: Path, timeout_s: float = 5.0) -> str:
         if time.monotonic() >= deadline:
             raise AssertionError(f"{path} carried no published value within {timeout_s}s")
         time.sleep(0.01)
+
+
+@contextmanager
+def hold_the_process_table(holder: str, *, wait_s: float, path: Path = PROCESS_TABLE_LOCK) -> Iterator[None]:
+    """Hold the machine's process table for ``holder`` while the body runs (#567).
+
+    Every run of the suite on the machine takes the same lock, so a test that
+    plants a process shaped like an agent CLI and a test that asserts none is
+    running never read the table at the same time, whichever runs they belong
+    to. A run that finds it held waits. One that waits out ``wait_s``, widened
+    by the runner's one time scale like every other bound in the suite, fails
+    naming the PID and the test holding it, because a bare timeout sends the
+    reader after the wrong run.
+
+    The lock is the operating system's, taken on an open file, so it is let go
+    when the holding process ends, however it ends: a run killed in the middle
+    of a test never leaves the next one waiting for a process that is gone. The
+    record naming the holder is only what a waiting run reports. The directory
+    is made owner-only when this is the first thing on the machine to need it,
+    as `tools/run_lock.py` makes it.
+    """
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        bound = scaled_time_bound(wait_s)
+        deadline = time.monotonic() + bound
+        while not _take_the_process_table(descriptor):
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"the machine's process table is held by {_process_table_holder(path)}, and was not let go "
+                    f"within {bound:g}s ({wait_s:g}s widened by {TIME_SCALE_VARIABLE}); the lock is {path}"
+                )
+            time.sleep(0.1)
+        try:
+            record = json.dumps({"pid": os.getpid(), "holder": holder}).encode("utf-8")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.write(descriptor, record)
+            os.ftruncate(descriptor, len(record))
+            yield
+        finally:
+            _let_go_of_the_process_table(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _take_the_process_table(descriptor: int) -> bool:
+    """Take the lock if it is free, and say whether it was, without waiting."""
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(descriptor, _PROCESS_TABLE_LOCKED_BYTE, os.SEEK_SET)
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        except PermissionError:
+            # EACCES: another handle holds the byte. Anything else is not an
+            # answer about the lock and stays an error.
+            return False
+        return True
+    import fcntl
+
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _let_go_of_the_process_table(descriptor: int) -> None:
+    """Let go at once, rather than whenever the system gets round to it after the close."""
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(descriptor, _PROCESS_TABLE_LOCKED_BYTE, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
+def _process_table_holder(path: Path) -> str:
+    """Who the record beside the lock names as its holder, for a run that waited it out."""
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        return f"PID {record['pid']} for {record['holder']}"
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return f"a process whose record in the lock could not be read ({error!r})"
 
 
 def trusted_launcher() -> Path:

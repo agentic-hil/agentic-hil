@@ -305,6 +305,56 @@ def test_a_block_step_that_failed_carries_the_iteration_that_failed_in_it() -> N
     assert body["iterations"][1]["steps"][0]["result"]["summary"] == "The window was missed."
 
 
+def test_a_block_step_the_stop_landed_in_passes_like_every_other_step_the_run_ran() -> None:
+    # The stop is read between the steps a block runs too, and a block it lands
+    # in ends with `run_stopped` as its own result. That is the run's stop, not
+    # something the block got wrong: every iteration it ran passed. The shape is
+    # the one the reactor wrote on the board for a run stopped on the second
+    # iteration of a `repeat`.
+    plan = (PLAN_STEPS[0], PlanStep(action="repeat", arguments={"count": 3}, steps=(PLAN_STEPS[1],)), PLAN_STEPS[2])
+    passed = {"index": 1, "route": "dut_uart", "action": "uart_read", "result": {"ok": True}}
+    result = {
+        "ok": False,
+        "tool": "test_reactor",
+        "name": "demo-plan",
+        "cleanup_ok": True,
+        "audit_ok": True,
+        "error_type": "run_stopped",
+        "stopped": True,
+        "stopped_after_step": 2,
+        "steps": [
+            {"index": 1, "route": "dut", "action": "flash", "result": {"ok": True, "elapsed_ms": 1500}},
+            {
+                "index": 2,
+                "route": "-",
+                "action": "repeat",
+                "iterations": [{"iteration": 1, "steps": [passed]}, {"iteration": 2, "steps": [passed]}],
+                "result": {
+                    "ok": False,
+                    "tool": "test_reactor",
+                    "action": "repeat",
+                    "error_type": "run_stopped",
+                    "summary": "A stop was requested on iteration 2 of this repeat block.",
+                    "count": 3,
+                    "iterations_run": 2,
+                    "elapsed_s": 2.5,
+                    "exit_reason": "stopped",
+                    "stopped_after_nested_step": 1,
+                },
+            },
+        ],
+    }
+
+    document = junit_xml_document(result, plan_steps=plan)
+
+    suite = suite_of(document)
+    assert (suite.get("tests"), suite.get("failures"), suite.get("errors"), suite.get("skipped")) == ("3", "0", "0", "1")
+    cases = cases_of(document)
+    assert len(cases["2.-.repeat"]) == 0
+    assert cases["2.-.repeat"].get("time") == "2.500"
+    assert "stopped on request after step 2" in (cases["3.dut.reset"].find("skipped").get("message") or "")
+
+
 def test_cleanup_and_audit_failures_each_add_their_own_case() -> None:
     result = {
         **green_result(),

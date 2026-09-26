@@ -65,8 +65,8 @@ import shutil
 import subprocess
 import sys
 from collections import Counter
-from collections.abc import Generator
-from dataclasses import dataclass
+from collections.abc import Generator, Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -79,6 +79,16 @@ BENCH_ENV = "AGENTIC_HIL_BENCH"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CHECKOUT_SOURCES = REPOSITORY_ROOT / "src"
 DEMO = REPOSITORY_ROOT / "examples" / "nucleo-f446re_demo"
+# The ELF the demo's Debug preset leaves, relative to a copy of the demo.
+DEMO_IMAGE = Path("build") / "Debug" / "nucleo-f446re_demo.elf"
+
+# The bench's own firmware, one C file per image, each built as the demo's
+# `main.c` with the demo's startup code, linker script and toolchain file.
+BENCH_FIRMWARE = Path(__file__).resolve().parent / "firmware"
+# Where a built image is put inside the project before a plan flashes it. Under
+# `build` because that is the artifact root a configuration that names none
+# still permits, and a generated one permits the whole workspace anyway.
+IMAGES_IN_THE_PROJECT = Path("build") / "bench-images"
 
 # What a child of this tier asks the interpreter for its own package, so the
 # session can compare the answer against this tree before anything reaches the
@@ -406,35 +416,26 @@ def gdb(bench: Bench) -> None:
         raise MissingHostTool(why)
 
 
-@pytest.fixture(scope="session")
-def firmware(bench: Bench) -> Path:
-    """The demo's ELF, built here, because a plan that flashes needs one.
-
-    Built rather than expected: this tier is run on a bench by an operator or by
-    ``tools/bench_battery.py``, and either way the tree it is pointed at is a
-    fresh copy. A bench without the cross toolchain skips the tests that flash
-    and still runs the ones that do not.
-    """
-    for tool in ("cmake", "arm-none-eabi-gcc"):
-        if shutil.which(tool) is None:
-            raise MissingHostTool(f"{tool} is not on PATH, so the demo firmware cannot be built here")
+def built_where_it_stands(project: Path) -> str | None:
+    """Build a copy of the demo with its own Debug preset; why it did not build, or None."""
     for command in (["cmake", "--preset", "Debug"], ["cmake", "--build", "--preset", "Debug"]):
-        built = subprocess.run(command, capture_output=True, text=True, cwd=str(bench.project), timeout=BUILD_TIMEOUT_S, check=False)
+        built = subprocess.run(command, capture_output=True, text=True, cwd=str(project), timeout=BUILD_TIMEOUT_S, check=False)
         if built.returncode != 0:
-            pytest.skip(f"the demo firmware did not build here: {' '.join(command)}\n{built.stdout[-2000:]}\n{built.stderr[-2000:]}")
-    image = bench.project / "build" / "Debug" / "nucleo-f446re_demo.elf"
-    assert image.is_file(), f"the build left no ELF at {image}"
-    # Put that firmware on the board, once per session, through the product's
-    # own plan runner. Every debug session below opens this ELF for its symbols
-    # and downloads nothing, so a breakpoint on `main` is an address in this
-    # build; a board carrying some other firmware runs straight past it and the
-    # resume times out. The flash tests used to be the only thing that made the
-    # two agree, which made every debug test depend on running after them.
-    plan = bench.project / "bench-firmware-on-the-board.yaml"
+            return f"{' '.join(command)}\n{built.stdout[-2000:]}\n{built.stderr[-2000:]}"
+    return None
+
+
+def put_on_board(bench: Bench, image: Path) -> dict:
+    """Flash one image inside the project and start it, through the product's own plan runner.
+
+    The report the run printed, whatever it says: the caller decides whether a
+    board that refused the image is a failure or the point of the test.
+    """
+    plan = bench.project / f"bench-put-on-the-board-{image.stem}.yaml"
     plan.write_text(
         chr(10).join([
             "version: 3",
-            "name: bench-firmware-on-the-board",
+            f"name: bench-put-on-the-board-{image.stem}",
             "steps:",
             f"  - device: {bench.debugger_name()}",
             "    action: flash",
@@ -448,15 +449,107 @@ def firmware(bench: Bench) -> Path:
     )
     try:
         flashed = bench.run("test-reactor", "--test-config", plan.name, "--json")
-        try:
-            report = json.loads(flashed.stdout)
-        except ValueError:
-            report = {}
-        if report.get("ok") is not True:
-            pytest.fail(f"the demo firmware could not be put on the board before this session: {report.get('summary') or flashed.stderr[-1500:]}", pytrace=False)
     finally:
         plan.unlink(missing_ok=True)
+    try:
+        return json.loads(flashed.stdout)
+    except ValueError:
+        return {"ok": False, "summary": f"the plan printed no report (exit {flashed.returncode}): {flashed.stderr[-1500:]}"}
+
+
+@pytest.fixture(scope="session")
+def firmware(bench: Bench) -> Path:
+    """The demo's ELF, built here, because a plan that flashes needs one.
+
+    Built rather than expected: this tier is run on a bench by an operator or by
+    ``tools/bench_battery.py``, and either way the tree it is pointed at is a
+    fresh copy. A bench without the cross toolchain skips the tests that flash
+    and still runs the ones that do not.
+    """
+    for tool in ("cmake", "arm-none-eabi-gcc"):
+        if shutil.which(tool) is None:
+            raise MissingHostTool(f"{tool} is not on PATH, so the demo firmware cannot be built here")
+    failure = built_where_it_stands(bench.project)
+    if failure is not None:
+        pytest.skip(f"the demo firmware did not build here: {failure}")
+    image = bench.project / DEMO_IMAGE
+    assert image.is_file(), f"the build left no ELF at {image}"
+    # Put that firmware on the board, once per session, through the product's
+    # own plan runner. Every debug session below opens this ELF for its symbols
+    # and downloads nothing, so a breakpoint on `main` is an address in this
+    # build; a board carrying some other firmware runs straight past it and the
+    # resume times out. The flash tests used to be the only thing that made the
+    # two agree, which made every debug test depend on running after them.
+    report = put_on_board(bench, image)
+    if report.get("ok") is not True:
+        pytest.fail(f"the demo firmware could not be put on the board before this session: {report.get('summary')}", pytrace=False)
     return image
+
+
+@dataclass
+class BoardImages:
+    """The bench's own images, built once per session, and which one the board runs.
+
+    Every other module in this tier assumes the board runs the demo, because its
+    debug sessions read symbols from the demo's ELF. So an image is put on the
+    board for one test and the demo goes back after it, by the ``board_images``
+    fixture rather than by the test, which a failed assertion would leave
+    halfway.
+    """
+
+    bench: Bench
+    demo: Path
+    build_root: Path
+    built: dict[str, Path] = field(default_factory=dict)
+    displaced: bool = False
+
+    def image(self, name: str) -> Path:
+        """``firmware/<name>.c`` built as the demo's ``main.c``; the ELF, inside the project."""
+        if name in self.built:
+            return self.built[name]
+        source = BENCH_FIRMWARE / f"{name}.c"
+        assert source.is_file(), f"there is no bench image called {name!r}: {source} does not exist"
+        variant = self.build_root / name
+        shutil.copytree(DEMO, variant, ignore=shutil.ignore_patterns("build", ".agentic-hil"))
+        shutil.copyfile(source, variant / "Src" / "main.c")
+        failure = built_where_it_stands(variant)
+        if failure is not None:
+            pytest.fail(f"the bench image {name!r} did not build: {failure}", pytrace=False)
+        image = self.bench.project / IMAGES_IN_THE_PROJECT / f"{name}.elf"
+        image.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(variant / DEMO_IMAGE, image)
+        self.built[name] = image
+        return image
+
+    def put(self, name: str) -> dict:
+        """Put one image on the board through the product; the plan's report."""
+        image = self.image(name)
+        # Marked before the flash rather than after it: a flash that fails
+        # halfway leaves the board running neither image.
+        self.displaced = True
+        return put_on_board(self.bench, image)
+
+    def restore(self) -> None:
+        """The demo back on the board, if anything else was put there."""
+        if not self.displaced:
+            return
+        report = put_on_board(self.bench, self.demo)
+        if report.get("ok") is not True:
+            pytest.fail(f"the demo firmware could not be put back on the board, so every module after this one would run against the wrong image: {report.get('summary')}", pytrace=False)
+        self.displaced = False
+
+
+@pytest.fixture(scope="session")
+def board_image_builds(bench: Bench, firmware: Path, tmp_path_factory: pytest.TempPathFactory) -> BoardImages:
+    """The session's builds of the bench's own images, shared by every test that puts one on the board."""
+    return BoardImages(bench=bench, demo=firmware, build_root=tmp_path_factory.mktemp("bench-images"))
+
+
+@pytest.fixture
+def board_images(board_image_builds: BoardImages) -> Iterator[BoardImages]:
+    """The bench's own images for one test, and the demo back on the board after it."""
+    yield board_image_builds
+    board_image_builds.restore()
 
 
 def failure_worded_lines(capture: str) -> list[str]:

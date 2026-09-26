@@ -4,7 +4,7 @@ import math
 import os
 import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,6 +91,8 @@ from agentic_hil.knowledge import (
 from agentic_hil.process import cleanup_registered_processes, managed_process_owner
 from agentic_hil.provisional import cleanup_provisional_handles
 from agentic_hil.report import (
+    CONTACT_MARKER_KEY,
+    CONTACT_MARKER_SOURCE_KEY,
     attach_canonical_audit_evidence,
     audit_unavailable,
     claim_auto_recover_default_warning,
@@ -99,6 +101,7 @@ from agentic_hil.report import (
     merge_audit_status,
     overall_success,
     read_last_report,
+    report_write_failed,
     write_report,
 )
 from agentic_hil.runlifecycle import request_run_stop, run_status
@@ -203,6 +206,12 @@ class AgenticHILToolService:
         # agent is told to stop retrying on that field, and it has to mean that
         # the machine did try, not that a gate was in the way.
         self._machine_recovery_ran = False
+        # What a `flash_firmware` capture's own COM session answered, from its
+        # open to its stop, kept for the length of one call. The debugger lease
+        # writes its own status over the flash result's lease fields, so the
+        # session's are merged back in once that lease is settled; see
+        # `_flash_with_capture`.
+        self._capture_state: JsonObject | None = None
         self._lifecycle_lock = threading.RLock()
         self._dispatch_local = threading.local()
         self._state = "open"
@@ -286,6 +295,9 @@ class AgenticHILToolService:
             return tool_error("flash_firmware", "invalid_argument", "reset_after_flash must be a boolean.")
         if reset_after_flash and not self.debugger_permissions.allow_reset:
             return tool_error("flash_firmware", "permission_denied", "Post-flash reset is disabled by the authoritative config.", self.debugger_permission_key("allow_reset"))
+        checked = None if payload.get("capture") is None else self._capture_check(payload["capture"], reset_after_flash)
+        if checked is not None and not checked["ok"]:
+            return checked
         validation = self.artifacts.validate_local_path(str(image_path)) if image_path else self.artifacts.resolve_artifact_id(str(artifact_id))
         if not validation["ok"]:
             return validation
@@ -293,7 +305,7 @@ class AgenticHILToolService:
         if not staged["ok"]:
             return staged
         try:
-            result = self.backend.flash_firmware(staged["artifact"], reset_after_flash)
+            result = self.backend.flash_firmware(staged["artifact"], reset_after_flash) if checked is None else self._flash_capturing(staged["artifact"], checked)
         except BaseException:
             # A backend that raised may have contacted or partly written the
             # target, so the ELF this bench remembered no longer provably
@@ -309,7 +321,7 @@ class AgenticHILToolService:
         finally:
             self.artifacts.release_stage(staged["artifact"])
         self._remember_symbol_elf(validation["artifact"], result)
-        return result
+        return result if checked is None else self._capture_result(result)
 
     def _remember_symbol_elf(self, artifact: JsonObject, result: JsonObject) -> None:
         """Record the flashed ELF as this bench's symbol source, or drop it.
@@ -336,6 +348,93 @@ class AgenticHILToolService:
             return
         if result.get("side_effect_status") != "not_started":
             self._symbol_elf = None
+
+    def _capture_check(self, capture: object, reset_after_flash: bool) -> JsonObject:
+        """What refuses a capture, asked before the board is touched.
+
+        The reset is required because the boot output is what the firmware
+        prints after it: without one, the port would open onto a board still
+        running whatever it ran before. The port's own refusals are the ones
+        `com_session_start` and `com_read` give. Every refusal says the flash
+        never started, because it did not."""
+        if not isinstance(capture, dict):
+            refusal = invalid_argument("flash_firmware", "capture", "type", "capture must be an object.")
+        elif reset_after_flash is not True:
+            refusal = invalid_argument("flash_firmware", "capture", "dependentSchemas", "capture needs reset_after_flash: true, because the boot output it reads is printed after that reset. Set reset_after_flash to true or leave capture out.")
+        else:
+            refusal = self.com_ports.capture_check(capture, "flash_firmware")
+            if refusal["ok"]:
+                return refusal
+        return {**refusal, **NOT_STARTED}
+
+    def _flash_capturing(self, artifact: JsonObject, checked: JsonObject) -> JsonObject:
+        """Open the capture's port, flash with the reset, read the port, stop it.
+
+        The port is opened, its input cleared, before the flash, so the first
+        bytes after the reset land in the session's buffer rather than on a
+        port nobody has open. `com_session_start` opens it, so the session is
+        leased, audited and refused exactly as one that call opens; a refusal
+        of the open flashes nothing. The read's wait counts from the end of the
+        flash, so a slow flash does not spend it. Answers the flash's own
+        result, or the refusal of the open."""
+        state = self._capture_state if self._capture_state is not None else {"sessions": []}
+        port_id = checked["port_id"]
+        opened = self.com_ports.session_start(port_id)
+        state["sessions"].append(opened)
+        if opened.get("ok") is not True or not overall_success(opened):
+            # The session's lease fields stay with the session: the debugger
+            # lease writes its own over these, and the session's are merged
+            # back in afterwards, so a port left to clean up is not read as the
+            # probe's cleanup.
+            refusal = {key: value for key, value in opened.items() if key not in _CAPTURE_SESSION_FIELDS}
+            if opened.get("ok") is True:
+                refusal.update({"error_type": "audit_unavailable", "summary": "The flash was not started: the capture's COM port session opened, but it could not be audited."})
+            return {**refusal, "ok": False, "tool": "flash_firmware", **NOT_STARTED}
+        try:
+            result = self.backend.flash_firmware(artifact, True)
+        except BaseException:
+            with suppress(BaseException):
+                state["sessions"].append(self.com_ports.session_stop(port_id))
+            raise
+        capture, stop = self.com_ports.capture_finish(checked, "flash_firmware", wait=result.get("ok") is True)
+        state["sessions"].append(stop)
+        state.update(capture=capture, stop=stop)
+        return result
+
+    def _capture_result(self, result: JsonObject) -> JsonObject:
+        """The flash result with the capture beside it, failed where the capture failed.
+
+        A capture that failed after a good flash fails the call and keeps every
+        field of the flash: the board was flashed and reset, and a caller who
+        read `ok: false` as nothing flashed would flash it again. The error is
+        the capture's own, the reader's or the stop's, with its decisive line in
+        the summary. Where two things failed, the first one's error stands and
+        the second one's line is kept as `cleanup_error`."""
+        state = self._capture_state or {}
+        capture = state.get("capture")
+        if not isinstance(capture, dict):
+            return result
+        stop = state.get("stop") or {}
+        port_id = capture["port_id"]
+        answer: JsonObject = {**result, "capture": capture}
+        stop_error = None if stop.get("ok") is True else str(stop.get("backend_error") or stop.get("summary") or "The COM port session could not be stopped.")
+        reader_error = capture.get("reader_error")
+        if result.get("ok") is not True:
+            failure = None
+        elif isinstance(reader_error, dict):
+            detail = str(reader_error.get("backend_error") or reader_error.get("summary") or "")
+            failure = {"error_type": reader_error.get("error_type", "serial_read_failed"), "summary": f"The firmware was flashed and the target reset, but reading its boot output from COM port {port_id} failed: {detail}", "backend_error": detail}
+        elif stop_error is not None:
+            failure = {"error_type": stop.get("error_type", "com_port_close_failed"), "summary": f"The firmware was flashed and its boot output read, but the COM port session on {port_id} could not be closed and remains registered for cleanup retry: {stop_error}", "backend_error": stop_error}
+            stop_error = None
+        else:
+            failure = None
+        if failure is not None:
+            answer.update({"ok": False, "error_type": failure["error_type"], "summary": failure["summary"]})
+            answer.setdefault("backend_error", failure["backend_error"])
+        if stop_error is not None:
+            answer["cleanup_error"] = stop_error
+        return answer
 
     def artifact_upload(self, payload: JsonObject | None = None) -> JsonObject:
         return self.artifacts.upload(payload)
@@ -529,7 +628,9 @@ class AgenticHILToolService:
 
         The envelope keeps its reasons and its guidance: what the call could not
         confirm is exactly what the caller needs to read, and it is the same text
-        the quarantine carried. What goes is the claim that the bench is held."""
+        the quarantine carried. What goes is the claim that the bench is held,
+        and the advice only a held bench needs, whichever ending ran, unless a
+        lease given back on the way out has quarantined the bench again."""
         if not isinstance(result, dict) or self.coordinator.run_active or self._debug_lease is not None:
             # A declared run is the agent's own hold, and its teardown is where
             # the recovery belongs: resetting the board at the end of step one
@@ -597,20 +698,39 @@ class AgenticHILToolService:
                 lease.release()
         if self._quarantined_lease is not None and self._quarantined_lease.state != "active":
             self._quarantined_lease = None
-        if stood_down is None:
-            # The incident was settled by the recovery action, which wrote its own
-            # ledger line and unblocked the coordinator, so there was nothing left
-            # to stand down. The call's own result stands as it was returned.
-            return result
         # Attached while the flags still say quarantined, so the reasons keep the
         # remediation text they had; `call` re-attaching it is a no-op.
         result = attach_quarantine_guidance(result)
-        # `quarantined` and nothing else. It is the one field that says the bench
-        # is being held, and it is the one that stopped being true. Its neighbour
-        # `cleanup_required` says something the stand-down did not change: this
-        # call left work behind, a debug session to stop, a state nobody
-        # confirmed, and a caller reading a failed result still has to know it.
-        return {**result, "incident_stood_down": stood_down, **withheld, **({"quarantined": False} if result.get("quarantined") is True else {})}
+        if stood_down is not None:
+            result = {**result, "incident_stood_down": stood_down, **withheld}
+        if self.coordinator.blocked:
+            # A lease given back above, or by the recovery action, could not be
+            # released, and a release that cannot persist fails closed under an
+            # incident of its own. The bench is held again, so the claim that it
+            # is, and the advice for a held bench, stay as the call made them.
+            return result
+        # Nothing holds the bench now, whichever of the two endings ran, and
+        # `quarantined` is the field that says it is held. Its neighbour
+        # `cleanup_required` says something neither ending changed: this call
+        # left work behind, a debug session to stop, a state nobody confirmed,
+        # and a caller reading a failed result still has to know it.
+        released: JsonObject = {**result, **({"quarantined": False} if result.get("quarantined") is True else {})}
+        # A refusal built on the quarantine's own remediation sends the caller to
+        # `agentic-hil recover` with an id that no longer names anything. That
+        # advice goes, and the retry it was the precondition for is the next step.
+        advice = remediation_fields("resource_quarantined")
+        if advice and result.get("remediation") == advice["remediation"]:
+            released.pop("remediation", None)
+            if result.get("do_not") == advice.get("do_not"):
+                released.pop("do_not", None)
+            released["next_step"] = "Call this again: the incident it reported has ended, and nothing holds the bench."
+        # The summary was written for a held bench and is not rewritten here. One
+        # that says the board is quarantined is followed by how that ended.
+        summary = result.get("summary")
+        if isinstance(summary, str) and "quarantined" in summary:
+            ending = "This call's own recovery has since ended the incident" if recovered else "The incident has since been stood down"
+            released["summary"] = f"{summary} {ending}, and nothing holds the bench."
+        return released
 
     def _call_unlocked(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         if arguments is None:
@@ -647,12 +767,12 @@ class AgenticHILToolService:
             "com_session_start": lambda: self.com_ports.session_start(args.get("port_id", ""), args.get("clear_buffer", True)),
             "com_session_stop": lambda: self.com_ports.session_stop(str(args.get("port_id", ""))),
             "com_write": lambda: self.com_ports.write(str(args.get("port_id", "")), {key: value for key, value in args.items() if key in {"text", "hex"}}),
-            "com_read": lambda: self.com_ports.read(str(args.get("port_id", "")), args.get("max_bytes"), args.get("wait_timeout_s", 0.0)),
+            "com_read": lambda: self.com_ports.read(str(args.get("port_id", "")), args.get("max_bytes"), args.get("wait_timeout_s"), args.get("until")),
             "can_buses_list": lambda: self.can_buses.list_buses(),
             "can_session_start": lambda: self.can_buses.session_start(args.get("bus_id", ""), args.get("clear_rx_queue", True)),
             "can_session_stop": lambda: self.can_buses.session_stop(str(args.get("bus_id", ""))),
             "can_send": lambda: self.can_buses.send(str(args.get("bus_id", "")), {key: value for key, value in args.items() if key != "bus_id"}),
-            "can_read": lambda: self.can_buses.read(str(args.get("bus_id", "")), args.get("max_frames"), args.get("wait_timeout_s", 0.0)),
+            "can_read": lambda: self.can_buses.read(str(args.get("bus_id", "")), args.get("max_frames"), args.get("wait_timeout_s"), args.get("until_id")),
             "bench_run_start": lambda: self.bench_run_start(args),
             "bench_run_stop": lambda: self.bench_run_stop(),
             "bench_run_status": lambda: self.bench_run_status(),
@@ -807,7 +927,12 @@ class AgenticHILToolService:
         try:
             declaration = self.coordinator.begin_run(resources, label=f"{IMPLICIT_RUN_LABEL}{name}")
         except CoordinationError as error:
-            return {"tool": name, "side_effect_committed": False, **error.result}
+            refusal = {"tool": name, "side_effect_committed": False, **error.result}
+            if name == "flash_firmware" and args.get("capture") is not None:
+                # A capture refused before its port was opened flashed nothing,
+                # and says so the way its other refusals before the flash do.
+                refusal = {**NOT_STARTED, **refusal}
+            return refusal
         declared = [item for item in declaration.get("declared_devices") or [] if isinstance(item, str)]
         try:
             result = action()
@@ -831,7 +956,14 @@ class AgenticHILToolService:
             "run_started_at": declaration.get("run_started_at"),
             "aborted": recovery is not None,
         }
-        return {**result, "run": run} if recovery is None else {**result, "run": run, "recovery": recovery}
+        if recovery is None:
+            return {**result, "run": run}
+        # The same narrowing the stand-down makes, for the incident the run's own
+        # teardown settled instead: the bench is not held for it any more, so the
+        # one field that says it is stops saying it. `cleanup_required` and the
+        # reasons stay, because what the call could not confirm is unchanged.
+        settled = recovery.get("incident_resolved") is True and result.get("quarantined") is True
+        return {**result, "run": run, "recovery": recovery, **({"quarantined": False} if settled else {})}
 
     def _end_implicit_run(self) -> bool:
         """Close the implicit run, never raising over the call's own answer."""
@@ -851,6 +983,8 @@ class AgenticHILToolService:
                 permission_failure = self._debug_permission_failure(name, args)
                 if permission_failure is not None:
                     return permission_failure
+                if name == "flash_firmware" and args.get("capture") is not None:
+                    return self._settle_after_recovery_class_call(name, blocked_before, self._flash_with_capture(action))
                 return self._settle_after_recovery_class_call(name, blocked_before, self._coordinated_debug_call(name, lambda: self._invoke_dispatch(action)))
             return self._settle_after_recovery_class_call(name, blocked_before, self._invoke_dispatch(action))
         except BaseException as error:
@@ -988,8 +1122,9 @@ class AgenticHILToolService:
         because of that split: a boolean is a flag the caller sets for itself,
         which is why `confirm_safe_state` does not exist here and will not, while
         a sentence about a bench is something the caller has to have been given.
-        Nothing here can verify it was; the tool's own description says outright
-        that inventing one writes a false ledger record with the agent named as
+        Nothing here can verify it was; the tool's own description forbids
+        inventing one, the refusal that asks for one says that doing so writes
+        a false ledger record with the agent named as
         actor, and the ledger keeps `operator_statement_via_agent` distinct from
         an operator's own `operator_confirmation` so the two are never read as
         the same evidence afterwards. The operator's command line stays in every
@@ -1893,6 +2028,60 @@ class AgenticHILToolService:
                 return self._invoke_dispatch(lambda: self.debug_start_session(args))
         return None
 
+    def _flash_with_capture(self, action) -> JsonObject:
+        """A `flash_firmware` with `capture`, on the probe's one-shot lease as any flash.
+
+        The COM session the capture opens inside it keeps its own lease and its
+        own answers, which `_settle_capture` merges in once the probe's lease has
+        written its status over the flash result."""
+        self._capture_state = {"sessions": []}
+        try:
+            result = self._coordinated_debug_call("flash_firmware", lambda: self._invoke_dispatch(action))
+            state = self._capture_state
+        finally:
+            self._capture_state = None
+        return self._settle_capture(result, state)
+
+    def _settle_capture(self, result: JsonObject, state: JsonObject) -> JsonObject:
+        """Merge what the capture's COM session left to clean up into the answer.
+
+        The probe's lease writes its own lease fields over the flash result, so a
+        session that could not be stopped, or whose audit failed, would vanish
+        from the answer behind a probe lease that settled cleanly. Its
+        `cleanup_required`, `quarantined`, reasons and audit errors are merged in
+        as `com_session_start` and `com_session_stop` reported them, and the
+        report is written again when that changed anything, so the record says
+        what the answer says. The report keeps the capture's `until` and wait in
+        force; the answer leaves them out."""
+        sources = [source for source in state.get("sessions", []) if isinstance(source, dict)]
+        merged = dict(result)
+        for source in sources:
+            if source.get("cleanup_required") is True:
+                merged["cleanup_required"] = True
+            if source.get("quarantined") is True:
+                merged["quarantined"] = True
+                if merged.get("quarantine_id") is None:
+                    merged["quarantine_id"] = source.get("quarantine_id")
+            reasons = [reason for reason in source.get("cleanup_reasons") or [] if reason not in (merged.get("cleanup_reasons") or [])]
+            if reasons:
+                merged["cleanup_reasons"] = [*(merged.get("cleanup_reasons") or []), *reasons]
+        merged = merge_audit_status(merged, *sources)
+        if merged != result:
+            written = write_report(self.config, merged)
+            if report_write_failed(merged, written):
+                self._poison_quietly("debug_coordination_report_audit_broken", audit_broken=True)
+                written = {**written, "ok": False, "cleanup_required": True, "quarantined": True, "quarantine_id": self.coordinator.quarantine_id}
+            merged = written
+        capture = merged.get("capture")
+        if isinstance(capture, dict):
+            merged["capture"] = {key: value for key, value in capture.items() if key not in {"until", "until_wait_s"}}
+        elif merged.get("side_effect_committed") is False and "side_effect_status" not in merged:
+            # Refused before the port was opened, as the probe's lease was:
+            # nothing was flashed, and the answer says so as the capture's other
+            # refusals before the flash do.
+            merged = {**NOT_STARTED, **merged}
+        return merged
+
     def _coordinated_debug_call(self, name: str, callback) -> JsonObject:
         # Backend-aware, because a symbol read is a one-shot on the backend that
         # has no session to hold its lease and a session-scoped call on the one
@@ -2286,6 +2475,11 @@ _READ_ONLY_HARDWARE_TOOLS = frozenset({"debugger_probes_list", "com_read", "can_
 # session it opened was still running; the release would be a statement that is
 # not true.
 _SESSION_START_TOOLS = frozenset({"com_session_start", "can_session_start", "debug_start_session"})
+# What a `flash_firmware` capture's COM session answers about its own lease and
+# audit. Kept out of the flash result where the session is refused, because the
+# debugger lease reports under the same names; the session's are merged into the
+# answer only after that lease has written its own.
+_CAPTURE_SESSION_FIELDS = frozenset({"lease_id", "resources", "lease_state", "safe_state_confirmed", "processes_reaped", "audit_ok", "audit_error", "audit_errors", "cleanup_required", "quarantined", "cleanup_reasons", "quarantine_id", "report_path", CONTACT_MARKER_KEY, CONTACT_MARKER_SOURCE_KEY})
 
 
 def debugger_one_shot_tools() -> set[str]:
@@ -2396,6 +2590,13 @@ def implicit_run_resources(config: AgenticHILConfig, name: str, args: JsonObject
     argument that names no configured device; the caller lets the call answer
     for that itself."""
     if name in debugger_effect_tools():
+        capture = args.get("capture") if name == "flash_firmware" else None
+        if isinstance(capture, dict):
+            # A capture leases its port inside the call, beside the probe, so the
+            # call's own run declares both: the port by the key a run declares
+            # it under, while the capture's lease also takes the name the port
+            # resolves to on the host.
+            return [*debugger_effect_resources(config), *uart_device(config, str(capture.get("port_id", ""))).declared_keys]
         return list(debugger_effect_resources(config))
     if name == "com_write":
         return [uart_device(config, str(args.get("port_id", "")))]

@@ -969,6 +969,134 @@ def test_com_input_read_before_a_concurrent_write_is_logged_before_it(tmp_path: 
     assert [entry["time"] for entry in entries] == sorted(entry["time"] for entry in entries), entries
 
 
+class TtyInputSerialHandle:
+    """A line that keeps delivering whether or not anyone reads it, into a
+    receive buffer of fixed size, as a tty's is: what arrives while that buffer
+    is full is lost before the session ever sees it, and nothing on the session
+    side counts it."""
+
+    is_open = True
+
+    def __init__(self, capacity: int) -> None:
+        self.capacity = capacity
+        self.waiting = bytearray()
+        self.lost = 0
+        self.guard = threading.Lock()
+        self.writes: list[bytes] = []
+
+    def deliver(self, data: bytes) -> None:
+        with self.guard:
+            room = self.capacity - len(self.waiting)
+            self.waiting.extend(data[:room])
+            self.lost += max(0, len(data) - room)
+
+    @property
+    def in_waiting(self) -> int:
+        with self.guard:
+            return len(self.waiting)
+
+    def read(self, size: int) -> bytes:
+        with self.guard:
+            data = bytes(self.waiting[:size])
+            del self.waiting[:size]
+        return data
+
+    def write(self, data: bytes) -> int:
+        self.writes.append(bytes(data))
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def test_com_reader_keeps_draining_the_port_while_its_log_entry_is_written(tmp_path: Path) -> None:
+    """#578: the reader stopped draining the port for as long as it took to
+    write each log line. Every append ends in an fsync, which on a loaded host
+    takes long enough for a board that transmits without pause to fill the
+    port's receive buffer, and what arrived then was lost before it reached the
+    session, where `overflow_bytes` never counted it.
+
+    Here the log entry for the first input is held while the line delivers
+    several receive buffers' worth more. The port has to keep being drained
+    meanwhile, and once the entry goes through, the log holds every byte in the
+    order it arrived and nothing was dropped anywhere."""
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-drain-while-logging.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = TtyInputSerialHandle(capacity=64)
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), start_reader=False)
+
+    at_log = threading.Event()
+    released = threading.Event()
+    session_append = session.append_audit
+
+    def held_rx(event, event_config=None):
+        if event.get("direction") == "rx":
+            at_log.set()
+            released.wait(wait_bound())
+        return session_append(event, event_config)
+
+    session.append_audit = held_rx  # type: ignore[method-assign]
+
+    stream = bytes(range(256)) * 2
+    session.start_reader()
+    reader = session.reader
+    assert reader is not None
+    try:
+        handle.deliver(stream[:16])
+        assert at_log.wait(wait_bound()), "reader never reached the log with the first input"
+        for start in range(16, len(stream), handle.capacity):
+            handle.deliver(stream[start : start + handle.capacity])
+            assert wait_until(lambda: handle.in_waiting == 0), "the port stopped being drained while a log entry was written"
+    finally:
+        released.set()
+        session.active = False
+        reader.join(wait_bound())
+    assert not reader.is_alive(), "reader thread never finished"
+
+    assert handle.lost == 0
+    assert session.overflow_bytes == 0
+    assert bytes(session.buffer) == stream
+    logged = b"".join(bytes.fromhex(entry["hex"]) for entry in log_entries(log_path) if entry.get("direction") == "rx")
+    assert logged == stream
+
+
+def test_com_input_the_log_has_not_reached_is_logged_before_a_later_write(tmp_path: Path) -> None:
+    """#578, the order half. With the port drained apart from the log, input
+    can be received and buffered before its entry is written, and a write can
+    reach the log in that window. The input arrived first, so it is logged
+    first: the write path records what is still waiting before its own
+    stimulus, rather than leaving it to land behind the `tx` entry.
+
+    Only the drain runs here, so nothing but the write path can log the boot
+    line, and the order below is the write path's alone."""
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-pending-before-write.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = SpontaneousBootSerialHandle()
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), start_reader=False)
+    service.sessions["dut"] = session
+
+    drain = threading.Thread(target=session._drain_loop)
+    drain.start()
+    try:
+        assert wait_until(lambda: bytes(session.buffer) == b"boot\n"), "drain never buffered the boot line"
+        assert not log_path.exists() or not log_entries(log_path), "only the write path may log in this test"
+        result = service.write_bytes("dut", b"version\n")
+    finally:
+        session.active = False
+        drain.join(wait_bound())
+    assert not drain.is_alive(), "drain thread never finished"
+
+    assert result["ok"] is True, result
+    entries = log_entries(log_path)
+    assert [(entry.get("direction"), entry.get("text")) for entry in entries] == [("rx", "boot\n"), ("tx", "version\n")], entries
+
+
 class AcceptingSerialHandle:
     """Takes every write whole and never answers."""
 

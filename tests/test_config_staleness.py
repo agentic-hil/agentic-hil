@@ -51,6 +51,7 @@ from agentic_hil.knowledge import (
     CONFIG_STALE_ERROR,
     CONFIG_WRITE_RIGHT,
     ERRORS_URI,
+    catalogue_entry,
     read_resource,
 )
 from agentic_hil.report import recommit_report_with_status, write_report
@@ -515,6 +516,50 @@ def test_bytes_that_are_no_longer_utf8_are_unreadable_rather_than_changed(tmp_pa
         load_authoritative_config(workspace)
 
 
+def test_a_file_that_will_not_open_is_made_readable_before_the_server_is_restarted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The order of repair, said by the answer that meets an unreadable file.
+
+    A restart reads the file again, so one asked for while the file will not
+    open is a restart that cannot come up. The step says which comes first and
+    why the other order fails, as the step for a file that is gone does."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+        path.write_bytes(path.read_bytes() + b'\ncomment: "\xff\xfe"\n')
+        answered = tools.call("com_ports_list")
+    finally:
+        tools.close()
+
+    status = answered["config_status"]
+    assert status["state"] == STATE_UNREADABLE
+    assert status["error_type"] == "config_unreadable"
+    step = next(step for step in status["remediation"] if "restart" in step)
+    assert step.index("readable again") < step.index("restart"), step
+    assert "restart before the file is readable again" in step, step
+
+
+def test_a_file_that_is_gone_is_put_back_before_the_server_is_restarted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same order for a file that is gone, which its answer already says.
+
+    There is nothing to restart onto until the file is back, so the step asks
+    for the file first and the restart after, and says why the other order
+    fails."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+        path.unlink()
+        answered = tools.call("com_ports_list")
+    finally:
+        tools.close()
+
+    status = answered["config_status"]
+    assert status["state"] == STATE_MISSING
+    assert status["error_type"] == "config_file_not_found"
+    step = next(step for step in status["remediation"] if "restart" in step)
+    assert step.index("put the file back") < step.index("restart"), step
+    assert "restart before the file is back" in step, step
+
+
 # ---------------------------------------------------------------------------
 # What is deliberately not done.
 
@@ -651,6 +696,37 @@ def test_the_errors_resource_serves_what_a_stale_answer_carries(tmp_path: Path, 
     assert scoped["remediation"] != unscoped["remediation"]
 
 
+def test_a_stale_answer_says_what_each_state_asks_for_before_a_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The three states and their order of repair, said to the session that meets one.
+
+    The server instructions said this to every session, stale or not. It is
+    said now by the advice a stale answer carries: `changed` has two ways
+    forward, one per half of the file; `missing` has to be restored and
+    `unreadable` made readable before there is anything to restart onto, so a
+    restart asked for first is a restart that cannot come up."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    tools = service(workspace)
+    try:
+        switch_to_pyocd(path)
+        answered = tools.call("debugger_info")
+    finally:
+        tools.close()
+
+    status = answered["config_status"]
+    assert status["state"] == STATE_CHANGED
+    assert status["error_type"] == CONFIG_STALE_ERROR
+    advice = [*status["remediation"], *status["do_not"]]
+    assert any(f"`{STATE_CHANGED}`" in step for step in advice), advice
+    assert any(f"`{STATE_MISSING}`" in step and "restored" in step for step in advice), advice
+    assert any(f"`{STATE_UNREADABLE}`" in step and "made readable" in step for step in advice), advice
+    assert any("restart" in step and f"`{STATE_MISSING}`" in step and f"`{STATE_UNREADABLE}`" in step for step in status["do_not"]), status["do_not"]
+    # What the entry already said about `changed`, and keeps saying: the
+    # description half by a reload, everything else by a restart of the server
+    # the host started, not of the command line.
+    assert any(PROJECT_CONFIG_RELOAD in step for step in status["remediation"]), status["remediation"]
+    assert any("restart" in step and "not the `agentic-hil` command line" in step for step in status["remediation"]), status["remediation"]
+
+
 def test_every_agent_facing_copy_names_the_states_this_module_has() -> None:
     """The guidance beside a state has to describe the state the code produces.
 
@@ -659,12 +735,18 @@ def test_every_agent_facing_copy_names_the_states_this_module_has() -> None:
     `invalid` is the case in point: it was a sixth state asserting that a restart
     onto the file would fail, it was removed with the candidate validation that
     was the only thing that could establish it, and a copy still
-    naming it would send an operator looking for a state no answer can carry."""
-    from agentic_hil.mcp import SERVER_INSTRUCTIONS
+    naming it would send an operator looking for a state no answer can carry.
+
+    The agent's own copy is the `config_stale` catalogue entry: it travels with
+    every stale answer and is served whole by the errors resource. The server
+    instructions carried one too until they were cut down to what has to
+    precede a first call."""
+    stale = catalogue_entry(CONFIG_STALE_ERROR)
+    assert stale is not None
 
     root = Path(__file__).resolve().parents[1]
     copies = {
-        "server instructions": SERVER_INSTRUCTIONS,
+        "config_stale catalogue entry": " ".join([stale["meaning"], *stale["remediation"], *stale.get("do_not", [])]),
         "packaged skill": (root / "src" / "agentic_hil" / "skills" / "agentic-hil" / "SKILL.md").read_text(encoding="utf-8"),
         "plugin skill": (root / "plugins" / "agentic-hil" / "skills" / "agentic-hil" / "SKILL.md").read_text(encoding="utf-8"),
         "AGENTS.md": (root / "AGENTS.md").read_text(encoding="utf-8"),

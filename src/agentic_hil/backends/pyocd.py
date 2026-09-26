@@ -116,6 +116,14 @@ TARGET_TYPE_INVALID_DOC = "target_support.html"
 # to be the erase line itself and not a family somebody assumed.
 PYOCD_ERASE_FAILURE_MARKERS = ["failed to erase sector"]
 
+# The format `pyocd flash --format` is told to read an image as, by its extension
+# compared without case, the way validation compares it (#580). Given no format,
+# pyOCD takes the extension as written and knows only the lower-case axf, bin,
+# elf and hex (pyOCD 0.45.1, `flash/file_programmer.py`), so an allowed
+# `FIRMWARE.ELF` stopped there as an unknown format. `--format` takes bin, hex
+# or elf; an `.axf` is the ELF pyOCD reads it as.
+PYOCD_FLASH_FORMATS = {".axf": "elf", ".bin": "bin", ".elf": "elf", ".hex": "hex"}
+
 # The connect the typed-debug reads use, and the whole reason they are allowed to
 # exist on this backend (#344). pyOCD reads target memory, so refusing the read
 # half outright was wider than this hardware's own limits; what stood in the way
@@ -297,8 +305,12 @@ class PyOCDBackend:
             return self._exclusive_permission_denied("flash_firmware", "Flashing", "allow_mass_erase")
 
         artifact_path = str(artifact["resolved_path"])
+        extension = Path(artifact_path).suffix
+        flash_format = PYOCD_FLASH_FORMATS.get(extension.lower())
+        if flash_format is None:
+            return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": f"pyOCD flashes .elf, .axf, .hex and .bin images, and the extension {extension!r} names none of them. Nothing was sent to pyOCD.", "artifact": self._artifact_summary(artifact)}
         address_args: list[str] = []
-        if Path(artifact_path).suffix.lower() == ".bin":
+        if flash_format == "bin":
             if self.config.debugger.flash_address is None:
                 return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with pyOCD requires debuggers.<name>.flash_address.", "artifact": self._artifact_summary(artifact)}
             address_args = ["--base-address", self.config.debugger.flash_address]
@@ -306,7 +318,7 @@ class PyOCDBackend:
         selected = self._resolve_probe_selector("flash_firmware")
         if not selected["ok"]:
             return selected
-        result = self._run_pyocd("flash_firmware", ["flash", "--no-reset", *self._connection_args(), *address_args, artifact_path])
+        result = self._run_pyocd("flash_firmware", ["flash", "--no-reset", *self._connection_args(), "--format", flash_format, *address_args, artifact_path])
         result["artifact"] = self._artifact_summary(artifact)
         result["verify"] = True
         if not overall_success(result):

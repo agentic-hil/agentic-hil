@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from agentic_hil.config import ConfigError
 from agentic_hil.coordination import CoordinationError
+from agentic_hil.devices import declared_keys
 from agentic_hil.junit import result_with_junit_xml, write_refusal_junit_xml
 from agentic_hil.report import write_report
 from agentic_hil.runlifecycle import RunRegistration, new_run_handle, start_detached_run
@@ -114,7 +115,7 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
     # may touch, so a step reaching past the plan is refused rather than
     # silently widening what the plan says it does.
     plan = plan_devices(config, test_config)
-    devices = plan.lock_keys
+    devices = sorted(set(declared_keys(plan)))
     if devices:
         try:
             # The registration's stop check goes into the wait, so a stop asked

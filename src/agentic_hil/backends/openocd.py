@@ -314,6 +314,7 @@ class OpenOCDBackend:
                     "OpenOCD enumerates ST-Link probes from this host's USB serial inventory, and that inventory could "
                     f"not be read: {inventory.get('summary', 'the serial backend did not answer')}"
                 ),
+                **({"backend_error": inventory["backend_error"]} if inventory.get("backend_error") else {}),
                 "interface_cfg": interface_cfg,
                 **NOT_CONTACTED,
             }

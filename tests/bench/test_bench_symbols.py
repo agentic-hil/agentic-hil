@@ -60,6 +60,7 @@ from typing import IO, Any
 
 import pytest
 import yaml
+from result_text import assert_text_projects
 from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, COMMAND_TIMEOUT_S, Bench, child_command, isolated_environment
@@ -295,7 +296,7 @@ class Server:
         """
         result = self.request("tools/call", {"name": name, "arguments": arguments or {}}, timeout_s)
         structured = result["structuredContent"]
-        assert json.loads(result["content"][0]["text"]) == structured, result
+        assert_text_projects(result)
         if structured.get("ok") is not True:
             assert result["isError"] is True, result
         return structured

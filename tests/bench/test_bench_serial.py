@@ -627,6 +627,31 @@ def test_a_capped_read_hands_over_the_cap_and_leaves_the_rest_where_it_was(
     assert BANNER in rest, rest[-400:]
 
 
+def test_a_read_until_the_banner_waits_in_one_call_and_leaves_what_follows_the_match_buffered(
+    open_session: Callable[[], tuple[Server, dict]], port: str
+) -> None:
+    """`until` makes the wait for a line one call, and the call ends where the match does.
+
+    Catches a read that answered on the first fragment of a banner arriving in
+    pieces, which is the polling `until` exists to replace; and a read that
+    consumed past the match, which would take from the next read the line
+    ending the starter prints after its banner.
+    """
+    server, _ = open_session()
+    drain(server, port)
+    reset = tool_document(server.call("reset_target", {"mode": "run"}))
+    assert reset["ok"] is True, reset
+
+    answered = tool_document(server.call("com_read", {"port_id": port, "until": BANNER, "wait_timeout_s": BANNER_TIMEOUT_S}))
+
+    assert answered["ok"] is True, answered
+    assert answered["until_matched"] is True, answered
+    assert answered["matched"] == BANNER, answered
+    assert answered["data"]["text"].endswith(BANNER), answered
+    following = read_until(server, port, "\n")
+    assert following.startswith(("\n", "\r\n")), following[:400]
+
+
 def test_a_write_naming_both_text_and_hex_is_refused_before_the_line_and_leaves_the_session_usable(
     bench: Bench, open_session: Callable[[], tuple[Server, dict]], port: str
 ) -> None:

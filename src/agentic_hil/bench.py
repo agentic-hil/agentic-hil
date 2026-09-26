@@ -386,12 +386,17 @@ class BenchMutex:
         deadline = time.monotonic() + validated_wait(wait_s)
         with self._guard:
             taken: list[str] = []
+            counted: list[str] = []
             try:
                 for resource in wanted:
                     if self._take(resource, deadline, stop_requested):
                         taken.append(resource)
+                    counted.append(resource)
             except BaseException:
-                for resource in reversed(taken):
+                # Every hold this call counted goes back, a device this owner
+                # already held included: `_take` counted that one once more, and
+                # a refused call has no release to come that would count it down.
+                for resource in reversed(counted):
                     self._drop(resource)
                 raise
             return taken
@@ -494,7 +499,17 @@ class BenchMutex:
         }
         if holder is not None:
             result["holder"] = holder
-            if holder.get("pid") == os.getpid():
+            # A pid names a process only within one PID namespace and one boot,
+            # and the record comes from whichever process holds the lock, in a
+            # directory another container or host may share. Whether this
+            # process holds the lock is answered by its own lock table, which
+            # no other process writes; the pid keeps the flag off a record some
+            # earlier holder left behind and off a forked child, which inherits
+            # the table.
+            lock_key = _LifetimeLock(self.root / f"{resource_digest(resource)}.lock").local_key
+            with _LOCAL_LOCKS_GUARD:
+                held_here = lock_key in _LOCAL_LOCKS
+            if held_here and holder.get("pid") == os.getpid():
                 result["holder_is_this_process"] = True
         age = _age_seconds(record.get("heartbeat_at"))
         if age is not None:

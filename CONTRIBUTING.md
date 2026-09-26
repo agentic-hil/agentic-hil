@@ -86,6 +86,15 @@ and the marks go back to being inert. The marker is registered by pytest-xdist,
 so it needs no entry in `pyproject.toml`. Keep the list of grouped tests short
 and give every entry a reason in the group name.
 
+A group keeps one run's tests apart, and a second run of the suite on the same
+machine has a scheduler of its own, so every test in the group also asks for the
+`process_table_lock` fixture on the test function itself, which holds
+`~/.agentic-hil/pytest-process-table.lock` while the test runs. A second run
+that reaches one of these tests waits for the first to let go, and one that
+waits out the bound fails naming the PID and the test holding the lock; the file
+lies in the running account's home, so two accounts on one machine do not share
+it.
+
 ### Working on Windows
 
 Part of this suite only runs on POSIX, and that part is where the platform bugs

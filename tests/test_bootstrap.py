@@ -45,6 +45,7 @@ from agentic_hil.config import (
 )
 from agentic_hil.coordination import DEBUGGER_DISCOVERY_RESOURCE
 from agentic_hil.devices import config_devices, debugger_device, uart_device
+from agentic_hil.humanize import render_result
 from agentic_hil.knowledge import (
     DEBUGGER_BACKENDS_URI,
     ERRORS_URI,
@@ -52,6 +53,7 @@ from agentic_hil.knowledge import (
     read_resource,
     remediation_fields,
 )
+from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.report import overall_success, read_last_report
 from agentic_hil.test_reactor import TestReactor, load_test_config
 from agentic_hil.tools import AgenticHILToolService, project_config_create
@@ -2492,7 +2494,7 @@ def test_the_incomplete_inventory_error_is_in_the_reference_contract() -> None:
     assert "one visible ST-Link is bound" in entry["meaning"]
     assert "ambiguous_hardware" in entry["meaning"]
     fix = " ".join(entry["remediation"])
-    assert "adopt-hardware --probe-id" in fix
+    assert "project_config_adopt_hardware" in fix and "--probe-id <serial>" in fix
     assert "STM32CubeProgrammer" in fix
     assert any("adapter_not_found" in step or "absent bench" in step for step in entry["do_not"])
     assert any("a rule against binding a single probe" in step for step in entry["do_not"])
@@ -2737,6 +2739,51 @@ def test_a_plan_naming_an_unbound_port_is_refused_by_the_port_not_by_the_plan(tm
     # single-debugger bench the command names the debugger it will select before
     # it reaches the port (round 2, finding 2).
     assert "agentic-hil adopt-hardware --debugger dut --com-port dut_uart" in validation["next_step"]
+
+
+def test_an_unbound_port_sends_the_agent_to_the_adoption_tool_and_a_person_to_the_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same refusal, read over MCP and at a shell.
+
+    The catalogue advice it carries sent an agent to `agentic-hil adopt-hardware`,
+    a command at a shell, for the move `project_config_adopt_hardware` makes over
+    MCP, and the server's instructions send an agent to these tools before any
+    shell. The command line renders the tool as the command, so the person who
+    ran the plan at a shell reads the command they can type."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch, ports=[])
+    assert init_config()["ok"] is True
+    (workspace / "nominal.testconfig.yaml").write_text(
+        yaml.safe_dump({"version": 2, "name": "nominal", "steps": [{"action": "uart_open", "port_id": "dut_uart"}]}),
+        encoding="utf-8",
+    )
+    service = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    try:
+        response = handle_mcp_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "test_reactor_run", "arguments": {"test_config_path": "nominal.testconfig.yaml"}},
+            },
+            service,
+        )
+    finally:
+        service.close()
+    assert isinstance(response, dict)
+    refused = response["result"]["structuredContent"]
+
+    assert refused["error_type"] == "com_port_not_bound", refused
+    assert any("project_config_adopt_hardware" in step for step in refused["remediation"]), refused["remediation"]
+    assert not any("agentic-hil adopt-hardware" in step for step in refused["remediation"]), refused["remediation"]
+
+    at_a_shell = " ".join(render_result(refused, "test-reactor").split())
+    assert "agentic-hil adopt-hardware" in at_a_shell
+    assert "project_config_adopt_hardware" not in at_a_shell
 
 
 def test_every_com_tool_refuses_an_unbound_port_by_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -245,6 +245,10 @@ def test_a_failed_or_empty_inventory_is_still_said_beside_the_confirmation(
     The failure is the product's own document for a pyserial it cannot
     import; the empty inventory is the recording with its ports taken out."""
     monkeypatch.setitem(sys.modules, "serial.tools", None)
+    # What the import system raises for the listing's own import, which the
+    # item names (#568).
+    with pytest.raises(ImportError) as raised:
+        __import__("serial.tools", fromlist=["list_ports"])
     failed = list_available_com_ports()
     assert failed["ok"] is False, failed
     empty = {**copy.deepcopy(RECORDED_INVENTORY), "ports": [], "summary": "0 available COM port(s)."}
@@ -252,7 +256,8 @@ def test_a_failed_or_empty_inventory_is_still_said_beside_the_confirmation(
 
     assert _confirming_item(cli.init_next_steps(failed, tmp_path / "config.yaml", bound_com_ports=bound)) == (
         f"com_ports.dut_uart is bound to {BY_ID_PATH}. "
-        "COM port discovery failed. Run: agentic-hil com-ports after checking the pyserial installation."
+        f"COM port discovery failed: {type(raised.value).__name__}: {raised.value}. "
+        "Run: agentic-hil com-ports after checking the pyserial installation."
     )
     assert _confirming_item(cli.init_next_steps(empty, tmp_path / "config.yaml", bound_com_ports=bound)) == (
         f"com_ports.dut_uart is bound to {BY_ID_PATH}. "
