@@ -90,9 +90,8 @@ BUS_ADAPTER_TIMEOUT_S = 11.0
 # a future broker adds.
 UNRECOGNISED_EXIT_CODE = 1
 
-# The most a broker that is mid shutdown may be waited for at the deadline, and
-# the bound the wall-clock test below allows the whole failed attach on top of
-# its own deadline. A budget larger than this stops being "short".
+# The most a broker that is mid shutdown may be waited for at the deadline. A
+# budget larger than this stops being "short".
 GRACE_CEILING_S = 3.0
 # How long the scripted broker of the shutdown case stays inside its shutdown
 # once the client starts waiting for it. Comfortably under the ceiling, so any
@@ -101,6 +100,19 @@ SHUTDOWN_LAG_S = 0.25
 # The deadline of the one test that runs on the real clock. Short, because what
 # it measures is the budget spent after the deadline, not the deadline.
 REAL_ATTACH_DEADLINE_S = 0.5
+# The bound that test puts on the whole failed attach, and the adapter timeout
+# of its bus, both before the time scale. By design the attach costs about 1.55 s:
+# the deadline, the shutdown grace the double sleeps in full because its broker
+# never answers, and one poll. The bound is not that cost plus a little, because a
+# stalled runner adds seconds to it. It is set by the second deadline it has to
+# catch, the bus's adapter timeout, which this test sets to twice the bound: an
+# attach that waits the timeout out takes more than twice as long as the bound
+# allows, and the bound leaves nearly twice the slowest stalled attach seen.
+REAL_CLOCK_BOUND_S = 8.0
+REAL_CLOCK_BUS_TIMEOUT_S = 2 * REAL_CLOCK_BOUND_S
+# The slowest failed attach a stalled runner has produced in that test: a two
+# core Windows runner whose other worker was busy (#573).
+SLOWEST_STALLED_ATTACH_S = 4.28
 
 # The document an explained broker leaves as the last line of its log. Seeded by
 # hand here: what these tests drive is the client, and the broker that wrote it
@@ -375,7 +387,7 @@ def test_the_budget_after_the_deadline_is_bounded_on_a_real_clock(tmp_path: Path
     with no timeout at all: the double refuses that outright, so an unbounded
     production wait cannot borrow the double's promptness.
     """
-    config, bus_key, log_path = prepared_bus(tmp_path, monkeypatch, "vcan532c")
+    config, bus_key, log_path = prepared_bus(tmp_path, monkeypatch, "vcan532c", timeout_s=scaled_time_bound(REAL_CLOCK_BUS_TIMEOUT_S))
     spawned: list = []
 
     def spawn(*args, **kwargs):
@@ -392,7 +404,20 @@ def test_the_budget_after_the_deadline_is_bounded_on_a_real_clock(tmp_path: Path
 
     assert spawned, "no broker was started at all"
     assert not any(child.unbounded_wait for child in spawned), "the client waited on the broker with no timeout"
-    assert elapsed_s < scaled_time_bound(REAL_ATTACH_DEADLINE_S + GRACE_CEILING_S), elapsed_s
+    assert elapsed_s < scaled_time_bound(REAL_CLOCK_BOUND_S), elapsed_s
+
+
+def test_the_real_clock_bound_clears_a_stalled_runner_and_catches_the_bus_timeout() -> None:
+    """The bound of the real-clock test is set by what it has to catch (#573).
+
+    What only the real clock catches is a budget that grew into a second
+    deadline, or a wait the double does not see, and the second deadline that
+    test's bus carries is its adapter timeout. A failed attach that waits it out
+    has to exceed the bound by a wide margin, at least twice over, while the
+    slowest attach a stalled runner has produced stays under it.
+    """
+    assert SLOWEST_STALLED_ATTACH_S < REAL_CLOCK_BOUND_S, (SLOWEST_STALLED_ATTACH_S, REAL_CLOCK_BOUND_S)
+    assert REAL_ATTACH_DEADLINE_S + REAL_CLOCK_BUS_TIMEOUT_S >= 2 * REAL_CLOCK_BOUND_S, (REAL_CLOCK_BUS_TIMEOUT_S, REAL_CLOCK_BOUND_S)
 
 
 # ---------------------------------------------------------------------------
