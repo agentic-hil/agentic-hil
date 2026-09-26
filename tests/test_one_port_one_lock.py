@@ -25,6 +25,11 @@ the device lock rather than the per-configuration lock kept under the state
 root. That is the layer where a second owner through the *same* spelling is
 refused `device_busy`, naming its holder, and the same-spelling cases pin that
 the harness reaches it.
+
+A run declares what its configuration names, and the node a link leads to is
+the host's to give: it can appear after the run began, when the board is plugged
+in late. The last two tests ask that such a run's own step is neither refused
+over that name nor let past somebody holding the port under it.
 """
 
 from __future__ import annotations
@@ -78,21 +83,32 @@ ONE_SPELLING = [
 ]
 
 
+def recorded_port(tmp_path: Path) -> tuple[Path, Path]:
+    """Where the recorded kernel node and its by-id link sit, before either exists."""
+    ports = json.loads(RECORDING_PATH.read_text(encoding="utf-8"))["recording"]["ports"]
+    (recorded,) = [port for port in ports if port.get("stable_device")]
+    return tmp_path / "host" / recorded["device"].lstrip("/"), tmp_path / "host" / recorded["stable_device"].lstrip("/")
+
+
+def publish(name: Path, target: Path | None = None) -> None:
+    """One name appearing as the board arrives: the node itself, or a link to it."""
+    name.parent.mkdir(parents=True, exist_ok=True)
+    if target is None:
+        # A plain file stands in for the character device: the lock never opens
+        # it, and a session's open goes to the fake serial backend.
+        name.write_text("", encoding="utf-8")
+    else:
+        name.symlink_to(target)
+
+
 @pytest.fixture
 def spellings(tmp_path: Path) -> dict[str, str]:
     """Every name the one port under test answers to on this host."""
     if os.name == "nt":
         return {"COM59": "COM59", "device namespace": COM59_DEVICE_NAMESPACE}
-    ports = json.loads(RECORDING_PATH.read_text(encoding="utf-8"))["recording"]["ports"]
-    (recorded,) = [port for port in ports if port.get("stable_device")]
-    node = tmp_path / "host" / recorded["device"].lstrip("/")
-    link = tmp_path / "host" / recorded["stable_device"].lstrip("/")
-    node.parent.mkdir(parents=True, exist_ok=True)
-    link.parent.mkdir(parents=True, exist_ok=True)
-    # A plain file stands in for the character device: the lock never opens it,
-    # and a session's open goes to the fake serial backend.
-    node.write_text("", encoding="utf-8")
-    link.symlink_to(node)
+    node, link = recorded_port(tmp_path)
+    publish(node)
+    publish(link, node)
     return {"kernel name": str(node), "by-id link": str(link)}
 
 
@@ -195,6 +211,79 @@ def test_a_run_holding_the_port_keeps_out_a_session_through_another_spelling(spe
         assert refused.get("error_type") == "device_busy", refused
         assert refused["holder"]["label"] == "boot-smoke", refused
         assert port.opens == 0
+        # Ending the run gives back every name it held for the port.
+        assert running.call("bench_run_stop")["ok"] is True
+        reached = stranger.call("com_session_start", {"port_id": PORT_ID})
+        assert reached.get("error_type") is None, reached
     finally:
         stranger.close()
+        running.close()
+
+
+@POSIX_ONLY
+def test_a_run_declared_before_its_link_appeared_reaches_the_port_once_it_has(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run's own step is not refused over a name the host gave its port later.
+
+    The run is declared while the board is unplugged, so neither the kernel node
+    nor the by-id link its configuration names exists yet. Then the board
+    arrives. The run declared what its configuration names, and the node the
+    link now leads to is not a device it failed to declare, so its session
+    reaches the port. Once the session and the run are over, a second workspace
+    through the kernel name gets the port: nothing stayed held under either
+    name."""
+    port = FakePort()
+    install_fake_serial(monkeypatch, port)
+    node, link = recorded_port(tmp_path)
+    running = AgenticHILToolService(workspace_config(tmp_path, "a", {PORT_ID: str(link)}))
+    other = AgenticHILToolService(workspace_config(tmp_path, "b", {PORT_ID: str(node)}))
+    try:
+        run = running.call("bench_run_start", {"devices": [{"kind": "uart", "id": PORT_ID}], "label": "boot-smoke"})
+        assert run["ok"] is True, run
+        publish(node)
+        publish(link, node)
+
+        started = running.call("com_session_start", {"port_id": PORT_ID})
+
+        assert started.get("error_type") is None, started
+        assert port.opens == 1
+        assert running.call("com_session_stop", {"port_id": PORT_ID})["ok"] is True
+        assert running.call("bench_run_stop")["ok"] is True
+        reached = other.call("com_session_start", {"port_id": PORT_ID})
+        assert reached.get("error_type") is None, reached
+        assert port.opens == 2
+    finally:
+        other.close()
+        running.close()
+
+
+@POSIX_ONLY
+def test_a_run_declared_before_its_link_appeared_is_kept_off_a_port_held_under_the_kernel_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same run, when the port it reaches is somebody else's by then.
+
+    Declared while the board is unplugged, as above. The board arrives, and a
+    second workspace naming the kernel node opens a session on it before the
+    link appears. The run's session through the link is refused `device_busy`,
+    naming that workspace, and never reaches the open."""
+    port = FakePort()
+    install_fake_serial(monkeypatch, port)
+    node, link = recorded_port(tmp_path)
+    running = AgenticHILToolService(workspace_config(tmp_path, "a", {PORT_ID: str(link)}))
+    holder = AgenticHILToolService(workspace_config(tmp_path, "b", {PORT_ID: str(node)}))
+    try:
+        run = running.call("bench_run_start", {"devices": [{"kind": "uart", "id": PORT_ID}], "label": "boot-smoke"})
+        assert run["ok"] is True, run
+        publish(node)
+        held = holder.call("com_session_start", {"port_id": PORT_ID})
+        assert held["ok"] is True, held
+        # The holder's open now has the node, as pyserial's flock does.
+        port.held = True
+        publish(link, node)
+
+        refused = running.call("com_session_start", {"port_id": PORT_ID})
+
+        assert refused.get("error_type") == "device_busy", refused
+        assert refused["holder"]["owner_id"] == holder.coordinator.bench.owner.owner_id, refused
+        assert port.opens == 1
+    finally:
+        holder.close()
         running.close()
