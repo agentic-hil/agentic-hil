@@ -1273,7 +1273,7 @@ class Participant:
     the same frame in the bus log, attributable from either end without either
     log having to be trusted about the other."""
 
-    def __init__(self, config: AgenticHILConfig, bus_id: str, name: str, connection: Connection, attached: JsonObject, mutex: BenchMutex, lock_key: str, *, broker_process: subprocess.Popen | None = None):
+    def __init__(self, config: AgenticHILConfig, bus_id: str, name: str, connection: Connection, attached: JsonObject, mutex: BenchMutex, lock_key: str, *, broker_process: subprocess.Popen | None = None, release_mutex_on_detach: bool = True):
         self.config = config
         self.bus_id = bus_id
         self.name = name
@@ -1281,6 +1281,7 @@ class Participant:
         self.attached = attached
         self.mutex = mutex
         self.lock_key = lock_key
+        self.release_mutex_on_detach = release_mutex_on_detach
         self.broker_process = broker_process
         self.broker_pid = int(attached.get("broker_pid") or 0)
         self.counter = int(attached.get("counter") or 0)
@@ -1330,8 +1331,9 @@ class Participant:
             with suppress(BaseException):
                 self.connection.close()
             self._log({"event": "detach", "participant": self.name, "attached_participants": result.get("attached_participants")})
-            with suppress(BaseException):
-                self.mutex.release_all()
+            if self.release_mutex_on_detach:
+                with suppress(BaseException):
+                    self.mutex.release([self.lock_key])
         return result
 
     def __enter__(self) -> Participant:
@@ -1365,6 +1367,7 @@ def attach_participant(
     wait_s: float = 0.0,
     start_timeout_s: float = BROKER_START_TIMEOUT_S,
     allow_start: bool = True,
+    lock_already_held: bool = False,
 ) -> Participant:
     """Attach this run to a named participant view, starting the broker if needed.
 
@@ -1386,19 +1389,23 @@ def attach_participant(
         raise ParticipantError(error.result) from error
     owner = mutex or BenchMutex(frontend="can-participant", label=f"can-participant:{bus_id}#{participant}")
     lock_key = participant_lock_key(bus_key, participant)
+    if lock_already_held and not owner.holds(lock_key):
+        raise ParticipantError({"ok": False, "error_type": "can_participant_lock_required", "summary": "A caller may reuse an existing participant lease only when it holds that participant lock.", "bus_id": bus_id, "participant": participant, "participant_lock": lock_key, "side_effect_committed": False, "retry_safe": True})
+    if not lock_already_held:
+        try:
+            owner.acquire_named(lock_key, wait_s=wait_s)
+        except DeviceBusyError as error:
+            raise ParticipantError({**error.result, "bus_id": bus_id, "participant": participant, "participant_lock": lock_key, "summary": f"CAN participant '{participant}' on bus '{bus_id}' is already held by another run; two runs may not share one participant name."}) from error
     try:
-        owner.acquire_named(lock_key, wait_s=wait_s)
-    except DeviceBusyError as error:
-        raise ParticipantError({**error.result, "bus_id": bus_id, "participant": participant, "participant_lock": lock_key, "summary": f"CAN participant '{participant}' on bus '{bus_id}' is already held by another run; two runs may not share one participant name."}) from error
-    try:
-        return _attach_with_broker(config, bus_id, participant, bus_key, owner, lock_key, start_timeout_s, allow_start)
+        return _attach_with_broker(config, bus_id, participant, bus_key, owner, lock_key, start_timeout_s, allow_start, release_mutex_on_detach=not lock_already_held)
     except BaseException:
-        with suppress(BaseException):
-            owner.release_all()
+        if not lock_already_held:
+            with suppress(BaseException):
+                owner.release([lock_key])
         raise
 
 
-def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str, bus_key: str, owner: BenchMutex, lock_key: str, start_timeout_s: float, allow_start: bool) -> Participant:
+def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str, bus_key: str, owner: BenchMutex, lock_key: str, start_timeout_s: float, allow_start: bool, *, release_mutex_on_detach: bool = True) -> Participant:
     lock_root = owner.root
     deadline = time.monotonic() + start_timeout_s
     started: subprocess.Popen | None = None
@@ -1408,7 +1415,7 @@ def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str,
         descriptor = read_descriptor(bus_key, lock_root)
         if descriptor is not None:
             attempts += 1
-            outcome = _attach_once(config, bus_id, participant, bus_key, descriptor, owner, lock_key, lock_root, started)
+            outcome = _attach_once(config, bus_id, participant, bus_key, descriptor, owner, lock_key, lock_root, started, release_mutex_on_detach=release_mutex_on_detach)
             if isinstance(outcome, Participant):
                 return outcome
             last = outcome
@@ -1506,7 +1513,7 @@ def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str,
     raise ParticipantError(last)
 
 
-def _attach_once(config: AgenticHILConfig, bus_id: str, participant: str, bus_key: str, descriptor: BrokerDescriptor, owner: BenchMutex, lock_key: str, lock_root: Path, started: subprocess.Popen | None) -> Participant | JsonObject:
+def _attach_once(config: AgenticHILConfig, bus_id: str, participant: str, bus_key: str, descriptor: BrokerDescriptor, owner: BenchMutex, lock_key: str, lock_root: Path, started: subprocess.Popen | None, *, release_mutex_on_detach: bool = True) -> Participant | JsonObject:
     if descriptor.protocol_version != PROTOCOL_VERSION or descriptor.protocol_digest != PROTOCOL_DIGEST:
         return {
             "ok": False,
@@ -1557,7 +1564,7 @@ def _attach_once(config: AgenticHILConfig, bus_id: str, participant: str, bus_ke
             connection.close()
         refusal = answer if isinstance(answer, dict) else {"ok": False, "error_type": "can_broker_invalid_message", "summary": "The CAN broker answered the attach with a message this client cannot read."}
         return {**refusal, "bus_id": bus_id, "participant": participant}
-    return Participant(config, bus_id, participant, connection, answer, owner, lock_key, broker_process=started)
+    return Participant(config, bus_id, participant, connection, answer, owner, lock_key, broker_process=started, release_mutex_on_detach=release_mutex_on_detach)
 
 
 def _last_broker_document(log_path: Path) -> JsonObject:

@@ -246,7 +246,7 @@ def test_can_session_stop_closes_a_helper_whose_group_refuses_the_signal(tmp_pat
     service = CanBusService(process_can_config(tmp_path))
     started = service.session_start("bench", clear_rx_queue=False)
     assert started["ok"] is True
-    child = service.sessions["bench"].adapter_session.child
+    child = service.sessions[("bench", None)].adapter_session.child
 
     def killpg_as_macos_answered(pgid: int, sig: int) -> None:
         if sig == 0:
@@ -262,7 +262,7 @@ def test_can_session_stop_closes_a_helper_whose_group_refuses_the_signal(tmp_pat
     assert stopped["ok"] is True
     assert stopped["summary"] == "CAN bus session stopped."
     assert child.poll() is not None
-    assert "bench" not in service.sessions
+    assert ("bench", None) not in service.sessions
     assert all(record.child is not child for record in process_module.managed_processes())
 
 
@@ -279,7 +279,7 @@ def test_can_session_stop_still_registers_a_helper_whose_group_will_not_clear(tm
     service = CanBusService(process_can_config(tmp_path))
     started = service.session_start("bench", clear_rx_queue=False)
     assert started["ok"] is True
-    child = service.sessions["bench"].adapter_session.child
+    child = service.sessions[("bench", None)].adapter_session.child
     real_killpg = process_module.os.killpg
     refusing = True
 
@@ -297,7 +297,7 @@ def test_can_session_stop_still_registers_a_helper_whose_group_will_not_clear(tm
     assert stopped["ok"] is False
     assert stopped["error_type"] == "can_adapter_close_failed"
     assert stopped["summary"] == "CAN bus session could not be closed and remains registered for cleanup retry."
-    assert "bench" in service.sessions
+    assert ("bench", None) in service.sessions
     assert cleanup_registered_processes(0.1, owner_marker=service.coordinator.owner_marker) == [
         f"pid {child.pid}: RuntimeError: Could not signal process group {child.pid} with SIGTERM "
         f"while killing pid {child.pid}, and the group still had a member after a 0.1s wait."

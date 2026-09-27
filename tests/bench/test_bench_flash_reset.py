@@ -252,10 +252,10 @@ def debugger_log(bench: Bench, log_path: str) -> dict:
 
 
 def assert_flash_holds(result: dict) -> None:
-    """The claims every confirmed flash of the demo's ELF makes, however it was named."""
+    """The claims each backend can support after flashing the demo's ELF."""
     assert result["ok"] is True, result
     assert result["tool"] == "flash_firmware", result
-    assert result["verify"] is True, result
+    assert result["verify"] is (result["backend"] != "pyocd"), result
     assert "error_type" not in result, result
     assert SHA256.match(str(result["artifact"]["sha256"])), result["artifact"]
     assert isinstance(result["elapsed_ms"], int) and result["elapsed_ms"] > 0, result
@@ -384,7 +384,8 @@ def test_a_flash_without_a_post_flash_reset_says_so_and_never_asks_the_debugger_
 
     assert_flash_holds(result)
     assert result["reset_after_flash"] is False, result
-    assert result["summary"].startswith("Firmware flashed and verified. Target was not reset."), result["summary"]
+    expected = "Firmware flashed. Target was not reset." if result["backend"] == "pyocd" else "Firmware flashed and verified. Target was not reset."
+    assert result["summary"] == expected, result["summary"]
     if result["backend"] == "openocd":
         commanded = debugger_log(bench, result["log_path"])["command"]
         assert "verify reset" not in commanded, commanded
@@ -404,7 +405,8 @@ def test_a_flash_that_asks_for_a_post_flash_reset_gets_one_in_the_same_debugger_
 
     assert_flash_holds(result)
     assert result["reset_after_flash"] is True, result
-    assert result["summary"].startswith("Firmware flashed, verified, and target reset."), result["summary"]
+    expected = "Firmware flashed and target reset." if result["backend"] == "pyocd" else "Firmware flashed, verified, and target reset."
+    assert result["summary"] == expected, result["summary"]
     if result["backend"] == "openocd":
         commanded = debugger_log(bench, result["log_path"])["command"]
         assert "verify reset" in commanded, commanded

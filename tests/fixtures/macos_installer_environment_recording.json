@@ -1,0 +1,146 @@
+{
+  "what": "Real macOS framework Python layout and hashing-tool output over this run's built agentic-hil wheel.",
+  "recorded_on": "2026-09-27",
+  "platform": "macOS",
+  "platform_version": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "github_actions": {
+    "repository": "agentic-hil/agentic-hil",
+    "run_id": "36356859067",
+    "run_attempt": "1",
+    "commit": "21f0de860a64419c5d27073e0d1e9accae49b9b2",
+    "ref": "refs/pull/605/merge",
+    "run_url": "https://github.com/agentic-hil/agentic-hil/actions/runs/36356859067"
+  },
+  "method": {
+    "python_install": "brew install python@3.13",
+    "wheel_build": "\"$RUNNER_TEMP/agentic-hil-build/bin/python\" -m build --wheel --outdir dist",
+    "homebrew_version": {
+      "command": [
+        "brew",
+        "--version"
+      ],
+      "returncode": 0,
+      "stdout": "Homebrew 6.0.22\nHomebrew/homebrew-core (git revision 3cc40d0f3a3; last commit 2026-09-07)\nHomebrew/homebrew-cask (git revision 3b664150524; last commit 2026-09-07)",
+      "stderr": ""
+    },
+    "python_formula": {
+      "command": [
+        "brew",
+        "list",
+        "--versions",
+        "python@3.13"
+      ],
+      "returncode": 0,
+      "stdout": "python@3.13 3.13.15",
+      "stderr": ""
+    }
+  },
+  "python": {
+    "version": "3.13.15",
+    "executable": "/opt/homebrew/opt/python@3.13/bin/python3.13",
+    "executable_path": {
+      "path": "/opt/homebrew/opt/python@3.13/bin/python3.13",
+      "realpath": "/opt/homebrew/Cellar/python@3.13/3.13.15/Frameworks/Python.framework/Versions/3.13/bin/python3.13",
+      "is_symlink": true,
+      "link_target": "../Frameworks/Python.framework/Versions/3.13/bin/python3.13"
+    },
+    "prefix": "/opt/homebrew/opt/python@3.13/Frameworks/Python.framework/Versions/3.13",
+    "base_prefix": "/opt/homebrew/opt/python@3.13/Frameworks/Python.framework/Versions/3.13",
+    "framework": "Python",
+    "preferred_user_scheme": "osx_framework_user",
+    "schemes": {
+      "osx_framework_user": {
+        "purelib": {
+          "path": "/Users/runner/Library/Python/3.13/lib/python/site-packages",
+          "realpath": "/Users/runner/Library/Python/3.13/lib/python/site-packages",
+          "is_symlink": false,
+          "link_target": null
+        },
+        "platlib": {
+          "path": "/Users/runner/Library/Python/3.13/lib/python/site-packages",
+          "realpath": "/Users/runner/Library/Python/3.13/lib/python/site-packages",
+          "is_symlink": false,
+          "link_target": null
+        }
+      },
+      "posix_user": {
+        "purelib": {
+          "path": "/Users/runner/Library/Python/3.13/lib/python3.13/site-packages",
+          "realpath": "/Users/runner/Library/Python/3.13/lib/python3.13/site-packages",
+          "is_symlink": false,
+          "link_target": null
+        },
+        "platlib": {
+          "path": "/Users/runner/Library/Python/3.13/lib/python3.13/site-packages",
+          "realpath": "/Users/runner/Library/Python/3.13/lib/python3.13/site-packages",
+          "is_symlink": false,
+          "link_target": null
+        }
+      }
+    }
+  },
+  "wheel": {
+    "path": "/Users/runner/work/agentic-hil/agentic-hil/dist/agentic_hil-0.21.6.dev0-py3-none-any.whl",
+    "filename": "agentic_hil-0.21.6.dev0-py3-none-any.whl",
+    "size": 992532,
+    "sha256": "ef82a11cfcaf91ca15712603eb7a59b51cce4fe7a5e8ae6a5e430c211868fcde"
+  },
+  "tools": {
+    "shasum": {
+      "executable": {
+        "path": "/opt/homebrew/bin/shasum",
+        "realpath": "/opt/homebrew/Cellar/perl/5.44.0/bin/shasum",
+        "is_symlink": true,
+        "link_target": "../Cellar/perl/5.44.0/bin/shasum"
+      },
+      "version": {
+        "command": [
+          "shasum",
+          "--version"
+        ],
+        "returncode": 0,
+        "stdout": "6.04",
+        "stderr": ""
+      },
+      "sha256": {
+        "command": [
+          "shasum",
+          "-a",
+          "256",
+          "/Users/runner/work/agentic-hil/agentic-hil/dist/agentic_hil-0.21.6.dev0-py3-none-any.whl"
+        ],
+        "returncode": 0,
+        "stdout": "ef82a11cfcaf91ca15712603eb7a59b51cce4fe7a5e8ae6a5e430c211868fcde  /Users/runner/work/agentic-hil/agentic-hil/dist/agentic_hil-0.21.6.dev0-py3-none-any.whl",
+        "stderr": ""
+      }
+    },
+    "openssl": {
+      "executable": {
+        "path": "/opt/homebrew/bin/openssl",
+        "realpath": "/opt/homebrew/Cellar/openssl@3/3.6.4/bin/openssl",
+        "is_symlink": true,
+        "link_target": "../Cellar/openssl@3/3.6.4/bin/openssl"
+      },
+      "version": {
+        "command": [
+          "openssl",
+          "version"
+        ],
+        "returncode": 0,
+        "stdout": "OpenSSL 3.6.4 25 Aug 2026 (Library: OpenSSL 3.6.4 25 Aug 2026)",
+        "stderr": ""
+      },
+      "sha256": {
+        "command": [
+          "openssl",
+          "dgst",
+          "-sha256",
+          "/Users/runner/work/agentic-hil/agentic-hil/dist/agentic_hil-0.21.6.dev0-py3-none-any.whl"
+        ],
+        "returncode": 0,
+        "stdout": "SHA2-256(/Users/runner/work/agentic-hil/agentic-hil/dist/agentic_hil-0.21.6.dev0-py3-none-any.whl)= ef82a11cfcaf91ca15712603eb7a59b51cce4fe7a5e8ae6a5e430c211868fcde",
+        "stderr": ""
+      }
+    }
+  }
+}

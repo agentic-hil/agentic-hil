@@ -586,9 +586,15 @@ class CanDevice(Device):
     }
 
     bus: CanBusConfig = field(repr=False)
+    participant: str | None = None
 
     @property
     def lock_key(self) -> str:
+        bus_key = self._bus_lock_key
+        return fold_resource_name(f"{bus_key}#{self.participant}") if self.participant is not None else bus_key
+
+    @property
+    def _bus_lock_key(self) -> str:
         if self.bus.resource_id:
             return f"physical:{fold_hardware_id(self.bus.resource_id)}"
         # Neither part is a path. The adapter is a fixed keyword and the channel
@@ -732,11 +738,13 @@ def uart_device(config: AgenticHILConfig, port_id: str) -> UartDevice:
     return UartDevice(config_id=port_id, port=port)
 
 
-def can_device(config: AgenticHILConfig, bus_id: str) -> CanDevice:
+def can_device(config: AgenticHILConfig, bus_id: str, participant: str | None = None) -> CanDevice:
     bus = config.can_buses.get(bus_id)
     if bus is None:
         raise DeviceError(_unknown_device("can", bus_id, sorted(config.can_buses)))
-    return CanDevice(config_id=bus_id, bus=bus)
+    if participant is not None and participant not in bus.shares:
+        raise DeviceError({"ok": False, "error_type": "can_participant_not_configured", "summary": "The authoritative config declares no such participant view on this CAN bus.", "bus_id": bus_id, "participant": participant, "configured_participants": sorted(bus.shares), "side_effect_committed": False, "retry_safe": False})
+    return CanDevice(config_id=bus_id, bus=bus, participant=participant)
 
 
 def _unknown_device(kind: str, name: str, configured: list[str]) -> JsonObject:
@@ -779,6 +787,9 @@ def resolve_device(config: AgenticHILConfig, selector: object) -> Device:
         )
     kind = selector.get("kind")
     name = selector.get("id")
+    participant = selector.get("participant")
+    if participant is not None and (kind != "can" or not isinstance(participant, str) or not participant):
+        raise DeviceError({"ok": False, "error_type": "invalid_argument", "summary": "participant is a non-empty selector available only for named CAN share views.", "kind": kind, "participant": participant, "side_effect_committed": False, "retry_safe": False})
     if kind == "debugger":
         # The only kind whose id may be omitted, and only when the project
         # configures exactly one probe; debugger_device says so when it cannot.
@@ -796,7 +807,9 @@ def resolve_device(config: AgenticHILConfig, selector: object) -> Device:
                     "retry_safe": False,
                 }
             )
-        return uart_device(config, str(name)) if kind == "uart" else can_device(config, str(name))
+        if kind == "can" and str(name) in config.can_buses and config.can_buses[str(name)].shares and participant is None:
+            raise DeviceError({"ok": False, "error_type": "can_participant_required", "summary": "A shared CAN bus run selector must name the participant view it declares.", "bus_id": str(name), "configured_participants": sorted(config.can_buses[str(name)].shares), "side_effect_committed": False, "retry_safe": False})
+        return uart_device(config, str(name)) if kind == "uart" else can_device(config, str(name), str(selector["participant"]) if selector.get("participant") is not None else None)
     raise DeviceError(
         {
             "ok": False,

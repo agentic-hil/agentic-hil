@@ -1729,7 +1729,7 @@ def test_active_can_session_drains_more_than_one_buffer_batch(tmp_path: Path) ->
 
     adapter = QueuedAdapter()
     session = CanBusSession("bench", config.can_buses["bench"], adapter, str(tmp_path / "can.jsonl"))
-    service.sessions["bench"] = session
+    service.sessions[("bench", None)] = session
 
     result = service.session_start("bench", clear_rx_queue=True)
 
@@ -1753,7 +1753,7 @@ def test_active_can_session_quarantines_when_queue_never_drains(tmp_path: Path) 
             return {"active": True}
 
     session = CanBusSession("bench", config.can_buses["bench"], BusyAdapter(), str(tmp_path / "can-limit.jsonl"))
-    service.sessions["bench"] = session
+    service.sessions[("bench", None)] = session
 
     result = service.session_start("bench", clear_rx_queue=True)
 
@@ -1798,7 +1798,7 @@ def test_can_queue_drain_budget_excludes_the_pre_drain_audit_write(tmp_path: Pat
 
     adapter = QueuedAdapter()
     session = CanBusSession("bench", config.can_buses["bench"], adapter, str(tmp_path / "can-slow-audit.jsonl"))
-    service.sessions["bench"] = session
+    service.sessions[("bench", None)] = session
 
     result = service.session_start("bench", clear_rx_queue=True)
 
@@ -1829,7 +1829,7 @@ def test_can_queue_drain_budget_still_bounds_adapter_time(tmp_path: Path, monkey
 
     adapter = SlowBusyAdapter()
     session = CanBusSession("bench", config.can_buses["bench"], adapter, str(tmp_path / "can-slow-adapter.jsonl"))
-    service.sessions["bench"] = session
+    service.sessions[("bench", None)] = session
 
     result = service.session_start("bench", clear_rx_queue=True)
 
@@ -3791,7 +3791,7 @@ def test_can_close_failure_retains_session_for_retry(tmp_path: Path) -> None:
     log_path.parent.mkdir(parents=True)
     session = CanBusSession("bench", config.can_buses["bench"], adapter, str(log_path))  # type: ignore[arg-type]
     service = CanBusService(config)
-    service.sessions["bench"] = session
+    service.sessions[("bench", None)] = session
 
     first = service.session_stop("bench")
     second = service.session_stop("bench")
@@ -3799,7 +3799,7 @@ def test_can_close_failure_retains_session_for_retry(tmp_path: Path) -> None:
     assert first["error_type"] == "can_adapter_close_failed"
     assert second["ok"] is True
     assert adapter.attempts == 2
-    assert "bench" not in service.sessions
+    assert ("bench", None) not in service.sessions
 
 
 def test_unavailable_audit_prevents_hardware_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

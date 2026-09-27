@@ -22,9 +22,8 @@ through the `test-reactor` command, and what is asserted is the whole document
 that came back, because the assertion gaps the bench found were in the outer
 fields nothing had read (#443, #447).
 
-The issue this file pins beside the transport is #501: a second session on a
-channel a session of this very process already holds is refused as if another
-process held it, with no holder named.
+The transport tier also pins #501's same-process exclusive-session behavior
+and #500's two named views over one live broker and SocketCAN adapter.
 
 Recorded 2026-09-06 against python-can 4.6.1 and the iproute2 this image
 installs; the python-can version is asserted so the record cannot go stale
@@ -1365,3 +1364,48 @@ def test_doctor_with_the_can_extra_installed_names_no_missing_python_can(tmp_pat
     )
     result = json.loads(checked.stdout)
     assert "python-can" not in json.dumps(result.get("warnings", [])), result
+
+
+def test_named_participant_sessions_share_one_vcan_and_read_each_others_frames(tmp_path: Path, vcan: str) -> None:
+    """Two broker views share one live SocketCAN adapter and retain independent sessions."""
+    entry = f'''  bus:
+    adapter: socketcan
+    channel: {vcan!r}
+    bitrate: 500000
+    timeout_s: {BUS_TIMEOUT_S}
+    max_buffer_frames: 8
+    permissions:
+      allow_write: true
+    shares:
+      ecu_a:
+        permissions:
+          allow_read: true
+          allow_write: true
+      ecu_b:
+        permissions:
+          allow_read: true
+          allow_write: true
+'''
+    project, config = can_project(tmp_path, entry)
+
+    with live_server(project, config) as server, far_end(vcan) as peer:
+        opened_a = server.call("can_session_start", {"bus_id": "bus", "participant": "ecu_a", "clear_rx_queue": False})
+        opened_b = server.call("can_session_start", {"bus_id": "bus", "participant": "ecu_b", "clear_rx_queue": False})
+        assert opened_a["ok"] is True, opened_a
+        assert opened_b["ok"] is True, opened_b
+        assert opened_a["adapter"] == opened_b["adapter"] == "broker", (opened_a, opened_b)
+        assert server.call("can_send", {"bus_id": "bus", "participant": "ecu_a", "frame_id": 0x123, "data_hex": "CA FE"})["ok"] is True
+
+        received_b = server.call("can_read", {"bus_id": "bus", "participant": "ecu_b", "wait_timeout_s": 1.0})
+        assert received_b["ok"] is True, received_b
+        assert received_b["frames"][0]["id"] == 0x123, received_b
+        assert received_b["frames"][0]["data_hex"] == "cafe", received_b
+        assert a_frame_at_the_far_end(peer) == (0x123, b"\xca\xfe")
+
+        assert server.call("can_send", {"bus_id": "bus", "participant": "ecu_b", "frame_id": 0x321, "data_hex": "01"})["ok"] is True
+        received_a = server.call("can_read", {"bus_id": "bus", "participant": "ecu_a", "wait_timeout_s": 1.0})
+        assert received_a["ok"] is True, received_a
+        assert received_a["frames"][0]["id"] == 0x321, received_a
+        stopped_a = server.call("can_session_stop", {"bus_id": "bus", "participant": "ecu_a"})
+        assert stopped_a["ok"] is True, stopped_a
+        assert server.call("can_session_stop", {"bus_id": "bus", "participant": "ecu_b"})["ok"] is True

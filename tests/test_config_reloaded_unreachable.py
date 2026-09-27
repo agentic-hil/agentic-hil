@@ -513,7 +513,7 @@ def test_a_reload_while_a_can_session_is_open_is_refused_and_swaps_nothing(tmp_p
     try:
         started = tools.call("can_session_start", {"bus_id": BUS_ID})
         assert started["ok"] is True, started
-        session = tools.can_buses.sessions[BUS_ID]
+        session = tools.can_buses.sessions[(BUS_ID, None)]
         rename_the_bus(path)
 
         refused = tools.call(PROJECT_CONFIG_RELOAD)
@@ -524,7 +524,7 @@ def test_a_reload_while_a_can_session_is_open_is_refused_and_swaps_nothing(tmp_p
         assert refused["open_holds"]["open_leases"] == [session.lease.lease_id], refused
         assert sorted(tools.config.can_buses) == [BUS_ID], sorted(tools.config.can_buses)
         assert sorted(tools.can_buses.config.can_buses) == [BUS_ID], sorted(tools.can_buses.config.can_buses)
-        assert tools.can_buses.sessions[BUS_ID] is session
+        assert tools.can_buses.sessions[(BUS_ID, None)] is session
         assert tools.call("can_buses_list")["buses"][BUS_ID]["session_active"] is True
         assert all(line.get("reason") != STOP_REASON for line in audit_lines(session.log_path)), audit_lines(session.log_path)
 
@@ -552,7 +552,7 @@ def test_a_reload_with_a_com_and_a_can_session_open_is_refused_for_both(tmp_path
         assert tools.call("com_session_start", {"port_id": PORT_ID})["ok"] is True
         assert tools.call("can_session_start", {"bus_id": BUS_ID})["ok"] is True
         com_session = tools.com_ports.sessions[PORT_ID]
-        can_session = tools.can_buses.sessions[BUS_ID]
+        can_session = tools.can_buses.sessions[(BUS_ID, None)]
         rename_the_uart(path)
         rename_the_bus(path)
 
@@ -565,7 +565,7 @@ def test_a_reload_with_a_com_and_a_can_session_open_is_refused_for_both(tmp_path
         assert sorted(tools.config.com_ports) == [PORT_ID], sorted(tools.config.com_ports)
         assert sorted(tools.config.can_buses) == [BUS_ID], sorted(tools.config.can_buses)
         assert tools.com_ports.sessions[PORT_ID] is com_session
-        assert tools.can_buses.sessions[BUS_ID] is can_session
+        assert tools.can_buses.sessions[(BUS_ID, None)] is can_session
         assert com_session.active is True and can_session.active is True
         assert all(line.get("reason") != STOP_REASON for line in audit_lines(com_session.log_path)), audit_lines(com_session.log_path)
         assert all(line.get("reason") != STOP_REASON for line in audit_lines(can_session.log_path)), audit_lines(can_session.log_path)
@@ -875,11 +875,11 @@ def test_the_can_loop_still_stops_a_session_whose_entry_moved(tmp_path: Path, mo
     holds.service = tools
     try:
         assert tools.call("can_session_start", {"bus_id": BUS_ID})["ok"] is True
-        session = tools.can_buses.sessions[BUS_ID]
+        session = tools.can_buses.sessions[(BUS_ID, None)]
 
         tools.can_buses.reconfigure(replace(tools.config, can_buses={}))
 
-        assert BUS_ID not in tools.can_buses.sessions, sorted(tools.can_buses.sessions)
+        assert (BUS_ID, None) not in tools.can_buses.sessions, sorted(tools.can_buses.sessions)
         assert session.active is False
         last = audit_lines(session.log_path)[-1]
         assert last["event"] == "stop", last
@@ -926,13 +926,13 @@ def test_the_can_loop_still_stops_a_session_whose_entry_changed_a_field(tmp_path
     holds.service = tools
     try:
         assert tools.call("can_session_start", {"bus_id": BUS_ID})["ok"] is True
-        session = tools.can_buses.sessions[BUS_ID]
+        session = tools.can_buses.sessions[(BUS_ID, None)]
         assert session.bus_config.channel == CHANNEL, session.bus_config.channel
 
         moved = replace(session.bus_config, channel=f"{CHANNEL}b")
         tools.can_buses.reconfigure(replace(tools.config, can_buses={BUS_ID: moved}))
 
-        assert BUS_ID not in tools.can_buses.sessions, sorted(tools.can_buses.sessions)
+        assert (BUS_ID, None) not in tools.can_buses.sessions, sorted(tools.can_buses.sessions)
         assert session.active is False
         last = audit_lines(session.log_path)[-1]
         assert last["event"] == "stop", last
@@ -984,13 +984,13 @@ def test_the_can_loop_leaves_a_session_whose_entry_did_not_move(tmp_path: Path, 
     holds.service = tools
     try:
         assert tools.call("can_session_start", {"bus_id": BUS_ID})["ok"] is True
-        session = tools.can_buses.sessions[BUS_ID]
+        session = tools.can_buses.sessions[(BUS_ID, None)]
         unchanged = replace(tools.config, can_buses=dict(tools.config.can_buses))
         assert unchanged is not tools.config
 
         tools.can_buses.reconfigure(unchanged)
 
-        assert tools.can_buses.sessions.get(BUS_ID) is session, sorted(tools.can_buses.sessions)
+        assert tools.can_buses.sessions.get((BUS_ID, None)) is session, sorted(tools.can_buses.sessions)
         assert session.active is True
         assert all(line.get("event") != "stop" for line in audit_lines(session.log_path)), audit_lines(session.log_path)
         assert tools.call("can_buses_list")["buses"][BUS_ID]["session_active"] is True

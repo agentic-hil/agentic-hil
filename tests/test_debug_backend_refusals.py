@@ -659,7 +659,7 @@ def test_pyocd_flash_then_failed_reset_is_partial(tmp_path: Path) -> None:
     assert result["side_effect_status"] == "partial", result
     assert result["retry_safe"] is False, result
     assert result["reset_after_flash"] is False, result
-    assert result["verify"] is True, result
+    assert result["verify"] is False, result
     assert result["artifact"]["path"] == "build/firmware.elf", result
     assert "reset failed" in result["programmer_output"]["stderr"], result["programmer_output"]
     # The firmware is on the board, so the failure is not one of the refusals
@@ -676,7 +676,7 @@ def test_pyocd_flash_without_a_reset_never_meets_the_failing_reset(tmp_path: Pat
 
     assert result["ok"] is True, result
     assert result["reset_after_flash"] is False, result
-    assert result["summary"] == "Firmware flashed and verified. Target was not reset.", result
+    assert result["summary"] == "Firmware flashed. Target was not reset.", result
 
 
 # ---------------------------------------------------------------------------

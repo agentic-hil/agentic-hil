@@ -29,6 +29,7 @@ import hashlib
 import json
 import queue
 import re
+import shutil
 import subprocess
 import threading
 from collections.abc import Callable, Iterator
@@ -562,6 +563,81 @@ def test_the_probe_listing_names_the_configured_probe_and_says_nothing_was_asked
     assert result["side_effect_committed"] is False, result
     assert result["side_effect_status"] == "not_started", result
     assert result["retry_safe"] is True, result
+
+
+def test_pyocd_probe_enumeration_carries_the_real_usb_result_and_log(bench: Bench, servers) -> None:
+    """Run pyOCD's real probe-list command through the product against this bench.
+
+    The test owns a copy of the bench config with only the debugger backend,
+    executable and required target name adapted for pyOCD. It retains the bench's
+    probe identity and permissions and never rewrites the config used by the rest
+    of the suite. Enumeration opens no target: success proves the attached ST-Link
+    is visible through pyOCD, while a USB-open refusal must carry pyOCD's own
+    output and the exact log the product wrote.
+    """
+    document = bench.configuration()
+    debugger_name = bench.debugger_name()
+    entry = document["debuggers"][debugger_name]
+    pyocd_executable = shutil.which("pyocd")
+    assert pyocd_executable, "the hardware bench image is expected to install pyOCD for this discovery check"
+
+    entry["type"] = "pyocd"
+    entry["executable"] = pyocd_executable
+    entry["target_type"] = "stm32f446re"
+    entry.pop("interface_cfg", None)
+    entry.pop("target_cfg", None)
+    variant = bench.config.parent / "bench-discovery-pyocd.yaml"
+    variant.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    try:
+        server = servers(variant)
+        failed, result = server.call("debugger_probes_list")
+    finally:
+        variant.unlink(missing_ok=True)
+
+    assert result["tool"] == "debugger_probes_list", result
+    assert result["target_contacted"] is False, result
+    assert result["side_effect_committed"] is False, result
+    assert result["side_effect_status"] == "not_started", result
+    assert result["retry_safe"] is True, result
+
+    if result["ok"] is True:
+        assert failed is False, result
+        probes = result["probes"]
+        assert probes, "pyOCD succeeded but enumerated no probes on the configured hardware bench"
+        ids = [probe.get("probe_id") for probe in probes]
+        assert all(isinstance(probe_id, str) and probe_id.strip() for probe_id in ids), probes
+        configured_probe_id = str(entry["probe_id"])
+        assert any(configured_probe_id.casefold() in probe_id.casefold() for probe_id in ids), (configured_probe_id, ids)
+        return
+
+    assert failed is True, result
+    assert result["error_type"] == "probe_discovery_failed", result
+    output = result.get("programmer_output")
+    assert isinstance(output, dict), result
+    assert output.get("returncode") not in (None, 0), output
+    assert output.get("stdout") or output.get("stderr"), output
+    stdout = output.get("stdout", "")
+    decoder = json.JSONDecoder()
+    json_errors: list[str] = []
+    for offset, character in enumerate(stdout):
+        if character != "{":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(stdout[offset:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("error"), str) and payload["error"].strip():
+            json_errors.append(payload["error"])
+    error_lines = [line.strip() for line in json_errors[-1].splitlines() if line.strip()] if json_errors else []
+    stderr_lines = [line.strip() for line in output.get("stderr", "").splitlines() if line.strip()]
+    stdout_lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    final_diagnostic = error_lines[-1] if error_lines else (stderr_lines[-1] if stderr_lines else stdout_lines[-1])
+    assert final_diagnostic in result["summary"], result
+    log_path = workspace_path(bench, result["log_path"])
+    log = json.loads(log_path.read_text(encoding="utf-8"))
+    assert log["returncode"] == output["returncode"], (log, output)
+    assert log["stdout"] == output["stdout"], (log, output)
+    assert log["stderr"] == output["stderr"], (log, output)
 
 
 def test_the_command_line_and_the_server_enumerate_the_same_probes_for_this_host(bench: Bench, servers) -> None:

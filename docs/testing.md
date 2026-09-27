@@ -50,7 +50,7 @@ The run pipeline is deliberately simple. It validates everything, then executes,
 
 ```yaml
 # .agentic-hil/testconfig.yaml
-version: 5
+version: 6
 name: capture-state
 steps:
   - {device: dut, action: flash, image_path: build/app.elf}
