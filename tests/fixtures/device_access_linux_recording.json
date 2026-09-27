@@ -1,0 +1,705 @@
+{
+ "what": "What a device-access check reads on a Linux bench, in the three places the bench tier runs: directly on the host, and in tools/bench_in_container.py's container with the device groups kept and with them withheld. For each, the USB devices under /sys/bus/usb/devices with the attributes discovery reads (idVendor, idProduct, busnum, devnum, serial) and the ttys under each interface; os.stat and os.access(R_OK | W_OK) of the USB nodes, the probe's tty, its /dev/serial/by-id link and /dev/ttyS0 where there is one; and this process's credentials, with the groups of this login (os.getgroups) beside the account's groups in the account database (os.getgrouplist). The unit tier replays these rather than typing a mode, an owner or a group.",
+ "recorded_on": "2026-09-27",
+ "how": "A throwaway pytest module in tests/bench, run once with the tier's markers: on the host with AGENTIC_HIL_BENCH=1, then through tools/bench_in_container.py and tools/bench_in_container.py --without-device-group (rootless Podman, the tier's Debian 13 image). The host is a stock Ubuntu 24.04.4 LTS (kernel 6.8) with OpenOCD's udev rules installed and one Nucleo-F446RE attached through its on-board ST-Link V2-1 (0483:374b). The module opened nothing. The probe serial is replaced by the suite's synthetic serial 066BFF505050505050505050, the account's own name and its private group by [withheld], and the one USB device that is neither the probe nor a root hub is left out; nothing else is changed.",
+ "recording": {
+  "host": {
+   "credentials": {
+    "account": "[withheld]",
+    "account_gid": 1001,
+    "database_groups": [
+     20,
+     46,
+     100,
+     1001
+    ],
+    "egid": 1001,
+    "euid": 1001,
+    "gid": 1001,
+    "group_names": {
+     "100": "users",
+     "1001": "[withheld]",
+     "20": "dialout",
+     "46": "plugdev"
+    },
+    "login_groups": [
+     20,
+     46,
+     100,
+     1001
+    ],
+    "uid": 1001
+   },
+   "gid_map": "0          0 4294967295",
+   "in_image": false,
+   "kernel": "6.8.0-139-generic",
+   "nodes": [
+    {
+     "access_r": true,
+     "access_rw": false,
+     "access_w": false,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw-r--",
+     "group": "root",
+     "owner": "root",
+     "path": "/dev/bus/usb/001/001",
+     "rdev": [
+      189,
+      0
+     ],
+     "realpath": "/dev/bus/usb/001/001",
+     "st_gid": 0,
+     "st_mode": 8628,
+     "st_uid": 0
+    },
+    {
+     "access_r": true,
+     "access_rw": false,
+     "access_w": false,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw-r--",
+     "group": "root",
+     "owner": "root",
+     "path": "/dev/bus/usb/001/002",
+     "rdev": [
+      189,
+      1
+     ],
+     "realpath": "/dev/bus/usb/001/002",
+     "st_gid": 0,
+     "st_mode": 8628,
+     "st_uid": 0
+    },
+    {
+     "access_r": true,
+     "access_rw": false,
+     "access_w": false,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw-r--",
+     "group": "root",
+     "owner": "root",
+     "path": "/dev/bus/usb/002/001",
+     "rdev": [
+      189,
+      128
+     ],
+     "realpath": "/dev/bus/usb/002/001",
+     "st_gid": 0,
+     "st_mode": 8628,
+     "st_uid": 0
+    },
+    {
+     "access_r": true,
+     "access_rw": true,
+     "access_w": true,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw----",
+     "group": "plugdev",
+     "owner": "root",
+     "path": "/dev/bus/usb/002/002",
+     "rdev": [
+      189,
+      129
+     ],
+     "realpath": "/dev/bus/usb/002/002",
+     "st_gid": 46,
+     "st_mode": 8624,
+     "st_uid": 0
+    },
+    {
+     "access_r": true,
+     "access_rw": false,
+     "access_w": false,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw-r--",
+     "group": "root",
+     "owner": "root",
+     "path": "/dev/bus/usb/003/001",
+     "rdev": [
+      189,
+      256
+     ],
+     "realpath": "/dev/bus/usb/003/001",
+     "st_gid": 0,
+     "st_mode": 8628,
+     "st_uid": 0
+    },
+    {
+     "access_r": true,
+     "access_rw": false,
+     "access_w": false,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw-r--",
+     "group": "root",
+     "owner": "root",
+     "path": "/dev/bus/usb/004/001",
+     "rdev": [
+      189,
+      384
+     ],
+     "realpath": "/dev/bus/usb/004/001",
+     "st_gid": 0,
+     "st_mode": 8628,
+     "st_uid": 0
+    },
+    {
+     "access_r": true,
+     "access_rw": true,
+     "access_w": true,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw----",
+     "group": "plugdev",
+     "owner": "root",
+     "path": "/dev/ttyACM0",
+     "rdev": [
+      166,
+      0
+     ],
+     "realpath": "/dev/ttyACM0",
+     "st_gid": 46,
+     "st_mode": 8624,
+     "st_uid": 0
+    },
+    {
+     "access_r": true,
+     "access_rw": true,
+     "access_w": true,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw----",
+     "group": "plugdev",
+     "owner": "root",
+     "path": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066BFF505050505050505050-if02",
+     "rdev": [
+      166,
+      0
+     ],
+     "realpath": "/dev/ttyACM0",
+     "st_gid": 46,
+     "st_mode": 8624,
+     "st_uid": 0
+    },
+    {
+     "access_r": true,
+     "access_rw": true,
+     "access_w": true,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw----",
+     "group": "dialout",
+     "owner": "root",
+     "path": "/dev/ttyS0",
+     "rdev": [
+      4,
+      64
+     ],
+     "realpath": "/dev/ttyS0",
+     "st_gid": 20,
+     "st_mode": 8624,
+     "st_uid": 0
+    }
+   ],
+   "os": "Ubuntu 24.04.4 LTS",
+   "overflowgid": "65534",
+   "overflowuid": "65534",
+   "setgroups": "allow",
+   "stage": "with_device_groups",
+   "sysfs_usb_devices": {
+    "1-0:1.0": {
+     "bInterfaceClass": "09",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "2-0:1.0": {
+     "bInterfaceClass": "09",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "2-2": {
+     "bDeviceClass": "ef",
+     "busnum": "2",
+     "children": {
+      "2-2:1.0": {},
+      "2-2:1.1": {},
+      "2-2:1.2": {
+       "tty": [
+        "ttyACM0"
+       ]
+      },
+      "2-2:1.3": {}
+     },
+     "devnum": "2",
+     "idProduct": "374b",
+     "idVendor": "0483",
+     "link": true,
+     "serial": "066BFF505050505050505050"
+    },
+    "2-2:1.0": {
+     "bInterfaceClass": "ff",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "2-2:1.1": {
+     "bInterfaceClass": "08",
+     "bInterfaceNumber": "01",
+     "link": true
+    },
+    "2-2:1.2": {
+     "bInterfaceClass": "02",
+     "bInterfaceNumber": "02",
+     "link": true
+    },
+    "2-2:1.3": {
+     "bInterfaceClass": "0a",
+     "bInterfaceNumber": "03",
+     "link": true
+    },
+    "3-0:1.0": {
+     "bInterfaceClass": "09",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "4-0:1.0": {
+     "bInterfaceClass": "09",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "usb1": {
+     "bDeviceClass": "09",
+     "busnum": "1",
+     "children": {
+      "1-0:1.0": {}
+     },
+     "devnum": "1",
+     "idProduct": "0002",
+     "idVendor": "1d6b",
+     "link": true,
+     "serial_present": true
+    },
+    "usb2": {
+     "bDeviceClass": "09",
+     "busnum": "2",
+     "children": {
+      "2-0:1.0": {}
+     },
+     "devnum": "1",
+     "idProduct": "0001",
+     "idVendor": "1d6b",
+     "link": true,
+     "serial_present": true
+    },
+    "usb3": {
+     "bDeviceClass": "09",
+     "busnum": "3",
+     "children": {
+      "3-0:1.0": {}
+     },
+     "devnum": "1",
+     "idProduct": "0001",
+     "idVendor": "1d6b",
+     "link": true,
+     "serial_present": true
+    },
+    "usb4": {
+     "bDeviceClass": "09",
+     "busnum": "4",
+     "children": {
+      "4-0:1.0": {}
+     },
+     "devnum": "1",
+     "idProduct": "0001",
+     "idVendor": "1d6b",
+     "link": true,
+     "serial_present": true
+    }
+   },
+   "uid_map": "0          0 4294967295"
+  },
+  "container_with_the_device_groups": {
+   "credentials": {
+    "account": "root",
+    "account_gid": 0,
+    "database_groups": [
+     0
+    ],
+    "egid": 0,
+    "euid": 0,
+    "gid": 0,
+    "group_names": {
+     "0": "root",
+     "65534": "nogroup"
+    },
+    "login_groups": [
+     0,
+     65534,
+     65534,
+     65534
+    ],
+    "uid": 0
+   },
+   "gid_map": "0       1001          1\n         1     165536      65536",
+   "in_image": true,
+   "kernel": "6.8.0-139-generic",
+   "nodes": [
+    {
+     "access_r": true,
+     "access_rw": true,
+     "access_w": true,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw----",
+     "group": "nogroup",
+     "owner": "nobody",
+     "path": "/dev/bus/usb/002/002",
+     "rdev": [
+      189,
+      129
+     ],
+     "realpath": "/dev/bus/usb/002/002",
+     "st_gid": 65534,
+     "st_mode": 8624,
+     "st_uid": 65534
+    },
+    {
+     "access_r": true,
+     "access_rw": true,
+     "access_w": true,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw----",
+     "group": "nogroup",
+     "owner": "nobody",
+     "path": "/dev/ttyACM0",
+     "rdev": [
+      166,
+      0
+     ],
+     "realpath": "/dev/ttyACM0",
+     "st_gid": 65534,
+     "st_mode": 8624,
+     "st_uid": 65534
+    },
+    {
+     "access_r": true,
+     "access_rw": true,
+     "access_w": true,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw----",
+     "group": "nogroup",
+     "owner": "nobody",
+     "path": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066BFF505050505050505050-if02",
+     "rdev": [
+      166,
+      0
+     ],
+     "realpath": "/dev/ttyACM0",
+     "st_gid": 65534,
+     "st_mode": 8624,
+     "st_uid": 65534
+    }
+   ],
+   "os": "Debian GNU/Linux 13 (trixie)",
+   "overflowgid": "65534",
+   "overflowuid": "65534",
+   "setgroups": "allow",
+   "stage": "with_device_groups",
+   "sysfs_usb_devices": {
+    "1-0:1.0": {
+     "bInterfaceClass": "09",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "2-0:1.0": {
+     "bInterfaceClass": "09",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "2-2": {
+     "bDeviceClass": "ef",
+     "busnum": "2",
+     "children": {
+      "2-2:1.0": {},
+      "2-2:1.1": {},
+      "2-2:1.2": {
+       "tty": [
+        "ttyACM0"
+       ]
+      },
+      "2-2:1.3": {}
+     },
+     "devnum": "2",
+     "idProduct": "374b",
+     "idVendor": "0483",
+     "link": true,
+     "serial": "066BFF505050505050505050"
+    },
+    "2-2:1.0": {
+     "bInterfaceClass": "ff",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "2-2:1.1": {
+     "bInterfaceClass": "08",
+     "bInterfaceNumber": "01",
+     "link": true
+    },
+    "2-2:1.2": {
+     "bInterfaceClass": "02",
+     "bInterfaceNumber": "02",
+     "link": true
+    },
+    "2-2:1.3": {
+     "bInterfaceClass": "0a",
+     "bInterfaceNumber": "03",
+     "link": true
+    },
+    "3-0:1.0": {
+     "bInterfaceClass": "09",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "4-0:1.0": {
+     "bInterfaceClass": "09",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "usb1": {
+     "bDeviceClass": "09",
+     "busnum": "1",
+     "children": {
+      "1-0:1.0": {}
+     },
+     "devnum": "1",
+     "idProduct": "0002",
+     "idVendor": "1d6b",
+     "link": true,
+     "serial_present": true
+    },
+    "usb2": {
+     "bDeviceClass": "09",
+     "busnum": "2",
+     "children": {
+      "2-0:1.0": {}
+     },
+     "devnum": "1",
+     "idProduct": "0001",
+     "idVendor": "1d6b",
+     "link": true,
+     "serial_present": true
+    },
+    "usb3": {
+     "bDeviceClass": "09",
+     "busnum": "3",
+     "children": {
+      "3-0:1.0": {}
+     },
+     "devnum": "1",
+     "idProduct": "0001",
+     "idVendor": "1d6b",
+     "link": true,
+     "serial_present": true
+    },
+    "usb4": {
+     "bDeviceClass": "09",
+     "busnum": "4",
+     "children": {
+      "4-0:1.0": {}
+     },
+     "devnum": "1",
+     "idProduct": "0001",
+     "idVendor": "1d6b",
+     "link": true,
+     "serial_present": true
+    }
+   },
+   "uid_map": "0       1001          1\n         1     165536      65536"
+  },
+  "container_without_the_device_groups": {
+   "credentials": {
+    "account": "root",
+    "account_gid": 0,
+    "database_groups": [
+     0
+    ],
+    "egid": 0,
+    "euid": 0,
+    "gid": 0,
+    "group_names": {
+     "0": "root"
+    },
+    "login_groups": [],
+    "uid": 0
+   },
+   "gid_map": "0       1001          1\n         1     165536      65536",
+   "in_image": true,
+   "kernel": "6.8.0-139-generic",
+   "nodes": [
+    {
+     "access_r": false,
+     "access_rw": false,
+     "access_w": false,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw----",
+     "group": "nogroup",
+     "owner": "nobody",
+     "path": "/dev/bus/usb/002/002",
+     "rdev": [
+      189,
+      129
+     ],
+     "realpath": "/dev/bus/usb/002/002",
+     "st_gid": 65534,
+     "st_mode": 8624,
+     "st_uid": 65534
+    },
+    {
+     "access_r": false,
+     "access_rw": false,
+     "access_w": false,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw----",
+     "group": "nogroup",
+     "owner": "nobody",
+     "path": "/dev/ttyACM0",
+     "rdev": [
+      166,
+      0
+     ],
+     "realpath": "/dev/ttyACM0",
+     "st_gid": 65534,
+     "st_mode": 8624,
+     "st_uid": 65534
+    },
+    {
+     "access_r": false,
+     "access_rw": false,
+     "access_w": false,
+     "acl_xattr": "OSError",
+     "filemode": "crw-rw----",
+     "group": "nogroup",
+     "owner": "nobody",
+     "path": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066BFF505050505050505050-if02",
+     "rdev": [
+      166,
+      0
+     ],
+     "realpath": "/dev/ttyACM0",
+     "st_gid": 65534,
+     "st_mode": 8624,
+     "st_uid": 65534
+    }
+   ],
+   "os": "Debian GNU/Linux 13 (trixie)",
+   "overflowgid": "65534",
+   "overflowuid": "65534",
+   "setgroups": "allow",
+   "stage": "without_device_groups",
+   "sysfs_usb_devices": {
+    "1-0:1.0": {
+     "bInterfaceClass": "09",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "2-0:1.0": {
+     "bInterfaceClass": "09",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "2-2": {
+     "bDeviceClass": "ef",
+     "busnum": "2",
+     "children": {
+      "2-2:1.0": {},
+      "2-2:1.1": {},
+      "2-2:1.2": {
+       "tty": [
+        "ttyACM0"
+       ]
+      },
+      "2-2:1.3": {}
+     },
+     "devnum": "2",
+     "idProduct": "374b",
+     "idVendor": "0483",
+     "link": true,
+     "serial": "066BFF505050505050505050"
+    },
+    "2-2:1.0": {
+     "bInterfaceClass": "ff",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "2-2:1.1": {
+     "bInterfaceClass": "08",
+     "bInterfaceNumber": "01",
+     "link": true
+    },
+    "2-2:1.2": {
+     "bInterfaceClass": "02",
+     "bInterfaceNumber": "02",
+     "link": true
+    },
+    "2-2:1.3": {
+     "bInterfaceClass": "0a",
+     "bInterfaceNumber": "03",
+     "link": true
+    },
+    "3-0:1.0": {
+     "bInterfaceClass": "09",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "4-0:1.0": {
+     "bInterfaceClass": "09",
+     "bInterfaceNumber": "00",
+     "link": true
+    },
+    "usb1": {
+     "bDeviceClass": "09",
+     "busnum": "1",
+     "children": {
+      "1-0:1.0": {}
+     },
+     "devnum": "1",
+     "idProduct": "0002",
+     "idVendor": "1d6b",
+     "link": true,
+     "serial_present": true
+    },
+    "usb2": {
+     "bDeviceClass": "09",
+     "busnum": "2",
+     "children": {
+      "2-0:1.0": {}
+     },
+     "devnum": "1",
+     "idProduct": "0001",
+     "idVendor": "1d6b",
+     "link": true,
+     "serial_present": true
+    },
+    "usb3": {
+     "bDeviceClass": "09",
+     "busnum": "3",
+     "children": {
+      "3-0:1.0": {}
+     },
+     "devnum": "1",
+     "idProduct": "0001",
+     "idVendor": "1d6b",
+     "link": true,
+     "serial_present": true
+    },
+    "usb4": {
+     "bDeviceClass": "09",
+     "busnum": "4",
+     "children": {
+      "4-0:1.0": {}
+     },
+     "devnum": "1",
+     "idProduct": "0001",
+     "idVendor": "1d6b",
+     "link": true,
+     "serial_present": true
+    }
+   },
+   "uid_map": "0       1001          1\n         1     165536      65536"
+  }
+ }
+}
