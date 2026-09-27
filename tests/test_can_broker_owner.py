@@ -23,7 +23,9 @@ participant starts, by a second participant that finds it running, and a broker
 whose heartbeat has rewritten its record since it published. A broker that names
 itself by pid alone, the way earlier releases do, is refused even while it holds
 the bus: nothing it publishes tells it apart from a stranger under the same pid,
-so a client meeting one fails closed.
+so a client meeting one fails closed. The descriptor a broker publishes names it
+by the owner id its mutex writes into the holder record, and its keys are part
+of the message surface the protocol digest is taken over.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from test_bench_mutex import child_environment, holder_pid, wait_for_file
 from test_can_broker import broker_diagnostics, reaped_brokers, shared_config  # noqa: F401  (fixture)
 
 from agentic_hil.canbroker import (
+    MESSAGE_SURFACE,
     CanBroker,
     ParticipantError,
     attach_participant,
@@ -225,3 +228,22 @@ def test_a_broker_that_names_itself_by_pid_alone_is_refused_even_while_it_holds_
     finally:
         broker.shutdown()
     assert outcome.get("error_type") in {"can_broker_not_bus_owner", "can_broker_protocol_mismatch"}, outcome
+
+
+def test_the_descriptor_names_the_bus_owner_by_its_owner_id_and_is_part_of_the_message_surface(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The id is the one the broker's own mutex writes into the holder record,
+    and every key of the descriptor is listed in the surface the digest covers,
+    so a descriptor that changes shape between releases moves the digest and
+    the two releases refuse each other before anything is seated."""
+    config = shared_config(tmp_path, monkeypatch)
+    broker = CanBroker(config, "bench")
+    broker.take_bus()
+    try:
+        with serving(broker):
+            published = json.loads(descriptor_path(broker.bus_key, broker.lock_root).read_text(encoding="utf-8"))
+            record = broker.mutex.holder(broker.bus_key)
+    finally:
+        broker.shutdown()
+    assert record is not None and record["state"] == "held", record
+    assert published.get("owner_id") == record["owner"]["owner_id"], (published, record)
+    assert sorted(published) == sorted(MESSAGE_SURFACE.get("descriptor", ())), published
