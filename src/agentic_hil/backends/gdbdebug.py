@@ -316,7 +316,7 @@ class GdbDebugSessions:
         else:
             ready = wait_for_tcp_port(gdb_port, timeout, server)
         if not ready:
-            failure = self._start_failure(session, tool, started_at, start, timed_out=server.poll() is None)
+            failure = self._start_failure(session, tool, started_at, start, timeout, timed_out=server.poll() is None)
             cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
             if cleanup_error is not None:
                 failure["cleanup_error"] = cleanup_error
@@ -1347,7 +1347,18 @@ class GdbDebugSessions:
             return "; ".join(f"{name}: {type(error).__name__}: {error}" for name, error in errors)
         return None
 
-    def _start_failure(self, session: GdbDebugSession, tool: str, started_at: str, start: float, timed_out: bool) -> JsonObject:
+    def _start_failure(self, session: GdbDebugSession, tool: str, started_at: str, start: float, timeout: float, timed_out: bool) -> JsonObject:
+        if not timed_out:
+            # The server has exited, but the lines it printed last, the ones that
+            # say why, can still be in a pipe on their way to a reader (#587). So
+            # the readers get to the end of the output first, within what is left
+            # of the start's budget, since a process the server started can hold
+            # a pipe open; a reader still running then is classified from what it
+            # has.
+            deadline = start + timeout
+            for reader in session.server_readers:
+                if reader.ident is not None:
+                    reader.join(timeout=max(0.0, deadline - time.perf_counter()))
         output = f"{session.server_stdout}{session.server_stderr}"
         if timed_out:
             error_type, backend_error_type = "timeout", "gdb_server_not_ready"
