@@ -4341,6 +4341,29 @@ def _user_path_in_the_registry() -> str | None:
 
 
 @WINDOWS_ONLY
+def test_the_windows_bench_hands_powershell_the_module_analysis_cache_the_machine_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PowerShell under the bench finds what it knows about its modules where the machine keeps it.
+
+    A hosted Windows runner names a prebuilt analysis of the modules on its
+    module path in `PSModuleAnalysisCachePath`. Without it, and with no local
+    application data in the bench's home to keep an analysis of its own in,
+    Windows PowerShell 5.1 analysed every one of those modules before its
+    first command: 20 to 35 seconds of every `install.ps1` run the suite made
+    there, where the same run with the variable took under a second. A
+    machine that names no cache gets none named for it.
+    """
+    cache = tmp_path / "analysis" / "ModuleAnalysisCache"
+    monkeypatch.setenv("PSModuleAnalysisCachePath", str(cache))
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes=None)
+
+    assert bench.environment().get("PSModuleAnalysisCachePath") == str(cache)
+
+    monkeypatch.delenv("PSModuleAnalysisCachePath")
+
+    assert "PSModuleAnalysisCachePath" not in bench.environment()
+
+
+@WINDOWS_ONLY
 def test_an_exact_version_pin_refuses_a_mismatched_copy_in_the_managers_bin_under_powershell(tmp_path: Path) -> None:
     """The shell test of the same name, on the script Windows actually runs.
 
