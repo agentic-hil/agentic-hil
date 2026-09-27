@@ -843,17 +843,34 @@ class HardwareCoordinator:
             self.bench.owner = replace(self.bench.owner, label=None)
             if held:
                 self.bench.release(held)
-            # A lease still open (a COM or CAN session the run left running)
-            # keeps its own hold on the device, so ending the run here does not
-            # pull a board out from under a live session. Say so rather than
-            # letting the caller infer a release that did not happen.
-            open_leases = sorted(lease.lease_id for lease in self.leases.values())
-            result: JsonObject = {"ok": True, "tool": "bench_run_stop", "released_devices": declared, "run_was_active": was_active, "summary": f"{len(declared)} device(s) were released."}
-            if open_leases:
-                result["open_leases"] = open_leases
-                result["still_held_devices"] = sorted(self.bench.held_resources())
-                result["summary"] = f"The run ended, but {len(open_leases)} lease(s) are still open and keep their devices held; stop those sessions to free them."
-            return result
+            result: JsonObject = {"ok": True, "tool": "bench_run_stop", "released_devices": declared, "run_was_active": was_active}
+            return {**result, **self.leases_still_open(len(declared))}
+
+    def leases_still_open(self, released: int, sessions: frozenset[str] = frozenset()) -> JsonObject:
+        """What is still held once a run has given its devices back, and the summary that says it.
+
+        A lease still open keeps its own hold on its device, so ending a run
+        does not pull a board out from under it. Say so rather than letting the
+        caller infer a release that did not happen. `released` is how many
+        devices the run gave back. `sessions` names the leases a live session
+        holds, the only ones that stopping a session frees, so the advice to
+        stop sessions goes with those alone. This coordinator cannot tell a
+        session's lease from any other; the service holding the sessions can,
+        and asks again once its own teardown has run, because that teardown
+        can end an incident and give back the lease it held."""
+        with self._guard:
+            open_leases = sorted(self.leases)
+            if not open_leases:
+                return {"summary": f"{released} device(s) were released."}
+            held = f"The run ended, but {len(open_leases)} lease(s) are still open and keep their devices held"
+            by_sessions = len([lease_id for lease_id in open_leases if lease_id in sessions])
+            if by_sessions == len(open_leases):
+                summary = f"{held}; stop those sessions to free them."
+            elif by_sessions:
+                summary = f"{held}; {by_sessions} of them belong to live sessions, and stopping those sessions frees their devices."
+            else:
+                summary = f"{held}."
+            return {"open_leases": open_leases, "still_held_devices": sorted(self.bench.held_resources()), "summary": summary}
 
     def run_status(self) -> JsonObject:
         """What this owner is holding for a run right now.

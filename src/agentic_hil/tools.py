@@ -583,6 +583,10 @@ class AgenticHILToolService:
             else:
                 result = self._call_unlocked(name, arguments)
                 result = self._stand_down_after_call(result)
+                if name == "bench_run_stop":
+                    # Only once the stand-down has run is the run's teardown
+                    # over, so this is where what is still held can be read.
+                    result = self._what_the_run_left_held(result)
             # A configuration that has moved since startup belongs in every
             # answer, not only in the two that name it outright: a caller reading
             # a flash result has the same reason to know that the policy it was
@@ -1435,6 +1439,27 @@ class AgenticHILToolService:
         if not ended or not self.coordinator.blocked:
             return None
         return self.recover_after_failed_run(declared)
+
+    def _what_the_run_left_held(self, result: JsonObject) -> JsonObject:
+        """`bench_run_stop`'s account of what is still held, read once the call is over.
+
+        The coordinator gives one when the run ends, and the run's teardown and
+        the end of the call both come after that: a call inside the run that
+        failed into an incident keeps its lease until one of them ends the
+        incident and gives the lease back. Read again here, the account names
+        what holds the bench when the call returns, which is what `lease-status`
+        shows right after it, and the advice to stop sessions goes with the
+        leases a live COM, CAN or debug session holds, since stopping a session
+        frees only those."""
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            return result
+        released = result.get("released_devices")
+        leases = [session.lease for session in (*self.com_ports.sessions.values(), *self.can_buses.sessions.values())]
+        if self._debug_lease is not None:
+            leases.append(self._debug_lease)
+        sessions = frozenset(lease.lease_id for lease in leases if isinstance(lease, HardwareLease))
+        described = {key: value for key, value in result.items() if key not in ("open_leases", "still_held_devices")}
+        return {**described, **self.coordinator.leases_still_open(len(released) if isinstance(released, list) else 0, sessions)}
 
     def bench_run_status(self) -> JsonObject:
         return self.coordinator.run_status()
