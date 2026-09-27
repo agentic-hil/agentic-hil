@@ -68,6 +68,32 @@ def test_can_session_contract_accepts_named_participants():
     assert schema["properties"]["participant"]["type"] == "string"
 
 
+def test_public_frame_normalization_preserves_broker_delivery_metadata():
+    from agentic_hil.can import normalize_received_frames
+
+    frames = normalize_received_frames([{
+        "id": 0x101,
+        "extended": False,
+        "rtr": False,
+        "data_hex": "aa",
+        "frame_seq": 7,
+        "origin": "participant_tx",
+        "delivery_status": "adapter_accepted",
+    }])
+
+    assert frames == [{
+        "id": 0x101,
+        "id_hex": "0x101",
+        "extended": False,
+        "rtr": False,
+        "data_hex": "aa",
+        "dlc": 1,
+        "frame_seq": 7,
+        "origin": "participant_tx",
+        "delivery_status": "adapter_accepted",
+    }]
+
+
 def test_broker_participant_close_proves_only_its_connection_and_keeps_unconfirmed_detach_failed():
     from agentic_hil.can import BrokerCanAdapterSession
 

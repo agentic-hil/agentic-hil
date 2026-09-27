@@ -372,7 +372,7 @@ class BrokerCanAdapterSession:
     def read(self, max_frames: int, wait_timeout_s: float) -> JsonObject:
         result = self.participant.read(max_frames, wait_timeout_s)
         frames = result.get("frames") if isinstance(result.get("frames"), list) else []
-        result["frames"] = [{key: value for key, value in frame.items() if key in {"id", "extended", "rtr", "data_hex", "dlc"}} for frame in frames if isinstance(frame, dict)]
+        result["frames"] = [{key: value for key, value in frame.items() if key in {"id", "extended", "rtr", "data_hex", "dlc", "frame_seq", "origin", "delivery_status"}} for frame in frames if isinstance(frame, dict)]
         for frame in result["frames"]:
             frame.setdefault("dlc", len(bytes.fromhex(str(frame.get("data_hex", "")))))
         return result
@@ -1213,7 +1213,10 @@ class PythonCanAdapterSession:
                 message = self.bus.recv(timeout=timeout)
                 if message is None:
                     break
-                frames.append({"id": message.arbitration_id, "id_hex": f"0x{message.arbitration_id:x}", "extended": bool(message.is_extended_id), "rtr": bool(message.is_remote_frame), "data_hex": bytes(message.data).hex(), "dlc": int(message.dlc)})
+                frame = {"id": message.arbitration_id, "id_hex": f"0x{message.arbitration_id:x}", "extended": bool(message.is_extended_id), "rtr": bool(message.is_remote_frame), "data_hex": bytes(message.data).hex(), "dlc": int(message.dlc)}
+                if getattr(message, "is_rx", None) is False:
+                    frame["origin"] = "adapter_tx_echo"
+                frames.append(frame)
             return {"ok": True, "backend": self.adapter_name, "frames": frames}
         except Exception as error:
             # recv() transmits nothing: a failed direct-adapter read proves no
@@ -2329,7 +2332,7 @@ def normalize_received_frames(raw_frames: object) -> list[JsonObject] | None:
         return None
     frames: list[JsonObject] = []
     for raw in raw_frames:
-        if not isinstance(raw, dict) or set(raw) - {"id", "id_hex", "frame_id", "extended", "rtr", "data_hex", "hex", "dlc"}:
+        if not isinstance(raw, dict) or set(raw) - {"id", "id_hex", "frame_id", "extended", "rtr", "data_hex", "hex", "dlc", "frame_seq", "origin", "delivery_status"}:
             return None
         frame_id = parse_can_id(raw.get("id", raw.get("frame_id")))
         data_hex = raw.get("data_hex", raw.get("hex", ""))
@@ -2343,7 +2346,17 @@ def normalize_received_frames(raw_frames: object) -> list[JsonObject] | None:
         expected_id_hex = f"0x{frame_id:x}"
         if data is None or frame_id < 0 or frame_id > max_id or not isinstance(dlc, int) or isinstance(dlc, bool) or dlc != len(data) or ("id_hex" in raw and raw["id_hex"] != expected_id_hex):
             return None
-        frames.append({"id": frame_id, "id_hex": f"0x{frame_id:x}", "extended": extended, "rtr": rtr, "data_hex": data.hex(), "dlc": len(data)})
+        frame = {"id": frame_id, "id_hex": f"0x{frame_id:x}", "extended": extended, "rtr": rtr, "data_hex": data.hex(), "dlc": len(data)}
+        frame_seq = raw.get("frame_seq")
+        if frame_seq is not None:
+            if not isinstance(frame_seq, int) or isinstance(frame_seq, bool) or frame_seq < 1:
+                return None
+            frame["frame_seq"] = frame_seq
+        if raw.get("origin") in {"adapter_tx_echo", "participant_tx", "adapter_rx"}:
+            frame["origin"] = raw["origin"]
+        if raw.get("delivery_status") in {"adapter_accepted", "adapter_received"}:
+            frame["delivery_status"] = raw["delivery_status"]
+        frames.append(frame)
     return frames
 
 

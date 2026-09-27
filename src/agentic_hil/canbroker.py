@@ -1110,6 +1110,15 @@ class CanBroker:
             # So gate the bus and abort every participant, rather than let another
             # keep transmitting over a controller that has failed.
             return self._raise_bus_incident("can_adapter_send_failed", str(sent.get("summary", "The CAN adapter failed to send a frame.")), extra={"side_effect_status": "unknown", "backend_error": sent.get("backend_error"), "frame_seq": seq, "frame": wire})
+        with self._guard:
+            delivered, overflowed = self._queue_frame_for_participants(
+                wire,
+                seq,
+                sender=attached.name,
+                origin="participant_tx",
+                delivery_status="adapter_accepted",
+            )
+            self._log_bus({"event": "participant_delivery", "direction": "tx", "bus_id": self.bus_id, "frame_seq": seq, "origin": "participant_tx", "delivery_status": "adapter_accepted", "participant": attached.name, "frame": wire, "delivered_to": delivered, **({"overflowed_participants": overflowed} if overflowed else {})})
         return {"ok": True, "message": "sent", "frame_seq": seq, "participant": attached.name, "frame": wire, "frames_used": attached.frames_used, "max_frames": attached.share.max_frames}
 
     def _handle_read(self, attached: _Attached, message: JsonObject) -> JsonObject:
@@ -1157,31 +1166,35 @@ class CanBroker:
             return self._raise_bus_incident("can_adapter_invalid_response", "The CAN adapter returned malformed frame data.")
         with self._guard:
             for frame in frames:
+                wire = {"id": int(frame["id"]), "extended": bool(frame["extended"]), "rtr": bool(frame["rtr"]), "data_hex": str(frame["data_hex"])}
+                if frame.get("origin") == "adapter_tx_echo":
+                    self._log_bus({"event": "adapter_tx_echo", "direction": "echo", "bus_id": self.bus_id, "frame": wire, "suppressed": True, "reason": "driver_confirmed_own_transmit_echo"})
+                    continue
                 self.frame_seq += 1
                 seq = self.frame_seq
-                wire = {"id": int(frame["id"]), "extended": bool(frame["extended"]), "rtr": bool(frame["rtr"]), "data_hex": str(frame["data_hex"])}
-                delivered: list[str] = []
-                overflowed: list[str] = []
-                for name, item in sorted(self.participants.items()):
-                    if not item.share.permissions.allow_read or not filter_accepts(item.share, wire["id"], wire["extended"]):
-                        continue
-                    if item.abort is not None:
-                        # Already aborted (a spent budget, an earlier overflow, a
-                        # bus incident), so it will never drain, and growing its
-                        # queue is the very leak this bound exists to close.
-                        continue
-                    bound = self._receive_queue_bound(item)
-                    if len(item.queue) >= bound:
-                        self._overflow_participant(item, bound)
-                        overflowed.append(name)
-                        continue
-                    item.queue.append({**wire, "frame_seq": seq})
-                    delivered.append(name)
+                delivered, overflowed = self._queue_frame_for_participants(wire, seq, origin="adapter_rx", delivery_status="adapter_received")
                 event = {"event": "frame", "seq": seq, "direction": "rx", "bus_id": self.bus_id, "frame": wire, "delivered_to": delivered}
                 if overflowed:
                     event["overflowed_participants"] = overflowed
                 self._log_bus(event)
         return None
+
+    def _queue_frame_for_participants(self, wire: JsonObject, seq: int, *, sender: str | None = None, origin: str, delivery_status: str) -> tuple[list[str], list[str]]:
+        delivered: list[str] = []
+        overflowed: list[str] = []
+        for name, item in sorted(self.participants.items()):
+            if name == sender or not item.share.permissions.allow_read or not filter_accepts(item.share, int(wire["id"]), bool(wire["extended"])):
+                continue
+            if item.abort is not None:
+                continue
+            bound = self._receive_queue_bound(item)
+            if len(item.queue) >= bound:
+                self._overflow_participant(item, bound)
+                overflowed.append(name)
+                continue
+            item.queue.append({**wire, "frame_seq": seq, "origin": origin, "delivery_status": delivery_status})
+            delivered.append(name)
+        return delivered, overflowed
 
     def _receive_queue_bound(self, attached: _Attached) -> int:
         """The most frames that may sit unread in one participant's queue.

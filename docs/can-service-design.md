@@ -99,6 +99,14 @@ bus by each holding a participant connection, not by racing for the bus lock.
 
 - The broker writes the whole-bus frame log; each participant's report keeps
   its own view beside it. A frame a participant sent is attributable in both.
+- After the adapter accepts a participant's send, the broker queues that frame
+  for matching, read-enabled peer participants; it excludes the sender. Those
+  frames carry `origin: participant_tx` and
+  `delivery_status: adapter_accepted`. This confirms adapter acceptance only,
+  not physical receipt or an ACK. Frames read from the adapter carry
+  `origin: adapter_rx` and `delivery_status: adapter_received`. A driver-marked
+  own-transmit echo is logged as an echo and suppressed, since the accepted TX
+  was already delivered to peers.
 
 ## Phases
 

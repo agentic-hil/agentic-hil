@@ -762,6 +762,29 @@ def _inprocess_broker(tmp_path: Path, config, *, bus_id: str = "bench", names=("
     return broker, seated
 
 
+def test_successful_send_is_queued_for_matching_peers_without_adapter_echo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The broker routes participant TX to peer views even when the adapter
+    does not echo a controller's own message back through its receive socket."""
+    config = shared_config(tmp_path, monkeypatch)
+    broker, seated = _inprocess_broker(tmp_path, config)
+
+    class _NoEchoAdapter:
+        def send(self, frame: object) -> dict:
+            return {"ok": True, "backend": "no-echo"}
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            return {"ok": True, "frames": []}
+
+    broker.adapter_session = _NoEchoAdapter()
+    sent = broker._handle_send(seated["alpha"], {"frame": canbroker.frame_to_wire(0x101, b"\xaa")})
+
+    assert sent["ok"] is True
+    received = broker._handle_read(seated["beta"], {"max_frames": 4, "wait_timeout_s": 0.0})
+    assert received["frames_read"] == 1
+    assert received["frames"][0] == {"id": 0x101, "extended": False, "rtr": False, "data_hex": "aa", "frame_seq": sent["frame_seq"], "origin": "participant_tx", "delivery_status": "adapter_accepted"}
+    assert seated["alpha"].queue == [], "the sender must not receive its own frame through broker fanout"
+
+
 def test_a_returned_send_failure_gates_the_bus_and_aborts_every_participant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
     """The adapter's own `send()` returns `ok: false`, the usual direct-adapter
     failure path, since it catches backend errors rather than raising. The frame
@@ -951,6 +974,7 @@ def test_a_sent_frame_is_attributable_in_both_logs(tmp_path: Path, monkeypatch: 
         assert received["frames_read"] == 1
         bus_lines = [json.loads(line) for line in (Path(config.work_dir) / alpha.bus_frame_log).read_text(encoding="utf-8").splitlines() if line.strip()]
         own_lines = [json.loads(line) for line in Path(alpha.log_path).read_text(encoding="utf-8").splitlines() if line.strip()]
+        peer_lines = [json.loads(line) for line in Path(beta.log_path).read_text(encoding="utf-8").splitlines() if line.strip()]
     finally:
         beta.detach()
         alpha.detach()
@@ -964,10 +988,16 @@ def test_a_sent_frame_is_attributable_in_both_logs(tmp_path: Path, monkeypatch: 
     own_tx = [line for line in own_lines if line.get("frame_seq") == sequence]
     assert len(own_tx) == 1
     assert own_tx[0]["direction"] == "tx"
-    # The whole-bus log is the broker's, so the received frame is in it too, with
-    # the participants it reached named.
-    bus_rx = [line for line in bus_lines if line.get("direction") == "rx"]
-    assert bus_rx and sorted(bus_rx[0]["delivered_to"]) == ["alpha", "beta"]
+    # The accepted TX is visible to the peer as a logical delivery, with honest
+    # metadata that distinguishes adapter acceptance from physical RX.
+    peer_delivery = [line for line in bus_lines if line.get("event") == "participant_delivery" and line.get("frame_seq") == sequence]
+    assert len(peer_delivery) == 1
+    assert peer_delivery[0]["delivery_status"] == "adapter_accepted"
+    assert peer_delivery[0]["delivered_to"] == ["beta"]
+    peer_rx = [line for line in peer_lines if line.get("direction") == "rx" and line.get("frame_seq") == sequence]
+    assert len(peer_rx) == 1
+    assert peer_rx[0]["frame"]["origin"] == "participant_tx"
+    assert peer_rx[0]["frame"]["delivery_status"] == "adapter_accepted"
     # And the frame really left through the adapter rather than only being logged.
     assert json.loads(tx_log.read_text(encoding="utf-8").splitlines()[0])["data_hex"] == "dead"
 
