@@ -4275,13 +4275,18 @@ class _WindowsBench:
         PowerShell builds from `HOMEDRIVE` and `HOMEPATH`. `PATH` carries the
         stubs' directory ahead of the manager's own bin, the way a machine with
         a manager on PATH is arranged, unless the test is about the machine
-        before its first install.
+        before its first install. `PSModuleAnalysisCachePath` goes along where
+        the machine names one: the bench's home has no local application data
+        for PowerShell to keep its analysis of the modules on its module path
+        in, and without the machine's, it analyses every one of them before its
+        first command, which on a hosted runner took 20 to 35 seconds.
         """
         system_root = os.environ["SYSTEMROOT"]
         temp = self.home / "tmp"
         temp.mkdir(exist_ok=True)
         path = [str(self.early_bin), *([str(self.manager_bin)] if manager_bin_on_path else []), str(Path(system_root) / "System32"), str(Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0")]
         drive, tail = os.path.splitdrive(str(self.home))
+        analysis_cache = os.environ.get("PSMODULEANALYSISCACHEPATH")
         return {
             "SYSTEMROOT": system_root,
             "SystemRoot": system_root,
@@ -4296,6 +4301,7 @@ class _WindowsBench:
             "TMP": str(temp),
             "UV_TOOL_BIN_DIR": str(self.uv_bin),
             "UV_TOOL_DIR": str(self.uv_tools),
+            **({"PSModuleAnalysisCachePath": analysis_cache} if analysis_cache else {}),
             **extra,
         }
 
