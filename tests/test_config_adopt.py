@@ -1395,9 +1395,9 @@ def test_a_timed_out_adopt_read_whose_lease_cannot_be_given_back_names_the_incid
     instead, under an id the read never saw. The refusal says the board is
     quarantined, which is right, and has to say under which incident: the
     top-level id and every lease's id are the one `lease-status` reports, the
-    reasons and guidance name that incident's reason, and the recover advice
-    stands beside that id. The id the read raised may appear in
-    `incident_stood_down` alone, which reports what ended."""
+    reasons and guidance name that incident's reason, `auto_recoverable` is that
+    incident's, and the recover advice stands beside that id. The id the read
+    raised may appear in `incident_stood_down` alone, which reports what ended."""
     workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
     _set_auto_recover(path, policy)
     monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read())
@@ -1417,6 +1417,7 @@ def test_a_timed_out_adopt_read_whose_lease_cannot_be_given_back_names_the_incid
         assert named_incidents(refused) == {status["quarantine_id"]}, refused
         assert LEASE_RELEASE_RETRY_REASON in refused["cleanup_reasons"], refused
         assert LEASE_RELEASE_RETRY_REASON in [item["reason"] for item in refused["quarantine_guidance"]], refused
+        assert refused.get("auto_recoverable") == status["auto_recoverable"], (refused, status["auto_recoverable"])
         assert "agentic-hil recover" in " ".join(refused["remediation"]), refused
         if "incident_stood_down" in refused:
             assert refused["incident_stood_down"]["quarantine_id"] != status["quarantine_id"], refused

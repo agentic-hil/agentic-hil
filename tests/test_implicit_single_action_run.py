@@ -510,10 +510,12 @@ def test_a_probe_list_whose_lease_cannot_be_given_back_names_the_incident_that_h
     The re-read settles the incident the read raised, and the lease it was held
     on cannot be given back, so a fresh `lease_release_unconfirmed` incident
     holds the bench when the call returns. `quarantined: true` is right; the id
-    beside it has to be that incident's, with its reason and its guidance, because
-    that id is the one `lease-status` reports. An id that no longer names anything
-    sends the caller after an incident that is over. `incident_stood_down` goes on
-    naming an incident that ended, never the one that holds the bench."""
+    beside it has to be that incident's, with its reason, its guidance and its
+    `auto_recoverable`, because that id is the one `lease-status` reports. An id
+    that no longer names anything sends the caller after an incident that is
+    over. `incident_stood_down` goes on naming an incident that ended, never the
+    one that holds the bench, and a result that carried no remediation is given
+    none."""
     config = config_for(tmp_path)
     service = AgenticHILToolService(config, backend=UnconfirmedReadBackend())
     fail_every_release(service, monkeypatch)
@@ -529,6 +531,8 @@ def test_a_probe_list_whose_lease_cannot_be_given_back_names_the_incident_that_h
         assert named_incidents(result) == {status["quarantine_id"]}, result
         assert LEASE_RELEASE_RETRY_REASON in result["cleanup_reasons"], result
         assert LEASE_RELEASE_RETRY_REASON in [item["reason"] for item in result["quarantine_guidance"]], result
+        assert result.get("auto_recoverable") == status["auto_recoverable"], (result, status["auto_recoverable"])
+        assert "remediation" not in result, result["remediation"]
         if "incident_stood_down" in result:
             assert result["incident_stood_down"]["quarantine_id"] != status["quarantine_id"], result
     finally:
@@ -559,6 +563,8 @@ def test_a_bare_flash_whose_lease_cannot_be_given_back_names_the_incident_that_h
         assert named_incidents(result) == {status["quarantine_id"]}, result
         assert LEASE_RELEASE_RETRY_REASON in result["cleanup_reasons"], result
         assert LEASE_RELEASE_RETRY_REASON in [item["reason"] for item in result["quarantine_guidance"]], result
+        assert result.get("auto_recoverable") == status["auto_recoverable"], (result, status["auto_recoverable"])
+        assert "remediation" not in result, result["remediation"]
         if "incident_stood_down" in result:
             assert result["incident_stood_down"]["quarantine_id"] != status["quarantine_id"], result
     finally:
