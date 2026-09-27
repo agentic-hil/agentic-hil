@@ -245,6 +245,8 @@ def _suite_callers() -> list[Path]:
     workflows = REPOSITORY_ROOT / ".github" / "workflows"
     callers = sorted(workflows.glob("*.yml")) + sorted(workflows.glob("*.yaml"))
     callers += [REPOSITORY_ROOT / "tools" / "ci_linux.py", REPOSITORY_ROOT / "tools" / "container" / "Dockerfile"]
+    # The bench tier's runner and its image start runs of the suite too.
+    callers += [REPOSITORY_ROOT / "tools" / "bench_in_container.py", REPOSITORY_ROOT / "tools" / "bench" / "Dockerfile"]
     return callers
 
 

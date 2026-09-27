@@ -136,6 +136,11 @@ class GdbDebugSession:
         self.server_stdout = ""
         self.server_stderr = ""
         self.server_readers: list[threading.Thread] = []
+        # The line the debug server prints once this session's GDB port listens,
+        # when its backend names one, and the event the output readers set as it
+        # arrives. See `wait_for_ready_line`.
+        self.server_ready_line: str | None = None
+        self.server_ready = threading.Event()
         self.load_phase = "not_started"
         self.firmware_load_status = "not_started"
         # Set only when a teardown leaves the target's own state (not merely
@@ -165,7 +170,13 @@ class _AuditRefusedResponse:
 
 
 class GdbDebugSessions:
-    """Typed GDB/MI debug sessions against a gdbserver-providing debugger process (e.g. OpenOCD)."""
+    """Typed GDB/MI debug sessions against a gdbserver-providing debugger process (e.g. OpenOCD).
+
+    `server_ready_line` is the line the debug server prints once its GDB port
+    listens, as a format with `{port}`. A backend that names one has each start
+    wait for that line for the port the start reserved, and leave the port to
+    GDB; without one, a start finds the port ready by connecting to it (#586).
+    """
 
     def __init__(
         self,
@@ -174,12 +185,14 @@ class GdbDebugSessions:
         resolve_server: Callable[[], JsonObject],
         build_server_args: Callable[[str, int, bool], list[str]],
         classify_server_output: Callable[[str], str],
+        server_ready_line: str | None = None,
     ):
         self.config = config
         self.backend_name = backend_name
         self._resolve_server = resolve_server
         self._build_server_args = build_server_args
         self._classify_server_output = classify_server_output
+        self._server_ready_line = server_ready_line
         self.session: GdbDebugSession | None = None
         # Permanent audit latch: once evidence persistence breaks, it stays
         # broken for this service instance; it is never consumed by reporting.
@@ -273,6 +286,8 @@ class GdbDebugSessions:
 
         session = GdbDebugSession(f"debug-{timestamp_for_filename()}", artifact, mode, gdb_port, server, server_args, log_path)
         session.load_phase = "server_spawned"
+        if self._server_ready_line is not None:
+            session.server_ready_line = self._server_ready_line.format(port=gdb_port)
         self.session = session
         try:
             self._start_output_readers(session)
@@ -296,8 +311,12 @@ class GdbDebugSessions:
                     self.session = session
             return result
 
-        if not wait_for_tcp_port(gdb_port, timeout, server):
-            failure = self._start_failure(session, tool, started_at, start, timed_out=server.poll() is None)
+        if session.server_ready_line is not None:
+            ready = wait_for_ready_line(session.server_ready, timeout, server)
+        else:
+            ready = wait_for_tcp_port(gdb_port, timeout, server)
+        if not ready:
+            failure = self._start_failure(session, tool, started_at, start, timeout, timed_out=server.poll() is None)
             cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
             if cleanup_error is not None:
                 failure["cleanup_error"] = cleanup_error
@@ -1328,11 +1347,28 @@ class GdbDebugSessions:
             return "; ".join(f"{name}: {type(error).__name__}: {error}" for name, error in errors)
         return None
 
-    def _start_failure(self, session: GdbDebugSession, tool: str, started_at: str, start: float, timed_out: bool) -> JsonObject:
+    def _start_failure(self, session: GdbDebugSession, tool: str, started_at: str, start: float, timeout: float, timed_out: bool) -> JsonObject:
+        if not timed_out:
+            # The server has exited, but the lines it printed last, the ones that
+            # say why, can still be in a pipe on their way to a reader (#587). So
+            # the readers get to the end of the output first, within what is left
+            # of the start's budget, since a process the server started can hold
+            # a pipe open; a reader still running then is classified from what it
+            # has.
+            deadline = start + timeout
+            for reader in session.server_readers:
+                if reader.ident is not None:
+                    reader.join(timeout=max(0.0, deadline - time.perf_counter()))
         output = f"{session.server_stdout}{session.server_stderr}"
         if timed_out:
             error_type, backend_error_type = "timeout", "gdb_server_not_ready"
-            summary = "Debug server did not open its GDB port before the timeout."
+            if session.server_ready_line is not None:
+                # Word for word, so a server that never prints it (an OpenOCD
+                # too old to, or one configured to log elsewhere or less) is
+                # told from a slow one by the result itself.
+                summary = f'Debug server did not print "{session.server_ready_line}" before the timeout.'
+            else:
+                summary = "Debug server did not open its GDB port before the timeout."
         else:
             backend_error_type = self._classify_server_output(output)
             error_type = backend_error_type if backend_error_type != "unknown_debugger_error" else "debugger_error"
@@ -1344,6 +1380,10 @@ class GdbDebugSessions:
             if stream is None:
                 return
             for line in stream:
+                # Recognised as it arrives rather than searched for in the tail
+                # later, where the output after it could already have pushed it out.
+                if session.server_ready_line is not None and line.rstrip("\r\n").endswith(session.server_ready_line):
+                    session.server_ready.set()
                 setattr(session, attribute, (getattr(session, attribute) + line)[-OUTPUT_TAIL_CHARS:])
 
         session.server_readers = [
@@ -1959,6 +1999,29 @@ class ReservedTcpPort:
 
 def reserve_tcp_port() -> ReservedTcpPort:
     return ReservedTcpPort()
+
+
+def wait_for_ready_line(ready: threading.Event, timeout_s: float, server: subprocess.Popen[str]) -> bool:
+    """Whether the server printed its ready line before it exited or the
+    deadline passed; the output readers set `ready` as the line arrives.
+
+    Nothing connects to the port to find out. A debug server can take any
+    connection to its GDB port for GDB's, and OpenOCD does: it runs its
+    per-connection setup against the target for it, and logs one that closes
+    without GDB's acknowledgement as rejected (#586). A server that has exited
+    is not ready whatever it printed before, as for `wait_for_tcp_port`, so its
+    start fails classified from its output.
+    """
+    deadline = time.monotonic() + max(0.1, timeout_s)
+    while True:
+        if server.poll() is not None:
+            return False
+        if ready.is_set():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        ready.wait(min(TCP_POLL_INTERVAL_S, remaining))
 
 
 def wait_for_tcp_port(port: int, timeout_s: float, server: subprocess.Popen[str]) -> bool:

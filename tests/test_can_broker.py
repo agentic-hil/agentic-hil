@@ -331,13 +331,15 @@ def test_broker_starts_on_first_attach_and_exits_on_last_detach(tmp_path: Path, 
     # be a launcher trampoline that execs the real interpreter as a separate
     # process, so the pid the parent gets from `Popen` is the launcher's, not the
     # broker's. Every pid that matters is one the broker wrote about itself: the
-    # descriptor and the bus-lock holder record both come from its `os.getpid()`,
-    # and the probe compares those two. Agreement between them is the identity
-    # this feature rests on, so that is what is checked.
+    # descriptor and the bus-lock holder record both come from its `os.getpid()`.
+    # The probe compares the owner id the two carry, which a pid cannot stand in
+    # for across PID namespaces. Agreement between them is the identity this
+    # feature rests on, so that is what is checked.
     assert descriptor_path(bus_key, lock_root).exists()
     assert read_descriptor(bus_key, lock_root).pid == alpha.broker_pid
     holder = json.loads((lock_root / f"{canbroker.resource_digest(bus_key)}.holder.json").read_text(encoding="utf-8"))
     assert holder["owner"]["pid"] == alpha.broker_pid, "the process holding the bus lock is the process that answered"
+    assert holder["owner"]["owner_id"] == read_descriptor(bus_key, lock_root).owner_id
 
     detached = alpha.detach()
     assert detached["ok"] is True
@@ -1042,16 +1044,17 @@ def test_a_killed_broker_leaves_a_corpse_that_the_next_attach_replaces(tmp_path:
     alpha = attach_participant(config, "bench", "alpha")
     lock_root = alpha.mutex.root
     dead_pid = alpha.broker_pid
+    dead_owner_id = read_descriptor(bus_key, lock_root).owner_id
     os.kill(dead_pid, signal.SIGTERM)
     deadline = time.monotonic() + 30
-    while time.monotonic() < deadline and canbroker.probe_bus_lock(bus_key, dead_pid, lock_root)["ok"]:
+    while time.monotonic() < deadline and canbroker.probe_bus_lock(bus_key, dead_owner_id, lock_root)["ok"]:
         time.sleep(0.05)
     alpha.detach()
 
     # The corpse is really there, and it really names the dead broker.
     assert descriptor_path(bus_key, lock_root).exists(), "a killed broker cannot clean up after itself"
     assert read_descriptor(bus_key, lock_root).pid == dead_pid
-    assert canbroker.probe_bus_lock(bus_key, dead_pid, lock_root)["bus_lock_held"] is False
+    assert canbroker.probe_bus_lock(bus_key, dead_owner_id, lock_root)["bus_lock_held"] is False
 
     # Starting a broker is what makes replacing it safe, so without that licence
     # the corpse is still refused rather than quietly cleared.

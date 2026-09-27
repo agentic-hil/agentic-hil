@@ -1356,7 +1356,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "A configuration write was attempted while this server holds hardware: a declared run, an open COM or CAN "
             "session, or a debug session. Those holds were taken under the policy this file states, so changing it "
             "underneath them would move the rules during the run they govern. Nothing was written and the run is "
-            "untouched."
+            "untouched. The hold can also be a lease a call could not give back, which `open_holds.leases_under_incident` "
+            "names: it stays registered under the incident holding it until that incident ends."
         ),
         remediation=(
             "Finish the run and close it with `bench_run_stop`, stop any COM or CAN session with "
@@ -1364,6 +1365,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "configuration change.",
             "`bench_run_status` says whether a run is open and which devices it declared; the refusal carries the "
             "same in `open_holds`.",
+            "A lease `open_holds.leases_under_incident` names belongs to no run and no session, and no stop call frees "
+            "it: it goes back when the incident it is registered under ends. `agentic-hil lease-status` names that "
+            "incident and whether it stands; repeat the configuration change once it shows no open lease.",
         ),
         do_not=(
             "Do not end a run early only to get the write through. The run is holding a board for a reason, and a "
@@ -1402,7 +1406,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "description on disk decides which physical unit each of those names means, so re-reading it mid-run could "
             "point a held name at another board. Nothing was re-read, nothing was written, and the run is untouched. "
             "The same rule as `config_write_in_open_run` and the same remedy; it is a separate error type only because "
-            "this call writes nothing, and a caller should not be told it did."
+            "this call writes nothing, and a caller should not be told it did. The hold can also be a lease a call could "
+            "not give back, which `open_holds.leases_under_incident` names: it stays registered under the incident "
+            "holding it until that incident ends."
         ),
         remediation=(
             "Finish the run and close it with `bench_run_stop`, stop any COM or CAN session with "
@@ -1410,6 +1416,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "reload.",
             "`bench_run_status` says whether a run is open and which devices it declared; the refusal carries the "
             "same in `open_holds`.",
+            "A lease `open_holds.leases_under_incident` names belongs to no run and no session, and no stop call frees "
+            "it: it goes back when the incident it is registered under ends. `agentic-hil lease-status` names that "
+            "incident and whether it stands; repeat the reload once it shows no open lease.",
             "Nothing was lost by the refusal. The file is unchanged and the reload is exactly as available after the "
             "run as it was before it.",
         ),
@@ -1481,9 +1490,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`quarantine_id` identifies this incident and changes when a new one is raised."
         ),
         remediation=(
-            "Read `auto_recoverable` first. True means no signature is owed: the next hardware call settles the "
-            "incident on the evidence it reads back, so make the call again. False means an operator has to look at "
-            "the board.",
+            "Read `incident_stands` first: only an incident that stands owes a signature. For one that does not, "
+            "`auto_recoverable` says how the next hardware call ends it: true, that call settles it on the evidence it "
+            "reads back; false, no recovery action this bench allows can, so that call stands it down unconfirmed. "
+            "Either way nothing is signed, so make the call again.",
             "Where a signature is owed, read `quarantine_guidance` and check the board against it, then run "
             "`agentic-hil recover --confirm-safe-state --quarantine-id <quarantine_id>` with the id "
             "`agentic-hil lease-status` reports right now.",
@@ -1533,6 +1543,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         remediation=(
             "Read `holder` and wait for that run, or ask its owner to finish. This is not a fault: it is the exclusivity "
             "that replaced the read permission.",
+            "A refusal that carries no `holder` is the same hold by an owner whose record does not name it yet: wait for "
+            "it the same way, and do not take the missing heartbeat for a hang.",
             "If waiting is the right answer, ask for it explicitly and bounded: `wait_s` on the run start. Waiting is "
             "never silent and never unbounded.",
             "A holder whose `heartbeat_age_s` is large and `holder_heartbeat_stale` is true is hung rather than busy; "
@@ -2187,16 +2199,21 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "plug defeated the erase and every immediate retry programmed and verified, so the retry is the "
             "substantive fix. Nothing has to be recovered first: this is an ordinary `debugger_result_unconfirmed` "
             "incident that owes no gate. When the failed call is a bare `flash_firmware`, its own implicit "
-            "single-action run, that incident stands down the moment the call ends: the result carries "
-            "`incident_stood_down` and `quarantined: false`, the bench is handed back automatically, and the next "
-            "flash is simply accepted. When the call ran inside a declared run (`bench_run_start` … "
+            "single-action run, that incident ends the moment the call ends, in one of two ways the result names. "
+            "Where the run's reset into halt and re-probe confirm, its recovery settles the incident and the result "
+            "carries `recovery.incident_resolved: true`; where the bench's policy or the probe's grants withhold that "
+            "reset, or the reset or the re-probe does not confirm, the incident is stood down and the result carries "
+            "`incident_stood_down`. Both endings return `quarantined: false`, the bench is handed back automatically, "
+            "and the next flash is simply accepted. When the call ran inside a declared run (`bench_run_start` … "
             "`bench_run_stop`), the run owns the hold, so the failed result stays `quarantined: true` with no "
-            "`incident_stood_down`, and the declared run keeps the probe until `bench_run_stop` performs the run "
-            "teardown and the same stand-down then. Either way the incident owes nobody a signature: "
-            "`hardware_recover` over it answers `nothing_to_recover: true`, because there is nothing standing to "
-            "clear, and a retry is accepted without a recovery step rather than being refused with "
-            "`resource_quarantined`. `recover --confirm-safe-state` is for a quarantine that actually holds the "
-            "bench, such as `resource_quarantined` or a broken audit, which this is not. It is not a free retry, "
+            "`incident_stood_down`, and the declared run keeps the probe until `bench_run_stop`, whose run teardown "
+            "ends the incident in one of the same two ways and names which in its own result. Either way the incident "
+            "owes nobody a signature, because it does not stand: `hardware_lease_status` reports "
+            "`incident_stands: false`, including inside a declared run whose results still say `quarantined: true`, "
+            "and that is what both recovery routes ask first, so `hardware_recover` and "
+            "`recover --confirm-safe-state` both answer `nothing_to_recover: true`, and a retry is accepted without a "
+            "recovery step rather than being refused with `resource_quarantined`. The signature is owed only for an "
+            "incident that stands: a broken audit. It is not a free retry, "
             "though: a refused erase does not prove the flash is untouched, which the result still says, "
             "`cleanup_required` stays true and `cleanup_reasons` still names `debugger_result_unconfirmed`, so the "
             "board holds an indeterminate image until a retry programs and verifies.",
@@ -2206,8 +2223,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`erase_refused_effect_unconfirmed` no less than `flash_change_underway` or `abort_point_unreadable`, "
             "because none of them proves the flash is unchanged. Reflashing is the way through it, not a retry taken "
             "as proof the erase never happened; the reflash needs no recovery step ahead of it, a bare call's "
-            "incident has already stood down, and a declared run's is one the reflash is allowed to run under, but "
-            "read it as writing over an unknown image rather than a clean one.",
+            "incident has already ended with its call, and a declared run's is one the reflash is allowed to run "
+            "under, but read it as writing over an unknown image rather than a clean one.",
             "If the refusal repeats on the retry, ask the device about protection rather than about wiring: read the "
             "option bytes with STM32CubeProgrammer yourself (`-ob displ`) and look for read-out protection, write "
             "protection or PCROP over the sectors the image covers.",
@@ -4639,7 +4656,7 @@ Nothing times a run out, and that is deliberate: dropping a device that may be m
 | the client disconnects | stdin reaches EOF, the server shuts its service down, and an open run is released on the way out |
 | the server process dies | the operating system drops the advisory lock it held; the next owner takes the device and its result carries `reclaimed` with reason `owner_process_exited_without_release` |
 
-So an abandoned run costs nothing beyond the life of the server process. While it lasts, a contender's `device_busy` refusal carries `heartbeat_age_s` and, past four heartbeat intervals, `holder_heartbeat_stale: true`. An idle holder is visible rather than merely obstructive. Call `bench_run_status` if you are unsure whether you still hold the bench, and `bench_run_stop` to be sure you do not.
+So an abandoned run costs nothing beyond the life of the server process. While it lasts, a contender's `device_busy` refusal carries `heartbeat_age_s` and, past four heartbeat intervals, `holder_heartbeat_stale: true`. An idle holder is visible rather than merely obstructive. A refusal that carries no `holder` carries no heartbeat either: the device is held by an owner whose record does not name it yet, so wait for it, bounded by `wait_s`, rather than reading it as a hang. Call `bench_run_status` if you are unsure whether you still hold the bench, and `bench_run_stop` to be sure you do not.
 
 One case is outside this: a server process left running with its stdin never closed, by a host that leaked the pipe. It sees no disconnect and holds the run. Ending that process is the answer; never delete a lock file under `~/.agentic-hil/device-locks`.
 

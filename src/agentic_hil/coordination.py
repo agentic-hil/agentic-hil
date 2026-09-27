@@ -573,6 +573,32 @@ class DetachedHardwareLease:
         }
 
 
+class RecoveryHold:
+    """The locks and the bench hold a recovery action keeps on the probe it drives.
+
+    Not a lease: nothing is written for it and no incident can be raised on it,
+    because it ends before the recovery that took it returns. What it shares with
+    a lease is the exclusivity, since the reset into halt and the re-read are the
+    same acts on the same board as the calls that lease it. Given back with
+    ``release`` or at the end of a ``with`` block, and before the incident the
+    recovery settled is resolved: resolving takes the incident's own locks, and
+    the probe can be among them."""
+
+    def __init__(self, coordinator: HardwareCoordinator, locks: list[_LifetimeLock], bench_resources: list[str]):
+        self.coordinator = coordinator
+        self.locks = locks
+        self.bench_resources = bench_resources
+
+    def release(self) -> None:
+        self.coordinator.release_recovery_hold(self)
+
+    def __enter__(self) -> RecoveryHold:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.release()
+
+
 class HardwareCoordinator:
     def __init__(self, config: AgenticHILConfig, frontend: str = "python"):
         self.config = config
@@ -817,17 +843,34 @@ class HardwareCoordinator:
             self.bench.owner = replace(self.bench.owner, label=None)
             if held:
                 self.bench.release(held)
-            # A lease still open (a COM or CAN session the run left running)
-            # keeps its own hold on the device, so ending the run here does not
-            # pull a board out from under a live session. Say so rather than
-            # letting the caller infer a release that did not happen.
-            open_leases = sorted(lease.lease_id for lease in self.leases.values())
-            result: JsonObject = {"ok": True, "tool": "bench_run_stop", "released_devices": declared, "run_was_active": was_active, "summary": f"{len(declared)} device(s) were released."}
-            if open_leases:
-                result["open_leases"] = open_leases
-                result["still_held_devices"] = sorted(self.bench.held_resources())
-                result["summary"] = f"The run ended, but {len(open_leases)} lease(s) are still open and keep their devices held; stop those sessions to free them."
-            return result
+            result: JsonObject = {"ok": True, "tool": "bench_run_stop", "released_devices": declared, "run_was_active": was_active}
+            return {**result, **self.leases_still_open(len(declared))}
+
+    def leases_still_open(self, released: int, sessions: frozenset[str] = frozenset()) -> JsonObject:
+        """What is still held once a run has given its devices back, and the summary that says it.
+
+        A lease still open keeps its own hold on its device, so ending a run
+        does not pull a board out from under it. Say so rather than letting the
+        caller infer a release that did not happen. `released` is how many
+        devices the run gave back. `sessions` names the leases a live session
+        holds, the only ones that stopping a session frees, so the advice to
+        stop sessions goes with those alone. This coordinator cannot tell a
+        session's lease from any other; the service holding the sessions can,
+        and asks again once its own teardown has run, because that teardown
+        can end an incident and give back the lease it held."""
+        with self._guard:
+            open_leases = sorted(self.leases)
+            if not open_leases:
+                return {"summary": f"{released} device(s) were released."}
+            held = f"The run ended, but {len(open_leases)} lease(s) are still open and keep their devices held"
+            by_sessions = len([lease_id for lease_id in open_leases if lease_id in sessions])
+            if by_sessions == len(open_leases):
+                summary = f"{held}; stop those sessions to free them."
+            elif by_sessions:
+                summary = f"{held}; {by_sessions} of them belong to live sessions, and stopping those sessions frees their devices."
+            else:
+                summary = f"{held}."
+            return {"open_leases": open_leases, "still_held_devices": sorted(self.bench.held_resources()), "summary": summary}
 
     def run_status(self) -> JsonObject:
         """What this owner is holding for a run right now.
@@ -1004,6 +1047,55 @@ class HardwareCoordinator:
                     self.project_lock.release()
                     self.project_lock = None
                 raise
+
+    def hold_for_recovery(self, resources: Sequence[str]) -> RecoveryHold:
+        """Hold the probe a recovery action is about to drive, or refuse.
+
+        The end of a call and the teardown of a run drive the probe after the
+        call's own lease is gone, and after a refused call, with no lease ever
+        granted. They drove it all the same, with no lock and no bench hold, so a
+        probe another workspace held through a run, a call or an incident was
+        reset and halted underneath it, and the reset was recorded here as the
+        recovery of an incident of this project's own.
+
+        So a recovery takes what a call driving the probe takes, and is refused
+        the same way: by the per-resource locks, by another project's unresolved
+        incident on any of them, and by the bench hold. What makes a call a call
+        is left out. No project lock and no record, because the hold ends before
+        the recovery returns and leaves nothing to find. No run declaration,
+        because the teardown runs once the run has ended. A resource a lease of
+        this owner holds is this owner's already, so its lock is not taken a
+        second time, and its bench hold is counted once more, the way a call
+        inside a run counts the run's."""
+        normalized = sorted({resource for resource in resources if resource})
+        with self._guard:
+            self._require_open()
+            held = {resource for lease in self.leases.values() for resource in lease.resources}
+            locks: list[_LifetimeLock] = []
+            try:
+                for resource in normalized:
+                    if resource in held:
+                        continue
+                    locks.append(self._acquire_lock(resource, normalized))
+                    record = self._read_record(resource)
+                    if record is not None and record.get("state") not in {None, "released"} and not self._record_matches_project(record):
+                        raise CoordinationError(self._foreign_incident_refusal(resource, record))
+                try:
+                    self.bench.acquire(normalized)
+                except DeviceBusyError as error:
+                    raise CoordinationError({**error.result, "resources": normalized}) from error
+            except BaseException:
+                for lock in reversed(locks):
+                    lock.release()
+                raise
+            return RecoveryHold(self, locks, physical_resources(normalized))
+
+    def release_recovery_hold(self, hold: RecoveryHold) -> None:
+        with self._guard:
+            self.bench.release(hold.bench_resources)
+            hold.bench_resources = []
+            while hold.locks:
+                hold.locks.pop().release()
 
     def release_lease(
         self,
@@ -2351,6 +2443,13 @@ def _read_record_at(path: Path, resource: str) -> JsonObject | None:
     return value
 
 
+# The next step for an open incident that does not stand, wherever one is
+# described: `lease-status`, the recovery routes, and a refusal the incident
+# holds. The end of a call that settles the incident or stands it down says
+# that instead.
+NOT_STANDING_NEXT_STEP = "Nothing to sign for. The next hardware call settles this incident on what it reads back from the board, or stands it down."
+
+
 def _with_status_sentences(status: JsonObject) -> JsonObject:
     """The lease status with the sentence a person reads first, and the next step.
 
@@ -2361,8 +2460,14 @@ def _with_status_sentences(status: JsonObject) -> JsonObject:
     in the result and says which of the three states the bench is in: held,
     quarantined, or neither. The next step is the recovery command with this
     incident's id in it where an operator's signature is what the bench is
-    waiting for, and the statement that nothing needs signing where the next
-    hardware call settles the incident on its own evidence.
+    waiting for, and the statement that nothing needs signing where it is not.
+
+    Where the incident does not stand, the sentence follows `auto_recoverable`,
+    which says whether a recovery action this bench allows can settle every
+    reason. True, the next hardware call settles it on what it reads back; false,
+    nothing runs that could, and that call stands it down unconfirmed. Saying
+    "on its own evidence" beside a false field told a reader two opposite
+    things about one incident.
     """
     devices = [str(item) for item in status.get("held_devices") or [] if isinstance(item, str)]
     reasons = [str(item) for item in status.get("cleanup_reasons") or [] if isinstance(item, str)]
@@ -2385,9 +2490,16 @@ def _with_status_sentences(status: JsonObject) -> JsonObject:
                 f"Check the board as `quarantine_guidance` describes, then run `{recovery_operator_command(str(quarantine_id) if quarantine_id else None)}`; "
                 "the signature is a statement about the physical board and nothing on the bench moves until it is given."
             )
-        else:
+        elif status.get("auto_recoverable") is True:
             summary = f"{opening} Nothing needs signing: the next hardware call settles it on its own evidence, and `cleanup_reasons` names what it has to confirm."
-            next_step = "Nothing to sign for. The next hardware call settles this incident, or stands it down, on what it reads back from the board."
+            next_step = NOT_STANDING_NEXT_STEP
+        else:
+            summary = (
+                f"{opening} Nothing needs signing: no recovery action this bench's `recovery.auto_recover` policy and probe "
+                "grants allow can settle it, so the next hardware call stands it down unconfirmed, and `quarantine_guidance` "
+                "says what nobody confirmed."
+            )
+            next_step = NOT_STANDING_NEXT_STEP
         if foreign:
             summary = f"{summary} {foreign}"
         return {**status, "summary": summary, "next_step": next_step}
@@ -2413,7 +2525,20 @@ def nothing_standing_result(status: JsonObject) -> JsonObject:
 
     ``cleanup_reasons`` travels with it when the bench has any, because a call
     that could not confirm its effect is still worth reading about; what is gone
-    is the claim that somebody has to sign for it."""
+    is the claim that somebody has to sign for it.
+
+    An incident of this workspace's own that is open and does not stand is not
+    nothing, though, and `lease-status` reports the bench quarantined under it.
+    The answer says what that status says (the incident, its reasons, that it
+    does not stand, that nothing needs signing and that the next hardware call
+    settles it or stands it down) and that a recovery has nothing to clear
+    there. It names the incident by `quarantine_id` and not in the sentence,
+    because the end of a call that cannot give a lease back raises another in
+    its place, and the field is what follows it. It is still a success, and
+    claims no `quarantined` or `cleanup_required` of its own: the call did its
+    job, which was to find nothing to clear, and an exit status or an MCP error
+    flag that read it as a failed recovery would send the operator after a
+    signature nobody owes."""
     reasons = [reason for reason in status.get("cleanup_reasons", []) if isinstance(reason, str)]
     result: JsonObject = {
         "ok": True,
@@ -2428,6 +2553,27 @@ def nothing_standing_result(status: JsonObject) -> JsonObject:
     }
     if reasons:
         result["cleanup_reasons"] = reasons
+    standing = [entry for entry in status.get("standing_incidents") or [] if isinstance(entry, dict)]
+    if status.get("cleanup_required") is True:
+        opening = "This bench is quarantined" + (f" for {', '.join(reasons)}" if reasons else "")
+        result.update(
+            {
+                "was_quarantined": True,
+                "incident_stands": False,
+                "quarantine_id": status.get("quarantine_id"),
+                "summary": (
+                    f"{opening}, and the incident does not stand: nothing needs signing, and the next hardware call "
+                    "settles it on its own evidence, or stands it down. `recover` signs only for the audit halt, where "
+                    "a report that was never written cannot be written by a reset; every other incident proves itself at "
+                    "the next contact, so it has nothing to clear here."
+                ),
+                "next_step": NOT_STANDING_NEXT_STEP,
+            }
+        )
+        if standing:
+            result["standing_incidents"] = standing
+            result["summary"] = f"{result['summary']} {foreign_incident_sentence(standing)}"
+        return result
     # The third dead end (#531). This is the command the documented operator
     # path sends a refused caller to with the id the refusal named, and on a
     # bench held by a neighbour's incident it answered that nothing was
@@ -2435,7 +2581,6 @@ def nothing_standing_result(status: JsonObject) -> JsonObject:
     # nothing and settles nothing: a second workspace may not resolve an
     # incident it does not own, and that rule is what the quarantine is. What it
     # stops doing is contradicting the refusal.
-    standing = [entry for entry in status.get("standing_incidents") or [] if isinstance(entry, dict)]
     if standing:
         sentence = foreign_incident_sentence(standing)
         result["standing_incidents"] = standing

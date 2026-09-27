@@ -34,6 +34,7 @@ directly.
 | A sequence of hardware calls that belong to one run | `bench_run_start`, `bench_run_stop`, `bench_run_status` |
 | Run this project's written test plan on the board | `test_reactor_run`, `test_reactor_status`, `test_reactor_stop` |
 | Create, read, or change this project's configuration | `project_config_create`, `project_config_describe`, `project_config_set`, `project_config_adopt_hardware`, `project_config_reload_description` |
+| Is the bench held, and does an open incident need signing | `hardware_lease_status` |
 | The bench is quarantined on a broken audit trail | `hardware_recover` |
 | Update Agentic HIL itself to the newest release | `server_upgrade` |
 
@@ -65,7 +66,9 @@ configuration denies an action the tool returns `permission_denied`. Reading a
 device needs no permission, so a refusal is about writing or changing state.
 A busy-device refusal is different again: the board is held by another run for
 its whole duration, and the result names who has it. Wait for that run or ask
-its owner; the hold is not something to clear. Do not stop
+its owner; the hold is not something to clear. A refusal that carries no
+`holder` is the same hold by an owner whose record does not name it yet: wait
+for it the same way. Do not stop
 there: finish through the gate. `get_last_report` and `classify_last_error` say
 what the attempt recorded and why it failed, and `debugger_info` or
 `probe_target` say whether the hardware would have been reachable at all.

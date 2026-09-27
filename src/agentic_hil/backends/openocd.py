@@ -107,6 +107,15 @@ OPENOCD_CONFIG_FIELD_BY_BACKEND_ERROR = {
 }
 
 OPENOCD_DISABLE_TCP_SERVER_COMMANDS = ["gdb_port disabled", "tcl_port disabled", "telnet_port disabled"]
+# What OpenOCD logs once a debug session's GDB port listens: `listen()` returns
+# and this line follows, naming the port and the service
+# (openocd/src/server/server.c:286 and :297 in v0.12.0; the same words since
+# 0.11.0, which is why debug sessions need 0.11.0 or newer). A session start
+# takes the port as ready on this line, for the port it reserved, and opens no
+# connection of its own: OpenOCD runs its per-connection setup for every
+# connection it accepts, and logs one that never sends GDB's acknowledgement as
+# rejected (#586).
+OPENOCD_GDB_LISTENING_LINE = "Listening on port {port} for gdb connections"
 # Each of these is `echo`ed by the command string *after* the one command the
 # tool exists for, and OpenOCD's interpreter stops evaluating a `-c` script at
 # the first command that fails. So a marker in the output is OpenOCD's own
@@ -192,6 +201,7 @@ class OpenOCDBackend:
             resolve_server=self._resolve_executable,
             build_server_args=self._debug_server_args,
             classify_server_output=self._classify_output,
+            server_ready_line=OPENOCD_GDB_LISTENING_LINE,
         )
 
     def reconfigure(self, config: AgenticHILConfig) -> None:

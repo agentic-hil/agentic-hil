@@ -1,0 +1,22 @@
+# What tools/bench/Dockerfile is built from, as an allowlist: everything is left
+# out, then the files the image needs are let back in. tools/bench_in_container.py
+# builds from a copy of the committed tree and puts this file at that copy's
+# root as both .dockerignore and .containerignore, so Docker and Podman read the
+# same list. BuildKit also finds it here, beside the Dockerfile.
+**
+!pyproject.toml
+!README.md
+!LICENSE
+!MANIFEST.in
+!requirements
+!src
+!tests
+# The tier copies, builds and flashes this demo, and builds its own images out
+# of it.
+!examples/nucleo-f446re_demo
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+**/.pytest_cache
+examples/nucleo-f446re_demo/build
+examples/nucleo-f446re_demo/.agentic-hil

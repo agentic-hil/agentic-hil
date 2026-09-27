@@ -116,14 +116,14 @@ def test_every_tool_states_the_hints_whose_default_is_not_silence() -> None:
 
 
 def test_the_tools_that_change_nothing_are_declared_read_only() -> None:
-    """The set the annotation work named, minus the two it named that this server
+    """The set the annotation work named, minus the one it named that this server
     does not expose: there is no `mass_erase` tool (it is a permission,
-    `allow_mass_erase`, and while it is true flashing is refused outright) and
-    `hardware_lease_status` is CLI-only, reachable as `agentic-hil
-    lease-status`."""
+    `allow_mass_erase`, and while it is true flashing is refused outright).
+    `hardware_lease_status` is served, and reads the same record `agentic-hil
+    lease-status` prints."""
     advertised = annotations_by_tool()
 
-    for name in ("debugger_info", "debugger_probes_list", "com_read", "can_read", "bench_run_status", "project_config_describe", "project_config_reload_description"):
+    for name in ("debugger_info", "debugger_probes_list", "com_read", "can_read", "bench_run_status", "hardware_lease_status", "project_config_describe", "project_config_reload_description"):
         assert advertised[name]["readOnlyHint"] is True, name
     # The reload is the one the issue turns on: a host that blocks it sends the
     # operator back to reconnecting the server, which is the thing the reload
@@ -134,7 +134,6 @@ def test_the_tools_that_change_nothing_are_declared_read_only() -> None:
         "openWorldHint": False,
     }
     assert "mass_erase" not in MCP_TOOL_NAMES
-    assert "hardware_lease_status" not in MCP_TOOL_NAMES
 
 
 def test_what_changes_hardware_irreversibly_is_declared_destructive() -> None:

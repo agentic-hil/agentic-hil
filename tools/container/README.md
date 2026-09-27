@@ -35,7 +35,10 @@ real OpenOCD binary.
 Anything that needs a debug probe or the board behind it. That is the third
 tier, `tests/bench`, which runs on a machine somebody owns and keeps, and is
 started by `AGENTIC_HIL_BENCH=1`. The image here has no hardware and asks no
-question that needs any.
+question that needs any. That tier has an image of its own,
+`tools/bench/Dockerfile`, which `tools/bench_in_container.py` runs against the
+board attached to that machine; `tools/bench/README.md` says how, and what the
+machine provides once.
 
 ## Build and run
 

@@ -70,12 +70,15 @@ from agentic_hil.configwrite import (
     NOT_STARTED,
     PROJECT_CONFIG_SET,
     authoritative_write_target,
+    leases_under_incident,
     load_config_document,
     project_config_set,
+    under_incident_sentence,
 )
 from agentic_hil.coordination import (
     DEBUGGER_DISCOVERY_RESOURCE,
     DEBUGGER_READONLY_TARGET_STATE_REASON,
+    NOT_STANDING_NEXT_STEP,
     CoordinationError,
     HardwareCoordinator,
     HardwareLease,
@@ -1331,7 +1334,7 @@ def discover_under_hardware_lease(
         released = lease.release() and released
     status = _combined_status(held)
     if not released or status["cleanup_required"] or status["quarantined"]:
-        return {}, _refuse_after_failed_release(existing, record, discovery, status, tool)
+        return {}, _refuse_after_failed_release(existing, record, discovery, status, tool, stands=coordinator.incident_stands)
     # The clean path re-commits too, so the persisted record carries the state the
     # leases actually ended in (`released`) rather than the `active` they were
     # written under. A no-op when the two already agree.
@@ -1404,7 +1407,7 @@ def _terminal_audit_refusal(
     return refusal
 
 
-def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject, discovery: JsonObject, status: JsonObject, tool: str) -> JsonObject:
+def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject, discovery: JsonObject, status: JsonObject, tool: str, *, stands: bool) -> JsonObject:
     """Refuse, and make the audit trail say so.
 
     The read is written as an `ok: true`, `lease_state: active` report before the
@@ -1426,7 +1429,7 @@ def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject,
     whose incident cannot be recorded is in a worse state than one whose incident
     can.
     """
-    refusal = _release_refusal(discovery, status, tool)
+    refusal = _release_refusal(discovery, status, tool, stands=stands)
     committed = write_report(existing, {**record, **refusal, **status})
     if committed.get("audit_ok") is False:
         return {
@@ -1477,14 +1480,20 @@ def _discovery_side_effect(discovery: JsonObject) -> JsonObject:
     return fields
 
 
-def _release_refusal(discovery: JsonObject, status: JsonObject, tool: str) -> JsonObject:
+def _release_refusal(discovery: JsonObject, status: JsonObject, tool: str, *, stands: bool = True) -> JsonObject:
     """The probe was read and this process could not give it back.
 
     Nothing is written after this. The read itself succeeded, so its result is
     carried for the operator to read, but a configuration written now would be
     written by a process holding quarantined hardware, and the answer would say
-    `ok: true` about a bench that needs `agentic-hil recover` before anything
-    else touches it.
+    `ok: true` about a bench whose incident has to end before anything else
+    touches it.
+
+    ``stands`` is whether the incident holding the bench stands. Only a standing
+    one is signed for with `agentic-hil recover`; for any other, `recover`
+    answers that it has nothing to clear, and the next step is the one
+    `lease-status` gives: the next hardware call settles the incident or stands
+    it down.
     """
     return {
         "ok": False,
@@ -1496,7 +1505,11 @@ def _release_refusal(discovery: JsonObject, status: JsonObject, tool: str) -> Js
             "`hardware_discovery`; the bench has to be resolved before it can be carried into the file."
         ),
         "hardware_discovery": discovery,
-        "next_step": "Resolve the incident with `agentic-hil recover` once the bench is known to be in a safe state, then call this again.",
+        "next_step": (
+            "Resolve the incident with `agentic-hil recover` once the bench is known to be in a safe state, then call this again."
+            if stands
+            else NOT_STANDING_NEXT_STEP
+        ),
         # The read is what happened; the release is what did not. Both are said,
         # and neither is inferred from the other, including where the discovery
         # said neither.
@@ -1580,7 +1593,10 @@ def _coordination_refusal(error: CoordinationError, resources: list[str], tool: 
             result.get("next_step")
             or "The board this would read belongs to the owner named above. Wait for it to be released, then call this again. Nothing was read and nothing was written."
         ),
-        **remediation_fields(str(result.get("error_type") or "")),
+        # The coordinator's own advice is written for the refusal it raised; a
+        # neighbour's incident carries the one scoped to a foreign incident. The
+        # catalogue entry for the error type is for a refusal that carries none.
+        **({} if result.get("remediation") else remediation_fields(str(result.get("error_type") or ""))),
         **NOT_STARTED,
     }
 
@@ -1619,6 +1635,27 @@ def _next_steps(plan: JsonObject, *, applied: bool) -> list[str]:
     return steps
 
 
+def _held_next_step(open_holds: JsonObject) -> str:
+    """What ends each hold the refusal reports, then the retry.
+
+    A run and a session each end with a call the caller makes, and only the
+    holds that exist are named. A lease registered under an incident that no
+    session holds is neither, and no stop call frees it: the step names the
+    incident it waits for, and the retry waits for `agentic-hil lease-status`
+    to show it gone."""
+    under_incident = leases_under_incident(open_holds)
+    run = bool(open_holds.get("run_active"))
+    sessions = any(lease not in under_incident for lease in open_holds.get("open_leases") or [])
+    if not run and not sessions and not under_incident:
+        run = sessions = True
+    closes = " and ".join(text for held, text in ((run, "close the run with `bench_run_stop`"), (sessions, "stop any open COM or CAN session")) if held)
+    closes = closes[:1].upper() + closes[1:]
+    if not under_incident:
+        return f"{closes}, then call this again."
+    parts = [f"{closes}." if closes else "", under_incident_sentence(under_incident), "Call this again once `agentic-hil lease-status` shows no open lease."]
+    return " ".join(part for part in parts if part)
+
+
 def _held_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> JsonObject:
     return {
         "ok": False,
@@ -1631,7 +1668,7 @@ def _held_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> JsonObj
         "open_holds": open_holds,
         "path": existing.config_path,
         "workspace_root": existing.workspace_root,
-        "next_step": "Close the run with `bench_run_stop` and stop any open COM or CAN session, then call this again.",
+        "next_step": _held_next_step(open_holds),
         **remediation_fields("config_write_in_open_run"),
         **NOT_STARTED,
         "retry_safe": True,

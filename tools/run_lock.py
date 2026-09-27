@@ -5,17 +5,23 @@ this machine has: `ci_linux.py` runs the suite the way the Linux CI runners do,
 and `loop_in_container.py` runs the agent review loop. Three or four of those at
 once starve each other until a run dies mid-flight, so they take turns, and they
 can only take turns if they queue on the same thing. This module is that thing,
-imported by both rather than implemented in each: two mechanisms that do not
+imported by each rather than implemented in each: two mechanisms that do not
 read each other's records are two runs that cannot see each other, which is the
 entire failure being prevented.
 
-Both tools are standalone scripts run from checkouts that may not be installed,
+A third, `bench_in_container.py`, runs the bench tier in its image against the
+board attached to this machine, under rootless Podman or Docker, and queues here
+for the same reason and one more. On a machine with a board, this lock is also
+what makes a second run of the tier wait its turn before it builds anything,
+rather than meet the first at the device locks, which stay the backstop.
+
+All three are standalone scripts run from checkouts that may not be installed,
 so this is stdlib only and lives beside them.
 
-Who reads the lock file: those two scripts, and nothing else. It is written by
-one of them on an operator's own machine, read by the next run of either on that
-machine, and understood by neither the MCP server nor any other tool in this
-repository.
+Who reads the lock file: those three scripts, and nothing else. It is written by
+one of them on an operator's own machine, read by the next run of any of them on
+that machine, and understood by neither the MCP server nor any other tool in
+this repository.
 
 It is deliberately *not* a device lock. The bench mutex lives one level further
 down, in `~/.agentic-hil/device-locks/`, is owned by the server, and is the one
@@ -41,7 +47,7 @@ Format: one JSON object, UTF-8, indented so it can be read in a terminal.
 The absolute path is in there on purpose: the first question of somebody looking
 at a queued run is which of their checkouts is holding it, and this file never
 leaves the machine that wrote it. `tool` and `runs_for` are there for the second
-question, which only exists now that two tools share the file: a suite run and a
+question, which only exists now that several tools share the file: a suite run and a
 review loop are minutes and hours apart, and a queue message that cannot tell
 them apart tells whoever is waiting nothing about whether to wait. The holder
 writes both, because the holder is the only run that knows what it started.

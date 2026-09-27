@@ -1064,9 +1064,7 @@ def test_a_flash_that_fails_stops_the_session_keeps_what_the_board_sent_and_reco
     ticks = b"old firmware: tick\r\n"
     service, backend = service_for(config, board, during_flash=ticks, unconfirmed=True, late=b"LATE\r\n")
     try:
-        started = time.monotonic()
         result = service.call("flash_firmware", flash_args(tmp_path, until="NEVER-SEEN", wait_timeout_s=12))
-        elapsed = time.monotonic() - started
 
         assert result["ok"] is False, result
         assert result["error_type"] == "flash_failed", result
@@ -1075,7 +1073,8 @@ def test_a_flash_that_fails_stops_the_session_keeps_what_the_board_sent_and_reco
         assert capture["data"] == data_result(ticks, "utf-8"), capture
         assert "close" in board.events, board.events
         assert service.com_ports.sessions == {}, sorted(service.com_ports.sessions)
-        assert elapsed < scaled_time_bound(4.0), elapsed
+        report = service.call("get_last_report")["report"]
+        assert report["capture"]["until_wait_s"] == 0.0, report["capture"]
         assert result["run"]["aborted"] is True, result
         recovery = result["recovery"]
         assert recovery["attempted"] is True, recovery
@@ -1127,15 +1126,24 @@ def test_a_read_that_fails_after_a_good_flash_keeps_every_field_of_the_flash(tmp
         service.close()
 
 
-def test_a_reader_that_dies_before_any_byte_still_keeps_the_flash_and_the_reason(tmp_path: Path, board: Board) -> None:
+def test_a_reader_that_dies_before_any_byte_still_keeps_the_flash_and_the_reason(tmp_path: Path, board: Board, monkeypatch: pytest.MonkeyPatch) -> None:
     """The reader's own error, not `session_not_active`: that answer tells a
     caller to start a session, and this session was the call's own."""
     config = config_for(tmp_path)
     service, backend = service_for(config, board, banner=b"", die_after_banner=True)
-    try:
+    read_observations: list[tuple[float, float]] = []
+    read_until = service.com_ports._read_until
+
+    def time_read_until(session, port_id, tool, max_bytes, wait_s, until):
         started = time.monotonic()
+        try:
+            return read_until(session, port_id, tool, max_bytes, wait_s, until)
+        finally:
+            read_observations.append((wait_s, time.monotonic() - started))
+
+    monkeypatch.setattr(service.com_ports, "_read_until", time_read_until)
+    try:
         result = service.call("flash_firmware", flash_args(tmp_path, until=READY, wait_timeout_s=12))
-        elapsed = time.monotonic() - started
 
         assert result["ok"] is False, result
         assert result["error_type"] == "serial_read_failed", result
@@ -1146,7 +1154,10 @@ def test_a_reader_that_dies_before_any_byte_still_keeps_the_flash_and_the_reason
         assert capture["reader_error"]["error_type"] == "serial_read_failed", capture
         assert "device disconnected" in capture["reader_error"]["backend_error"], capture
         assert "device disconnected" in result["summary"], result
-        assert elapsed < scaled_time_bound(4.0), elapsed
+        assert len(read_observations) == 1, read_observations
+        wait_s, elapsed = read_observations[0]
+        assert wait_s == 12.0, read_observations
+        assert elapsed < scaled_time_bound(4.0), read_observations
         assert_bench_free(service)
     finally:
         service.close()

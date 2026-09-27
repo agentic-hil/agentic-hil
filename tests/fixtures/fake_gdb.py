@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -173,6 +174,15 @@ MEMORY_READ_REFUSAL = "Cannot access memory at address 0x20000080"
 CONNECT_DROPPED_ONCE = "connect_dropped_once"
 CONNECT_ALWAYS_DROPPED = "connect_always_dropped"
 CONNECT_DROPPED_MESSAGE = "Remote communication error.  Target disconnected: Connection reset by peer."
+# A GDB that opens the TCP connection `-target-select` names, for the tests that
+# watch what reaches the debug server's GDB port. It sends the `+` GDB sends when
+# it connects, which OpenOCD reads before it serves the connection
+# (openocd/src/server/gdb_server.c:1024 to :1030 in v0.12.0), and waits for the
+# server's own. The connection stays open until this fake exits, and a dropped
+# connect closes it first. Opted into by name, so the rest of the suite keeps a
+# GDB that connects to nothing.
+CONNECTS_TO_SERVER = "connects_to_server"
+server_connections: list[socket.socket] = []
 
 
 def emit(line: str) -> None:
@@ -290,6 +300,33 @@ def connect_dropped(image: Path | None) -> bool:
     return seen == 0
 
 
+def connect_to_server(command: str) -> str | None:
+    """Open the connection `-target-select` names, or say why it could not be.
+
+    The words are this fake's own, not GDB's: a test that meets them has sent
+    GDB to a port nothing was serving yet."""
+    address = command.split()[-1]
+    host, _, port_text = address.rpartition(":")
+    try:
+        connection = socket.create_connection(("127.0.0.1" if host == "localhost" else host, int(port_text)))
+    except (OSError, ValueError) as error:
+        return f"fake GDB could not connect to {address}: {error}".replace("\\", "/").replace('"', "'")
+    server_connections.append(connection)
+    try:
+        connection.sendall(b"+")
+        answer = connection.recv(1)
+    except OSError as error:
+        return f"fake GDB lost its connection to {address}: {error}".replace("\\", "/").replace('"', "'")
+    if answer != b"+":
+        return f"fake GDB connected to {address} and the server answered {answer!r}".replace('"', "'")
+    return None
+
+
+def close_server_connections() -> None:
+    while server_connections:
+        server_connections.pop().close()
+
+
 def batch_query(args: list[str]) -> int:
     """`--batch -nx -q -ex ... <elf>`: read the ELF's symbol table and exit.
 
@@ -352,7 +389,13 @@ def main() -> int:
         if command.startswith("-target-select"):
             if behavior() == "target_select_timeout":
                 continue
+            if has_behavior(CONNECTS_TO_SERVER):
+                refused = connect_to_server(command)
+                if refused is not None:
+                    emit(f'{token}^error,msg="{refused}"')
+                    continue
             if connect_dropped(image):
+                close_server_connections()
                 emit(f'{token}^error,msg="{CONNECT_DROPPED_MESSAGE}"')
                 continue
             emit(f"{token}^done")

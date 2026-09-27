@@ -230,7 +230,10 @@ computed against the ledger at the moment it is read.
 whether recovery was `attempted`, which `actions` ran, the `outcome`, the
 `devices` involved, and the `auto_recover_policy` with whether it came from the
 configuration or from the default. A bench that withholds recovery names the
-setting that withheld it in `reason_not_attempted`. Recovering the bench never
+setting that withheld it in `reason_not_attempted`. Recovery holds the probe it
+drives the way a call does, so a probe another run, call or unresolved incident
+holds is left alone, and the block names `probe_held_elsewhere` there with the
+refusal in its summary. Recovering the bench never
 un-fails a test (`ok` is not touched by this block); it only says whether the
 next run can start.
 

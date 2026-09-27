@@ -467,6 +467,203 @@ def test_a_probe_list_whose_lease_cannot_be_given_back_still_reads_as_quarantine
         service.close()
 
 
+def fail_every_release(service: AgenticHILToolService, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every lease release of this service fail to persist.
+
+    Only the write that records a lease as released fails, so a recovery still
+    runs and still settles what it can. Every attempt to give a lease back then
+    fails closed under a fresh `lease_release_unconfirmed` incident, and the
+    bench is still held when the call returns."""
+    original_persist = service.coordinator._persist_lease
+
+    def failing_persist(lease, state=None, incident_override=None):
+        if state == "released":
+            raise OSError("injected lease-release persistence failure")
+        return original_persist(lease, state=state, incident_override=incident_override)
+
+    monkeypatch.setattr(service.coordinator, "_persist_lease", failing_persist)
+
+
+def named_incidents(result: object) -> set[str]:
+    """Every incident a result names as its own, by id, wherever it names one.
+
+    `incident_stood_down` is left out: it is the one field whose id names an
+    incident that has ended, and it says so."""
+    found: set[str] = set()
+    if isinstance(result, dict):
+        for key, value in result.items():
+            if key == "incident_stood_down":
+                continue
+            if key == "quarantine_id" and isinstance(value, str) and value:
+                found.add(value)
+            else:
+                found |= named_incidents(value)
+    elif isinstance(result, list):
+        for item in result:
+            found |= named_incidents(item)
+    return found
+
+
+def test_a_probe_list_whose_lease_cannot_be_given_back_names_the_incident_that_holds_the_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The result names the incident that holds the bench now, not the one that ended.
+
+    The re-read settles the incident the read raised, and the lease it was held
+    on cannot be given back, so a fresh `lease_release_unconfirmed` incident
+    holds the bench when the call returns. `quarantined: true` is right; the id
+    beside it has to be that incident's, with its reason, its guidance and its
+    `auto_recoverable`, because that id is the one `lease-status` reports. An id
+    that no longer names anything sends the caller after an incident that is
+    over. `incident_stood_down` goes on naming an incident that ended, never the
+    one that holds the bench, and a result that carried no remediation is given
+    none."""
+    config = config_for(tmp_path)
+    service = AgenticHILToolService(config, backend=UnconfirmedReadBackend())
+    fail_every_release(service, monkeypatch)
+    try:
+        result = service.call("debugger_probes_list")
+        status = service.coordinator.status()
+
+        assert result["ok"] is False, result
+        assert status["blocked"] is True, status
+        assert LEASE_RELEASE_RETRY_REASON in status["cleanup_reasons"], status
+        assert result["quarantined"] is True, result
+        assert result["quarantine_id"] == status["quarantine_id"], (result, status["quarantine_id"])
+        assert named_incidents(result) == {status["quarantine_id"]}, result
+        assert LEASE_RELEASE_RETRY_REASON in result["cleanup_reasons"], result
+        assert LEASE_RELEASE_RETRY_REASON in [item["reason"] for item in result["quarantine_guidance"]], result
+        assert result.get("auto_recoverable") == status["auto_recoverable"], (result, status["auto_recoverable"])
+        assert "remediation" not in result, result["remediation"]
+        if "incident_stood_down" in result:
+            assert result["incident_stood_down"]["quarantine_id"] != status["quarantine_id"], result
+    finally:
+        service.close()
+
+
+def test_a_bare_flash_whose_lease_cannot_be_given_back_names_the_incident_that_holds_the_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same rule on an effect call, whose result names an incident twice.
+
+    The run's teardown resets the target and settles the flash's incident, then
+    cannot give the lease back, and the end of the call cannot either. The top of
+    the result and its `recovery` block each carry a quarantine id, and every id
+    the result gives as its own has to be the one that holds the bench when the
+    call returns."""
+    config = config_for(tmp_path)
+    service = AgenticHILToolService(config, backend=FakeBackend(flash_unconfirmed=True))
+    fail_every_release(service, monkeypatch)
+    try:
+        result = service.call("flash_firmware", firmware(tmp_path))
+        status = service.coordinator.status()
+
+        assert result["ok"] is False, result
+        assert result["recovery"]["attempted"] is True, result["recovery"]
+        assert status["blocked"] is True, status
+        assert LEASE_RELEASE_RETRY_REASON in status["cleanup_reasons"], status
+        assert result["quarantined"] is True, result
+        assert result["quarantine_id"] == status["quarantine_id"], (result, status["quarantine_id"])
+        assert named_incidents(result) == {status["quarantine_id"]}, result
+        assert LEASE_RELEASE_RETRY_REASON in result["cleanup_reasons"], result
+        assert LEASE_RELEASE_RETRY_REASON in [item["reason"] for item in result["quarantine_guidance"]], result
+        assert result.get("auto_recoverable") == status["auto_recoverable"], (result, status["auto_recoverable"])
+        assert "remediation" not in result, result["remediation"]
+        if "incident_stood_down" in result:
+            assert result["incident_stood_down"]["quarantine_id"] != status["quarantine_id"], result
+    finally:
+        service.close()
+
+
+def fail_the_first_release(service: AgenticHILToolService, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the first lease release of this service fail to persist, and no other.
+
+    The attempt that fails raises a `lease_release_unconfirmed` incident the way
+    `fail_every_release` does, and the next attempt to give the lease back
+    persists and ends it."""
+    original_persist = service.coordinator._persist_lease
+    failures = [OSError("injected lease-release persistence failure")]
+
+    def failing_persist(lease, state=None, incident_override=None):
+        if state == "released" and failures:
+            raise failures.pop()
+        return original_persist(lease, state=state, incident_override=incident_override)
+
+    monkeypatch.setattr(service.coordinator, "_persist_lease", failing_persist)
+
+
+def held_claims(result: object, path: str = "result") -> list[str]:
+    """Every place a result says the bench is held, by path.
+
+    `quarantined: true` and `incident_open: true` are the two fields that say an
+    incident holds the bench now. `incident_stood_down` is left out for the same
+    reason as in `named_incidents`."""
+    found: list[str] = []
+    if isinstance(result, dict):
+        for key, value in result.items():
+            if key == "incident_stood_down":
+                continue
+            if key in ("quarantined", "incident_open") and value is True:
+                found.append(f"{path}.{key}")
+            else:
+                found += held_claims(value, f"{path}.{key}")
+    elif isinstance(result, list):
+        for index, item in enumerate(result):
+            found += held_claims(item, f"{path}[{index}]")
+    return found
+
+
+def test_a_bare_flash_whose_lease_is_given_back_on_the_second_attempt_names_no_incident_as_holding_the_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same rule when nothing holds the bench: the result names no incident as holding it.
+
+    The run's teardown settles the flash's incident and then cannot give the
+    lease back, so its `recovery` block reports a new incident that keeps the
+    bench quarantined. The end of the call settles that one too and gives the
+    lease back, and nothing holds the bench when the call returns. The `recovery`
+    block may not go on saying the bench is quarantined under an open incident:
+    a caller reading it would go after an incident `lease-status` does not show."""
+    config = config_for(tmp_path)
+    service = AgenticHILToolService(config, backend=FakeBackend(flash_unconfirmed=True))
+    fail_the_first_release(service, monkeypatch)
+    try:
+        result = service.call("flash_firmware", firmware(tmp_path))
+        status = service.coordinator.status()
+
+        assert result["ok"] is False, result
+        assert result["recovery"]["attempted"] is True, result["recovery"]
+        assert LEASE_RELEASE_RETRY_REASON in result["recovery"]["cleanup_reasons"], result["recovery"]
+        assert status["blocked"] is False, status
+        assert held_claims(result) == [], result
+        assert named_incidents(result["recovery"]) == set(), result["recovery"]
+        assert result["recovery"].get("cleanup_required") is not True, result["recovery"]
+        assert "nothing holds the bench" in result["recovery"]["incident_summary"], result["recovery"]
+    finally:
+        service.close()
+
+
+def test_a_bare_flash_whose_incident_is_stood_down_names_no_incident_as_holding_the_bench(tmp_path: Path) -> None:
+    """The same rule when the incident the run could not settle is stood down.
+
+    Under `auto_recover: readonly` the run's teardown re-reads the target, which
+    does not settle an unconfirmed flash, so its `recovery` block reports the
+    incident as open and needing the operator. The end of the call then stands it
+    down, and nothing holds the bench when the call returns. `incident_stood_down`
+    names the incident that ended, and the `recovery` block may not go on
+    reporting it as open."""
+    config = config_for(tmp_path, auto_recover="readonly")
+    service = AgenticHILToolService(config, backend=FakeBackend(flash_unconfirmed=True))
+    try:
+        result = service.call("flash_firmware", firmware(tmp_path))
+        status = service.coordinator.status()
+
+        assert result["ok"] is False, result
+        assert result["recovery"]["attempted"] is True, result["recovery"]
+        assert result["recovery"]["safe_state_predicate"] == "readonly_probe", result["recovery"]
+        assert status["blocked"] is False, status
+        assert result["incident_stood_down"]["quarantine_id"] == result["quarantine_id"], result
+        assert held_claims(result) == [], result
+        assert named_incidents(result["recovery"]) == set(), result["recovery"]
+        assert "nothing holds the bench" in result["recovery"]["incident_summary"], result["recovery"]
+    finally:
+        service.close()
+
+
 # ---------------------------------------------------------------------------
 # C. A declared run is untouched.
 

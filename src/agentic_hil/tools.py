@@ -67,6 +67,7 @@ from agentic_hil.coordination import (
     DEBUGGER_DISCOVERY_RESOURCE,
     DEBUGGER_READONLY_RESULT_REASON,
     DEBUGGER_READONLY_TARGET_STATE_REASON,
+    NOT_STANDING_NEXT_STEP,
     RECOVERY_ACTION_REASONS,
     RECOVERY_ACTION_VIA,
     RECOVERY_ACTOR_AGENT,
@@ -74,6 +75,7 @@ from agentic_hil.coordination import (
     CoordinationError,
     HardwareCoordinator,
     HardwareLease,
+    RecoveryHold,
     debugger_effect_resources,
     nothing_standing_result,
 )
@@ -85,6 +87,7 @@ from agentic_hil.knowledge import (
     permission_denied_next_step,
     permission_denied_summary,
     permission_key,
+    quarantine_reason_details,
     recovery_operator_command,
     remediation_fields,
 )
@@ -580,7 +583,17 @@ class AgenticHILToolService:
                 result: JsonObject = {"ok": False, "tool": name, "error_type": "service_closed" if self._state == "closed" else "service_cleanup_required", "summary": "Agentic HIL service is not accepting new calls.", "side_effect_committed": False, "cleanup_required": self._state == "cleanup_required"}
             else:
                 result = self._call_unlocked(name, arguments)
-                result = self._stand_down_after_call(result)
+                # A status read reports the incident as it found it and leaves it
+                # there. The seam recovers and stands down, and a read that did
+                # either would drive the board to answer a question about it and
+                # report an incident it had just ended. `agentic-hil lease-status`
+                # reads the same record with no seam at all.
+                if name != "hardware_lease_status":
+                    result = self._stand_down_after_call(result)
+                if name == "bench_run_stop":
+                    # Only once the stand-down has run is the run's teardown
+                    # over, so this is where what is still held can be read.
+                    result = self._what_the_run_left_held(result)
             # A configuration that has moved since startup belongs in every
             # answer, not only in the two that name it outright: a caller reading
             # a flash result has the same reason to know that the policy it was
@@ -630,7 +643,8 @@ class AgenticHILToolService:
         confirm is exactly what the caller needs to read, and it is the same text
         the quarantine carried. What goes is the claim that the bench is held,
         and the advice only a held bench needs, whichever ending ran, unless a
-        lease given back on the way out has quarantined the bench again."""
+        lease given back on the way out has quarantined the bench again or the
+        claim is about a neighbour's incident, which nothing here ended."""
         if not isinstance(result, dict) or self.coordinator.run_active or self._debug_lease is not None:
             # A declared run is the agent's own hold, and its teardown is where
             # the recovery belongs: resetting the board at the end of step one
@@ -684,18 +698,11 @@ class AgenticHILToolService:
         if stood_down is None and not recovered:
             return {**result, **withheld} if withheld else result
         # Whatever the ended incident left registered goes back, because the call
-        # that took it is over and the bench is not held for it any more. This
-        # runs after a recovery action too, not only after a stand-down: a
-        # `project_config_adopt_hardware` read whose target the recovery reset and
-        # re-read leaves its enumeration and probe leases registered and `active`,
-        # and a leftover active lease would tell the next config write this server
-        # is still holding the bench. A lease a live COM or CAN session owns is
-        # the exception and the only one: the session is still there, still
-        # usable, and still the thing that gives its device back.
-        session_leases = {id(session.lease) for session in (*self.com_ports.sessions.values(), *self.can_buses.sessions.values())}
-        for lease in list(self.coordinator.leases.values()):
-            if lease.state == "active" and id(lease) not in session_leases:
-                lease.release()
+        # that took it is over and the bench is not held for it any more. A
+        # recovery action gives back what its own ending set `active`; this is
+        # for the stand-down, and for a lease whose release inside the recovery
+        # failed into an incident the stand-down has just ended.
+        self._give_back_leftover_leases()
         if self._quarantined_lease is not None and self._quarantined_lease.state != "active":
             self._quarantined_lease = None
         # Attached while the flags still say quarantined, so the reasons keep the
@@ -703,18 +710,37 @@ class AgenticHILToolService:
         result = attach_quarantine_guidance(result)
         if stood_down is not None:
             result = {**result, "incident_stood_down": stood_down, **withheld}
+        if self._claims_a_neighbour_s_incident(result):
+            return result
         if self.coordinator.blocked:
             # A lease given back above, or by the recovery action, could not be
             # released, and a release that cannot persist fails closed under an
             # incident of its own. The bench is held again, so the claim that it
-            # is, and the advice for a held bench, stay as the call made them.
-            return result
+            # is, and the advice for a held bench, stay as the call made them,
+            # about the incident that holds it now.
+            return self._named_after_the_holding_incident(result)
         # Nothing holds the bench now, whichever of the two endings ran, and
         # `quarantined` is the field that says it is held. Its neighbour
         # `cleanup_required` says something neither ending changed: this call
         # left work behind, a debug session to stop, a state nobody confirmed,
         # and a caller reading a failed result still has to know it.
         released: JsonObject = {**result, **({"quarantined": False} if result.get("quarantined") is True else {})}
+        ending = "This call's own recovery has since ended the incident" if recovered else "The incident has since been stood down"
+        # A `recovery` block from the run's teardown said what held the bench
+        # when the teardown returned: an incident it could not settle, or one a
+        # lease that could not be given back raised. That incident has ended
+        # too, so the block stops calling it open and names no id as holding
+        # the bench, and its summary is followed by how it ended. Its reasons
+        # stay, for the same reason the top-level ones do.
+        recovery = result.get("recovery")
+        if isinstance(recovery, dict) and (recovery.get("incident_open") is True or recovery.get("quarantined") is True):
+            ended: JsonObject = {key: value for key, value in recovery.items() if key != "quarantine_id"}
+            for field in ("incident_open", "cleanup_required", "quarantined"):
+                if ended.get(field) is True:
+                    ended[field] = False
+            if isinstance(recovery.get("incident_summary"), str):
+                ended["incident_summary"] = f"{recovery['incident_summary']} {ending}, and nothing holds the bench."
+            released["recovery"] = ended
         # A refusal built on the quarantine's own remediation sends the caller to
         # `agentic-hil recover` with an id that no longer names anything. That
         # advice goes, and the retry it was the precondition for is the next step.
@@ -723,14 +749,66 @@ class AgenticHILToolService:
             released.pop("remediation", None)
             if result.get("do_not") == advice.get("do_not"):
                 released.pop("do_not", None)
-            released["next_step"] = "Call this again: the incident it reported has ended, and nothing holds the bench."
+            released["next_step"] = ended_incident_next_step(result)
+        # The step for an incident that does not stand says the next hardware
+        # call settles it. This call has, and a caller told to make another call
+        # for it would be making one for nothing.
+        if released.get("next_step") == NOT_STANDING_NEXT_STEP:
+            released["next_step"] = "Nothing to sign for: the incident has ended, and nothing holds the bench."
         # The summary was written for a held bench and is not rewritten here. One
         # that says the board is quarantined is followed by how that ended.
         summary = result.get("summary")
         if isinstance(summary, str) and "quarantined" in summary:
-            ending = "This call's own recovery has since ended the incident" if recovered else "The incident has since been stood down"
             released["summary"] = f"{summary} {ending}, and nothing holds the bench."
         return released
+
+    def _claims_a_neighbour_s_incident(self, result: JsonObject) -> bool:
+        """Whether the result's claim is about another project's incident.
+
+        A refusal for a neighbour's incident on a shared resource names the
+        project that owns it. The end of a call settles or stands down an
+        incident of this project's own and nothing else: the neighbour's still
+        stands, refuses the next call the same way, and resolves only in the
+        workspace that owns it, so its claim and its advice stay as they were."""
+        owner = result.get("project_resource")
+        return isinstance(owner, str) and owner != self.coordinator.project_key
+
+    def _named_after_the_holding_incident(self, result: JsonObject) -> JsonObject:
+        """Name the incident that holds the bench wherever the result names one as its own.
+
+        The incident the call reported has ended, and a lease that could not be
+        given back on the way out raised another in its place, under an id the
+        call never saw. That id is the one `lease-status` reports and the one a
+        signature has to name, so it replaces the ended one at the top, on every
+        lease and in the `recovery` block; `incident_stood_down` goes on naming
+        what ended. At the top the new incident's reasons join the ones already
+        there, which the call still could not confirm, with the guidance for
+        all of them, and `auto_recoverable` is the new incident's, computed the
+        way `lease-status` computes it. Nothing else changes: the claim that the
+        bench is held is true, and a result that carried no remediation is not
+        given one."""
+        holding = self.coordinator.quarantine_id
+        if not isinstance(holding, str) or not holding:
+            return result
+        named: JsonObject = dict(result)
+        if isinstance(result.get("quarantine_id"), str):
+            reasons = sorted({reason for lease in self.coordinator.leases.values() for reason in lease.cleanup_reasons()})
+            listed = result.get("cleanup_reasons")
+            kept = [reason for reason in listed if isinstance(reason, str) and reason] if isinstance(listed, list) else []
+            merged = kept + [reason for reason in reasons if reason not in kept]
+            recoverable = self.coordinator.recoverable_reasons()
+            named["quarantine_id"] = holding
+            if merged:
+                named["cleanup_reasons"] = merged
+                named["quarantine_guidance"] = quarantine_reason_details(merged)
+            named["auto_recoverable"] = bool(reasons) and all(reason in recoverable for reason in reasons)
+        leases = result.get("leases")
+        if isinstance(leases, list):
+            named["leases"] = [{**lease, "quarantine_id": holding} if isinstance(lease, dict) and isinstance(lease.get("quarantine_id"), str) else lease for lease in leases]
+        recovery = result.get("recovery")
+        if isinstance(recovery, dict) and isinstance(recovery.get("quarantine_id"), str):
+            named["recovery"] = {**recovery, "quarantine_id": holding}
+        return named
 
     def _call_unlocked(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         if arguments is None:
@@ -792,6 +870,10 @@ class AgenticHILToolService:
             # refuses every hardware tool while an incident is open) must not
             # stand in front of it.
             "hardware_recover": lambda: self.hardware_recover(args.get("operator_statement"), args.get("accept_config_change") is True),
+            # Outside every set above for the same reason: it is what a caller
+            # reads about a blocked bench, so no gate stands in front of it, and
+            # it needs no debugger bound to answer for a bench that has none.
+            "hardware_lease_status": lambda: self.hardware_lease_status(),
             # On a configured server this is the authorized-rewrite half: a
             # configuration already exists, so the call is refused unless a
             # person set permissions.allow_config_write on it. It also reads a
@@ -961,8 +1043,9 @@ class AgenticHILToolService:
         # The same narrowing the stand-down makes, for the incident the run's own
         # teardown settled instead: the bench is not held for it any more, so the
         # one field that says it is stops saying it. `cleanup_required` and the
-        # reasons stay, because what the call could not confirm is unchanged.
-        settled = recovery.get("incident_resolved") is True and result.get("quarantined") is True
+        # reasons stay, because what the call could not confirm is unchanged. A
+        # refusal for a neighbour's incident is not about the one it settled.
+        settled = recovery.get("incident_resolved") is True and result.get("quarantined") is True and not self._claims_a_neighbour_s_incident(result)
         return {**result, "run": run, "recovery": recovery, **({"quarantined": False} if settled else {})}
 
     def _end_implicit_run(self) -> bool:
@@ -1150,7 +1233,10 @@ class AgenticHILToolService:
         Idempotent, and honestly so: a bench with no open incident answers `ok`
         with `was_quarantined: false` rather than failing, the way `bench_run_stop`
         and `com_session_stop` do, so a second call after a successful one is
-        free.
+        free. An open incident that does not stand answers `ok` and
+        `nothing_to_recover` too, and clears nothing, but it says
+        `was_quarantined: true` and names the incident, because `lease-status`
+        reports that bench quarantined under it and the two may not disagree.
         """
         # Read first, refuse second, and deliberately in that order. Reading this
         # bench's state needs no grant anywhere in this project, nothing is
@@ -1273,16 +1359,26 @@ class AgenticHILToolService:
         touch what it declared. Both a declared run and a lease taken outside one
         count: a COM session outlives `bench_run_stop` by design, so asking only
         whether a run is open would miss the case where a board is still held.
+
+        `leases_under_incident` names the open leases registered under an
+        incident that no live session holds: a call took each of them and could
+        not give it back. No run declared them and no session stops them, so the
+        refusals built from this name the incident they wait for instead of a
+        stop call that frees nothing.
         """
         run = self.coordinator.run_status()
         leases = sorted(lease.lease_id for lease in self.coordinator.leases.values())
         if not run.get("run_active") and not leases:
             return None
+        sessions = self._session_lease_ids()
         holds: JsonObject = {
             "run_active": bool(run.get("run_active")),
             "declared_devices": run.get("declared_devices") or [],
             "held_devices": run.get("held_devices") or [],
             "open_leases": leases,
+            "leases_under_incident": sorted(
+                lease.lease_id for lease in self.coordinator.leases.values() if lease.state in {"cleanup_required", "quarantined"} and lease.lease_id not in sessions
+            ),
         }
         if run.get("run_label"):
             holds["run_label"] = run["run_label"]
@@ -1365,6 +1461,36 @@ class AgenticHILToolService:
         if not ended or not self.coordinator.blocked:
             return None
         return self.recover_after_failed_run(declared)
+
+    def _what_the_run_left_held(self, result: JsonObject) -> JsonObject:
+        """`bench_run_stop`'s account of what is still held, read once the call is over.
+
+        The coordinator gives one when the run ends, and the run's teardown and
+        the end of the call both come after that: a call inside the run that
+        failed into an incident keeps its lease until one of them ends the
+        incident and gives the lease back. Read again here, the account names
+        what holds the bench when the call returns, which is what `lease-status`
+        shows right after it, and the advice to stop sessions goes with the
+        leases a live COM, CAN or debug session holds, since stopping a session
+        frees only those."""
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            return result
+        released = result.get("released_devices")
+        described = {key: value for key, value in result.items() if key not in ("open_leases", "still_held_devices")}
+        return {**described, **self.coordinator.leases_still_open(len(released) if isinstance(released, list) else 0, self._session_lease_ids())}
+
+    def _session_lease_ids(self) -> frozenset[str]:
+        """The leases a live COM, CAN or debug session holds, by id.
+
+        Stopping a session gives back its lease and no other, so these are the
+        leases a caller frees by stopping one, and the only ones an ended
+        incident leaves `active` that nothing here may give back: the session is
+        still there, still usable, and still the thing that gives its device
+        back."""
+        leases = [session.lease for session in (*self.com_ports.sessions.values(), *self.can_buses.sessions.values())]
+        if self._debug_lease is not None:
+            leases.append(self._debug_lease)
+        return frozenset(lease.lease_id for lease in leases if isinstance(lease, HardwareLease))
 
     def bench_run_status(self) -> JsonObject:
         return self.coordinator.run_status()
@@ -1606,28 +1732,38 @@ class AgenticHILToolService:
         reason = self.coordinator.retryable_incident(allowed) if allowed else None
         if reason is None or not authority.probe_allowed():
             return None
-        if not self._machine_recovery_attempt_allowed():
-            return None
-        # Never drive the board for a reason a re-read already settles: the
-        # stronger predicate is a physical act, not a default.
-        needs_reset = reason not in RETRYABLE_CLEANUP_REASONS
-        if cleanup_registered_processes(owner_marker=self.coordinator.owner_marker):
-            return None
-        backend, owns_backend = self._recovery_backend(recovery_config)
-        # From here on a predicate is driven, and whatever it answers (or
-        # raises) the attempt has run.
-        self._machine_recovery_ran = True
+        # The probe is held before anything is counted, reaped or driven. A probe
+        # another workspace holds refuses the recovery the way it refuses a call,
+        # and that refusal is no attempt: the bound on attempts is for a
+        # predicate that ran and did not confirm, not for a board that was never
+        # this call's to drive.
         try:
-            if needs_reset:
-                reset = self._invoke_dispatch(lambda: backend.reset_target("halt"))
-                if not overall_success(reset):
-                    return None
-            verification = self._invoke_dispatch(backend.probe_target)
-        finally:
-            # A backend built for this recovery holds no session and spawns its
-            # work in its calls, so closing it only drops the throwaway object.
-            if owns_backend:
-                backend.close()
+            hold = self._hold_probe_for_recovery(authority)
+        except CoordinationError:
+            return None
+        with hold:
+            if not self._machine_recovery_attempt_allowed():
+                return None
+            # Never drive the board for a reason a re-read already settles: the
+            # stronger predicate is a physical act, not a default.
+            needs_reset = reason not in RETRYABLE_CLEANUP_REASONS
+            if cleanup_registered_processes(owner_marker=self.coordinator.owner_marker):
+                return None
+            backend, owns_backend = self._recovery_backend(recovery_config)
+            # From here on a predicate is driven, and whatever it answers (or
+            # raises) the attempt has run.
+            self._machine_recovery_ran = True
+            try:
+                if needs_reset:
+                    reset = self._invoke_dispatch(lambda: backend.reset_target("halt"))
+                    if not overall_success(reset):
+                        return None
+                verification = self._invoke_dispatch(backend.probe_target)
+            finally:
+                # A backend built for this recovery holds no session and spawns its
+                # work in its calls, so closing it only drops the throwaway object.
+                if owns_backend:
+                    backend.close()
         if not overall_success(verification) or verification.get("target_detected") is not True:
             return None
         policy = self.config.recovery
@@ -1677,6 +1813,15 @@ class AgenticHILToolService:
         self._release_recovered_leases()
         return report
 
+    def _hold_probe_for_recovery(self, config: AgenticHILConfig) -> RecoveryHold:
+        """Hold the probe a recovery action drives through ``config``, or raise CoordinationError.
+
+        The resources are the ones a call driving that probe leases. A config
+        with no debugger bound names no probe, and its backend refuses whatever
+        the recovery asks of it, so the hold is empty."""
+        resources = debugger_effect_resources(config) if config.debugger is not None else ()
+        return self.coordinator.hold_for_recovery(resources)
+
     def recover_after_failed_run(self, devices: list[str] | None = None) -> JsonObject:
         """Put the bench back into a state the next run can start from.
 
@@ -1697,6 +1842,11 @@ class AgenticHILToolService:
         `RECOVERY_ACTION_REASONS` for which reasons that covers and why the
         `audit_broken` families are not among them.
 
+        The actions run under a hold on the probe they drive, taken the way a
+        call driving it takes one. A probe another owner holds, through a run, a
+        call or an incident, is not this teardown's to reset or re-read: nothing
+        is driven, and the block names `probe_held_elsewhere` and the refusal.
+
         Returns the run result's `recovery` block. It never raises: a fault
         inside recovery must not replace the run's own verdict with a crash."""
         block: JsonObject = {"attempted": False, "actions": [], "outcome": "skipped"}
@@ -1710,7 +1860,16 @@ class AgenticHILToolService:
             reason, summary = withheld
             return {**block, "reason_not_attempted": reason, "summary": summary}
         try:
-            return {**block, **self._perform_recovery_actions()}
+            try:
+                hold = self._hold_probe_for_recovery(self.config)
+            except CoordinationError as refusal:
+                refused = f"{refusal.result.get('error_type')}: {str(refusal.result.get('summary', '')).rstrip('.')}"
+                return {
+                    **block,
+                    "reason_not_attempted": "probe_held_elsewhere",
+                    "summary": f"The probe this recovery would drive could not be held ({refused}), so nothing was driven and the target was left in whatever state the failed run put it in.",
+                }
+            return {**block, **self._perform_recovery_actions(hold)}
         except Exception as error:
             # Same rule as the acquire path: recovery may unblock hardware, so a
             # fault inside it fails closed. The incident, if there is one, stays.
@@ -1748,8 +1907,19 @@ class AgenticHILToolService:
             )
         return None
 
-    def _perform_recovery_actions(self) -> JsonObject:
-        """Reap, reset into halt, re-read the probe; then settle any incident."""
+    def _perform_recovery_actions(self, hold: RecoveryHold) -> JsonObject:
+        """Drive the recovery under the hold, give it back, then settle any incident.
+
+        Settling takes the incident's own locks, and the probe can be among
+        them, so the hold ends first."""
+        with hold:
+            actions = self._drive_recovery_actions()
+        if actions.get("outcome") != "recovered":
+            return actions
+        return {**actions, **self._settle_incident_after_recovery(actions.get("safe_state_predicate") == "reset_halt")}
+
+    def _drive_recovery_actions(self) -> JsonObject:
+        """Reap, reset into halt, re-read the probe."""
         actions: list[str] = ["reap_processes"]
         result: JsonObject = {"attempted": True, "actions": actions}
         if cleanup_registered_processes(owner_marker=self.coordinator.owner_marker):
@@ -1801,7 +1971,7 @@ class AgenticHILToolService:
                 verification,
             )
         result["safe_state_predicate"] = "reset_halt" if reset_halt else "readonly_probe"
-        return {**result, "outcome": "recovered", **self._settle_incident_after_recovery(reset_halt)}
+        return {**result, "outcome": "recovered"}
 
     @staticmethod
     def _recovery_action_failed(result: JsonObject, action: str, failed_check: str | None, summary: str, source: JsonObject) -> JsonObject:
@@ -1939,6 +2109,12 @@ class AgenticHILToolService:
         `session_already_active` even after the coordinator considers the
         incident it raised settled.
 
+        The handles are not all the incident held. Ending it set every lease it
+        held back to `active`, still registered, and a lease the service keeps no
+        handle on, such as the one an adoption read or a COM call took, goes back
+        here too: the call that took it is over, and a lease left registered is
+        a hold nothing ends, since no run declared it and no session stops it.
+
         Returns whether every release confirmed. `HardwareLease.release()` fails
         closed: a release that cannot persist its own record re-quarantines the
         bench under a fresh `lease_release_unconfirmed` incident, and a caller
@@ -1959,6 +2135,23 @@ class AgenticHILToolService:
             self._debug_artifact = None
         released = True
         for lease in handles:
+            if not lease.release():
+                released = False
+        if not self._give_back_leftover_leases():
+            released = False
+        return released
+
+    def _give_back_leftover_leases(self) -> bool:
+        """Release every `active` lease no live session holds, and say whether each release confirmed.
+
+        Asked once an incident has ended, by a recovery or a stand-down, which
+        sets the leases it held back to `active` with the call that took them
+        over. A lease a live session holds is the exception and the only one."""
+        sessions = self._session_lease_ids()
+        released = True
+        for lease in list(self.coordinator.leases.values()):
+            if lease.state != "active" or lease.lease_id in sessions:
+                continue
             if not lease.release():
                 released = False
         return released
@@ -2649,6 +2842,26 @@ def recovery_class_settles(name: str, result: JsonObject) -> frozenset[str] | No
     if name == "flash_firmware":
         return RECOVERY_ACTION_REASONS if result.get("reset_after_flash") is not False else RETRYABLE_CLEANUP_REASONS
     return None
+
+
+def ended_incident_next_step(result: JsonObject) -> str:
+    """The next step of a refusal whose incident ended before its call returned.
+
+    Nothing holds the bench, so the recover advice the refusal was built on has
+    nothing left to name. Whether the call can simply be made again is the
+    result's own `retry_safe`: a read that may have changed the board says
+    false, and a plain "call this again" beside it would contradict the field.
+    The fields that say why are named, so the caller knows what to confirm."""
+    if result.get("retry_safe") is True:
+        return "Call this again: the incident it reported has ended, and nothing holds the bench."
+    because: list[str] = []
+    effect = result.get("side_effect_status")
+    if isinstance(effect, str) and effect and effect != "not_started":
+        because.append(f"`side_effect_status` is `{effect}`")
+    if result.get("cleanup_required") is True:
+        because.append("`cleanup_required` is true")
+    why = f": {' and '.join(because)}" if because else ""
+    return f"The incident this result reported has ended, and nothing holds the bench. This call is not safe to repeat as it stands{why}, so confirm the board's state before calling it again."
 
 
 def unbound_debugger_error(tool: str, config: AgenticHILConfig) -> JsonObject:
@@ -3529,8 +3742,9 @@ def _bootstrap_device_busy(busy: JsonObject, tool: str) -> JsonObject:
     The machine-wide lock answered (another workspace or server is on this
     board) before anything was said to it. `discover_attached_hardware` reads
     the device directly here because there is no configuration to lease against,
-    but "no lease" was never "no exclusion": the refusal names the holder and is
-    retry-safe, exactly as the leased path's `device_busy` is."""
+    but "no lease" was never "no exclusion": the refusal names the holder, or
+    carries no `holder` while the holder's record does not name it yet, and is
+    retry-safe either way, exactly as the leased path's `device_busy` is."""
     return {**busy, "tool": tool, "side_effect_status": "not_started", "hardware_state": "unchanged"}
 
 

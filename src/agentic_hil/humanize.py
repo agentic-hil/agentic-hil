@@ -503,6 +503,7 @@ _REMEDY_SCOPE_KEYS = ("field", "backend", "adapter", "permission", "tool")
 # arguments the command does not take, is not an entry here.
 _CLI_COMMANDS = {
     "debugger_probes_list": "agentic-hil debugger-probes",
+    "hardware_lease_status": "agentic-hil lease-status",
     "project_config_adopt_hardware": "agentic-hil adopt-hardware",
     "server_upgrade": "agentic-hil upgrade",
     "test_reactor_run": "agentic-hil test-reactor",
@@ -1574,6 +1575,10 @@ def render_recover(result: JsonObject) -> list[str]:
             [
                 ("recovered_quarantine_id", result.get("recovered_quarantine_id")),
                 ("was_quarantined", result.get("was_quarantined")),
+                # An incident that is open and does not stand has nothing to
+                # clear, and is named so it can be matched with `lease-status`.
+                ("quarantine_id", result.get("quarantine_id")),
+                ("incident_stands", result.get("incident_stands")),
                 ("nothing_to_recover", result.get("nothing_to_recover")),
                 ("actor", result.get("actor")),
                 ("attestation", result.get("attestation")),

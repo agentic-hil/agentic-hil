@@ -992,9 +992,12 @@ def test_a_session_a_dead_owner_left_is_an_incident_the_next_caller_reads_and_th
         assert recovered["was_quarantined"] is True, recovered
     else:
         # The narrowed case: nothing to sign for, and the answer says which of
-        # the two this is rather than reporting a recovery that did nothing.
+        # the two this is rather than reporting a recovery that did nothing. The
+        # incident is still open, as `lease-status` said, and the answer names it.
         assert recovered["nothing_to_recover"] is True, recovered
-        assert recovered["was_quarantined"] is False, recovered
+        assert recovered["was_quarantined"] is True, recovered
+        assert recovered["incident_stands"] is False, recovered
+        assert recovered["quarantine_id"] == quarantine_id, recovered
         assert "audit halt" in recovered["summary"], recovered["summary"]
 
     heir = servers()
