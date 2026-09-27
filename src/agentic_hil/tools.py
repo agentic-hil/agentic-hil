@@ -744,7 +744,7 @@ class AgenticHILToolService:
             released.pop("remediation", None)
             if result.get("do_not") == advice.get("do_not"):
                 released.pop("do_not", None)
-            released["next_step"] = "Call this again: the incident it reported has ended, and nothing holds the bench."
+            released["next_step"] = ended_incident_next_step(result)
         # The summary was written for a held bench and is not rewritten here. One
         # that says the board is quarantined is followed by how that ended.
         summary = result.get("summary")
@@ -2718,6 +2718,26 @@ def recovery_class_settles(name: str, result: JsonObject) -> frozenset[str] | No
     if name == "flash_firmware":
         return RECOVERY_ACTION_REASONS if result.get("reset_after_flash") is not False else RETRYABLE_CLEANUP_REASONS
     return None
+
+
+def ended_incident_next_step(result: JsonObject) -> str:
+    """The next step of a refusal whose incident ended before its call returned.
+
+    Nothing holds the bench, so the recover advice the refusal was built on has
+    nothing left to name. Whether the call can simply be made again is the
+    result's own `retry_safe`: a read that may have changed the board says
+    false, and a plain "call this again" beside it would contradict the field.
+    The fields that say why are named, so the caller knows what to confirm."""
+    if result.get("retry_safe") is True:
+        return "Call this again: the incident it reported has ended, and nothing holds the bench."
+    because: list[str] = []
+    effect = result.get("side_effect_status")
+    if isinstance(effect, str) and effect and effect != "not_started":
+        because.append(f"`side_effect_status` is `{effect}`")
+    if result.get("cleanup_required") is True:
+        because.append("`cleanup_required` is true")
+    why = f": {' and '.join(because)}" if because else ""
+    return f"The incident this result reported has ended, and nothing holds the bench. This call is not safe to repeat as it stands{why}, so confirm the board's state before calling it again."
 
 
 def unbound_debugger_error(tool: str, config: AgenticHILConfig) -> JsonObject:
