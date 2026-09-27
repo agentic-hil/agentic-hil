@@ -3635,9 +3635,10 @@ def test_a_linux_start_time_is_when_the_process_started_and_not_when_it_was_look
     """
     from agentic_hil.process import filetime_epoch_seconds, snapshot_process_images
 
+    before = time.time()
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    after = time.time()
     try:
-        started_at = time.time()
         # Long enough that a lookup time and a start time cannot be mistaken for
         # one another, and short enough to stay a unit test.
         time.sleep(2.0)
@@ -3646,7 +3647,11 @@ def test_a_linux_start_time_is_when_the_process_started_and_not_when_it_was_look
         entry = next(image for image in snapshot if image.pid == child.pid)
         reported = filetime_epoch_seconds(entry.created_ns)
         assert reported is not None
-        assert reported == pytest.approx(started_at, abs=1.0)
+        # The child began between the two clock reads around its start. The
+        # kernel records that as the boot time in whole seconds plus whole clock
+        # ticks since boot, which can read up to a second and a tick early.
+        tick = 1.0 / os.sysconf("SC_CLK_TCK")
+        assert before - 1.0 - tick <= reported <= after
         assert time.time() - reported >= 1.5
     finally:
         child.kill()
