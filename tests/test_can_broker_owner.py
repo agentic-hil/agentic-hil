@@ -122,9 +122,17 @@ def serving(broker: CanBroker) -> Iterator[CanBroker]:
     try:
         yield broker
     finally:
-        broker.stop("test_finished")
+        # `stop` wakes the serve loop with a connection of its own and waits for
+        # the loop to answer it. A loop that has not looked at the stop flag yet
+        # when the block ends leaves without answering, and then only `shutdown`
+        # closing the listener ends that wait: so the stop runs beside the join.
+        stopper = threading.Thread(target=broker.stop, args=("test_finished",), daemon=True)
+        stopper.start()
         server.join(timeout=scaled_time_bound(10))
         broker.shutdown()
+        stopper.join(timeout=scaled_time_bound(10))
+    assert not server.is_alive(), "the serve loop outlived the block"
+    assert not stopper.is_alive(), "the stop outlived the listener"
 
 
 def attach_outcome(config, participant: str) -> dict:
