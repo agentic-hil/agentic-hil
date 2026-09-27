@@ -20,8 +20,8 @@ parallel.
 **Attaching proves the peer owns the bus, rather than asking it.** A broker's
 claim to hold the lock is worth nothing on its own: a stale endpoint or an
 impostor listener says the same words. So the attaching participant probes the
-lock itself: it reads the holder record, checks that the pid there is the pid the
-peer announced, and then *tries to take the bus lock*. Success is the refusal:
+lock itself: it reads the holder record, checks that the owner id there is
+the peer's, and then *tries to take the bus lock*. Success is the refusal:
 a lock this process could take is a lock the peer does not hold.
 
 **Two staleness contracts, because they fail differently.** The protocol carries
@@ -49,7 +49,6 @@ import hashlib
 import json
 import os
 import secrets
-import socket
 import stat
 import subprocess
 import sys
@@ -115,6 +114,10 @@ MESSAGE_SURFACE: dict[str, tuple[str, ...]] = {
     "bus_status": ("ok", "bus_key", "counter", "broker_pid", "attached_participants", "bus_gated", "frames_seen"),
     "frame": ("id", "extended", "rtr", "data_hex"),
     "abort": ("scope", "reason", "detail", "recovery_action", "at"),
+    # Not a message: what a client reads before it says anything. Listed so that
+    # its shape is part of what the digest compares, and a descriptor that names
+    # its broker differently in another release is refused by name.
+    "descriptor": ("version", "bus_key", "endpoint", "family", "pid", "owner_id", "protocol_version", "protocol_digest", "counter", "started_at"),
 }
 PROTOCOL_DIGEST = hashlib.sha256(json.dumps(MESSAGE_SURFACE, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
 
@@ -286,6 +289,10 @@ class BrokerDescriptor:
     endpoint: str
     family: str
     pid: int
+    # The owner id the broker's bus lock mutex writes into the holder record. A
+    # pid names a process only inside one PID namespace, so this is what a
+    # client matches the record against.
+    owner_id: str | None
     protocol_version: int
     protocol_digest: str
     counter: int
@@ -298,6 +305,7 @@ class BrokerDescriptor:
             "endpoint": self.endpoint,
             "family": self.family,
             "pid": self.pid,
+            "owner_id": self.owner_id,
             "protocol_version": self.protocol_version,
             "protocol_digest": self.protocol_digest,
             "counter": self.counter,
@@ -308,12 +316,17 @@ class BrokerDescriptor:
     def from_json(value: object) -> BrokerDescriptor | None:
         if not isinstance(value, dict) or value.get("version") != DESCRIPTOR_VERSION:
             return None
+        # A descriptor without an owner id is still read: it is one a release
+        # that named its broker by pid alone wrote, and reading it lets the
+        # digest refuse that broker by name rather than as no broker at all.
+        owner_id = value.get("owner_id")
         try:
             return BrokerDescriptor(
                 bus_key=str(value["bus_key"]),
                 endpoint=str(value["endpoint"]),
                 family=str(value["family"]),
                 pid=int(value["pid"]),
+                owner_id=owner_id if isinstance(owner_id, str) else None,
                 protocol_version=int(value["protocol_version"]),
                 protocol_digest=str(value["protocol_digest"]),
                 counter=int(value["counter"]),
@@ -376,12 +389,13 @@ def _read_authkey(path: Path) -> bytes | None:
 # The lock probe: the peer holds the bus, or it does not.
 
 
-def probe_bus_lock(bus_key: str, expected_pid: int, lock_root: Path) -> JsonObject:
-    """Whether the process at ``expected_pid`` really holds this bus lock.
+def probe_bus_lock(bus_key: str, expected_owner_id: str | None, lock_root: Path) -> JsonObject:
+    """Whether the owner named by ``expected_owner_id`` really holds this bus lock.
 
     Three questions, and the third is the one that cannot be faked. The holder
-    record must exist and name that pid on this host, but the record is
-    advisory, so an impostor could have written it. The lock itself is not: a
+    record must exist and carry that owner id, not merely the pid, which names
+    a process only inside one PID namespace. But the record is advisory, so an
+    impostor could have written it. The lock itself is not: a
     lock this process can take is a lock nobody holds. So the probe *tries to
     acquire* the bus lock non-blocking, and treats success as the refusal.
 
@@ -410,7 +424,7 @@ def probe_bus_lock(bus_key: str, expected_pid: int, lock_root: Path) -> JsonObje
             "error_type": "can_broker_not_bus_owner",
             "summary": "The CAN broker endpoint does not hold this bus lock; the bus lock was free while it claimed to own the bus.",
             "bus_key": bus_key,
-            "claimed_broker_pid": expected_pid,
+            "claimed_broker_owner_id": expected_owner_id,
             "bus_lock_held": False,
             "retry_safe": False,
             "side_effect_committed": False,
@@ -421,24 +435,24 @@ def probe_bus_lock(bus_key: str, expected_pid: int, lock_root: Path) -> JsonObje
             "error_type": "can_broker_not_bus_owner",
             "summary": "The CAN bus lock is held, but no holder record identifies the process holding it as the broker that answered.",
             "bus_key": bus_key,
-            "claimed_broker_pid": expected_pid,
+            "claimed_broker_owner_id": expected_owner_id,
             "bus_lock_held": True,
             "retry_safe": True,
             "side_effect_committed": False,
         }
-    if owner.get("pid") != expected_pid or owner.get("host") != socket.gethostname():
+    if not expected_owner_id or owner.get("owner_id") != expected_owner_id:
         return {
             "ok": False,
             "error_type": "can_broker_not_bus_owner",
-            "summary": "The CAN bus lock is held by a different process than the endpoint that answered.",
+            "summary": "The CAN bus lock is held by a different owner than the one the endpoint's descriptor names.",
             "bus_key": bus_key,
-            "claimed_broker_pid": expected_pid,
-            "bus_lock_holder": {"pid": owner.get("pid"), "host": owner.get("host")},
+            "claimed_broker_owner_id": expected_owner_id,
+            "bus_lock_holder": {"owner_id": owner.get("owner_id"), "pid": owner.get("pid"), "host": owner.get("host")},
             "bus_lock_held": True,
             "retry_safe": False,
             "side_effect_committed": False,
         }
-    return {"ok": True, "bus_key": bus_key, "broker_pid": expected_pid, "bus_lock_held": True}
+    return {"ok": True, "bus_key": bus_key, "broker_owner_id": expected_owner_id, "bus_lock_held": True}
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +608,7 @@ class CanBroker:
             endpoint=self._endpoint,
             family=endpoint_family(),
             pid=os.getpid(),
+            owner_id=self.mutex.owner.owner_id,
             protocol_version=PROTOCOL_VERSION,
             protocol_digest=PROTOCOL_DIGEST,
             counter=self.counter,
@@ -1407,9 +1422,9 @@ def _attach_once(config: AgenticHILConfig, bus_id: str, participant: str, bus_ke
             "retry_safe": False,
             "side_effect_committed": False,
         }
-    probe = probe_bus_lock(bus_key, descriptor.pid, lock_root)
+    probe = probe_bus_lock(bus_key, descriptor.owner_id, lock_root)
     if not probe["ok"]:
-        return {**probe, "bus_id": bus_id, "participant": participant}
+        return {**probe, "bus_id": bus_id, "participant": participant, "claimed_broker_pid": descriptor.pid}
     key = _read_authkey(authkey_path(bus_key, lock_root))
     if key is None:
         return {"ok": False, "error_type": "can_broker_unavailable", "summary": "The CAN broker published no authentication key beside its descriptor.", "bus_id": bus_id, "retry_safe": True, "side_effect_committed": False}
