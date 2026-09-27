@@ -779,3 +779,34 @@ def test_an_adopt_refused_for_a_neighbour_s_incident_keeps_its_claim_when_this_p
         assert refused.get("do_not"), refused
     finally:
         tools.close()
+
+
+def test_an_adopt_refused_for_a_neighbour_s_incident_carries_the_remediation_for_a_foreign_incident(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The adoption refusal keeps the advice the coordinator gave for a neighbour's incident.
+
+    The discovery lock refuses for the neighbour's incident with the remediation
+    scoped to a foreign incident, the same one `debugger_probes_list` carries for
+    it. No incident of this project's own is involved, so the end of the call
+    changes nothing. The adoption refusal built from the coordinator's answer
+    may not replace that remediation with the advice for an incident of this
+    project's own, which sends the caller to `agentic-hil recover` here, where
+    nothing stands to recover."""
+    workspace, _ = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    owner, foreign_id = foreign_incident(tmp_path)
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read())
+
+    tools = AgenticHILToolService(load_authoritative_config(workspace), backend=_RecoveryBackend(), frontend="mcp")
+    try:
+        assert tools.coordinator.status()["blocked"] is False
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined", refused
+        assert "incident_stood_down" not in refused, refused
+        assert refused["quarantine_id"] == foreign_id, refused
+        assert refused["project_resource"] == owner.project_key, refused
+        foreign = remediation_fields("resource_quarantined", "foreign_project")
+        assert refused["remediation"] == foreign["remediation"], refused
+        assert refused["do_not"] == foreign["do_not"], refused
+    finally:
+        tools.close()
