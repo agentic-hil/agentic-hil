@@ -70,6 +70,8 @@ def test_capture_workflow_is_scoped_and_uploads_the_raw_recording() -> None:
     assert "tools/record_macos_installer_facts.py" in source
     assert "macos-installer-recording" in source
     assert "actions/upload-artifact@" in source
+    assert '"$RUNNER_TEMP/agentic-hil-build/bin/python" -m build --wheel --outdir dist' in source
+    assert "--no-isolation" not in source
 
 
 @pytest.mark.parametrize(

@@ -32,7 +32,7 @@ jobs:
 
       - name: Build a wheel for hashing
         run: >-
-          "$RUNNER_TEMP/agentic-hil-build/bin/python" -m build --wheel --no-isolation --outdir dist
+          "$RUNNER_TEMP/agentic-hil-build/bin/python" -m build --wheel --outdir dist
 
       - name: Record interpreter layout and raw hash-tool output
         run: >-

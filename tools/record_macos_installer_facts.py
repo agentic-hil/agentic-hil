@@ -112,7 +112,7 @@ def capture(wheel_path: Path) -> dict[str, Any]:
         },
         "method": {
             "python_install": "brew install python@3.13",
-            "wheel_build": "python -m build --wheel --no-isolation --outdir dist",
+            "wheel_build": '"$RUNNER_TEMP/agentic-hil-build/bin/python" -m build --wheel --outdir dist',
             "homebrew_version": homebrew_version,
             "python_formula": python_formula,
         },
