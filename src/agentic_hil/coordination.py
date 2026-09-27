@@ -2443,6 +2443,13 @@ def _read_record_at(path: Path, resource: str) -> JsonObject | None:
     return value
 
 
+# The next step for an open incident that does not stand, wherever one is
+# described: `lease-status`, the recovery routes, and a refusal the incident
+# holds. The end of a call that settles the incident or stands it down says
+# that instead.
+NOT_STANDING_NEXT_STEP = "Nothing to sign for. The next hardware call settles this incident, or stands it down, on what it reads back from the board."
+
+
 def _with_status_sentences(status: JsonObject) -> JsonObject:
     """The lease status with the sentence a person reads first, and the next step.
 
@@ -2479,7 +2486,7 @@ def _with_status_sentences(status: JsonObject) -> JsonObject:
             )
         else:
             summary = f"{opening} Nothing needs signing: the next hardware call settles it on its own evidence, and `cleanup_reasons` names what it has to confirm."
-            next_step = "Nothing to sign for. The next hardware call settles this incident, or stands it down, on what it reads back from the board."
+            next_step = NOT_STANDING_NEXT_STEP
         if foreign:
             summary = f"{summary} {foreign}"
         return {**status, "summary": summary, "next_step": next_step}
@@ -2505,7 +2512,20 @@ def nothing_standing_result(status: JsonObject) -> JsonObject:
 
     ``cleanup_reasons`` travels with it when the bench has any, because a call
     that could not confirm its effect is still worth reading about; what is gone
-    is the claim that somebody has to sign for it."""
+    is the claim that somebody has to sign for it.
+
+    An incident of this workspace's own that is open and does not stand is not
+    nothing, though, and `lease-status` reports the bench quarantined under it.
+    The answer says what that status says (the incident, its reasons, that it
+    does not stand, that nothing needs signing and that the next hardware call
+    settles it or stands it down) and that a recovery has nothing to clear
+    there. It names the incident by `quarantine_id` and not in the sentence,
+    because the end of a call that cannot give a lease back raises another in
+    its place, and the field is what follows it. It is still a success, and
+    claims no `quarantined` or `cleanup_required` of its own: the call did its
+    job, which was to find nothing to clear, and an exit status or an MCP error
+    flag that read it as a failed recovery would send the operator after a
+    signature nobody owes."""
     reasons = [reason for reason in status.get("cleanup_reasons", []) if isinstance(reason, str)]
     result: JsonObject = {
         "ok": True,
@@ -2520,6 +2540,27 @@ def nothing_standing_result(status: JsonObject) -> JsonObject:
     }
     if reasons:
         result["cleanup_reasons"] = reasons
+    standing = [entry for entry in status.get("standing_incidents") or [] if isinstance(entry, dict)]
+    if status.get("cleanup_required") is True:
+        opening = "This bench is quarantined" + (f" for {', '.join(reasons)}" if reasons else "")
+        result.update(
+            {
+                "was_quarantined": True,
+                "incident_stands": False,
+                "quarantine_id": status.get("quarantine_id"),
+                "summary": (
+                    f"{opening}, and the incident does not stand: nothing needs signing, and the next hardware call "
+                    "settles it on its own evidence, or stands it down. `recover` signs only for the audit halt, where "
+                    "a report that was never written cannot be written by a reset; every other incident proves itself at "
+                    "the next contact, so it has nothing to clear here."
+                ),
+                "next_step": NOT_STANDING_NEXT_STEP,
+            }
+        )
+        if standing:
+            result["standing_incidents"] = standing
+            result["summary"] = f"{result['summary']} {foreign_incident_sentence(standing)}"
+        return result
     # The third dead end (#531). This is the command the documented operator
     # path sends a refused caller to with the id the refusal named, and on a
     # bench held by a neighbour's incident it answered that nothing was
@@ -2527,7 +2568,6 @@ def nothing_standing_result(status: JsonObject) -> JsonObject:
     # nothing and settles nothing: a second workspace may not resolve an
     # incident it does not own, and that rule is what the quarantine is. What it
     # stops doing is contradicting the refusal.
-    standing = [entry for entry in status.get("standing_incidents") or [] if isinstance(entry, dict)]
     if standing:
         sentence = foreign_incident_sentence(standing)
         result["standing_incidents"] = standing

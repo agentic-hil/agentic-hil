@@ -870,7 +870,9 @@ def test_a_worker_killed_mid_run_is_named_gone_refuses_a_stop_and_leaves_a_bench
         assert recovered["was_quarantined"] is True, recovered
     else:
         assert recovered["nothing_to_recover"] is True, recovered
-        assert recovered["was_quarantined"] is False, recovered
+        assert recovered["was_quarantined"] is True, recovered
+        assert recovered["incident_stands"] is False, recovered
+        assert recovered["quarantine_id"] == quarantine_id, recovered
         assert "audit halt" in recovered["summary"], recovered["summary"]
 
     heir = McpServer.launch(bench)

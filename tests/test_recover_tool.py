@@ -817,7 +817,11 @@ def test_an_incident_that_does_not_stand_answers_nothing_to_recover(tmp_path: Pa
 
         assert result["ok"] is True, result
         assert result["nothing_to_recover"] is True
-        assert result["was_quarantined"] is False
+        # Nothing is cleared, and the bench is still quarantined under the
+        # incident, which `lease-status` says too: the answer may not say it was
+        # not.
+        assert result["was_quarantined"] is True
+        assert result["incident_stands"] is False
         assert "error_type" not in result
         # The record is still there, and that is the honest answer rather than a
         # tidy one: this call runs no recovery action, and a bench whose incident
@@ -904,7 +908,8 @@ def test_the_operator_command_line_answers_the_same_way(tmp_path: Path, monkeypa
 
     assert answer["ok"] is True, answer
     assert answer["nothing_to_recover"] is True
-    assert answer["was_quarantined"] is False
+    assert answer["was_quarantined"] is True
+    assert answer["quarantine_id"] == incident
 
 
 def test_the_operator_command_line_still_clears_a_standing_quarantine(tmp_path: Path) -> None:

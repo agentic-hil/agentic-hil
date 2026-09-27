@@ -1574,6 +1574,10 @@ def render_recover(result: JsonObject) -> list[str]:
             [
                 ("recovered_quarantine_id", result.get("recovered_quarantine_id")),
                 ("was_quarantined", result.get("was_quarantined")),
+                # An incident that is open and does not stand has nothing to
+                # clear, and is named so it can be matched with `lease-status`.
+                ("quarantine_id", result.get("quarantine_id")),
+                ("incident_stands", result.get("incident_stands")),
                 ("nothing_to_recover", result.get("nothing_to_recover")),
                 ("actor", result.get("actor")),
                 ("attestation", result.get("attestation")),

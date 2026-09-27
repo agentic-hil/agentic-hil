@@ -78,6 +78,7 @@ from agentic_hil.configwrite import (
 from agentic_hil.coordination import (
     DEBUGGER_DISCOVERY_RESOURCE,
     DEBUGGER_READONLY_TARGET_STATE_REASON,
+    NOT_STANDING_NEXT_STEP,
     CoordinationError,
     HardwareCoordinator,
     HardwareLease,
@@ -1333,7 +1334,7 @@ def discover_under_hardware_lease(
         released = lease.release() and released
     status = _combined_status(held)
     if not released or status["cleanup_required"] or status["quarantined"]:
-        return {}, _refuse_after_failed_release(existing, record, discovery, status, tool)
+        return {}, _refuse_after_failed_release(existing, record, discovery, status, tool, stands=coordinator.incident_stands)
     # The clean path re-commits too, so the persisted record carries the state the
     # leases actually ended in (`released`) rather than the `active` they were
     # written under. A no-op when the two already agree.
@@ -1406,7 +1407,7 @@ def _terminal_audit_refusal(
     return refusal
 
 
-def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject, discovery: JsonObject, status: JsonObject, tool: str) -> JsonObject:
+def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject, discovery: JsonObject, status: JsonObject, tool: str, *, stands: bool) -> JsonObject:
     """Refuse, and make the audit trail say so.
 
     The read is written as an `ok: true`, `lease_state: active` report before the
@@ -1428,7 +1429,7 @@ def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject,
     whose incident cannot be recorded is in a worse state than one whose incident
     can.
     """
-    refusal = _release_refusal(discovery, status, tool)
+    refusal = _release_refusal(discovery, status, tool, stands=stands)
     committed = write_report(existing, {**record, **refusal, **status})
     if committed.get("audit_ok") is False:
         return {
@@ -1479,14 +1480,20 @@ def _discovery_side_effect(discovery: JsonObject) -> JsonObject:
     return fields
 
 
-def _release_refusal(discovery: JsonObject, status: JsonObject, tool: str) -> JsonObject:
+def _release_refusal(discovery: JsonObject, status: JsonObject, tool: str, *, stands: bool = True) -> JsonObject:
     """The probe was read and this process could not give it back.
 
     Nothing is written after this. The read itself succeeded, so its result is
     carried for the operator to read, but a configuration written now would be
     written by a process holding quarantined hardware, and the answer would say
-    `ok: true` about a bench that needs `agentic-hil recover` before anything
-    else touches it.
+    `ok: true` about a bench whose incident has to end before anything else
+    touches it.
+
+    ``stands`` is whether the incident holding the bench stands. Only a standing
+    one is signed for with `agentic-hil recover`; for any other, `recover`
+    answers that it has nothing to clear, and the next step is the one
+    `lease-status` gives: the next hardware call settles the incident or stands
+    it down.
     """
     return {
         "ok": False,
@@ -1498,7 +1505,11 @@ def _release_refusal(discovery: JsonObject, status: JsonObject, tool: str) -> Js
             "`hardware_discovery`; the bench has to be resolved before it can be carried into the file."
         ),
         "hardware_discovery": discovery,
-        "next_step": "Resolve the incident with `agentic-hil recover` once the bench is known to be in a safe state, then call this again.",
+        "next_step": (
+            "Resolve the incident with `agentic-hil recover` once the bench is known to be in a safe state, then call this again."
+            if stands
+            else NOT_STANDING_NEXT_STEP
+        ),
         # The read is what happened; the release is what did not. Both are said,
         # and neither is inferred from the other, including where the discovery
         # said neither.

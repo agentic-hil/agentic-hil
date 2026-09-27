@@ -67,6 +67,7 @@ from agentic_hil.coordination import (
     DEBUGGER_DISCOVERY_RESOURCE,
     DEBUGGER_READONLY_RESULT_REASON,
     DEBUGGER_READONLY_TARGET_STATE_REASON,
+    NOT_STANDING_NEXT_STEP,
     RECOVERY_ACTION_REASONS,
     RECOVERY_ACTION_VIA,
     RECOVERY_ACTOR_AGENT,
@@ -743,6 +744,11 @@ class AgenticHILToolService:
             if result.get("do_not") == advice.get("do_not"):
                 released.pop("do_not", None)
             released["next_step"] = ended_incident_next_step(result)
+        # The step for an incident that does not stand says the next hardware
+        # call settles it. This call has, and a caller told to make another call
+        # for it would be making one for nothing.
+        if released.get("next_step") == NOT_STANDING_NEXT_STEP:
+            released["next_step"] = "Nothing to sign for: the incident has ended, and nothing holds the bench."
         # The summary was written for a held bench and is not rewritten here. One
         # that says the board is quarantined is followed by how that ended.
         summary = result.get("summary")
@@ -1217,7 +1223,10 @@ class AgenticHILToolService:
         Idempotent, and honestly so: a bench with no open incident answers `ok`
         with `was_quarantined: false` rather than failing, the way `bench_run_stop`
         and `com_session_stop` do, so a second call after a successful one is
-        free.
+        free. An open incident that does not stand answers `ok` and
+        `nothing_to_recover` too, and clears nothing, but it says
+        `was_quarantined: true` and names the incident, because `lease-status`
+        reports that bench quarantined under it and the two may not disagree.
         """
         # Read first, refuse second, and deliberately in that order. Reading this
         # bench's state needs no grant anywhere in this project, nothing is
