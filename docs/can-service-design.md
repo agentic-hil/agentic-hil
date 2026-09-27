@@ -71,6 +71,10 @@ racing for the device lock.
   attach handshake additionally proves the broker is the process actually
   holding the bus lock (a lock probe, not a self-description), so a stale or
   impostor endpoint fails the handshake.
+- Each connection runs the authkey handshake on its own thread, within a
+  bounded time. A peer that fails it, leaves in the middle of it or never
+  answers it loses its own connection: the broker keeps serving every
+  participant, and a stop still reaches it.
 
 ### Incidents
 
