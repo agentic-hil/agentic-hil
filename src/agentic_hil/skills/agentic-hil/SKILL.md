@@ -34,6 +34,7 @@ directly.
 | A sequence of hardware calls that belong to one run | `bench_run_start`, `bench_run_stop`, `bench_run_status` |
 | Run this project's written test plan on the board | `test_reactor_run`, `test_reactor_status`, `test_reactor_stop` |
 | Create, read, or change this project's configuration | `project_config_create`, `project_config_describe`, `project_config_set`, `project_config_adopt_hardware`, `project_config_reload_description` |
+| Is the bench held, and does an open incident need signing | `hardware_lease_status` |
 | The bench is quarantined on a broken audit trail | `hardware_recover` |
 | Update Agentic HIL itself to the newest release | `server_upgrade` |
 

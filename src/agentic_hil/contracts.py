@@ -202,6 +202,18 @@ MCP_TOOLS: list[JsonObject] = [
             }
         ),
     },
+    # Reading is free, so this takes no arguments: it answers for the bench this
+    # server is bound to, as `agentic-hil lease-status` does at a shell. The
+    # server instructions, AGENTS.md and the error catalogue send a caller here
+    # before `hardware_recover`, so the text says which incident is its to clear.
+    {
+        "name": "hardware_lease_status",
+        "description": (
+            "Read who holds this bench and any open incident: its cleanup_reasons, quarantine_guidance and "
+            "incident_stands. Only an incident that stands needs hardware_recover."
+        ),
+        "inputSchema": EMPTY_OBJECT_SCHEMA,
+    },
     # No parameters, and that is the contract. The configuration is generated for
     # the workspace this server is bound to, out of what is attached to this
     # machine: a workspace_root argument would let a caller provision a project
@@ -551,6 +563,11 @@ TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     # second call finds nothing standing and answers `ok` with
     # `nothing_to_recover: true`.
     "hardware_recover": {"title": "Clear a bench quarantine", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    # Reads this project's lease and incident records and the device holds on
+    # this machine, and changes neither: the end-of-call seam that recovers and
+    # stands an incident down passes this call by, so the answer describes the
+    # bench as the call found it and leaves it that way.
+    "hardware_lease_status": {"title": "Bench lease status", "readOnlyHint": True, "openWorldHint": False},
     # Rewrites the authoritative configuration with no backup on disk, and
     # carries over the permissions of the document *this server loaded at
     # startup*, so a narrowing made with project_config_set in this session is

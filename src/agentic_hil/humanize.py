@@ -503,6 +503,7 @@ _REMEDY_SCOPE_KEYS = ("field", "backend", "adapter", "permission", "tool")
 # arguments the command does not take, is not an entry here.
 _CLI_COMMANDS = {
     "debugger_probes_list": "agentic-hil debugger-probes",
+    "hardware_lease_status": "agentic-hil lease-status",
     "project_config_adopt_hardware": "agentic-hil adopt-hardware",
     "server_upgrade": "agentic-hil upgrade",
     "test_reactor_run": "agentic-hil test-reactor",

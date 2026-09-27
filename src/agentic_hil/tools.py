@@ -583,7 +583,13 @@ class AgenticHILToolService:
                 result: JsonObject = {"ok": False, "tool": name, "error_type": "service_closed" if self._state == "closed" else "service_cleanup_required", "summary": "Agentic HIL service is not accepting new calls.", "side_effect_committed": False, "cleanup_required": self._state == "cleanup_required"}
             else:
                 result = self._call_unlocked(name, arguments)
-                result = self._stand_down_after_call(result)
+                # A status read reports the incident as it found it and leaves it
+                # there. The seam recovers and stands down, and a read that did
+                # either would drive the board to answer a question about it and
+                # report an incident it had just ended. `agentic-hil lease-status`
+                # reads the same record with no seam at all.
+                if name != "hardware_lease_status":
+                    result = self._stand_down_after_call(result)
                 if name == "bench_run_stop":
                     # Only once the stand-down has run is the run's teardown
                     # over, so this is where what is still held can be read.
@@ -864,6 +870,10 @@ class AgenticHILToolService:
             # refuses every hardware tool while an incident is open) must not
             # stand in front of it.
             "hardware_recover": lambda: self.hardware_recover(args.get("operator_statement"), args.get("accept_config_change") is True),
+            # Outside every set above for the same reason: it is what a caller
+            # reads about a blocked bench, so no gate stands in front of it, and
+            # it needs no debugger bound to answer for a bench that has none.
+            "hardware_lease_status": lambda: self.hardware_lease_status(),
             # On a configured server this is the authorized-rewrite half: a
             # configuration already exists, so the call is refused unless a
             # person set permissions.allow_config_write on it. It also reads a
