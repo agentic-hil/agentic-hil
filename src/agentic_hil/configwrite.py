@@ -1894,24 +1894,55 @@ def _entry_patterns(rights: dict[str, bool]) -> list[JsonObject]:
     return patterns
 
 
+def leases_under_incident(open_holds: JsonObject) -> list[str]:
+    """The open leases `open_holds` reports as registered under an incident and held by no session."""
+    return [str(item) for item in open_holds.get("leases_under_incident") or []]
+
+
+def under_incident_sentence(lease_ids: list[str]) -> str:
+    """What holds a lease no run and no session holds, and what ends that hold.
+
+    A call took the lease and could not give it back, so it stays registered
+    under the incident that holds it. No stop call frees it: it goes back when
+    that incident ends, and `agentic-hil lease-status` names the incident."""
+    named = ", ".join(f"`{lease_id}`" for lease_id in lease_ids)
+    if len(lease_ids) == 1:
+        return (
+            f"Lease {named} belongs to no run and no session: the call that took it could not give it back, so it stays "
+            "registered under the incident `agentic-hil lease-status` names until that incident ends, and no stop call frees it."
+        )
+    return (
+        f"Leases {named} belong to no run and no session: the calls that took them could not give them back, so they stay "
+        "registered under the incident `agentic-hil lease-status` names until that incident ends, and no stop call frees them."
+    )
+
+
 def _open_holds_step(open_holds: JsonObject) -> str:
     """The step for what this server holds, naming the call that ends each hold it reports (#577).
 
     A declared run ends with `bench_run_stop`. A lease outside it is a COM, CAN
     or debug session, which outlives `bench_run_stop` by design, and the holds do
     not say which of the three it is, so each call is named with the session it
-    ends, as the write refusal's remediation names them. Holds that report
-    neither get every call."""
+    ends, as the write refusal's remediation names them. A lease registered
+    under an incident that no session holds is none of them: no stop call frees
+    it, and the step names the incident it waits for instead. Holds that report
+    none of these get every call."""
+    under_incident = leases_under_incident(open_holds)
     run = bool(open_holds.get("run_active"))
-    sessions = bool(open_holds.get("open_leases"))
-    if not run and not sessions:
+    sessions = any(lease not in under_incident for lease in open_holds.get("open_leases") or [])
+    if not run and not sessions and not under_incident:
         run = sessions = True
     ends: list[str] = []
     if run:
         ends.append("the declared run with `bench_run_stop`")
     if sessions:
         ends.append("a COM session with `com_session_stop`, a CAN session with `can_session_stop` and a debug session with `debug_stop_session`")
-    return "A run or session is holding hardware, so no configuration write is accepted until each hold is closed: " + "; ".join(ends) + "."
+    parts: list[str] = []
+    if ends:
+        parts.append("A run or session is holding hardware, so no configuration write is accepted until each hold is closed: " + "; ".join(ends) + ".")
+    if under_incident:
+        parts.append(under_incident_sentence(under_incident) + " No configuration write is accepted until then.")
+    return " ".join(parts)
 
 
 def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], open_holds: JsonObject | None, status: JsonObject, *, on_disk: bool) -> list[str]:
@@ -1977,6 +2008,7 @@ __all__ = [
     "deny_all_permissions",
     "description_view",
     "granted_rights",
+    "leases_under_incident",
     "load_config_document",
     "permission_delta",
     "permission_surface",
@@ -1986,4 +2018,5 @@ __all__ = [
     "recorded_actor",
     "resolve_permission_key",
     "set_permission",
+    "under_incident_sentence",
 ]

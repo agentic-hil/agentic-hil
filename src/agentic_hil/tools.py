@@ -691,18 +691,11 @@ class AgenticHILToolService:
         if stood_down is None and not recovered:
             return {**result, **withheld} if withheld else result
         # Whatever the ended incident left registered goes back, because the call
-        # that took it is over and the bench is not held for it any more. This
-        # runs after a recovery action too, not only after a stand-down: a
-        # `project_config_adopt_hardware` read whose target the recovery reset and
-        # re-read leaves its enumeration and probe leases registered and `active`,
-        # and a leftover active lease would tell the next config write this server
-        # is still holding the bench. A lease a live COM or CAN session owns is
-        # the exception and the only one: the session is still there, still
-        # usable, and still the thing that gives its device back.
-        session_leases = {id(session.lease) for session in (*self.com_ports.sessions.values(), *self.can_buses.sessions.values())}
-        for lease in list(self.coordinator.leases.values()):
-            if lease.state == "active" and id(lease) not in session_leases:
-                lease.release()
+        # that took it is over and the bench is not held for it any more. A
+        # recovery action gives back what its own ending set `active`; this is
+        # for the stand-down, and for a lease whose release inside the recovery
+        # failed into an incident the stand-down has just ended.
+        self._give_back_leftover_leases()
         if self._quarantined_lease is not None and self._quarantined_lease.state != "active":
             self._quarantined_lease = None
         # Attached while the flags still say quarantined, so the reasons keep the
@@ -1347,16 +1340,26 @@ class AgenticHILToolService:
         touch what it declared. Both a declared run and a lease taken outside one
         count: a COM session outlives `bench_run_stop` by design, so asking only
         whether a run is open would miss the case where a board is still held.
+
+        `leases_under_incident` names the open leases registered under an
+        incident that no live session holds: a call took each of them and could
+        not give it back. No run declared them and no session stops them, so the
+        refusals built from this name the incident they wait for instead of a
+        stop call that frees nothing.
         """
         run = self.coordinator.run_status()
         leases = sorted(lease.lease_id for lease in self.coordinator.leases.values())
         if not run.get("run_active") and not leases:
             return None
+        sessions = self._session_lease_ids()
         holds: JsonObject = {
             "run_active": bool(run.get("run_active")),
             "declared_devices": run.get("declared_devices") or [],
             "held_devices": run.get("held_devices") or [],
             "open_leases": leases,
+            "leases_under_incident": sorted(
+                lease.lease_id for lease in self.coordinator.leases.values() if lease.state in {"cleanup_required", "quarantined"} and lease.lease_id not in sessions
+            ),
         }
         if run.get("run_label"):
             holds["run_label"] = run["run_label"]
@@ -1454,12 +1457,21 @@ class AgenticHILToolService:
         if not isinstance(result, dict) or result.get("ok") is not True:
             return result
         released = result.get("released_devices")
+        described = {key: value for key, value in result.items() if key not in ("open_leases", "still_held_devices")}
+        return {**described, **self.coordinator.leases_still_open(len(released) if isinstance(released, list) else 0, self._session_lease_ids())}
+
+    def _session_lease_ids(self) -> frozenset[str]:
+        """The leases a live COM, CAN or debug session holds, by id.
+
+        Stopping a session gives back its lease and no other, so these are the
+        leases a caller frees by stopping one, and the only ones an ended
+        incident leaves `active` that nothing here may give back: the session is
+        still there, still usable, and still the thing that gives its device
+        back."""
         leases = [session.lease for session in (*self.com_ports.sessions.values(), *self.can_buses.sessions.values())]
         if self._debug_lease is not None:
             leases.append(self._debug_lease)
-        sessions = frozenset(lease.lease_id for lease in leases if isinstance(lease, HardwareLease))
-        described = {key: value for key, value in result.items() if key not in ("open_leases", "still_held_devices")}
-        return {**described, **self.coordinator.leases_still_open(len(released) if isinstance(released, list) else 0, sessions)}
+        return frozenset(lease.lease_id for lease in leases if isinstance(lease, HardwareLease))
 
     def bench_run_status(self) -> JsonObject:
         return self.coordinator.run_status()
@@ -2078,6 +2090,12 @@ class AgenticHILToolService:
         `session_already_active` even after the coordinator considers the
         incident it raised settled.
 
+        The handles are not all the incident held. Ending it set every lease it
+        held back to `active`, still registered, and a lease the service keeps no
+        handle on, such as the one an adoption read or a COM call took, goes back
+        here too: the call that took it is over, and a lease left registered is
+        a hold nothing ends, since no run declared it and no session stops it.
+
         Returns whether every release confirmed. `HardwareLease.release()` fails
         closed: a release that cannot persist its own record re-quarantines the
         bench under a fresh `lease_release_unconfirmed` incident, and a caller
@@ -2098,6 +2116,23 @@ class AgenticHILToolService:
             self._debug_artifact = None
         released = True
         for lease in handles:
+            if not lease.release():
+                released = False
+        if not self._give_back_leftover_leases():
+            released = False
+        return released
+
+    def _give_back_leftover_leases(self) -> bool:
+        """Release every `active` lease no live session holds, and say whether each release confirmed.
+
+        Asked once an incident has ended, by a recovery or a stand-down, which
+        sets the leases it held back to `active` with the call that took them
+        over. A lease a live session holds is the exception and the only one."""
+        sessions = self._session_lease_ids()
+        released = True
+        for lease in list(self.coordinator.leases.values()):
+            if lease.state != "active" or lease.lease_id in sessions:
+                continue
             if not lease.release():
                 released = False
         return released

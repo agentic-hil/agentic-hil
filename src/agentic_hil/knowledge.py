@@ -1356,7 +1356,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "A configuration write was attempted while this server holds hardware: a declared run, an open COM or CAN "
             "session, or a debug session. Those holds were taken under the policy this file states, so changing it "
             "underneath them would move the rules during the run they govern. Nothing was written and the run is "
-            "untouched."
+            "untouched. The hold can also be a lease a call could not give back, which `open_holds.leases_under_incident` "
+            "names: it stays registered under the incident holding it until that incident ends."
         ),
         remediation=(
             "Finish the run and close it with `bench_run_stop`, stop any COM or CAN session with "
@@ -1364,6 +1365,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "configuration change.",
             "`bench_run_status` says whether a run is open and which devices it declared; the refusal carries the "
             "same in `open_holds`.",
+            "A lease `open_holds.leases_under_incident` names belongs to no run and no session, and no stop call frees "
+            "it: it goes back when the incident it is registered under ends. `agentic-hil lease-status` names that "
+            "incident and whether it stands; repeat the configuration change once it shows no open lease.",
         ),
         do_not=(
             "Do not end a run early only to get the write through. The run is holding a board for a reason, and a "
@@ -1402,7 +1406,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "description on disk decides which physical unit each of those names means, so re-reading it mid-run could "
             "point a held name at another board. Nothing was re-read, nothing was written, and the run is untouched. "
             "The same rule as `config_write_in_open_run` and the same remedy; it is a separate error type only because "
-            "this call writes nothing, and a caller should not be told it did."
+            "this call writes nothing, and a caller should not be told it did. The hold can also be a lease a call could "
+            "not give back, which `open_holds.leases_under_incident` names: it stays registered under the incident "
+            "holding it until that incident ends."
         ),
         remediation=(
             "Finish the run and close it with `bench_run_stop`, stop any COM or CAN session with "
@@ -1410,6 +1416,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "reload.",
             "`bench_run_status` says whether a run is open and which devices it declared; the refusal carries the "
             "same in `open_holds`.",
+            "A lease `open_holds.leases_under_incident` names belongs to no run and no session, and no stop call frees "
+            "it: it goes back when the incident it is registered under ends. `agentic-hil lease-status` names that "
+            "incident and whether it stands; repeat the reload once it shows no open lease.",
             "Nothing was lost by the refusal. The file is unchanged and the reload is exactly as available after the "
             "run as it was before it.",
         ),

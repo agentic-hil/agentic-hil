@@ -70,8 +70,10 @@ from agentic_hil.configwrite import (
     NOT_STARTED,
     PROJECT_CONFIG_SET,
     authoritative_write_target,
+    leases_under_incident,
     load_config_document,
     project_config_set,
+    under_incident_sentence,
 )
 from agentic_hil.coordination import (
     DEBUGGER_DISCOVERY_RESOURCE,
@@ -1622,6 +1624,27 @@ def _next_steps(plan: JsonObject, *, applied: bool) -> list[str]:
     return steps
 
 
+def _held_next_step(open_holds: JsonObject) -> str:
+    """What ends each hold the refusal reports, then the retry.
+
+    A run and a session each end with a call the caller makes, and only the
+    holds that exist are named. A lease registered under an incident that no
+    session holds is neither, and no stop call frees it: the step names the
+    incident it waits for, and the retry waits for `agentic-hil lease-status`
+    to show it gone."""
+    under_incident = leases_under_incident(open_holds)
+    run = bool(open_holds.get("run_active"))
+    sessions = any(lease not in under_incident for lease in open_holds.get("open_leases") or [])
+    if not run and not sessions and not under_incident:
+        run = sessions = True
+    closes = " and ".join(text for held, text in ((run, "close the run with `bench_run_stop`"), (sessions, "stop any open COM or CAN session")) if held)
+    closes = closes[:1].upper() + closes[1:]
+    if not under_incident:
+        return f"{closes}, then call this again."
+    parts = [f"{closes}." if closes else "", under_incident_sentence(under_incident), "Call this again once `agentic-hil lease-status` shows no open lease."]
+    return " ".join(part for part in parts if part)
+
+
 def _held_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> JsonObject:
     return {
         "ok": False,
@@ -1634,7 +1657,7 @@ def _held_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> JsonObj
         "open_holds": open_holds,
         "path": existing.config_path,
         "workspace_root": existing.workspace_root,
-        "next_step": "Close the run with `bench_run_stop` and stop any open COM or CAN session, then call this again.",
+        "next_step": _held_next_step(open_holds),
         **remediation_fields("config_write_in_open_run"),
         **NOT_STARTED,
         "retry_safe": True,
