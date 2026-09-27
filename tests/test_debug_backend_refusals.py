@@ -65,6 +65,7 @@ from conftest import (
 from fixtures.fake_gdb import MEMORY_READ_REFUSAL as GDB_MEMORY_READ_REFUSAL
 from support import scaled_time_bound
 
+from agentic_hil.backends import gdbdebug
 from agentic_hil.backends.common import NOT_CONTACTED
 from agentic_hil.backends.gdbdebug import GdbDebugSession
 from agentic_hil.backends.openocd import OpenOCDBackend
@@ -765,6 +766,87 @@ def test_a_server_that_dies_at_startup_is_classified_from_its_output(tmp_path: P
     assert started["backend_error_type"] == "adapter_not_found", started
     assert started["summary"] == "Debug server exited before the GDB port became ready.", started
     assert started["elapsed_ms"] < scaled_time_bound(START_TIMEOUT_S * 1000 / 2), started
+    assert started["cleanup_confirmed"] is True, started
+    assert started["side_effect_status"] == "not_started", started
+    assert started["retry_safe"] is True, started
+    assert decisive_line in Path(tmp_path / started["log_path"]).read_text(encoding="utf-8"), started["log_path"]
+
+
+class ReaderHeldAtLine:
+    """Holds the product's reader of the debug server's stderr at one line until
+    a thread joins that reader.
+
+    The server's stderr is handed to the reader through this, and every
+    `Thread.join` is watched for the one thread it holds. The hold ends as soon
+    as both have happened, in either order, so nothing depends on which thread
+    the scheduler runs first; the bound only keeps a reader nobody ever joins
+    from outliving the test.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, line: str):
+        self.line = line
+        self.reached = threading.Event()
+        self._released = threading.Event()
+        self._lock = threading.Lock()
+        self._joined: set[threading.Thread] = set()
+        self._holding: threading.Thread | None = None
+        spawn = gdbdebug.spawn_managed_process
+        join = threading.Thread.join
+
+        def spawn_with_held_stderr(*args, **kwargs):
+            server = spawn(*args, **kwargs)
+            server.stderr = self._held(server.stderr)
+            return server
+
+        def join_releasing_the_held_reader(thread: threading.Thread, timeout: float | None = None) -> None:
+            with self._lock:
+                self._joined.add(thread)
+                if thread is self._holding:
+                    self._released.set()
+            join(thread, timeout)
+
+        monkeypatch.setattr(gdbdebug, "spawn_managed_process", spawn_with_held_stderr)
+        monkeypatch.setattr(threading.Thread, "join", join_releasing_the_held_reader)
+
+    def _held(self, stream):
+        for line in stream:
+            if line.rstrip("\r\n") == self.line and not self.reached.is_set():
+                with self._lock:
+                    self._holding = threading.current_thread()
+                    if self._holding in self._joined:
+                        self._released.set()
+                self.reached.set()
+                self._released.wait(scaled_time_bound(START_TIMEOUT_S))
+            yield line
+
+
+def test_a_server_that_dies_at_startup_is_classified_after_its_readers_finish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The start failure reads the server's output once the readers have it (#587).
+
+    When a start sees that the server has exited, the lines the server printed
+    last, which are the ones that say why, can still be in the pipe on their way
+    to a reader. Here the reader of the server's stderr is held at the recorded
+    decisive line until something joins it, which makes that order the only one:
+    a start that classifies before it waits for its readers classifies a tail
+    without the line, and a start that waits releases the reader and has it. The
+    session log, written after the cleanup's own join, holds the line either
+    way, which is how the failure showed: a type the log beside it contradicts.
+    """
+    decisive_line = "Error: open failed"
+    play_recording(monkeypatch, "openocd_server_stlink_no_probe")
+    held = ReaderHeldAtLine(monkeypatch, decisive_line)
+    service = debug_service(tmp_path, server=FAKE_TRANSCRIPT)
+    try:
+        started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": START_TIMEOUT_S})
+    finally:
+        closing = closed_reporting_its_own_failure(service)
+
+    assert closing is None, closing
+    assert held.reached.is_set(), "the reader never reached the recorded decisive line"
+    assert started["ok"] is False, started
+    assert started["error_type"] == "adapter_not_found", started
+    assert started["backend_error_type"] == "adapter_not_found", started
+    assert started["summary"] == "Debug server exited before the GDB port became ready.", started
     assert started["cleanup_confirmed"] is True, started
     assert started["side_effect_status"] == "not_started", started
     assert started["retry_safe"] is True, started
