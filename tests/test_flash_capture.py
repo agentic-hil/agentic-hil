@@ -1089,7 +1089,7 @@ def test_a_flash_that_fails_stops_the_session_keeps_what_the_board_sent_and_reco
         service.close()
 
 
-def test_a_read_that_fails_after_a_good_flash_keeps_every_field_of_the_flash(tmp_path: Path, board: Board) -> None:
+def test_a_read_that_fails_after_a_good_flash_keeps_every_field_of_the_flash(tmp_path: Path, board: Board, monkeypatch: pytest.MonkeyPatch) -> None:
     """The board was flashed and reset, and then the port died. `ok` is false
     because the capture failed, and the result still says the flash committed,
     with every field the same flash has without a capture, so nobody reads it as
@@ -1097,6 +1097,17 @@ def test_a_read_that_fails_after_a_good_flash_keeps_every_field_of_the_flash(tmp
     config = config_for(tmp_path)
     partial = b"\r\nboot: demo firmware 1.0\r\n"
     service, backend = service_for(config, board)
+    read_observations: list[tuple[float, float]] = []
+    read_until = service.com_ports._read_until
+
+    def time_read_until(session, port_id, tool, max_bytes, wait_s, until):
+        started = time.monotonic()
+        try:
+            return read_until(session, port_id, tool, max_bytes, wait_s, until)
+        finally:
+            read_observations.append((wait_s, time.monotonic() - started))
+
+    monkeypatch.setattr(service.com_ports, "_read_until", time_read_until)
     try:
         plain = service.call("flash_firmware", {**firmware(tmp_path), "reset_after_flash": True})
         assert plain["ok"] is True, plain
@@ -1105,9 +1116,7 @@ def test_a_read_that_fails_after_a_good_flash_keeps_every_field_of_the_flash(tmp
         backend.banner = partial
         backend.die_after_banner = True
 
-        started = time.monotonic()
         result = service.call("flash_firmware", flash_args(tmp_path, until=READY, wait_timeout_s=12))
-        elapsed = time.monotonic() - started
 
         assert result["ok"] is False, result
         assert result["error_type"] == "serial_read_failed", result
@@ -1120,7 +1129,10 @@ def test_a_read_that_fails_after_a_good_flash_keeps_every_field_of_the_flash(tmp
         assert capture["reader_error"]["error_type"] == "serial_read_failed", capture
         assert "device disconnected" in capture["reader_error"]["backend_error"], capture
         assert "device disconnected" in result["summary"], result
-        assert elapsed < scaled_time_bound(4.0), elapsed
+        assert len(read_observations) == 1, read_observations
+        wait_s, elapsed = read_observations[0]
+        assert wait_s == 12.0, read_observations
+        assert elapsed < scaled_time_bound(4.0), (read_observations, scaled_time_bound(4.0))
         assert_bench_free(service)
     finally:
         service.close()
