@@ -624,6 +624,39 @@ def test_the_refused_erase_texts_name_how_bench_run_stop_ends_it_on_a_bench_whos
         service.close()
 
 
+def test_the_refused_erase_texts_do_not_deny_the_hold_a_declared_run_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the texts say about a signature, read against a declared run's own fields.
+
+    Inside a declared run the failed flash says `quarantined: true` until
+    `bench_run_stop`, so a text that sets it apart from a quarantine that holds
+    the bench contradicts the result it is attached to. What is true there is
+    that the incident does not stand: `hardware_lease_status` says
+    `incident_stands: false`, the question both recovery routes ask before
+    anything else, and `hardware_recover` answers `nothing_to_recover: true`.
+    The texts have to give that as the reason nothing is owed, not that the
+    bench is not held."""
+    service, _ = refused_erase_bench(tmp_path, monkeypatch)
+    try:
+        started = service.call("bench_run_start", {"devices": [{"kind": "debugger"}]})
+        assert started["ok"] is True, started
+
+        result = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+        assert result["error_type"] == "flash_erase_failed"
+        assert result["quarantined"] is True
+        assert service.coordinator.status()["incident_stands"] is False
+        recovered = service.call("hardware_recover", {})
+        assert recovered["nothing_to_recover"] is True, recovered
+
+        for name, text in (("remediation", " ".join(result["remediation"])), ("TROUBLESHOOTING.md 10a", refused_erase_section())):
+            assert "which this is not" not in text, name
+            assert "incident_stands: false" in text, name
+
+        stopped = service.call("bench_run_stop")
+        assert stopped["ok"] is True, stopped
+    finally:
+        service.close()
+
+
 def test_a_transcript_that_cannot_place_the_failure_keeps_the_quarantine() -> None:
     """When in doubt the quarantine stays, and the result says which it is.
 
