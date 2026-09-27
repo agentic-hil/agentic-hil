@@ -85,6 +85,7 @@ from agentic_hil.knowledge import (
     permission_denied_next_step,
     permission_denied_summary,
     permission_key,
+    quarantine_reason_details,
     recovery_operator_command,
     remediation_fields,
 )
@@ -710,14 +711,31 @@ class AgenticHILToolService:
             # A lease given back above, or by the recovery action, could not be
             # released, and a release that cannot persist fails closed under an
             # incident of its own. The bench is held again, so the claim that it
-            # is, and the advice for a held bench, stay as the call made them.
-            return result
+            # is, and the advice for a held bench, stay as the call made them,
+            # about the incident that holds it now.
+            return self._named_after_the_holding_incident(result)
         # Nothing holds the bench now, whichever of the two endings ran, and
         # `quarantined` is the field that says it is held. Its neighbour
         # `cleanup_required` says something neither ending changed: this call
         # left work behind, a debug session to stop, a state nobody confirmed,
         # and a caller reading a failed result still has to know it.
         released: JsonObject = {**result, **({"quarantined": False} if result.get("quarantined") is True else {})}
+        ending = "This call's own recovery has since ended the incident" if recovered else "The incident has since been stood down"
+        # A `recovery` block from the run's teardown said what held the bench
+        # when the teardown returned: an incident it could not settle, or one a
+        # lease that could not be given back raised. That incident has ended
+        # too, so the block stops calling it open and names no id as holding
+        # the bench, and its summary is followed by how it ended. Its reasons
+        # stay, for the same reason the top-level ones do.
+        recovery = result.get("recovery")
+        if isinstance(recovery, dict) and (recovery.get("incident_open") is True or recovery.get("quarantined") is True):
+            ended: JsonObject = {key: value for key, value in recovery.items() if key != "quarantine_id"}
+            for field in ("incident_open", "cleanup_required", "quarantined"):
+                if ended.get(field) is True:
+                    ended[field] = False
+            if isinstance(recovery.get("incident_summary"), str):
+                ended["incident_summary"] = f"{recovery['incident_summary']} {ending}, and nothing holds the bench."
+            released["recovery"] = ended
         # A refusal built on the quarantine's own remediation sends the caller to
         # `agentic-hil recover` with an id that no longer names anything. That
         # advice goes, and the retry it was the precondition for is the next step.
@@ -731,7 +749,6 @@ class AgenticHILToolService:
         # that says the board is quarantined is followed by how that ended.
         summary = result.get("summary")
         if isinstance(summary, str) and "quarantined" in summary:
-            ending = "This call's own recovery has since ended the incident" if recovered else "The incident has since been stood down"
             released["summary"] = f"{summary} {ending}, and nothing holds the bench."
         return released
 
@@ -745,6 +762,43 @@ class AgenticHILToolService:
         workspace that owns it, so its claim and its advice stay as they were."""
         owner = result.get("project_resource")
         return isinstance(owner, str) and owner != self.coordinator.project_key
+
+    def _named_after_the_holding_incident(self, result: JsonObject) -> JsonObject:
+        """Name the incident that holds the bench wherever the result names one as its own.
+
+        The incident the call reported has ended, and a lease that could not be
+        given back on the way out raised another in its place, under an id the
+        call never saw. That id is the one `lease-status` reports and the one a
+        signature has to name, so it replaces the ended one at the top, on every
+        lease and in the `recovery` block; `incident_stood_down` goes on naming
+        what ended. At the top the new incident's reasons join the ones already
+        there, which the call still could not confirm, with the guidance for
+        all of them, and `auto_recoverable` is the new incident's, computed the
+        way `lease-status` computes it. Nothing else changes: the claim that the
+        bench is held is true, and a result that carried no remediation is not
+        given one."""
+        holding = self.coordinator.quarantine_id
+        if not isinstance(holding, str) or not holding:
+            return result
+        named: JsonObject = dict(result)
+        if isinstance(result.get("quarantine_id"), str):
+            reasons = sorted({reason for lease in self.coordinator.leases.values() for reason in lease.cleanup_reasons()})
+            listed = result.get("cleanup_reasons")
+            kept = [reason for reason in listed if isinstance(reason, str) and reason] if isinstance(listed, list) else []
+            merged = kept + [reason for reason in reasons if reason not in kept]
+            recoverable = self.coordinator.recoverable_reasons()
+            named["quarantine_id"] = holding
+            if merged:
+                named["cleanup_reasons"] = merged
+                named["quarantine_guidance"] = quarantine_reason_details(merged)
+            named["auto_recoverable"] = bool(reasons) and all(reason in recoverable for reason in reasons)
+        leases = result.get("leases")
+        if isinstance(leases, list):
+            named["leases"] = [{**lease, "quarantine_id": holding} if isinstance(lease, dict) and isinstance(lease.get("quarantine_id"), str) else lease for lease in leases]
+        recovery = result.get("recovery")
+        if isinstance(recovery, dict) and isinstance(recovery.get("quarantine_id"), str):
+            named["recovery"] = {**recovery, "quarantine_id": holding}
+        return named
 
     def _call_unlocked(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         if arguments is None:
