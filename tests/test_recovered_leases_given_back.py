@@ -34,10 +34,11 @@ from test_config_write import SESSION_STOP_CALLS
 
 from agentic_hil.adopt import PROJECT_CONFIG_ADOPT
 from agentic_hil.config import load_authoritative_config
-from agentic_hil.configwrite import PROJECT_CONFIG_DESCRIBE
+from agentic_hil.configreload import PROJECT_CONFIG_RELOAD
+from agentic_hil.configwrite import PROJECT_CONFIG_DESCRIBE, PROJECT_CONFIG_SET
 from agentic_hil.coordination import LEASE_RELEASE_RETRY_REASON
-from agentic_hil.knowledge import CONFIG_DESCRIPTION_RIGHT
-from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.knowledge import CONFIG_DESCRIPTION_RIGHT, CONFIG_WRITE_RIGHT
+from agentic_hil.tools import PROJECT_CONFIG_CREATE, AgenticHILToolService
 
 
 def fail_the_first_releases(service: AgenticHILToolService, monkeypatch: pytest.MonkeyPatch, count: int) -> None:
@@ -53,18 +54,18 @@ def fail_the_first_releases(service: AgenticHILToolService, monkeypatch: pytest.
     monkeypatch.setattr(service.coordinator, "_persist_lease", failing_persist)
 
 
-def recovery_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str | None) -> tuple[Path, AgenticHILToolService]:
+def recovery_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str | None, **grants: bool) -> tuple[Path, AgenticHILToolService]:
     """The placeholder bench, under ``policy`` or the default one, on a probe double a recovery can drive."""
-    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True, **grants})
     if policy is not None:
         _set_auto_recover(path, policy)
     return path, AgenticHILToolService(load_authoritative_config(workspace), backend=_RecoveryBackend(), frontend="mcp")
 
 
-def timed_out_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str | None) -> tuple[Path, AgenticHILToolService]:
+def timed_out_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str | None, **grants: bool) -> tuple[Path, AgenticHILToolService]:
     """The same bench with a board whose first read is reaped mid-attach."""
     monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read())
-    return recovery_bench(tmp_path, monkeypatch, policy)
+    return recovery_bench(tmp_path, monkeypatch, policy, **grants)
 
 
 @pytest.mark.parametrize(
@@ -195,5 +196,45 @@ def test_describe_names_a_lease_held_under_an_incident_and_no_run_or_session(tmp
         assert not any("run or session is holding" in step for step in steps), steps
         hold_steps = [step for step in steps if "agentic-hil lease-status" in step and all(lease_id in step for lease_id in held)]
         assert len(hold_steps) == 1, steps
+    finally:
+        tools.close()
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "error_type"),
+    [
+        (PROJECT_CONFIG_SET, {"changes": [{"key": "debuggers.dut.permissions.allow_mass_erase", "value": False}]}, "config_write_in_open_run"),
+        (PROJECT_CONFIG_CREATE, {}, "config_write_in_open_run"),
+        (PROJECT_CONFIG_RELOAD, {}, "config_reload_in_open_run"),
+    ],
+    ids=["set", "create", "reload"],
+)
+def test_the_other_configuration_refusals_say_what_ends_a_lease_held_under_an_incident(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str, arguments: dict[str, object], error_type: str
+) -> None:
+    """`project_config_set`, `project_config_create` and `project_config_reload_description` read the same holds.
+
+    Each refuses while the read's lease is still held under its incident, as the
+    adoption does. Their advice is the catalogue's, which named only a run and a
+    session to close, and neither frees this lease: the holds name it as held
+    under an incident, and the remediation says what ends that hold and where the
+    incident is named. The end of the refused call gives the lease back."""
+    _, tools = timed_out_bench(tmp_path, monkeypatch, "off", **{CONFIG_WRITE_RIGHT: True})
+    fail_the_first_releases(tools, monkeypatch, 1)
+    try:
+        assert tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})["ok"] is False
+        held = sorted(tools.coordinator.leases)
+        assert held, tools.coordinator.status()
+
+        refused = tools.call(tool, arguments)
+
+        assert refused["error_type"] == error_type, refused
+        holds = refused["open_holds"]
+        assert holds["run_active"] is False, holds
+        assert holds["leases_under_incident"] == held, holds
+        steps = [step for step in refused["remediation"] if "leases_under_incident" in step]
+        assert len(steps) == 1, refused["remediation"]
+        assert "agentic-hil lease-status" in steps[0], steps
+        assert tools.open_hardware_holds() is None, tools.open_hardware_holds()
     finally:
         tools.close()
