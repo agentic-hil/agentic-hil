@@ -6,8 +6,8 @@ below. The nightly job in `hardware-bench.yml` runs the Nucleo-F446RE demo on a
 machine with that board attached, and the second half holds it to the rules a
 self-hosted runner cannot recover from getting wrong: no `pull_request` trigger,
 a runner addressed by labels alone, one queue for one board, every action pinned
-by commit, every hardware action through the `agentic-hil` CLI, and evidence
-uploaded whatever the run did. The gate in `bench-gate.yml`, which runs the
+by commit, every hardware action through the `agentic-hil` CLI and under the
+machine's run lock, and evidence uploaded whatever the run did. The gate in `bench-gate.yml`, which runs the
 bench tier on that board for one commit a maintainer names, is held to the same
 rules and to one of its own: the commit it names runs only inside the container.
 
@@ -38,6 +38,7 @@ id in front of it.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import shlex
 import sys
@@ -585,12 +586,13 @@ def test_the_bench_job_selects_its_runner_by_label_alone() -> None:
     it runs one job at a time, and the STM32 starter's hardware workflow selects
     the same runner by the same labels, so a run from either repository waits in
     that one runner's queue while the other holds the board. The concurrency
-    group cannot do this, it is scoped to one repository.
+    group cannot do this, it is scoped to one repository. The limit is held
+    below, beside the wait it has to make room for.
     """
     job = bench_job()
 
     assert job["runs-on"] == BENCH_LABELS
-    assert job["timeout-minutes"] == 20
+    assert isinstance(job["timeout-minutes"], int), job
 
 
 def test_a_forks_schedule_never_goes_looking_for_this_bench() -> None:
@@ -743,6 +745,108 @@ def test_the_bench_run_uploads_its_evidence_whatever_the_run_did() -> None:
     assert upload[0]["if"] == "always()"
     assert upload[0]["with"]["retention-days"] == 14
     assert f"{DEMO_DIRECTORY}/artifacts/" in upload[0]["with"]["path"]
+
+
+# The machine's run lock, the one tools/run_lock.py keeps and every container
+# runner on that machine queues on before it builds anything. The job takes it
+# before its first step that reaches the board and gives it back after its last,
+# so a run started on the machine meanwhile waits for the job rather than
+# meeting it as `device_busy` in the middle of a plan, and the job waits for such
+# a run the same way.
+RUN_LOCK = "tools/run_lock.py"
+# What the job's own work had before it queued for the machine, and still has:
+# the wait has a limit of its own, on the step that waits, so a long queue fails
+# that step instead of stopping a plan half way through a flash.
+BENCH_WORK_MINUTES = 20
+
+
+def run_lock_step(action: str) -> tuple[int, dict, list[str]]:
+    """The one bench step that runs `run_lock.py <action>`: its index, the step, its command."""
+    found = []
+    for index, step in enumerate(bench_job()["steps"]):
+        lines = run_lines({"steps": [step]})
+        commands = [shlex.split(line) for line in lines]
+        if any(action in command and any(word.endswith(RUN_LOCK) for word in command) for command in commands):
+            found.append((index, step, commands))
+    assert len(found) == 1, found
+    index, step, commands = found[0]
+    assert len(commands) == 1, commands
+    return index, step, commands[0]
+
+
+def step_index(needle: str) -> int:
+    """The index of the one bench step whose command runs `needle`."""
+    found = [index for index, step in enumerate(bench_job()["steps"]) if needle in step.get("run", "")]
+    assert len(found) == 1, (needle, found)
+    return found[0]
+
+
+def resolved_script(step: dict, script: str) -> str:
+    """Where a step's script is, from the workspace root, whatever directory the step runs in."""
+    return posixpath.normpath(posixpath.join(step.get("working-directory", DEMO_DIRECTORY), script))
+
+
+def test_the_bench_job_takes_the_machines_run_lock_before_it_reaches_the_board() -> None:
+    """Queued behind any run already on the machine, and held for the job's life.
+
+    `exec`, so the command is the step's own process and its parent is the job's
+    process, the one `--for-the-life-of` names with `$PPID`: the lock follows
+    the job rather than the step that took it, and a job that ends however it
+    ends leaves a record naming a process that is gone, which the next run on
+    the machine breaks as stale. No `--no-wait`, because a nightly that met
+    another run would otherwise fail instead of running after it. The state
+    goes where the runner empties before and after every job.
+    """
+    index, step, command = run_lock_step("take")
+
+    assert command[:2] == ["exec", "python3"], command
+    assert resolved_script(step, command[2]) == RUN_LOCK, (step, command)
+    assert command[3] == "take", command
+    assert option_value(command, "--for-the-life-of") == "$PPID", command
+    assert (option_value(command, "--state") or "").startswith("$RUNNER_TEMP/"), command
+    assert option_value(command, "--tool") == ".github/workflows/hardware-bench.yml", command
+    assert option_value(command, "--runs-for"), command
+    assert "--no-wait" not in command, command
+    assert "if" not in step, step
+    assert index < step_index("agentic-hil doctor"), index
+
+
+def test_the_bench_job_gives_the_lock_back_after_its_last_step_on_the_board_whatever_happened() -> None:
+    """From the state the take wrote, after the plan and the pytest variant, always.
+
+    `always()`, because a red plan and a cancelled run hold the machine as much
+    as a green one; a take that never held it finds nothing to give back and
+    says so. Nothing after it reaches the board: the evidence is built from the
+    report the plan already wrote.
+    """
+    _, _, taken = run_lock_step("take")
+    index, step, command = run_lock_step("give-back")
+
+    assert command[0] == "python3", command
+    assert resolved_script(step, command[1]) == RUN_LOCK, (step, command)
+    assert command[2] == "give-back", command
+    assert option_value(command, "--state") == option_value(taken, "--state"), (command, taken)
+    assert step["if"] == "always()", step
+    assert index > step_index("agentic-hil test-reactor"), index
+    assert index > step_index("pytest tests/"), index
+    for later in bench_job()["steps"][index + 1 :]:
+        assert "agentic-hil doctor" not in later.get("run", ""), later
+        assert "test-reactor" not in later.get("run", ""), later
+        assert "pytest" not in later.get("run", ""), later
+
+
+def test_the_wait_for_the_machine_never_eats_into_the_time_the_jobs_work_has() -> None:
+    """The wait has its own limit, and the job's is that limit plus the work's twenty minutes.
+
+    Before the job queued for the machine it had twenty minutes for the whole
+    of its work. A wait counted against that would stop a plan that started
+    late in the middle of a flash, so the step that waits fails on its own
+    limit instead, before anything reached the board.
+    """
+    _, step, _ = run_lock_step("take")
+
+    assert isinstance(step["timeout-minutes"], int), step
+    assert bench_job()["timeout-minutes"] == step["timeout-minutes"] + BENCH_WORK_MINUTES
 
 
 # The gate: the bench tier, run by tools/bench_in_container.py in its image on
