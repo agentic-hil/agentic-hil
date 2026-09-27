@@ -74,6 +74,7 @@ from agentic_hil.coordination import (
     CoordinationError,
     HardwareCoordinator,
     HardwareLease,
+    RecoveryHold,
     debugger_effect_resources,
     nothing_standing_result,
 )
@@ -1675,28 +1676,38 @@ class AgenticHILToolService:
         reason = self.coordinator.retryable_incident(allowed) if allowed else None
         if reason is None or not authority.probe_allowed():
             return None
-        if not self._machine_recovery_attempt_allowed():
-            return None
-        # Never drive the board for a reason a re-read already settles: the
-        # stronger predicate is a physical act, not a default.
-        needs_reset = reason not in RETRYABLE_CLEANUP_REASONS
-        if cleanup_registered_processes(owner_marker=self.coordinator.owner_marker):
-            return None
-        backend, owns_backend = self._recovery_backend(recovery_config)
-        # From here on a predicate is driven, and whatever it answers (or
-        # raises) the attempt has run.
-        self._machine_recovery_ran = True
+        # The probe is held before anything is counted, reaped or driven. A probe
+        # another workspace holds refuses the recovery the way it refuses a call,
+        # and that refusal is no attempt: the bound on attempts is for a
+        # predicate that ran and did not confirm, not for a board that was never
+        # this call's to drive.
         try:
-            if needs_reset:
-                reset = self._invoke_dispatch(lambda: backend.reset_target("halt"))
-                if not overall_success(reset):
-                    return None
-            verification = self._invoke_dispatch(backend.probe_target)
-        finally:
-            # A backend built for this recovery holds no session and spawns its
-            # work in its calls, so closing it only drops the throwaway object.
-            if owns_backend:
-                backend.close()
+            hold = self._hold_probe_for_recovery(authority)
+        except CoordinationError:
+            return None
+        with hold:
+            if not self._machine_recovery_attempt_allowed():
+                return None
+            # Never drive the board for a reason a re-read already settles: the
+            # stronger predicate is a physical act, not a default.
+            needs_reset = reason not in RETRYABLE_CLEANUP_REASONS
+            if cleanup_registered_processes(owner_marker=self.coordinator.owner_marker):
+                return None
+            backend, owns_backend = self._recovery_backend(recovery_config)
+            # From here on a predicate is driven, and whatever it answers (or
+            # raises) the attempt has run.
+            self._machine_recovery_ran = True
+            try:
+                if needs_reset:
+                    reset = self._invoke_dispatch(lambda: backend.reset_target("halt"))
+                    if not overall_success(reset):
+                        return None
+                verification = self._invoke_dispatch(backend.probe_target)
+            finally:
+                # A backend built for this recovery holds no session and spawns its
+                # work in its calls, so closing it only drops the throwaway object.
+                if owns_backend:
+                    backend.close()
         if not overall_success(verification) or verification.get("target_detected") is not True:
             return None
         policy = self.config.recovery
@@ -1746,6 +1757,15 @@ class AgenticHILToolService:
         self._release_recovered_leases()
         return report
 
+    def _hold_probe_for_recovery(self, config: AgenticHILConfig) -> RecoveryHold:
+        """Hold the probe a recovery action drives through ``config``, or raise CoordinationError.
+
+        The resources are the ones a call driving that probe leases. A config
+        with no debugger bound names no probe, and its backend refuses whatever
+        the recovery asks of it, so the hold is empty."""
+        resources = debugger_effect_resources(config) if config.debugger is not None else ()
+        return self.coordinator.hold_for_recovery(resources)
+
     def recover_after_failed_run(self, devices: list[str] | None = None) -> JsonObject:
         """Put the bench back into a state the next run can start from.
 
@@ -1766,6 +1786,11 @@ class AgenticHILToolService:
         `RECOVERY_ACTION_REASONS` for which reasons that covers and why the
         `audit_broken` families are not among them.
 
+        The actions run under a hold on the probe they drive, taken the way a
+        call driving it takes one. A probe another owner holds, through a run, a
+        call or an incident, is not this teardown's to reset or re-read: nothing
+        is driven, and the block names `probe_held_elsewhere` and the refusal.
+
         Returns the run result's `recovery` block. It never raises: a fault
         inside recovery must not replace the run's own verdict with a crash."""
         block: JsonObject = {"attempted": False, "actions": [], "outcome": "skipped"}
@@ -1779,7 +1804,16 @@ class AgenticHILToolService:
             reason, summary = withheld
             return {**block, "reason_not_attempted": reason, "summary": summary}
         try:
-            return {**block, **self._perform_recovery_actions()}
+            try:
+                hold = self._hold_probe_for_recovery(self.config)
+            except CoordinationError as refusal:
+                refused = f"{refusal.result.get('error_type')}: {str(refusal.result.get('summary', '')).rstrip('.')}"
+                return {
+                    **block,
+                    "reason_not_attempted": "probe_held_elsewhere",
+                    "summary": f"The probe this recovery would drive could not be held ({refused}), so nothing was driven and the target was left in whatever state the failed run put it in.",
+                }
+            return {**block, **self._perform_recovery_actions(hold)}
         except Exception as error:
             # Same rule as the acquire path: recovery may unblock hardware, so a
             # fault inside it fails closed. The incident, if there is one, stays.
@@ -1817,8 +1851,19 @@ class AgenticHILToolService:
             )
         return None
 
-    def _perform_recovery_actions(self) -> JsonObject:
-        """Reap, reset into halt, re-read the probe; then settle any incident."""
+    def _perform_recovery_actions(self, hold: RecoveryHold) -> JsonObject:
+        """Drive the recovery under the hold, give it back, then settle any incident.
+
+        Settling takes the incident's own locks, and the probe can be among
+        them, so the hold ends first."""
+        with hold:
+            actions = self._drive_recovery_actions()
+        if actions.get("outcome") != "recovered":
+            return actions
+        return {**actions, **self._settle_incident_after_recovery(actions.get("safe_state_predicate") == "reset_halt")}
+
+    def _drive_recovery_actions(self) -> JsonObject:
+        """Reap, reset into halt, re-read the probe."""
         actions: list[str] = ["reap_processes"]
         result: JsonObject = {"attempted": True, "actions": actions}
         if cleanup_registered_processes(owner_marker=self.coordinator.owner_marker):
@@ -1870,7 +1915,7 @@ class AgenticHILToolService:
                 verification,
             )
         result["safe_state_predicate"] = "reset_halt" if reset_halt else "readonly_probe"
-        return {**result, "outcome": "recovered", **self._settle_incident_after_recovery(reset_halt)}
+        return {**result, "outcome": "recovered"}
 
     @staticmethod
     def _recovery_action_failed(result: JsonObject, action: str, failed_check: str | None, summary: str, source: JsonObject) -> JsonObject:

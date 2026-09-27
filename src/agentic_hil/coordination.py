@@ -573,6 +573,32 @@ class DetachedHardwareLease:
         }
 
 
+class RecoveryHold:
+    """The locks and the bench hold a recovery action keeps on the probe it drives.
+
+    Not a lease: nothing is written for it and no incident can be raised on it,
+    because it ends before the recovery that took it returns. What it shares with
+    a lease is the exclusivity, since the reset into halt and the re-read are the
+    same acts on the same board as the calls that lease it. Given back with
+    ``release`` or at the end of a ``with`` block, and before the incident the
+    recovery settled is resolved: resolving takes the incident's own locks, and
+    the probe can be among them."""
+
+    def __init__(self, coordinator: HardwareCoordinator, locks: list[_LifetimeLock], bench_resources: list[str]):
+        self.coordinator = coordinator
+        self.locks = locks
+        self.bench_resources = bench_resources
+
+    def release(self) -> None:
+        self.coordinator.release_recovery_hold(self)
+
+    def __enter__(self) -> RecoveryHold:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.release()
+
+
 class HardwareCoordinator:
     def __init__(self, config: AgenticHILConfig, frontend: str = "python"):
         self.config = config
@@ -1004,6 +1030,55 @@ class HardwareCoordinator:
                     self.project_lock.release()
                     self.project_lock = None
                 raise
+
+    def hold_for_recovery(self, resources: Sequence[str]) -> RecoveryHold:
+        """Hold the probe a recovery action is about to drive, or refuse.
+
+        The end of a call and the teardown of a run drive the probe after the
+        call's own lease is gone, and after a refused call, with no lease ever
+        granted. They drove it all the same, with no lock and no bench hold, so a
+        probe another workspace held through a run, a call or an incident was
+        reset and halted underneath it, and the reset was recorded here as the
+        recovery of an incident of this project's own.
+
+        So a recovery takes what a call driving the probe takes, and is refused
+        the same way: by the per-resource locks, by another project's unresolved
+        incident on any of them, and by the bench hold. What makes a call a call
+        is left out. No project lock and no record, because the hold ends before
+        the recovery returns and leaves nothing to find. No run declaration,
+        because the teardown runs once the run has ended. A resource a lease of
+        this owner holds is this owner's already, so its lock is not taken a
+        second time, and its bench hold is counted once more, the way a call
+        inside a run counts the run's."""
+        normalized = sorted({resource for resource in resources if resource})
+        with self._guard:
+            self._require_open()
+            held = {resource for lease in self.leases.values() for resource in lease.resources}
+            locks: list[_LifetimeLock] = []
+            try:
+                for resource in normalized:
+                    if resource in held:
+                        continue
+                    locks.append(self._acquire_lock(resource, normalized))
+                    record = self._read_record(resource)
+                    if record is not None and record.get("state") not in {None, "released"} and not self._record_matches_project(record):
+                        raise CoordinationError(self._foreign_incident_refusal(resource, record))
+                try:
+                    self.bench.acquire(normalized)
+                except DeviceBusyError as error:
+                    raise CoordinationError({**error.result, "resources": normalized}) from error
+            except BaseException:
+                for lock in reversed(locks):
+                    lock.release()
+                raise
+            return RecoveryHold(self, locks, physical_resources(normalized))
+
+    def release_recovery_hold(self, hold: RecoveryHold) -> None:
+        with self._guard:
+            self.bench.release(hold.bench_resources)
+            hold.bench_resources = []
+            while hold.locks:
+                hold.locks.pop().release()
 
     def release_lease(
         self,
