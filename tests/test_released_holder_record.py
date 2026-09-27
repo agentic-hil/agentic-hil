@@ -20,6 +20,9 @@ interpreter, a bare lifetime lock, held the way `probe_bus_lock` holds a bus
 lock for the length of its probe, and the device mutex caught between taking
 the lock and writing its record; in this process, the device mutex whose record
 could not be written, a hold `_take` keeps.
+
+Every text that tells an agent or an operator that the refusal names its
+holder says, in the same words, what to do when it names none.
 """
 
 from __future__ import annotations
@@ -40,12 +43,22 @@ from test_holder_is_this_process import BOARD, lock_directory, refusal_to_a_cont
 
 from agentic_hil import bench as bench_module
 from agentic_hil.bench import BenchMutex
+from agentic_hil.knowledge import LEASE_LIFECYCLE_URI, read_resource, remediation_fields
 
 # Every field of a refusal that says who holds the device and how that holder is
 # doing. Only a record in state `held` may supply any of them.
 HOLDER_FIELDS = ("holder", "held_since", "heartbeat_at", "heartbeat_age_s", "holder_heartbeat_stale", "holder_is_this_process")
 
 PREVIOUS_LABEL = "earlier-run"
+
+# The field a named holder arrives in, spelled once and compared against the
+# refusal and the texts, so a rename on either side fails here. Every text that
+# promises a named holder carries this clause for a refusal that names none.
+HOLDER_FIELD = "holder"
+NO_HOLDER_CLAUSE = f"carries no `{HOLDER_FIELD}`"
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+TEXTS_THAT_PROMISE_A_NAMED_HOLDER = ("AGENTS.md", "TROUBLESHOOTING.md", "src/agentic_hil/skills/agentic-hil/SKILL.md", "plugins/agentic-hil/skills/agentic-hil/SKILL.md")
 
 # Holds BOARD with the product's lifetime lock and nothing else, the way
 # `probe_bus_lock` holds a bus lock while it probes: no record is written, so
@@ -182,3 +195,40 @@ def test_a_released_record_under_a_lock_held_here_names_nobody_as_the_holder(tmp
     assert record["owner"] == previous.owner.as_json(), record
     assert record["owner"]["pid"] == os.getpid(), record
     assert_names_nobody_as_the_holder(refusal)
+
+
+def rest_of_the_sentence(text: str, clause: str) -> str | None:
+    """The sentence in `text` from `clause` on, with the line breaks of a wrapped text undone."""
+    flat = " ".join(text.split())
+    start = flat.find(clause)
+    if start < 0:
+        return None
+    end = flat.find(". ", start)
+    return flat[start:] if end < 0 else flat[start : end + 1]
+
+
+def test_every_text_that_promises_a_named_holder_says_what_to_do_when_the_refusal_carries_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = lock_directory(tmp_path)
+    released_by_a_previous_owner(root, monkeypatch)
+    with held_by_another_process(tmp_path, root, LOCK_ONLY_SCRIPT):
+        refusal = refusal_to_a_contender_here(root)
+
+    # The premise: the product's own refusal for a device that is held carries
+    # no holder, and is as safe to retry as one that names it.
+    assert refusal["error_type"] == "device_busy", refusal
+    assert HOLDER_FIELD not in refusal, refusal
+    assert refusal["retry_safe"] is True, refusal
+
+    texts = {
+        "the device_busy remediation": " ".join(remediation_fields(refusal["error_type"])["remediation"]),
+        LEASE_LIFECYCLE_URI: read_resource(LEASE_LIFECYCLE_URI)["text"],
+        **{name: (REPOSITORY_ROOT / name).read_text(encoding="utf-8") for name in TEXTS_THAT_PROMISE_A_NAMED_HOLDER},
+    }
+    sentences = {name: rest_of_the_sentence(text, NO_HOLDER_CLAUSE) for name, text in texts.items()}
+    silent = [name for name, sentence in sentences.items() if sentence is None]
+    assert not silent, f"these texts promise a named holder and say nothing about a refusal that {NO_HOLDER_CLAUSE}: {silent}"
+    # And each says what to do then: wait for it, as for a holder that is named.
+    no_advice = {name: sentence for name, sentence in sentences.items() if "wait" not in str(sentence).lower()}
+    assert not no_advice, no_advice
+    # The two copies of the skill say it in the same words.
+    assert sentences["src/agentic_hil/skills/agentic-hil/SKILL.md"] == sentences["plugins/agentic-hil/skills/agentic-hil/SKILL.md"]
