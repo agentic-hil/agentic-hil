@@ -65,7 +65,9 @@ configuration denies an action the tool returns `permission_denied`. Reading a
 device needs no permission, so a refusal is about writing or changing state.
 A busy-device refusal is different again: the board is held by another run for
 its whole duration, and the result names who has it. Wait for that run or ask
-its owner; the hold is not something to clear. Do not stop
+its owner; the hold is not something to clear. A refusal that carries no
+`holder` is the same hold by an owner whose record does not name it yet: wait
+for it the same way. Do not stop
 there: finish through the gate. `get_last_report` and `classify_last_error` say
 what the attempt recorded and why it failed, and `debugger_info` or
 `probe_target` say whether the hardware would have been reachable at all.

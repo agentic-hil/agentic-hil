@@ -485,12 +485,19 @@ class BenchMutex:
         return self._read_holder(resource)
 
     def busy_result(self, resource: str, *, waited_s: float = 0.0) -> JsonObject:
-        record = self._read_holder(resource) or {}
+        on_disk = self._read_holder(resource) or {}
+        # Only a record in state `held` says who holds the device. A released
+        # one is what the last owner wrote as it let go, and the lock can be
+        # held again while it is still on disk: before the new holder has
+        # written its own, when that write failed, or under a lock that writes
+        # none. Read as the holder, it named an owner that is gone, with its
+        # old timestamps and a heartbeat that stopped when it let go.
+        record = on_disk if on_disk.get("state") == "held" else {}
         holder = record.get("owner") if isinstance(record.get("owner"), dict) else None
         result: JsonObject = {
             "ok": False,
             "error_type": "device_busy",
-            "summary": _busy_summary(resource, holder),
+            "summary": _busy_summary(resource, holder, released=on_disk.get("state") == "released"),
             "resource": resource,
             "retry_safe": True,
             "side_effect_committed": False,
@@ -673,8 +680,10 @@ def _reclaim_detail(record: JsonObject | None) -> JsonObject | None:
     }
 
 
-def _busy_summary(resource: str, holder: JsonObject | None) -> str:
+def _busy_summary(resource: str, holder: JsonObject | None, *, released: bool = False) -> str:
     if not holder:
+        if released:
+            return f"Physical device {resource} is held, but the current holder is not known: the record beside its lock is marked released and names nobody who holds it now."
         return f"Physical device {resource} is held by another Agentic HIL owner."
     label = holder.get("label")
     who = f"pid {holder.get('pid')} on {holder.get('host')} ({holder.get('frontend')})"

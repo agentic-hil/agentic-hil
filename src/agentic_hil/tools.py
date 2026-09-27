@@ -3529,8 +3529,9 @@ def _bootstrap_device_busy(busy: JsonObject, tool: str) -> JsonObject:
     The machine-wide lock answered (another workspace or server is on this
     board) before anything was said to it. `discover_attached_hardware` reads
     the device directly here because there is no configuration to lease against,
-    but "no lease" was never "no exclusion": the refusal names the holder and is
-    retry-safe, exactly as the leased path's `device_busy` is."""
+    but "no lease" was never "no exclusion": the refusal names the holder, or
+    carries no `holder` while the holder's record does not name it yet, and is
+    retry-safe either way, exactly as the leased path's `device_busy` is."""
     return {**busy, "tool": tool, "side_effect_status": "not_started", "hardware_state": "unchanged"}
 
 

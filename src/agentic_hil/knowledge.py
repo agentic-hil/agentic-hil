@@ -1533,6 +1533,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         remediation=(
             "Read `holder` and wait for that run, or ask its owner to finish. This is not a fault: it is the exclusivity "
             "that replaced the read permission.",
+            "A refusal that carries no `holder` is the same hold by an owner whose record does not name it yet: wait for "
+            "it the same way, and do not take the missing heartbeat for a hang.",
             "If waiting is the right answer, ask for it explicitly and bounded: `wait_s` on the run start. Waiting is "
             "never silent and never unbounded.",
             "A holder whose `heartbeat_age_s` is large and `holder_heartbeat_stale` is true is hung rather than busy; "
@@ -4639,7 +4641,7 @@ Nothing times a run out, and that is deliberate: dropping a device that may be m
 | the client disconnects | stdin reaches EOF, the server shuts its service down, and an open run is released on the way out |
 | the server process dies | the operating system drops the advisory lock it held; the next owner takes the device and its result carries `reclaimed` with reason `owner_process_exited_without_release` |
 
-So an abandoned run costs nothing beyond the life of the server process. While it lasts, a contender's `device_busy` refusal carries `heartbeat_age_s` and, past four heartbeat intervals, `holder_heartbeat_stale: true`. An idle holder is visible rather than merely obstructive. Call `bench_run_status` if you are unsure whether you still hold the bench, and `bench_run_stop` to be sure you do not.
+So an abandoned run costs nothing beyond the life of the server process. While it lasts, a contender's `device_busy` refusal carries `heartbeat_age_s` and, past four heartbeat intervals, `holder_heartbeat_stale: true`. An idle holder is visible rather than merely obstructive. A refusal that carries no `holder` carries no heartbeat either: the device is held by an owner whose record does not name it yet, so wait for it, bounded by `wait_s`, rather than reading it as a hang. Call `bench_run_status` if you are unsure whether you still hold the bench, and `bench_run_stop` to be sure you do not.
 
 One case is outside this: a server process left running with its stdin never closed, by a host that leaked the pipe. It sees no disconnect and holds the run. Ending that process is the answer; never delete a lock file under `~/.agentic-hil/device-locks`.
 
