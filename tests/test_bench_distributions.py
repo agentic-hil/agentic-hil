@@ -76,7 +76,7 @@ EQUIVALENTS = {
 # `python` command it creates it with.
 PYTHON = {"apt": {"python3", "python3-venv", "python-is-python3"}, "dnf": {"python3", "python-unversioned-command"}}
 
-DIGEST = re.compile(r"^FROM docker\.io/library/(?P<image>[a-z0-9.-]+)@sha256:[0-9a-f]{64}$")
+DIGEST = re.compile(r"^FROM docker\.io/library/(?P<image>[a-z0-9.-]+)@sha256:[0-9a-f]{64}(?: AS (?P<stage>[a-z0-9-]+))?$")
 
 
 def head_text(distribution: str) -> str:
@@ -119,7 +119,18 @@ def installed_packages(head: str) -> set[str]:
 
 
 def default_packages() -> set[str]:
-    return installed_packages(DOCKERFILE.read_text(encoding="utf-8"))
+    """What the default file's own distribution part installs, before its first WORKDIR."""
+    lines = DOCKERFILE.read_text(encoding="utf-8").splitlines()
+    start = next(index for index, line in enumerate(lines) if line.startswith("WORKDIR "))
+    return installed_packages("\n".join(lines[:start]))
+
+
+def first_stage() -> str:
+    """The name the default file gives its first stage, which its later stages build on."""
+    line = next(line for line in DOCKERFILE.read_text(encoding="utf-8").splitlines() if line.startswith("FROM "))
+    words = line.split()
+    assert len(words) == 4 and words[2] == "AS", line
+    return words[3]
 
 
 def shared_part() -> str:
@@ -152,6 +163,18 @@ def test_each_head_starts_from_its_distribution_pinned_by_digest(distribution: s
     image, tag = BASES[distribution].split(":")
     assert match["image"] == image
     assert lines[froms[0] + 1] == f"# ^ {image}:{tag}"
+
+
+@pytest.mark.parametrize("distribution", sorted(BASES))
+def test_each_head_names_its_stage_as_the_default_file_names_the_one_its_later_stages_build_on(
+    distribution: str,
+) -> None:
+    """The default file's later stages start FROM its first stage by name, and
+    under a head that named its stage otherwise a build would look for an image
+    of that name in a registry instead."""
+    (line,) = [line for line in head_text(distribution).splitlines() if line.startswith("FROM ")]
+
+    assert DIGEST.match(line)["stage"] == first_stage(), line
 
 
 @pytest.mark.parametrize("distribution", sorted(BASES))
@@ -193,15 +216,19 @@ def test_every_package_of_the_default_image_is_accounted_for() -> None:
 
 
 def test_the_shared_part_follows_one_distribution_part() -> None:
-    """The composition's premise: one stage, its base and its packages, and the
-    rest from the first WORKDIR on. A second stage in the default file would
-    have to be taught to the composition before a distribution can share it."""
+    """The composition's premise: one stage with its base and its packages, and
+    the rest from the first WORKDIR on. A later stage starts from that first
+    stage by name, so it follows whichever distribution the head brought; one
+    from a base image of its own would have to be taught to the composition
+    before a distribution can share it."""
     lines = DOCKERFILE.read_text(encoding="utf-8").splitlines()
     froms = [index for index, line in enumerate(lines) if line.startswith("FROM ")]
     workdirs = [index for index, line in enumerate(lines) if line.startswith("WORKDIR ")]
 
-    assert len(froms) == 1, froms
     assert workdirs and froms[0] < workdirs[0], (froms, workdirs)
+    assert all(index > workdirs[0] and lines[index].split()[1] == first_stage() for index in froms[1:]), [
+        lines[index] for index in froms
+    ]
 
 
 @pytest.mark.parametrize("distribution", sorted(BASES))
@@ -212,9 +239,9 @@ def test_a_composed_file_is_the_head_then_the_default_files_shared_part(distribu
 
     assert composed.startswith(head.rstrip("\n") + "\n")
     assert composed.endswith(shared_part())
-    assert [line for line in composed.splitlines() if line.startswith("FROM ")] == [
-        line for line in head.splitlines() if line.startswith("FROM ")
-    ]
+    froms = [line for line in composed.splitlines() if line.startswith("FROM ")]
+    assert froms[:1] == [line for line in head.splitlines() if line.startswith("FROM ")]
+    assert all(line.split()[1] == first_stage() for line in froms[1:]), froms
 
 
 def test_a_default_file_without_a_shared_part_is_refused() -> None:
