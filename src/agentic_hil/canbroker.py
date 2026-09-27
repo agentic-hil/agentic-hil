@@ -91,7 +91,7 @@ from agentic_hil.types import AgenticHILConfig, CanBusConfig, CanShareConfig, Js
 # Bumped whenever a message name, a field name or the meaning of a field moves.
 # It seeds the connection counter, so a client built against another revision
 # cannot present a counter a broker of this one would accept even by accident.
-SURFACE_REVISION = 1
+SURFACE_REVISION = 2
 PROTOCOL_VERSION = 1
 
 # The message surface itself, as data. The digest below is taken over it, so a
