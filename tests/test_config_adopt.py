@@ -37,6 +37,8 @@ from typing import Any
 import pytest
 import yaml
 from conftest import DEFAULT_TEST_PERMISSIONS, FAKE_GDB, FAKE_STLINK, write_authoritative_config
+from test_agent_provisioning import _regenerable_bench
+from test_implicit_single_action_run import fail_every_release, named_incidents
 
 from agentic_hil.adopt import (
     PROJECT_CONFIG_ADOPT,
@@ -64,12 +66,13 @@ from agentic_hil.configstate import STATE_UNREADABLE
 from agentic_hil.configwrite import ACTOR_COMMAND_LINE, PROJECT_CONFIG_SET
 from agentic_hil.coordination import (
     DEBUGGER_READONLY_TARGET_STATE_REASON,
+    LEASE_RELEASE_RETRY_REASON,
     RECOVERY_ACTION_VIA,
     HardwareCoordinator,
     HardwareLease,
 )
 from agentic_hil.knowledge import CONFIG_DESCRIPTION_RIGHT, CONFIG_PERMISSIONS_RIGHT, CONFIG_WRITE_RIGHT
-from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.tools import PROJECT_CONFIG_CREATE, AgenticHILToolService
 from agentic_hil.types import fold_hardware_id
 
 PROBE_SERIAL = "0045002B3038510934333935"
@@ -1374,6 +1377,112 @@ def test_a_timed_out_adopt_read_whose_incident_ended_neither_claims_nor_remedies
         ending = "This call's own recovery has since ended the incident" if policy == "reset_halt" else "The incident has since been stood down"
         assert "the board is quarantined" in refused["summary"], refused["summary"]
         assert refused["summary"].endswith(f"{ending}, and nothing holds the bench."), refused["summary"]
+    finally:
+        tools.close()
+
+
+@pytest.mark.parametrize("policy", ["reset_halt", "off"], ids=["settled", "stood_down"])
+def test_a_timed_out_adopt_read_whose_lease_cannot_be_given_back_names_the_incident_that_holds_the_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str) -> None:
+    """The read's incident ends, and a new one holds the bench when the call returns.
+
+    Every lease release fails to persist, so ending the incident the read raised
+    does not hand the bench back: a `lease_release_unconfirmed` incident holds it
+    instead, under an id the read never saw. The refusal says the board is
+    quarantined, which is right, and has to say under which incident: the
+    top-level id and every lease's id are the one `lease-status` reports, the
+    reasons and guidance name that incident's reason, and the recover advice
+    stands beside that id. The id the read raised may appear in
+    `incident_stood_down` alone, which reports what ended."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    _set_auto_recover(path, policy)
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read())
+
+    tools = AgenticHILToolService(load_authoritative_config(workspace), backend=_RecoveryBackend(), frontend="mcp")
+    fail_every_release(tools, monkeypatch)
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+        status = tools.coordinator.status()
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined", refused
+        assert status["blocked"] is True, status
+        assert LEASE_RELEASE_RETRY_REASON in status["cleanup_reasons"], status
+        assert refused["quarantined"] is True, refused
+        assert refused["quarantine_id"] == status["quarantine_id"], (refused, status["quarantine_id"])
+        assert named_incidents(refused) == {status["quarantine_id"]}, refused
+        assert LEASE_RELEASE_RETRY_REASON in refused["cleanup_reasons"], refused
+        assert LEASE_RELEASE_RETRY_REASON in [item["reason"] for item in refused["quarantine_guidance"]], refused
+        assert "agentic-hil recover" in " ".join(refused["remediation"]), refused
+        if "incident_stood_down" in refused:
+            assert refused["incident_stood_down"]["quarantine_id"] != status["quarantine_id"], refused
+    finally:
+        tools.close()
+
+
+def assert_no_plain_retry_is_advised(refused: dict) -> None:
+    """The next step of a refusal whose incident ended but whose call is unsafe to repeat.
+
+    `retry_safe` stays as the call made it, and so do the fields that say why:
+    the read may have changed the board, and nobody has confirmed that it did
+    not. A plain "call this again" is advice for a result that says the call is
+    safe to repeat, and this one says the opposite. The next step says the
+    incident has ended and nothing holds the bench, and that the board's state has
+    to be confirmed before the call is made again, naming those fields."""
+    assert refused["retry_safe"] is False, refused
+    assert refused["side_effect_status"] == "unknown", refused
+    assert refused["cleanup_required"] is True, refused
+    next_step = refused["next_step"]
+    assert not next_step.startswith("Call this again"), next_step
+    assert "ended" in next_step and "nothing holds the bench" in next_step, next_step
+    assert "confirm" in next_step.lower(), next_step
+    for field in ("side_effect_status", "cleanup_required"):
+        assert field in next_step, (field, next_step)
+    assert "agentic-hil recover" not in next_step, next_step
+
+
+@pytest.mark.parametrize("policy", ["reset_halt", "off"], ids=["settled", "stood_down"])
+def test_a_timed_out_adopt_read_whose_incident_ended_does_not_advise_the_retry_it_calls_unsafe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str) -> None:
+    """`retry_safe: false` and a plain "call this again" may not stand side by side.
+
+    The read's incident ends before the call returns, by the call's own recovery
+    or by a stand-down, and nothing holds the bench. What the read did to the
+    board is still unconfirmed, which is what `retry_safe: false` says, so the
+    next step may not advise repeating the call as it stands."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    _set_auto_recover(path, policy)
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read())
+
+    tools = AgenticHILToolService(load_authoritative_config(workspace), backend=_RecoveryBackend(), frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined", refused
+        assert tools.coordinator.blocked is False
+        assert_no_plain_retry_is_advised(refused)
+    finally:
+        tools.close()
+
+
+@pytest.mark.parametrize("policy", ["reset_halt", "off"], ids=["settled", "stood_down"])
+def test_a_timed_out_regeneration_whose_incident_ended_does_not_advise_the_retry_it_calls_unsafe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str) -> None:
+    """The same refusal, reached through `project_config_create` on a configured server.
+
+    Regeneration reads the board through the same lifecycle as adoption and
+    refuses with the same release refusal when the read cannot be confirmed, so
+    the same rule holds for its next step."""
+    workspace, path = _regenerable_bench(tmp_path, monkeypatch)
+    _set_auto_recover(path, policy)
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read(probe_serial=document_of(path)["debuggers"]["dut"]["probe_id"]))
+
+    tools = AgenticHILToolService(load_authoritative_config(workspace), backend=_RecoveryBackend(), frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_CREATE)
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined", refused
+        assert tools.coordinator.blocked is False
+        assert_no_plain_retry_is_advised(refused)
     finally:
         tools.close()
 

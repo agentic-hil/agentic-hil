@@ -44,11 +44,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import write_config
+from conftest import DEFAULT_TEST_PERMISSIONS, write_config
+from test_config_adopt import _RecoveryBackend, _set_auto_recover, _timed_out_read, placeholder_bench
 
 from agentic_hil.adopt import PROJECT_CONFIG_ADOPT, _release_refusal
 from agentic_hil.cli import doctor, entrypoint
-from agentic_hil.config import load_config
+from agentic_hil.config import load_authoritative_config, load_config
 from agentic_hil.coordination import (
     DEBUGGER_DISCOVERY_RESOURCE,
     CoordinationError,
@@ -57,7 +58,7 @@ from agentic_hil.coordination import (
     debugger_effect_resources,
     debugger_resource,
 )
-from agentic_hil.knowledge import catalogue_entry, remediation_fields
+from agentic_hil.knowledge import CONFIG_DESCRIPTION_RIGHT, catalogue_entry, remediation_fields
 from agentic_hil.tools import AgenticHILToolService
 
 # The reasons the reported incident carried, both of them in the reset-halt
@@ -686,3 +687,95 @@ def test_a_clean_bench_stays_silent(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert report["ok"] is True, report
     assert report["unhealthy"] == []
     assert standing_incidents(report) == []
+
+
+def dead_owner_incident(config: Any) -> None:
+    """This workspace's previous server ended with an incident of its own open.
+
+    The next server on the same configuration inherits that incident, so the
+    first call it makes ends with an incident of this project's to settle or
+    stand down, whatever the call itself was refused for."""
+    previous = HardwareCoordinator(config, "previous-server")
+    lease = previous.acquire("physical:own-incident")
+    lease.quarantine("debug_session_start_unconfirmed")
+    previous.close()
+
+
+@pytest.mark.parametrize("auto_recover", [None, "off"], ids=["settled", "stood_down"])
+@pytest.mark.parametrize("tool", ["debugger_probes_list", "probe_target"])
+def test_a_refusal_for_a_neighbour_s_incident_keeps_its_claim_when_this_project_s_own_incident_ends(tmp_path: Path, tool: str, auto_recover: str | None) -> None:
+    """The end of a call rewrites only what it says about the incident it ended.
+
+    A neighbour's incident stands on the shared probe, and this workspace's
+    previous server left an incident of its own. The call is refused for the
+    neighbour's incident, and the end of the call then ends this project's own,
+    by its recovery action or by a stand-down. The refusal's claim is about the
+    neighbour's incident, which still stands and still refuses the next call, so
+    it stays exactly as the call made it: `quarantined: true`, the neighbour's
+    id and owner, the next step that sends the operator to the owning workspace,
+    and the remediation scoped to a foreign incident."""
+    config = config_for(tmp_path / "blocked-workspace", auto_recover=auto_recover)
+    dead_owner_incident(config)
+    owner, foreign_id = foreign_incident(tmp_path)
+    service = AgenticHILToolService(config, backend=_RecoveryBackend(), frontend="mcp")
+    try:
+        own = service.coordinator.status()
+        assert own["blocked"] is True, own
+        assert own["quarantine_id"] != foreign_id, own
+        result = service.call(tool)
+        status = service.coordinator.status()
+
+        assert result["ok"] is False, result
+        assert result["error_type"] == "resource_quarantined", result
+        assert status["blocked"] is False, status
+        assert {entry["quarantine_id"] for entry in standing_incidents(status)} == {foreign_id}, status
+        assert result["quarantine_id"] == foreign_id, result
+        assert result["project_resource"] == owner.project_key, result
+        assert result["quarantined"] is True, result
+        assert owner.project_key in result["next_step"], result["next_step"]
+        assert "nothing holds the bench" not in result["next_step"] + result["summary"], result
+        foreign = remediation_fields("resource_quarantined", "foreign_project")
+        assert result["remediation"] == foreign["remediation"], result
+        assert result["do_not"] == foreign["do_not"], result
+        if "incident_stood_down" in result:
+            assert result["incident_stood_down"]["quarantine_id"] == own["quarantine_id"], result
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("policy", ["reset_halt", "off"], ids=["settled", "stood_down"])
+def test_an_adopt_refused_for_a_neighbour_s_incident_keeps_its_claim_when_this_project_s_own_incident_ends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str) -> None:
+    """The same rule on the configuration write that reads the board.
+
+    Adoption is refused at the discovery lock the neighbour's incident holds, and
+    the end of the call ends this project's own incident. The refusal still says
+    the board is quarantined, still names the neighbour's incident, keeps the next
+    step that sends the operator to the owning workspace, and keeps a remediation:
+    none of it is about the incident that ended, and the next call meets the same
+    refusal."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    _set_auto_recover(path, policy)
+    dead_owner_incident(load_authoritative_config(workspace))
+    owner, foreign_id = foreign_incident(tmp_path)
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read())
+
+    tools = AgenticHILToolService(load_authoritative_config(workspace), backend=_RecoveryBackend(), frontend="mcp")
+    try:
+        own = tools.coordinator.status()
+        assert own["blocked"] is True, own
+        assert own["quarantine_id"] != foreign_id, own
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+        status = tools.coordinator.status()
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined", refused
+        assert status["blocked"] is False, status
+        assert {entry["quarantine_id"] for entry in standing_incidents(status)} == {foreign_id}, status
+        assert refused["quarantine_id"] == foreign_id, refused
+        assert refused["project_resource"] == owner.project_key, refused
+        assert refused["quarantined"] is True, refused
+        assert owner.project_key in refused["next_step"], refused["next_step"]
+        assert refused.get("remediation"), refused
+        assert refused.get("do_not"), refused
+    finally:
+        tools.close()

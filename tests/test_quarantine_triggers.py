@@ -532,6 +532,98 @@ def test_the_refused_erase_incident_inside_a_declared_run_holds_until_the_run_st
         service.close()
 
 
+def refused_erase_section() -> str:
+    """TROUBLESHOOTING.md section 10a, the page the refused erase is documented on."""
+    text = (SRC_ROOT.parents[1] / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+    start = text.index("## 10a. The First Flash After Power-Up Is Refused At The Erase")
+    return text[start : text.index("\n## ", start)]
+
+
+def refused_erase_bench(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[AgenticHILToolService, list[str]]:
+    """The refused erase on a bench whose reset into halt and re-probe confirm.
+
+    The fixture programmer confirms no reset, which is why the two tests above
+    see the incident stood down. A working board answers both, and that is what
+    the default `recovery.auto_recover: reset_halt` meets on the reference bench:
+    the recovery action settles the incident rather than standing it down.
+    Returns the service and the reset modes it drove."""
+    firmware = workspace / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True, exist_ok=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    config = config_for(workspace, debugger_type="stlink", debugger_executable=FAKE_STLINK_ERASE_REFUSED, probe_id="STLINK123")
+    service = AgenticHILToolService(config)
+    resets: list[str] = []
+    monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+    monkeypatch.setattr(
+        service.backend,
+        "reset_target",
+        lambda mode="run": resets.append(mode) or {"ok": True, "tool": "reset_target", "summary": "Target reset."},
+    )
+    return service, resets
+
+
+def test_the_refused_erase_texts_name_how_a_bare_flash_ends_on_a_bench_whose_reset_confirms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The texts say what the product returns, on the bench they were measured on.
+
+    A bare `flash_firmware` whose erase was refused ends its incident when the
+    call ends, but not always by standing it down. Where the reset into halt and
+    the re-probe confirm, the call's own recovery settles it: the result carries
+    `recovery.incident_resolved: true`, `quarantined: false`, and no
+    `incident_stood_down`. The remedy the result carries and section 10a both say
+    the result carries `incident_stood_down` and that a bare call's incident has
+    already stood down, which is true only where the recovery cannot settle it.
+    Both have to name the ending this bench returns."""
+    service, resets = refused_erase_bench(tmp_path, monkeypatch)
+    try:
+        result = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+
+        assert result["error_type"] == "flash_erase_failed"
+        assert resets == ["halt"]
+        assert result["recovery"]["incident_resolved"] is True, result["recovery"]
+        assert result["quarantined"] is False
+        assert "incident_stood_down" not in result
+        assert service.coordinator.blocked is False
+
+        for name, text in (("remediation", " ".join(result["remediation"])), ("TROUBLESHOOTING.md 10a", refused_erase_section())):
+            assert "incident_resolved" in text, name
+            assert "a bare call's incident has already stood down" not in text, name
+    finally:
+        service.close()
+
+
+def test_the_refused_erase_texts_name_how_bench_run_stop_ends_it_on_a_bench_whose_reset_confirms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The declared-run variant, on the same bench.
+
+    Inside a declared run the failed flash stays `quarantined: true` with no
+    `incident_stood_down`, as the texts say. What `bench_run_stop` does then is
+    where they go wrong: its teardown's recovery settles the incident, so its
+    result carries `recovery.incident_resolved: true` and no
+    `incident_stood_down`, where the remedy and section 10a both promise the same
+    stand-down then."""
+    service, resets = refused_erase_bench(tmp_path, monkeypatch)
+    try:
+        started = service.call("bench_run_start", {"devices": [{"kind": "debugger"}]})
+        assert started["ok"] is True, started
+
+        result = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+        assert result["error_type"] == "flash_erase_failed"
+        assert result["quarantined"] is True
+        assert "incident_stood_down" not in result
+        assert resets == []
+
+        stopped = service.call("bench_run_stop")
+        assert resets == ["halt"]
+        assert stopped["recovery"]["incident_resolved"] is True, stopped["recovery"]
+        assert "incident_stood_down" not in stopped
+        assert service.coordinator.blocked is False
+        assert service.coordinator.run_active is False
+
+        for name, text in (("remediation", " ".join(result["remediation"])), ("TROUBLESHOOTING.md 10a", refused_erase_section())):
+            assert "the same stand-down then" not in text, name
+    finally:
+        service.close()
+
+
 def test_a_transcript_that_cannot_place_the_failure_keeps_the_quarantine() -> None:
     """When in doubt the quarantine stays, and the result says which it is.
 
