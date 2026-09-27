@@ -81,11 +81,13 @@ TIMEOUT_FAILURE = {
     "ok": False,
     "error_type": "timeout",
     "backend_error_type": "gdb_server_not_ready",
-    "summary": "Debug server did not open its GDB port before the timeout.",
     "cleanup_confirmed": True,
     "side_effect_status": "not_started",
     "retry_safe": True,
 }
+# The line a start on OpenOCD waits for, which its timeout summary names: the
+# recorded listening line without the level OpenOCD puts in front of it.
+AWAITED_LINE = RECORDED_LISTENING_LINE.removeprefix("Info : ")
 
 
 def drive_fake_openocd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, listen_after: str = "0", line_after: str = "0", decoys: bool = False, flood: int = 0) -> Path:
@@ -127,6 +129,13 @@ def close(service: AgenticHILToolService) -> None:
     except BaseException:
         service.coordinator.bench.release_all()
         raise
+
+
+def served_port(record: Path) -> int:
+    """The GDB port the fake OpenOCD was told to serve, which is the port the start reserved."""
+    ports = {json.loads(line)["port"] for line in record.read_text(encoding="utf-8").splitlines()}
+    assert len(ports) == 1, ports
+    return ports.pop()
 
 
 def timelines(record: Path) -> list[list[str]]:
@@ -240,9 +249,14 @@ def test_other_listening_lines_do_not_count(tmp_path: Path, monkeypatch: pytest.
     ],
     ids=["listening-without-the-line", "only-other-listening-lines", "not-listening"],
 )
-def test_a_start_that_never_sees_the_line_times_out_as_it_does_today(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listen_after: str, decoys: bool, expected: list[str]) -> None:
-    """No line before the deadline is today's timeout failure, and nothing
-    connects to the port, whether it listens or not."""
+def test_a_start_that_never_sees_the_line_times_out_naming_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listen_after: str, decoys: bool, expected: list[str]) -> None:
+    """No line before the deadline is today's timeout failure, `gdb_server_not_ready`,
+    and nothing connects to the port, whether it listens or not.
+
+    The summary names the line the start waited for, word for word, so an
+    OpenOCD that never prints it (a release older than 0.11.0, or one whose
+    configuration lowers `debug_level` or logs to a file) can be told from the
+    result alone."""
     record = drive_fake_openocd(monkeypatch, tmp_path, listen_after=listen_after, line_after=NEVER, decoys=decoys)
     service = debug_service(tmp_path)
     try:
@@ -251,6 +265,7 @@ def test_a_start_that_never_sees_the_line_times_out_as_it_does_today(tmp_path: P
         close(service)
 
     assert {key: started.get(key) for key in TIMEOUT_FAILURE} == TIMEOUT_FAILURE
+    assert started["summary"] == f'Debug server did not print "{AWAITED_LINE.format(port=served_port(record))}" before the timeout.', started
     assert timelines(record) == [expected]
 
 
