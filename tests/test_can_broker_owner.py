@@ -21,7 +21,7 @@ wrong with it is that it is not the process that wrote the record.
 Beside it, the broker that does hold the bus is still accepted: the one a
 participant starts, by a second participant that finds it running, and a broker
 whose heartbeat has rewritten its record since it published. A broker that names
-itself by pid alone, the way release 0.21.5 does, is refused even while it holds
+itself by pid alone, the way earlier releases do, is refused even while it holds
 the bus: nothing it publishes tells it apart from a stranger under the same pid,
 so a client meeting one fails closed.
 """
@@ -53,9 +53,10 @@ from agentic_hil.canbroker import (
 )
 from agentic_hil.config import atomic_write_text
 
-# A broker descriptor exactly as release 0.21.5 writes it: these keys and no
-# others, its descriptor and protocol versions, and the digest of its message
-# surface. The one thing in it that names the broker is `pid`.
+# A broker descriptor exactly as the last release that names its broker by pid
+# alone writes it: these keys and no others, its descriptor and protocol
+# versions, and the digest of its message surface. The one thing in it that
+# names the broker is `pid`.
 PID_ONLY_DESCRIPTOR_KEYS = ("version", "bus_key", "endpoint", "family", "pid", "protocol_version", "protocol_digest", "counter", "started_at")
 PID_ONLY_RELEASE = {"version": 1, "protocol_version": 1, "protocol_digest": "112df16f33592fe0"}
 
@@ -137,7 +138,7 @@ def attach_outcome(config, participant: str) -> dict:
 
 
 def published_as_the_pid_only_release(broker: CanBroker) -> None:
-    """Rewrite `broker`'s descriptor into the one release 0.21.5 publishes for the same broker."""
+    """Rewrite `broker`'s descriptor into the one the last pid-only release publishes for the same broker."""
     path = descriptor_path(broker.bus_key, broker.lock_root)
     published = json.loads(path.read_text(encoding="utf-8"))
     pid_only = {key: published[key] for key in PID_ONLY_DESCRIPTOR_KEYS}
@@ -209,11 +210,11 @@ def test_the_broker_is_still_the_bus_owner_after_its_heartbeat_rewrote_the_recor
 
 
 def test_a_broker_that_names_itself_by_pid_alone_is_refused_even_while_it_holds_the_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A broker of release 0.21.5 names itself by pid alone, in its descriptor
-    and in its handshake. A client cannot tell it from an endpoint that only
-    shares the bus holder's pid, so it does not accept it on the pid: the pair
-    fails closed. The broker here does hold the bus; only its descriptor is the
-    one that release publishes."""
+    """A broker of an earlier release names itself by pid alone, in its
+    descriptor and in its handshake. A client cannot tell it from an endpoint
+    that only shares the bus holder's pid, so it does not accept it on the pid:
+    the pair fails closed. The broker here does hold the bus; only its
+    descriptor is the one the last such release publishes."""
     config = shared_config(tmp_path, monkeypatch)
     broker = CanBroker(config, "bench")
     broker.take_bus()
