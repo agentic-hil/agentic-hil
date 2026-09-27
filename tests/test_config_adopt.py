@@ -71,7 +71,12 @@ from agentic_hil.coordination import (
     HardwareCoordinator,
     HardwareLease,
 )
-from agentic_hil.knowledge import CONFIG_DESCRIPTION_RIGHT, CONFIG_PERMISSIONS_RIGHT, CONFIG_WRITE_RIGHT
+from agentic_hil.knowledge import (
+    CONFIG_DESCRIPTION_RIGHT,
+    CONFIG_PERMISSIONS_RIGHT,
+    CONFIG_WRITE_RIGHT,
+    remediation_fields,
+)
 from agentic_hil.tools import PROJECT_CONFIG_CREATE, AgenticHILToolService
 from agentic_hil.types import fold_hardware_id
 
@@ -1484,6 +1489,54 @@ def test_a_timed_out_regeneration_whose_incident_ended_does_not_advise_the_retry
         assert tools.coordinator.blocked is False
         assert_no_plain_retry_is_advised(refused)
     finally:
+        tools.close()
+
+
+def test_a_refusal_whose_incident_ended_and_that_is_safe_to_repeat_is_told_to_call_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of the rule: `retry_safe: true` keeps the plain retry.
+
+    No tool builds this result today. Every refusal that carries the quarantine's
+    own remediation also says `retry_safe: false`, so the result is made by hand
+    here, over an incident of this project's own that the end of the call stands
+    down, and this test passes on the code before the fix as well. It is here so
+    that the fix for the unsafe case leaves "call this again" to the result that
+    says the call is safe to repeat."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    _set_auto_recover(path, "off")
+
+    tools = AgenticHILToolService(load_authoritative_config(workspace), backend=_RecoveryBackend(), frontend="mcp")
+    lease = tools.coordinator.acquire("physical:config-adopt-retry-safe")
+    try:
+        lease.quarantine(DEBUGGER_READONLY_TARGET_STATE_REASON)
+        made = {
+            "ok": False,
+            "tool": PROJECT_CONFIG_ADOPT,
+            "error_type": "resource_quarantined",
+            "summary": "The board is quarantined, and nothing was read.",
+            "side_effect_status": "not_started",
+            "cleanup_required": True,
+            "quarantined": True,
+            "cleanup_reasons": [DEBUGGER_READONLY_TARGET_STATE_REASON],
+            "quarantine_id": tools.coordinator.quarantine_id,
+            "retry_safe": True,
+            "next_step": "Resolve the incident with `agentic-hil recover`, then call this again.",
+            **remediation_fields("resource_quarantined"),
+        }
+        monkeypatch.setattr(tools, "_call_unlocked", lambda name, arguments=None: dict(made))
+
+        result = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+
+        assert result["incident_stood_down"]["quarantine_id"] == made["quarantine_id"], result
+        assert tools.coordinator.blocked is False
+        assert tools.open_hardware_holds() is None
+        assert result["quarantined"] is False, result
+        assert result["next_step"].startswith("Call this again"), result["next_step"]
+        assert "nothing holds the bench" in result["next_step"], result["next_step"]
+        assert "remediation" not in result, result["remediation"]
+        assert "do_not" not in result, result["do_not"]
+    finally:
+        if lease.state == "active":
+            lease.release()
         tools.close()
 
 
