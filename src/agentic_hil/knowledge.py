@@ -1490,9 +1490,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`quarantine_id` identifies this incident and changes when a new one is raised."
         ),
         remediation=(
-            "Read `auto_recoverable` first. True means no signature is owed: the next hardware call settles the "
-            "incident on the evidence it reads back, so make the call again. False means an operator has to look at "
-            "the board.",
+            "Read `incident_stands` first: only an incident that stands owes a signature. For one that does not, "
+            "`auto_recoverable` says how the next hardware call ends it: true, that call settles it on the evidence it "
+            "reads back; false, no recovery action this bench allows can, so that call stands it down unconfirmed. "
+            "Either way nothing is signed, so make the call again.",
             "Where a signature is owed, read `quarantine_guidance` and check the board against it, then run "
             "`agentic-hil recover --confirm-safe-state --quarantine-id <quarantine_id>` with the id "
             "`agentic-hil lease-status` reports right now.",

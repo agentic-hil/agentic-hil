@@ -2447,7 +2447,7 @@ def _read_record_at(path: Path, resource: str) -> JsonObject | None:
 # described: `lease-status`, the recovery routes, and a refusal the incident
 # holds. The end of a call that settles the incident or stands it down says
 # that instead.
-NOT_STANDING_NEXT_STEP = "Nothing to sign for. The next hardware call settles this incident, or stands it down, on what it reads back from the board."
+NOT_STANDING_NEXT_STEP = "Nothing to sign for. The next hardware call settles this incident on what it reads back from the board, or stands it down."
 
 
 def _with_status_sentences(status: JsonObject) -> JsonObject:
@@ -2460,8 +2460,14 @@ def _with_status_sentences(status: JsonObject) -> JsonObject:
     in the result and says which of the three states the bench is in: held,
     quarantined, or neither. The next step is the recovery command with this
     incident's id in it where an operator's signature is what the bench is
-    waiting for, and the statement that nothing needs signing where the next
-    hardware call settles the incident on its own evidence.
+    waiting for, and the statement that nothing needs signing where it is not.
+
+    Where the incident does not stand, the sentence follows `auto_recoverable`,
+    which says whether a recovery action this bench allows can settle every
+    reason. True, the next hardware call settles it on what it reads back; false,
+    nothing runs that could, and that call stands it down unconfirmed. Saying
+    "on its own evidence" beside a false field told a reader two opposite
+    things about one incident.
     """
     devices = [str(item) for item in status.get("held_devices") or [] if isinstance(item, str)]
     reasons = [str(item) for item in status.get("cleanup_reasons") or [] if isinstance(item, str)]
@@ -2484,8 +2490,15 @@ def _with_status_sentences(status: JsonObject) -> JsonObject:
                 f"Check the board as `quarantine_guidance` describes, then run `{recovery_operator_command(str(quarantine_id) if quarantine_id else None)}`; "
                 "the signature is a statement about the physical board and nothing on the bench moves until it is given."
             )
-        else:
+        elif status.get("auto_recoverable") is True:
             summary = f"{opening} Nothing needs signing: the next hardware call settles it on its own evidence, and `cleanup_reasons` names what it has to confirm."
+            next_step = NOT_STANDING_NEXT_STEP
+        else:
+            summary = (
+                f"{opening} Nothing needs signing: no recovery action this bench's `recovery.auto_recover` policy and probe "
+                "grants allow can settle it, so the next hardware call stands it down unconfirmed, and `quarantine_guidance` "
+                "says what nobody confirmed."
+            )
             next_step = NOT_STANDING_NEXT_STEP
         if foreign:
             summary = f"{summary} {foreign}"
