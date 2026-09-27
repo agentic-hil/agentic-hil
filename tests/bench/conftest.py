@@ -365,9 +365,26 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> Bench:
         refuse(strayed)
     prepared = Bench(project=project, config=config, config_root=config_root, state_root=state_root)
     verdict = prepared.run("doctor")
-    if verdict.returncode != 0:
+    if verdict.returncode != 0 and not refused_for_the_withheld_groups_alone(prepared):
         refuse(f"this bench is not bound to hardware, so no plan can run against it:\n{verdict.stdout}")
     return prepared
+
+
+# `doctor`'s finding for a probe or a serial port this account may not open.
+DEVICE_ACCESS_FINDING = "device_access"
+
+
+def refused_for_the_withheld_groups_alone(bench: Bench) -> bool:
+    """Whether `doctor`'s one finding is the access the stage without the device group withholds.
+
+    That stage hands the container the probe's nodes and none of the groups they
+    are opened through, so `doctor` failing its device-access check there is the
+    state the stage measures, not a bench that was not set up. Anywhere else, and
+    beside any other finding, a red `doctor` still fails the session."""
+    if os.environ.get(DEVICE_GROUPS_ENV) != DEVICE_GROUPS_WITHHELD:
+        return False
+    _, report = bench.document("doctor")
+    return report.get("unhealthy") == [DEVICE_ACCESS_FINDING]
 
 
 def missing_gdb(bench: Bench) -> str | None:
