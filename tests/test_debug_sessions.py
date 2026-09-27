@@ -234,15 +234,15 @@ def test_failed_debug_start_does_not_poison_retry(tmp_path: Path, monkeypatch: p
     service = debug_service(tmp_path)
     from agentic_hil.backends import gdbdebug
 
-    original_wait = gdbdebug.wait_for_tcp_port
+    original_wait = gdbdebug.wait_for_ready_line
     attempts = 0
 
-    def fail_once(port: int, timeout_s: float, server) -> bool:
+    def fail_once(ready, timeout_s: float, server) -> bool:
         nonlocal attempts
         attempts += 1
-        return False if attempts == 1 else original_wait(port, timeout_s, server)
+        return False if attempts == 1 else original_wait(ready, timeout_s, server)
 
-    monkeypatch.setattr(gdbdebug, "wait_for_tcp_port", fail_once)
+    monkeypatch.setattr(gdbdebug, "wait_for_ready_line", fail_once)
     try:
         first = start_debug_session(service, mode="attach")
         second = start_debug_session(service, mode="attach")
