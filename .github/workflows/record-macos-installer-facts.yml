@@ -1,0 +1,47 @@
+name: Record macOS installer facts
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/record-macos-installer-facts.yml
+      - requirements/build.txt
+      - tests/fixtures/macos_installer_environment_recording.json
+      - tests/test_macos_installer_recording.py
+      - tools/record_macos_installer_facts.py
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    name: Capture macOS framework Python and hash tools
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Homebrew framework Python
+        run: brew install python@3.13
+
+      - name: Create isolated build environment and install locked tools
+        run: >-
+          "$(brew --prefix python@3.13)/bin/python3.13" -m venv "$RUNNER_TEMP/agentic-hil-build"
+          && "$RUNNER_TEMP/agentic-hil-build/bin/python" -m pip install --require-hashes -r requirements/build.txt
+
+      - name: Build a wheel for hashing
+        run: >-
+          "$RUNNER_TEMP/agentic-hil-build/bin/python" -m build --wheel --no-isolation --outdir dist
+
+      - name: Record interpreter layout and raw hash-tool output
+        run: >-
+          "$(brew --prefix python@3.13)/bin/python3.13" tools/record_macos_installer_facts.py --wheel dist/agentic_hil-*.whl --output artifacts/macos_installer_environment_recording.json
+
+      - name: Upload the unmodified recording
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-installer-recording-${{ github.run_id }}
+          path: artifacts/macos_installer_environment_recording.json
+          if-no-files-found: error
+          retention-days: 7
