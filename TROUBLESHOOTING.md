@@ -183,6 +183,8 @@ Likely cause: the debug probe is not connected, the USB cable is charge-only, a 
 
 Fix: reconnect with a data-capable USB cable, close other debugger sessions, check OS drivers or udev rules, then run `agentic-hil doctor` and probe again.
 
+With `backend_error_type: "adapter_access_denied"` the probe is attached and this user may not open it: OpenOCD printed `LIBUSB_ERROR_ACCESS`. On Linux, add the user to the group the probe's udev rule gives its USB device to (`plugdev` on Debian and Ubuntu), or install that rule, and log in again. `ls -l` on the probe's node under `/dev/bus/usb` shows the group it needs; `doctor` opens no device, so it passes either way.
+
 ## 7. `target_not_detected`
 
 Symptom: `probe_target` returns `ok: false` with `error_type: "target_not_detected"`.

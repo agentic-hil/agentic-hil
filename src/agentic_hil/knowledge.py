@@ -2071,8 +2071,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning="OpenOCD could not open a debug adapter.",
         remediation=(
             "Call debugger_probes_list to see what the host enumerates.",
-            "Connect the probe, or on Windows bind the correct USB driver to it (ST-Link needs the ST driver, not "
-            "WinUSB, unless the config selects a WinUSB interface).",
+            "Connect the probe. On Linux, install its udev rule and add this user to the group the rule names, then "
+            "log in again; on Windows, bind the correct USB driver to it (ST-Link needs the ST driver, not WinUSB, "
+            "unless the config selects a WinUSB interface).",
             "Set `debuggers.<name>.probe_id` to the serial number of the intended probe when more than one is attached; "
             "it is passed as `adapter serial`.",
             "Close whatever else holds the probe.",

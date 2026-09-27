@@ -51,6 +51,11 @@ How a run reaches the bench:
   directory, under both the POSIX names and the Windows ones, and the
   configuration ``init`` selects is checked against that root before any test
   runs.
+* ``AGENTIC_HIL_BENCH_DEVICE_GROUPS=withheld`` says the groups the probe is
+  opened through were withheld, which ``tools/bench_in_container.py
+  --without-device-group`` does. Such a run carries one stage alone, the module
+  marked ``without_device_group``, and every other run on a bench leaves that
+  module out; both are deselections, never skips.
 * HOME is deliberately *not* redirected for the commands this tier runs. The
   machine-wide device locks live under it, and they are what keeps this run off
   a board another run is holding. A tier that isolated HOME would be a tier that
@@ -75,6 +80,14 @@ from support import scaled_time_bound
 # What says this run is on a bench. Set by the operator, or by the battery in
 # `tools/bench_battery.py`, and by nothing that runs unattended.
 BENCH_ENV = "AGENTIC_HIL_BENCH"
+
+# What says this run withholds the groups the probe is opened through, and the
+# mark of the one stage that runs there. Set by
+# `tools/bench_in_container.py --without-device-group`, which copies the name
+# and the value; a test keeps the copies one.
+DEVICE_GROUPS_ENV = "AGENTIC_HIL_BENCH_DEVICE_GROUPS"
+DEVICE_GROUPS_WITHHELD = "withheld"
+WITHOUT_DEVICE_GROUP = "without_device_group"
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CHECKOUT_SOURCES = REPOSITORY_ROOT / "src"
@@ -638,6 +651,29 @@ def pytest_runtest_makereport(
     if kind is not None:
         outcomes[item.nodeid] = (kind, "" if report.passed else first_line_of_why(report, excinfo))
     return report
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """The stage that withholds the probe's group runs alone, and never beside the tier.
+
+    Where the groups are kept it cannot pass, and where they are withheld
+    nothing else can, because every other test opens the probe. So on a bench
+    each is deselected from the other's run rather than skipped, since a skip is
+    what fails the tier. Off a bench nothing is taken out: every test here skips
+    there by its own mark. A hook in this conftest sees the whole session's
+    items, so it goes by the mark and never by the directory.
+    """
+    if os.environ.get(BENCH_ENV) != "1":
+        return
+    withheld = os.environ.get(DEVICE_GROUPS_ENV) == DEVICE_GROUPS_WITHHELD
+    kept: list[pytest.Item] = []
+    deselected: list[pytest.Item] = []
+    for item in items:
+        in_the_stage = item.get_closest_marker(WITHOUT_DEVICE_GROUP) is not None
+        (kept if in_the_stage == withheld else deselected).append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = kept
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:

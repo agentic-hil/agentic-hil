@@ -360,6 +360,66 @@ def test_docker_runs_the_tier_as_the_invoking_user_with_the_nodes_groups(machine
     assert option_values(command, "--device") == [USB_NODE, TTY_NODE]
 
 
+def test_without_the_device_group_podman_keeps_none_of_this_users_groups(machine: SimpleNamespace) -> None:
+    """The stage that proves a probe this user may not open is named as one.
+
+    The nodes are handed in as ever and the groups they are opened through are
+    not, so the tier meets the device nodes' modes the way an account that never
+    joined those groups does. The tier is told, because in such a run it runs
+    that stage and nothing else."""
+    assert run(machine, "--without-device-group") == 0
+
+    command = machine.runtime.tier
+    assert command[:4] == ["podman", "--runtime", "crun", "run"]
+    assert "--group-add" not in command
+    assert "keep-groups" not in command
+    assert "label=disable" in option_values(command, "--security-opt")
+    assert "--user" not in command
+    assert option_values(command, "--device") == [USB_NODE, TTY_NODE]
+    assert f"{bench_in_container.DEVICE_GROUPS_ENV}={bench_in_container.DEVICE_GROUPS_WITHHELD}" in option_values(command, "-e")
+    assert "AGENTIC_HIL_BENCH=1" in option_values(command, "-e")
+
+
+def test_without_the_device_group_docker_runs_as_the_user_with_its_own_group_alone(machine: SimpleNamespace) -> None:
+    assert run(machine, "--runtime", "docker", "--without-device-group") == 0
+
+    command = machine.runtime.tier
+    assert option_values(command, "--user") == [f"{UID}:{GID}"]
+    assert "--group-add" not in command
+    assert option_values(command, "--device") == [USB_NODE, TTY_NODE]
+    assert f"{bench_in_container.DEVICE_GROUPS_ENV}={bench_in_container.DEVICE_GROUPS_WITHHELD}" in option_values(command, "-e")
+
+
+@pytest.mark.parametrize("runtime", ["podman", "docker"])
+def test_a_full_run_withholds_no_group_and_says_so_by_saying_nothing(machine: SimpleNamespace, runtime: str) -> None:
+    assert run(machine, "--runtime", runtime) == 0
+
+    environment = option_values(machine.runtime.tier, "-e")
+    assert not [value for value in environment if value.startswith(f"{bench_in_container.DEVICE_GROUPS_ENV}=")], environment
+
+
+def test_without_the_device_group_the_user_must_still_open_the_probe_through_them(machine: SimpleNamespace) -> None:
+    """What the stage proves is that the withheld group is what refuses. On a
+    machine where this user cannot open the probe even with its groups, the
+    refusal would be the machine's and not the stage's, so the run is refused
+    exactly as a full run is, before anything is built."""
+    machine.openable.discard(USB_NODE)
+
+    assert run(machine, "--without-device-group") == bench_in_container.EXIT_NO_PROBE
+
+    assert machine.runtime.commands == []
+
+
+def test_the_withheld_groups_are_announced_in_the_words_the_tier_reads() -> None:
+    """Two copies of one name and one value, because the runner is a stdlib
+    script run from a checkout that need not be installed, and the tier's
+    conftest does not import it. This is what keeps them one."""
+    from tests.bench.conftest import DEVICE_GROUPS_ENV, DEVICE_GROUPS_WITHHELD
+
+    assert bench_in_container.DEVICE_GROUPS_ENV == DEVICE_GROUPS_ENV
+    assert bench_in_container.DEVICE_GROUPS_WITHHELD == DEVICE_GROUPS_WITHHELD
+
+
 @pytest.mark.parametrize("runtime", ["podman", "docker"])
 def test_the_container_gets_the_board_and_nothing_of_the_machine_besides(machine: SimpleNamespace, runtime: str) -> None:
     """No host process table, no privileged mode, no network, no capabilities.
