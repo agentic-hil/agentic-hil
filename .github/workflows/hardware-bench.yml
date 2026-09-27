@@ -67,12 +67,16 @@ jobs:
     # would be reading a stuck job that was never theirs to run.
     if: github.repository == 'agentic-hil/agentic-hil'
     runs-on: [self-hosted, agentic-hil, nucleo-f446re]
-    timeout-minutes: 20
+    # Twenty minutes for the work, as before the job queued for the machine, on
+    # top of the wait's own limit on the step that takes the run lock: a wait
+    # counted against the work would stop a late plan half way through a flash.
+    timeout-minutes: 260
 
     # Every `run:` step below is about the demo, so the demo directory is the
     # working directory rather than a `cd` repeated in each step. This reaches
     # `run:` steps only, which is why the upload paths at the end are spelled
-    # from the workspace root.
+    # from the workspace root. The two steps about the machine's run lock say
+    # where they run themselves.
     defaults:
       run:
         working-directory: examples/nucleo-f446re_demo
@@ -87,6 +91,35 @@ jobs:
       # printed so a report can be placed against the release that produced it.
       - name: Say which Agentic HIL the bench is running
         run: agentic-hil --version
+
+      # The machine's run lock, the one every container runner on it queues on
+      # before it builds anything: tools/bench_in_container.py, the gate's own
+      # command, and tools/ci_linux.py and tools/loop_in_container.py beside it.
+      # The concurrency group above only orders this workflow against the gate
+      # on GitHub's side, so without the lock a tier started on the machine
+      # itself would meet this job as `device_busy` in the middle of a plan, and
+      # this job would meet the tier the same way. Taken before doctor, which is
+      # the first step that reaches the probe, and queued behind whoever holds
+      # it rather than refused.
+      #
+      # `exec`, so the command is the step's own process and `$PPID` is the job's
+      # process, which lives until the job ends: the lock is held for the job's
+      # life, not the step's, and a job that ends without the step that gives it
+      # back leaves a record naming a process that is gone, which the next run
+      # breaks as stale. Its lines withhold the machine's names, as the tier's
+      # runner does in the gate's log.
+      #
+      # Four hours to wait, then this step fails without anything having reached
+      # the board. A tier holds the machine for ten to thirty minutes and the
+      # Linux suite for seven; a review loop holds it for hours, and a nightly
+      # that waits one out still proves the night's commit that morning. This
+      # job's own steps on the board took under half a minute on every night of
+      # the two weeks before the lock, which is what a run queued behind it is
+      # told.
+      - name: Take the machine's run lock
+        working-directory: .
+        timeout-minutes: 240
+        run: exec python3 tools/run_lock.py take --state "$RUNNER_TEMP/run-lock.json" --tool .github/workflows/hardware-bench.yml --runs-for "under a minute" --for-the-life-of "$PPID"
 
       # Doctor first, before a plan gets near the board: it resolves the
       # authoritative configuration for this directory, names the probe and the
@@ -137,6 +170,16 @@ jobs:
       - name: Run the same loop through the pytest plugin
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: pytest tests/
+
+      # After the last step that reaches the board, and whatever happened: a red
+      # plan and a cancelled run hold the machine as much as a green one. A take
+      # that never held it finds nothing to give back and says so. The step
+      # fails when the lock is no longer this job's, because the board may then
+      # have been shared while the job believed it held it.
+      - name: Give the machine's run lock back
+        if: always()
+        working-directory: .
+        run: python3 tools/run_lock.py give-back --state "$RUNNER_TEMP/run-lock.json"
 
       # What a reviewer with no access to this bench reads: the outcome, the plan
       # and its digest, the tool versions, the bench identity by configuration
