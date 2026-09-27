@@ -757,7 +757,14 @@ def test_the_gate_runs_the_runner_and_nothing_else() -> None:
     command = shlex.split(lines[0])
     assert command[:2] == ["exec", "python3"], command
     assert command[2].endswith(GATE_RUNNER), command
-    assert command[3:] == ["--output", f"../{GATE_RESULTS}"], command
+    assert command[3:] == [
+        "--source",
+        "../under-test",
+        "--expected-commit",
+        "$(git -C ../under-test rev-parse HEAD)",
+        "--output",
+        f"../{GATE_RESULTS}",
+    ], command
     line = lines[0]
     assert not RAW_HARDWARE.search(line), line
     assert not FETCH_TOOL.search(line), line
@@ -766,7 +773,7 @@ def test_the_gate_runs_the_runner_and_nothing_else() -> None:
 
 
 def test_the_commit_under_test_runs_only_inside_the_container() -> None:
-    """The runner comes from the workflow's own commit; the named one is only built.
+    """The runner comes from the workflow's own commit; the named one is built and tested.
 
     Dispatched on a pull request's head, the runner from that head would run on
     the machine itself, as the runner's user, beside the runner's own files.
@@ -789,6 +796,8 @@ def test_the_commit_under_test_runs_only_inside_the_container() -> None:
     assert step["working-directory"] == named_path, step
     command = shlex.split(run_lines(gate_job())[0])
     assert command[2] == f"../{harness_path}/{GATE_RUNNER}", command
+    assert command[command.index("--source") + 1] == f"../{named_path}", command
+    assert command[command.index("--expected-commit") + 1] == f"$(git -C ../{named_path} rev-parse HEAD)", command
 
 
 def test_the_gate_keeps_the_token_out_of_both_checkouts() -> None:

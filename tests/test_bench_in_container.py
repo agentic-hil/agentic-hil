@@ -1163,6 +1163,80 @@ def test_the_committed_tree_is_staged_without_the_checkouts_own_state(tmp_path: 
     assert not (destination / ".git").exists()
 
 
+def test_source_and_expected_commit_select_the_under_test_checkout_before_building(
+    machine: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A trusted harness can build the candidate from a separate checkout."""
+    harness = tmp_path / "harness"
+    candidate = tmp_path / "under-test"
+    harness.mkdir()
+    candidate.mkdir()
+    harness_commit = "1" * 40
+    candidate_commit = "2" * 40
+    roots: list[Path] = []
+
+    def current_commit(root: Path) -> str:
+        return {harness: harness_commit, candidate: candidate_commit}[root]
+
+    def stage_candidate(root: Path, commit: str, destination: Path) -> None:
+        roots.append(root)
+        assert commit == candidate_commit
+        stage(root, commit, destination)
+
+    monkeypatch.setattr(bench_in_container, "repository_root", lambda: harness)
+    monkeypatch.setattr(bench_in_container, "current_commit", current_commit)
+    monkeypatch.setattr(bench_in_container, "uncommitted_changes", lambda root: "")
+    monkeypatch.setattr(bench_in_container, "stage_committed_tree", stage_candidate)
+
+    status = run(
+        machine,
+        "--build-only",
+        "--source",
+        str(candidate),
+        "--expected-commit",
+        candidate_commit,
+    )
+
+    assert status == 0
+    assert roots == [candidate]
+    assert machine.runtime.issued("build")
+
+
+def test_source_commit_mismatch_refuses_before_build_or_container_run(
+    machine: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    harness = tmp_path / "harness"
+    candidate = tmp_path / "under-test"
+    harness.mkdir()
+    candidate.mkdir()
+    monkeypatch.setattr(bench_in_container, "repository_root", lambda: harness)
+    monkeypatch.setattr(
+        bench_in_container,
+        "current_commit",
+        lambda root: "1" * 40 if root == harness else "2" * 40,
+    )
+    monkeypatch.setattr(bench_in_container, "uncommitted_changes", lambda root: "")
+
+    def hardware_or_runtime_must_not_be_checked(*args: object, **kwargs: object) -> None:
+        raise AssertionError("source SHA mismatch must be refused before runtime or hardware discovery")
+
+    for name in ("pick_runtime", "check_this_machine", "the_devices", "check_access", "device_lock_directory"):
+        monkeypatch.setattr(bench_in_container, name, hardware_or_runtime_must_not_be_checked)
+
+    status = run(
+        machine,
+        "--source",
+        str(candidate),
+        "--expected-commit",
+        "3" * 40,
+    )
+
+    assert status == bench_in_container.EXIT_BUILD_FAILED
+    assert machine.runtime.issued("build") == []
+    assert machine.runtime.issued("run") == []
+    assert "expected commit" in capsys.readouterr().err.lower()
+
+
 # What the image gives the runner.
 
 

@@ -9,13 +9,17 @@ only the board, the probe and the right to open them.
 
 A run, in order:
 
-* finds the probe and refuses what it cannot run against, before anything else;
+* checks `--expected-commit` against the selected checkout before any runtime
+  or hardware discovery, then finds the probe and refuses what it cannot run
+  against;
 * takes this machine's run lock, and stops a container an earlier run of this
   tool left behind;
-* builds the image from the committed tree, never the working tree: `git archive`
-  of HEAD, staged apart from the checkout, with tools/bench/Dockerfile.dockerignore
-  as the context's ignore file. Uncommitted changes are named, and are not what
-  runs;
+* builds the image from the selected source checkout's committed tree, never
+  its working tree: `git archive` of HEAD, staged apart from the checkout, with
+  tools/bench/Dockerfile.dockerignore as the context's ignore file. By default
+  the source is this tool's checkout; `--source` selects another checkout and
+  `--expected-commit` can bind it to a full SHA before any hardware check or
+  build. Uncommitted changes are named, and are not what runs;
 * runs the tier in a container that gets the probe's device nodes, the
   machine's device locks and a directory of the run's own for its report, and
   nothing else of the machine: no network, no capabilities, no host process
@@ -103,6 +107,7 @@ Usage, from a checkout on the machine the board is attached to:
     python3 tools/bench_in_container.py                      # the whole tier
     python3 tools/bench_in_container.py -- tests/bench/test_bench_serial.py -x
     python3 tools/bench_in_container.py --runtime docker
+    python3 tools/bench_in_container.py --source ../candidate --expected-commit <full-sha>
     python3 tools/bench_in_container.py --build-only         # the image alone, anywhere
 
 Everything after `--` goes to pytest and replaces the default selection,
@@ -1168,6 +1173,18 @@ def parse_options(argv: list[str] | None) -> argparse.Namespace:
         help="The probe's serial port, instead of finding it. Repeatable; needs --usb-device.",
     )
     parser.add_argument("--output", default="bench-results", help="Where the JUnit report and the log go (default bench-results).")
+    parser.add_argument(
+        "--source",
+        default=None,
+        metavar="CHECKOUT",
+        help="Git checkout whose committed tree builds the image (default: this tool's checkout).",
+    )
+    parser.add_argument(
+        "--expected-commit",
+        default=None,
+        metavar="SHA",
+        help="Require the selected source checkout's HEAD to equal this full commit SHA before doing any work.",
+    )
     parser.add_argument("--no-wait", action="store_true", help="Refuse instead of queueing when another run holds this machine.")
     parser.add_argument("--build-only", action="store_true", help="Build the image and stop; needs no probe and runs anywhere.")
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER, help="After --: handed to pytest, replacing tests/bench -v.")
@@ -1191,6 +1208,17 @@ def main(argv: list[str] | None = None) -> int:
     # Every refusal that costs nothing comes before the queue: a run that cannot
     # start here should not wait an hour to say so.
     try:
+        root = Path(options.source).resolve() if options.source is not None else repository_root()
+        commit = current_commit(root)
+        if options.expected_commit is not None:
+            expected = options.expected_commit.lower()
+            if not re.fullmatch(r"[0-9a-f]{40}", expected):
+                raise Refused(EXIT_BUILD_FAILED, "the expected commit must be a full 40-character hexadecimal SHA")
+            if commit.lower() != expected:
+                raise Refused(
+                    EXIT_BUILD_FAILED,
+                    f"source checkout HEAD is {commit}, not the expected commit {expected}; nothing was built or run",
+                )
         runtime = pick_runtime(options.runtime)
         if running:
             check_this_machine(runtime)
@@ -1198,8 +1226,6 @@ def main(argv: list[str] | None = None) -> int:
             voice.withhold(devices.serial_numbers)
             check_access(runtime, devices)
             locks = device_lock_directory()
-        root = repository_root()
-        commit = current_commit(root)
     except Refused as refusal:
         voice(str(refusal))
         return refusal.status

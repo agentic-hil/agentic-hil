@@ -171,10 +171,12 @@ gh workflow run bench-gate.yml -f ref=<commit, branch or tag>
 
 The runner script is checked out from the branch the workflow is dispatched
 from, the default branch unless `--ref` names another, and the named commit
-beside it, so the named commit reaches the machine only as the image built from
-it and the tier that image runs. That is what lets the head of a pull request
-from a fork be named. For the length of the run the board and its probe are that
-commit's to drive, which is the decision a dispatch makes.
+beside it. The runner receives that candidate checkout explicitly with
+`--source` and verifies its full HEAD SHA with `--expected-commit` before it
+checks the board or builds. The named commit reaches the machine only as the
+image built from it and the tier that image runs. That is what lets the head of
+a pull request from a fork be named. For the length of the run the board and its
+probe are that commit's to drive, which is the decision a dispatch makes.
 
 The gate shares its concurrency group with `.github/workflows/hardware-bench.yml`,
 so the two never hold the board at once and neither cancels the other. A group
