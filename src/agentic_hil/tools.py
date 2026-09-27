@@ -630,7 +630,8 @@ class AgenticHILToolService:
         confirm is exactly what the caller needs to read, and it is the same text
         the quarantine carried. What goes is the claim that the bench is held,
         and the advice only a held bench needs, whichever ending ran, unless a
-        lease given back on the way out has quarantined the bench again."""
+        lease given back on the way out has quarantined the bench again or the
+        claim is about a neighbour's incident, which nothing here ended."""
         if not isinstance(result, dict) or self.coordinator.run_active or self._debug_lease is not None:
             # A declared run is the agent's own hold, and its teardown is where
             # the recovery belongs: resetting the board at the end of step one
@@ -703,6 +704,8 @@ class AgenticHILToolService:
         result = attach_quarantine_guidance(result)
         if stood_down is not None:
             result = {**result, "incident_stood_down": stood_down, **withheld}
+        if self._claims_a_neighbour_s_incident(result):
+            return result
         if self.coordinator.blocked:
             # A lease given back above, or by the recovery action, could not be
             # released, and a release that cannot persist fails closed under an
@@ -731,6 +734,17 @@ class AgenticHILToolService:
             ending = "This call's own recovery has since ended the incident" if recovered else "The incident has since been stood down"
             released["summary"] = f"{summary} {ending}, and nothing holds the bench."
         return released
+
+    def _claims_a_neighbour_s_incident(self, result: JsonObject) -> bool:
+        """Whether the result's claim is about another project's incident.
+
+        A refusal for a neighbour's incident on a shared resource names the
+        project that owns it. The end of a call settles or stands down an
+        incident of this project's own and nothing else: the neighbour's still
+        stands, refuses the next call the same way, and resolves only in the
+        workspace that owns it, so its claim and its advice stay as they were."""
+        owner = result.get("project_resource")
+        return isinstance(owner, str) and owner != self.coordinator.project_key
 
     def _call_unlocked(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         if arguments is None:
@@ -961,8 +975,9 @@ class AgenticHILToolService:
         # The same narrowing the stand-down makes, for the incident the run's own
         # teardown settled instead: the bench is not held for it any more, so the
         # one field that says it is stops saying it. `cleanup_required` and the
-        # reasons stay, because what the call could not confirm is unchanged.
-        settled = recovery.get("incident_resolved") is True and result.get("quarantined") is True
+        # reasons stay, because what the call could not confirm is unchanged. A
+        # refusal for a neighbour's incident is not about the one it settled.
+        settled = recovery.get("incident_resolved") is True and result.get("quarantined") is True and not self._claims_a_neighbour_s_incident(result)
         return {**result, "run": run, "recovery": recovery, **({"quarantined": False} if settled else {})}
 
     def _end_implicit_run(self) -> bool:

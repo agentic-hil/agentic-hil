@@ -1580,7 +1580,10 @@ def _coordination_refusal(error: CoordinationError, resources: list[str], tool: 
             result.get("next_step")
             or "The board this would read belongs to the owner named above. Wait for it to be released, then call this again. Nothing was read and nothing was written."
         ),
-        **remediation_fields(str(result.get("error_type") or "")),
+        # The coordinator's own advice is written for the refusal it raised; a
+        # neighbour's incident carries the one scoped to a foreign incident. The
+        # catalogue entry for the error type is for a refusal that carries none.
+        **({} if result.get("remediation") else remediation_fields(str(result.get("error_type") or ""))),
         **NOT_STARTED,
     }
 
