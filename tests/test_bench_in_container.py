@@ -695,7 +695,11 @@ def test_named_devices_are_refused_unless_both_kinds_are_real_character_devices(
     assert says in capsys.readouterr().err
 
 
-@pytest.mark.skipif(not hasattr(os, "makedev"), reason="device numbers and their sysfs links are a POSIX layout")
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="Linux device numbers: macOS before Python 3.12 turns os.makedev(189, 262) into a negative number its own "
+    "os.major refuses",
+)
 def test_a_named_node_is_traced_back_to_its_probe_for_the_serial_to_withhold(
     machine: SimpleNamespace, capsys: pytest.CaptureFixture
 ) -> None:
