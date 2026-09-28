@@ -688,6 +688,9 @@ class RunLock:
         returns False, re-reads under the guard, and recognises the record there.
         """
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # The time the machine is taken, not the time this run began to wait
+        # for it: a run queued behind this one is told how long it has held it.
+        self.record["started_at"] = utc_now_iso()
         staging = self.path.with_name(f"{self.path.name}.{self.record['owner_id']}.new")
         descriptor = os.open(staging, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         try:
