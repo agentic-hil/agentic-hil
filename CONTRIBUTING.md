@@ -38,6 +38,18 @@ cancelled two runs whose tests were green. `tools/ci_linux.py` and the review
 loop container below stay one process by design; their durations and their
 limits are their own.
 
+The hosted suite puts pytest's temporary tree under `runner.temp`, outside the
+checkout and on the same runner volume used for its other temporary files. A
+paired GitHub-hosted diagnostic of seven session/process tests found Windows'
+default temp root on C: while `runner.temp` and the checkout were on D:. Across
+two samples, the tests took 13.71/13.20 seconds with pytest's default root and
+12.43/9.27 seconds with a base under `runner.temp`; atomic writes took
+6.191/5.420 versus 4.160/4.246 seconds, and `fsync` took 4.284/3.589 versus
+2.578/2.620 seconds for the same 713 calls. These selected tests support a
+temp placement improvement, but do not explain the full-suite Windows cost. CI also
+uploads a per-test JUnit timing report for each OS/Python leg so future full
+runs can compare every testcase, beyond the thirty slowest printed in the log.
+
 `AGENTIC_HIL_TEST_TIME_SCALE` multiplies every wall-clock bound the suite takes
 through `scaled_time_bound` by one factor, accepted from 1.0 to 100 and left at
 1.0 while the variable is unset, so a machine that is busy with something else
