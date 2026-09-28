@@ -10,6 +10,7 @@ target attached.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -20,28 +21,31 @@ from agentic_hil.config import load_config
 from agentic_hil.tools import AgenticHILToolService
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "stm32cubeprogrammer_2_23_0_recordings.json"
+VM_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "stm32cubeprogrammer_2_23_0_vm_36440193292_recordings.json"
 CUBE_CLI = Path("/opt/st/cubeprogrammer-2.23.0/bin/STM32_Programmer_CLI")
-NO_STLINK_NOTICE = "ST-LINK error (DEV_NO_STLINK)"
 
 
-def output_matches_recording(name: str, observed: str) -> bool:
-    """Match the recording, with one exact VM-observed no-probe notice variant.
+def _normalized_usb_device_path(output: str) -> str:
+    """Normalize only the three-digit bus and device fields in a captured node path."""
+    return re.sub(r"/dev/bus/usb/[0-9]{3}/[0-9]{3}", "/dev/bus/usb/<BUS>/<DEVICE>", output)
 
-    The VM's CubeProgrammer build adds this one line immediately before its
-    existing no-probe message. It is accepted only for probe listing and only
-    at that exact position; all other transcript differences remain visible.
+
+def output_matches_recording(name: str, observed_stdout: str, observed_stderr: str) -> bool:
+    """Match a complete captured output pair, allowing only USB node renumbering.
+
+    Both checked-in captures are genuine command runs. The kernel assigns a
+    different three-digit bus/device path to the missing USB node across image
+    builds, so that exact path field alone is normalized in stderr. All other
+    stdout and stderr text, including the libusb errno and vendor marker, must
+    match one of the recorded pairs.
     """
-    expected = json.loads(FIXTURE.read_text(encoding="utf-8"))["recordings"][name]["stdout"]
-    if observed == expected:
-        return True
-    if name != "list_no_probe" or expected.count("No ST-Link detected!") != 1:
-        return False
-    with_notice = expected.replace(
-        "No ST-Link detected!",
-        f"{NO_STLINK_NOTICE}\nNo ST-Link detected!",
-        1,
-    )
-    return observed == with_notice
+    observed = (observed_stdout, _normalized_usb_device_path(observed_stderr))
+    for fixture_path in (FIXTURE, VM_FIXTURE):
+        expected = json.loads(fixture_path.read_text(encoding="utf-8"))["recordings"][name]
+        recorded = (expected["stdout"], _normalized_usb_device_path(expected["stderr"]))
+        if observed == recorded:
+            return True
+    return False
 
 
 def run_cli_smoke(records: dict) -> dict:
@@ -66,8 +70,7 @@ def run_cli_smoke(records: dict) -> dict:
     for name, record in records.items():
         result = observed[name]
         assert result["returncode"] == record["returncode"], (record["argv"], result)
-        assert output_matches_recording(name, result["stdout"]), (record["argv"], result["stdout"])
-        assert result["stderr"] == record["stderr"], (record["argv"], result["stderr"])
+        assert output_matches_recording(name, result["stdout"], result["stderr"]), (record["argv"], result)
     return observed
 
 

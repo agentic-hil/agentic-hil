@@ -1,0 +1,42 @@
+{
+  "provenance": {
+    "tool": "STM32CubeProgrammer",
+    "version": "2.23.0",
+    "recorded_on": "2026-09-28",
+    "workflow_run_id": 36440193292,
+    "source_commit": "cc96acb2a7a65211c75f65c09343d97f9f45f753",
+    "installer_archive_sha256": "6a9e60a5a048c45eb3241f9bb66bdc2e6cbd0119fb2e42568dc059fc6167442a",
+    "environment": "Optional CubeProgrammer smoke in the Podman-built bench-tier-cubeprogrammer image on the self-hosted Agentic HIL VM; no USB device nodes passed through and build step used --network=none. The image was built from the pinned Python base image and its Debian packages.",
+    "capture_source": "GitHub Actions run 36440193292, step output from tests/container/cubeprogrammer_without_a_probe.py before transcript assertions."
+  },
+  "recordings": {
+    "version": {
+      "argv": [
+        "--version"
+      ],
+      "returncode": 0,
+      "stdout": "\u001b[36m\u001b[01m      -------------------------------------------------------------------\n\u001b[39;49m\u001b[0m\u001b[36m\u001b[01m                        STM32CubeProgrammer v2.23.0                  \n\u001b[39;49m\u001b[0m\u001b[36m\u001b[01m      -------------------------------------------------------------------\n\n\u001b[39;49m\u001b[0m\u001b[39;49mSTM32CubeProgrammer version: 2.23.0 \n\n\u001b[39;49m\u001b[0m",
+      "stderr": ""
+    },
+    "list_no_probe": {
+      "argv": [
+        "-q",
+        "-l",
+        "st-link-only"
+      ],
+      "returncode": 0,
+      "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\n===== STLink Interface =====\nST-LINK error (DEV_NO_STLINK)\nNo ST-Link detected!\n\n",
+      "stderr": "libusb: error [get_usbfs_fd] File doesn't exist, wait 10 ms and try again\nlibusb: error [get_usbfs_fd] libusb couldn't open USB device /dev/bus/usb/002/002, errno=2\n"
+    },
+    "connect_no_probe": {
+      "argv": [
+        "-q",
+        "-c",
+        "port=SWD"
+      ],
+      "returncode": 1,
+      "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK error (DEV_NO_STLINK)\n",
+      "stderr": "libusb: error [get_usbfs_fd] File doesn't exist, wait 10 ms and try again\nlibusb: error [get_usbfs_fd] libusb couldn't open USB device /dev/bus/usb/002/002, errno=2\n"
+    }
+  }
+}

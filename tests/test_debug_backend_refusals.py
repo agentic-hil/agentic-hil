@@ -133,6 +133,11 @@ def cube_recording(name: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))["recordings"][name]
 
 
+def cube_vm_recording(name: str) -> dict:
+    path = FIXTURES / "stm32cubeprogrammer_2_23_0_vm_36440193292_recordings.json"
+    return json.loads(path.read_text(encoding="utf-8"))["recordings"][name]
+
+
 def play_recording(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     """Have the transcript fake replay one recorded run, byte for byte."""
     monkeypatch.setenv("AGENTIC_HIL_FAKE_TRANSCRIPT_RECORDING", name)
@@ -141,6 +146,17 @@ def play_recording(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
 def play_cube_recording(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     """Replay a real CubeProgrammer recording without requiring its licensed binary."""
     transcript = cube_recording(name)
+    play_transcript(
+        monkeypatch,
+        stdout=transcript["stdout"],
+        stderr=transcript["stderr"],
+        returncode=transcript["returncode"],
+    )
+
+
+def play_cube_vm_recording(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Replay a real CubeProgrammer transcript captured in the VM image build."""
+    transcript = cube_vm_recording(name)
     play_transcript(
         monkeypatch,
         stdout=transcript["stdout"],
@@ -404,6 +420,43 @@ def test_stlink_probe_target_classifies_cubes_real_no_probe_refusal(tmp_path: Pa
     assert result["error_type"] == "adapter_not_found", result
     assert result["programmer_output"]["stdout"] == transcript["stdout"], result
     assert_refused_before_contact(result, config)
+
+
+def test_stlink_probe_listing_accepts_vm_recorded_libusb_no_probe_diagnostic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    play_cube_vm_recording(monkeypatch, "list_no_probe")
+    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+
+    result = call(config, "debugger_probes_list")
+
+    assert result["ok"] is True, result
+    assert result["probes"] == [], result
+    assert result.get("target_contacted") is not True, result
+    assert result["side_effect_status"] == "not_started", result
+    assert result["retry_safe"] is True, result
+
+
+def test_stlink_probe_target_classifies_vm_recorded_dev_no_stlink_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    transcript = cube_vm_recording("connect_no_probe")
+    play_cube_vm_recording(monkeypatch, "connect_no_probe")
+    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+
+    result = call(config, "probe_target")
+
+    assert result["ok"] is False, result
+    assert result["backend_error_type"] == "probe_not_found", result
+    assert result["error_type"] == "adapter_not_found", result
+    assert result["programmer_output"]["stdout"] == transcript["stdout"], result
+    assert result["programmer_output"]["stderr"] == transcript["stderr"], result
+    assert_refused_before_contact(result, config)
+
+
+def test_stlink_probe_target_does_not_generalize_a_neighboring_vendor_error_code(tmp_path: Path) -> None:
+    transcript = cube_vm_recording("connect_no_probe")
+    output = transcript["stdout"].replace("DEV_NO_STLINK", "DEV_NO_STLINK_OTHER") + transcript["stderr"]
+    config = load_config(str(write_config(tmp_path, debugger_type="stlink")))
+    backend = STLinkBackend(config)
+
+    assert backend._classify_output(output, "probe_target") == "config_file_not_found"
 
 
 def test_doctor_reports_the_classified_version_failure_and_exits_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

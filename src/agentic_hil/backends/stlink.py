@@ -818,6 +818,8 @@ class STLinkBackend:
 
     def _classify_output(self, output: str, tool: str | None = None) -> str:
         lower = output.lower()
+        if "st-link error (dev_no_stlink)" in lower:
+            return "probe_not_found"
         if contains_any(lower, ["no st-link", "no stlink", "st-link not found", "stlink not found", "no debug probe"]):
             return "probe_not_found"
         if contains_any(lower, ["no stm32 target found", "cannot connect to target", "can not connect to target", "failed to connect"]):
