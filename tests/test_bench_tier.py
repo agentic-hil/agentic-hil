@@ -219,3 +219,36 @@ def test_the_stage_mark_is_declared_where_strict_markers_look(pytestconfig: pyte
     declared = pytestconfig.getini("markers")
 
     assert [line for line in declared if line.startswith("without_device_group:")], declared
+
+
+# -- the tests that install the product from the bench image's index -------
+
+
+def test_what_installs_from_the_bench_images_index_runs_only_where_that_index_is(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Deselected, not skipped, on a bench without the index; kept beside the rest on one that has it."""
+    from tests.bench import conftest
+
+    monkeypatch.setenv(conftest.BENCH_ENV, "1")
+    monkeypatch.delenv(conftest.DEVICE_GROUPS_ENV, raising=False)
+    monkeypatch.setattr(conftest, "WHEELHOUSE", tmp_path / "wheelhouse")
+    installing = "tests/bench/test_bench_first_run.py::test_upgrade"
+    selections = []
+    for _ in ("without the index", "with it"):
+        items, config = [*the_items(), AnItem(installing, "bench", conftest.NEEDS_THE_WHEELHOUSE)], AConfig()
+        conftest.pytest_collection_modifyitems(config, items)
+        selections.append(([item.nodeid for item in items], [item.nodeid for item in config.deselected]))
+        conftest.WHEELHOUSE.mkdir(exist_ok=True)
+
+    stage = "tests/bench/test_bench_without_device_group.py::test_probe"
+    rest = ["tests/bench/test_bench_serial.py::test_echo", "tests/test_config.py::test_load"]
+    assert selections == [(rest, [stage, installing]), ([*rest, installing], [stage])]
+
+
+def test_the_index_mark_is_declared_where_strict_markers_look(pytestconfig: pytest.Config) -> None:
+    from tests.bench.conftest import NEEDS_THE_WHEELHOUSE
+
+    declared = pytestconfig.getini("markers")
+
+    assert [line for line in declared if line.startswith(f"{NEEDS_THE_WHEELHOUSE}:")], declared

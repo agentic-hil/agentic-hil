@@ -89,6 +89,12 @@ DEVICE_GROUPS_ENV = "AGENTIC_HIL_BENCH_DEVICE_GROUPS"
 DEVICE_GROUPS_WITHHELD = "withheld"
 WITHOUT_DEVICE_GROUP = "without_device_group"
 
+# The package index `tools/bench/Dockerfile` builds into the bench image, and the
+# mark of the tests that install the product from it. Where it is not, on a bench
+# run directly or in any other image, those tests are deselected.
+WHEELHOUSE = Path("/wheelhouse")
+NEEDS_THE_WHEELHOUSE = "wheelhouse"
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CHECKOUT_SOURCES = REPOSITORY_ROOT / "src"
 DEMO = REPOSITORY_ROOT / "examples" / "nucleo-f446re_demo"
@@ -678,16 +684,20 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     each is deselected from the other's run rather than skipped, since a skip is
     what fails the tier. Off a bench nothing is taken out: every test here skips
     there by its own mark. A hook in this conftest sees the whole session's
-    items, so it goes by the mark and never by the directory.
+    items, so it goes by the mark and never by the directory. A test that
+    installs the product from the bench image's package index is deselected the
+    same way wherever that index is not.
     """
     if os.environ.get(BENCH_ENV) != "1":
         return
     withheld = os.environ.get(DEVICE_GROUPS_ENV) == DEVICE_GROUPS_WITHHELD
+    indexed = WHEELHOUSE.is_dir()
     kept: list[pytest.Item] = []
     deselected: list[pytest.Item] = []
     for item in items:
         in_the_stage = item.get_closest_marker(WITHOUT_DEVICE_GROUP) is not None
-        (kept if in_the_stage == withheld else deselected).append(item)
+        installable = indexed or item.get_closest_marker(NEEDS_THE_WHEELHOUSE) is None
+        (kept if in_the_stage == withheld and installable else deselected).append(item)
     if deselected:
         config.hook.pytest_deselected(items=deselected)
         items[:] = kept

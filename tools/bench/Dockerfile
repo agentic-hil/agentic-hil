@@ -84,12 +84,31 @@ RUN python -m pip install --no-cache-dir --disable-pip-version-check --require-h
 COPY requirements/dev.txt /tmp/dev.txt
 RUN python -m pip install --no-cache-dir --disable-pip-version-check --require-hashes -r /tmp/dev.txt
 
+# A package index for the tests that install the product the way a newcomer
+# does, into an account of their own, and then upgrade and remove it. The tier
+# runs with no network, so the index is filled here: first the runtime
+# dependencies from their locked file, with their hashes, as wheels for this
+# interpreter, before the checkout is copied in for the reason the layer above
+# gives; then, below, a wheel of this commit. Nothing is installed from it here,
+# and nothing in /work/.venv ever is: the tests hand it to pip through pip's own
+# index variables, in an account whose home is theirs alone.
+COPY requirements/runtime.txt /tmp/runtime.txt
+RUN python -m pip download --no-cache-dir --disable-pip-version-check --require-hashes --only-binary=:all: --dest /wheelhouse -r /tmp/runtime.txt
+
 COPY . /work
 # `--no-deps`, because the line above installed them from the locked file and a
 # resolver run here would be free to move any of them. `--no-build-isolation`,
 # because an isolated build fetches the build backend from the index without a
 # hash, and the one installed from the lock above is the one this build uses.
 RUN python -m pip install --no-cache-dir --disable-pip-version-check --no-deps --no-build-isolation -e .
+
+# The wheel of this commit for the index above, built from a copy of the tree so
+# the editable installation stays exactly as it is.
+RUN mkdir /tmp/wheel-source \
+    && cp -r pyproject.toml README.md LICENSE MANIFEST.in src /tmp/wheel-source/ \
+    && rm -rf /tmp/wheel-source/src/*.egg-info \
+    && python -m build --wheel --no-isolation --outdir /wheelhouse /tmp/wheel-source \
+    && rm -rf /tmp/wheel-source
 
 # What says a run really is in this image, written by this build and by nothing
 # else. The runner prints it before pytest starts and refuses a verdict from a
