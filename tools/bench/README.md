@@ -153,8 +153,10 @@ apply.
   container gets the probe's nodes and none of the groups they are opened
   through, the way a Linux account meets a probe it has not been given the group
   of, and the product has to say the probe is attached and this user may not
-  open it. It relies on the nodes being opened through a group, as above; a node
-  the container could still open fails the stage by name. Every other run leaves
+  open it: `doctor` fails its device-access check for the probe and the port,
+  naming the group, and `init` binds both and warns in the same words. It
+  relies on the nodes being opened through a group, as above; a node the
+  container could still open fails the stage by name. Every other run leaves
   the stage out, as deselected rather than skipped.
 
 In ordinary stages, the container gets only the probe's device nodes, the

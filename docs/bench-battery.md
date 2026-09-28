@@ -68,7 +68,7 @@ With `--hardware`:
 
 | Check | What it establishes |
 | --- | --- |
-| `doctor` | the configuration loads and every device it declares names hardware |
+| `doctor` | the configuration loads, every device it declares names hardware, and off Windows this account may open the probe and the serial port |
 | `probe-inventory` | the attached probe is enumerated and carries a serial |
 | `reset` | a real reset over the probe succeeds, and whatever the debugger said on the way is carried as evidence rather than read as a verdict |
 | `plan` | your project's own plan is green on the board |

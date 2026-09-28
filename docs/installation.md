@@ -261,6 +261,8 @@ pyocd pack install stm32f446retx  # downloads it from the vendor index
 
 `agentic-hil doctor` reports this as `debuggers.<name>.target_support` before anything is flashed, and separates "this host cannot resolve that target type" (red, with the install command) from "this host cannot answer the question" (green, with the reason). Agentic HIL never installs a pack itself: `pyocd pack install` fetches over the network, and that is a step a person takes knowingly. Details: `agentic-hil://reference/target-support`.
 
+Off Windows `doctor` also asks whether this account may open the probe's USB device and each bound serial port, and opens neither to find out: the kernel answers for the node's mode, group and ACL. It reports the answer as `debuggers.<name>.device_access` and `com_ports.<name>.device_access`, following a `/dev/serial/by-id` link to the tty it names. A node this account may not open fails the run with `device_access_denied`, naming the node, the group that owns it and whether logging in again is the whole fix; `init` keeps the file it wrote and repeats those sentences as warnings, and `setup` shows them in its `doctor` step. A probe that is not on USB on this machine gets no such entry. [TROUBLESHOOTING.md](https://github.com/agentic-hil/agentic-hil/blob/master/TROUBLESHOOTING.md) section 6 has the udev rule and the group step.
+
 ## Command reference
 
 ```text
