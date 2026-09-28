@@ -2075,7 +2075,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "log in again; on Windows, bind the correct USB driver to it (ST-Link needs the ST driver, not WinUSB, "
             "unless the config selects a WinUSB interface).",
             "Set `debuggers.<name>.probe_id` to the serial number of the intended probe when more than one is attached; "
-            "it is passed as `adapter serial`.",
+            "OpenOCD 0.12.0 and newer are passed it as `adapter serial`, older releases as the adapter driver's own "
+            "serial command (`hla_serial` for `interface/stlink.cfg`).",
             "Close whatever else holds the probe.",
         ),
     ),
@@ -3674,7 +3675,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "tool": "openocd",
         "type": {"status": "optional", "value": "openocd", "note": "Default. Omit only if no other backend is meant. Settable over MCP behind allow_config_description_write, and switching an entry to this backend has to carry interface_cfg and target_cfg in the same call, because OpenOCD reaches the board through no other route; an entry that does not name them is refused rather than left half switched. Send executable in that call too, or `null` to have OpenOCD discovered on PATH: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to `openocd` on PATH, except on the untouched starter entry, which stays inert until somebody names a toolchain in it. An absolute path or a value containing a separator is resolved against workspace_root and must exist."},
-        "probe_id": {"status": "optional", "note": "Adapter serial number, passed as `adapter serial <probe_id>`. Required once more than one debugger is configured."},
+        "probe_id": {"status": "optional", "note": "Adapter serial number. OpenOCD 0.12.0 and newer are passed `adapter serial <probe_id>`; an older release is passed the adapter driver's own serial command (`hla_serial`, `st-link serial` or `cmsis_dap_serial`), and a call whose driver has none is refused `not_supported` before OpenOCD is started for it. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "OpenOCD selects the target through target_cfg."},
         "interface": {"status": "ignored", "note": "OpenOCD selects the transport through interface_cfg."},
         "interface_cfg": {"status": "required", "default": "interface/stlink.cfg", "note": "OpenOCD script, passed as `-f`. Either an OpenOCD search name such as `interface/stlink.cfg`, which OpenOCD resolves against its own script path and which therefore does not have to exist on this host, or an absolute path to an existing file outside the workspace. A path under the system temporary directory is refused: it is cleared without warning and the configuration would stop describing this bench."},
@@ -3753,7 +3754,7 @@ BOOTSTRAP_DISCOVERY_RULE = {
     ),
     "usb_serial_inventory": (
         "A host serial port whose USB vendor is 0483 and whose product is one of the ST-Link ids publishes the probe "
-        "serial in its descriptor, which is the string OpenOCD's `adapter serial` takes. The toolchain is the "
+        "serial in its descriptor, which is the string OpenOCD selects the probe by. The toolchain is the "
         "`openocd` on PATH, and the generated entry is `type: openocd` with its interface_cfg and target_cfg. This is "
         "the path on an ordinary Linux workstation, which normally has OpenOCD and not STM32CubeProgrammer."
     ),
@@ -3775,7 +3776,7 @@ BOOTSTRAP_DISCOVERY_RULE = {
     ),
     "target_identity_without_the_cli": (
         "The workspace profile's `target.controller` when it names one, which is exact and says nothing to the board; "
-        "otherwise a read-only OpenOCD `init`, `targets`, `shutdown` against the selected adapter serial, which "
+        "otherwise a read-only OpenOCD `init`, `targets`, `shutdown` against the probe selected by that serial, which "
         "reports the target script's family rather than the part number. Neither flashes, erases, resets nor halts. A "
         "probe whose target could not be named is still written down, with `target.controller` left at the "
         "placeholder."
@@ -3797,7 +3798,7 @@ BOOTSTRAP_DISCOVERY_RULE = {
 
 UNNAMED_PROBE_RULE = {
     "rule": "Once `debuggers` holds more than one entry, the bound one must carry a probe_id before a probe-addressing tool (flash_firmware, reset_target, probe_target, the typed debug tools) will drive it.",
-    "why": "the bound entry's name alone does not prove which physical probe a call reaches once another configured entry could just as easily be meant; probe_id is what pyOCD and ST-Link verify against the attached hardware, and what OpenOCD opens by adapter serial.",
+    "why": "the bound entry's name alone does not prove which physical probe a call reaches once another configured entry could just as easily be meant; probe_id is what pyOCD and ST-Link verify against the attached hardware, and the serial OpenOCD selects the probe by.",
     "enforced_at": "each probe-addressing tool call, as error_type `not_supported`",
     "single_debugger_exemption": (
         "A lone configured debugger does not have to carry a probe_id: it has no other entry to be confused with, so "

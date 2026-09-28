@@ -1595,7 +1595,7 @@ class AgenticHILToolService:
         recovery keeps that backend.
 
         The probe is the enumerated spelling, never the folded resource id: it is
-        what a toolchain's `adapter serial`/`sn=` selector is matched against, so a
+        what a toolchain's serial selector (`adapter serial`, `hla_serial`, `sn=`) is matched against, so a
         case-folded copy could select nothing. The entry is the `debugger_id` the
         read named: a configuration with several debuggers is loaded unbound, so the
         probe alone cannot say which toolchain and grants to recover the board
@@ -2942,8 +2942,8 @@ def unnamed_probe_error(tool: str, config: AgenticHILConfig) -> JsonObject:
     blind spot for the identical reason (see
     devices.DebuggerDevice.identity_warning). An operator who wants that
     guarantee sets probe_id, checked against the attached probe at the pyOCD
-    and ST-Link hardware boundary and passed to OpenOCD as the adapter serial
-    to open, whether one debugger is configured or several."""
+    and ST-Link hardware boundary and passed to OpenOCD as the serial of the
+    probe to open, whether one debugger is configured or several."""
     return {
         "ok": False,
         "tool": tool,

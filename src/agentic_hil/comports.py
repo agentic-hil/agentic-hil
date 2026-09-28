@@ -98,9 +98,10 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
 # Which of the ports this host lists is a debug probe.
 #
 # An ST-Link publishes its serial in the USB descriptor of the virtual COM
-# port it exposes, and that string is exactly what OpenOCD's `adapter serial`
-# takes. So the inventory above is also a probe enumeration, and it is the only
-# one two callers have: bootstrap discovery on a host with no
+# port it exposes, and that string is exactly what OpenOCD selects the probe by
+# (`adapter serial` from 0.12, the adapter driver's own command before). So
+# the inventory above is also a probe enumeration, and it is the only one two
+# callers have: bootstrap discovery on a host with no
 # STM32CubeProgrammer, and the configured OpenOCD backend, which has no
 # backend-independent command of its own to enumerate probes with. It lives
 # here, beside the reading it interprets, so those two cannot grow different

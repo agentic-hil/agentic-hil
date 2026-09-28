@@ -1,10 +1,12 @@
 """What OpenOCD 0.11 answers to the probe selection this backend sends, from the bench.
 
-Ubuntu 22.04 packages OpenOCD 0.11. With `probe_id` set, every call the OpenOCD
-backend makes puts `-c "adapter serial <serial>"` on OpenOCD's command line
-after the interface script and ahead of the target script and of the call's own
-command. The OpenOCD the default image carries runs it, on every green default
-tier; 0.11 has no such subcommand. It prints the usage of the `adapter` group,
+Ubuntu 22.04 packages OpenOCD 0.11. With `probe_id` set, a call the OpenOCD
+backend makes on 0.12 and newer, or on an OpenOCD whose release it could not
+read, puts `-c "adapter serial <serial>"` on OpenOCD's command line after the
+interface script and ahead of the target script and of the call's own command
+(test_openocd_0_11_probe_selection holds what a 0.11 that names its release
+gets instead). The OpenOCD the default image carries runs it, on every green
+default tier; 0.11 has no such subcommand. It prints the usage of the `adapter` group,
 whose list names `hla_serial` for the job and no `serial`, then
 `Error: invalid subcommand "serial <serial>"`, and exits 1 with no line from an
 adapter or a target in between: OpenOCD evaluates
