@@ -596,7 +596,7 @@ def record_gdb_stop_evidence(bench: Bench, log_path: str, scenario: str, record_
     assert any(f'func="{FAULT_HANDLER}"' in line for line in raw_records), raw_records
 
     gdb_executable = resolve_bench_gdb_executable(bench.config, bench.project, backend_type(bench))
-    version = subprocess.run([str(gdb_executable), "--version"], capture_output=True, text=True, timeout=10, check=False)
+    version = subprocess.run([str(gdb_executable), "--version"], capture_output=True, text=True, timeout=scaled_time_bound(10), check=False)
     assert version.returncode == 0, (version.returncode, version.stderr)
     version_line = next((line.strip() for line in version.stdout.splitlines() if line.strip()), "")
     assert version_line, version.stdout

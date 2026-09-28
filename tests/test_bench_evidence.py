@@ -18,7 +18,7 @@ def test_bench_gdb_resolution_uses_explicit_fixture_config_despite_parent_overri
 
     executable = resolve_bench_gdb_executable(config_path, project, "openocd")
 
-    assert Path(executable) == Path(sys.executable)
+    assert Path(executable).resolve(strict=True) == Path(sys.executable).resolve(strict=True)
 
 
 def test_bench_evidence_export_redacts_absolute_file_and_fullname_fields(tmp_path: Path, monkeypatch) -> None:
