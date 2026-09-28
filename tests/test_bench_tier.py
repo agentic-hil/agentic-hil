@@ -23,6 +23,7 @@ import ast
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -141,3 +142,80 @@ def test_the_session_fixture_reports_no_setup_failure_as_a_skip() -> None:
     skips = [node for node in ast.walk(fixture) if isinstance(node, ast.Attribute) and node.attr == "skip"]
 
     assert skips == [], "a setup failure in a declared bench is a failure, not a skip"
+
+
+# -- the stage that withholds the probe's group ----------------------------
+
+
+class AnItem:
+    """A collected test as the tier's selection reads one: its id and its marks."""
+
+    def __init__(self, nodeid: str, *marks: str) -> None:
+        self.nodeid = nodeid
+        self.marks = set(marks)
+
+    def get_closest_marker(self, name: str) -> object | None:
+        return name if name in self.marks else None
+
+
+class AConfig:
+    """What the selection hook reaches through `config`: the deselection report."""
+
+    def __init__(self) -> None:
+        self.deselected: list[AnItem] = []
+        self.hook = SimpleNamespace(pytest_deselected=lambda items: self.deselected.extend(items))
+
+
+def the_items() -> list[AnItem]:
+    return [
+        AnItem("tests/bench/test_bench_serial.py::test_echo", "bench"),
+        AnItem("tests/bench/test_bench_without_device_group.py::test_probe", "bench", "without_device_group"),
+        AnItem("tests/test_config.py::test_load"),
+    ]
+
+
+def selected_after(monkeypatch: pytest.MonkeyPatch, **environment: str) -> tuple[list[str], list[str]]:
+    from tests.bench.conftest import BENCH_ENV, DEVICE_GROUPS_ENV, pytest_collection_modifyitems
+
+    monkeypatch.delenv(BENCH_ENV, raising=False)
+    monkeypatch.delenv(DEVICE_GROUPS_ENV, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    items, config = the_items(), AConfig()
+    pytest_collection_modifyitems(config, items)
+    return [item.nodeid for item in items], [item.nodeid for item in config.deselected]
+
+
+def test_off_a_bench_the_selection_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test of the tier skips there by its own mark, the stage's included."""
+    kept, deselected = selected_after(monkeypatch)
+
+    assert kept == [item.nodeid for item in the_items()]
+    assert deselected == []
+
+
+def test_a_bench_that_keeps_the_groups_never_runs_the_stage_that_withholds_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deselected, not skipped: a skip is what fails the tier, and the stage
+    cannot pass where the groups it withholds are still there."""
+    from tests.bench.conftest import BENCH_ENV
+
+    kept, deselected = selected_after(monkeypatch, **{BENCH_ENV: "1"})
+
+    assert kept == ["tests/bench/test_bench_serial.py::test_echo", "tests/test_config.py::test_load"]
+    assert deselected == ["tests/bench/test_bench_without_device_group.py::test_probe"]
+
+
+def test_a_bench_that_withholds_the_groups_runs_that_stage_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every other test opens the probe, and the container it runs in may not."""
+    from tests.bench.conftest import BENCH_ENV, DEVICE_GROUPS_ENV, DEVICE_GROUPS_WITHHELD
+
+    kept, deselected = selected_after(monkeypatch, **{BENCH_ENV: "1", DEVICE_GROUPS_ENV: DEVICE_GROUPS_WITHHELD})
+
+    assert kept == ["tests/bench/test_bench_without_device_group.py::test_probe"]
+    assert deselected == ["tests/bench/test_bench_serial.py::test_echo", "tests/test_config.py::test_load"]
+
+
+def test_the_stage_mark_is_declared_where_strict_markers_look(pytestconfig: pytest.Config) -> None:
+    declared = pytestconfig.getini("markers")
+
+    assert [line for line in declared if line.startswith("without_device_group:")], declared

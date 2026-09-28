@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -66,6 +67,10 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "target_config_not_found": "debugger_config_not_found",
     "config_file_not_found": "debugger_config_not_found",
     "command_rejected_before_init": "debugger_command_rejected",
+    # The probe is attached and this user may not open it. The public name stays
+    # the one that means "could not be found or opened", and the backend's own
+    # type, the summary and the causes say it was the opening (#506).
+    "adapter_access_denied": "adapter_not_found",
     # An exit of 0 with the tool's success marker missing from the output. This
     # branch read nothing out of OpenOCD's words, so it gets a public error_type
     # of its own rather than the classification the words would have produced:
@@ -104,6 +109,26 @@ OPENOCD_ERASE_FAILURE_MARKERS = ["failed erasing sectors"]
 OPENOCD_CONFIG_FIELD_BY_BACKEND_ERROR = {
     "interface_config_not_found": "interface_cfg",
     "target_config_not_found": "target_cfg",
+}
+
+# What OpenOCD 0.12.0 printed on the bench with the probe attached and the group
+# that owns its USB device withheld from the user (2026-09-27):
+# `Error: libusb_open() failed with LIBUSB_ERROR_ACCESS`, and then the same
+# `Error: open failed` it prints with nothing on USB. libusb enumerated the probe
+# and the device node's mode refused opening it. Read only off Windows: there
+# libusb can give the same error for a device another program holds, which the
+# causes `adapter_not_found` already carries cover, the way the serial path reads
+# EACCES.
+OPENOCD_ACCESS_REFUSED_MARKER = "libusb_error_access"
+
+# Causes for a classification the public error_type is less specific than. The
+# generic causes for `adapter_not_found` start with a probe that is not
+# connected, which is the one thing this transcript rules out.
+OPENOCD_CAUSES_BY_BACKEND_ERROR = {
+    "adapter_access_denied": [
+        "this user may not open the probe's USB device: on Linux add the user to the group the probe's udev rule gives it to (plugdev on Debian and Ubuntu) and log in again",
+        "no udev rule for this probe is installed, or its rule or the device node's mode denies this user (ls -l /dev/bus/usb/<bus>/<device>, with the numbers lsusb prints for the probe, shows its owner and group)",
+    ],
 }
 
 OPENOCD_DISABLE_TCP_SERVER_COMMANDS = ["gdb_port disabled", "tcl_port disabled", "telnet_port disabled"]
@@ -655,7 +680,7 @@ class OpenOCDBackend:
     # timeout, which is the deadline killing the process before it could say
     # where it stopped.
     PRE_CONTACT_BACKEND_ERRORS = frozenset(
-        {"interface_config_not_found", "target_config_not_found", "config_file_not_found", "adapter_not_found"}
+        {"interface_config_not_found", "target_config_not_found", "config_file_not_found", "adapter_not_found", "adapter_access_denied"}
     )
     # One classification further out, and only for the two tools whose command
     # string drives nothing: OpenOCD's own report that nothing answered on the
@@ -706,7 +731,7 @@ class OpenOCDBackend:
         # line about whatever this run stopped at, including the `invalid command
         # name` its own interpreter answered with, and that line is what the
         # classification, the summary and the causes were all read out of.
-        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._failure_summary(backend_error_type, error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path), **programmer_output_fields(completed)}
+        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._failure_summary(backend_error_type, error_type), "likely_causes": OPENOCD_CAUSES_BY_BACKEND_ERROR.get(backend_error_type) or self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path), **programmer_output_fields(completed)}
         if operation_result is not None:
             result["operation_result"] = operation_result
         if rejected_commands:
@@ -817,6 +842,11 @@ class OpenOCDBackend:
             return "interface_config_not_found"
         if target_config in lower and contains_any(lower, ["not found", "can't find", "couldn't find", "couldn't open"]):
             return "target_config_not_found"
+        # Ahead of the adapter rule, which the same transcript also matches: its
+        # `open failed` line is the whole of what OpenOCD prints with no probe on
+        # USB, so only the libusb line says the probe was there.
+        if OPENOCD_ACCESS_REFUSED_MARKER in lower and os.name != "nt":
+            return "adapter_access_denied"
         if contains_any(lower, ["adapter not found", "no adapter", "no device found", "unable to open", "open failed", "libusb_open"]):
             return "adapter_not_found"
         if contains_any(lower, ["target not examined", "target not detected", "unable to connect", "failed to read"]):
@@ -859,7 +889,11 @@ class OpenOCDBackend:
         reader to check "the configuration file" when this backend takes two.
         The field whose value OpenOCD said it could not find is the first thing
         the operator has to look at, so it is in the sentence rather than only in
-        `backend_error_type` (#506)."""
+        `backend_error_type` (#506). A probe this user may not open is the other
+        such case: `adapter_not_found` covers it, and the sentence for it would
+        leave the reader looking for a probe that is plugged in."""
+        if backend_error_type == "adapter_access_denied":
+            return "OpenOCD was refused permission to open the debug probe (LIBUSB_ERROR_ACCESS): the probe is attached, and this user may not open its USB device."
         field = OPENOCD_CONFIG_FIELD_BY_BACKEND_ERROR.get(backend_error_type)
         if field is None:
             return self._summary_for_error(error_type)

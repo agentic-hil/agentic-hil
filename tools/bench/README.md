@@ -78,6 +78,7 @@ From a checkout on the machine the board is attached to:
 python3 tools/bench_in_container.py                      # the whole tier
 python3 tools/bench_in_container.py -- tests/bench/test_bench_serial.py -x
 python3 tools/bench_in_container.py --runtime docker
+python3 tools/bench_in_container.py --without-device-group
 python3 tools/bench_in_container.py --build-only         # the image alone, anywhere
 ```
 
@@ -103,6 +104,14 @@ summary line as the verdict.
   other run on the machine still meet at the board's own lock.
 - `--usb-device` and `--serial-device` name the probe's nodes instead of
   finding them. They go together, and each can be given more than once.
+- `--without-device-group` runs the one stage the tier cannot hold,
+  `tests/bench/test_bench_without_device_group.py`, and nothing else: the
+  container gets the probe's nodes and none of the groups they are opened
+  through, the way a Linux account meets a probe it has not been given the group
+  of, and the product has to say the probe is attached and this user may not
+  open it. It relies on the nodes being opened through a group, as above; a node
+  the container could still open fails the stage by name. Every other run leaves
+  the stage out, as deselected rather than skipped.
 
 The container gets the probe's device nodes, the machine's device-lock
 directory, the serial port's `/dev/serial/by-id` links read only, and the
@@ -178,10 +187,15 @@ image built from it and the tier that image runs. That is what lets the head of
 a pull request from a fork be named. For the length of the run the board and its
 probe are that commit's to drive, which is the decision a dispatch makes.
 
+The gate runs the tier, and then `--without-device-group` on the image the
+tier's run built: after a red tier too, because what the stage proves does not
+depend on what the tier found, and never after a cancelled run.
+
 The gate shares its concurrency group with `.github/workflows/hardware-bench.yml`,
 so the two never hold the board at once and neither cancels the other. A group
 keeps one pending run: a second dispatch while one waits takes its place. The report and the log are uploaded as the `bench-tier` artifact on
-every path, including a red or cancelled run, and kept for fourteen days.
+every path, including a red or cancelled run, and kept for fourteen days; the
+stage's are in its `without-device-group` directory inside it.
 
 ## What is in the image
 

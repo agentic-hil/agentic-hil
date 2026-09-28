@@ -161,8 +161,10 @@ def test_doctor_accepts_a_bound_configuration_whose_openocd_is_installed(tmp_pat
 #
 # A libusb refusal is not recordable here: the container has no USB bus, so
 # libusb has nothing to refuse and the transcript carries the open failure
-# alone. On a host without a udev rule the same run prints
-# `Error: libusb_open() failed with LIBUSB_ERROR_ACCESS` ahead of it.
+# alone. With the probe attached and this user unable to open it, the same run
+# prints `Error: libusb_open() failed with LIBUSB_ERROR_ACCESS` ahead of it,
+# which the bench stage that withholds the probe's group records
+# (tests/bench/test_bench_without_device_group.py).
 
 THE_THREE_TOOLS = [
     ("probe_target", {}),

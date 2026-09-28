@@ -38,6 +38,7 @@ id in front of it.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import shlex
 import sys
@@ -750,8 +751,11 @@ def test_the_bench_run_uploads_its_evidence_whatever_the_run_did() -> None:
 
 GATE_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "bench-gate.yml"
 GATE_RUNNER = "tools/bench_in_container.py"
-# Where the report and the log land, as the run step says and the upload reads.
+# Where the report and the log land, as the run steps say and the upload reads:
+# the tier's in the directory itself, the stage's without the device group in a
+# directory of its own inside it.
 GATE_RESULTS = "bench-results"
+GATE_STAGE_RESULTS = f"{GATE_RESULTS}/without-device-group"
 
 
 def gate_job() -> dict:
@@ -762,10 +766,11 @@ def gate_checkouts() -> list[dict]:
     return [step for step in gate_job()["steps"] if "actions/checkout" in str(step.get("uses", ""))]
 
 
-def gate_run_step() -> dict:
+def gate_run_steps() -> list[dict]:
+    """The tier's step, then the step of the stage that withholds the probe's groups."""
     running = [step for step in gate_job()["steps"] if "run" in step]
-    assert len(running) == 1, running
-    return running[0]
+    assert len(running) == 2, running
+    return running
 
 
 def test_the_gate_is_started_by_hand_and_by_nothing_else() -> None:
@@ -814,33 +819,48 @@ def test_the_gate_pins_every_action_by_commit() -> None:
 
 
 def test_the_gate_runs_the_runner_and_nothing_else() -> None:
-    """One command: the runner, which builds the image and runs the tier in it.
+    """Two commands, both the runner: the tier, then the stage the tier cannot hold.
 
-    Nothing on the host installs, fetches, writes a configuration or reaches a
-    debugger or a port; the product itself runs only inside the container.
-    `exec`, so the runner is the step's process and the SIGINT a cancelled run
-    sends reaches it, and not a shell that would take it and leave the
-    container running.
+    The runner builds the image and runs the tier in it. Nothing on the host
+    installs, fetches, writes a configuration or reaches a debugger or a port;
+    the product itself runs only inside the container. `exec`, so the runner is
+    the step's process and the SIGINT a cancelled run sends reaches it, and not
+    a shell that would take it and leave the container running.
+
+    The second command is the stage with the probe attached and this user not
+    allowed to open it, which only a container that withholds the groups the
+    probe is opened through can put the product in, and which every other test
+    of the tier would fail in.
     """
     lines = run_lines(gate_job())
 
-    assert len(lines) == 1, lines
-    command = shlex.split(lines[0])
-    assert command[:2] == ["exec", "python3"], command
-    assert command[2].endswith(GATE_RUNNER), command
-    assert command[3:] == [
-        "--source",
-        "../under-test",
-        "--expected-commit",
-        "$(git -C ../under-test rev-parse HEAD)",
-        "--output",
-        f"../{GATE_RESULTS}",
-    ], command
-    line = lines[0]
-    assert not RAW_HARDWARE.search(line), line
-    assert not FETCH_TOOL.search(line), line
-    for word in ("pip", "agentic-hil", "podman", "docker", "sudo"):
-        assert word not in command, command
+    assert len(lines) == 2, lines
+    tier, stage = (shlex.split(line) for line in lines)
+    for command, line in zip((tier, stage), lines, strict=True):
+        assert command[:2] == ["exec", "python3"], command
+        assert command[2].endswith(GATE_RUNNER), command
+        assert not RAW_HARDWARE.search(line), line
+        assert not FETCH_TOOL.search(line), line
+        for word in ("pip", "agentic-hil", "podman", "docker", "sudo"):
+            assert word not in command, command
+    source_args = ["--source", "../under-test", "--expected-commit", "$(git -C ../under-test rev-parse HEAD)"]
+    assert tier[3:] == [*source_args, "--output", f"../{GATE_RESULTS}"], tier
+    assert stage[3:] == [*source_args, "--without-device-group", "--output", f"../{GATE_STAGE_RESULTS}"], stage
+
+
+def test_the_stage_without_the_device_group_runs_after_the_tier_unless_the_run_was_cancelled() -> None:
+    """Its verdict is worth having beside a red tier, and a stopped run starts nothing more.
+
+    It runs second, on the image the tier's run built, and after a red tier
+    too: whether the product names a refused probe as one does not depend on
+    what the tier found on the board. After a cancelled run, or one the job's
+    limit stopped, nothing more goes near the machine.
+    """
+    tier, stage = gate_run_steps()
+
+    assert "if" not in tier, tier
+    # Wrapped, because YAML reads a bare leading `!` as a tag.
+    assert stage["if"] == "${{ !cancelled() }}", stage
 
 
 def test_the_commit_under_test_runs_only_inside_the_container() -> None:
@@ -863,12 +883,12 @@ def test_the_commit_under_test_runs_only_inside_the_container() -> None:
     named_path = named[0]["with"]["path"]
     assert harness_path != named_path
 
-    step = gate_run_step()
-    assert step["working-directory"] == named_path, step
-    command = shlex.split(run_lines(gate_job())[0])
-    assert command[2] == f"../{harness_path}/{GATE_RUNNER}", command
-    assert command[command.index("--source") + 1] == f"../{named_path}", command
-    assert command[command.index("--expected-commit") + 1] == f"$(git -C ../{named_path} rev-parse HEAD)", command
+    for step in gate_run_steps():
+        assert step["working-directory"] == named_path, step
+        command = shlex.split(run_lines({"steps": [step]})[0])
+        assert command[2] == f"../{harness_path}/{GATE_RUNNER}", command
+        assert command[command.index("--source") + 1] == f"../{named_path}", command
+        assert command[command.index("--expected-commit") + 1] == f"$(git -C ../{named_path} rev-parse HEAD)", command
 
 
 def test_the_gate_keeps_the_token_out_of_both_checkouts() -> None:
@@ -893,3 +913,20 @@ def test_the_gate_uploads_the_tiers_report_whatever_the_run_did() -> None:
     assert upload[0]["with"]["path"].strip() == f"{GATE_RESULTS}/"
     assert upload[0]["with"]["if-no-files-found"] == "warn"
     assert upload[0]["with"]["retention-days"] == 14
+
+
+def test_the_gate_uploads_the_stages_report_beside_the_tiers() -> None:
+    """Each run step writes where the one upload reads, and neither over the other.
+
+    The runner clears a report and a log out of the directory it is given, so
+    the stage writing into the tier's own directory would delete the tier's.
+    """
+    uploaded = next(step for step in gate_job()["steps"] if "upload-artifact" in str(step.get("uses", "")))["with"]["path"].strip()
+    landed = []
+    for step in gate_run_steps():
+        command = shlex.split(run_lines({"steps": [step]})[0])
+        written = posixpath.normpath(posixpath.join(step["working-directory"], command[command.index("--output") + 1]))
+        assert f"{written}/".startswith(uploaded), (written, uploaded)
+        landed.append(written)
+
+    assert landed == [GATE_RESULTS, GATE_STAGE_RESULTS], landed

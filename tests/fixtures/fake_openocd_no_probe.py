@@ -12,9 +12,10 @@ tier runs on a host that has no OpenOCD, and it has to stay word for word what
 the recording says.
 
 Not recorded here, because a container with no USB bus gives libusb nothing to
-refuse: on a Linux host without a udev rule the same run prints `Error:
-libusb_open() failed with LIBUSB_ERROR_ACCESS` ahead of the `open failed` line.
-The classifier reads either.
+refuse: with the probe attached and this user unable to open it, the same run
+prints `Error: libusb_open() failed with LIBUSB_ERROR_ACCESS` ahead of the
+`open failed` line, a failure of its own with its own recording
+(fake_openocd_access_denied.py).
 """
 
 from __future__ import annotations
