@@ -768,7 +768,10 @@ def gate_checkouts() -> list[dict]:
 
 def gate_run_steps() -> list[dict]:
     """The tier's step, then the step of the stage that withholds the probe's groups."""
-    running = [step for step in gate_job()["steps"] if "run" in step]
+    running = [
+        step for step in gate_job()["steps"]
+        if "run" in step and "bench_vm_diagnostic.py" not in step.get("run", "")
+    ]
     assert len(running) == 2, running
     return running
 
@@ -791,9 +794,12 @@ def test_the_gate_is_started_by_hand_and_by_nothing_else() -> None:
 def test_the_gate_asks_which_commit_to_run() -> None:
     inputs = triggers(workflow_document(GATE_WORKFLOW))["workflow_dispatch"]["inputs"]
 
-    assert set(inputs) == {"ref"}, inputs
+    assert set(inputs) == {"ref", "diagnose_only", "cubeprogrammer_asset_id"}, inputs
     assert inputs["ref"]["required"] is True
     assert inputs["ref"]["type"] == "string"
+    assert inputs["diagnose_only"]["default"] is False
+    assert inputs["diagnose_only"]["type"] == "boolean"
+    assert inputs["cubeprogrammer_asset_id"]["required"] is False
 
 
 def test_the_gate_runs_on_the_nightlys_board_and_queues_with_it() -> None:
@@ -832,7 +838,12 @@ def test_the_gate_runs_the_runner_and_nothing_else() -> None:
     probe is opened through can put the product in, and which every other test
     of the tier would fail in.
     """
-    lines = run_lines(gate_job())
+    lines = [
+        line
+        for step in gate_run_steps()
+        for line in step.get("run", "").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
 
     assert len(lines) == 2, lines
     tier, stage = (shlex.split(line) for line in lines)
@@ -858,9 +869,9 @@ def test_the_stage_without_the_device_group_runs_after_the_tier_unless_the_run_w
     """
     tier, stage = gate_run_steps()
 
-    assert "if" not in tier, tier
+    assert "if" in tier and "diagnose_only" in tier["if"], tier
     # Wrapped, because YAML reads a bare leading `!` as a tag.
-    assert stage["if"] == "${{ !cancelled() }}", stage
+    assert stage["if"] == chr(36) + "{{ !cancelled() && !inputs.diagnose_only }}", stage
 
 
 def test_the_commit_under_test_runs_only_inside_the_container() -> None:
@@ -902,6 +913,19 @@ def test_the_named_commit_never_reaches_a_shell() -> None:
     action as a value and is never expanded into a command line."""
     for step in gate_job()["steps"]:
         assert "${{" not in step.get("run", ""), step
+
+
+def test_diagnostic_mode_skips_all_bench_tier_commands_and_never_modifies_sysfs() -> None:
+    steps = gate_job()["steps"]
+    diagnostic = [step for step in steps if "bench_vm_diagnostic.py" in step.get("run", "")]
+
+    assert len(diagnostic) == 1, diagnostic
+    assert diagnostic[0]["if"] == chr(36) + "{{ inputs.diagnose_only }}"
+    assert "GH_TOKEN" in diagnostic[0]["env"]
+    assert "CUBEPROGRAMMER_ASSET_ID" in diagnostic[0]["env"]
+    assert all("diagnose_only" in step.get("if", "") for step in gate_run_steps())
+    assert "authorized" not in diagnostic[0].get("run", "")
+    assert "bind" not in diagnostic[0].get("run", "")
 
 
 def test_the_gate_uploads_the_tiers_report_whatever_the_run_did() -> None:

@@ -45,6 +45,16 @@ on:
         description: The commit, branch or tag whose bench tier runs on the board
         required: true
         type: string
+      diagnose_only:
+        description: Read VM USB/sudo/runtime capabilities without running the bench tier
+        required: false
+        default: false
+        type: boolean
+      cubeprogrammer_asset_id:
+        description: Optional private release asset ID to SHA-256-check into the runner cache
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -80,11 +90,26 @@ jobs:
       # The ref goes to the action as a value and never into a command line:
       # whoever starts the gate types it.
       - name: Check out the commit under test
+        if: ${{ !inputs.diagnose_only }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
           path: under-test
           persist-credentials: false
+
+      # This branch answers only whether the existing Linux VM could perform a
+      # future selective kernel USB disconnect. It reads the bench runner's
+      # allowlisted sysfs inventory, reports permissions and rootless runtimes,
+      # and never writes sysfs or calls a debugger. The optional archive is
+      # downloaded with this read-only repository token into a verified cache;
+      # it is not installed on the host. No bench-tier step runs in this mode.
+      - name: Read VM capabilities and optionally cache the pinned private asset
+        if: ${{ inputs.diagnose_only }}
+        working-directory: harness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CUBEPROGRAMMER_ASSET_ID: ${{ inputs.cubeprogrammer_asset_id }}
+        run: python3 tools/bench_vm_diagnostic.py --asset-id "$CUBEPROGRAMMER_ASSET_ID"
 
       # The source and SHA are read from the checked-out candidate, never from
       # the harness checkout this script belongs to. The tool verifies that
@@ -97,6 +122,7 @@ jobs:
       # teardown is done: the container finishes it on its own, and the next
       # run waits for it before it builds anything.
       - name: Run the bench tier in its container
+        if: ${{ !inputs.diagnose_only }}
         working-directory: under-test
         run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output ../bench-results
 
@@ -110,7 +136,7 @@ jobs:
       # goes into a directory of its own, since the runner clears the one it is
       # given of an earlier report.
       - name: Run the stage without the probe's device group
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && !inputs.diagnose_only }}
         working-directory: under-test
         run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --without-device-group --output ../bench-results/without-device-group
 
