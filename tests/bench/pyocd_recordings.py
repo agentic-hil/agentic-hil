@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -159,6 +160,139 @@ def product_diagnostics(result: dict) -> dict:
             "verify",
             "reset_after_flash",
         )
+    }
+
+
+LEASE_STATUS_EVIDENCE_FIELDS = (
+    "ok",
+    "error",
+    "error_type",
+    "summary",
+    "audit_ok",
+    "cleanup_ok",
+    "cleanup_required",
+    "quarantined",
+    "lease_state",
+    "blocked",
+    "incident_stands",
+    "standing_incidents",
+    "cleanup_reasons",
+    "quarantine_guidance",
+    "auto_recoverable",
+    "auto_recover_policy",
+    "quarantine_id",
+)
+RUN_STOP_EVIDENCE_FIELDS = (
+    "ok",
+    "error",
+    "error_type",
+    "summary",
+    "target_ok",
+    "audit_ok",
+    "cleanup_ok",
+    "cleanup_required",
+    "quarantined",
+    "lease_state",
+    "side_effect_status",
+    "hardware_state",
+    "released_devices",
+)
+RUN_STOP_RECOVERY_EVIDENCE_FIELDS = (
+    "ok",
+    "failed_check",
+    "target_ok",
+    "audit_ok",
+    "cleanup_ok",
+    "cleanup_required",
+    "quarantined",
+    "lease_state",
+    "side_effect_status",
+    "hardware_state",
+    "attempted",
+    "actions",
+    "outcome",
+    "auto_recover_policy",
+    "auto_recover_policy_source",
+    "failed_action",
+    "incident_resolved",
+    "incident_open",
+    "incident_summary",
+    "resolved_reason",
+    "resolved_quarantine_id",
+    "quarantine_id",
+    "safe_state_predicate",
+    "reason_not_attempted",
+    "cleanup_reasons",
+    "summary",
+)
+
+
+def lease_status_evidence(result: object, private_values: tuple[str, ...]) -> dict:
+    """Keep a small, redacted lease-status snapshot; failed reads stay unavailable."""
+    if not isinstance(result, dict):
+        return {"available": False, "unavailable_reason": "status_result_missing"}
+    evidence = {key: result[key] for key in LEASE_STATUS_EVIDENCE_FIELDS if key in result}
+    available = result.get("ok") is True
+    evidence["available"] = available
+    if not available:
+        evidence["unavailable_reason"] = "status_call_failed"
+    return redact_values(evidence, private_values)
+
+
+def run_stop_evidence(result: object, private_values: tuple[str, ...]) -> dict:
+    """Preserve the stop result and its recovery verdict without implying success."""
+    if isinstance(result, Exception):
+        return {
+            "available": False,
+            "unavailable_reason": "run_stop_call_failed",
+            "error": redact(f"{type(result).__name__}: {result}", private_values),
+            "recovery": None,
+        }
+    if not isinstance(result, dict):
+        return {"available": False, "unavailable_reason": "run_stop_result_missing", "recovery": None}
+    evidence = {key: result[key] for key in RUN_STOP_EVIDENCE_FIELDS if key in result}
+    recovery = result.get("recovery")
+    if isinstance(recovery, dict):
+        evidence["recovery"] = {
+            key: recovery[key] for key in RUN_STOP_RECOVERY_EVIDENCE_FIELDS if key in recovery
+        }
+    else:
+        evidence["recovery"] = None
+    evidence["available"] = True
+    return redact_values(evidence, private_values)
+
+
+def run_stop_succeeded(result: object) -> bool:
+    """A closed run with an unresolved recovery block is not a clean teardown."""
+    if not isinstance(result, dict) or not overall_success(result):
+        return False
+    recovery = result.get("recovery")
+    if recovery is None:
+        return True
+    return isinstance(recovery, dict) and recovery.get("outcome") == "recovered" and recovery.get("incident_open") is False
+
+
+def capture_run_stop_with_lease_evidence(server: Server, private_values: tuple[str, ...]) -> dict:
+    """Read status on either side of the single normal run-stop call."""
+    try:
+        before_result = server.try_call("hardware_lease_status")
+    except Exception:
+        before_result = None
+    before = lease_status_evidence(before_result, private_values)
+    stop_result = None
+    try:
+        stop_result = server.try_call("bench_run_stop")
+    except Exception as error:
+        stop_result = error
+    finally:
+        try:
+            after_result = server.try_call("hardware_lease_status")
+        except Exception:
+            after_result = None
+    return {
+        "lease_status_before_stop": before,
+        "run_stop": run_stop_evidence(stop_result, private_values),
+        "lease_status_after_stop": lease_status_evidence(after_result, private_values),
     }
 
 
@@ -502,6 +636,7 @@ def test_pyocd_f446re_probe_flash_reset_and_uart_recording(bench: Bench, tmp_pat
     reset_result: dict | None = None
     boot_confirmed = False
     uart_session_open = False
+    run_closure: dict | None = None
     try:
         server.greet()
         _, info = server.call("debugger_info")
@@ -619,9 +754,11 @@ def test_pyocd_f446re_probe_flash_reset_and_uart_recording(bench: Bench, tmp_pat
                     uart_session_open = False
             finally:
                 if run_open and server.process.poll() is None:
-                    stopped = server.try_call("bench_run_stop")
-                    assert isinstance(stopped, dict) and stopped.get("ok") is True, stopped
-                    run_stopped = True
+                    run_closure = capture_run_stop_with_lease_evidence(server, private_values)
+                    stopped = run_closure["run_stop"]
+                    run_stopped = run_stop_succeeded(stopped)
+                    if not run_stopped and sys.exc_info()[0] is None:
+                        pytest.fail(f"Agentic HIL run stop failed its continue predicate: {stopped}", pytrace=False)
         finally:
             try:
                 server.close()
@@ -636,6 +773,9 @@ def test_pyocd_f446re_probe_flash_reset_and_uart_recording(bench: Bench, tmp_pat
                             "run_stopped": run_stopped,
                             "reset_result": product_diagnostics(reset_result) if reset_result is not None else None,
                             "uart_boot_confirmed_after_reset": boot_confirmed,
+                            "lease_status_before_stop": run_closure["lease_status_before_stop"] if run_closure else {"available": False, "unavailable_reason": "run_stop_not_attempted"},
+                            "run_stop": run_closure["run_stop"] if run_closure else {"available": False, "unavailable_reason": "run_stop_not_attempted"},
+                            "lease_status_after_stop": run_closure["lease_status_after_stop"] if run_closure else {"available": False, "unavailable_reason": "run_stop_not_attempted"},
                         },
                         sort_keys=True,
                         separators=(",", ":"),

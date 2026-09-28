@@ -160,6 +160,230 @@ def test_pyocd_failure_evidence_keeps_diagnostics_when_action_log_shape_is_inval
     assert evidence["transcript_error"]
 
 
+class FakeLeaseStatusServer:
+    def __init__(self, results: list[object]) -> None:
+        self.results = iter(results)
+        self.calls: list[str] = []
+
+    def try_call(self, name: str, arguments: dict | None = None) -> object:
+        self.calls.append(name)
+        result = next(self.results)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
+def test_pyocd_run_stop_captures_sanitized_statuses_and_product_recovery() -> None:
+    server = FakeLeaseStatusServer(
+        [
+            {
+                "ok": True,
+                "audit_ok": True,
+                "cleanup_required": True,
+                "quarantined": True,
+                "lease_state": "cleanup_required",
+                "blocked": True,
+                "incident_stands": False,
+                "standing_incidents": [{"probe_id": "STLINK123", "summary": "incident at /dev/ttyACM0"}],
+                "cleanup_reasons": ["target_probe_timeout"],
+                "quarantine_guidance": [{"summary": "inspect STLINK123 at /dev/ttyACM0"}],
+                "auto_recoverable": True,
+                "auto_recover_policy": "reset_halt",
+                "quarantine_id": "STLINK123-incident",
+                "private_extra": "must not be copied",
+            },
+            {
+                "ok": True,
+                "released_devices": ["debugger:dut", "uart:uart"],
+                "recovery": {
+                    "attempted": True,
+                    "actions": ["reap_processes", "reset_halt", "probe_target"],
+                    "outcome": "recovered",
+                    "auto_recover_policy": "reset_halt",
+                    "failed_action": None,
+                    "incident_resolved": True,
+                    "incident_open": False,
+                    "summary": "recovered STLINK123 at /dev/ttyACM0",
+                    "private_extra": "must not be copied",
+                },
+            },
+            {
+                "ok": True,
+                "audit_ok": True,
+                "cleanup_required": False,
+                "quarantined": False,
+                "lease_state": "released",
+                "blocked": False,
+                "auto_recoverable": False,
+                "auto_recover_policy": "reset_halt",
+            },
+        ]
+    )
+
+    evidence = pyocd_recordings.capture_run_stop_with_lease_evidence(
+        server,
+        ("STLINK123", "/dev/ttyACM0"),
+    )
+
+    assert server.calls == ["hardware_lease_status", "bench_run_stop", "hardware_lease_status"]
+    assert evidence["lease_status_before_stop"]["available"] is True
+    assert evidence["lease_status_before_stop"]["auto_recover_policy"] == "reset_halt"
+    assert evidence["lease_status_before_stop"]["quarantine_guidance"] == [
+        {"summary": "inspect [redacted] at [redacted]"}
+    ]
+    assert evidence["lease_status_after_stop"]["lease_state"] == "released"
+    assert evidence["run_stop"]["recovery"] == {
+        "attempted": True,
+        "actions": ["reap_processes", "reset_halt", "probe_target"],
+        "outcome": "recovered",
+        "auto_recover_policy": "reset_halt",
+        "failed_action": None,
+        "incident_resolved": True,
+        "incident_open": False,
+        "summary": "recovered [redacted] at [redacted]",
+    }
+    assert pyocd_recordings.run_stop_succeeded(evidence["run_stop"]) is True
+    assert "STLINK123" not in json.dumps(evidence)
+    assert "/dev/ttyACM0" not in json.dumps(evidence)
+    assert "private_extra" not in json.dumps(evidence)
+
+
+def test_pyocd_run_stop_keeps_a_failed_recovery_verdict_even_if_stop_closed_the_run() -> None:
+    server = FakeLeaseStatusServer(
+        [
+            {"ok": True, "blocked": True, "auto_recoverable": True},
+            {
+                "ok": True,
+                "released_devices": ["debugger:dut"],
+                "recovery": {
+                    "audit_ok": False,
+                    "cleanup_ok": True,
+                    "cleanup_required": True,
+                    "quarantined": True,
+                    "lease_state": "cleanup_required",
+                    "side_effect_status": "partial",
+                    "hardware_state": "unknown",
+                    "attempted": True,
+                    "actions": ["reap_processes", "reset_halt"],
+                    "outcome": "failed",
+                    "failed_action": "reset_halt",
+                    "failed_check": "audit_ok",
+                    "incident_open": True,
+                    "summary": "reset could not be confirmed",
+                },
+            },
+            {"ok": True, "blocked": True, "incident_stands": True, "quarantined": True},
+        ]
+    )
+
+    evidence = pyocd_recordings.capture_run_stop_with_lease_evidence(server, ())
+
+    assert evidence["run_stop"]["ok"] is True
+    assert evidence["run_stop"]["recovery"]["outcome"] == "failed"
+    assert evidence["run_stop"]["recovery"]["failed_action"] == "reset_halt"
+    assert evidence["run_stop"]["recovery"]["failed_check"] == "audit_ok"
+    assert evidence["run_stop"]["recovery"]["audit_ok"] is False
+    assert evidence["run_stop"]["recovery"]["side_effect_status"] == "partial"
+    assert evidence["lease_status_after_stop"]["incident_stands"] is True
+    assert pyocd_recordings.run_stop_succeeded(evidence["run_stop"]) is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("ok", False),
+        ("target_ok", False),
+        ("audit_ok", False),
+        ("cleanup_ok", False),
+        ("cleanup_required", True),
+        ("quarantined", True),
+        ("lease_state", "stale"),
+        ("side_effect_status", "unknown"),
+        ("side_effect_status", "partial"),
+        ("hardware_state", "unknown"),
+    ],
+)
+def test_pyocd_run_stop_uses_the_product_continue_predicate(field: str, value: object) -> None:
+    result = {
+        "ok": True,
+        "target_ok": None,
+        "audit_ok": True,
+        "cleanup_ok": True,
+        "cleanup_required": False,
+        "quarantined": False,
+        "lease_state": "released",
+        "side_effect_status": "not_started",
+        "hardware_state": "unchanged",
+    }
+    result[field] = value
+
+    evidence = pyocd_recordings.run_stop_evidence(result, ())
+
+    assert pyocd_recordings.run_stop_succeeded(evidence) is False
+
+
+def test_pyocd_run_stop_accepts_recovered_outcome_when_incident_is_closed() -> None:
+    result = {
+        "ok": True,
+        "recovery": {
+            "outcome": "recovered",
+            "incident_resolved": False,
+            "incident_open": False,
+        },
+    }
+
+    assert pyocd_recordings.run_stop_succeeded(pyocd_recordings.run_stop_evidence(result, ())) is True
+
+
+def test_pyocd_run_stop_capture_keeps_after_status_and_original_failure_if_stop_raises() -> None:
+    server = FakeLeaseStatusServer(
+        [
+            {"ok": True, "lease_state": "active"},
+            RuntimeError("stop call failed for /dev/ttyACM0"),
+            {"ok": True, "lease_state": "released"},
+        ]
+    )
+    captured = None
+
+    with pytest.raises(AssertionError, match="original test failure"):
+        try:
+            raise AssertionError("original test failure")
+        finally:
+            captured = pyocd_recordings.capture_run_stop_with_lease_evidence(server, ("/dev/ttyACM0",))
+
+    assert server.calls == ["hardware_lease_status", "bench_run_stop", "hardware_lease_status"]
+    assert captured["lease_status_after_stop"]["lease_state"] == "released"
+    assert captured["run_stop"] == {
+        "available": False,
+        "unavailable_reason": "run_stop_call_failed",
+        "error": "RuntimeError: stop call failed for [redacted]",
+        "recovery": None,
+    }
+    assert pyocd_recordings.run_stop_succeeded(captured["run_stop"]) is False
+
+
+@pytest.mark.parametrize(
+    "failed_status",
+    [None, {"ok": False, "error_type": "backend_error", "summary": "status unavailable"}, OSError("private path /dev/ttyACM0")],
+)
+def test_pyocd_run_stop_marks_failed_status_unavailable_without_skipping_stop(failed_status) -> None:
+    server = FakeLeaseStatusServer(
+        [
+            failed_status,
+            {"ok": True, "released_devices": [], "recovery": {"attempted": False, "outcome": "skipped"}},
+            failed_status,
+        ]
+    )
+
+    evidence = pyocd_recordings.capture_run_stop_with_lease_evidence(server, ("/dev/ttyACM0",))
+
+    assert server.calls == ["hardware_lease_status", "bench_run_stop", "hardware_lease_status"]
+    assert evidence["lease_status_before_stop"]["available"] is False
+    assert evidence["run_stop"]["ok"] is True
+    assert evidence["lease_status_after_stop"]["available"] is False
+    assert "/dev/ttyACM0" not in json.dumps(evidence)
+
+
 class FakePyOcdServer:
     def __init__(self, results: list[dict], events: list[tuple]) -> None:
         self._results = iter(results)
