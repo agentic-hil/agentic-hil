@@ -32,7 +32,10 @@ configured. It sets up every agent, then upgrades to a wheel of this same tree
 one release higher while an MCP server it started holds the board, and then
 takes itself back with ``uninstall`` and the line that result ends on. The
 tier's own installation is never touched. Only the bench image carries that
-index, so those tests are marked ``wheelhouse`` and deselected everywhere else.
+index, so those tests are marked ``wheelhouse`` and deselected everywhere else,
+and on an image built on a distribution whose clean account cannot do the
+quick start's ``python -m pip install --user``, which the run names in one line
+with what that account's ``python`` lacks.
 
 Device locks: the product takes them under the home directory of whoever runs it,
 in ``~/.agentic-hil/device-locks``, a place with no configuration key and no
@@ -84,6 +87,7 @@ from .conftest import (
     WHEELHOUSE,
     WHERE_THE_PRODUCT_CAME_FROM,
     BoardImages,
+    a_clean_accounts_path,
     import_path,
     not_the_checkout,
     refuse,
@@ -931,10 +935,13 @@ def an_account_of_its_own(root: Path, index: Path) -> tuple[Path, dict[str, str]
     """A home made the way this machine makes one, the account's own roots, and pip pointed at the index.
 
     The home is a copy of the skeleton every new account here starts from, so a
-    new login shell reads the profile a newcomer's shell reads, and nothing of
-    this tier's environment is on its PATH. The index reaches pip through pip's
-    own variables, `PIP_FIND_LINKS` and `PIP_NO_INDEX`, the way a machine that
-    installs from a local mirror is configured; the product is told nothing.
+    new login shell reads the profile a newcomer's shell reads. Its PATH is this
+    run's without the directory this tier's interpreter runs from, which a
+    clean account never had: a login shell keeps the PATH it is started with
+    unless its distribution's profile sets one of its own, and Ubuntu's and
+    Fedora's do not. The index reaches pip through pip's own variables,
+    `PIP_FIND_LINKS` and `PIP_NO_INDEX`, the way a machine that installs from a
+    local mirror is configured; the product is told nothing.
     """
     if not SKELETON.is_dir():
         refuse(f"there is no {SKELETON} to make a new account's home from, so the newcomer's own installation cannot be made here")
@@ -943,7 +950,7 @@ def an_account_of_its_own(root: Path, index: Path) -> tuple[Path, dict[str, str]
     shutil.copytree(SKELETON, home, symlinks=True)
     temporary.mkdir()
     environment = account_environment(home, temporary)
-    environment.update(PIP_FIND_LINKS=str(index), PIP_NO_INDEX="1")
+    environment.update(PATH=a_clean_accounts_path(environment.get("PATH", "")), PIP_FIND_LINKS=str(index), PIP_NO_INDEX="1")
     return home, environment
 
 

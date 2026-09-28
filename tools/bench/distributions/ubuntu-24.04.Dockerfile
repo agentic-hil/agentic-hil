@@ -23,3 +23,9 @@ FROM docker.io/library/ubuntu@sha256:008173c23f95b170204355c12626cb5a965d779a7e1
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --yes openocd gcc-arm-none-eabi libnewlib-arm-none-eabi gdb-multiarch cmake ninja-build libusb-1.0-0 tini python3 python3-venv python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
+
+# The distribution's name, where the bench tier reads which image it runs in.
+# A stage that a clean account here cannot run is left out under this name.
+# The default image names no distribution, and nothing is left out there for
+# what the image lacks.
+RUN mkdir -p /etc/agentic-hil && printf '%s\n' ubuntu-24.04 > /etc/agentic-hil/bench-distribution

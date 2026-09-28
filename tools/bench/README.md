@@ -367,6 +367,16 @@ single stage, as a test holds it to, since the composition knows of one: a
 second would be missing from the composed file, or would put the default base
 image in the distribution's place.
 
+A head also names its distribution in `/etc/agentic-hil/bench-distribution`,
+which the default image does not write. The tests marked `wheelhouse` install
+the product for a clean account through the quick start's
+`python -m pip install --user`, run from that account's login shell. On an image
+that names its distribution, where that shell's `python` has no pip or is marked
+externally managed, they are deselected, since a skip fails the tier, and the
+run says so in one line naming the distribution and what that `python` lacks.
+The default image names none, so they always run there, and fail there if they
+cannot.
+
 What the distributions packaged when the tier was run on each of them, on
 2026-09-27 and 2026-09-28:
 

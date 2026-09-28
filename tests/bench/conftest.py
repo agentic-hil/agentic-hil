@@ -66,9 +66,11 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass, field
@@ -94,6 +96,27 @@ WITHOUT_DEVICE_GROUP = "without_device_group"
 # run directly or in any other image, those tests are deselected.
 WHEELHOUSE = Path("/wheelhouse")
 NEEDS_THE_WHEELHOUSE = "wheelhouse"
+# What says a run is in the bench image, written by `tools/bench/Dockerfile`, and
+# what an image built on another distribution says it is: the distribution's
+# name, written by its head under `tools/bench/distributions`. The default image
+# names none. In the bench image the tests with the index's mark always run,
+# with or without the index, unless the image names a distribution on which a
+# clean account cannot do what the quick start's install line does: there they
+# are deselected, and the run says why in one line.
+BENCH_IMAGE = Path("/etc/agentic-hil/bench-test-image")
+DISTRIBUTION_NAME = Path("/etc/agentic-hil/bench-distribution")
+# What a new login shell's `python` answers about that line, `python -m pip
+# install --user`: which interpreter it is, whether it has pip, and the marker by
+# which its distribution keeps it for its own packages (PEP 668). pip refuses a
+# `--user` install under that marker too, and ignores it in a virtual
+# environment, as this does.
+ASK_ABOUT_A_USER_INSTALL = (
+    "import importlib.util, json, os, sys, sysconfig; "
+    "marker = os.path.join(sysconfig.get_path('stdlib'), 'EXTERNALLY-MANAGED'); "
+    "managed = sys.prefix == sys.base_prefix and os.path.isfile(marker); "
+    "print(json.dumps({'python': sys.executable, 'pip': importlib.util.find_spec('pip') is not None, 'managed': marker if managed else ''}))"
+)
+INDEX_LEFT_OUT = pytest.StashKey[str]()
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CHECKOUT_SOURCES = REPOSITORY_ROOT / "src"
@@ -676,6 +699,74 @@ def pytest_runtest_makereport(
     return report
 
 
+def a_clean_accounts_path(search_path: str) -> str:
+    """`search_path` without the directory this tier's interpreter runs from.
+
+    A clean account never had that directory on its PATH, and a login shell
+    keeps the PATH it is started with unless its distribution's profile sets
+    one of its own, which not every distribution's does.
+    """
+    own = Path(sys.executable).parent
+    return os.pathsep.join(entry for entry in search_path.split(os.pathsep) if entry and Path(entry) != own)
+
+
+def a_clean_login_runs_python(script: str) -> subprocess.CompletedProcess[str]:
+    """`python -c script` in a new login shell of an account with an empty home, a clean PATH and nothing else of this run."""
+    with tempfile.TemporaryDirectory() as home:
+        return subprocess.run(
+            ["bash", "-lc", f"python -c {shlex.quote(script)}"],
+            capture_output=True,
+            text=True,
+            cwd=home,
+            env={"HOME": home, "PATH": a_clean_accounts_path(os.environ.get("PATH", ""))},
+            timeout=COMMAND_TIMEOUT_S,
+            check=False,
+        )
+
+
+def why_a_clean_account_cannot_install_for_itself() -> str | None:
+    """What stops the quick start's `python -m pip install --user` in a clean login here, or None.
+
+    None as well where the login gives no answer that can be read: the tests
+    then run, and fail on whatever stopped it, rather than be left out on a
+    guess.
+    """
+    try:
+        answered = a_clean_login_runs_python(ASK_ABOUT_A_USER_INSTALL)
+        facts = json.loads(answered.stdout.strip().splitlines()[-1])
+    except (OSError, subprocess.SubprocessError, IndexError, ValueError):
+        return None
+    if answered.returncode != 0 or not isinstance(facts, dict):
+        return None
+    lacks = []
+    if facts.get("pip") is False:
+        lacks.append("has no pip")
+    if facts.get("managed"):
+        lacks.append(f"is marked externally managed by {facts['managed']}")
+    return f"its login shell's `python`, {facts.get('python')}, {' and '.join(lacks)}" if lacks else None
+
+
+def why_the_index_tests_are_left_out() -> str | None:
+    """Why the tests with the index's mark are deselected from this run, or None where they run.
+
+    Outside the bench image, only where the index is not. In the image, only on
+    a distribution that names itself and whose clean login measurably cannot
+    install the product the way the quick start says; the default image names
+    none, so nothing leaves them out of the image the gate runs in, and what
+    they lack there fails them.
+    """
+    if not BENCH_IMAGE.is_file():
+        return None if WHEELHOUSE.is_dir() else f"deselected, there is no package index at {WHEELHOUSE.as_posix()} outside the bench image"
+    try:
+        distribution = DISTRIBUTION_NAME.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    lacking = why_a_clean_account_cannot_install_for_itself() if distribution else None
+    if lacking is None:
+        return None
+    return f"deselected on {distribution}, where a clean account cannot do the quick start's `python -m pip install --user`: {lacking}"
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """The stage that withholds the probe's group runs alone, and never beside the tier.
 
@@ -686,21 +777,30 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     there by its own mark. A hook in this conftest sees the whole session's
     items, so it goes by the mark and never by the directory. A test that
     installs the product from the bench image's package index is deselected the
-    same way wherever that index is not.
+    same way where `why_the_index_tests_are_left_out` gives a reason, and the
+    reason is reported after collection.
     """
     if os.environ.get(BENCH_ENV) != "1":
         return
     withheld = os.environ.get(DEVICE_GROUPS_ENV) == DEVICE_GROUPS_WITHHELD
-    indexed = WHEELHOUSE.is_dir()
+    indexing = not withheld and any(item.get_closest_marker(NEEDS_THE_WHEELHOUSE) is not None for item in items)
+    left_out = why_the_index_tests_are_left_out() if indexing else None
     kept: list[pytest.Item] = []
     deselected: list[pytest.Item] = []
     for item in items:
         in_the_stage = item.get_closest_marker(WITHOUT_DEVICE_GROUP) is not None
-        installable = indexed or item.get_closest_marker(NEEDS_THE_WHEELHOUSE) is None
+        installable = left_out is None or item.get_closest_marker(NEEDS_THE_WHEELHOUSE) is None
         (kept if in_the_stage == withheld and installable else deselected).append(item)
+    if left_out is not None:
+        config.stash[INDEX_LEFT_OUT] = f"tests marked {NEEDS_THE_WHEELHOUSE}: {left_out}"
     if deselected:
         config.hook.pytest_deselected(items=deselected)
         items[:] = kept
+
+
+def pytest_report_collectionfinish(config: pytest.Config) -> str | None:
+    """The one line that says why the tests with the index's mark were deselected, where they were."""
+    return config.stash.get(INDEX_LEFT_OUT, None)
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:

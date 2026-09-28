@@ -23,3 +23,9 @@ FROM docker.io/library/fedora@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f
 # packages are in the default image.
 RUN dnf install --assumeyes --setopt=install_weak_deps=False openocd arm-none-eabi-gcc-cs arm-none-eabi-gcc-cs-c++ arm-none-eabi-newlib gdb cmake ninja-build libusb1 tini python3 python-unversioned-command \
     && dnf clean all
+
+# The distribution's name, where the bench tier reads which image it runs in.
+# A stage that a clean account here cannot run is left out under this name.
+# The default image names no distribution, and nothing is left out there for
+# what the image lacks.
+RUN mkdir -p /etc/agentic-hil && printf '%s\n' fedora-44 > /etc/agentic-hil/bench-distribution
