@@ -256,8 +256,19 @@ def test_usb_reset_reenumeration_is_an_opt_in_stage_after_all_other_gates():
     assert "--source ../under-test" in usb["run"]
     assert "--expected-commit" in usb["run"]
     assert '--output "$BENCH_RESULTS/usb-reset"' in usb["run"]
+    assert "--runtime podman" in usb["run"]
+    assert "--live-device-tree" in usb["run"]
     assert usb["run"].endswith("-- tests/bench/usb_reset_reenumeration.py")
     assert "--cubeprogrammer-archive" not in usb["run"]
+
+    other_bench_runs = [
+        step
+        for step in steps
+        if "bench_in_container.py" in step.get("run", "")
+        and "tests/bench/usb_reset_reenumeration.py" not in step.get("run", "")
+    ]
+    assert other_bench_runs
+    assert all("--live-device-tree" not in step["run"] for step in other_bench_runs)
 
     step_names = [step.get("name") for step in steps]
     assert step_names.index("Run CubeProgrammer hardware recordings") < step_names.index(usb["name"])

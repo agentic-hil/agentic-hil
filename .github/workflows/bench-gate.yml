@@ -20,13 +20,14 @@
 # works in the latter with the script from the former. So the named commit
 # reaches the machine as the image built from it, whose build runs that
 # commit's Dockerfile with the network a build needs, and as the tier that image
-# runs with no network, no capabilities and nothing of the machine but the
-# probe's device nodes, the machine's device-lock directory and a directory of
-# the run's own, out of which the report alone is copied. Its code never runs on
-# the machine itself, beside the runner's own files, which is what lets a
-# maintainer name the head of a pull request from a fork: that head is served
-# from this repository too. The board and its probe are that commit's to drive
-# for the length of the run, which is the decision a dispatch makes.
+# runs with no network, no capabilities and normally only the probe's device
+# nodes, the machine's device-lock directory and a directory of the run's own,
+# out of which the report alone is copied. The opt-in USB reset stage instead
+# gets the host /dev tree read only so a recreated tty node is visible. Its code
+# never runs on the machine itself, beside the runner's own files, which is what
+# lets a maintainer name the head of a pull request from a fork: that head is
+# served from this repository too. The board and its probe are that commit's to
+# drive for the length of the run, which is the decision a dispatch makes.
 #
 # The runner is addressed by its labels and by nothing else, the same three as
 # hardware-bench.yml: no host name, no user, no path and no network address
@@ -183,7 +184,7 @@ jobs:
       - name: Run USB reset and re-enumeration recording
         if: ${{ success() && !inputs.diagnose_only && inputs.run_usb_reset_reenumeration }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS/usb-reset" -- tests/bench/usb_reset_reenumeration.py
+        run: exec python3 ../harness/tools/bench_in_container.py --runtime podman --live-device-tree --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS/usb-reset" -- tests/bench/usb_reset_reenumeration.py
 
       # `if: always()` because a red or cancelled run's report is the one worth
       # reading, and `warn` because a run that never reached pytest has already

@@ -20,10 +20,11 @@ A run, in order:
   the source is this tool's checkout; `--source` selects another checkout and
   `--expected-commit` can bind it to a full SHA before any hardware check or
   build. Uncommitted changes are named, and are not what runs;
-* runs the tier in a container that gets the probe's device nodes, the
-  machine's device locks and a directory of the run's own for its report, and
-  nothing else of the machine: no network, no capabilities, no host process
-  table;
+* runs the tier in a container that normally gets the probe's device nodes,
+  the machine's device locks and a directory of the run's own for its report.
+  The opt-in `--live-device-tree` mode instead bind mounts host `/dev` read only
+  for USB re-enumeration stages; neither mode gives the container network,
+  capabilities or the host process table;
 * copies the report alone out of that directory, as a regular file and without
   following a link, into the output directory, which the container never sees;
 * reads pytest's summary line as the verdict.
@@ -983,6 +984,7 @@ def tier_command(
     run_id: str,
     *,
     withhold_groups: bool = False,
+    live_device_tree: bool = False,
 ) -> list[str]:
     uid, gid = user_ids()
     command = [runtime]
@@ -1014,10 +1016,13 @@ def tier_command(
         if not withhold_groups:
             for group in docker_groups(devices):
                 command += ["--group-add", str(group)]
-    for node in devices.nodes:
-        command += ["--device", node]
+    if live_device_tree:
+        command += ["-v", "/dev:/dev:ro"]
+    else:
+        for node in devices.nodes:
+            command += ["--device", node]
     command += ["-v", f"{locks}:{CONTAINER_LOCKS}", "-v", f"{results}:{RESULTS}"]
-    if stable_names is not None:
+    if stable_names is not None and not live_device_tree:
         command += ["-v", f"{stable_names}:{CONTAINER_SERIAL_BY_ID}:ro"]
     for key, value in ENVIRONMENT.items():
         command += ["-e", f"{key}={value}"]
@@ -1280,6 +1285,11 @@ def parse_options(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="Withhold the groups the probe's nodes are opened through, and run the stage about that alone.",
     )
+    parser.add_argument(
+        "--live-device-tree",
+        action="store_true",
+        help="For a re-enumeration stage only: bind the host /dev tree read-only (rootless Podman only).",
+    )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER, help="After --: handed to pytest, replacing tests/bench -v.")
     return parser.parse_args(argv)
 
@@ -1313,6 +1323,11 @@ def main(argv: list[str] | None = None) -> int:
                     f"source checkout HEAD is {commit}, not the expected commit {expected}; nothing was built or run",
                 )
         runtime = pick_runtime(options.runtime)
+        if options.live_device_tree and runtime != "podman":
+            raise Refused(
+                EXIT_CANNOT_RUN_HERE,
+                "--live-device-tree requires rootless Podman; Docker's device cgroup policy is not supported for a live /dev tree",
+            )
         if running:
             check_this_machine(runtime)
             devices = the_devices(options.usb_device, options.serial_device)
@@ -1365,7 +1380,7 @@ def main(argv: list[str] | None = None) -> int:
         devices = the_devices(options.usb_device, options.serial_device)
         voice.withhold(devices.serial_numbers)
         check_access(runtime, devices)
-        stable_names = stage_stable_names(devices.serial_ports, workdir / "by-id")
+        stable_names = None if options.live_device_tree else stage_stable_names(devices.serial_ports, workdir / "by-id")
         # The one directory the tier writes to, and it is the run's own: the
         # output directory, which a gate uploads, is never mounted.
         results = workdir / "results"
@@ -1376,6 +1391,7 @@ def main(argv: list[str] | None = None) -> int:
         command = tier_command(
             runtime, image_id, name, devices, locks, results, stable_names, pytest_args,
             commit, f"{run_id}-{run_attempt}", withhold_groups=options.without_device_group,
+            live_device_tree=options.live_device_tree,
         )
         voice(f"$ {shlex.join(command)}")
         returncode, printed, interrupted = run_tier(runtime, name, command, output / LOG_NAME, voice.redact, voice, signals)

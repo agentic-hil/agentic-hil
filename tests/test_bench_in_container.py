@@ -365,6 +365,25 @@ def test_docker_runs_the_tier_as_the_invoking_user_with_the_nodes_groups(machine
     assert option_values(command, "--device") == [USB_NODE, TTY_NODE]
 
 
+def test_live_device_tree_mode_mounts_dev_read_only_without_static_device_nodes(machine: SimpleNamespace) -> None:
+    assert run(machine, "--runtime", "podman", "--live-device-tree") == 0
+
+    command = machine.runtime.tier
+    assert command[:4] == ["podman", "--runtime", "crun", "run"]
+    assert option_values(command, "-v").count("/dev:/dev:ro") == 1
+    assert option_values(command, "--device") == []
+    assert not [value for value in option_values(command, "-v") if "/dev/serial/by-id" in value]
+    assert option_values(command, "--network") == ["none"]
+    assert option_values(command, "--cap-drop") == ["ALL"]
+
+
+def test_live_device_tree_mode_refuses_docker_before_build_or_run(machine: SimpleNamespace, capsys: pytest.CaptureFixture) -> None:
+    assert run(machine, "--runtime", "docker", "--live-device-tree") == bench_in_container.EXIT_CANNOT_RUN_HERE
+
+    assert machine.runtime.commands == []
+    assert "rootless Podman" in capsys.readouterr().err
+
+
 def test_without_the_device_group_podman_keeps_none_of_this_users_groups(machine: SimpleNamespace) -> None:
     """The stage that proves a probe this user may not open is named as one.
 

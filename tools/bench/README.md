@@ -79,6 +79,7 @@ python3 tools/bench_in_container.py                      # the whole tier
 python3 tools/bench_in_container.py -- tests/bench/test_bench_serial.py -x
 python3 tools/bench_in_container.py --runtime docker
 python3 tools/bench_in_container.py --without-device-group
+python3 tools/bench_in_container.py --runtime podman --live-device-tree -- tests/bench/usb_reset_reenumeration.py
 python3 tools/bench_in_container.py --build-only         # the image alone, anywhere
 python3 tools/bench_in_container.py --cubeprogrammer-archive ~/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip --build-only
 ```
@@ -106,6 +107,21 @@ a serial number; takes this machine's run lock; builds the image; runs the tier
 with the probe's nodes handed in; copies the JUnit report out; and reads pytest's
 summary line as the verdict.
 
+The USB reset re-enumeration stage is the one exception to static device-node
+mounts. Run it with `--runtime podman --live-device-tree`: the rootless
+container receives the host `/dev` directory as a read-only bind mount, so a
+kernel-recreated tty node and updated `/dev/serial/by-id` links can be resolved
+by the same MCP server after USB reset. This mode does not add per-node
+`--device` mounts or stage by-id links, and Docker is refused before build or
+run because its device-cgroup policy for newly registered nodes is unsupported.
+The read-only bind protects directory entries from container changes; it does
+not make character devices read-only. Processes in the container may perform
+device I/O that the invoking user is permitted to perform, and can see other
+host `/dev` entries that this user may access. The gate uses this broader view
+only for the explicitly selected USB reset test. Network remains disabled,
+capabilities remain dropped, and the existing non-root and crun checks still
+apply.
+
 - The image is built from the commit checked out, never from the working tree.
   Uncommitted changes are named, and are not what runs.
 - Everything after `--` goes to pytest and replaces the default selection,
@@ -132,11 +148,13 @@ summary line as the verdict.
   the container could still open fails the stage by name. Every other run leaves
   the stage out, as deselected rather than skipped.
 
-The container gets the probe's device nodes, the machine's device-lock
-directory, the serial port's `/dev/serial/by-id` links read only, and the
-directory the report is written to, and nothing else of the machine: no network,
-no capabilities, and a process table and a host name of its own. A run as root
-is refused, because root's device locks are not the ones the board's user takes.
+In ordinary stages, the container gets only the probe's device nodes, the
+machine's device-lock directory, the serial port's `/dev/serial/by-id` links
+read only, and the directory the report is written to. The USB live-device-tree
+stage instead gets the host `/dev` directory read only, as described above. The
+container has no network or capabilities, and has a process table and host name
+of its own. A run as root is refused, because root's device locks are not the
+ones the board's user takes.
 
 ## Interrupting a run
 
