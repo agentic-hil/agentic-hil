@@ -1,6 +1,6 @@
 """Temporary, payload-free pytest profiling plugin for #536 investigation.
 
-Load with ``-p ci_debug_phase_profile`` and set
+Load with ``-p tools.ci_debug_phase_profile`` and set
 ``AGENTIC_HIL_PHASE_PROFILE_ROOT`` to a writable artifact directory. Each xdist
 worker writes its own JSONL file. The plugin records durations and bounded
 operation labels only: no commands, arguments, paths, process ids or env values.
@@ -13,6 +13,7 @@ import json
 import os
 import platform
 import shutil
+import tempfile
 import time
 from contextvars import ContextVar
 from pathlib import Path
@@ -215,9 +216,15 @@ def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None):
 def pytest_report_header(config: pytest.Config) -> str:
     workers = getattr(config.option, "numprocesses", None)
     sample = os.environ.get("AGENTIC_HIL_PHASE_PROFILE_SAMPLE", "sample")
+    # Drives alone are enough to tell whether pytest's default temp directory
+    # differs from RUNNER_TEMP without disclosing any path components.
+    temp_drive = Path(tempfile.gettempdir()).drive or "none"
+    runner_temp_drive = Path(os.environ.get("RUNNER_TEMP", "")).drive or "unset"
+    workspace_drive = Path.cwd().drive or "none"
     return (
         f"Phase profile {sample}: OS={platform.system()} {platform.release()}, Python={platform.python_version()}, "
         f"CPU={platform.processor() or 'unknown'} x{os.cpu_count() or 'unknown'}, xdist_workers={workers}; "
+        f"temp_drive={temp_drive}, runner_temp_drive={runner_temp_drive}, workspace_drive={workspace_drive}; "
         "durations are wall-clock seconds; MI waits include write/flush and use the recorded timeout budget; "
         "tree-reap durations are inclusive cleanup-call time; nested spans carry parent ids and must not be added "
         "to their parents."
