@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -43,17 +45,55 @@ def pyocd_bench_environment(bench: Bench, **overrides: str) -> dict[str, str]:
     return environment
 
 
+@contextmanager
+def temporary_pyocd_traceback_environment(
+    base_environment: Mapping[str, str], project_dir: Path
+) -> Iterator[dict[str, str]]:
+    """Create a private, traceback-only pyOCD project without displacing one."""
+    if base_environment.get("PYOCD_PROJECT_DIR"):
+        raise ValueError("refusing to replace an existing PYOCD_PROJECT_DIR")
+
+    created = False
+    config_path = project_dir / "pyocd.yaml"
+    try:
+        project_dir.mkdir(parents=True, exist_ok=False)
+        created = True
+        with config_path.open("x", encoding="utf-8", newline="\n") as config_file:
+            config_file.write("debug.traceback: true\n")
+        environment = dict(base_environment)
+        environment["PYOCD_PROJECT_DIR"] = str(project_dir)
+        yield environment
+    finally:
+        if created:
+            config_path.unlink(missing_ok=True)
+            project_dir.rmdir()
+
+
 class PyOcdBench:
     """Use the image's CMSIS pack data root only for this opt-in test's commands."""
 
-    def __init__(self, bench: Bench) -> None:
+    def __init__(self, bench: Bench, *, traceback_project_dir: Path | None = None) -> None:
         self._bench = bench
+        self._traceback_context = None
+        self._environment: dict[str, str] | None = None
+        if traceback_project_dir is not None:
+            self._traceback_context = temporary_pyocd_traceback_environment(
+                pyocd_bench_environment(bench), traceback_project_dir
+            )
+            self._environment = self._traceback_context.__enter__()
 
     def __getattr__(self, name: str):
         return getattr(self._bench, name)
 
     def environment(self, **overrides: str) -> dict[str, str]:
-        return pyocd_bench_environment(self._bench, **overrides)
+        environment = dict(self._environment) if self._environment is not None else pyocd_bench_environment(self._bench)
+        environment.update(overrides)
+        return environment
+
+    def close(self) -> None:
+        if self._traceback_context is not None:
+            context, self._traceback_context = self._traceback_context, None
+            context.__exit__(None, None, None)
 
 
 def pyocd_provenance(environment: dict[str, str]) -> tuple[str, str, str]:
@@ -518,7 +558,9 @@ def test_pyocd_discovery_recovers_after_verified_usb_reset(bench: Bench, tmp_pat
     debugger.pop("target_cfg", None)
     variant.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
-    variant_bench = PyOcdBench(replace(bench, config=variant))
+    variant_bench = PyOcdBench(
+        replace(bench, config=variant), traceback_project_dir=tmp_path / "pyocd-discovery-traceback-project"
+    )
     server = Server(variant_bench, tmp_path / "pyocd-discovery-reset-mcp.stderr")
     run_open = False
     private_values = (
@@ -597,9 +639,12 @@ def test_pyocd_discovery_recovers_after_verified_usb_reset(bench: Bench, tmp_pat
             try:
                 server.close()
             finally:
-                if bench.config.read_bytes() != original_config:
-                    pytest.fail("the original bench fixture config was modified", pytrace=False)
-                variant.unlink(missing_ok=True)
+                try:
+                    variant_bench.close()
+                finally:
+                    if bench.config.read_bytes() != original_config:
+                        pytest.fail("the original bench fixture config was modified", pytrace=False)
+                    variant.unlink(missing_ok=True)
 
 
 def test_pyocd_f446re_probe_flash_reset_and_uart_recording(bench: Bench, tmp_path: Path, record_property) -> None:
@@ -631,7 +676,9 @@ def test_pyocd_f446re_probe_flash_reset_and_uart_recording(bench: Bench, tmp_pat
     debugger.pop("target_cfg", None)
     variant.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
-    variant_bench = PyOcdBench(replace(bench, config=variant))
+    variant_bench = PyOcdBench(
+        replace(bench, config=variant), traceback_project_dir=tmp_path / "pyocd-recording-traceback-project"
+    )
     server = Server(variant_bench, tmp_path / "pyocd-recording-mcp.stderr")
     run_open = False
     run_stopped = False
@@ -782,8 +829,11 @@ def test_pyocd_f446re_probe_flash_reset_and_uart_recording(bench: Bench, tmp_pat
             try:
                 server.close()
             finally:
-                assert bench.config.read_bytes() == original_config, "the original bench fixture config was modified"
-                variant.unlink(missing_ok=True)
+                try:
+                    variant_bench.close()
+                finally:
+                    assert bench.config.read_bytes() == original_config, "the original bench fixture config was modified"
+                    variant.unlink(missing_ok=True)
                 record_property(
                     "pyocd_run_closure_v1",
                     json.dumps(

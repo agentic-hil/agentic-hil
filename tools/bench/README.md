@@ -107,12 +107,14 @@ a serial number; takes this machine's run lock; builds the image; runs the tier
 with the probe's nodes handed in; copies the JUnit report out; and reads pytest's
 summary line as the verdict.
 
-The USB reset re-enumeration stage and the pyOCD discovery diagnostic are the
-exceptions to static device-node mounts. Both run with
+The USB reset re-enumeration stage, pyOCD discovery diagnostic, and opt-in
+incident recovery check are the exceptions to static device-node mounts. They
+run with
 `--runtime podman --live-device-tree`: the rootless
 container receives the host `/dev` directory as a read-only bind mount, so a
 kernel-recreated tty node and updated `/dev/serial/by-id` links can be resolved
-by the same MCP server after USB reset. The first test in the pyOCD stage
+by the same MCP server after USB reset or during the recovery check's reset and
+probe. The first test in the pyOCD stage
 records native probe-listing evidence, requests one identity-checked USB reset,
 then requires the same MCP process to list the configured probe again; that
 diagnostic does not connect to or alter the target. The existing healthy pyOCD
@@ -124,8 +126,9 @@ The read-only bind protects directory entries from container changes; it does
 not make character devices read-only. Processes in the container may perform
 device I/O that the invoking user is permitted to perform, and can see other
 host `/dev` entries that this user may access. The gate uses this broader view
-only for the explicitly selected pyOCD or USB reset test. Network remains disabled,
-capabilities remain dropped, and the existing non-root and crun checks still
+only for explicitly selected pyOCD, USB reset, or incident recovery checks.
+Network remains disabled, capabilities remain dropped, and the existing
+non-root and crun checks still
 apply.
 
 - The image is built from the commit checked out, never from the working tree.
