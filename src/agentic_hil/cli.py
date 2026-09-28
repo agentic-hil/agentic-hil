@@ -90,6 +90,7 @@ from agentic_hil.coordination import (
     project_resource,
     standing_foreign_incidents,
 )
+from agentic_hil.device_access import port_access, probe_access
 from agentic_hil.devices import config_devices
 from agentic_hil.humanize import JSON_FLAG_HELP, PROTOCOL_COMMANDS, render_result, split_by_usb_identity, write_rendered
 from agentic_hil.junit import detached_junit_refusal, write_refusal_junit_xml
@@ -545,7 +546,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="e.g. debuggers.dut.allow_mass_erase; several may be named and are applied together or not at all",
     )
 
-    doctor_parser = subparsers.add_parser("doctor", help="validate config, check debugger availability, and say whether this bench is bound to hardware yet: a configuration whose devices name no hardware exits non-zero and names the command that binds them, because no test plan can run against it")
+    doctor_parser = subparsers.add_parser("doctor", help="validate config, check debugger availability, and say whether this bench is bound to hardware yet: a configuration whose devices name no hardware exits non-zero and names the command that binds them, because no test plan can run against it; off Windows it also asks whether this account may open the probe and the serial port, and exits non-zero naming the node and its group where it may not")
     doctor_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
 
     config_reload_parser = subparsers.add_parser(
@@ -2092,7 +2093,13 @@ DOCTOR_UNBOUND_FINDING = "bench_binding"
 # over it, for the same reason it keeps one over an unbound bench: the finding is
 # about the state of the machine and says nothing about the document.
 DOCTOR_STANDING_INCIDENT_FINDING = "standing_incident"
-DOCTOR_FINDINGS_SETUP_KEEPS = frozenset({DOCTOR_UNBOUND_FINDING, DOCTOR_STANDING_INCIDENT_FINDING})
+# A probe or a serial port this account may not open, asked of the kernel off
+# Windows (`agentic_hil.device_access`). `doctor` counts it because the first
+# hardware call would be refused over it; `init` and `setup` keep the file they
+# wrote over it and repeat the check's words as warnings, because the finding is
+# about this account on this machine and the document binds the right hardware.
+DOCTOR_DEVICE_ACCESS_FINDING = "device_access"
+DOCTOR_FINDINGS_SETUP_KEEPS = frozenset({DOCTOR_UNBOUND_FINDING, DOCTOR_STANDING_INCIDENT_FINDING, DOCTOR_DEVICE_ACCESS_FINDING})
 
 
 def doctor_findings_setup_keeps(doctor_result: JsonObject) -> bool:
@@ -2273,6 +2280,9 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
         # reads rather than in `--json` alone.
         warnings = [_kept_root_warning(finding) for finding in kept_findings]
         warnings.extend(_unchecked_open_run_warning(config_result))
+        # The bind stands and the account still cannot open what it bound: said
+        # in the check's own words, which are the ones `doctor` prints.
+        warnings.extend(_device_access_warnings(doctor_result))
         return {
             "ok": ok and not rollback_errors,
             "tool": "agentic_hil_init",
@@ -2294,6 +2304,18 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
                 "agent_write_restriction": permission_result,
             },
         }
+
+
+def _device_access_warnings(doctor_result: JsonObject) -> list[str]:
+    """The summary of every device-access check this `doctor` step failed, probe first, each node once."""
+    warnings: dict[str, None] = {}
+    for section in ("debuggers", "com_ports"):
+        entries = doctor_result.get(section)
+        for entry in entries.values() if isinstance(entries, dict) else ():
+            check = entry.get("device_access") if isinstance(entry, dict) else None
+            if isinstance(check, dict) and check.get("ok") is False and isinstance(check.get("summary"), str):
+                warnings[check["summary"]] = None
+    return list(warnings)
 
 
 def _unreached_project_scope(summary: str) -> JsonObject:
@@ -5189,6 +5211,19 @@ def doctor(config_path: str | None = None) -> JsonObject:
     checks = {name: result for name, (result, _) in probed.items()}
     target_support = {name: support for name, (_, support) in probed.items()}
     checked = [result for result in checks.values() if result.get("skipped") is not True]
+    # Whether this account may open each probe checked above and each bound
+    # serial port, asked of the kernel off Windows and opening nothing. Before
+    # this, `doctor` was green on an account outside the device groups, and the
+    # first hardware call was where it found out (#604 named that refusal). A
+    # node the check cannot find answers nothing and adds no entry: a probe that
+    # is not on USB here stays what the checks above say about it.
+    probe_access_checks = {name: verdict for name in probed if (verdict := probe_access(config.debuggers[name].probe_id)) is not None}
+    port_access_checks = {
+        port_id: verdict
+        for port_id, port in config.com_ports.items()
+        if not com_port_is_unbound(port) and (verdict := port_access(port.device)) is not None
+    }
+    denied_access = [check for check in (*probe_access_checks.values(), *port_access_checks.values()) if check.get("ok") is not True]
     debugger_info = next(iter(checks.values()), None) or {
         "ok": True,
         "tool": "debugger_info",
@@ -5237,6 +5272,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         *([] if state_root_ok else ["state_root"]),
         *([] if binding_ok else [DOCTOR_UNBOUND_FINDING]),
         *([DOCTOR_STANDING_INCIDENT_FINDING] if standing else []),
+        *([DOCTOR_DEVICE_ACCESS_FINDING] if denied_access else []),
     ]
     all_ok = not unhealthy
     if not checked:
@@ -5277,6 +5313,11 @@ def doctor(config_path: str | None = None) -> JsonObject:
         # has to be told is that the next hardware call from this workspace is
         # refused by something no check above this one looks at.
         summary = f"{summary} {foreign_incident_sentence(standing)}"
+    for sentence in dict.fromkeys(check["summary"] for check in denied_access):
+        # In the headline for the same reason again, one sentence per node (two
+        # debugger entries on one probe share it): the node, its group, and
+        # whether logging in again is the whole remedy.
+        summary = f"{summary} {sentence}"
     # Checked at the end, against the configuration this run was decided by. The
     # probe checks spawn debugger processes and take seconds, so the file can
     # move inside a single `doctor`; a report printed out of a document that has
@@ -5356,10 +5397,21 @@ def doctor(config_path: str | None = None) -> JsonObject:
                 **({"scripts": _doctor_debugger_scripts(entry)} if entry.type == "openocd" else {}),
                 **({"check": checks[name]} if name in checks else {}),
                 **({"target_support": target_support[name]} if name in target_support else {}),
+                **({"device_access": probe_access_checks[name]} if name in probe_access_checks else {}),
             }
             for name, entry in config.debuggers.items()
         },
-        "com_ports": {port_id: {"device": port.device, "baudrate": port.baudrate, "encoding": port.encoding, **port_identity_fields(config, port_id), "permissions": granted["com_ports"][port_id]} for port_id, port in config.com_ports.items()},
+        "com_ports": {
+            port_id: {
+                "device": port.device,
+                "baudrate": port.baudrate,
+                "encoding": port.encoding,
+                **port_identity_fields(config, port_id),
+                "permissions": granted["com_ports"][port_id],
+                **({"device_access": port_access_checks[port_id]} if port_id in port_access_checks else {}),
+            }
+            for port_id, port in config.com_ports.items()
+        },
         "can_buses": {bus_id: {"adapter": bus.adapter, "channel": bus.channel, "bitrate": bus.bitrate, "fd": bus.fd, "permissions": granted["can_buses"][bus_id]} for bus_id, bus in config.can_buses.items()},
         "debugger": debugger_info,
     }

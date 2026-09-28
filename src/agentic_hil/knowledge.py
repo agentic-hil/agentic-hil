@@ -2098,6 +2098,61 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Close whatever else holds the probe.",
         ),
     ),
+    # `doctor`'s device-access check, which `init` repeats as a warning. It asks
+    # the kernel with `os.access` and opens nothing, so these are the refusals the
+    # first hardware call would meet, said before it is made.
+    "device_access_denied:probe": ErrorRemedy(
+        meaning=(
+            "This account may not open the probe's USB device for reading and writing. `doctor` asked the kernel, "
+            "which applies the node's mode, group and ACL to this process, and opened nothing. The first flash, reset "
+            "or probe of the target would be refused as `adapter_not_found` with `backend_error_type: "
+            "adapter_access_denied`. The check names the node, its owner, group and mode, whether this account is in "
+            "that group in the account database, and whether this login holds it."
+        ),
+        remediation=(
+            "Where `account_in_group` is true and `login_in_group` false, the account joined the group after this "
+            "login began: log in again (a new SSH session or desktop login) and nothing else has to change.",
+            "Otherwise an administrator adds this account to the group the check names, once (`sudo usermod -aG "
+            "<group> <account>`; the probe's udev rule gives it to plugdev on Debian and Ubuntu), and the account "
+            "logs in again.",
+            "A node owned by root:root means no udev rule applies to the probe: install its rule (OpenOCD's "
+            "60-openocd.rules, or the one ST ships with its tools), replug the probe, join the group the rule names "
+            "and log in again.",
+            "`ls -l` on the node shows its owner, group and mode; run `agentic-hil doctor` again after the change. "
+            "TROUBLESHOOTING.md section 6 is the rest of it.",
+        ),
+        do_not=(
+            "Do not run Agentic HIL, OpenOCD or the agent as root to get past this: the refusal is about this "
+            "account, and a root process leaves root-owned files in the state root that the account cannot clean up.",
+            "Do not chmod the node. udev creates it again at the next replug or boot, and a mode that admits this "
+            "account admits every account on the machine.",
+        ),
+    ),
+    "device_access_denied:com_port": ErrorRemedy(
+        meaning=(
+            "This account may not open the configured serial port's device node for reading and writing. `doctor` "
+            "asked the kernel at the node the configured path resolves to, a /dev/serial/by-id link followed to its "
+            "tty, and opened nothing. The first serial session on the port would be refused as "
+            "`com_port_open_failed`. The check names the node, its owner, group and mode, whether this account is in "
+            "that group in the account database, and whether this login holds it."
+        ),
+        remediation=(
+            "Where `account_in_group` is true and `login_in_group` false, the account joined the group after this "
+            "login began: log in again (a new SSH session or desktop login) and nothing else has to change.",
+            "Otherwise an administrator adds this account to the group the check names, once (`sudo usermod -aG "
+            "<group> <account>`; dialout on Debian and Ubuntu, uucp on Arch), and the account logs in again.",
+            "A node owned by root:root means no udev rule applies to the adapter: install a udev rule for it, replug "
+            "it, join the group the rule names and log in again.",
+            "`ls -l` on the node shows its owner, group and mode; run `agentic-hil doctor` again after the change. "
+            "TROUBLESHOOTING.md section 11 is the rest of it.",
+        ),
+        do_not=(
+            "Do not run Agentic HIL or the agent as root to get past this: the refusal is about this account, and a "
+            "root process leaves root-owned files in the state root that the account cannot clean up.",
+            "Do not chmod the node. udev creates it again at the next replug or boot, and a mode that admits this "
+            "account admits every account on the machine.",
+        ),
+    ),
     "probe_inventory_incomplete": ErrorRemedy(
         meaning=(
             "Bootstrap discovery found no probe to bind and cannot say the bench is empty. STM32CubeProgrammer is not "

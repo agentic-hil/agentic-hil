@@ -1536,19 +1536,26 @@ def _doctor_debuggers(debuggers: Mapping[str, object]) -> list[str]:
         if permissions:
             rows.append(("permissions", _permission_line(permissions)))
         lines.extend(_fields(rows, indent=detail))
-        checks = [(label, _mapping(entry.get(label))) for label in ("check", "target_support") if _mapping(entry.get(label))]
-        if not checks:
-            continue
-        label_width = max(len(label) for label, _ in checks)
-        verdict_width = max(len(_check_verdict(check)) for _, check in checks)
-        for label, check in checks:
-            head = f"{detail}{label.ljust(label_width)}  {_check_verdict(check).ljust(verdict_width)}  "
-            lines.extend(_wrap(_summary(check) or check.get("undetermined_reason") or _check_verdict(check), indent=head, hanging=" " * len(head)))
-            error_type = _error_type(check)
-            if error_type:
-                lines.extend(_fields([("error_type", error_type)], indent=" " * len(head)))
-                remedy, _ = _remediation(check)
-                lines.extend(_numbered(remedy, indent=" " * len(head)))
+        lines.extend(_doctor_checks(entry, ("check", "target_support", "device_access"), detail))
+    return lines
+
+
+def _doctor_checks(entry: Mapping[str, object], labels: Sequence[str], detail: str) -> list[str]:
+    """One entry's checks, one aligned row each, with the remedy under a failed one."""
+    checks = [(label, _mapping(entry.get(label))) for label in labels if _mapping(entry.get(label))]
+    if not checks:
+        return []
+    lines: list[str] = []
+    label_width = max(len(label) for label, _ in checks)
+    verdict_width = max(len(_check_verdict(check)) for _, check in checks)
+    for label, check in checks:
+        head = f"{detail}{label.ljust(label_width)}  {_check_verdict(check).ljust(verdict_width)}  "
+        lines.extend(_wrap(_summary(check) or check.get("undetermined_reason") or _check_verdict(check), indent=head, hanging=" " * len(head)))
+        error_type = _error_type(check)
+        if error_type:
+            lines.extend(_fields([("error_type", error_type)], indent=" " * len(head)))
+            remedy, _ = _remediation(check)
+            lines.extend(_numbered(remedy, indent=" " * len(head)))
     return lines
 
 
@@ -1564,6 +1571,7 @@ def _doctor_devices(devices: Mapping[str, object], keys: Sequence[str]) -> list[
         permissions = _mapping(entry.get("permissions"))
         if permissions:
             lines.extend(_fields([("permissions", _permission_line(permissions))], indent=detail))
+        lines.extend(_doctor_checks(entry, ("device_access",), detail))
     return lines
 
 
