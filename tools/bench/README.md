@@ -80,7 +80,26 @@ python3 tools/bench_in_container.py -- tests/bench/test_bench_serial.py -x
 python3 tools/bench_in_container.py --runtime docker
 python3 tools/bench_in_container.py --without-device-group
 python3 tools/bench_in_container.py --build-only         # the image alone, anywhere
+python3 tools/bench_in_container.py --cubeprogrammer-archive ~/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip --build-only
 ```
+
+The licensed STM32CubeProgrammer layer is opt-in. Its archive stays outside the
+checkout in the runner cache at
+`~/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip`; the runner obtains
+it through authenticated access to the unpublished release asset. The helper
+checks the supplied archive against SHA-256
+`6a9e60a5a048c45eb3241f9bb66bdc2e6cbd0119fb2e42568dc059fc6167442a` before
+copying it into the temporary build context, which is removed when the command
+finishes. The binary is never committed or published as a public release.
+
+With `--cubeprogrammer-archive`, the build selects the separate
+`bench-tier-cubeprogrammer` stage. It installs CubeProgrammer 2.23.0 at
+`/opt/st/cubeprogrammer-2.23.0` and runs the dedicated USB-free recording smoke
+test during the build. The CLI is not added to `PATH`, so an ordinary `init`
+continues to discover OpenOCD by default; a test that needs CubeProgrammer names
+the installed executable explicitly. The installer log reported all three
+packages installed, including TrustedPackageCreator, even though the unattended
+XML marked that pack unselected.
 
 A run finds the probe through sysfs by its USB vendor and product ids, never by
 a serial number; takes this machine's run lock; builds the image; runs the tier

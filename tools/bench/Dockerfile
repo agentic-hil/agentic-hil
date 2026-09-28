@@ -32,7 +32,7 @@
 # alias table the machine may not have and otherwise asks which registry to use,
 # which a run with no terminal cannot answer. Docker reads the same reference as
 # the short name it has always used.
-FROM docker.io/library/python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+FROM docker.io/library/python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS bench-tier
 # ^ python:3.12-slim
 
 # OpenOCD is the debugger backend the tier flashes, resets and debugs the board
@@ -128,3 +128,22 @@ LABEL agentic-hil.image="bench-tier"
 STOPSIGNAL SIGINT
 ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
 CMD ["python", "-m", "pytest", "tests/bench", "-p", "no:cacheprovider"]
+
+# Optional software-only layer for reproducing STM32CubeProgrammer's actual
+# USB-free CLI output. The runner adds the licensed, digest-pinned archive to
+# its throwaway build context only when this target is requested. The build-time
+# smoke test runs without a USB device and validates the captured refusal text
+# through both the CLI and Agentic HIL. This target is never the default image.
+FROM bench-tier AS bench-tier-cubeprogrammer
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes libglib2.0-0t64 unzip \
+    && rm -rf /var/lib/apt/lists/*
+COPY build-inputs/cubeprogrammer.zip /tmp/cubeprogrammer.zip
+COPY tools/bench/install_cubeprogrammer.sh /tmp/install_cubeprogrammer.sh
+COPY tools/bench/cubeprogrammer-auto-install.xml /tmp/cubeprogrammer-auto-install.xml
+RUN --network=none sh /tmp/install_cubeprogrammer.sh /tmp/cubeprogrammer.zip /tmp/cubeprogrammer-auto-install.xml
+RUN --network=none python -m pytest -q tests/container/cubeprogrammer_without_a_probe.py
+
+# Keep the standard bench image the implicit last stage. An ordinary build
+# never needs the licensed payload or evaluates the optional COPY above.
+FROM bench-tier AS bench-tier-default

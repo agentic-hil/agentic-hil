@@ -1,0 +1,31 @@
+{
+  "provenance": {
+    "tool": "STM32CubeProgrammer",
+    "version": "2.23.0",
+    "recorded_on": "2026-09-28",
+    "installer_archive_sha256": "6a9e60a5a048c45eb3241f9bb66bdc2e6cbd0119fb2e42568dc059fc6167442a",
+    "environment": "Local Docker Desktop/WSL2 container with no network and no USB devices passed through.",
+    "installed_prefix": "/opt/st/cubeprogrammer-auto-check",
+    "package_selection_observation": "The unattended XML marked STM32TrustedPackageCreator selected=false, but the installer log reported 3/3 packages installed. Do not infer that package was excluded."
+  },
+  "recordings": {
+    "version": {
+      "argv": ["--version"],
+      "returncode": 0,
+      "stdout": "\u001b[36m\u001b[01m      -------------------------------------------------------------------\n\u001b[39;49m\u001b[0m\u001b[36m\u001b[01m                        STM32CubeProgrammer v2.23.0                  \n\u001b[39;49m\u001b[0m\u001b[36m\u001b[01m      -------------------------------------------------------------------\n\n\u001b[39;49m\u001b[0m\u001b[39;49mSTM32CubeProgrammer version: 2.23.0 \n\n\u001b[39;49m\u001b[0m",
+      "stderr": ""
+    },
+    "list_no_probe": {
+      "argv": ["-q", "-l", "st-link-only"],
+      "returncode": 0,
+      "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\n===== STLink Interface =====\nNo ST-Link detected!\n\n",
+      "stderr": ""
+    },
+    "connect_no_probe": {
+      "argv": ["-q", "-c", "port=SWD"],
+      "returncode": 1,
+      "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nError: No debug probe detected.\n",
+      "stderr": ""
+    }
+  }
+}

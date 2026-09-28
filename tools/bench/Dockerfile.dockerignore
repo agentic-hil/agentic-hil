@@ -11,6 +11,12 @@
 !requirements
 !src
 !tests
+!build-inputs/
+!build-inputs/cubeprogrammer.zip
+!tools/
+!tools/bench/
+!tools/bench/install_cubeprogrammer.sh
+!tools/bench/cubeprogrammer-auto-install.xml
 # The tier copies, builds and flashes this demo, and builds its own images out
 # of it.
 !examples/nucleo-f446re_demo
