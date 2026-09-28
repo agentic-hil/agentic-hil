@@ -201,3 +201,36 @@ def test_write_scoped_private_asset_job_is_manual_conditional_and_separate_from_
     checkouts = [step for step in provision["steps"] if "actions/checkout" in str(step.get("uses", ""))]
     assert len(checkouts) == 1
     assert checkouts[0]["with"]["persist-credentials"] == "false"
+
+
+def test_cubeprogrammer_recordings_are_an_opt_in_step_after_the_standard_gates():
+    workflow = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    bench_steps = workflow["jobs"]["bench-tier"]["steps"]
+    cube_steps = [step for step in bench_steps if "cubeprogrammer_recordings.py" in step.get("run", "")]
+
+    assert inputs["run_cubeprogrammer_recordings"]["type"] == "boolean"
+    assert inputs["run_cubeprogrammer_recordings"]["default"] == "false"
+    assert len(cube_steps) == 1, cube_steps
+    cube = cube_steps[0]
+    assert "success()" in cube["if"]
+    assert "!inputs.diagnose_only" in cube["if"]
+    assert "inputs.run_cubeprogrammer_recordings" in cube["if"]
+    assert cube["working-directory"] == "under-test"
+    assert "--cubeprogrammer-archive" in cube["run"]
+    assert "$HOME/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip" in cube["run"]
+    assert "--output ../bench-results/cubeprogrammer" in cube["run"]
+    assert "-- tests/bench/cubeprogrammer_recordings.py" in cube["run"]
+
+    standard = [step for step in bench_steps if step.get("name") in {"Run the bench tier in its container", "Run the stage without the probe's device group"}]
+    assert len(standard) == 2
+    assert all("run_cubeprogrammer_recordings" not in step.get("if", "") for step in standard)
+
+
+def test_diagnostic_only_run_does_not_upload_stale_bench_results():
+    workflow = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    upload = [step for step in workflow["jobs"]["bench-tier"]["steps"] if "upload-artifact" in str(step.get("uses", ""))]
+
+    assert len(upload) == 1
+    assert "always()" in upload[0]["if"]
+    assert "!inputs.diagnose_only" in upload[0]["if"]

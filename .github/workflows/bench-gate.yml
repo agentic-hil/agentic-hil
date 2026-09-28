@@ -55,6 +55,11 @@ on:
         required: false
         default: ""
         type: string
+      run_cubeprogrammer_recordings:
+        description: Run CubeProgrammer probe/flash/reset recordings after the standard bench gates
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -139,12 +144,21 @@ jobs:
         working-directory: under-test
         run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --without-device-group --output ../bench-results/without-device-group
 
+      # Kept separate from the standard tier and the without-device-group
+      # stage so the extra hardware scenario cannot change either hard gate.
+      # The image reads the already verified, user-local cache through the
+      # explicit archive argument; the host never runs the installer.
+      - name: Run CubeProgrammer hardware recordings
+        if: ${{ success() && !inputs.diagnose_only && inputs.run_cubeprogrammer_recordings }}
+        working-directory: under-test
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output ../bench-results/cubeprogrammer --cubeprogrammer-archive "$HOME/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip" -- tests/bench/cubeprogrammer_recordings.py
+
       # `if: always()` because a red or cancelled run's report is the one worth
       # reading, and `warn` because a run that never reached pytest has already
       # failed for a reason the step's log names. The report and the log have
       # the probe's serial numbers and the machine's names withheld.
       - name: Upload the tier's report and log
-        if: always()
+        if: ${{ always() && !inputs.diagnose_only }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bench-tier

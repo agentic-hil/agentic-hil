@@ -770,7 +770,9 @@ def gate_run_steps() -> list[dict]:
     """The tier's step, then the step of the stage that withholds the probe's groups."""
     running = [
         step for step in gate_job()["steps"]
-        if "run" in step and "bench_vm_diagnostic.py" not in step.get("run", "")
+        if "run" in step
+        and "bench_vm_diagnostic.py" not in step.get("run", "")
+        and "cubeprogrammer_recordings.py" not in step.get("run", "")
     ]
     assert len(running) == 2, running
     return running
@@ -794,12 +796,14 @@ def test_the_gate_is_started_by_hand_and_by_nothing_else() -> None:
 def test_the_gate_asks_which_commit_to_run() -> None:
     inputs = triggers(workflow_document(GATE_WORKFLOW))["workflow_dispatch"]["inputs"]
 
-    assert set(inputs) == {"ref", "diagnose_only", "cubeprogrammer_asset_id"}, inputs
+    assert set(inputs) == {"ref", "diagnose_only", "cubeprogrammer_asset_id", "run_cubeprogrammer_recordings"}, inputs
     assert inputs["ref"]["required"] is True
     assert inputs["ref"]["type"] == "string"
     assert inputs["diagnose_only"]["default"] is False
     assert inputs["diagnose_only"]["type"] == "boolean"
     assert inputs["cubeprogrammer_asset_id"]["required"] is False
+    assert inputs["run_cubeprogrammer_recordings"]["default"] is False
+    assert inputs["run_cubeprogrammer_recordings"]["type"] == "boolean"
 
 
 def test_the_gate_runs_on_the_nightlys_board_and_queues_with_it() -> None:
@@ -936,7 +940,8 @@ def test_the_gate_uploads_the_tiers_report_whatever_the_run_did() -> None:
     upload = [step for step in gate_job()["steps"] if "upload-artifact" in str(step.get("uses", ""))]
 
     assert len(upload) == 1, upload
-    assert upload[0]["if"] == "always()"
+    assert "always()" in upload[0]["if"]
+    assert "!inputs.diagnose_only" in upload[0]["if"]
     assert upload[0]["with"]["path"].strip() == f"{GATE_RESULTS}/"
     assert upload[0]["with"]["if-no-files-found"] == "warn"
     assert upload[0]["with"]["retention-days"] == 14
