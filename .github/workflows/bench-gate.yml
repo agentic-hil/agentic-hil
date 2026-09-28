@@ -51,6 +51,11 @@ on:
         required: false
         default: false
         type: boolean
+      run_recovery_check:
+        description: Read lease status and confirm reset-halt/probe before the standard bench gates
+        required: false
+        default: false
+        type: boolean
       cubeprogrammer_asset_id:
         description: Optional private release asset ID to SHA-256-check into the runner cache
         required: false
@@ -141,8 +146,14 @@ jobs:
       # for itself. The step is killed seconds later, which can be before that
       # teardown is done: the container finishes it on its own, and the next
       # run waits for it before it builds anything.
+      - name: Run the opt-in incident recovery check
+        id: recovery_check
+        if: ${{ success() && !inputs.diagnose_only && inputs.run_recovery_check }}
+        working-directory: under-test
+        run: exec python3 ../harness/tools/bench_in_container.py --runtime podman --live-device-tree --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS/recovery-check" -- tests/bench/recovery_check.py
+
       - name: Run the bench tier in its container
-        if: ${{ !inputs.diagnose_only }}
+        if: ${{ success() && !inputs.diagnose_only }}
         working-directory: under-test
         run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS"
 
@@ -156,7 +167,7 @@ jobs:
       # goes into a directory of its own, since the runner clears the one it is
       # given of an earlier report.
       - name: Run the stage without the probe's device group
-        if: ${{ !cancelled() && !inputs.diagnose_only }}
+        if: ${{ !cancelled() && !inputs.diagnose_only && (!inputs.run_recovery_check || steps.recovery_check.outcome == 'success') }}
         working-directory: under-test
         run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --without-device-group --output "$BENCH_RESULTS/without-device-group"
 

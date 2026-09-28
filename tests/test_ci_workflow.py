@@ -772,6 +772,7 @@ def gate_run_steps() -> list[dict]:
         step for step in gate_job()["steps"]
         if "run" in step
         and "bench_vm_diagnostic.py" not in step.get("run", "")
+        and "recovery_check.py" not in step.get("run", "")
         and "pyocd_recordings.py" not in step.get("run", "")
         and "cubeprogrammer_recordings.py" not in step.get("run", "")
         and "usb_reset_reenumeration.py" not in step.get("run", "")
@@ -798,11 +799,13 @@ def test_the_gate_is_started_by_hand_and_by_nothing_else() -> None:
 def test_the_gate_asks_which_commit_to_run() -> None:
     inputs = triggers(workflow_document(GATE_WORKFLOW))["workflow_dispatch"]["inputs"]
 
-    assert set(inputs) == {"ref", "diagnose_only", "cubeprogrammer_asset_id", "run_pyocd_recordings", "run_cubeprogrammer_recordings", "run_usb_reset_reenumeration"}, inputs
+    assert set(inputs) == {"ref", "diagnose_only", "run_recovery_check", "cubeprogrammer_asset_id", "run_pyocd_recordings", "run_cubeprogrammer_recordings", "run_usb_reset_reenumeration"}, inputs
     assert inputs["ref"]["required"] is True
     assert inputs["ref"]["type"] == "string"
     assert inputs["diagnose_only"]["default"] is False
     assert inputs["diagnose_only"]["type"] == "boolean"
+    assert inputs["run_recovery_check"]["default"] is False
+    assert inputs["run_recovery_check"]["type"] == "boolean"
     assert inputs["cubeprogrammer_asset_id"]["required"] is False
     assert inputs["run_pyocd_recordings"]["default"] is False
     assert inputs["run_pyocd_recordings"]["type"] == "boolean"
@@ -883,7 +886,10 @@ def test_the_stage_without_the_device_group_runs_after_the_tier_unless_the_run_w
 
     assert "if" in tier and "diagnose_only" in tier["if"], tier
     # Wrapped, because YAML reads a bare leading `!` as a tag.
-    assert stage["if"] == chr(36) + "{{ !cancelled() && !inputs.diagnose_only }}", stage
+    assert stage["if"] == (
+        chr(36)
+        + "{{ !cancelled() && !inputs.diagnose_only && (!inputs.run_recovery_check || steps.recovery_check.outcome == 'success') }}"
+    ), stage
 
 
 def test_the_commit_under_test_runs_only_inside_the_container() -> None:
@@ -960,6 +966,7 @@ def test_every_gate_stage_writes_under_the_one_run_scoped_upload_root() -> None:
     expected = {
         "Run the bench tier in its container": GATE_RESULTS,
         "Run the stage without the probe's device group": GATE_STAGE_RESULTS,
+        "Run the opt-in incident recovery check": f"{GATE_RESULTS}/recovery-check",
         "Run pyOCD hardware recordings": f"{GATE_RESULTS}/pyocd",
         "Run CubeProgrammer hardware recordings": f"{GATE_RESULTS}/cubeprogrammer",
         "Run USB reset and re-enumeration recording": f"{GATE_RESULTS}/usb-reset",
@@ -982,11 +989,12 @@ def test_pyocd_recording_stage_gets_live_device_tree_for_bounded_usb_reset_diagn
         if "bench_in_container.py" in step.get("run", "")
     }
     pyocd = runner_steps["Run pyOCD hardware recordings"]
+    recovery = runner_steps["Run the opt-in incident recovery check"]
     usb_reset = runner_steps["Run USB reset and re-enumeration recording"]
     default_tier = runner_steps["Run the bench tier in its container"]
     cube = runner_steps["Run CubeProgrammer hardware recordings"]
 
-    for step in (pyocd, usb_reset):
+    for step in (pyocd, usb_reset, recovery):
         command = shlex.split(run_lines({"steps": [step]})[0])
         assert command[command.index("--runtime") + 1] == "podman", command
         assert "--live-device-tree" in command, command
@@ -996,6 +1004,7 @@ def test_pyocd_recording_stage_gets_live_device_tree_for_bounded_usb_reset_diagn
 
     assert "tests/bench/pyocd_recordings.py" in pyocd["run"]
     assert "tests/bench/usb_reset_reenumeration.py" in usb_reset["run"]
+    assert "tests/bench/recovery_check.py" in recovery["run"]
 
 
 def test_run_attempt_scopes_upload_away_from_stale_skipped_stage_artifacts(tmp_path: Path) -> None:

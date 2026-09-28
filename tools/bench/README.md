@@ -221,13 +221,21 @@ board is attached to, for one commit named when it is started, on
 gh workflow run bench-gate.yml -f ref=<commit, branch or tag>
 ```
 
-The optional hardware recording stages are off by default. Enable any of them
-independently with `run_pyocd_recordings`, `run_cubeprogrammer_recordings`, or
+The optional hardware stages are off by default. Enable the status-gated reset
+preflight with `run_recovery_check`, and recordings independently with
+`run_pyocd_recordings`, `run_cubeprogrammer_recordings`, or
 `run_usb_reset_reenumeration`:
 
 ```
 gh workflow run bench-gate.yml -f ref=<commit, branch or tag> -f run_pyocd_recordings=true -f run_cubeprogrammer_recordings=true -f run_usb_reset_reenumeration=true
 ```
+
+When selected, the recovery check runs before the standard tier in the default
+image. It reads lease status first and refuses a failed audit or any standing
+incident; otherwise it declares the debugger, requests reset into halt, and
+probes the target through MCP. A failed check stops the standard gates. The
+withheld-device-group diagnostic still runs after an ordinary red standard
+tier, but only when the selected recovery check succeeded.
 
 The ordinary tier and the stage without the probe's device group run first.
 Then the requested recordings run in this order, each in its own container

@@ -267,10 +267,14 @@ def test_usb_reset_reenumeration_is_an_opt_in_stage_after_all_other_gates():
         if "bench_in_container.py" in step.get("run", "")
         and any(
             module in step.get("run", "")
-            for module in ("tests/bench/usb_reset_reenumeration.py", "tests/bench/pyocd_recordings.py")
+            for module in (
+                "tests/bench/usb_reset_reenumeration.py",
+                "tests/bench/pyocd_recordings.py",
+                "tests/bench/recovery_check.py",
+            )
         )
     ]
-    assert len(live_tree_runs) == 2
+    assert len(live_tree_runs) == 3
     assert all("--live-device-tree" in step["run"] for step in live_tree_runs)
     other_bench_runs = [step for step in steps if "bench_in_container.py" in step.get("run", "") and step not in live_tree_runs]
     assert other_bench_runs
@@ -321,3 +325,42 @@ def test_pyocd_recordings_are_an_independent_opt_in_stage_before_cube_and_usb():
     assert step_names.index("Run the stage without the probe's device group") < step_names.index(pyocd["name"])
     assert step_names.index(pyocd["name"]) < step_names.index("Run CubeProgrammer hardware recordings")
     assert step_names.index(pyocd["name"]) < step_names.index("Run USB reset and re-enumeration recording")
+
+
+def test_incident_recovery_check_is_an_explicit_preflight_before_the_standard_gates():
+    workflow = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    job = workflow["jobs"]["bench-tier"]
+    steps = job["steps"]
+
+    assert inputs["run_recovery_check"]["type"] == "boolean"
+    assert inputs["run_recovery_check"]["default"] == "false"
+    checks = [step for step in steps if "tests/bench/recovery_check.py" in step.get("run", "")]
+    assert len(checks) == 1, checks
+    check = checks[0]
+    assert check["id"] == "recovery_check"
+    assert "success()" in check["if"]
+    assert "!inputs.diagnose_only" in check["if"]
+    assert "inputs.run_recovery_check" in check["if"]
+    assert check["working-directory"] == "under-test"
+    assert "--live-device-tree" in check["run"]
+    assert "--cubeprogrammer-archive" not in check["run"]
+    assert check["run"].endswith("-- tests/bench/recovery_check.py")
+
+    standard = [
+        step
+        for step in steps
+        if step.get("name") in {"Run the bench tier in its container", "Run the stage without the probe's device group"}
+    ]
+    assert len(standard) == 2
+    names = [step.get("name") for step in steps]
+    assert names.index(check["name"]) < names.index("Run the bench tier in its container")
+    assert names.index(check["name"]) < names.index("Run the stage without the probe's device group")
+    tier = next(step for step in standard if step.get("name") == "Run the bench tier in its container")
+    assert "success()" in tier["if"]
+    withheld = next(step for step in standard if step.get("name") == "Run the stage without the probe's device group")
+    assert "!cancelled()" in withheld["if"]
+    assert "!inputs.diagnose_only" in withheld["if"]
+    assert "!inputs.run_recovery_check" in withheld["if"]
+    assert "steps.recovery_check.outcome == 'success'" in withheld["if"]
+    assert "success()" not in withheld["if"]
