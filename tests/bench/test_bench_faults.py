@@ -44,7 +44,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import suppress
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 from result_text import assert_text_projects
@@ -52,6 +52,7 @@ from support import scaled_time_bound
 
 from agentic_hil.backends.gdbdebug import resolve_gdb_executable
 from agentic_hil.config import load_config
+from agentic_hil.gdbmi import unescape_mi_string
 
 from .conftest import BENCH_ONLY, DEMO_IMAGE, Bench, BoardImages, child_command
 
@@ -557,7 +558,18 @@ def assert_stopped_in_the_fault(document: dict) -> None:
     assert stop["frame"]["function"] == FAULT_HANDLER, stop
 
 
-GDB_MI_FULLNAME_FIELD = re.compile(r'fullname="(?:\\.|[^"\\])*"')
+GDB_MI_SOURCE_PATH_FIELD = re.compile(r'(?P<field>file|fullname)="(?P<value>(?:\\.|[^"\\])*)"')
+
+
+def sanitize_gdb_mi_source_paths(line: str) -> str:
+    """Redact absolute source paths in GDB/MI `file` and `fullname` fields only."""
+    def replace(match: re.Match[str]) -> str:
+        value = unescape_mi_string(match.group("value"))
+        if PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute():
+            return f'{match.group("field")}="<path redacted>"'
+        return match.group(0)
+
+    return GDB_MI_SOURCE_PATH_FIELD.sub(replace, line)
 
 
 def resolve_bench_gdb_executable(config_path: Path, workspace: Path, backend: str) -> str:
@@ -574,8 +586,8 @@ def record_gdb_stop_evidence(bench: Bench, log_path: str, scenario: str, record_
 
     The product log stores the raw stop records before interpreting them. The
     JUnit property keeps the records intact except for GDB's absolute source
-    path field, which is not needed to replay the stop parser and must not
-    escape in the public bench artifact.
+    path values in `file` and `fullname`; relative names and all other MI fields
+    remain verbatim.
     """
     recorded = json.loads((bench.project / log_path).read_text(encoding="utf-8"))
     raw_records = recorded.get("gdb_stop_records")
@@ -595,7 +607,7 @@ def record_gdb_stop_evidence(bench: Bench, log_path: str, scenario: str, record_
         assert re.fullmatch(r"[0-9a-f]{40}", source_commit), source_commit
     if run_id:
         assert re.fullmatch(r"[A-Za-z0-9_.-]+", run_id), run_id
-    sanitized = [GDB_MI_FULLNAME_FIELD.sub('fullname="<path redacted>"', line) for line in raw_records]
+    sanitized = [sanitize_gdb_mi_source_paths(line) for line in raw_records]
     record_property(
         "gdb_mi_stop_recording_v1",
         json.dumps(
