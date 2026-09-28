@@ -849,6 +849,129 @@ def test_the_wait_for_the_machine_never_eats_into_the_time_the_jobs_work_has() -
     assert bench_job()["timeout-minutes"] == step["timeout-minutes"] + BENCH_WORK_MINUTES
 
 
+# The bench tier on every other distribution tools/bench_in_container.py builds
+# its image on, one after another on the same board once the demo's job is done,
+# each distribution's report and log uploaded under a name of its own.
+DISTRIBUTION_RUNNER = "tools/bench_in_container.py"
+DISTRIBUTION_RESULTS = "bench-results"
+# Measured on the bench on 2026-09-27 and 2026-09-28, from the moment a run held
+# the machine to its verdict, each image built without a cache of its own layers:
+# Ubuntu 24.04 12m42s, Debian 12 11m43s and Fedora 44 19m26s, the slowest, of
+# which its build took 2m23s and the others' about a minute and a half. Ubuntu
+# 22.04's run ends within four minutes, since its OpenOCD refuses every run on the
+# board before it starts (see tools/bench/README.md). A step's limit counts its
+# wait for the machine too, as the gate's does, so the floor is twice the slowest
+# run, rounded up: a whole run of the tier started on the machine itself in front
+# of a distribution still leaves it its own time. The job's limit is the four
+# steps' and room for the checkout and the uploads, which took seconds.
+DISTRIBUTION_STEP_FLOOR_MINUTES = 39
+ROOM_AROUND_THE_DISTRIBUTIONS_MINUTES = 5
+
+
+def distributions_job() -> dict:
+    return workflow_document(BENCH_WORKFLOW)["jobs"]["distributions"]
+
+
+def runner_distributions() -> tuple[str, ...]:
+    """What the runner's `--distribution` offers, in its own order.
+
+    Read from the runner rather than repeated here, so a distribution it gains
+    is one the nightly has to prove before this goes green again. Imported only
+    once the workflow has been read: an unpacked source distribution carries
+    neither the workflow nor tools/, and skips at the first.
+    """
+    tools = str(REPOSITORY_ROOT / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    import bench_in_container
+
+    return tuple(bench_in_container.DISTRIBUTIONS)
+
+
+def distribution_steps() -> list[tuple[str, dict, dict]]:
+    """Each distribution the job runs, in order: its name, its run step, and the step after it."""
+    steps = distributions_job()["steps"]
+    found = []
+    for index, step in enumerate(steps):
+        if "run" not in step:
+            continue
+        lines = run_lines({"steps": [step]})
+        assert len(lines) == 1, lines
+        command = shlex.split(lines[0])
+        distribution = option_value(command, "--distribution")
+        assert distribution, command
+        following = steps[index + 1] if index + 1 < len(steps) else {}
+        found.append((distribution, step, following))
+    return found
+
+
+def test_the_other_distributions_run_after_the_nightlys_job_on_the_same_board() -> None:
+    """After the demo's job, on its runner, after a red one too, never after a cancel.
+
+    What the tier proves on another distribution does not depend on what the
+    demo found, so a red demo still gets its distributions; a cancelled run
+    starts nothing more on the machine. A fork has no runner behind these
+    labels either.
+    """
+    job = distributions_job()
+
+    assert job["needs"] == "bench", job
+    assert job["runs-on"] == BENCH_LABELS
+    assert " ".join(job["if"].split()) == "${{ !cancelled() && github.repository == 'agentic-hil/agentic-hil' }}", job
+    checkouts = [step for step in job["steps"] if "actions/checkout" in str(step.get("uses", ""))]
+    assert len(checkouts) == 1, checkouts
+    assert checkouts[0]["with"]["persist-credentials"] is False, checkouts
+
+
+def test_every_distribution_the_runner_builds_runs_its_whole_tier_one_after_another() -> None:
+    """The runner, once per distribution, in its own order, and nothing else.
+
+    The whole tier each time, so nothing after `--`, and `exec` for the gate's
+    reason: the runner is the step's process and the SIGINT a cancelled run
+    sends reaches it rather than a shell. After a red distribution the next
+    still runs; after a cancel, none. Each takes the machine's run lock itself,
+    as the gate's run does, and queues for it.
+    """
+    ran = distribution_steps()
+
+    assert [distribution for distribution, _, _ in ran] == list(runner_distributions()), ran
+    for distribution, step, _ in ran:
+        line = run_lines({"steps": [step]})[0]
+        command = shlex.split(line)
+        assert command == ["exec", "python3", DISTRIBUTION_RUNNER, "--distribution", distribution, "--output", f"{DISTRIBUTION_RESULTS}/{distribution}"], command
+        assert step["if"] == "${{ !cancelled() }}", step
+        assert "working-directory" not in step, step
+        assert not RAW_HARDWARE.search(line), line
+        assert not FETCH_TOOL.search(line), line
+
+
+def test_each_distributions_report_and_log_are_uploaded_under_its_own_name_whatever_happened() -> None:
+    """Right after its run, so a later distribution's limit cannot cost an earlier one's report."""
+    for distribution, _, upload in distribution_steps():
+        assert "upload-artifact" in str(upload.get("uses", "")), (distribution, upload)
+        assert upload["if"] == "always()", upload
+        assert upload["with"]["name"] == f"bench-tier-{distribution}", upload
+        assert upload["with"]["path"].strip() == f"{DISTRIBUTION_RESULTS}/{distribution}/", upload
+        assert upload["with"]["if-no-files-found"] == "warn", upload
+        assert upload["with"]["retention-days"] == 14, upload
+
+
+def test_the_distributions_run_inside_a_limit_measured_on_the_bench() -> None:
+    """Each distribution has room for what the slowest one took, and the job for all of them.
+
+    A floor rather than the number itself, as the hosted suite's limit is:
+    raising it needs no edit here, lowering it back into the measured range
+    does. The job's limit is the steps' together and the room around them, so
+    no distribution loses its time to the ones before it.
+    """
+    ran = distribution_steps()
+    limits = [step["timeout-minutes"] for _, step, _ in ran]
+
+    for limit in limits:
+        assert isinstance(limit, int) and limit >= DISTRIBUTION_STEP_FLOOR_MINUTES, limits
+    assert distributions_job()["timeout-minutes"] >= sum(limits) + ROOM_AROUND_THE_DISTRIBUTIONS_MINUTES, limits
+
+
 # The gate: the bench tier, run by tools/bench_in_container.py in its image on
 # the same board, for one commit a maintainer names when starting it.
 
