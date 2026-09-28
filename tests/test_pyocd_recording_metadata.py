@@ -362,6 +362,75 @@ def test_pyocd_run_stop_capture_keeps_after_status_and_original_failure_if_stop_
     assert pyocd_recordings.run_stop_succeeded(captured["run_stop"]) is False
 
 
+def _clean_run_closure_evidence() -> dict:
+    return {
+        "run_stop": {
+            "available": True,
+            "ok": True,
+            "target_ok": None,
+            "audit_ok": True,
+            "cleanup_ok": True,
+            "cleanup_required": False,
+            "quarantined": False,
+            "lease_state": "released",
+            "side_effect_status": "unchanged",
+            "hardware_state": "unchanged",
+            "released_devices": ["debugger:dut", "uart:uart"],
+            "recovery": None,
+        },
+        "lease_status_after_stop": {
+            "available": True,
+            "ok": True,
+            "target_ok": None,
+            "audit_ok": True,
+            "cleanup_ok": True,
+            "cleanup_required": False,
+            "quarantined": False,
+            "lease_state": "released",
+            "side_effect_status": "unchanged",
+            "hardware_state": "unchanged",
+            "blocked": False,
+            "incident_stands": False,
+            "standing_incidents": [],
+            "cleanup_reasons": [],
+            "auto_recoverable": False,
+            "auto_recover_policy": "reset_halt",
+        },
+    }
+
+
+def test_pyocd_run_closure_accepts_clean_after_status_and_successful_stop() -> None:
+    evidence = _clean_run_closure_evidence()
+
+    assert pyocd_recordings.run_closure_succeeded(evidence) is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("available", False),
+        ("ok", False),
+        ("target_ok", False),
+        ("audit_ok", False),
+        ("cleanup_ok", False),
+        ("cleanup_required", True),
+        ("quarantined", True),
+        ("lease_state", "stale"),
+        ("side_effect_status", "unknown"),
+        ("side_effect_status", "partial"),
+        ("hardware_state", "unknown"),
+        ("blocked", True),
+        ("incident_stands", True),
+        ("standing_incidents", [{"summary": "unresolved incident"}]),
+    ],
+)
+def test_pyocd_run_closure_rejects_unclean_after_status(field: str, value: object) -> None:
+    evidence = _clean_run_closure_evidence()
+    evidence["lease_status_after_stop"][field] = value
+
+    assert pyocd_recordings.run_closure_succeeded(evidence) is False
+
+
 @pytest.mark.parametrize(
     "failed_status",
     [None, {"ok": False, "error_type": "backend_error", "summary": "status unavailable"}, OSError("private path /dev/ttyACM0")],

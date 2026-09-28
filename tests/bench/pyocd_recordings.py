@@ -173,6 +173,7 @@ LEASE_STATUS_EVIDENCE_FIELDS = (
     "cleanup_required",
     "quarantined",
     "lease_state",
+    "target_ok",
     "blocked",
     "incident_stands",
     "standing_incidents",
@@ -181,6 +182,8 @@ LEASE_STATUS_EVIDENCE_FIELDS = (
     "auto_recoverable",
     "auto_recover_policy",
     "quarantine_id",
+    "side_effect_status",
+    "hardware_state",
 )
 RUN_STOP_EVIDENCE_FIELDS = (
     "ok",
@@ -270,6 +273,22 @@ def run_stop_succeeded(result: object) -> bool:
     if recovery is None:
         return True
     return isinstance(recovery, dict) and recovery.get("outcome") == "recovered" and recovery.get("incident_open") is False
+
+
+def run_closure_succeeded(evidence: object) -> bool:
+    """Require both the stop result and its final lease snapshot to be clean."""
+    if not isinstance(evidence, dict) or not run_stop_succeeded(evidence.get("run_stop")):
+        return False
+    status = evidence.get("lease_status_after_stop")
+    if not isinstance(status, dict) or status.get("available") is not True:
+        return False
+    if not overall_success(status):
+        return False
+    return (
+        status.get("blocked") is False
+        and status.get("incident_stands") is False
+        and status.get("standing_incidents") == []
+    )
 
 
 def capture_run_stop_with_lease_evidence(server: Server, private_values: tuple[str, ...]) -> dict:
@@ -756,8 +775,8 @@ def test_pyocd_f446re_probe_flash_reset_and_uart_recording(bench: Bench, tmp_pat
                 if run_open and server.process.poll() is None:
                     run_closure = capture_run_stop_with_lease_evidence(server, private_values)
                     stopped = run_closure["run_stop"]
-                    run_stopped = run_stop_succeeded(stopped)
-                    if not run_stopped and sys.exc_info()[0] is None:
+                    run_stopped = isinstance(stopped, dict) and stopped.get("ok") is True
+                    if not run_closure_succeeded(run_closure) and sys.exc_info()[0] is None:
                         pytest.fail(f"Agentic HIL run stop failed its continue predicate: {stopped}", pytrace=False)
         finally:
             try:
