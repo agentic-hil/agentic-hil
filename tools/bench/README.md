@@ -392,10 +392,13 @@ start of the build to the verdict, each image built afresh, the runs took
 12m42s, 11m43s and 19m26s: on Fedora 44 the tier itself took 17 minutes, where
 it took 10 to 11 on the others. The nightly's limits are set from these runs.
 
-OpenOCD 0.11, Ubuntu 22.04's, has no `adapter serial`, which is how the OpenOCD
-backend selects the probe when a configuration binds it by serial number, as
-the tier's does. It refuses the command before it opens the probe, with
-`invalid subcommand "serial <serial>"`, and the product reports that as
-`debugger_command_rejected` naming `adapter serial`: the board was not touched
-and stays in service. Every test that reaches the board through OpenOCD fails
-there on that refusal, so the tier on `ubuntu-22.04` is red.
+OpenOCD 0.11, Ubuntu 22.04's, has no `adapter serial`: that command, which
+selects a probe by serial number for every adapter driver, came with 0.12, and
+the tier's configuration binds its probe by serial number. So the OpenOCD
+backend asks the installed OpenOCD which release it is and, before 0.12, which
+adapter driver the interface script loads, and selects the probe with that
+driver's own command: `hla_serial` for the `interface/stlink.cfg` the tier's
+configuration names. The whole tier passed on `ubuntu-22.04` as well, on
+2026-09-28: the tier itself took 10m39s, and the run 10m49s from the start of
+the build to the verdict, with the distribution's packages already in the image
+cache.
