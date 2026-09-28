@@ -22,7 +22,7 @@ from agentic_hil.coordination import (
     HardwareCoordinator,
     HardwareLease,
 )
-from agentic_hil.devices import can_device
+from agentic_hil.devices import DeviceError, can_device
 from agentic_hil.knowledge import (
     CAN_ADAPTER_LIBRARY_MISSING_ERROR,
     CAN_CHANNEL_NOT_AVAILABLE_ERROR,
@@ -149,6 +149,14 @@ SOCKETCAN_INTERFACE_NAME = re.compile(r"[^\s/\\:]{1,15}")
 # Keyed by name and not by a `can_` prefix. The CAN error types outside this
 # table keep the generic answer until each is decided on its own terms.
 CAN_LIKELY_CAUSES: dict[str, list[str]] = {
+    "can_participant_required": [
+        "the CAN bus declares named `shares`, so the session or operation must name one configured participant",
+        "the run declared the physical CAN bus without the participant resource that owns the session view",
+    ],
+    "can_participant_not_configured": [
+        "the participant name is misspelled or was removed from `can_buses.<id>.shares`",
+        "the selected participant belongs to a different CAN bus; use a name declared on this bus",
+    ],
     CAN_INTERFACE_NOT_FOUND_ERROR: [
         "the SocketCAN interface was never created (`ip link add dev <dev> type can` has not been run for it, or `type vcan` for a virtual one)",
         "`can_buses.<id>.channel` names an interface this host does not have, or names it with a typo",
@@ -322,8 +330,9 @@ class CanAdapterSession(Protocol):
 
 
 class CanBusSession:
-    def __init__(self, bus_id: str, bus_config: CanBusConfig, adapter_session: CanAdapterSession, log_path: str, lease: HardwareLease | None = None, contact: ContactMarker | None = None):
+    def __init__(self, bus_id: str, bus_config: CanBusConfig, adapter_session: CanAdapterSession, log_path: str, lease: HardwareLease | None = None, contact: ContactMarker | None = None, participant: str | None = None):
         self.bus_id = bus_id
+        self.participant = participant
         self.bus_config = bus_config
         self.adapter_session = adapter_session
         self.log_path = log_path
@@ -345,6 +354,61 @@ class CanBusSession:
         self.contact = contact if contact is not None else ContactMarker()
         if contact is None:
             self.contact.record("can_adapter_opened")
+
+
+class BrokerCanAdapterSession:
+    """Adapt one named broker participant to the CAN service session interface."""
+
+    adapter_name = "broker"
+
+    def __init__(self, participant):
+        self.participant = participant
+        self.active = True
+        self.detach_unconfirmed = False
+
+    def send(self, frame: CanFrame) -> JsonObject:
+        return self.participant.send(frame.id, frame.data, extended=frame.extended, rtr=frame.rtr)
+
+    def read(self, max_frames: int, wait_timeout_s: float) -> JsonObject:
+        result = self.participant.read(max_frames, wait_timeout_s)
+        frames = result.get("frames") if isinstance(result.get("frames"), list) else []
+        result["frames"] = [{key: value for key, value in frame.items() if key in {"id", "extended", "rtr", "data_hex", "dlc", "frame_seq", "origin", "delivery_status"}} for frame in frames if isinstance(frame, dict)]
+        for frame in result["frames"]:
+            frame.setdefault("dlc", len(bytes.fromhex(str(frame.get("data_hex", "")))))
+        return result
+
+    def close(self) -> JsonObject:
+        result = self.participant.detach()
+        self.active = False
+        if result.get("ok") is not True or result.get("broker_unreachable") is True:
+            self.detach_unconfirmed = True
+        return {
+            **result,
+            # This session owns only its broker connection. A confirmed detach
+            # is the safe-state proof for that participant; it never owns the
+            # shared broker process, so there is no broker process to reap.
+            "safe_state_confirmed": not self.detach_unconfirmed,
+            "process_reaped": True,
+        }
+
+    def status(self) -> JsonObject:
+        if not self.active:
+            return {"ok": True, "active": False, "detached": True, "cleanup_required": self.detach_unconfirmed}
+        result = self.participant.status()
+        return {**result, "active": result.get("abort") is None and result.get("bus_gated") is not True}
+
+
+def broker_incident_scope(result: JsonObject) -> str | None:
+    """Read the broker's nested abort scope while preserving its public result."""
+    abort = result.get("abort")
+    scope = abort.get("scope") if isinstance(abort, dict) else result.get("incident_scope")
+    if scope in {"bus", "participant"}:
+        return str(scope)
+    if result.get("bus_gated") is True or result.get("error_type") == "can_bus_incident":
+        return "bus"
+    if result.get("error_type") == "can_participant_incident":
+        return "participant"
+    return None
 
 
 def socketcan_bitrate_honesty_fields(bus_config: CanBusConfig) -> JsonObject:
@@ -391,7 +455,7 @@ class CanBusService:
         self.config = config
         self.coordinator = coordinator or HardwareCoordinator(config, "can-service")
         self._owns_coordinator = coordinator is None
-        self.sessions: dict[str, CanBusSession] = {}
+        self.sessions: dict[tuple[str, str | None], CanBusSession] = {}
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
         # Unreachable with a session open, and kept for the day it is not. The
@@ -410,35 +474,47 @@ class CanBusService:
         # The loop stays because it is the local fail-safe. If that refusal is
         # ever narrowed to the sections nothing holds, this is what keeps a held
         # device name meaning the same physical board.
-        for bus_id, session in list(self.sessions.items()):
-            if config.can_buses.get(bus_id) != session.bus_config:
+        for key, session in list(self.sessions.items()):
+            if config.can_buses.get(session.bus_id) != session.bus_config:
                 self._stop_session(session, "config_reloaded")
-                self.sessions.pop(bus_id, None)
+                self.sessions.pop(key, None)
         self.config = config
 
     def list_buses(self) -> JsonObject:
-        buses = {bus_id: self._bus_status(bus_config, self.sessions.get(bus_id)) for bus_id, bus_config in self.config.can_buses.items()}
+        buses: JsonObject = {}
+        for bus_id, bus_config in self.config.can_buses.items():
+            sessions = [session for (session_bus, _), session in self.sessions.items() if session_bus == bus_id]
+            active = [session for session in sessions if self._session_is_active(session)]
+            status = self._bus_status(bus_config, active[0] if active else (sessions[0] if sessions else None))
+            if bus_config.shares:
+                status["active_participants"] = sorted(session.participant for session in active if session.participant is not None)
+            buses[bus_id] = status
         summary = f"{len(buses)} configured CAN bus(es)."
         shared = sum(1 for bus_config in self.config.can_buses.values() if bus_config.shares)
         if shared:
             # Said in the summary as well as per bus: the summary is the line an
             # agent reads first, and "shareable" without the rest of the sentence
             # is the claim this listing must not make.
-            summary += f" {shared} declared shareable through shares:, and a session still takes the whole bus."
+            summary += f" {shared} shared bus(es) support named participant sessions."
         return {"ok": True, "tool": "can_buses_list", "buses": buses, "supported_adapters": SUPPORTED_CAN_ADAPTERS, "summary": summary}
 
-    def session_start(self, bus_id: str, clear_rx_queue: bool = True) -> JsonObject:
+    def session_start(self, bus_id: str, clear_rx_queue: bool = True, participant: str | None = None) -> JsonObject:
         if not isinstance(bus_id, str) or not isinstance(clear_rx_queue, bool):
             return self._write_report({"ok": False, "tool": "can_session_start", "error_type": "invalid_argument", "summary": "bus_id must be a string and clear_rx_queue must be a boolean.", "side_effect_committed": False})
+        if participant is not None:
+            return self._participant_session_start(bus_id, participant, clear_rx_queue)
         bus = self._configured_bus(bus_id, "can_session_start")
         if not bus["ok"]:
             return self._write_report(bus)
+        if bus["bus_config"].shares:
+            return self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "can_participant_required", "summary": "This bus declares shares:; name the participant view opened by this session.", "configured_participants": sorted(bus["bus_config"].shares), "side_effect_committed": False})
         bus_permissions = bus["bus_config"].permissions
         if not self.config.can_read_allowed(bus["bus_config"]) and not bus_permissions.allow_write:
             return self._write_report(self._permission_denied("can_session_start", "Reading and writing this CAN bus are disabled by the authoritative config.", bus_id, "allow_read"))
         if clear_rx_queue and not self.config.can_read_allowed(bus["bus_config"]):
             return self._write_report(self._permission_denied("can_session_start", "Clearing this CAN bus receive queue requires permissions.allow_read on the bus.", bus_id, "allow_read"))
-        existing = self.sessions.get(bus_id)
+        key = (bus_id, None)
+        existing = self.sessions.get(key)
         if existing and self._session_is_active(existing):
             if clear_rx_queue:
                 cleared = self._drain_rx_queue(existing)
@@ -450,7 +526,7 @@ class CanBusService:
                 self._stop_session(existing, "replaced")
             except Exception as error:
                 return self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "Previous CAN bus session could not be closed and remains registered for cleanup retry.", "backend_error": str(error), **can_likely_causes("can_adapter_close_failed")})
-            self.sessions.pop(bus_id, None)
+            self.sessions.pop(key, None)
         bus_config = bus["bus_config"]
         try:
             log_path = str(Path(logs_directory(self.config)) / f"can-{timestamp_for_filename()}-{safe_filename(bus_id, 'bus')}.jsonl")
@@ -481,7 +557,7 @@ class CanBusService:
             if opened.get("cleanup_required") and isinstance(opened.get("session"), ProcessCanAdapterSession):
                 session = CanBusSession(bus_id, bus_config, opened["session"], log_path, lease, contact)
                 session.active = False
-                self.sessions[bus_id] = session
+                self.sessions[(bus_id, None)] = session
                 # The bridge child would not be cleaned up. The session stays
                 # registered holding its lease, exactly as a live session does,
                 # and the refusal below carries the reason and its remediation.
@@ -522,7 +598,7 @@ class CanBusService:
             lease.release()
             raise
         discharge_provisional_handle(adapter_provisional)
-        self.sessions[bus_id] = session
+        self.sessions[(bus_id, None)] = session
         cleared: JsonObject = {"ok": True, "frames_drained": 0}
         if clear_rx_queue and self.config.can_read_allowed(bus_config):
             try:
@@ -548,7 +624,7 @@ class CanBusService:
                     return written
                 if not session.lease.release(safe_state_confirmed=session.safe_state_confirmed, processes_reaped=session.process_reaped):
                     return self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "CAN lease release remained unconfirmed.", "cleanup_required": True, **can_likely_causes("can_adapter_close_failed")})
-                self.sessions.pop(bus_id, None)
+                self.sessions.pop((bus_id, None), None)
                 if isinstance(error, (KeyboardInterrupt, SystemExit)):
                     raise error
                 return recommit_report_with_status(self.config, written, session.lease.status())
@@ -562,27 +638,83 @@ class CanBusService:
             result["cleanup_required"] = True
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
-    def session_stop(self, bus_id: str) -> JsonObject:
+    def _participant_session_start(self, bus_id: str, participant: str, clear_rx_queue: bool) -> JsonObject:
+        bus = self._configured_bus(bus_id, "can_session_start")
+        if not bus["ok"]:
+            return self._write_report(bus)
+        bus_config = bus["bus_config"]
+        if not isinstance(participant, str) or not participant:
+            return self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "invalid_argument", "summary": "participant must be a non-empty configured share name."})
+        share = bus_config.shares.get(participant)
+        if share is None:
+            return self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "participant": participant, "error_type": "can_participant_not_configured", "summary": "The authoritative config declares no such participant view on this CAN bus.", "configured_participants": sorted(bus_config.shares), "side_effect_committed": False, "retry_safe": False})
+        read_allowed = self.config.can_read_allowed(bus_config) and (self.config.read_free or share.permissions.allow_read)
+        write_allowed = bus_config.permissions.allow_write and share.permissions.allow_write
+        if not read_allowed and not write_allowed:
+            permission = "allow_read" if not self.config.can_read_allowed(bus_config) else "allow_read"
+            is_share = self.config.can_read_allowed(bus_config) and not share.permissions.allow_read and not write_allowed
+            return self._write_report(self._permission_denied("can_session_start", "Reading and writing this CAN participant are disabled by the authoritative config.", bus_id, permission, participant if is_share else None))
+        key = (bus_id, participant)
+        existing = self.sessions.get(key)
+        if existing and self._session_is_active(existing):
+            return self._write_report({"ok": True, "tool": "can_session_start", "bus_id": bus_id, "participant": participant, "already_active": True, "frames_drained": 0, "session": self._session_status(existing), "summary": "CAN participant session is already active."})
+        try:
+            log_path = str(Path(logs_directory(self.config)) / f"can-{timestamp_for_filename()}-{safe_filename(bus_id, 'bus')}-{safe_filename(participant, 'participant')}.jsonl")
+            safe_append_text(log_path, "")
+        except (ConfigError, OSError) as error:
+            return audit_unavailable("can_session_start", error)
+        try:
+            lease = self.coordinator.acquire(can_device(self.config, bus_id, participant))
+        except (CoordinationError, DeviceError) as error:
+            return self._write_report({"tool": "can_session_start", "bus_id": bus_id, "participant": participant, "side_effect_committed": False, **error.result})
+        try:
+            from agentic_hil.canbroker import ParticipantError, attach_participant
+
+            attached = attach_participant(self.config, bus_id, participant, mutex=self.coordinator.bench, lock_already_held=True)
+        except BaseException as error:
+            if isinstance(error, ParticipantError):
+                result = {"tool": "can_session_start", "bus_id": bus_id, "participant": participant, "side_effect_committed": False, **error.result}
+                lease.release()
+                return self._write_report(result)
+            lease.quarantine("can_participant_attach_unconfirmed", error)
+            raise
+        adapter_session = BrokerCanAdapterSession(attached)
+        session = CanBusSession(bus_id, bus_config, adapter_session, log_path, lease, participant=participant)
+        self.sessions[key] = session
+        audit_error = append_jsonl_audited(self.config, log_path, {"event": "start", "bus_id": bus_id, "participant": participant, "adapter": "broker", "clear_rx_queue_requested": clear_rx_queue, "frames_drained": 0})
+        result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "participant": participant, "already_active": False, "adapter": "broker", "frames_drained": 0, "session": self._session_status(session), "summary": "CAN participant session started."}
+        if audit_error is not None:
+            session.audit_broken = True
+            with suppress(BaseException):
+                self._stop_session(session, "audit_failed")
+            result["cleanup_required"] = True
+        return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
+
+    def session_stop(self, bus_id: str, participant: str | None = None) -> JsonObject:
         bus = self._configured_bus(bus_id, "can_session_stop")
         if not bus["ok"]:
             return self._write_report(bus)
-        session = self.sessions.get(bus_id)
+        key = (bus_id, participant)
+        configured = self.config.can_buses.get(bus_id)
+        if configured is not None and configured.shares and participant is None:
+            return self._write_report({"ok": False, "tool": "can_session_stop", "bus_id": bus_id, "error_type": "can_participant_required", "summary": "This bus is shared; name the participant whose session this call stops.", "configured_participants": sorted(configured.shares), "side_effect_committed": False})
+        session = self.sessions.get(key)
         if session is None:
             return self._write_report({"ok": True, "tool": "can_session_stop", "bus_id": bus_id, "was_active": False, "summary": "CAN bus session was not active."})
         try:
             audit_error = self._stop_session(session, "requested", defer_release=True)
         except Exception as error:
             return self._write_report({"ok": False, "tool": "can_session_stop", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "CAN bus session could not be closed and remains registered for cleanup retry.", "backend_error": str(error), **can_likely_causes("can_adapter_close_failed")})
-        result = {"ok": True, "tool": "can_session_stop", "bus_id": bus_id, "was_active": True, "session": self._session_status(session), "summary": "CAN bus session stopped."}
+        result = {"ok": True, "tool": "can_session_stop", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "was_active": True, "session": self._session_status(session), "summary": "CAN bus session stopped."}
         written = self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
         if written.get("audit_ok") is False:
             return {**written, "cleanup_required": True, "quarantined": True}
         if not session.lease.release(safe_state_confirmed=session.safe_state_confirmed, processes_reaped=session.process_reaped):
             return self._write_report({"ok": False, "tool": "can_session_stop", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "CAN lease release remained unconfirmed.", "cleanup_required": True, **can_likely_causes("can_adapter_close_failed")})
-        self.sessions.pop(bus_id, None)
+        self.sessions.pop(key, None)
         return recommit_report_with_status(self.config, written, session.lease.status())
 
-    def send(self, bus_id: str, payload: JsonObject) -> JsonObject:
+    def send(self, bus_id: str, payload: JsonObject, participant: str | None = None) -> JsonObject:
         bus = self._configured_bus(bus_id, "can_send")
         if not bus["ok"]:
             return self._write_report(bus)
@@ -597,10 +729,12 @@ class CanBusService:
             return self._write_report(mode)
         if not bus["bus_config"].permissions.allow_write:
             return self._write_report(self._permission_denied("can_send", "Writing to this CAN bus is disabled by the authoritative config.", bus_id, "allow_write"))
-        session_result = self._active_session(bus_id, "can_send")
+        session_result = self._active_session(bus_id, "can_send", participant)
         if not session_result["ok"]:
             return self._write_report(session_result)
         session = session_result["session"]
+        if session.participant is not None and not session.bus_config.shares[session.participant].permissions.allow_write:
+            return self._write_report(self._permission_denied("can_send", "Writing to this CAN participant is disabled by the authoritative config.", bus_id, "allow_write", session.participant))
         parsed = payload_frame(session.bus_config, payload)
         if not parsed["ok"]:
             parsed["bus_id"] = bus_id
@@ -612,30 +746,34 @@ class CanBusService:
             session.lease.quarantine("can_send_effect_unconfirmed", error)
             raise
         if not sent["ok"]:
+            if session.participant is not None and broker_incident_scope(sent) == "bus":
+                session.lease.quarantine("can_send_effect_unconfirmed", sent)
             # The causes go in ahead of `**sent` so that a backend answering with
             # its own keeps them: the direct python-can adapter does, and a
             # process bridge is code this project did not write and need not.
             # Both are the same error type to the caller, so both name the same
             # causes about the bus (#517).
-            result = {"tool": "can_send", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "log_path": display_path(self.config, session.log_path), **can_likely_causes(sent.get("error_type")), **sent}
+            result = {"tool": "can_send", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "log_path": display_path(self.config, session.log_path), **can_likely_causes(sent.get("error_type")), **sent}
             if result.get("side_effect_committed") is not False and result.get("side_effect_status") is None:
                 result.update({"side_effect_status": "unknown", "cleanup_required": True})
             audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "direction": "tx", **result})
             return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
-        result = {"ok": True, "tool": "can_send", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "adapter_result": public_backend_result(sent), "log_path": display_path(self.config, session.log_path), "summary": "CAN frame sent."}
+        result = {"ok": True, "tool": "can_send", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "adapter_result": public_backend_result(sent), "log_path": display_path(self.config, session.log_path), "summary": "CAN frame sent."}
         audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "tx", **result})
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
-    def read(self, bus_id: str, max_frames: object | None = None, wait_timeout_s: object | None = None, until_id: object | None = None) -> JsonObject:
+    def read(self, bus_id: str, max_frames: object | None = None, wait_timeout_s: object | None = None, until_id: object | None = None, participant: str | None = None) -> JsonObject:
         bus = self._configured_bus(bus_id, "can_read")
         if not bus["ok"]:
             return self._write_report(bus)
         if not self.config.can_read_allowed(bus["bus_config"]):
             return self._write_report(self._permission_denied("can_read", "Reading this CAN bus is disabled by the authoritative config.", bus_id, "allow_read"))
-        session_result = self._active_session(bus_id, "can_read")
+        session_result = self._active_session(bus_id, "can_read", participant)
         if not session_result["ok"]:
             return self._write_report(session_result)
         session = session_result["session"]
+        if session.participant is not None and not session.bus_config.shares[session.participant].permissions.allow_read and not self.config.read_free:
+            return self._write_report(self._permission_denied("can_read", "Reading this CAN participant is disabled by the authoritative config.", bus_id, "allow_read", session.participant))
         try:
             parsed_max_frames = session.bus_config.max_buffer_frames if max_frames is None else int(max_frames)
             parsed_wait_timeout_s = 0.0 if wait_timeout_s is None else float(wait_timeout_s)
@@ -656,15 +794,17 @@ class CanBusService:
             session.lease.quarantine("can_read_effect_unconfirmed", error)
             raise
         if not read["ok"]:
-            result = {"tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "log_path": display_path(self.config, session.log_path), **read}
+            if session.participant is not None and broker_incident_scope(read) == "bus":
+                session.lease.quarantine("can_read_effect_unconfirmed", read)
+            result = {"tool": "can_read", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "adapter": session.adapter_session.adapter_name, "log_path": display_path(self.config, session.log_path), **read}
             if result.get("side_effect_committed") is not False and result.get("side_effect_status") is None:
                 result.update({"side_effect_status": "unknown", "cleanup_required": True})
             audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "direction": "rx", **result})
             return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
         frames = normalize_received_frames(read.get("frames", []))
         if frames is None:
-            return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "error_type": "can_adapter_invalid_response", "summary": "CAN adapter returned malformed frame data.", "side_effect_status": "unknown", "cleanup_required": True, **remediation_fields("can_adapter_invalid_response"), **can_likely_causes("can_adapter_invalid_response")})
-        result = {"ok": True, "tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frames_read": len(frames), "frames": frames, "adapter_result": public_backend_result(read, ["frames"]), "log_path": display_path(self.config, session.log_path), "summary": "CAN frame(s) read." if frames else "No CAN frames were available."}
+            return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "adapter": session.adapter_session.adapter_name, "error_type": "can_adapter_invalid_response", "summary": "CAN adapter returned malformed frame data.", "side_effect_status": "unknown", "cleanup_required": True, **remediation_fields("can_adapter_invalid_response"), **can_likely_causes("can_adapter_invalid_response")})
+        result = {"ok": True, "tool": "can_read", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "adapter": session.adapter_session.adapter_name, "frames_read": len(frames), "frames": frames, "adapter_result": public_backend_result(read, ["frames"]), "log_path": display_path(self.config, session.log_path), "summary": "CAN frame(s) read." if frames else "No CAN frames were available."}
         audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "rx", **result})
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
@@ -693,14 +833,16 @@ class CanBusService:
             # them keeps them next to its own error.
             kept: JsonObject = {"frames": frames, "until_matched": False} if frames else {}
             if not read["ok"]:
-                result = {"tool": "can_read", "bus_id": bus_id, "adapter": adapter, "log_path": display_path(self.config, session.log_path), **read, **kept}
+                if session.participant is not None and broker_incident_scope(read) == "bus":
+                    session.lease.quarantine("can_read_effect_unconfirmed", read)
+                result = {"tool": "can_read", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "adapter": adapter, "log_path": display_path(self.config, session.log_path), **read, **kept}
                 if result.get("side_effect_committed") is not False and result.get("side_effect_status") is None:
                     result.update({"side_effect_status": "unknown", "cleanup_required": True})
                 audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "direction": "rx", **result})
                 return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
             batch = normalize_received_frames(read.get("frames", []))
             if batch is None:
-                result = {"ok": False, "tool": "can_read", "bus_id": bus_id, "adapter": adapter, "error_type": "can_adapter_invalid_response", "summary": "CAN adapter returned malformed frame data.", "side_effect_status": "unknown", "cleanup_required": True, **remediation_fields("can_adapter_invalid_response"), **can_likely_causes("can_adapter_invalid_response"), **kept}
+                result = {"ok": False, "tool": "can_read", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "adapter": adapter, "error_type": "can_adapter_invalid_response", "summary": "CAN adapter returned malformed frame data.", "side_effect_status": "unknown", "cleanup_required": True, **remediation_fields("can_adapter_invalid_response"), **can_likely_causes("can_adapter_invalid_response"), **kept}
                 audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "direction": "rx", **result}) if kept else None
                 return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
             frames.extend(batch)
@@ -726,7 +868,7 @@ class CanBusService:
             summary = f"No frame whose id is in until_id arrived within {wait_s:g} s; the frames read so far are returned."
         else:
             summary = f"No frame whose id is in until_id arrived within {wait_s:g} s, and no CAN frames were available."
-        result = {"ok": True, "tool": "can_read", "bus_id": bus_id, "adapter": adapter, "frames_read": len(frames), "frames": frames, "adapter_result": public_backend_result(read, ["frames"]), "log_path": display_path(self.config, session.log_path), "summary": summary, "until_matched": matched_id is not None}
+        result = {"ok": True, "tool": "can_read", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "adapter": adapter, "frames_read": len(frames), "frames": frames, "adapter_result": public_backend_result(read, ["frames"]), "log_path": display_path(self.config, session.log_path), "summary": summary, "until_matched": matched_id is not None}
         if matched_id is not None:
             result["matched_id"] = matched_id
         audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "rx", **result})
@@ -735,9 +877,9 @@ class CanBusService:
     def close(self) -> None:
         errors: list[tuple[str, BaseException]] = []
         interrupt: BaseException | None = None
-        for bus_id in list(self.sessions):
+        for bus_id, participant in list(self.sessions):
             try:
-                result = self.session_stop(bus_id)
+                result = self.session_stop(bus_id, participant)
                 if not overall_success(result):
                     raise RuntimeError(str(result.get("summary", "CAN bus cleanup failed.")))
             except BaseException as error:
@@ -764,11 +906,15 @@ class CanBusService:
             return {"ok": False, "tool": tool, "bus_id": bus_id, "error_type": "can_bus_not_configured", "summary": "CAN bus is not available in the authoritative config.", "configured_buses": sorted(self.config.can_buses.keys()), **can_likely_causes("can_bus_not_configured")}
         return {"ok": True, "bus_config": bus_config}
 
-    def _active_session(self, bus_id: str, tool: str) -> JsonObject:
+    def _active_session(self, bus_id: str, tool: str, participant: str | None = None) -> JsonObject:
         bus = self._configured_bus(bus_id, tool)
         if not bus["ok"]:
             return bus
-        session = self.sessions.get(bus_id)
+        if bus["bus_config"].shares and participant is None:
+            return {"ok": False, "tool": tool, "bus_id": bus_id, "error_type": "can_participant_required", "summary": "This bus is shared; name the participant whose session this call uses.", "configured_participants": sorted(bus["bus_config"].shares), "side_effect_committed": False}
+        if participant is not None and participant not in bus["bus_config"].shares:
+            return {"ok": False, "tool": tool, "bus_id": bus_id, "participant": participant, "error_type": "can_participant_not_configured", "summary": "The authoritative config declares no such participant view on this CAN bus.", "configured_participants": sorted(bus["bus_config"].shares), "side_effect_committed": False}
+        session = self.sessions.get((bus_id, participant))
         if session is None or self.coordinator.incident_stands or session.audit_broken or session.lease.state != "active" or not self._session_is_active(session):
             if session is not None and (self.coordinator.incident_stands or session.audit_broken or session.lease.state != "active"):
                 return {"ok": False, "tool": tool, "bus_id": bus_id, "error_type": "resource_quarantined", "summary": "CAN bus requires cleanup or audit recovery before further actions.", "cleanup_required": True, "quarantined": True}
@@ -811,7 +957,10 @@ class CanBusService:
         return result
 
     def _session_status(self, session: CanBusSession) -> JsonObject:
-        return {"session_active": self._session_is_active(session), "started_at": session.started_at, "adapter": session.adapter_session.adapter_name, "adapter_status": session.adapter_session.status(), "log_path": display_path(self.config, session.log_path)}
+        result = {"session_active": self._session_is_active(session), "started_at": session.started_at, "adapter": session.adapter_session.adapter_name, "adapter_status": session.adapter_session.status(), "log_path": display_path(self.config, session.log_path)}
+        if session.participant is not None:
+            result["participant"] = session.participant
+        return result
 
     def _session_is_active(self, session: CanBusSession) -> bool:
         adapter_status = session.adapter_session.status()
@@ -888,9 +1037,11 @@ class CanBusService:
     def _write_report(self, result: JsonObject) -> JsonObject:
         prepared = mark_side_effect(result)
         bus_id = prepared.get("bus_id")
-        session = self.sessions.get(bus_id) if isinstance(bus_id, str) else None
+        participant = prepared.get("participant")
+        session = self.sessions.get((bus_id, participant if isinstance(participant, str) else None)) if isinstance(bus_id, str) else None
         unsafe_effect = prepared.get("side_effect_status") in {"unknown", "partial"}
-        if session is not None and unsafe_effect and prepared.get("cleanup_confirmed") is not True:
+        broker_bus_incident = session is not None and session.participant is not None and broker_incident_scope(prepared) == "bus"
+        if session is not None and unsafe_effect and prepared.get("cleanup_confirmed") is not True and not broker_bus_incident:
             # No marker consult here, and that is the intended asymmetry: a
             # registered session exists only downstream of an adapter that
             # opened, so every failure reaching this line is an after-contact
@@ -923,7 +1074,7 @@ class CanBusService:
             return write_report(self.config, {**written, **lease.status(), "ok": False, "cleanup_required": True, "summary": "CAN lease release remained unconfirmed."})
         return recommit_report_with_status(self.config, written, lease.status())
 
-    def _permission_denied(self, tool: str, summary: str, bus_id: str | None = None, permission: str | None = None) -> JsonObject:
+    def _permission_denied(self, tool: str, summary: str, bus_id: str | None = None, permission: str | None = None, participant: str | None = None) -> JsonObject:
         """A refusal one permission caused, carrying which one and what to do.
 
         `permission` is the dotted key the file uses and `agentic-hil grant`
@@ -934,7 +1085,7 @@ class CanBusService:
         if bus_id:
             result["bus_id"] = bus_id
         if permission:
-            key = permission_key("can_buses", bus_id, permission)
+            key = f"can_buses.{bus_id}.shares.{participant}.permissions.{permission}" if participant is not None else permission_key("can_buses", bus_id, permission)
             result["summary"] = permission_denied_summary(summary, key)
             result.update(permission_denied_fields(key))
             result.update(remediation_fields("permission_denied", permission=key))
@@ -1108,26 +1259,19 @@ def peak_channel_uses_socketcan(channel: str) -> bool:
     return os.name != "nt" and not is_windows_peak_channel(channel) and PEAK_LINUX_NETDEV_CHANNEL.fullmatch(channel) is not None
 
 
-# What a bus with `shares:` says about itself while a session still takes it
-# whole. The broker's participant path exists (`canbroker.attach_participant`)
-# and no tool or plan step reaches it: `can_session_start` leases the bus's own
-# key and opens the adapter itself, so a second session on a shared bus is
-# refused exactly as on a single-owner one. Until a session can attach as a
-# participant, the listing an agent reads before starting a session, and the
-# refusal it meets when it did not, both say so. A bus without `shares:` carries
-# none of these fields: the vocabulary appears where shares are declared and
-# nowhere else.
+# A bus with `shares:` supports named participant sessions. A bus without
+# `shares:` keeps its original exclusive-session semantics.
 SHARING_NOTE = (
-    "This bus declares shares:, and a session still takes the whole bus: can_session_start holds the bus lock itself "
-    "and opens no participant view yet, so a second session on this bus is refused until participant sessions land. "
-    "The declared shares are configuration only for now."
+    "This bus declares shares: and supports participant sessions. Name one configured participant on "
+    "can_session_start, can_session_stop, can_send and can_read; each run declares that same participant. "
+    "The broker owns the physical bus once and keeps each participant's filtered view and permissions separate."
 )
 
 
 def sharing_advertisement(bus_config: CanBusConfig) -> JsonObject:
     if not bus_config.shares:
         return {}
-    return {"shares_declared": True, "session_takes_whole_bus": True, "sharing_note": SHARING_NOTE}
+    return {"shares_declared": True, "session_takes_whole_bus": False, "participant_sessions": True, "sharing_note": SHARING_NOTE}
 
 
 def effective_can_adapter(bus_config: CanBusConfig) -> str:
@@ -2185,7 +2329,7 @@ def normalize_received_frames(raw_frames: object) -> list[JsonObject] | None:
         return None
     frames: list[JsonObject] = []
     for raw in raw_frames:
-        if not isinstance(raw, dict) or set(raw) - {"id", "id_hex", "frame_id", "extended", "rtr", "data_hex", "hex", "dlc"}:
+        if not isinstance(raw, dict) or set(raw) - {"id", "id_hex", "frame_id", "extended", "rtr", "data_hex", "hex", "dlc", "frame_seq", "origin", "delivery_status"}:
             return None
         frame_id = parse_can_id(raw.get("id", raw.get("frame_id")))
         data_hex = raw.get("data_hex", raw.get("hex", ""))
@@ -2199,7 +2343,17 @@ def normalize_received_frames(raw_frames: object) -> list[JsonObject] | None:
         expected_id_hex = f"0x{frame_id:x}"
         if data is None or frame_id < 0 or frame_id > max_id or not isinstance(dlc, int) or isinstance(dlc, bool) or dlc != len(data) or ("id_hex" in raw and raw["id_hex"] != expected_id_hex):
             return None
-        frames.append({"id": frame_id, "id_hex": f"0x{frame_id:x}", "extended": extended, "rtr": rtr, "data_hex": data.hex(), "dlc": len(data)})
+        frame = {"id": frame_id, "id_hex": f"0x{frame_id:x}", "extended": extended, "rtr": rtr, "data_hex": data.hex(), "dlc": len(data)}
+        frame_seq = raw.get("frame_seq")
+        if frame_seq is not None:
+            if not isinstance(frame_seq, int) or isinstance(frame_seq, bool) or frame_seq < 1:
+                return None
+            frame["frame_seq"] = frame_seq
+        if raw.get("origin") in {"participant_tx", "adapter_rx"}:
+            frame["origin"] = raw["origin"]
+        if raw.get("delivery_status") in {"adapter_accepted", "adapter_received"}:
+            frame["delivery_status"] = raw["delivery_status"]
+        frames.append(frame)
     return frames
 
 

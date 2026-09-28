@@ -910,7 +910,7 @@ def test_a_can_report_that_landed_is_not_reported_as_unpersisted_because_the_lea
     monkeypatch.setitem(sys.modules, "can", SimpleNamespace(Bus=lambda **kwargs: bus, CanInitializationError=FakeCanInitializationError))
     try:
         assert service.call("can_session_start", {"bus_id": "bench"})["ok"] is True
-        session = service.can_buses.sessions["bench"]
+        session = service.can_buses.sessions[("bench", None)]
         session.audit_broken = True
         session.lease.quarantine("can_reader_audit_broken", OSError(13, "Permission denied", "can-bench.jsonl"), audit_broken=True)
 

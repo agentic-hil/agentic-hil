@@ -208,6 +208,9 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     # that made it, the way a bench log names the programmer that printed it.
     # The recording is evidence about that release and must not follow this one.
     "tests/fixtures/protocol_startup_refusal_recording.json": "the recording names the release that made it",
+    # This captured macOS wheel and its hash identify the exact installer run;
+    # rewriting its version would make the recording false.
+    "tests/fixtures/macos_installer_environment_recording.json": "the immutable macOS recording names the wheel version it captured",
     # NOT_CONTACTED's comment names the release that introduced the shape it
     # generalizes. History, not a pin.
     "src/agentic_hil/backends/common.py": "prose reference to the release a precedent shipped in",

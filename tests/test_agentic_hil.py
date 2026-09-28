@@ -2534,25 +2534,35 @@ def test_a_framework_macos_installation_is_read_off_the_scheme_pip_installs_into
     console script over a missing package that `_user_site_installation` exists
     to prevent, on the one platform where the two names differ.
 
-    No Mac is needed to state it, because all that differs is which name
-    sysconfig answers with. The table itself is worth recording once beside
-    this test, with `python3 -c "import sysconfig;
-    print(sysconfig.get_preferred_scheme('user'));
-    print(sysconfig.get_path('purelib', 'osx_framework_user'));
-    print(sysconfig.get_path('purelib', 'posix_user'))"` on such an
-    interpreter.
+    The real Homebrew framework layout is kept in
+    `tests/fixtures/macos_installer_environment_recording.json`; this test
+    roots its two captured scheme paths under its temporary directory so the
+    same regression runs on every host OS.
     """
     from agentic_hil.upgrade import _user_site_installation
 
-    framework_user_site = tmp_path / "Library" / "Python" / "3.13" / "lib" / "python" / "site-packages"
-    other_user_site = tmp_path / ".local" / "lib" / "python3.13" / "site-packages"
-    monkeypatch.setattr(sys, "prefix", str(tmp_path / "Library" / "Frameworks" / "Python.framework"))
-    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "Library" / "Frameworks" / "Python.framework"))
+    recording_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "fixtures"
+        / "macos_installer_environment_recording.json"
+    )
+    recording = json.loads(recording_path.read_text(encoding="utf-8"))
+    python = recording["python"]
+    framework_scheme = python["preferred_user_scheme"]
+    framework_path = PurePosixPath(python["schemes"][framework_scheme]["purelib"]["path"])
+    posix_path = PurePosixPath(python["schemes"]["posix_user"]["purelib"]["path"])
+    # Keep the captured layout's version and suffix while rooting it under this
+    # test's temp directory, because this regression runs on every host OS.
+    framework_user_site = tmp_path.joinpath(*framework_path.parts[-6:])
+    other_user_site = tmp_path.joinpath(*posix_path.parts[-5:])
+    monkeypatch.setattr(sys, "prefix", python["prefix"])
+    monkeypatch.setattr(sys, "base_prefix", python["base_prefix"])
     _installation_located_at(
         monkeypatch,
         distribution_at=framework_user_site,
         user_site=framework_user_site,
-        preferred_user_scheme="osx_framework_user",
+        preferred_user_scheme=framework_scheme,
         other_schemes={"posix_user": other_user_site},
     )
     assert _user_site_installation() is True

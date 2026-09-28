@@ -614,11 +614,20 @@ class BenchMutex:
         atomic_write_text(self._holder_path(resource), json.dumps(record, indent=2) + "\n")
 
     def _read_holder(self, resource: str) -> JsonObject | None:
-        try:
-            text = safe_read_text(self._holder_path(resource))
-        except FileNotFoundError:
-            return None
-        except (OSError, UnicodeDecodeError, ConfigError):
+        # A heartbeat atomically replaces the record. If it lands between open
+        # and stat, the safe reader refuses the changed inode. Retry the full
+        # safety check, bounded so a persistently unsafe path still yields no
+        # holder and never keeps a contender waiting indefinitely.
+        for _ in range(3):
+            try:
+                text = safe_read_text(self._holder_path(resource))
+                break
+            except ConfigError as error:
+                if error.error_type != "unsafe_configured_path":
+                    return None
+            except (OSError, UnicodeDecodeError):
+                return None
+        else:
             return None
         try:
             value = json.loads(text)

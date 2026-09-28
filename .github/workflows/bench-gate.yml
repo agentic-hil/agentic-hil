@@ -5,8 +5,9 @@
 # debugger or programmer and the board behind it. tools/bench_in_container.py
 # runs it in the image tools/bench/Dockerfile builds from one commit, against
 # the board this runner holds, and reads pytest's summary line as the verdict.
-# This workflow is that command and nothing else, so the gate on a commit is the
-# same run a maintainer gets from a terminal on the machine.
+# This workflow is that command and nothing else, once for the tier and once
+# with --without-device-group for the stage the tier cannot hold, so the gate on
+# a commit is the same run a maintainer gets from a terminal on the machine.
 #
 # There is deliberately no `pull_request`, `pull_request_target`, `workflow_run`,
 # `push` or `schedule` trigger. Which commit goes on the board is a maintainer's
@@ -85,7 +86,10 @@ jobs:
           path: under-test
           persist-credentials: false
 
-      # `exec`, so the runner script is the step's process. A cancelled or timed
+      # The source and SHA are read from the checked-out candidate, never from
+      # the harness checkout this script belongs to. The tool verifies that
+      # exact HEAD before checking hardware or building. `exec`, so the runner
+      # script is the step's process. A cancelled or timed
       # out run sends the step SIGINT, and the script answers it by stopping the
       # container with SIGINT, the signal the tier tears down on and puts the
       # demo back on the board after; a shell in between would take the signal
@@ -94,7 +98,21 @@ jobs:
       # run waits for it before it builds anything.
       - name: Run the bench tier in its container
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --output ../bench-results
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output ../bench-results
+
+      # The one stage the tier cannot hold: the probe attached and this user not
+      # allowed to open it, as on a Linux account that has not joined the group
+      # the probe's udev rule names. The container gets the probe's device nodes
+      # and none of the groups they are opened through, so every other test
+      # would fail in it, and this stage runs alone, on the image the step
+      # above built. After a red tier too, because what it proves does not
+      # depend on what the tier found; never after a cancelled run. Its report
+      # goes into a directory of its own, since the runner clears the one it is
+      # given of an earlier report.
+      - name: Run the stage without the probe's device group
+        if: ${{ !cancelled() }}
+        working-directory: under-test
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --without-device-group --output ../bench-results/without-device-group
 
       # `if: always()` because a red or cancelled run's report is the one worth
       # reading, and `warn` because a run that never reached pytest has already

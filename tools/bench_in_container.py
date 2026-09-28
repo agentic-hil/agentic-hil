@@ -9,13 +9,17 @@ only the board, the probe and the right to open them.
 
 A run, in order:
 
-* finds the probe and refuses what it cannot run against, before anything else;
+* checks `--expected-commit` against the selected checkout before any runtime
+  or hardware discovery, then finds the probe and refuses what it cannot run
+  against;
 * takes this machine's run lock, and stops a container an earlier run of this
   tool left behind;
-* builds the image from the committed tree, never the working tree: `git archive`
-  of HEAD, staged apart from the checkout, with tools/bench/Dockerfile.dockerignore
-  as the context's ignore file. Uncommitted changes are named, and are not what
-  runs;
+* builds the image from the selected source checkout's committed tree, never
+  its working tree: `git archive` of HEAD, staged apart from the checkout, with
+  tools/bench/Dockerfile.dockerignore as the context's ignore file. By default
+  the source is this tool's checkout; `--source` selects another checkout and
+  `--expected-commit` can bind it to a full SHA before any hardware check or
+  build. Uncommitted changes are named, and are not what runs;
 * runs the tier in a container that gets the probe's device nodes, the
   machine's device locks and a directory of the run's own for its report, and
   nothing else of the machine: no network, no capabilities, no host process
@@ -38,6 +42,16 @@ here rather than failing in the container. Rootless Docker and Docker Desktop
 put the container in a user namespace or a virtual machine of their own, where
 the nodes are not what they are on the host; neither is supported for a run,
 and `--build-only` works with both.
+
+The stage without the device group. `--without-device-group` hands the
+container the same nodes and withholds every group they are opened through: no
+`keep-groups` under Podman, no `--group-add` under Docker. The tier then meets
+the nodes' modes the way an account that never joined those groups does, which
+is where a newcomer on Linux starts, and runs
+tests/bench/test_bench_without_device_group.py alone, which holds the product
+to naming that refusal for what it is. The machine is checked as for a full
+run: a user who cannot open the probe even through those groups is refused,
+because the refusal the stage measures would then be the machine's.
 
 Device passthrough. The probe is found through sysfs by its public USB identity,
 the vendor and product ids the product itself recognises an in-circuit debugger
@@ -103,6 +117,8 @@ Usage, from a checkout on the machine the board is attached to:
     python3 tools/bench_in_container.py                      # the whole tier
     python3 tools/bench_in_container.py -- tests/bench/test_bench_serial.py -x
     python3 tools/bench_in_container.py --runtime docker
+    python3 tools/bench_in_container.py --source ../candidate --expected-commit <full-sha>
+    python3 tools/bench_in_container.py --without-device-group
     python3 tools/bench_in_container.py --build-only         # the image alone, anywhere
 
 Everything after `--` goes to pytest and replaces the default selection,
@@ -207,6 +223,12 @@ ENVIRONMENT = {
     "PYTHONUNBUFFERED": "1",
     "PYTHONDONTWRITEBYTECODE": "1",
 }
+# What a run that withholds the groups the probe is opened through tells the
+# tier, whose conftest then runs the one stage about that and nothing else.
+# Copied in tests/bench/conftest.py, which does not import this script; a test
+# keeps the two copies one name and one value.
+DEVICE_GROUPS_ENV = "AGENTIC_HIL_BENCH_DEVICE_GROUPS"
+DEVICE_GROUPS_WITHHELD = "withheld"
 
 # The USB identity of the in-circuit debuggers or programmers the product
 # recognises, copied from `agentic_hil.comports` because this script runs from
@@ -903,6 +925,10 @@ def tier_command(
     results: Path,
     stable_names: Path | None,
     pytest_args: list[str],
+    source_commit: str,
+    run_id: str,
+    *,
+    withhold_groups: bool = False,
 ) -> list[str]:
     uid, gid = user_ids()
     command = [runtime]
@@ -926,11 +952,14 @@ def tier_command(
         "no-new-privileges",
     ]
     if runtime == "podman":
-        command += ["--group-add", "keep-groups", "--security-opt", "label=disable"]
+        if not withhold_groups:
+            command += ["--group-add", "keep-groups"]
+        command += ["--security-opt", "label=disable"]
     else:
         command += ["--user", f"{uid}:{gid}"]
-        for group in docker_groups(devices):
-            command += ["--group-add", str(group)]
+        if not withhold_groups:
+            for group in docker_groups(devices):
+                command += ["--group-add", str(group)]
     for node in devices.nodes:
         command += ["--device", node]
     command += ["-v", f"{locks}:{CONTAINER_LOCKS}", "-v", f"{results}:{RESULTS}"]
@@ -938,6 +967,9 @@ def tier_command(
         command += ["-v", f"{stable_names}:{CONTAINER_SERIAL_BY_ID}:ro"]
     for key, value in ENVIRONMENT.items():
         command += ["-e", f"{key}={value}"]
+    command += ["-e", f"AGENTIC_HIL_BENCH_COMMIT={source_commit}", "-e", f"AGENTIC_HIL_BENCH_RUN_ID={run_id}"]
+    if withhold_groups:
+        command += ["-e", f"{DEVICE_GROUPS_ENV}={DEVICE_GROUPS_WITHHELD}"]
     return [*command, image_id, "sh", "-c", CONTAINER_SCRIPT, SCRIPT_ARGV0, *FIXED_PYTEST_ARGS, *pytest_args]
 
 
@@ -1168,8 +1200,25 @@ def parse_options(argv: list[str] | None) -> argparse.Namespace:
         help="The probe's serial port, instead of finding it. Repeatable; needs --usb-device.",
     )
     parser.add_argument("--output", default="bench-results", help="Where the JUnit report and the log go (default bench-results).")
+    parser.add_argument(
+        "--source",
+        default=None,
+        metavar="CHECKOUT",
+        help="Git checkout whose committed tree builds the image (default: this tool's checkout).",
+    )
+    parser.add_argument(
+        "--expected-commit",
+        default=None,
+        metavar="SHA",
+        help="Require the selected source checkout's HEAD to equal this full commit SHA before doing any work.",
+    )
     parser.add_argument("--no-wait", action="store_true", help="Refuse instead of queueing when another run holds this machine.")
     parser.add_argument("--build-only", action="store_true", help="Build the image and stop; needs no probe and runs anywhere.")
+    parser.add_argument(
+        "--without-device-group",
+        action="store_true",
+        help="Withhold the groups the probe's nodes are opened through, and run the stage about that alone.",
+    )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER, help="After --: handed to pytest, replacing tests/bench -v.")
     return parser.parse_args(argv)
 
@@ -1191,6 +1240,17 @@ def main(argv: list[str] | None = None) -> int:
     # Every refusal that costs nothing comes before the queue: a run that cannot
     # start here should not wait an hour to say so.
     try:
+        root = Path(options.source).resolve() if options.source is not None else repository_root()
+        commit = current_commit(root)
+        if options.expected_commit is not None:
+            expected = options.expected_commit.lower()
+            if not re.fullmatch(r"[0-9a-f]{40}", expected):
+                raise Refused(EXIT_BUILD_FAILED, "the expected commit must be a full 40-character hexadecimal SHA")
+            if commit.lower() != expected:
+                raise Refused(
+                    EXIT_BUILD_FAILED,
+                    f"source checkout HEAD is {commit}, not the expected commit {expected}; nothing was built or run",
+                )
         runtime = pick_runtime(options.runtime)
         if running:
             check_this_machine(runtime)
@@ -1198,8 +1258,6 @@ def main(argv: list[str] | None = None) -> int:
             voice.withhold(devices.serial_numbers)
             check_access(runtime, devices)
             locks = device_lock_directory()
-        root = repository_root()
-        commit = current_commit(root)
     except Refused as refusal:
         voice(str(refusal))
         return refusal.status
@@ -1252,7 +1310,12 @@ def main(argv: list[str] | None = None) -> int:
         results = workdir / "results"
         results.mkdir(mode=0o700)
         name = f"{CONTAINER_PREFIX}{secrets.token_hex(4)}"
-        command = tier_command(runtime, image_id, name, devices, locks, results, stable_names, pytest_args)
+        run_id = os.environ.get("GITHUB_RUN_ID", "local")
+        run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
+        command = tier_command(
+            runtime, image_id, name, devices, locks, results, stable_names, pytest_args,
+            commit, f"{run_id}-{run_attempt}", withhold_groups=options.without_device_group,
+        )
         voice(f"$ {shlex.join(command)}")
         returncode, printed, interrupted = run_tier(runtime, name, command, output / LOG_NAME, voice.redact, voice, signals)
         # What follows decides what is published and whether the machine is

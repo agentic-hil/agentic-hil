@@ -2071,8 +2071,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning="OpenOCD could not open a debug adapter.",
         remediation=(
             "Call debugger_probes_list to see what the host enumerates.",
-            "Connect the probe, or on Windows bind the correct USB driver to it (ST-Link needs the ST driver, not "
-            "WinUSB, unless the config selects a WinUSB interface).",
+            "Connect the probe. On Linux, install its udev rule and add this user to the group the rule names, then "
+            "log in again; on Windows, bind the correct USB driver to it (ST-Link needs the ST driver, not WinUSB, "
+            "unless the config selects a WinUSB interface).",
             "Set `debuggers.<name>.probe_id` to the serial number of the intended probe when more than one is attached; "
             "it is passed as `adapter serial`.",
             "Close whatever else holds the probe.",
@@ -2306,9 +2307,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "addresses the device refuses while the connect and the identification both succeeded. "
             "`agentic-hil doctor` reports what the configured value resolves to, in "
             "`debuggers.<name>.target_support`.",
-            "Treat the board as holding an indeterminate image until a flash programs and verifies. A refused erase "
-            "does not prove the flash is unchanged, which is why the result says the contents are unconfirmed, and "
-            "reflashing is the way through it rather than a retry taken as proof the erase never happened.",
+            "Treat the board as holding an indeterminate image until a later operation confirms its contents. "
+            "This service does not perform or claim a separate flash readback. A refused erase does not prove the flash "
+            "is unchanged, which is why the result says the contents are unconfirmed, and reflashing is the way through "
+            "it rather than a retry taken as proof the erase never happened.",
         ),
         do_not=(
             "Do not read this as a reset problem. No reset failed, and re-seating the reset line or power-cycling on "
@@ -2374,36 +2376,28 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "verify_failed:pyocd": ErrorRemedy(
         meaning=(
-            "pyOCD flashed the image and its own verify refused it. `pyocd flash` erases, programs and then reads the "
-            "flash back in one run, and this run reported the read-back different from the file: `Verify failed at "
-            "<address>` is the line, and the whole transcript travels with the result under `programmer_output`.\n\n"
-            "The program step ran, so the board holds an image nothing has vouched for rather than the one that was "
-            "flashed."
+            "The captured pyOCD output says `Verify failed at <address>`. This service does not independently read "
+            "flash back, so the transcript alone does not establish what pyOCD compared or how much of the image "
+            "reached the device. Treat the image as indeterminate and keep the full transcript under `programmer_output`."
         ),
         remediation=(
             "Read `programmer_output.stdout` and `programmer_output.stderr` before anything else, and the log the "
-            "result names by `log_path`. They are pyOCD's own account of the erase, the program and the verify, and the "
-            "address the verify names places the mismatch inside the image.",
-            "Read what came before it in the same transcript. pyOCD's flash is an erase, a program and a verify in one "
-            "command, and a verify that fails after a program which reported nothing is a different fault from one that "
-            "follows a sector either earlier step complained about.",
-            "Ask whether the link read the flash back correctly before doubting the write. `debugger_probes_list` says "
-            "what this host enumerates, and a probe on long or unshielded wiring, on a shared hub, or held by a second "
-            "session between the program and the read-back produces a mismatch out of bytes that were written "
-            "correctly.",
-            "Check that the flash algorithm pyOCD programmed and verified with is this device's. It comes from the "
-            "CMSIS pack behind `debuggers.<name>.target_type`, so a value that resolves to a near neighbour of this "
-            "part writes at page sizes and addresses the device does not have while the connect and the identification "
-            "both succeed. `agentic-hil doctor` reports what the configured value resolves to, in "
-            "`debuggers.<name>.target_support`; provenance is in MCP resource " + TARGET_SUPPORT_URI + ".",
-            "Treat the board as holding an indeterminate image until a flash programs and verifies. A refused verify "
-            "does not say how much of the program landed, so reflashing is the way through it rather than a retry taken "
-            "as proof that nothing changed.",
+            "result names by `log_path`. Confirm the `Verify failed at <address>` line is present and read the lines "
+            "before it to see what pyOCD reported about the erase, program and target connection.",
+            "Check that `debuggers.<name>.target_type` names this device. The CMSIS pack supplies pyOCD's target "
+            "memory map and flash algorithm; a near neighbour can select the wrong address or page size. "
+            "`agentic-hil doctor` reports the resolved target support, and MCP resource " + TARGET_SUPPORT_URI + " "
+            "describes how to check it.",
+            "Check the probe and link if the transcript points to a communication problem. `debugger_probes_list` "
+            "reports which probe this host can enumerate, while the transcript shows whether the target connection "
+            "failed before the reported verify line.",
+            "Treat the board as holding an indeterminate image until a later operation confirms its contents. "
+            "This service does not perform or claim a separate flash readback.",
         ),
         do_not=(
             "Do not read this as a refused erase. pyOCD names an erase it could not perform in its own words and this "
-            "service classifies that as `flash_erase_failed`; these words are about the read-back after a program that "
-            "ran.",
+            "service classifies that as `flash_erase_failed`; inspect the captured output to see which operation it "
+            "describes.",
             "Do not answer it with a chip erase (`pyocd erase --chip` or a `--erase chip` flash). That erases the whole "
             "device rather than the sectors the image covers, and the same reasoning is why this service refuses to "
             "flash at all once `allow_mass_erase` is granted.",
@@ -2436,8 +2430,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "of 1 MHz: `pyocd flash --target <target_type> --frequency 100k` against the same board says whether a "
             "slower SWD clock carries the image. Report what that run answered rather than changing the bench on the "
             "strength of it.",
-            "Treat the board as holding an indeterminate image until a flash programs and verifies, and read the "
-            "reflash as writing over an unknown image rather than a clean one.",
+            "Treat the board as holding an indeterminate image until a later operation confirms its contents. "
+            "This service does not perform or claim a separate flash readback, so read a reflash as writing over an "
+            "unknown image rather than a clean one.",
         ),
         do_not=(
             "Do not reach for `--erase chip` or `pyocd erase --chip` to get the image through. That erases the whole "
@@ -3512,6 +3507,12 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
         confirmed="The session is out of service; no further frames can be sent through it.",
         unknown="Whether the adapter still participates on the bus.",
         physical_check="Confirm the adapter is free and bus traffic is normal, then sign.",
+    ),
+    "can_participant_attach_unconfirmed": QuarantineReasonGuide(
+        attempted="Attaching a named CAN participant to the shared broker did not return a confirmed result.",
+        confirmed="The attach path sends no CAN frame and the participant session was not admitted for use.",
+        unknown="Whether the broker accepted the participant connection before its reply was lost.",
+        physical_check="Confirm the broker has no active connection for this participant, the adapter remains under the broker, and bus traffic is normal, then sign.",
     ),
     "can_effect_unconfirmed": QuarantineReasonGuide(
         attempted="A CAN call reported a side effect it could not confirm.",
@@ -4967,7 +4968,7 @@ If `target_type` resolves on one machine and not on another, the difference is t
 # through the reactor's own schema validation and version gate: an example a
 # reader cannot run is worse than none, and this is a document meant to be
 # copied from.
-PLAN_MINIMAL_EXAMPLE = r"""version: 5
+PLAN_MINIMAL_EXAMPLE = r"""version: 6
 name: boot-smoke
 steps:
   - {device: dut, action: flash, image_path: build/app.elf, reset_after_flash: true}
@@ -4975,7 +4976,7 @@ steps:
   - {device: dut_uart, action: uart_expect, text: "boot complete", timeout_s: 10}
 """
 
-PLAN_COMPARATOR_EXAMPLE = r"""version: 5
+PLAN_COMPARATOR_EXAMPLE = r"""version: 6
 name: capture-in-range
 steps:
   - {device: dut_uart, action: uart_open}

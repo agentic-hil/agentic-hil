@@ -641,6 +641,13 @@ class CanBroker:
         self.bus_frame_log = str(Path(logs_directory(self.config)) / f"can-bus-{timestamp_for_filename()}-{safe_filename(self.bus_id, 'bus')}.jsonl")
         safe_append_text(self.bus_frame_log, "")
         adapter_config = self.bus_config
+        if self.bus_config.shares:
+            # The broker already routes each accepted participant TX to its
+            # matching peer views and excludes the sender. Asking a backend to
+            # receive its own transmissions could duplicate those frames, while
+            # SocketCAN's is_rx flag cannot distinguish this socket from another
+            # local sender. Keep the caller's authoritative config untouched.
+            adapter_config = replace(adapter_config, receive_own_messages=False)
         if self.bus_config.listen_only and self.bus_config.listen_only_enforcement == "service":
             # `service` listen-only is the broker declining to forward writes
             # (`_listen_only_conflict` already refuses any participant that may
@@ -650,7 +657,7 @@ class CanBroker:
             # bench configured for the documented weaker mode would fail to open
             # wherever that controller proof is unavailable, while its own status
             # already reports software filtering as what backs the claim.
-            adapter_config = replace(self.bus_config, listen_only=False)
+            adapter_config = replace(adapter_config, listen_only=False)
         opened = open_adapter(self.config, self.bus_id, adapter_config, False)
         if not opened.get("ok"):
             return {key: value for key, value in opened.items() if key != "session"}
@@ -1110,10 +1117,19 @@ class CanBroker:
             # So gate the bus and abort every participant, rather than let another
             # keep transmitting over a controller that has failed.
             return self._raise_bus_incident("can_adapter_send_failed", str(sent.get("summary", "The CAN adapter failed to send a frame.")), extra={"side_effect_status": "unknown", "backend_error": sent.get("backend_error"), "frame_seq": seq, "frame": wire})
+        with self._guard:
+            delivered, overflowed = self._queue_frame_for_participants(
+                wire,
+                seq,
+                sender=attached.name,
+                origin="participant_tx",
+                delivery_status="adapter_accepted",
+            )
+            self._log_bus({"event": "participant_delivery", "direction": "tx", "bus_id": self.bus_id, "frame_seq": seq, "origin": "participant_tx", "delivery_status": "adapter_accepted", "participant": attached.name, "frame": wire, "delivered_to": delivered, **({"overflowed_participants": overflowed} if overflowed else {})})
         return {"ok": True, "message": "sent", "frame_seq": seq, "participant": attached.name, "frame": wire, "frames_used": attached.frames_used, "max_frames": attached.share.max_frames}
 
     def _handle_read(self, attached: _Attached, message: JsonObject) -> JsonObject:
-        if not attached.share.permissions.allow_read:
+        if not self.config.read_free and not attached.share.permissions.allow_read:
             return {"ok": False, "error_type": "permission_denied", "summary": "Reading this CAN bus is disabled for this participant by the authoritative config.", "bus_id": self.bus_id, "participant": attached.name, "retry_safe": False, "side_effect_committed": False}
         try:
             max_frames = int(message.get("max_frames") or 1)
@@ -1157,31 +1173,32 @@ class CanBroker:
             return self._raise_bus_incident("can_adapter_invalid_response", "The CAN adapter returned malformed frame data.")
         with self._guard:
             for frame in frames:
+                wire = {"id": int(frame["id"]), "extended": bool(frame["extended"]), "rtr": bool(frame["rtr"]), "data_hex": str(frame["data_hex"])}
                 self.frame_seq += 1
                 seq = self.frame_seq
-                wire = {"id": int(frame["id"]), "extended": bool(frame["extended"]), "rtr": bool(frame["rtr"]), "data_hex": str(frame["data_hex"])}
-                delivered: list[str] = []
-                overflowed: list[str] = []
-                for name, item in sorted(self.participants.items()):
-                    if not item.share.permissions.allow_read or not filter_accepts(item.share, wire["id"], wire["extended"]):
-                        continue
-                    if item.abort is not None:
-                        # Already aborted (a spent budget, an earlier overflow, a
-                        # bus incident), so it will never drain, and growing its
-                        # queue is the very leak this bound exists to close.
-                        continue
-                    bound = self._receive_queue_bound(item)
-                    if len(item.queue) >= bound:
-                        self._overflow_participant(item, bound)
-                        overflowed.append(name)
-                        continue
-                    item.queue.append({**wire, "frame_seq": seq})
-                    delivered.append(name)
+                delivered, overflowed = self._queue_frame_for_participants(wire, seq, origin="adapter_rx", delivery_status="adapter_received")
                 event = {"event": "frame", "seq": seq, "direction": "rx", "bus_id": self.bus_id, "frame": wire, "delivered_to": delivered}
                 if overflowed:
                     event["overflowed_participants"] = overflowed
                 self._log_bus(event)
         return None
+
+    def _queue_frame_for_participants(self, wire: JsonObject, seq: int, *, sender: str | None = None, origin: str, delivery_status: str) -> tuple[list[str], list[str]]:
+        delivered: list[str] = []
+        overflowed: list[str] = []
+        for name, item in sorted(self.participants.items()):
+            if name == sender or not (self.config.read_free or item.share.permissions.allow_read) or not filter_accepts(item.share, int(wire["id"]), bool(wire["extended"])):
+                continue
+            if item.abort is not None:
+                continue
+            bound = self._receive_queue_bound(item)
+            if len(item.queue) >= bound:
+                self._overflow_participant(item, bound)
+                overflowed.append(name)
+                continue
+            item.queue.append({**wire, "frame_seq": seq, "origin": origin, "delivery_status": delivery_status})
+            delivered.append(name)
+        return delivered, overflowed
 
     def _receive_queue_bound(self, attached: _Attached) -> int:
         """The most frames that may sit unread in one participant's queue.
@@ -1273,7 +1290,7 @@ class Participant:
     the same frame in the bus log, attributable from either end without either
     log having to be trusted about the other."""
 
-    def __init__(self, config: AgenticHILConfig, bus_id: str, name: str, connection: Connection, attached: JsonObject, mutex: BenchMutex, lock_key: str, *, broker_process: subprocess.Popen | None = None):
+    def __init__(self, config: AgenticHILConfig, bus_id: str, name: str, connection: Connection, attached: JsonObject, mutex: BenchMutex, lock_key: str, *, broker_process: subprocess.Popen | None = None, release_mutex_on_detach: bool = True):
         self.config = config
         self.bus_id = bus_id
         self.name = name
@@ -1281,6 +1298,7 @@ class Participant:
         self.attached = attached
         self.mutex = mutex
         self.lock_key = lock_key
+        self.release_mutex_on_detach = release_mutex_on_detach
         self.broker_process = broker_process
         self.broker_pid = int(attached.get("broker_pid") or 0)
         self.counter = int(attached.get("counter") or 0)
@@ -1330,8 +1348,9 @@ class Participant:
             with suppress(BaseException):
                 self.connection.close()
             self._log({"event": "detach", "participant": self.name, "attached_participants": result.get("attached_participants")})
-            with suppress(BaseException):
-                self.mutex.release_all()
+            if self.release_mutex_on_detach:
+                with suppress(BaseException):
+                    self.mutex.release([self.lock_key])
         return result
 
     def __enter__(self) -> Participant:
@@ -1365,6 +1384,7 @@ def attach_participant(
     wait_s: float = 0.0,
     start_timeout_s: float = BROKER_START_TIMEOUT_S,
     allow_start: bool = True,
+    lock_already_held: bool = False,
 ) -> Participant:
     """Attach this run to a named participant view, starting the broker if needed.
 
@@ -1386,19 +1406,23 @@ def attach_participant(
         raise ParticipantError(error.result) from error
     owner = mutex or BenchMutex(frontend="can-participant", label=f"can-participant:{bus_id}#{participant}")
     lock_key = participant_lock_key(bus_key, participant)
+    if lock_already_held and not owner.holds(lock_key):
+        raise ParticipantError({"ok": False, "error_type": "can_participant_lock_required", "summary": "A caller may reuse an existing participant lease only when it holds that participant lock.", "bus_id": bus_id, "participant": participant, "participant_lock": lock_key, "side_effect_committed": False, "retry_safe": True})
+    if not lock_already_held:
+        try:
+            owner.acquire_named(lock_key, wait_s=wait_s)
+        except DeviceBusyError as error:
+            raise ParticipantError({**error.result, "bus_id": bus_id, "participant": participant, "participant_lock": lock_key, "summary": f"CAN participant '{participant}' on bus '{bus_id}' is already held by another run; two runs may not share one participant name."}) from error
     try:
-        owner.acquire_named(lock_key, wait_s=wait_s)
-    except DeviceBusyError as error:
-        raise ParticipantError({**error.result, "bus_id": bus_id, "participant": participant, "participant_lock": lock_key, "summary": f"CAN participant '{participant}' on bus '{bus_id}' is already held by another run; two runs may not share one participant name."}) from error
-    try:
-        return _attach_with_broker(config, bus_id, participant, bus_key, owner, lock_key, start_timeout_s, allow_start)
+        return _attach_with_broker(config, bus_id, participant, bus_key, owner, lock_key, start_timeout_s, allow_start, release_mutex_on_detach=not lock_already_held)
     except BaseException:
-        with suppress(BaseException):
-            owner.release_all()
+        if not lock_already_held:
+            with suppress(BaseException):
+                owner.release([lock_key])
         raise
 
 
-def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str, bus_key: str, owner: BenchMutex, lock_key: str, start_timeout_s: float, allow_start: bool) -> Participant:
+def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str, bus_key: str, owner: BenchMutex, lock_key: str, start_timeout_s: float, allow_start: bool, *, release_mutex_on_detach: bool = True) -> Participant:
     lock_root = owner.root
     deadline = time.monotonic() + start_timeout_s
     started: subprocess.Popen | None = None
@@ -1408,7 +1432,7 @@ def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str,
         descriptor = read_descriptor(bus_key, lock_root)
         if descriptor is not None:
             attempts += 1
-            outcome = _attach_once(config, bus_id, participant, bus_key, descriptor, owner, lock_key, lock_root, started)
+            outcome = _attach_once(config, bus_id, participant, bus_key, descriptor, owner, lock_key, lock_root, started, release_mutex_on_detach=release_mutex_on_detach)
             if isinstance(outcome, Participant):
                 return outcome
             last = outcome
@@ -1506,7 +1530,7 @@ def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str,
     raise ParticipantError(last)
 
 
-def _attach_once(config: AgenticHILConfig, bus_id: str, participant: str, bus_key: str, descriptor: BrokerDescriptor, owner: BenchMutex, lock_key: str, lock_root: Path, started: subprocess.Popen | None) -> Participant | JsonObject:
+def _attach_once(config: AgenticHILConfig, bus_id: str, participant: str, bus_key: str, descriptor: BrokerDescriptor, owner: BenchMutex, lock_key: str, lock_root: Path, started: subprocess.Popen | None, *, release_mutex_on_detach: bool = True) -> Participant | JsonObject:
     if descriptor.protocol_version != PROTOCOL_VERSION or descriptor.protocol_digest != PROTOCOL_DIGEST:
         return {
             "ok": False,
@@ -1557,7 +1581,7 @@ def _attach_once(config: AgenticHILConfig, bus_id: str, participant: str, bus_ke
             connection.close()
         refusal = answer if isinstance(answer, dict) else {"ok": False, "error_type": "can_broker_invalid_message", "summary": "The CAN broker answered the attach with a message this client cannot read."}
         return {**refusal, "bus_id": bus_id, "participant": participant}
-    return Participant(config, bus_id, participant, connection, answer, owner, lock_key, broker_process=started)
+    return Participant(config, bus_id, participant, connection, answer, owner, lock_key, broker_process=started, release_mutex_on_detach=release_mutex_on_detach)
 
 
 def _last_broker_document(log_path: Path) -> JsonObject:

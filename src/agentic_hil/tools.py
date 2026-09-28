@@ -847,10 +847,10 @@ class AgenticHILToolService:
             "com_write": lambda: self.com_ports.write(str(args.get("port_id", "")), {key: value for key, value in args.items() if key in {"text", "hex"}}),
             "com_read": lambda: self.com_ports.read(str(args.get("port_id", "")), args.get("max_bytes"), args.get("wait_timeout_s"), args.get("until")),
             "can_buses_list": lambda: self.can_buses.list_buses(),
-            "can_session_start": lambda: self.can_buses.session_start(args.get("bus_id", ""), args.get("clear_rx_queue", True)),
-            "can_session_stop": lambda: self.can_buses.session_stop(str(args.get("bus_id", ""))),
-            "can_send": lambda: self.can_buses.send(str(args.get("bus_id", "")), {key: value for key, value in args.items() if key != "bus_id"}),
-            "can_read": lambda: self.can_buses.read(str(args.get("bus_id", "")), args.get("max_frames"), args.get("wait_timeout_s"), args.get("until_id")),
+            "can_session_start": lambda: self.can_buses.session_start(args.get("bus_id", ""), args.get("clear_rx_queue", True), args.get("participant")),
+            "can_session_stop": lambda: self.can_buses.session_stop(str(args.get("bus_id", "")), args.get("participant")),
+            "can_send": lambda: self.can_buses.send(str(args.get("bus_id", "")), {key: value for key, value in args.items() if key not in {"bus_id", "participant"}}, args.get("participant")),
+            "can_read": lambda: self.can_buses.read(str(args.get("bus_id", "")), args.get("max_frames"), args.get("wait_timeout_s"), args.get("until_id"), args.get("participant")),
             "bench_run_start": lambda: self.bench_run_start(args),
             "bench_run_stop": lambda: self.bench_run_stop(),
             "bench_run_status": lambda: self.bench_run_status(),
@@ -2794,7 +2794,7 @@ def implicit_run_resources(config: AgenticHILConfig, name: str, args: JsonObject
     if name == "com_write":
         return [uart_device(config, str(args.get("port_id", "")))]
     if name == "can_send":
-        return [can_device(config, str(args.get("bus_id", "")))]
+        return [can_device(config, str(args.get("bus_id", "")), args.get("participant") if isinstance(args.get("participant"), str) else None)]
     return []
 
 

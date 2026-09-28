@@ -114,7 +114,20 @@ TARGET_TYPE_INVALID_DOC = "target_support.html"
 # the ST-Link and OpenOCD marker lists hold one each: pyOCD is the backend
 # likeliest to print `Resetting target` beside a flash failure, so the phrase has
 # to be the erase line itself and not a family somebody assumed.
-PYOCD_ERASE_FAILURE_MARKERS = ["failed to erase sector"]
+PYOCD_ERASE_FAILURE_MARKERS = ["failed to erase sector", "flash erase sector failure"]
+
+# pyOCD 0.45.x programmer messages do not consistently use "failed" or
+# "error". These are operation failures when emitted by `pyocd flash`, so
+# classify them from command context instead of relying on generic words.
+PYOCD_FLASH_FAILURE_MARKERS = [
+    "attempt to program invalid flash address",
+    "flash uninit",
+    "target was not halted as expected",
+    "flash algorithm overflowed stack",
+    "program page sequence not available",
+    "delegate is not available",
+    "flash program page failure",
+]
 
 # The format `pyocd flash --format` is told to read an image as, by its extension
 # compared without case, the way validation compares it (#580). Given no format,
@@ -263,6 +276,7 @@ class PyOCDBackend:
         if not resolved["ok"]:
             return {"tool": tool, **resolved}
         command = [*invocation(str(resolved["executable_path"])), "json", "--probes", "--no-config"]
+        log_path = str(Path(logs_directory(self.config)) / f"pyocd-{timestamp_for_filename()}-{tool}.log")
         completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), self.config.debugger.timeout_s)
         if completed.not_found:
             return {"tool": tool, **PYOCD_NOT_FOUND}
@@ -271,7 +285,49 @@ class PyOCDBackend:
         if completed.timed_out:
             return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Debugger probe discovery timed out.", **NOT_CONTACTED}
         if completed.returncode != 0:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "probe_discovery_failed", "summary": "pyOCD probe discovery command failed.", **NOT_CONTACTED}
+            diagnostic = ""
+            stdout_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+            payloads: list[object] = []
+            try:
+                payloads.append(json.loads(completed.stdout))
+            except (json.JSONDecodeError, TypeError):
+                decoder = json.JSONDecoder()
+                for offset, character in enumerate(completed.stdout):
+                    if character != "{":
+                        continue
+                    try:
+                        payload, _ = decoder.raw_decode(completed.stdout[offset:])
+                    except json.JSONDecodeError:
+                        continue
+                    payloads.append(payload)
+            for payload in reversed(payloads):
+                if not isinstance(payload, dict):
+                    continue
+                error = payload.get("error")
+                if isinstance(error, str) and error.strip():
+                    diagnostic = next((line.strip() for line in reversed(error.splitlines()) if line.strip()), "")
+                elif isinstance(error, dict):
+                    fragments = [value.strip() for key in ("message", "detail", "reason") if isinstance((value := error.get(key)), str) and value.strip()]
+                    diagnostic = next((line.strip() for line in reversed("; ".join(fragments).splitlines()) if line.strip()), "")
+                if diagnostic:
+                    break
+            stderr_lines = [line.strip() for line in completed.stderr.splitlines() if line.strip()]
+            if not diagnostic and stderr_lines:
+                diagnostic = stderr_lines[-1]
+            if not diagnostic:
+                diagnostic = stdout_lines[-1] if stdout_lines else "pyOCD probe discovery command failed."
+            audit_error = self._write_log(log_path, command, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
+            failure: JsonObject = {
+                "ok": False,
+                "tool": tool,
+                "backend": self.backend_name,
+                "error_type": "probe_discovery_failed",
+                "summary": f"pyOCD probe discovery command failed: {diagnostic}",
+                "log_path": display_path(self.config, log_path),
+                **programmer_output_fields(completed),
+                **NOT_CONTACTED,
+            }
+            return self._finish_log_audit(failure, audit_error)
         parsed = parse_pyocd_probes(completed.stdout)
         if not parsed["ok"]:
             return {"tool": tool, "backend": self.backend_name, **parsed, **NOT_CONTACTED}
@@ -320,7 +376,9 @@ class PyOCDBackend:
             return selected
         result = self._run_pyocd("flash_firmware", ["flash", "--no-reset", *self._connection_args(), "--format", flash_format, *address_args, artifact_path])
         result["artifact"] = self._artifact_summary(artifact)
-        result["verify"] = True
+        # pyOCD's CLI reports FlashProgramDone before post-program verification
+        # and the backend does no independent readback, so it cannot claim one.
+        result["verify"] = False
         if not overall_success(result):
             result["reset_after_flash"] = False
             if result.get("ok") is True:
@@ -328,7 +386,7 @@ class PyOCDBackend:
             return self._write_action_report(result)
         if not reset_after_flash:
             result["reset_after_flash"] = False
-            result["summary"] = "Firmware flashed and verified. Target was not reset."
+            result["summary"] = "Firmware flashed. Target was not reset."
             return self._write_action_report(result)
 
         reset = self._run_pyocd("flash_firmware", ["commander", "--command", "reset", *self._connection_args()])
@@ -341,9 +399,12 @@ class PyOCDBackend:
             reset["retry_safe"] = False
             reset["error_type"] = "reset_failed"
             reset["summary"] = "Firmware flashed, but the post-flash reset failed."
+            reset["verify"] = False
+            reset["target_contacted"] = result.get("target_contacted", True)
+            reset["hardware_state"] = "changed"
             return self._write_action_report(merge_audit_status(reset, result, reset))
         result["reset_after_flash"] = reset_after_flash
-        result["summary"] = "Firmware flashed, verified, and target reset."
+        result["summary"] = "Firmware flashed and target reset."
         return self._write_action_report(merge_audit_status(result, result, reset))
 
     def reset_target(self, mode: str = "run") -> JsonObject:
@@ -1035,7 +1096,7 @@ class PyOCDBackend:
         # target device available` line the flash bucket would otherwise claim.
         if contains_any(lower, ["no available debug probes", "no debug probes are connected", "unable to open probe", "probe not found", "no probe with uid", "no connected debug probes", "no connected debug probe matches unique id"]):
             return "probe_not_found"
-        if contains_any(lower, ["unable to connect", "failed to connect", "target is not responding", "no ack received", "error connecting"]):
+        if contains_any(lower, ["unable to connect", "failed to connect", "target is not responding", "no ack", "error connecting"]):
             return "target_not_detected"
         if contains_any(lower, TARGET_TYPE_INVALID_PHRASES) or TARGET_TYPE_INVALID_DOC in lower:
             return "target_type_invalid"
@@ -1048,6 +1109,8 @@ class PyOCDBackend:
         # `Resetting target` first, as a failed reset (#333).
         if contains_any(lower, PYOCD_ERASE_FAILURE_MARKERS):
             return "flash_erase_failed"
+        if tool == "flash_firmware" and contains_any(lower, PYOCD_FLASH_FAILURE_MARKERS):
+            return "flash_failed"
         if "verify" in lower and contains_any(lower, ["failed", "mismatch", "error"]):
             return "verify_failed"
         if reports_reset_failure(output):

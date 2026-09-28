@@ -1,0 +1,39 @@
+{
+  "schema": "agentic-hil.gdb-mi-stop-recording/v1",
+  "provenance": {
+    "source_commit": "1b4a9c8116a433366c9d1fda0ceceae4f0378556",
+    "run_id": "36368702404-1",
+    "workflow_url": "https://github.com/agentic-hil/agentic-hil/actions/runs/36368702404",
+    "gdb_version": "GNU gdb (Debian 16.3-1) 16.3",
+    "backend": "openocd",
+    "board": "ST Nucleo-F446RE (STM32F446RE)",
+    "firmware_image": "undefined_instruction",
+    "firmware_source": "tests/bench/firmware/undefined_instruction.c",
+    "evidence_artifacts": {
+      "bench-junit.xml_sha256": "5c32bcc8b3bc433b1d88e36aa2ced49210a15a90667968d03cc477b298131652",
+      "bench-tier.log_sha256": "b7cf7c669661d07ca77c0e3f89b1f832af363af5c300069d14eb9e4b5cd7a2cd"
+    },
+    "redacted_fields": {
+      "frame.file": "absolute source path replaced with <path redacted>; relative source names retained",
+      "frame.fullname": "absolute source path replaced with <path redacted>; relative source names retained"
+    }
+  },
+  "recordings": [
+    {
+      "scenario": "attach_hardfault",
+      "records": [
+        "*stopped,frame={addr=\"0x08000438\",func=\"HardFault_Handler\",args=[],file=\"<path redacted>\",fullname=\"<path redacted>\",line=\"87\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\""
+      ],
+      "expected_stop_reasons": ["exception:hardfault"]
+    },
+    {
+      "scenario": "reset_halt_to_hardfault",
+      "records": [
+        "*stopped,frame={addr=\"0x08000454\",func=\"Reset_Handler\",args=[],file=\"<path redacted>\",fullname=\"<path redacted>\",line=\"56\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+        "*stopped,reason=\"breakpoint-hit\",disp=\"keep\",bkptno=\"1\",frame={addr=\"0x08000440\",func=\"main\",args=[],file=\"<path redacted>\",fullname=\"<path redacted>\",line=\"93\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+        "*stopped,reason=\"signal-received\",signal-name=\"SIGINT\",signal-meaning=\"Interrupt\",frame={addr=\"0x08000438\",func=\"HardFault_Handler\",args=[],file=\"<path redacted>\",fullname=\"<path redacted>\",line=\"87\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\""
+      ],
+      "expected_stop_reasons": ["reset", "breakpoint_hit:expected", "exception:hardfault"]
+    }
+  ]
+}

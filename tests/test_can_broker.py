@@ -116,6 +116,15 @@ def test_single_owner_bus_has_no_participants_and_starts_no_broker(tmp_path: Pat
     assert not descriptor_path(bus_lock_key(config, "bench"), Path(os.path.expanduser("~")) / ".agentic-hil" / "device-locks").exists()
 
 
+def test_reusing_a_run_lock_requires_that_exact_participant_to_be_held(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.bench import BenchMutex
+
+    config = shared_config(tmp_path, monkeypatch)
+    with pytest.raises(ParticipantError) as refusal:
+        attach_participant(config, "bench", "alpha", mutex=BenchMutex(), lock_already_held=True)
+    assert refusal.value.result["error_type"] == "can_participant_lock_required"
+
+
 def test_a_service_enforced_bus_never_reports_a_controller_proof(tmp_path: Path) -> None:
     """A software claim must not be readable as a controller one, on any line.
 
@@ -302,11 +311,11 @@ def reaped_brokers(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[subprocess.
             child.kill()
 
 
-def shared_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **kwargs):
+def shared_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, config_version: int | None = None, **kwargs):
     from agentic_hil.config import load_authoritative_config
 
     workspace = tmp_path / "project"
-    write_authoritative_config(workspace, monkeypatch, can_buses_yaml=shared_bus_yaml(**kwargs))
+    write_authoritative_config(workspace, monkeypatch, config_version=config_version, can_buses_yaml=shared_bus_yaml(**kwargs))
     return load_authoritative_config(workspace)
 
 
@@ -753,6 +762,118 @@ def _inprocess_broker(tmp_path: Path, config, *, bus_id: str = "bench", names=("
     return broker, seated
 
 
+def test_successful_send_is_queued_for_matching_peers_without_adapter_echo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The broker routes participant TX to peer views even when the adapter
+    does not echo a controller's own message back through its receive socket."""
+    config = shared_config(tmp_path, monkeypatch)
+    broker, seated = _inprocess_broker(tmp_path, config)
+
+    class _NoEchoAdapter:
+        def send(self, frame: object) -> dict:
+            return {"ok": True, "backend": "no-echo"}
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            return {"ok": True, "frames": []}
+
+    broker.adapter_session = _NoEchoAdapter()
+    sent = broker._handle_send(seated["alpha"], {"frame": canbroker.frame_to_wire(0x101, b"\xaa")})
+
+    assert sent["ok"] is True
+    received = broker._handle_read(seated["beta"], {"max_frames": 4, "wait_timeout_s": 0.0})
+    assert received["frames_read"] == 1
+    assert received["frames"][0] == {"id": 0x101, "extended": False, "rtr": False, "data_hex": "aa", "frame_seq": sent["frame_seq"], "origin": "participant_tx", "delivery_status": "adapter_accepted"}
+    assert seated["alpha"].queue == [], "the sender must not receive its own frame through broker fanout"
+
+
+def test_read_free_config_allows_shared_physical_and_peer_frames_without_share_read_grant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shares = (
+        "      alpha:\n"
+        "        max_frames: 16\n"
+        "        permissions:\n"
+        "          allow_read: false\n"
+        "          allow_write: true\n"
+        "      beta:\n"
+        "        max_frames: 16\n"
+        "        permissions:\n"
+        "          allow_read: false\n"
+        "          allow_write: true\n"
+    )
+    config = shared_config(tmp_path, monkeypatch, config_version=2, shares=shares)
+    broker, seated = _inprocess_broker(tmp_path, config)
+
+    class _Adapter:
+        def __init__(self) -> None:
+            self.pending = [{"id": 0x201, "extended": False, "rtr": False, "data_hex": "beef"}]
+
+        def send(self, frame: object) -> dict:
+            return {"ok": True, "backend": "recording"}
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            pending, self.pending = self.pending, []
+            return {"ok": True, "frames": pending}
+
+    broker.adapter_session = _Adapter()
+    physical = broker._handle_read(seated["alpha"], {"max_frames": 1, "wait_timeout_s": 0.0})
+    assert physical["ok"] is True, physical
+    assert physical["frames"][0]["origin"] == "adapter_rx"
+
+    sent = broker._handle_send(seated["alpha"], {"frame": canbroker.frame_to_wire(0x202, b"\x01")})
+    peer = broker._handle_read(seated["beta"], {"max_frames": 4, "wait_timeout_s": 0.0})
+    assert sent["ok"] is True, sent
+    assert peer["ok"] is True, peer
+    assert [(frame["id"], frame["origin"]) for frame in peer["frames"]] == [(0x201, "adapter_rx"), (0x202, "participant_tx")]
+
+
+def test_legacy_shared_read_denial_remains_enforced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shares = (
+        "      alpha:\n"
+        "        permissions:\n"
+        "          allow_read: false\n"
+        "          allow_write: true\n"
+        "      beta:\n"
+        "        permissions:\n"
+        "          allow_read: false\n"
+        "          allow_write: true\n"
+    )
+    config = shared_config(tmp_path, monkeypatch, config_version=1, shares=shares)
+    broker, seated = _inprocess_broker(tmp_path, config)
+
+    class _Adapter:
+        def send(self, frame: object) -> dict:
+            return {"ok": True, "backend": "recording"}
+
+    broker.adapter_session = _Adapter()
+    assert broker._handle_send(seated["alpha"], {"frame": canbroker.frame_to_wire(0x201, b"\x01")})["ok"] is True
+    assert seated["beta"].queue == []
+    denied = broker._handle_read(seated["beta"], {"max_frames": 1, "wait_timeout_s": 0.0})
+    assert denied["error_type"] == "permission_denied", denied
+
+
+def test_shared_broker_disables_adapter_own_message_reception_without_changing_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = shared_config(tmp_path, monkeypatch)
+    bus = dataclasses.replace(config.can_buses["bench"], receive_own_messages=True)
+    config = dataclasses.replace(config, can_buses={**config.can_buses, "bench": bus})
+    observed: dict[str, object] = {}
+
+    class _Adapter:
+        def close(self) -> dict:
+            return {"ok": True}
+
+    def open_adapter(config_arg, bus_id, bus_config, clear_rx_queue):
+        observed["bus_config"] = bus_config
+        return {"ok": True, "session": _Adapter()}
+
+    monkeypatch.setattr("agentic_hil.can.open_adapter", open_adapter)
+    broker, _ = _inprocess_broker(tmp_path, config)
+    opened = broker.open_bus()
+    try:
+        assert opened["ok"] is True, opened
+        assert bus.receive_own_messages is True, "the authoritative config remains intact"
+        assert observed["bus_config"].receive_own_messages is False
+    finally:
+        broker.shutdown()
+
+
 def test_a_returned_send_failure_gates_the_bus_and_aborts_every_participant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
     """The adapter's own `send()` returns `ok: false`, the usual direct-adapter
     failure path, since it catches backend errors rather than raising. The frame
@@ -942,6 +1063,7 @@ def test_a_sent_frame_is_attributable_in_both_logs(tmp_path: Path, monkeypatch: 
         assert received["frames_read"] == 1
         bus_lines = [json.loads(line) for line in (Path(config.work_dir) / alpha.bus_frame_log).read_text(encoding="utf-8").splitlines() if line.strip()]
         own_lines = [json.loads(line) for line in Path(alpha.log_path).read_text(encoding="utf-8").splitlines() if line.strip()]
+        peer_lines = [json.loads(line) for line in Path(beta.log_path).read_text(encoding="utf-8").splitlines() if line.strip()]
     finally:
         beta.detach()
         alpha.detach()
@@ -955,10 +1077,16 @@ def test_a_sent_frame_is_attributable_in_both_logs(tmp_path: Path, monkeypatch: 
     own_tx = [line for line in own_lines if line.get("frame_seq") == sequence]
     assert len(own_tx) == 1
     assert own_tx[0]["direction"] == "tx"
-    # The whole-bus log is the broker's, so the received frame is in it too, with
-    # the participants it reached named.
-    bus_rx = [line for line in bus_lines if line.get("direction") == "rx"]
-    assert bus_rx and sorted(bus_rx[0]["delivered_to"]) == ["alpha", "beta"]
+    # The accepted TX is visible to the peer as a logical delivery, with honest
+    # metadata that distinguishes adapter acceptance from physical RX.
+    peer_delivery = [line for line in bus_lines if line.get("event") == "participant_delivery" and line.get("frame_seq") == sequence]
+    assert len(peer_delivery) == 1
+    assert peer_delivery[0]["delivery_status"] == "adapter_accepted"
+    assert peer_delivery[0]["delivered_to"] == ["beta"]
+    peer_rx = [line for line in peer_lines if line.get("direction") == "rx" and line.get("frame_seq") == sequence]
+    assert len(peer_rx) == 1
+    assert peer_rx[0]["frame"]["origin"] == "participant_tx"
+    assert peer_rx[0]["frame"]["delivery_status"] == "adapter_accepted"
     # And the frame really left through the adapter rather than only being logged.
     assert json.loads(tx_log.read_text(encoding="utf-8").splitlines()[0])["data_hex"] == "dead"
 
@@ -1390,21 +1518,15 @@ def test_an_attach_after_the_last_detach_stop_decision_is_refused(tmp_path: Path
 
 
 # ---------------------------------------------------------------------------
-# What a bus with `shares:` says about itself while sessions still take it whole (#489).
-#
-# The broker's participant path is complete under `attach_participant`, and no
-# tool or plan step reaches it: `can_session_start` takes the bus's own lock and
-# opens the adapter itself, so a second session on a shared bus is refused
-# exactly as on a single-owner one. Until a session can attach as a participant,
-# the advertisement has to say so, in the listing an agent reads before starting
-# a session and in the refusal it meets when it did not.
+# Public participant-session behavior added for #500, building on the broker
+# participant support introduced for #489.
 
-SHARING_NOTE_FRAGMENT = "takes the whole bus"
+SHARING_NOTE_FRAGMENT = "participant sessions"
 # A second, single-owner entry beside the shared one, for the mixed listing.
 SOLO_BUS_YAML = '  solo:\n    adapter: "peak"\n    channel: "PCAN_USBBUS2"\n    bitrate: 500000\n'
 
 
-def test_a_shared_bus_says_sessions_still_take_it_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_shared_bus_advertises_named_participant_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = shared_config(tmp_path, monkeypatch)
     service = CanBusService(config)
     try:
@@ -1416,10 +1538,11 @@ def test_a_shared_bus_says_sessions_still_take_it_whole(tmp_path: Path, monkeypa
     # listing is where an operator checks what the file says.
     assert sorted(status["shares"]) == ["alpha", "beta"]
     assert status["shares_declared"] is True
-    assert status["session_takes_whole_bus"] is True
+    assert status["session_takes_whole_bus"] is False
+    assert status["participant_sessions"] is True
     assert "can_session_start" in status["sharing_note"]
     assert SHARING_NOTE_FRAGMENT in status["sharing_note"]
-    assert "declared shareable" in listed["summary"]
+    assert "shared bus(es) support named participant sessions" in listed["summary"]
     assert SHARING_NOTE_FRAGMENT in listed["summary"]
 
 
@@ -1449,33 +1572,27 @@ def test_a_mixed_listing_counts_the_shared_buses_in_its_summary(tmp_path: Path, 
         listed = service.list_buses()
     finally:
         service.close()
-    assert listed["summary"].startswith("2 configured CAN bus(es). 1 declared shareable")
+    assert listed["summary"].startswith("2 configured CAN bus(es). 1 shared bus(es) support named participant sessions.")
     assert SHARING_NOTE_FRAGMENT in listed["summary"]
     assert listed["buses"]["bench"]["shares_declared"] is True
     assert "sharing_note" not in listed["buses"]["solo"]
 
 
-def test_a_second_session_on_a_shared_bus_is_refused_and_told_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_two_sessions_on_one_shared_bus_use_distinct_named_views(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
     config = shared_config(tmp_path, monkeypatch)
     first = CanBusService(config)
-    second = CanBusService(config)
     try:
-        opened = first.session_start("bench")
-        assert opened["ok"] is True, opened
-        assert "participant" not in opened
-
-        refused = second.session_start("bench")
-
+        opened_a = first.session_start("bench", False, "alpha")
+        opened_b = first.session_start("bench", False, "beta")
+        assert opened_a["ok"] is True, opened_a
+        assert opened_b["ok"] is True, opened_b
+        assert opened_a["participant"] == "alpha", opened_a
+        assert opened_b["participant"] == "beta", opened_b
+        assert first.sessions[("bench", "alpha")].adapter_session.status()["attached_participants"] == ["alpha", "beta"]
+        refused = first.session_start("bench", False)
         assert refused["ok"] is False, refused
-        # The project lock answers first for a second owner of the same
-        # configuration, so this is the refusal a second run in fact meets.
-        assert refused["error_type"] == "resource_busy", refused
-        assert refused["side_effect_committed"] is False
-        assert refused["shares_declared"] is True
-        assert refused["session_takes_whole_bus"] is True
-        assert SHARING_NOTE_FRAGMENT in refused["sharing_note"]
+        assert refused["error_type"] == "can_participant_required", refused
     finally:
-        second.close()
         first.close()
 
 
@@ -1507,23 +1624,14 @@ def test_a_second_session_on_a_single_owner_bus_is_refused_without_the_sharing_n
         first.close()
 
 
-def test_a_participant_argument_is_refused_by_the_schema_until_sharing_lands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The design document plans a participant vocabulary for `can_session_start`
-    (Phase 2). An agent that read it and passes `participant` today is told the
-    argument does not exist, rather than being admitted onto a surface whose
-    sessions are still keyed by bus alone. Pinned so the advertisement fields
-    are not half-joined by an argument the sessions map cannot honour."""
-    from agentic_hil.mcp import call_tool
-    from agentic_hil.tools import AgenticHILToolService
-
-    service = AgenticHILToolService(shared_config(tmp_path, monkeypatch))
+def test_shared_bus_session_without_a_participant_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = shared_config(tmp_path, monkeypatch)
+    service = CanBusService(config)
     try:
-        response = call_tool({"name": "can_session_start", "arguments": {"bus_id": "bench", "participant": "alpha"}}, service)
-        refused = response["structuredContent"]
-        assert refused["ok"] is False
-        assert refused["error_type"] == "invalid_argument", refused
-        assert "participant" in json.dumps(refused)
-        assert service.can_buses.sessions == {}
+        refused = service.session_start("bench", False)
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "can_participant_required", refused
+        assert service.sessions == {}
     finally:
         service.close()
 

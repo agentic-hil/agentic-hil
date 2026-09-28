@@ -201,6 +201,48 @@ def test_debug_continue_reports_target_exception_context(tmp_path: Path) -> None
         service.close()
 
 
+def test_debug_session_log_retains_actual_mi_stop_line_and_does_not_fabricate_one(tmp_path: Path) -> None:
+    service = debug_service(tmp_path, fake_gdb_behavior="hardfault")
+    expected_stop = '*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={addr="0x08000400",func="HardFault_Handler",args=[],file="startup.c",fullname="/work/startup.c",line="88"},thread-id="1",stopped-threads="all"'
+    try:
+        assert start_debug_session(service)["ok"] is True
+        continued = service.call("debug_continue", {"timeout_s": 5})
+        assert continued["error_type"] == "target_exception", continued
+        assert "gdb_stop_records" not in continued
+
+        log_path = tmp_path / continued["log_path"]
+        recorded = json.loads(log_path.read_text(encoding="utf-8"))
+        assert recorded["gdb_stop_records"] == [expected_stop]
+
+        already_stopped = service.call("debug_continue", {"timeout_s": 5})
+        assert already_stopped["error_type"] == "target_exception", already_stopped
+        assert already_stopped["summary"] == "Target is already stopped: exception."
+        assert "gdb_stop_records" not in already_stopped
+        recorded_again = json.loads(log_path.read_text(encoding="utf-8"))
+        assert recorded_again["gdb_stop_records"] == [expected_stop]
+    finally:
+        service.close()
+
+
+def test_synthesized_session_start_halt_does_not_create_a_raw_mi_stop_line(tmp_path: Path) -> None:
+    service = debug_service(tmp_path)
+    try:
+        started = start_debug_session(service)
+        assert started["ok"] is True, started
+        assert "stop_reason" not in started
+
+        halted = service.call("debug_halt")
+        assert halted["ok"] is True, halted
+        assert halted["stop_reason"] == "halted"
+        assert "gdb_stop_records" not in halted
+
+        log = json.loads((tmp_path / halted["log_path"]).read_text(encoding="utf-8"))
+        assert log["stop_reason"] == {"stop_reason": "halted", "backend_stop_reason": "session_start"}
+        assert log["gdb_stop_records"] == []
+    finally:
+        service.close()
+
+
 def test_debug_start_records_async_exception_stop(tmp_path: Path) -> None:
     service = debug_service(tmp_path, fake_gdb_behavior="stopped_on_attach_hardfault")
     try:

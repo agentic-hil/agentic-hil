@@ -217,9 +217,9 @@ def test_a_stop_asked_while_the_worker_waits_for_a_held_device_ends_the_wait(tmp
     """A run in `starting` reads its stop inside the device wait, not after it.
 
     A stranger holds the plan's device, the run is registered and asked to
-    stop, and then waits up to 3 s for the device. Today the wait runs to its
-    end and the run ends `device_busy`; a stop asked of a run that holds
-    nothing yet has to end the wait and the run, as `stopped`."""
+    stop, and then waits up to 3 s for the device. The mutex wait itself must
+    end promptly as `stopped`, even when writing the final report is slow."""
+    import agentic_hil.reactorrun as reactorrun
     from agentic_hil.bench import BenchMutex
     from agentic_hil.reactorrun import run_registered_plan
 
@@ -228,23 +228,45 @@ def test_a_stop_asked_while_the_worker_waits_for_a_held_device_ends_the_wait(tmp
     test_config = load_test_config(str(plan), config.work_dir)
     stranger = BenchMutex(frontend="stranger", label="other-bench-session")
     stranger.acquire(declared_devices(config, test_config))
+    original_acquire = BenchMutex.acquire
+    waited_s: list[float] = []
+    mutex_wait_finished_at: list[float] = []
+    report_started_after_mutex: list[bool] = []
+
+    def measured_acquire(mutex, *args, **kwargs):
+        wait_started = time.monotonic()
+        try:
+            return original_acquire(mutex, *args, **kwargs)
+        finally:
+            mutex_wait_finished_at.append(time.monotonic())
+            waited_s.append(mutex_wait_finished_at[-1] - wait_started)
+
+    monkeypatch.setattr(BenchMutex, "acquire", measured_acquire)
+    original_write_report = reactorrun.write_report
+
+    def slow_report(*args, **kwargs):
+        report_started_after_mutex.append(bool(mutex_wait_finished_at))
+        time.sleep(scaled_time_bound(1.1))
+        return original_write_report(*args, **kwargs)
+
+    monkeypatch.setattr(reactorrun, "write_report", slow_report)
     try:
         registration = runlifecycle.RunRegistration.take(config, runlifecycle.new_run_handle(), name=test_config.name, test_config_path=test_config.path, detached=True)
         with registration:
             requested = runlifecycle.request_run_stop(config, registration.handle)
             assert requested["ok"] is True, requested
             assert requested["stop_requested"] is True, requested
-            started = time.monotonic()
             result = run_registered_plan(config, test_config, wait_s=3.0, registration=registration)
-            elapsed_s = time.monotonic() - started
             registration.finish(result)
     finally:
         stranger.release_all()
 
-    # Under a second, against the 3 s the wait was granted: the mutex polls the
-    # lock every 0.2 s and the stop file is read at most every 0.1 s, so a stop
-    # already on disk ends the first poll that asks.
-    assert elapsed_s < scaled_time_bound(1.0), (elapsed_s, result.get("error_type"), result.get("summary"))
+    # The mutex polls the lock every 0.2 s and the stop file at most every 0.1 s.
+    # Time exactly the acquire boundary so durable report I/O cannot turn a
+    # successful prompt stop into a timing failure.
+    assert len(waited_s) == 1, waited_s
+    assert waited_s[0] < scaled_time_bound(1.0), (waited_s, result.get("error_type"), result.get("summary"))
+    assert report_started_after_mutex == [True], report_started_after_mutex
     assert result["stopped"] is True, result
     assert result["error_type"] == "run_stopped", result
     assert result["stopped_after_step"] == 0, result

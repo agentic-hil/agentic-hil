@@ -444,6 +444,85 @@ def test_the_holder_record_names_the_device_it_belongs_to() -> None:
     assert released["state"] == "released"
 
 
+@pytest.mark.parametrize("read_busy_result", [False, True])
+def test_a_holder_read_retries_a_heartbeat_replacement(monkeypatch: pytest.MonkeyPatch, read_busy_result: bool) -> None:
+    owner = BenchMutex(frontend="owner", label="refreshing-run")
+    contender = BenchMutex(frontend="contender")
+    owner.acquire([BOARD])
+    read_text = bench_module.safe_read_text
+    attempts = 0
+
+    def replaced_once(path):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            owner.heartbeat()
+            raise ConfigError("unsafe_configured_path", "Configured file changed while it was being opened.")
+        return read_text(path)
+
+    monkeypatch.setattr(bench_module, "safe_read_text", replaced_once)
+    try:
+        result = contender.busy_result(BOARD) if read_busy_result else contender.holder(BOARD)
+        assert result is not None
+        assert result["holder" if read_busy_result else "owner"]["label"] == "refreshing-run"
+        assert attempts == 2
+    finally:
+        owner.release_all()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permits replacing a file while its old inode is open")
+def test_an_atomic_heartbeat_between_open_and_stat_keeps_the_holder(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil import config as config_module
+
+    owner = BenchMutex(frontend="owner", label="refreshing-run")
+    contender = BenchMutex(frontend="contender")
+    owner.acquire([BOARD])
+    validate = config_module._validate_open_file
+    replaced = False
+
+    def replace_after_validation(descriptor, path):
+        nonlocal replaced
+        opened = validate(descriptor, path)
+        if path == owner._holder_path(BOARD) and not replaced:
+            replaced = True
+            owner.heartbeat()
+        return opened
+
+    monkeypatch.setattr(config_module, "_validate_open_file", replace_after_validation)
+    try:
+        result = contender.busy_result(BOARD)
+        assert replaced
+        assert result["holder"]["label"] == "refreshing-run", result
+        assert result["heartbeat_at"] is not None
+    finally:
+        owner.release_all()
+
+
+def test_retrying_a_holder_read_still_refuses_a_hard_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    owner = BenchMutex(frontend="owner", label="unsafe-record")
+    contender = BenchMutex(frontend="contender")
+    monkeypatch.setattr(owner, "_ensure_heartbeat_pump", lambda: None)
+    owner.acquire([BOARD])
+    link = tmp_path / "holder-link.json"
+    read_text = bench_module.safe_read_text
+    attempts = 0
+
+    def counted_read(path):
+        nonlocal attempts
+        attempts += 1
+        assert attempts <= 3, "a permanently unsafe holder record must not loop"
+        return read_text(path)
+
+    try:
+        os.link(owner._holder_path(BOARD), link)
+        monkeypatch.setattr(bench_module, "safe_read_text", counted_read)
+        assert "holder" not in contender.busy_result(BOARD)
+        assert attempts > 0
+    finally:
+        link.unlink(missing_ok=True)
+        owner.release_all()
+
+
 # ---------------------------------------------------------------------------
 # The heartbeat of a live run (#489).
 #

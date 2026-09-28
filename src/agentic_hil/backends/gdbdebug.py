@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from agentic_hil.config import (
 )
 from agentic_hil.elfsymbols import read_elf_byte_order, read_elf_symbol
 from agentic_hil.gdbmi import (
+    STOP_RECORD_PREFIX,
     GdbMiClient,
     GdbMiStopResult,
     mi_field,
@@ -130,6 +132,7 @@ class GdbDebugSession:
         self.started_at = utc_now_iso()
         self.status = "starting"
         self.stop_reason: JsonObject | None = None
+        self.gdb_stop_records: deque[str] = deque(maxlen=16)
         self.breakpoints: list[JsonObject] = []
         self.next_breakpoint_id = 1
         self.gdb: GdbMiClient | None = None
@@ -1039,6 +1042,8 @@ class GdbDebugSessions:
         return result
 
     def _stop_reason_from_gdb(self, session: GdbDebugSession, stop: GdbMiStopResult) -> JsonObject:
+        if stop.line.startswith(STOP_RECORD_PREFIX):
+            session.gdb_stop_records.append(stop.line)
         if stop.timed_out:
             return {"stop_reason": "timeout", "backend_stop_reason": "timeout"}
         if stop.error_message:
@@ -1419,6 +1424,7 @@ class GdbDebugSessions:
             "server_stdout_tail": session.server_stdout,
             "server_stderr_tail": session.server_stderr,
             "gdb_commands": session.gdb.history() if session.gdb else [],
+            "gdb_stop_records": list(session.gdb_stop_records),
             "breakpoints": list(session.breakpoints),
             "load_phase": session.load_phase,
             "firmware_load_status": session.firmware_load_status,

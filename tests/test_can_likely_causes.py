@@ -177,13 +177,13 @@ CAN_ERROR_TYPES_BUILT_BY_THE_BRIDGE = [
 BRIDGE_ERROR_KINDS = ["close_interrupted", "invalid_request", "invalid_response", "process_exited", "timeout"]
 
 # Every error type a CAN refusal answers with that reaches the classifier.
-CAN_ERROR_TYPES = CAN_ERROR_TYPES_FROM_517 + CAN_ERROR_TYPES_FROM_523 + CAN_ERROR_TYPES_BUILT_BY_THE_BRIDGE
+CAN_ERROR_TYPES = CAN_ERROR_TYPES_FROM_517 + CAN_ERROR_TYPES_FROM_523 + CAN_ERROR_TYPES_BUILT_BY_THE_BRIDGE + [
+    "can_participant_required",
+    "can_participant_not_configured",
+]
 
-# The broker's own error types, which this table does not answer and this issue
-# does not decide: the participant path they belong to is being designed in #500,
-# and a cause list written here would be an answer given ahead of that design.
-# Recorded rather than left implicit, so that the day they are folded in, this
-# list is what has to be edited on purpose.
+# Broker errors that remain internal to the transport. Participant selection
+# errors are public session refusals and are covered by CAN_LIKELY_CAUSES.
 BROKER_ONLY_ERROR_TYPES = [
     "can_broker_authentication_failed",
     "can_broker_counter_mismatch",
@@ -202,7 +202,7 @@ BROKER_ONLY_ERROR_TYPES = [
     "can_participant_busy",
     "can_participant_filter_violation",
     "can_participant_frame_budget_exhausted",
-    "can_participant_not_configured",
+    "can_participant_lock_required",
 ]
 
 # A `can_` type no code raises anywhere, which is what the boundary is once the
@@ -277,6 +277,8 @@ OTHER_TRANSPORT_WORDS = ("com port", "serial", "debugger", "gdb", "openocd", "st
 # copies of the same sentence: each list has to say something about its own
 # failure. Alternatives, because the wording is the implementation's to choose.
 TYPE_ANCHORS = {
+    "can_participant_required": ("participant", "shares", "session", "run"),
+    "can_participant_not_configured": ("participant", "misspelled", "removed", "declared"),
     CAN_INTERFACE_NOT_FOUND_ERROR: ("interface", "channel", "netdev"),
     CAN_ADAPTER_LIBRARY_MISSING_ERROR: ("library", "driver", "install", "installed"),
     CAN_CHANNEL_NOT_AVAILABLE_ERROR: ("channel", "driver", "adapter"),
@@ -809,7 +811,7 @@ def test_a_queue_clear_that_will_not_drain_refuses_with_causes_of_its_own(tmp_pa
     config = queue_bus_config(tmp_path)
     service = can_module_under_test.CanBusService(config)
     session = can_module_under_test.CanBusSession(QUEUE_BUS_ID, config.can_buses[QUEUE_BUS_ID], RefusingDrainAdapter(), str(tmp_path / "can-queue.jsonl"))
-    service.sessions[QUEUE_BUS_ID] = session
+    service.sessions[(QUEUE_BUS_ID, None)] = session
 
     result = service.session_start(QUEUE_BUS_ID, clear_rx_queue=True)
 
@@ -827,7 +829,7 @@ def test_a_queue_that_never_empties_refuses_at_the_drain_limit_with_causes_of_it
     config = queue_bus_config(tmp_path)
     service = can_module_under_test.CanBusService(config)
     session = can_module_under_test.CanBusSession(QUEUE_BUS_ID, config.can_buses[QUEUE_BUS_ID], NeverEmptyingAdapter(), str(tmp_path / "can-limit.jsonl"))
-    service.sessions[QUEUE_BUS_ID] = session
+    service.sessions[(QUEUE_BUS_ID, None)] = session
 
     result = service.session_start(QUEUE_BUS_ID, clear_rx_queue=True)
 
@@ -843,7 +845,7 @@ def test_a_read_the_adapter_refuses_carries_causes_of_its_own(tmp_path: Path) ->
     config = queue_bus_config(tmp_path)
     service = can_module_under_test.CanBusService(config)
     adapter = can_module_under_test.PythonCanAdapterSession("socketcan", RefusingReceiveBus(), 1.0)
-    service.sessions[QUEUE_BUS_ID] = can_module_under_test.CanBusSession(QUEUE_BUS_ID, config.can_buses[QUEUE_BUS_ID], adapter, str(tmp_path / "can-read.jsonl"))
+    service.sessions[(QUEUE_BUS_ID, None)] = can_module_under_test.CanBusSession(QUEUE_BUS_ID, config.can_buses[QUEUE_BUS_ID], adapter, str(tmp_path / "can-read.jsonl"))
 
     result = service.read(QUEUE_BUS_ID, 1, 0.0)
 
@@ -884,7 +886,7 @@ def test_a_read_the_bridge_answers_in_the_wrong_shape_refuses_with_causes_of_its
     service = can_module_under_test.CanBusService(config)
     adapter = can_module_under_test.ProcessCanAdapterSession(SimpleNamespace(poll=lambda: None, stdout=iter(()), stderr=iter(())), 1.0)
     adapter.request = lambda method, params, timeout_s: {"ok": True, "frames": [], "unexpected": 1}
-    service.sessions[QUEUE_BUS_ID] = can_module_under_test.CanBusSession(QUEUE_BUS_ID, config.can_buses[QUEUE_BUS_ID], adapter, str(tmp_path / "can-shape.jsonl"))
+    service.sessions[(QUEUE_BUS_ID, None)] = can_module_under_test.CanBusSession(QUEUE_BUS_ID, config.can_buses[QUEUE_BUS_ID], adapter, str(tmp_path / "can-shape.jsonl"))
 
     result = service.read(QUEUE_BUS_ID, 1, 0.0)
 
@@ -898,7 +900,7 @@ def test_frames_that_cannot_be_read_back_refuse_with_causes_of_their_own(tmp_pat
     claimed success and handed over frame data `CanBusService` cannot read."""
     config = queue_bus_config(tmp_path)
     service = can_module_under_test.CanBusService(config)
-    service.sessions[QUEUE_BUS_ID] = can_module_under_test.CanBusSession(QUEUE_BUS_ID, config.can_buses[QUEUE_BUS_ID], MalformedFrameAdapter(), str(tmp_path / "can-frames.jsonl"))
+    service.sessions[(QUEUE_BUS_ID, None)] = can_module_under_test.CanBusSession(QUEUE_BUS_ID, config.can_buses[QUEUE_BUS_ID], MalformedFrameAdapter(), str(tmp_path / "can-frames.jsonl"))
 
     result = service.read(QUEUE_BUS_ID, 1, 0.0)
 
@@ -914,11 +916,11 @@ def test_a_stop_whose_adapter_will_not_close_refuses_with_causes_of_its_own(tmp_
     send them to a serial log."""
     config = queue_bus_config(tmp_path)
     service = can_module_under_test.CanBusService(config)
-    service.sessions[QUEUE_BUS_ID] = can_module_under_test.CanBusSession(QUEUE_BUS_ID, config.can_buses[QUEUE_BUS_ID], RefusingCloseAdapter(), str(tmp_path / "can-close.jsonl"))
+    service.sessions[(QUEUE_BUS_ID, None)] = can_module_under_test.CanBusSession(QUEUE_BUS_ID, config.can_buses[QUEUE_BUS_ID], RefusingCloseAdapter(), str(tmp_path / "can-close.jsonl"))
     try:
         result = service.session_stop(QUEUE_BUS_ID)
     finally:
-        service.sessions.pop(QUEUE_BUS_ID, None)
+        service.sessions.pop((QUEUE_BUS_ID, None), None)
         service.close()
 
     assert result["ok"] is False and result["error_type"] == ADAPTER_CLOSE_FAILED_ERROR, result
