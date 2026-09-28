@@ -181,3 +181,23 @@ def test_release_asset_redirect_drops_bearer_token_on_cross_origin_redirect(monk
     )
 
     assert redirected.get_header("Authorization") is None
+
+
+def test_write_scoped_private_asset_job_is_manual_conditional_and_separate_from_bench():
+    workflow = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    jobs = workflow["jobs"]
+
+    assert set(jobs) == {"bench-tier", "provision-cubeprogrammer"}
+    provision = jobs["provision-cubeprogrammer"]
+    bench = jobs["bench-tier"]
+    assert provision["permissions"] == {"contents": "write"}
+    assert "github.repository == 'agentic-hil/agentic-hil'" in provision["if"]
+    assert "inputs.diagnose_only" in provision["if"]
+    assert "inputs.cubeprogrammer_asset_id" in provision["if"]
+    assert "cubeprogrammer_asset_id" in bench["if"]
+    assert "diagnose_only" in bench["if"]
+    assert "permissions" not in bench
+    assert workflow["permissions"] == {"contents": "read"}
+    checkouts = [step for step in provision["steps"] if "actions/checkout" in str(step.get("uses", ""))]
+    assert len(checkouts) == 1
+    assert checkouts[0]["with"]["persist-credentials"] == "false"

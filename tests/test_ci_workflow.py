@@ -813,7 +813,9 @@ def test_the_gate_runs_on_the_nightlys_board_and_queues_with_it() -> None:
     job = gate_job()
 
     assert job["runs-on"] == BENCH_LABELS
-    assert " ".join(job["if"].split()) == "github.repository == 'agentic-hil/agentic-hil'"
+    assert "github.repository == 'agentic-hil/agentic-hil'" in job["if"]
+    assert "inputs.diagnose_only" in job["if"]
+    assert "inputs.cubeprogrammer_asset_id" in job["if"]
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["concurrency"]["group"] == BENCH_CONCURRENCY_GROUP
     assert workflow["concurrency"]["cancel-in-progress"] is False
@@ -920,7 +922,8 @@ def test_diagnostic_mode_skips_all_bench_tier_commands_and_never_modifies_sysfs(
     diagnostic = [step for step in steps if "bench_vm_diagnostic.py" in step.get("run", "")]
 
     assert len(diagnostic) == 1, diagnostic
-    assert diagnostic[0]["if"] == chr(36) + "{{ inputs.diagnose_only }}"
+    assert "inputs.diagnose_only" in diagnostic[0]["if"]
+    assert "inputs.cubeprogrammer_asset_id" in diagnostic[0]["if"]
     assert "GH_TOKEN" in diagnostic[0]["env"]
     assert "CUBEPROGRAMMER_ASSET_ID" in diagnostic[0]["env"]
     assert all("diagnose_only" in step.get("if", "") for step in gate_run_steps())

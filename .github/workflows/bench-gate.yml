@@ -74,7 +74,7 @@ jobs:
     name: Run the bench tier on the board
     # A fork inherits this file. Without this, a dispatch in a fork would queue
     # forever against labels it has no runner for.
-    if: github.repository == 'agentic-hil/agentic-hil'
+    if: ${{ github.repository == 'agentic-hil/agentic-hil' && (!inputs.diagnose_only || inputs.cubeprogrammer_asset_id == '') }}
     runs-on: [self-hosted, agentic-hil, nucleo-f446re]
     # The tier takes minutes on the board, and a build with a cold cache adds
     # more. The limit is margin, not an estimate.
@@ -100,11 +100,10 @@ jobs:
       # This branch answers only whether the existing Linux VM could perform a
       # future selective kernel USB disconnect. It reads the bench runner's
       # allowlisted sysfs inventory, reports permissions and rootless runtimes,
-      # and never writes sysfs or calls a debugger. The optional archive is
-      # downloaded with this read-only repository token into a verified cache;
-      # it is not installed on the host. No bench-tier step runs in this mode.
-      - name: Read VM capabilities and optionally cache the pinned private asset
-        if: ${{ inputs.diagnose_only }}
+      # and never writes sysfs or calls a debugger. This read-only branch runs
+      # only without an asset ID; a download gets a separate write-scoped job.
+      - name: Read VM capabilities
+        if: ${{ inputs.diagnose_only && inputs.cubeprogrammer_asset_id == '' }}
         working-directory: harness
         env:
           GH_TOKEN: ${{ github.token }}
@@ -152,3 +151,24 @@ jobs:
           path: bench-results/
           if-no-files-found: warn
           retention-days: 14
+
+  provision-cubeprogrammer:
+    name: Cache the private CubeProgrammer archive on the bench VM
+    if: ${{ github.repository == 'agentic-hil/agentic-hil' && inputs.diagnose_only && inputs.cubeprogrammer_asset_id != '' }}
+    runs-on: [self-hosted, agentic-hil, nucleo-f446re]
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    steps:
+      - name: Check out the diagnostic helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+
+      - name: Read VM capabilities and cache the pinned private asset
+        working-directory: harness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CUBEPROGRAMMER_ASSET_ID: ${{ inputs.cubeprogrammer_asset_id }}
+        run: python3 tools/bench_vm_diagnostic.py --asset-id "$CUBEPROGRAMMER_ASSET_ID"
