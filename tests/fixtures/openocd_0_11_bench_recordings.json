@@ -1,0 +1,21 @@
+{
+  "what": "What OpenOCD 0.11 answers when the OpenOCD backend selects its probe by serial, recorded on the bench. Ubuntu 22.04 packages OpenOCD 0.11, and a call made with `probe_id` set puts `-c \"adapter serial <serial>\"` on OpenOCD's command line ahead of the target script and of the call's own command. 0.11 has no such subcommand: it prints the usage of the `adapter` group, names the words it could not place, and exits 1. The unit tier replays the streams through fake_debugger_transcript.py, so the classification is held to this release's own words.",
+  "recorded_on": "2026-09-27",
+  "how": "The bench tier's test_a_real_reset_over_the_probe_is_a_success_and_carries_whatever_openocd_said, run by `tools/bench_in_container.py --distribution ubuntu-22.04` with `-vv -l`, one Nucleo-F446RE attached through its on-board debugger, agentic-hil 0.21.6.dev0 at commit 0ce1f8e. The streams are the product's own `programmer_output` for `reset_target` in mode `run`, as the tier printed the report. The runner withholds the probe serial in every line it prints; it is replaced here by the suite's synthetic serial 066BFF505050505050505050, and nothing else is changed.",
+  "tool_versions": {
+    "openocd": "Open On-Chip Debugger 0.11.0",
+    "openocd_ubuntu_package": "0.11.0-1"
+  },
+  "probe_serial": "066BFF505050505050505050",
+  "recordings": {
+    "reset_target_run": {
+      "tool": "reset_target",
+      "arguments": {
+        "mode": "run"
+      },
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nadapter\n  adapter assert |deassert [srst|trst [assert|deassert srst|trst]]\n  adapter deassert |assert [srst|trst [deassert|assert srst|trst]]\n  adapter driver driver_name\n  adapter list\n  adapter name\n  adapter speed [khz]\n  adapter srst\n    adapter srst delay [milliseconds]\n    adapter srst pulse_width [milliseconds]\n  adapter transports transport ... \n  adapter usb\n    adapter usb location [<bus>-port[.port]...]\nhla_command <command>\nhla_device_desc description_string\nhla_layout layout_name\nhla_serial serial_string\nhla_vid_pid (vid pid)* \nreset_config [none|trst_only|srst_only|trst_and_srst]\n          [srst_pulls_trst|trst_pulls_srst|combined|separate]\n          [srst_gates_jtag|srst_nogate] [trst_push_pull|trst_open_drain]\n          [srst_push_pull|srst_open_drain]\n          [connect_deassert_srst|connect_assert_srst]\nError: invalid subcommand \"serial 066BFF505050505050505050\"\n\n"
+    }
+  }
+}
