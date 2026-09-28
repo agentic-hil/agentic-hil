@@ -63,3 +63,73 @@ def test_pyocd_bench_environment_restores_the_image_pack_data_home() -> None:
     assert environment["XDG_CONFIG_HOME"] == "/bench-config"
     assert environment["XDG_STATE_HOME"] == "/bench-state"
     assert isolated_environment["XDG_DATA_HOME"] == "/tmp/pytest-home/.local/share"
+
+
+def test_pyocd_failure_evidence_keeps_redacted_diagnostics_and_real_transcript(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    action_log = state_root / "pyocd-probe.json"
+    action_log.write_text(
+        json.dumps(
+            {
+                "command": "pyocd commander --uid PYOCD123 --port /dev/ttyACM0",
+                "returncode": 1,
+                "timed_out": False,
+                "stdout": "connecting to PYOCD123",
+                "stderr": "SWD/JTAG communication failure (No ACK) at /dev/ttyACM0",
+            }
+        ),
+        encoding="utf-8",
+    )
+    bench = SimpleNamespace(project=tmp_path, state_root=state_root)
+    result = {
+        "ok": False,
+        "error_type": "target_not_detected",
+        "backend_error_type": "target_not_detected",
+        "summary": f"pyOCD could not connect to PYOCD123 at /dev/ttyACM0 in {tmp_path}",
+        "programmer_output": {
+            "stdout": "connecting to PYOCD123",
+            "stderr": "SWD/JTAG communication failure (No ACK) at /dev/ttyACM0",
+            "returncode": 1,
+        },
+        "log_path": str(action_log),
+    }
+
+    evidence = pyocd_recordings.pyocd_result_evidence(
+        bench,
+        result,
+        ("PYOCD123", "/dev/ttyACM0", str(tmp_path), tmp_path.as_posix()),
+    )
+    serialized = json.dumps(evidence, sort_keys=True)
+
+    assert evidence["result"]["summary"] == "pyOCD could not connect to [redacted] at [redacted] in [redacted]"
+    assert evidence["result"]["backend_error_type"] == "target_not_detected"
+    assert evidence["programmer_output"]["stderr"] == "SWD/JTAG communication failure (No ACK) at [redacted]"
+    assert evidence["action_log"]["stderr"] == "SWD/JTAG communication failure (No ACK) at [redacted]"
+    assert "PYOCD123" not in serialized
+    assert "/dev/ttyACM0" not in serialized
+    assert str(tmp_path) not in serialized
+
+
+def test_pyocd_failure_evidence_keeps_diagnostics_when_action_log_shape_is_invalid(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    action_log = state_root / "pyocd-probe.json"
+    action_log.write_text("[]", encoding="utf-8")
+    bench = SimpleNamespace(project=tmp_path, state_root=state_root)
+    result = {
+        "ok": False,
+        "error_type": "probe_discovery_failed",
+        "backend_error_type": "probe_discovery_failed",
+        "summary": "pyOCD could not enumerate probes",
+        "programmer_output": {"stderr": "USB permission refused"},
+        "log_path": str(action_log),
+    }
+
+    evidence = pyocd_recordings.pyocd_result_evidence(bench, result, ())
+
+    assert evidence["result"]["summary"] == "pyOCD could not enumerate probes"
+    assert evidence["result"]["backend_error_type"] == "probe_discovery_failed"
+    assert evidence["programmer_output"] == {"stderr": "USB permission refused"}
+    assert evidence["action_log"] is None
+    assert evidence["transcript_error"]

@@ -126,10 +126,9 @@ def transcript(bench: Bench, result: dict, private_values: tuple[str, ...]) -> d
         except ValueError:
             resolved.relative_to(bench.state_root.resolve())
         loaded = json.loads(resolved.read_text(encoding="utf-8"))
-        assert isinstance(loaded, dict), loaded
-        action_log = {
-            key: redact(value, private_values) if isinstance(value, str) else value for key, value in loaded.items()
-        }
+        if not isinstance(loaded, dict):
+            raise ValueError("the product action log must contain a JSON object")
+        action_log = redact_values(loaded, private_values)
     output = result.get("programmer_output")
     if isinstance(output, dict):
         output = {key: redact(value, private_values) if isinstance(value, str) else value for key, value in output.items()}
@@ -159,9 +158,26 @@ def product_diagnostics(result: dict) -> dict:
     }
 
 
-def require_success(result: dict, action: str) -> None:
+def pyocd_result_evidence(bench: Bench, result: dict, private_values: tuple[str, ...]) -> dict:
+    """Preserve a pyOCD result and any real subprocess transcript safely."""
+    diagnostics = product_diagnostics(result)
+    diagnostics["summary"] = redact(str(result.get("summary") or ""), private_values)
+    evidence = {"result": diagnostics}
+    try:
+        evidence.update(transcript(bench, result, private_values))
+    except (OSError, ValueError, TypeError) as exc:
+        # A missing or malformed action log must not hide the backend result.
+        evidence["transcript_error"] = redact(f"{type(exc).__name__}: {exc}", private_values)
+        output = result.get("programmer_output")
+        evidence["programmer_output"] = redact_values(output, private_values)
+        evidence["action_log"] = None
+    return evidence
+
+
+def require_success(result: dict, action: str, evidence: dict | None = None) -> None:
     if not overall_success(result):
-        pytest.fail(f"Agentic HIL {action} failed its continue predicate: {product_diagnostics(result)}", pytrace=False)
+        diagnostics = evidence if evidence is not None else product_diagnostics(result)
+        pytest.fail(f"Agentic HIL {action} failed its continue predicate: {diagnostics}", pytrace=False)
 
 
 def read_boot_banner(server: Server, port_id: str, timeout_s: float = 15.0) -> str:
@@ -245,11 +261,13 @@ def test_pyocd_f446re_probe_flash_reset_and_uart_recording(bench: Bench, tmp_pat
     try:
         server.greet()
         _, info = server.call("debugger_info")
-        require_success(info, "debugger_info")
-        assert info.get("backend") == "pyocd", info
-        assert info.get("target_type") == TARGET_TYPE, info
-        assert isinstance(info.get("version"), str) and pyocd_version in info["version"], info
-        assert info.get("executable") == executable, info
+        info_evidence = pyocd_result_evidence(bench, info, private_values)
+        record_property("pyocd_debugger_info_v1", json.dumps(info_evidence, sort_keys=True, separators=(",", ":")))
+        require_success(info, "debugger_info", info_evidence)
+        assert info.get("backend") == "pyocd", info_evidence
+        assert info.get("target_type") == TARGET_TYPE, info_evidence
+        assert isinstance(info.get("version"), str) and pyocd_version in info["version"], info_evidence
+        assert info.get("executable") == executable, info_evidence
 
         _, opened = server.call(
             "bench_run_start",
@@ -265,9 +283,11 @@ def test_pyocd_f446re_probe_flash_reset_and_uart_recording(bench: Bench, tmp_pat
         run_open = True
 
         _, probe_result = server.call("probe_target")
-        require_success(probe_result, "probe_target")
-        assert probe_result.get("backend") == "pyocd", probe_result
-        assert probe_result.get("target_detected") is True, probe_result
+        probe_evidence = pyocd_result_evidence(bench, probe_result, private_values)
+        record_property("pyocd_probe_result_v1", json.dumps(probe_evidence, sort_keys=True, separators=(",", ":")))
+        require_success(probe_result, "probe_target", probe_evidence)
+        assert probe_result.get("backend") == "pyocd", probe_evidence
+        assert probe_result.get("target_detected") is True, probe_evidence
 
         _, flash_result = server.call(
             "flash_firmware",
