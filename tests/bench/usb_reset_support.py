@@ -256,6 +256,60 @@ def wait_for_usb_device(
             sleep(min(poll_interval_s, remaining))
 
 
+def tty_device_snapshot(
+    device: str,
+    *,
+    sysfs_root: Path,
+    device_root: Path,
+    stat_fn: Callable[[Path], Any] | None = None,
+    lstat_fn: Callable[[Path], Any] | None = None,
+) -> dict[str, Any]:
+    """Read identity metadata for one configured tty, without opening it.
+
+    Only the basename of the configured device (or its resolved symlink target)
+    is used to select `/sys/class/tty/<name>` and `/dev/<name>`. Paths and
+    symlink targets never leave this helper. Individual stat failures are
+    recorded as errno/type facts so diagnostic collection cannot hide the
+    preceding MCP open error.
+    """
+    resolved_name = Path(device).resolve(strict=False).name
+    if not re.fullmatch(r"tty[A-Za-z0-9_.-]+", resolved_name):
+        raise ValueError("the configured device does not resolve to one tty name")
+    sysfs_path = sysfs_root / resolved_name
+    node_path = device_root / resolved_name
+    stat_device = stat_fn or os.stat
+    lstat_device = lstat_fn or os.lstat
+
+    def read_stat(path: Path, function: Callable[[Path], Any]) -> tuple[Any | None, dict[str, Any] | None]:
+        try:
+            return function(path), None
+        except OSError as error:
+            return None, {"error_type": type(error).__name__, "errno": error.errno}
+
+    sysfs_stat, sysfs_error = read_stat(sysfs_path, stat_device)
+    sysfs_link_stat, sysfs_link_error = read_stat(sysfs_path, lstat_device)
+    node_stat, node_error = read_stat(node_path, stat_device)
+    rdev = None if node_stat is None else int(node_stat.st_rdev)
+    major, minor = (None, None) if rdev is None else _device_number(rdev)
+    snapshot: dict[str, Any] = {
+        "name": resolved_name,
+        "sysfs_inode": None if sysfs_stat is None else int(sysfs_stat.st_ino),
+        "sysfs_link_inode": None if sysfs_link_stat is None else int(sysfs_link_stat.st_ino),
+        "node_inode": None if node_stat is None else int(node_stat.st_ino),
+        "node_mode": None if node_stat is None else int(node_stat.st_mode),
+        "node_rdev": rdev,
+        "major": major,
+        "minor": minor,
+    }
+    if sysfs_error is not None:
+        snapshot["sysfs_stat_error"] = sysfs_error
+    if sysfs_link_error is not None:
+        snapshot["sysfs_link_stat_error"] = sysfs_link_error
+    if node_error is not None:
+        snapshot["node_stat_error"] = node_error
+    return snapshot
+
+
 def usb_reset_recording(
     *,
     serial_number: str,
@@ -264,6 +318,10 @@ def usb_reset_recording(
     after: dict[str, int] | None,
     reset_confirmed: bool,
     uart_rebind_observed: bool,
+    uart_open_result: dict[str, Any] | None = None,
+    tty_before: dict[str, Any] | None = None,
+    tty_after: dict[str, Any] | None = None,
+    private_values: tuple[str, ...] = (),
     source_commit: str = "",
     run_id: str = "",
 ) -> dict[str, Any]:
@@ -274,6 +332,32 @@ def usb_reset_recording(
         raise ValueError("run id contains unsupported characters")
     safe_before = _numeric_snapshot(before)
     safe_after = _numeric_snapshot(after)
+    safe_tty_before = _tty_snapshot_for_record(tty_before)
+    safe_tty_after = _tty_snapshot_for_record(tty_after)
+    tty_rebind_evidence = any(
+        _snapshot_changed(safe_tty_before, safe_tty_after, field) is True
+        for field in ("name", "sysfs_inode", "sysfs_link_inode", "node_inode", "node_rdev")
+    )
+    failure_fields = (
+        "error_type",
+        "backend_error",
+        "summary",
+        "retry_safe",
+        "ok",
+        "target_ok",
+        "audit_ok",
+        "cleanup_ok",
+        "cleanup_required",
+        "quarantined",
+        "lease_state",
+        "side_effect_status",
+        "hardware_state",
+    )
+    safe_open_result = None
+    if uart_open_result is not None:
+        safe_open_result = _redact_private(
+            {key: uart_open_result.get(key) for key in failure_fields}, private_values
+        )
     return {
         "schema": "agentic-hil.usb-reset-recording/v1",
         "source_commit": source_commit or None,
@@ -283,13 +367,80 @@ def usb_reset_recording(
         "serial_number": "[redacted]" if serial_number else None,
         "host_paths": ["[redacted]" for _ in host_paths],
         "reset_confirmed": bool(reset_confirmed),
-        "uart_rebind_observed": bool(uart_rebind_observed),
+        "uart_rebind_observed": bool(uart_rebind_observed or tty_rebind_evidence),
         "before": safe_before,
         "after": safe_after,
         "devnum_changed": _changed(safe_before, safe_after, "devnum"),
         "major_minor_changed": _pair_changed(safe_before, safe_after, "major", "minor"),
+        "uart_open_failure": safe_open_result,
+        "tty_before": safe_tty_before,
+        "tty_after": safe_tty_after,
+        "tty_name_changed": _snapshot_changed(safe_tty_before, safe_tty_after, "name"),
+        "tty_sysfs_inode_changed": _snapshot_changed(safe_tty_before, safe_tty_after, "sysfs_inode"),
+        "tty_sysfs_link_inode_changed": _snapshot_changed(safe_tty_before, safe_tty_after, "sysfs_link_inode"),
+        "tty_node_inode_changed": _snapshot_changed(safe_tty_before, safe_tty_after, "node_inode"),
+        "tty_rdev_changed": _tty_rdev_changed(safe_tty_before, safe_tty_after),
         "full_reenumeration_claimed": False,
     }
+
+
+def _tty_snapshot_for_record(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    if snapshot is None:
+        return None
+    fields = (
+        "name",
+        "sysfs_inode",
+        "sysfs_link_inode",
+        "node_inode",
+        "node_mode",
+        "node_rdev",
+        "major",
+        "minor",
+    )
+    safe = {key: snapshot.get(key) for key in fields}
+    name = safe["name"]
+    if name is not None and (not isinstance(name, str) or not re.fullmatch(r"tty[A-Za-z0-9_.-]+", name)):
+        raise ValueError("TTY snapshots may contain only a tty basename")
+    for key in fields[1:]:
+        value = safe[key]
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError("TTY snapshot metadata must be numeric")
+    for key in ("sysfs_stat_error", "sysfs_link_stat_error", "node_stat_error"):
+        error = snapshot.get(key)
+        if error is not None:
+            if not isinstance(error, dict) or not isinstance(error.get("error_type"), str):
+                raise ValueError("TTY stat errors must retain their error type")
+            errno = error.get("errno")
+            if errno is not None and (isinstance(errno, bool) or not isinstance(errno, int)):
+                raise ValueError("TTY stat errno must be numeric")
+            safe[key] = {"error_type": error["error_type"], "errno": errno}
+    return safe
+
+
+def _redact_private(value: Any, private_values: tuple[str, ...]) -> Any:
+    if isinstance(value, str):
+        for private in sorted((item for item in private_values if item), key=len, reverse=True):
+            value = re.sub(re.escape(private), "[redacted]", value, flags=re.IGNORECASE)
+        return value
+    if isinstance(value, list):
+        return [_redact_private(item, private_values) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_private(item, private_values) for key, item in value.items()}
+    return value
+
+
+def _snapshot_changed(
+    before: dict[str, Any] | None, after: dict[str, Any] | None, field: str
+) -> bool | None:
+    if before is None or after is None or before.get(field) is None or after.get(field) is None:
+        return None
+    return before[field] != after[field]
+
+
+def _tty_rdev_changed(before: dict[str, Any] | None, after: dict[str, Any] | None) -> bool | None:
+    if before is None or after is None or before.get("node_rdev") is None or after.get("node_rdev") is None:
+        return None
+    return before["node_rdev"] != after["node_rdev"]
 
 
 def _numeric_snapshot(snapshot: dict[str, int] | None) -> dict[str, int] | None:

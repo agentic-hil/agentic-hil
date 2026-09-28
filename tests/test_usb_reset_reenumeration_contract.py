@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import stat
 from pathlib import Path
@@ -330,6 +331,151 @@ def test_recording_sanitizes_probe_serial_and_host_paths_but_keeps_identity_chan
     assert SERIAL not in str(value)
     assert str(tmp_path) not in str(value)
     assert "/dev/bus/usb/001/007" not in str(value)
+
+
+def test_recording_keeps_redacted_uart_open_failure_and_tty_lifecycle_facts(tmp_path: Path) -> None:
+    """The failure report retains diagnosis and inode evidence without host identities."""
+    helper = importlib.import_module(MODULE)
+    private_device = "/dev/ttyACM0"
+    open_result = {
+        "ok": False,
+        "tool": "com_session_start",
+        "error_type": "com_port_open_failed",
+        "backend_error": f"[Errno 5] could not open port {private_device} for ST-Link {SERIAL} under {tmp_path}: [Errno 5] Input/output error",
+        "summary": "COM port could not be opened.",
+        "retry_safe": True,
+    }
+    before = {
+        "name": "ttyACM0",
+        "sysfs_inode": 111,
+        "sysfs_link_inode": 211,
+        "node_inode": 311,
+        "node_mode": stat.S_IFCHR | 0o660,
+        "node_rdev": 17,
+        "major": 166,
+        "minor": 0,
+    }
+    after = {**before, "sysfs_inode": 112, "sysfs_link_inode": 212, "node_inode": 312}
+
+    value = helper.usb_reset_recording(
+        serial_number=SERIAL,
+        host_paths=(str(tmp_path), private_device),
+        before={"busnum": 1, "devnum": 2, "major": 189, "minor": 129},
+        after={"busnum": 1, "devnum": 2, "major": 189, "minor": 129},
+        reset_confirmed=True,
+        uart_rebind_observed=False,
+        uart_open_result=open_result,
+        tty_before=before,
+        tty_after=after,
+        private_values=(SERIAL, private_device, str(tmp_path), tmp_path.as_posix()),
+    )
+
+    failure = value["uart_open_failure"]
+    assert failure["error_type"] == "com_port_open_failed"
+    assert failure["backend_error"] == (
+        "[Errno 5] could not open port [redacted] for ST-Link [redacted] under [redacted]: "
+        "[Errno 5] Input/output error"
+    )
+    assert failure["summary"] == "COM port could not be opened."
+    assert failure["retry_safe"] is True
+    assert value["uart_rebind_observed"] is True
+    assert value["tty_before"] == before
+    assert value["tty_after"] == after
+    assert value["tty_sysfs_inode_changed"] is True
+    assert value["tty_sysfs_link_inode_changed"] is True
+    assert value["tty_node_inode_changed"] is True
+    assert value["tty_rdev_changed"] is False
+    encoded = json.dumps(value)
+    assert SERIAL not in encoded
+    assert private_device not in encoded
+    assert str(tmp_path) not in encoded
+
+
+def test_open_failure_continue_diagnostic_includes_redacted_backend_error_and_retry_safety() -> None:
+    helper = importlib.import_module("tests.bench.usb_reset_reenumeration")
+    private_values = (SERIAL, "/dev/ttyACM0", "C:/private/bench")
+    result = {
+        "ok": False,
+        "error_type": "com_port_open_failed",
+        "backend_error": "cannot open /dev/ttyACM0 for PRIVATE-STLINK-SERIAL from C:/private/bench",
+        "retry_safe": True,
+        "lease_state": "released",
+        "side_effect_status": "not_started",
+    }
+
+    with pytest.raises(pytest.fail.Exception) as caught:
+        helper.require_product_success(result, "com_session_start after reset", private_values)
+
+    diagnostic = str(caught.value)
+    assert "com_port_open_failed" in diagnostic
+    assert "retry_safe" in diagnostic and "True" in diagnostic
+    assert "cannot open [redacted] for [redacted] from [redacted]" in diagnostic
+    assert SERIAL not in diagnostic
+    assert "/dev/ttyACM0" not in diagnostic
+    assert "C:/private/bench" not in diagnostic
+
+
+def test_tty_snapshot_records_same_name_sysfs_node_and_device_identity_read_only(tmp_path: Path, monkeypatch) -> None:
+    helper = importlib.import_module(MODULE)
+    sysfs_root = tmp_path / "sys" / "class" / "tty"
+    device_root = tmp_path / "dev"
+    tty_path = sysfs_root / "ttyACM0"
+    node_path = device_root / "ttyACM0"
+    tty_path.mkdir(parents=True)
+    node_path.parent.mkdir(parents=True)
+    node_path.touch()
+    calls: list[tuple[str, Path]] = []
+
+    def stat_fn(path: Path):
+        calls.append(("stat", path))
+        if path == tty_path:
+            return SimpleNamespace(st_ino=112, st_mode=stat.S_IFDIR | 0o755, st_rdev=0)
+        assert path == node_path
+        return SimpleNamespace(st_ino=312, st_mode=stat.S_IFCHR | 0o660, st_rdev=17)
+
+    def lstat_fn(path: Path):
+        calls.append(("lstat", path))
+        assert path == tty_path
+        return SimpleNamespace(st_ino=212, st_mode=stat.S_IFLNK | 0o777, st_rdev=0)
+
+    monkeypatch.setattr(helper.os, "major", lambda rdev: 166, raising=False)
+    monkeypatch.setattr(helper.os, "minor", lambda rdev: 0, raising=False)
+    snapshot = helper.tty_device_snapshot(
+        "/dev/ttyACM0", sysfs_root=sysfs_root, device_root=device_root, stat_fn=stat_fn, lstat_fn=lstat_fn
+    )
+
+    assert snapshot == {
+        "name": "ttyACM0",
+        "sysfs_inode": 112,
+        "sysfs_link_inode": 212,
+        "node_inode": 312,
+        "node_mode": stat.S_IFCHR | 0o660,
+        "node_rdev": 17,
+        "major": 166,
+        "minor": 0,
+    }
+    assert calls == [("stat", tty_path), ("lstat", tty_path), ("stat", node_path)]
+
+
+def test_tty_snapshot_preserves_errno_when_sysfs_stat_is_unavailable(tmp_path: Path) -> None:
+    helper = importlib.import_module(MODULE)
+    error = OSError(5, "I/O error")
+
+    def denied(path: Path):
+        raise error
+
+    snapshot = helper.tty_device_snapshot(
+        "/dev/ttyACM0",
+        sysfs_root=tmp_path / "sysfs",
+        device_root=tmp_path / "dev",
+        stat_fn=denied,
+        lstat_fn=denied,
+    )
+
+    assert snapshot["sysfs_stat_error"] == {"error_type": "OSError", "errno": 5}
+    assert snapshot["sysfs_link_stat_error"] == {"error_type": "OSError", "errno": 5}
+    assert snapshot["node_stat_error"] == {"error_type": "OSError", "errno": 5}
+    assert snapshot["node_rdev"] is None
 
 
 def test_boot_read_accumulates_fragments_until_the_demo_banner_is_complete() -> None:

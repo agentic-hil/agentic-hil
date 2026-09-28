@@ -34,6 +34,9 @@ def require_product_success(result: dict, action: str, private_values: tuple[str
             for key in (
                 "error_type",
                 "backend_error_type",
+                "backend_error",
+                "summary",
+                "retry_safe",
                 "ok",
                 "target_ok",
                 "audit_ok",
@@ -161,6 +164,9 @@ def test_usbdevfs_reset_is_recovered_by_the_same_mcp_server_and_demo_uart(
     uart_rebind_observed = False
     before = None
     after = None
+    tty_before = None
+    tty_after = None
+    uart_open_result = None
     host_paths = (
         str(USB_SYSFS),
         USB_SYSFS.as_posix(),
@@ -216,6 +222,11 @@ def test_usbdevfs_reset_is_recovered_by_the_same_mcp_server_and_demo_uart(
             expected_serial=serial,
             expected_vid=vid,
             expected_pid=pid,
+        )
+        tty_before = usb.tty_device_snapshot(
+            str(before_port.get("device") or ""),
+            sysfs_root=Path("/sys/class/tty"),
+            device_root=Path("/dev"),
         )
 
         _, flashed = server.call(
@@ -281,9 +292,22 @@ def test_usbdevfs_reset_is_recovered_by_the_same_mcp_server_and_demo_uart(
         after_port = matching_available_port(after_listing, serial, vid, pid)
         before_device = str(before_port.get("device") or "")
         after_device = str(after_port.get("device") or "")
+        tty_after = usb.tty_device_snapshot(
+            after_device,
+            sysfs_root=Path("/sys/class/tty"),
+            device_root=Path("/dev"),
+        )
         uart_rebind_observed = bool(before_device and after_device and before_device != after_device)
+        if tty_before is not None:
+            uart_rebind_observed = uart_rebind_observed or any(
+                tty_before.get(field) is not None
+                and tty_after.get(field) is not None
+                and tty_before[field] != tty_after[field]
+                for field in ("sysfs_inode", "sysfs_link_inode", "node_inode", "node_rdev")
+            )
 
         _, opened = server.call("com_session_start", {"port_id": port_id, "clear_buffer": True})
+        uart_open_result = opened
         require_product_success(opened, "com_session_start after reset", private_values)
         uart_open = True
         _, reset_target = server.call("reset_target", {"mode": "run"})
@@ -338,6 +362,10 @@ def test_usbdevfs_reset_is_recovered_by_the_same_mcp_server_and_demo_uart(
                         after=identity_after,
                         reset_confirmed=reset_confirmed,
                         uart_rebind_observed=uart_rebind_observed,
+                        uart_open_result=uart_open_result,
+                        tty_before=tty_before,
+                        tty_after=tty_after,
+                        private_values=private_values,
                         source_commit=source_commit,
                         run_id=run_id,
                     )
