@@ -263,6 +263,16 @@ stage's are in its `without-device-group` directory inside it.
 - `/etc/agentic-hil/bench-test-image`, written by this build and by nothing
   else, which is the marker a verdict needs.
 
+The image installs the STM32F4 CMSIS pack with pyOCD's supported
+`pyocd pack install stm32f446retx` command. The pack is stored under
+`/bench-home/.local/share/cmsis-pack-manager`, matching the image's runtime
+`HOME`. This installer resolves the current vendor index at build time; an
+offline image check requires the reviewed `Keil.STM32F4xx_DFP` version 3.1.1
+and verifies that both `stm32f446re` and `stm32f446retx` are listed from a
+pack. That check reads software metadata only and opens no probe. A change in
+the vendor index therefore requires reviewing and updating the expected
+version; the install itself is not a hash-pinned pack download.
+
 `AGENTIC_HIL_BENCH` is deliberately not set in the image. It is the statement
 that a probe and a board are attached, which an image cannot know, and the
 runner sets it on the run that hands the devices in.

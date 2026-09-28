@@ -109,6 +109,12 @@ ENV HOME=/bench-home \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# Install the Nucleo-F446RE CMSIS pack through pyOCD's supported installer.
+# The command resolves the vendor index at build time; the offline check below
+# records the expected pack release and target names so index drift is visible.
+RUN pyocd pack install stm32f446retx
+RUN --network=none python -m pytest --noconftest -q -p no:cacheprovider tests/container/pyocd_f446_support.py
+
 # Deliberately not set here: AGENTIC_HIL_BENCH. It is the statement that a probe
 # and a board are attached, and an image cannot know that; the runner sets it on
 # the run that hands the devices in.
