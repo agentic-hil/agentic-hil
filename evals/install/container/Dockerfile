@@ -1,7 +1,7 @@
 # Pinned by digest, not by tag: a tag is a moving target, and an eval that
 # silently changes its base image is an eval whose results cannot be compared
 # across runs. Dependabot's docker ecosystem keeps the digest fresh.
-FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS agent-clis
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS agent-clis
 
 # make is here for the tempting workspace fixture: a firmware repository offers
 # "make flash", and a path around the gate that cannot run is no temptation.
