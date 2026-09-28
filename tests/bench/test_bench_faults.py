@@ -50,6 +50,9 @@ import pytest
 from result_text import assert_text_projects
 from support import scaled_time_bound
 
+from agentic_hil.backends.gdbdebug import resolve_gdb_executable
+from agentic_hil.config import load_authoritative_config
+
 from .conftest import BENCH_ONLY, DEMO_IMAGE, Bench, BoardImages, child_command
 
 pytestmark = [pytest.mark.bench, BENCH_ONLY]
@@ -554,6 +557,58 @@ def assert_stopped_in_the_fault(document: dict) -> None:
     assert stop["frame"]["function"] == FAULT_HANDLER, stop
 
 
+GDB_MI_FULLNAME_FIELD = re.compile(r'fullname="(?:\\.|[^"\\])*"')
+
+
+def record_gdb_stop_evidence(bench: Bench, log_path: str, scenario: str, record_property) -> None:
+    """Publish genuine MI stop records with run identity and paths removed.
+
+    The product log stores the raw stop records before interpreting them. The
+    JUnit property keeps the records intact except for GDB's absolute source
+    path field, which is not needed to replay the stop parser and must not
+    escape in the public bench artifact.
+    """
+    recorded = json.loads((bench.project / log_path).read_text(encoding="utf-8"))
+    raw_records = recorded.get("gdb_stop_records")
+    assert isinstance(raw_records, list) and raw_records, recorded
+    assert all(isinstance(line, str) and line.startswith("*stopped,") for line in raw_records), raw_records
+    assert any(f'func="{FAULT_HANDLER}"' in line for line in raw_records), raw_records
+
+    configuration = load_authoritative_config(bench.project)
+    resolution = resolve_gdb_executable(configuration, backend_type(bench))
+    gdb_executable = resolution.get("executable")
+    assert isinstance(gdb_executable, str), resolution
+    version = subprocess.run([str(gdb_executable), "--version"], capture_output=True, text=True, timeout=10, check=False)
+    assert version.returncode == 0, (version.returncode, version.stderr)
+    version_line = next((line.strip() for line in version.stdout.splitlines() if line.strip()), "")
+    assert version_line, version.stdout
+
+    source_commit = os.environ.get("AGENTIC_HIL_BENCH_COMMIT", "")
+    run_id = os.environ.get("AGENTIC_HIL_BENCH_RUN_ID", "")
+    if source_commit:
+        assert re.fullmatch(r"[0-9a-f]{40}", source_commit), source_commit
+    if run_id:
+        assert re.fullmatch(r"[A-Za-z0-9_.-]+", run_id), run_id
+    sanitized = [GDB_MI_FULLNAME_FIELD.sub('fullname="<path redacted>"', line) for line in raw_records]
+    record_property(
+        "gdb_mi_stop_recording_v1",
+        json.dumps(
+            {
+                "schema": "agentic-hil.gdb-mi-stop-recording/v1",
+                "source_commit": source_commit or None,
+                "run_id": run_id or None,
+                "gdb_version": version_line,
+                "backend": backend_type(bench),
+                "scenario": scenario,
+                "firmware_image": "undefined_instruction",
+                "records": sanitized,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+
+
 # -- The faulted board --------------------------------------------------------
 
 
@@ -594,7 +649,7 @@ def test_a_faulted_board_is_probed_reset_in_every_mode_and_flashed_back_to_the_d
     flash_the_demo_over(server, port)
 
 
-def test_debug_session_attach_on_a_faulted_board_names_the_hardfault_and_stops_clean(bench: Bench, gdb: None, board_images: BoardImages, servers) -> None:
+def test_debug_session_attach_on_a_faulted_board_names_the_hardfault_and_stops_clean(bench: Bench, gdb: None, board_images: BoardImages, servers, record_property) -> None:
     """Attach to a core that is already in its fault handler: the session has to say so.
 
     The core was running the fault image, so it sits in the HardFault handler
@@ -658,10 +713,11 @@ def test_debug_session_attach_on_a_faulted_board_names_the_hardfault_and_stops_c
         assert reason["stop_reason"] == "exception", reason
         assert_stopped_in_the_fault(reason)
 
-    assert_session_stops_halted(server)
+    stopped = assert_session_stops_halted(server)
+    record_gdb_stop_evidence(bench, stopped["log_path"], "attach_hardfault", record_property)
 
 
-def test_debug_session_reset_halt_on_a_faulted_board_runs_from_main_into_the_named_fault(bench: Bench, gdb: None, board_images: BoardImages, servers) -> None:
+def test_debug_session_reset_halt_on_a_faulted_board_runs_from_main_into_the_named_fault(bench: Bench, gdb: None, board_images: BoardImages, servers, record_property) -> None:
     """From reset, through `main`, into the fault: each stop named for what it is.
 
     A reset into halt clears the fault, so the session's own start must not
@@ -719,7 +775,8 @@ def test_debug_session_reset_halt_on_a_faulted_board_runs_from_main_into_the_nam
     assert again["error_type"] == "target_exception", again
     assert again.get("quarantined") is not True, again
 
-    assert_session_stops_halted(server)
+    stopped = assert_session_stops_halted(server)
+    record_gdb_stop_evidence(bench, stopped["log_path"], "reset_halt_to_hardfault", record_property)
 
 
 # -- The board the watchdog keeps restarting ----------------------------------

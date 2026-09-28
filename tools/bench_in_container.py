@@ -908,6 +908,8 @@ def tier_command(
     results: Path,
     stable_names: Path | None,
     pytest_args: list[str],
+    source_commit: str,
+    run_id: str,
 ) -> list[str]:
     uid, gid = user_ids()
     command = [runtime]
@@ -943,6 +945,7 @@ def tier_command(
         command += ["-v", f"{stable_names}:{CONTAINER_SERIAL_BY_ID}:ro"]
     for key, value in ENVIRONMENT.items():
         command += ["-e", f"{key}={value}"]
+    command += ["-e", f"AGENTIC_HIL_BENCH_COMMIT={source_commit}", "-e", f"AGENTIC_HIL_BENCH_RUN_ID={run_id}"]
     return [*command, image_id, "sh", "-c", CONTAINER_SCRIPT, SCRIPT_ARGV0, *FIXED_PYTEST_ARGS, *pytest_args]
 
 
@@ -1278,7 +1281,9 @@ def main(argv: list[str] | None = None) -> int:
         results = workdir / "results"
         results.mkdir(mode=0o700)
         name = f"{CONTAINER_PREFIX}{secrets.token_hex(4)}"
-        command = tier_command(runtime, image_id, name, devices, locks, results, stable_names, pytest_args)
+        run_id = os.environ.get("GITHUB_RUN_ID", "local")
+        run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
+        command = tier_command(runtime, image_id, name, devices, locks, results, stable_names, pytest_args, commit, f"{run_id}-{run_attempt}")
         voice(f"$ {shlex.join(command)}")
         returncode, printed, interrupted = run_tier(runtime, name, command, output / LOG_NAME, voice.redact, voice, signals)
         # What follows decides what is published and whether the machine is

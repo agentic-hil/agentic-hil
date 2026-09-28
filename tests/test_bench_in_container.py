@@ -382,10 +382,12 @@ def test_the_container_gets_the_board_and_nothing_of_the_machine_besides(machine
     assert option_values(command, "--label") == [f"{bench_in_container.RUN_LABEL}={UID}"]
 
 
-def test_the_tier_finds_the_machines_device_locks_under_its_own_home(machine: SimpleNamespace) -> None:
+def test_the_tier_finds_the_machines_device_locks_under_its_own_home(machine: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     """The device locks are the backstop against every other run on this
     machine, and the tier keeps HOME to reach them. So the container's home is
     where the machine's lock directory is mounted, and only that directory."""
+    monkeypatch.setenv("GITHUB_RUN_ID", "742001")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
     assert run(machine) == 0
 
     command = machine.runtime.tier
@@ -396,6 +398,8 @@ def test_the_tier_finds_the_machines_device_locks_under_its_own_home(machine: Si
     environment = option_values(command, "-e")
     assert f"HOME={bench_in_container.CONTAINER_HOME}" in environment
     assert "AGENTIC_HIL_BENCH=1" in environment
+    assert f"AGENTIC_HIL_BENCH_COMMIT={COMMIT}" in environment
+    assert "AGENTIC_HIL_BENCH_RUN_ID=742001-2" in environment
 
 
 def test_the_tier_writes_its_report_into_a_directory_of_the_runs_own(machine: SimpleNamespace) -> None:
