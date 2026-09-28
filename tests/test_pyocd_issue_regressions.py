@@ -261,6 +261,112 @@ def test_zero_exit_probe_discovery_parse_refusal_still_propagates_log_audit_fail
     assert overall_success(result) is False
 
 
+def test_successful_probe_enumeration_keeps_native_output_and_action_log(
+    backend: PyOCDBackend,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from agentic_hil.backends.common import CompletedCommand
+
+    executable = tmp_path / "pyocd.exe"
+    stdout = '{"status": 0, "boards": [{"unique_id": "PYOCD123"}]}\n'
+    stderr = "probe listing completed\n"
+    monkeypatch.setattr(backend, "_resolve_executable", lambda: {"ok": True, "executable_path": str(executable), "executable": str(executable)})
+    monkeypatch.setattr(
+        "agentic_hil.backends.pyocd.spawn_command",
+        lambda *args, **kwargs: CompletedCommand(stdout=stdout, stderr=stderr, returncode=0, timed_out=False, not_found=False),
+    )
+
+    result = backend._enumerate_probes("debugger_probes_list")
+
+    assert result["ok"] is True
+    assert result["probes"] == [{"probe_id": "PYOCD123"}]
+    assert result["programmer_output"] == {"stdout": stdout, "stderr": stderr, "returncode": 0}
+    assert result["target_contacted"] is False
+    assert result["side_effect_status"] == "not_started"
+    assert result["hardware_state"] == "unchanged"
+    assert result["retry_safe"] is True
+    action_log = json.loads((Path(backend.config.workspace_root) / result["log_path"]).read_text(encoding="utf-8"))
+    assert action_log["command"].endswith("json --probes --no-config")
+    assert action_log["returncode"] == 0
+    assert action_log["timed_out"] is False
+    assert action_log["stdout"] == stdout
+    assert action_log["stderr"] == stderr
+
+
+def test_successful_probe_enumeration_does_not_hide_log_audit_failure(
+    backend: PyOCDBackend,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from agentic_hil.backends.common import CompletedCommand
+
+    executable = tmp_path / "pyocd.exe"
+    stdout = '{"status": 0, "boards": [{"unique_id": "PYOCD123"}]}\n'
+    stderr = ""
+    audit_error = OSError("could not persist pyOCD action log")
+    monkeypatch.setattr(backend, "_resolve_executable", lambda: {"ok": True, "executable_path": str(executable), "executable": str(executable)})
+    monkeypatch.setattr(
+        "agentic_hil.backends.pyocd.spawn_command",
+        lambda *args, **kwargs: CompletedCommand(stdout=stdout, stderr=stderr, returncode=0, timed_out=False, not_found=False),
+    )
+    monkeypatch.setattr(backend, "_write_log", lambda *args, **kwargs: audit_error)
+
+    result = backend._enumerate_probes("debugger_probes_list")
+
+    assert result["ok"] is True
+    assert result["audit_ok"] is False
+    assert result["programmer_output"] == {"stdout": stdout, "stderr": stderr, "returncode": 0}
+    assert result["audit_error"]["backend_error"] == "could not persist pyOCD action log"
+    assert result["target_contacted"] is False
+    assert result["side_effect_status"] == "not_started"
+    assert result["hardware_state"] == "unchanged"
+    assert result["retry_safe"] is True
+    assert overall_success(result) is False
+
+
+@pytest.mark.parametrize("operation", ["probe_target", "flash_firmware", "reset_target", "symbol_read_prepare"])
+def test_probe_selector_audit_failure_blocks_every_target_command(
+    backend: PyOCDBackend,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    from agentic_hil.backends.common import CompletedCommand
+
+    executable = tmp_path / "pyocd.exe"
+    listing = '{"status": 0, "boards": [{"unique_id": "PYOCD123"}]}\n'
+    commands: list[list[str]] = []
+    monkeypatch.setattr(backend, "_resolve_executable", lambda: {"ok": True, "executable_path": str(executable), "executable": str(executable)})
+
+    def spawn(command: list[str], *args: object, **kwargs: object) -> CompletedCommand:
+        commands.append(command)
+        return CompletedCommand(stdout=listing if "json" in command else "", stderr="", returncode=0, timed_out=False, not_found=False)
+
+    monkeypatch.setattr("agentic_hil.backends.pyocd.spawn_command", spawn)
+    monkeypatch.setattr(backend, "_write_log", lambda *args, **kwargs: OSError("could not persist pyOCD action log"))
+
+    if operation == "probe_target":
+        result = backend.probe_target()
+        failure = result
+    elif operation == "flash_firmware":
+        result = backend.flash_firmware({"resolved_path": str(tmp_path / "firmware.elf")})
+        failure = result
+    elif operation == "reset_target":
+        result = backend.reset_target(mode="halt")
+        failure = result
+    else:
+        monkeypatch.setattr("agentic_hil.backends.pyocd.validate_debug_symbol", lambda *args, **kwargs: {"ok": True})
+        monkeypatch.setattr("agentic_hil.backends.pyocd.resolve_symbol_offline", lambda *args, **kwargs: {"ok": True, "size_bytes": 4, "address_value": 0x20000000})
+        result = backend._prepare_symbol_read("debug_symbol_value", "counter", None)
+        failure = result.get("result", result)
+
+    assert len(commands) == 1
+    assert commands[0][-3:] == ["json", "--probes", "--no-config"]
+    assert failure["audit_ok"] is False
+    assert overall_success(failure) is False
+
+
 def test_recorded_stlink_usb_timeout_replays_as_not_contacted_probe_discovery_failure(
     backend: PyOCDBackend,
     monkeypatch: pytest.MonkeyPatch,

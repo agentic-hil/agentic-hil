@@ -341,19 +341,24 @@ class PyOCDBackend:
             }
             return self._finish_log_audit(failure, audit_error)
         probes = parsed["probes"]
-        return {
+        audit_error = self._write_log(log_path, command, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
+        result: JsonObject = {
             "ok": True,
             "tool": tool,
             "backend": self.backend_name,
             "probes": probes,
             "summary": f"{len(probes)} connected debugger probe(s) detected.",
+            "log_path": display_path(self.config, log_path),
+            **programmer_output_fields(completed),
+            **NOT_CONTACTED,
         }
+        return self._finish_log_audit(result, audit_error)
 
     def probe_target(self) -> JsonObject:
         if not self.config.probe_allowed():
             return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.", self._permission_key("allow_probe"))
         selected = self._resolve_probe_selector("probe_target")
-        if not selected["ok"]:
+        if not overall_success(selected):
             return selected
         result = self._run_pyocd("probe_target", ["commander", "--command", "status", "-O", "debug.traceback=true", *self._connection_args()])
         if result.get("ok"):
@@ -381,7 +386,7 @@ class PyOCDBackend:
             address_args = ["--base-address", self.config.debugger.flash_address]
 
         selected = self._resolve_probe_selector("flash_firmware")
-        if not selected["ok"]:
+        if not overall_success(selected):
             return selected
         result = self._run_pyocd("flash_firmware", ["flash", "--no-reset", *self._connection_args(), "--format", flash_format, *address_args, artifact_path])
         result["artifact"] = self._artifact_summary(artifact)
@@ -424,7 +429,7 @@ class PyOCDBackend:
             return reset_init_unsupported(self.backend_name, "pyOCD's commander has no equivalent")
         commander_command = "reset" if mode == "run" else "reset halt"
         selected = self._resolve_probe_selector("reset_target")
-        if not selected["ok"]:
+        if not overall_success(selected):
             return selected
         result = self._run_pyocd("reset_target", ["commander", "--command", commander_command, *self._connection_args()])
         result["mode"] = mode
@@ -760,7 +765,7 @@ class PyOCDBackend:
             noun = "read" if tool == "debug_symbol_value" else "dump"
             return {"ok": False, "result": {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": f"Symbol {noun} exceeds debug.max_dump_size_bytes.", "symbol": symbol, "size_bytes": size_bytes, "max_dump_size_bytes": self.config.debug.max_dump_size_bytes}}
         selected = self._resolve_probe_selector(tool)
-        if not selected["ok"]:
+        if not overall_success(selected):
             return {"ok": False, "result": selected}
         return {"ok": True, "resolved": resolved}
 
@@ -885,7 +890,7 @@ class PyOCDBackend:
             return {"ok": True, "uid": self._resolved_probe_uid}
 
         listed = self._enumerate_probes(tool)
-        if not listed["ok"]:
+        if not overall_success(listed):
             return listed
         available = [str(probe.get("probe_id", "")) for probe in listed["probes"]]
         needle = debugger.probe_id.split(":", 1)[1] if ":" in debugger.probe_id else debugger.probe_id

@@ -256,7 +256,12 @@ def test_a_probe_that_vanished_after_its_uid_was_resolved_is_refused_the_same_wa
         # beside one that did not.
         assert result["elapsed_ms"] < scaled_time_bound(CONFIGURED_TIMEOUT_S) * 1000, result
     assert elapsed_s < scaled_time_bound(2 * CONFIGURED_TIMEOUT_S), elapsed_s
-    assert len(written_logs(config)) == 2, [path.name for path in written_logs(config)]
+    action_logs = [json.loads(path.read_text(encoding="utf-8")) for path in written_logs(config)]
+    listing_logs = [entry for entry in action_logs if entry["command"].endswith("json --probes --no-config")]
+    target_logs = [entry for entry in action_logs if "--uid PYOCD123" in entry["command"]]
+    assert len(action_logs) == 3, action_logs
+    assert len(listing_logs) == 1, listing_logs
+    assert len(target_logs) == 2, target_logs
 
 
 @pytest.mark.parametrize(
