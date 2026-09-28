@@ -1,0 +1,74 @@
+# Short-lived paired measurement workflow for issue #536. This branch-only
+# trigger cannot replace or satisfy Python CI, and this selection drives no
+# hardware.
+name: Windows runtime diagnostic
+
+on:
+  push:
+    branches:
+      - task/windows-runtime-20260928
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    if: github.ref == 'refs/heads/task/windows-runtime-20260928'
+    name: Phase profile on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - name: Check out diagnostic commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install hash-pinned test dependencies
+        run: python -m pip install --require-hashes -r requirements/dev.txt
+
+      - name: Install this checkout
+        run: python -m pip install --no-deps -e .
+
+      # Same 2-worker setting as the slow hosted comparison. Each worker writes
+      # a separate artifact file. Run twice, with fresh pytest processes, to
+      # make one transient slow runner less likely to look like a cause.
+      - name: Profile selected cases, sample 1
+        env:
+          AGENTIC_HIL_PHASE_PROFILE_ROOT: ${{ runner.temp }}/agentic-hil-phase-profile
+          AGENTIC_HIL_PHASE_PROFILE_SAMPLE: sample-1
+        run: >-
+          python -m pytest -n 2 --durations=0 -p tools.ci_debug_phase_profile
+          tests/test_debug_session_run_state.py::test_a_failed_lookup_leaves_the_session_able_to_resume
+          tests/test_debug_session_run_state.py::test_a_failed_lookup_on_a_session_with_no_recorded_stop_records_none
+          tests/test_debug_session_run_state.py::test_an_interrupt_that_is_acknowledged_but_never_stops_the_target_still_quarantines
+          tests/test_debug_sessions.py::test_debug_session_full_cycle_breakpoint_symbol_and_ihex_dump
+          'tests/test_debugger_processes.py::test_a_hanging_debugger_is_reaped_and_answers_timeout[openocd]'
+
+      - name: Profile selected cases, sample 2
+        env:
+          AGENTIC_HIL_PHASE_PROFILE_ROOT: ${{ runner.temp }}/agentic-hil-phase-profile
+          AGENTIC_HIL_PHASE_PROFILE_SAMPLE: sample-2
+        run: >-
+          python -m pytest -n 2 --durations=0 -p tools.ci_debug_phase_profile
+          tests/test_debug_session_run_state.py::test_a_failed_lookup_leaves_the_session_able_to_resume
+          tests/test_debug_session_run_state.py::test_a_failed_lookup_on_a_session_with_no_recorded_stop_records_none
+          tests/test_debug_session_run_state.py::test_an_interrupt_that_is_acknowledged_but_never_stops_the_target_still_quarantines
+          tests/test_debug_sessions.py::test_debug_session_full_cycle_breakpoint_symbol_and_ihex_dump
+          'tests/test_debugger_processes.py::test_a_hanging_debugger_is_reaped_and_answers_timeout[openocd]'
+
+      - name: Upload phase traces
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-runtime-phase-profile-${{ matrix.os }}
+          path: ${{ runner.temp }}/agentic-hil-phase-profile/
+          if-no-files-found: error
+          retention-days: 7
