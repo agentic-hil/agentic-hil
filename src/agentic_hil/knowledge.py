@@ -2697,6 +2697,45 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not swap the probe. The probe is not what refused; the backend the configuration names for it is.",
         ),
     ),
+    # Not a missing capability of the backend but of the installed OpenOCD: the
+    # release decides whether the configured probe can be selected by serial.
+    "not_supported:openocd_probe_selection": ErrorRemedy(
+        meaning=(
+            "This configuration names its probe by `probe_id`, and the installed OpenOCD has no way to select that "
+            "probe by its serial. OpenOCD 0.12.0 and newer select every adapter driver's probe with `adapter serial`. "
+            "Older releases, such as the 0.11 Ubuntu 22.04 packages, select one only through a command of the adapter "
+            "driver's own: `hla_serial` for the hla driver `interface/stlink.cfg` loads, `st-link serial` for the "
+            "st-link driver, `cmsis_dap_serial` for cmsis-dap. So the OpenOCD backend asks the installed OpenOCD which "
+            "release it is and, before 0.12, which driver `interface_cfg` loads, both at OpenOCD's configuration stage "
+            "where no adapter is opened, and uses that driver's command. `openocd_version` and `adapter_driver` on the "
+            "result say what it was told: a driver with no command that takes this serial (`jlink serial` takes numbers "
+            "only), or `undefined` for an interface script that loads no driver at all.\n\n"
+            "The call was refused rather than sent without a selector, because without one OpenOCD opens whichever "
+            "probe it finds first, and that need not be the board this configuration binds. Nothing was sent to the "
+            "bench for this refusal. The target is exactly as the last call that did reach it left it."
+        ),
+        remediation=(
+            "Read `openocd_version` and `adapter_driver` on the result: they are what the installed OpenOCD said about "
+            "itself and about `debuggers.<name>.interface_cfg`. `debugger_info` reports the same release.",
+            "Install OpenOCD 0.12.0 or newer, which selects every adapter driver's probe with `adapter serial`, and "
+            "have `debuggers.<name>.executable` or PATH name it. Which OpenOCD a bench runs is the operator's "
+            "decision, so report the refusal and get their word before changing it.",
+            "If the probe is one an older OpenOCD can select by serial, an interface script for that driver does it on "
+            "this release as well: `interface/stlink.cfg` (hla) or `interface/stlink-dap.cfg` (st-link) for an "
+            "ST-Link, `interface/cmsis-dap.cfg` for a CMSIS-DAP probe. `debuggers.<name>.interface_cfg` changes "
+            "through `project_config_set` behind `allow_config_description_write`, with the operator's word.",
+            "Retry the call once the cause is fixed. The bench was not driven, so nothing has to be inspected or "
+            "recovered first.",
+        ),
+        do_not=(
+            "Do not remove `probe_id` to get past this refusal. Without a selector OpenOCD opens whichever probe it "
+            "finds first, which is the wrong-board risk `probe_id` exists to rule out.",
+            "Do not reach for `openocd` or a raw debugger command to select the probe by hand. That bypasses the "
+            "policy this refusal comes from and takes the probe out from under the bench's own coordination.",
+            "Do not inspect the hardware or run `agentic-hil recover` for this result. It is a refused call, not an "
+            "unconfirmed target state.",
+        ),
+    ),
     # -- The debugger that is not a probe, in the two states it goes missing in --
     "gdb_not_found": ErrorRemedy(
         meaning=(

@@ -4,6 +4,8 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from agentic_hil.backends.common import (
@@ -191,10 +193,41 @@ OPENOCD_INIT_PREFIX = f'init; echo "{OPENOCD_INIT_STAGE_MARKER}"; '
 OPENOCD_UNREGISTERED_COMMAND = re.compile(r'invalid command name "([^"]+)"', re.IGNORECASE)
 OPENOCD_WRONG_STAGE_COMMAND = re.compile(r"the '([^']+)' command must be used (?:after|before) 'init'", re.IGNORECASE)
 # OpenOCD 0.11's answer to a group asked for a subcommand it does not have, which
-# names the words after the group: `invalid subcommand "serial <serial>"` for the
-# `adapter serial <serial>` this backend selects a probe by, recorded on Ubuntu
-# 22.04's package (tests/fixtures/openocd_0_11_bench_recordings.json).
+# names the words after the group: `invalid subcommand "serial <serial>"` for an
+# `adapter serial <serial>`, recorded on Ubuntu 22.04's package
+# (tests/fixtures/openocd_0_11_bench_recordings.json).
 OPENOCD_UNKNOWN_SUBCOMMAND = re.compile(r'invalid subcommand "([^"]+)"', re.IGNORECASE)
+
+# The release an OpenOCD says it is, in the banner every build prints first:
+# `Open On-Chip Debugger 0.11.0` from Ubuntu 22.04's package, on stderr, and a
+# suffix after the numbers from a development build. Read for one decision only:
+# how the probe a configuration names by serial is selected.
+OPENOCD_VERSION_BANNER = re.compile(r"Open On-Chip Debugger\s+v?((\d+)\.(\d+)(?:\.(\d+))?\S*)")
+# The release `adapter serial` came with, the one selector every adapter driver
+# takes. Every release before it selects a probe by serial through a command of
+# the adapter driver's own.
+OPENOCD_ADAPTER_SERIAL_SINCE = (0, 12, 0)
+# Which adapter driver an interface script loads, asked the way the bench asked
+# OpenOCD 0.11: `adapter name` names the driver, or answers `undefined` when the
+# script loaded none, and it is echoed behind a marker of this backend's own.
+# The run loads the interface script, answers and shuts down at the
+# configuration stage, so no adapter is opened for it.
+OPENOCD_ADAPTER_DRIVER_MARKER = "AGENTIC_HIL_ADAPTER_DRIVER:"
+OPENOCD_ADAPTER_DRIVER_QUERY = f'echo "{OPENOCD_ADAPTER_DRIVER_MARKER}[adapter name]"'
+# The selector each adapter driver takes a probe's serial with before 0.12, as
+# OpenOCD 0.11 took the recorded serial with each (the `selector_*` recordings):
+# `hla_serial` for the hla driver `interface/stlink.cfg` loads, `st-link serial`
+# for the st-link driver of `interface/stlink-dap.cfg`, `cmsis_dap_serial` for
+# cmsis-dap. Each is a filter and not a preference: given a serial no attached
+# probe carries, OpenOCD 0.11 answered "No device matches the serial string" and
+# opened nothing. `jlink serial` is not here, because it refused the recorded
+# serial as not a number, and the other drivers have no selector at all.
+OPENOCD_0_11_SERIAL_SELECTORS = {"hla": "hla_serial", "st-link": "st-link serial", "cmsis-dap": "cmsis_dap_serial"}
+# How long a configuration-stage read may take: it loads one or two scripts and
+# exits, and the debugger's own timeout is sized for flashing a board.
+OPENOCD_CONFIGURATION_READ_TIMEOUT_S = 10.0
+
+OpenOCDRelease = tuple[str, tuple[int, int, int]]
 
 # The adapter scripts whose probes this host can enumerate without OpenOCD's
 # help. OpenOCD ships one family of them under that prefix (`stlink.cfg`,
@@ -220,15 +253,133 @@ def openocd_interface_enumerates_by_usb(interface_cfg: str) -> bool:
     return stem.startswith(OPENOCD_USB_ENUMERATED_INTERFACE)
 
 
+def parse_openocd_version(output: str) -> OpenOCDRelease | None:
+    """The release OpenOCD's banner names, as written and as numbers, or None without a banner."""
+    match = OPENOCD_VERSION_BANNER.search(output)
+    if match is None:
+        return None
+    return match.group(1), (int(match.group(2)), int(match.group(3)), int(match.group(4) or 0))
+
+
+def openocd_version(executable_path: str, timeout_s: float) -> OpenOCDRelease | None:
+    """The release the OpenOCD at this path says it is, from its own `--version`.
+
+    None when it did not say: it could not be started, did not answer in time,
+    failed, or printed no banner."""
+    completed = spawn_command([*invocation(executable_path), "--version"], str(Path(executable_path).parent), timeout_s)
+    if completed.not_found or completed.not_executable or completed.timed_out or completed.returncode != 0:
+        return None
+    return parse_openocd_version(f"{completed.stdout}{completed.stderr}")
+
+
+def parse_openocd_adapter_driver(output: str) -> str | None:
+    """The adapter driver `adapter name` named behind this backend's marker, word for word.
+
+    That includes OpenOCD's own `undefined` for a script that loaded none. None
+    when no line, or more than one answer, carries the marker: a run that stopped
+    before the echo, such as on an interface script OpenOCD could not find."""
+    answers = {line.strip()[len(OPENOCD_ADAPTER_DRIVER_MARKER) :].strip() for line in output.splitlines() if line.strip().startswith(OPENOCD_ADAPTER_DRIVER_MARKER)}
+    if len(answers) != 1:
+        return None
+    return answers.pop() or None
+
+
+def openocd_adapter_driver(executable_path: str, interface_cfg: str, timeout_s: float) -> str | None:
+    """The adapter driver this interface script loads on the OpenOCD at this path, or None.
+
+    OpenOCD loads the script, echoes `adapter name` and shuts down, all at its
+    configuration stage: `init`, which opens the adapter, is never reached."""
+    completed = spawn_command(
+        [*invocation(executable_path), "-f", interface_cfg, "-c", OPENOCD_ADAPTER_DRIVER_QUERY, "-c", "shutdown"],
+        str(Path(executable_path).parent),
+        timeout_s,
+    )
+    if completed.not_found or completed.not_executable or completed.timed_out or completed.returncode != 0:
+        return None
+    return parse_openocd_adapter_driver(f"{completed.stdout}{completed.stderr}")
+
+
+@dataclass(frozen=True)
+class OpenOCDProbeSelection:
+    """The `-c` arguments that select the configured probe, and what they were chosen from.
+
+    `supported` is False when this OpenOCD has no selector for the probe's
+    adapter driver, and then `commands` is empty: such a call is refused, never
+    sent without a selector."""
+
+    commands: tuple[str, ...]
+    version: str | None
+    adapter_driver: str | None
+    supported: bool
+
+
+def openocd_probe_selection(
+    executable_path: str,
+    interface_cfg: str,
+    probe_id: str | None,
+    timeout_s: float,
+    *,
+    read_release: Callable[[str, float], OpenOCDRelease | None] = openocd_version,
+) -> OpenOCDProbeSelection:
+    """How the OpenOCD at this path is told which probe to open.
+
+    Without a `probe_id` nothing is selected, as always. With one, the choice
+    turns on the release. OpenOCD 0.12.0 and newer take `adapter serial` for
+    every adapter driver, and so does an OpenOCD whose release cannot be read:
+    a release without the command refuses it before `init`, so no probe is
+    opened either way. Before 0.12 the selector is the adapter driver's own,
+    and the driver is asked of the interface script at the configuration stage.
+    A driver with none this backend can give the serial to is not supported,
+    and neither is a script that loads no driver; a driver that cannot be read
+    is given `adapter serial`, which that release refuses before `init`.
+
+    The one thing never returned for a `probe_id` is an empty selection that is
+    supported: OpenOCD would open whichever probe it found first.
+
+    `read_release` reads the release; the backend passes one that remembers it."""
+    if probe_id is None:
+        return OpenOCDProbeSelection((), None, None, True)
+    generic = ("-c", f"adapter serial {probe_id}")
+    release = read_release(executable_path, timeout_s)
+    if release is None:
+        return OpenOCDProbeSelection(generic, None, None, True)
+    version, numbers = release
+    if numbers >= OPENOCD_ADAPTER_SERIAL_SINCE:
+        return OpenOCDProbeSelection(generic, version, None, True)
+    driver = openocd_adapter_driver(executable_path, interface_cfg, timeout_s)
+    if driver is None:
+        return OpenOCDProbeSelection(generic, version, None, True)
+    selector = OPENOCD_0_11_SERIAL_SELECTORS.get(driver)
+    if selector is None:
+        return OpenOCDProbeSelection((), version, driver, False)
+    return OpenOCDProbeSelection(("-c", f"{selector} {probe_id}"), version, driver, True)
+
+
+def probe_selection_unsupported_reason(selection: OpenOCDProbeSelection, interface_cfg: str) -> str:
+    """Why this OpenOCD cannot select the configured probe, naming the release and the driver."""
+    if selection.adapter_driver == "undefined":
+        driver = f"the interface script `{interface_cfg}` loads no adapter driver"
+    else:
+        driver = f"the `{selection.adapter_driver}` adapter driver the interface script `{interface_cfg}` loads has none that takes this probe's serial"
+    return f"OpenOCD {selection.version} selects a probe by serial only through the adapter driver's own command, and {driver}"
+
+
 class OpenOCDBackend:
     backend_name = "openocd"
 
     def __init__(self, config: AgenticHILConfig):
         self.config = config
+        # The release each OpenOCD file this backend has run says it is, by path,
+        # modification time and size, so a file replaced in place is asked again.
+        # Only answers are kept: an OpenOCD that did not say is asked next time.
+        self._releases: dict[tuple[str, int, int], OpenOCDRelease] = {}
+        # The selection a session start's resolve chose, for the server it then
+        # starts, with the executable, script and serial it was chosen for.
+        self._debug_probe_selection: tuple[tuple[str, str, str | None], OpenOCDProbeSelection] | None = None
         self._debug = GdbDebugSessions(
             config,
             backend_name=self.backend_name,
-            resolve_server=self._resolve_executable,
+            resolve_server=self._resolve_debug_server,
             build_server_args=self._debug_server_args,
             classify_server_output=self._classify_output,
             server_ready_line=OPENOCD_GDB_LISTENING_LINE,
@@ -297,7 +448,8 @@ class OpenOCDBackend:
         which adapter to open and opens it. What it has, on an ST-Link bench, is
         a host that already knows. The probe publishes its serial in the USB
         descriptor of the virtual COM port it exposes, that string is exactly
-        what `adapter serial` takes, and bootstrap discovery has read probes out
+        what OpenOCD selects the probe by (`adapter serial` from 0.12, the
+        adapter driver's own selector before), and bootstrap discovery has read probes out
         of it since #423. The configured bench simply did not use it, so
         `agentic-hil debugger-probes` refused `not_supported` on the very bench
         TROUBLESHOOTING.md sends an OpenOCD reader to it from, while the serial
@@ -548,11 +700,19 @@ class OpenOCDBackend:
 
     def _debug_server_args(self, executable_path: str, gdb_port: int, reset: bool) -> list[str]:
         startup = "init; reset halt" if reset else "init; halt"
+        key = (executable_path, self.config.debugger.interface_cfg, self.config.debugger.probe_id)
+        stored = self._debug_probe_selection
+        selection = stored[1] if stored is not None and stored[0] == key else self._probe_selection(executable_path)
+        # A session start refuses an unsupported selection in its resolve, before
+        # this runs. Reached without one, the server is still never started
+        # without a selector: it gets `adapter serial`, which a release without
+        # it refuses before `init`.
+        probe_selection = list(selection.commands) if selection.supported else self._adapter_serial_selection()
         return [
             *invocation(executable_path),
             "-f",
             self.config.debugger.interface_cfg,
-            *self._probe_selection_commands(),
+            *probe_selection,
             "-f",
             self.config.debugger.target_cfg,
             "-c",
@@ -585,6 +745,23 @@ class OpenOCDBackend:
             return dict(OPENOCD_NOT_FOUND)
         return {"ok": True, "executable": found, "executable_path": found}
 
+    def _resolve_debug_server(self) -> JsonObject:
+        """The OpenOCD a debug session starts, or the refusal that starts none.
+
+        The server selects the probe the way every other call does, and the reads
+        that decide how run here, before a port is reserved or a server started:
+        an OpenOCD with no way to select the configured probe refuses the session
+        with nothing started for it."""
+        resolved = self._resolve_executable()
+        if not resolved["ok"]:
+            return resolved
+        executable_path = str(resolved["executable_path"])
+        selection = self._probe_selection(executable_path)
+        if not selection.supported:
+            return self._probe_selection_refusal(selection)
+        self._debug_probe_selection = ((executable_path, self.config.debugger.interface_cfg, self.config.debugger.probe_id), selection)
+        return resolved
+
     def _run_openocd(self, tool: str, openocd_command: str, success_marker: str | None = None) -> JsonObject:
         started_at = utc_now_iso()
         start = time.perf_counter()
@@ -592,7 +769,12 @@ class OpenOCDBackend:
         if not resolved["ok"]:
             return {"tool": tool, "backend": self.backend_name, "started_at": started_at, **resolved, "finished_at": utc_now_iso(), "elapsed_ms": int((time.perf_counter() - start) * 1000)}
 
-        probe_selection = self._probe_selection_commands()
+        selection = self._probe_selection(str(resolved["executable_path"]))
+        if not selection.supported:
+            # Before the call's own run and before its log: OpenOCD was started
+            # only for the two configuration-stage reads, which open no adapter.
+            return {"tool": tool, "started_at": started_at, **self._probe_selection_refusal(selection), "finished_at": utc_now_iso(), "elapsed_ms": int((time.perf_counter() - start) * 1000)}
+        probe_selection = list(selection.commands)
         args = [
             *invocation(str(resolved["executable_path"])),
             "-f",
@@ -839,8 +1021,59 @@ class OpenOCDBackend:
             **exclusive_permission_fields(blocking, self.config.debugger_id),
         }
 
-    def _probe_selection_commands(self) -> list[str]:
+    def _probe_selection(self, executable_path: str) -> OpenOCDProbeSelection:
+        """How the OpenOCD at this path selects the configured probe (see `openocd_probe_selection`)."""
+        return openocd_probe_selection(
+            executable_path,
+            self.config.debugger.interface_cfg,
+            self.config.debugger.probe_id,
+            min(self.config.debugger.timeout_s, OPENOCD_CONFIGURATION_READ_TIMEOUT_S),
+            read_release=self._release,
+        )
+
+    def _release(self, executable_path: str, timeout_s: float) -> OpenOCDRelease | None:
+        """The release the OpenOCD at this path says it is, asked once per file."""
+        try:
+            status = os.stat(executable_path)
+        except OSError:
+            return openocd_version(executable_path, timeout_s)
+        key = (executable_path, status.st_mtime_ns, status.st_size)
+        release = self._releases.get(key)
+        if release is None:
+            release = openocd_version(executable_path, timeout_s)
+            if release is not None:
+                self._releases[key] = release
+        return release
+
+    def _adapter_serial_selection(self) -> list[str]:
         return [] if self.config.debugger.probe_id is None else ["-c", f"adapter serial {self.config.debugger.probe_id}"]
+
+    def _probe_selection_refusal(self, selection: OpenOCDProbeSelection) -> JsonObject:
+        """A call refused because this OpenOCD cannot select the configured probe by its serial.
+
+        Refused rather than sent without a selector, which would let OpenOCD open
+        whichever probe it found first. The caller adds its tool and times."""
+        interface_cfg = self.config.debugger.interface_cfg
+        return {
+            "ok": False,
+            "backend": self.backend_name,
+            "error_type": "not_supported",
+            "backend_error_type": "probe_selection_not_supported",
+            "summary": (
+                f"{probe_selection_unsupported_reason(selection, interface_cfg)}, so the probe `probe_id` names cannot "
+                "be selected. The call was refused before OpenOCD was started for it, and nothing was sent to the "
+                "board. OpenOCD 0.12.0 and newer select every adapter driver's probe with `adapter serial`."
+            ),
+            "openocd_version": selection.version,
+            "adapter_driver": selection.adapter_driver,
+            "interface_cfg": interface_cfg,
+            "likely_causes": [
+                f"the installed OpenOCD is {selection.version}, older than 0.12.0, which added `adapter serial` for every adapter driver",
+                "the interface script loads an adapter driver with no serial selector of its own on this release, or one whose selector takes serials in another form (`jlink serial` takes numbers only), or loads no adapter driver at all",
+            ],
+            **remediation_fields("not_supported", "openocd_probe_selection"),
+            **NOT_CONTACTED,
+        }
 
     def _classify_output(self, output: str, tool: str | None = None) -> str:
         lower = output.lower()
@@ -996,16 +1229,19 @@ def rejected_openocd_commands(openocd_command: str, output: str, configuration_c
     command line ahead of `openocd_command`, the probe selection. OpenOCD
     evaluates its arguments in order and stops at the first that fails, so one
     of them refused is proof that the `init` in `openocd_command` never ran.
-    OpenOCD 0.11 refuses `adapter serial` that way, naming only the words after
-    the group, so the command is the one whose words after its first are
-    exactly the words OpenOCD quoted, named by its group and subcommand.
+    Their names count as sent: OpenOCD 0.11 answers a selector the loaded
+    adapter driver does not register, such as `hla_serial` beside the jlink
+    driver, with `invalid command name`. And it refuses `adapter serial` naming
+    only the words after the group, so that command is the one whose words
+    after its first are exactly the words OpenOCD quoted, named by its group and
+    subcommand.
 
     Everything else stays unconfirmed and keeps quarantining: an adapter that
     would not open, a target that would not answer, a reset that was issued and
     not confirmed, a timeout. None of those can prove where they stopped."""
     if OPENOCD_INIT_STAGE_MARKER in output:
         return []
-    sent = {segment.strip().split(" ", 1)[0].strip() for segment in openocd_command.split(";")}
+    sent = {segment.strip().split(" ", 1)[0].strip() for segment in (*openocd_command.split(";"), *configuration_commands)}
     named = {match.group(1) for pattern in (OPENOCD_UNREGISTERED_COMMAND, OPENOCD_WRONG_STAGE_COMMAND) for match in pattern.finditer(output)}
     quoted = {match.group(1) for match in OPENOCD_UNKNOWN_SUBCOMMAND.finditer(output)}
     subcommands = {f"{group} {words.split(' ', 1)[0]}" for group, _, words in (command.strip().partition(" ") for command in configuration_commands) if words in quoted}
