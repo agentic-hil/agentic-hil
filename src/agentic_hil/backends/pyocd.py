@@ -355,7 +355,7 @@ class PyOCDBackend:
         selected = self._resolve_probe_selector("probe_target")
         if not selected["ok"]:
             return selected
-        result = self._run_pyocd("probe_target", ["commander", "--command", "status", *self._connection_args()])
+        result = self._run_pyocd("probe_target", ["commander", "--command", "status", "-O", "debug.traceback=true", *self._connection_args()])
         if result.get("ok"):
             result["target_detected"] = True
             result["summary"] = "Target detected through pyOCD."
