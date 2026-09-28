@@ -65,7 +65,7 @@ from agentic_hil.config import (
     secure_optional_read_text,
     secure_remove_file,
     secure_user_file_lock,
-    tighten_owned_writable_ancestors,
+    tighten_launcher_write_access,
     tool_owned_user_roots,
     trusted_persistent_executable,
     user_file_lock_path,
@@ -1228,11 +1228,10 @@ def _skipped_setup_step(summary: str) -> JsonObject:
 
 
 def _smooth_permissions(targets: list[Path]) -> list[str]:
-    """Silently tighten the current user's own group/other-writable components
-    along these chains so the fail-closed trust validator accepts a launcher an
-    installer wrote under a umask-002 / private-group home without the operator
-    hand-fixing permissions. Only user-owned components are ever changed. POSIX
-    only; on Windows this is a no-op."""
+    """Tighten each of these launcher files the trust validator would refuse for
+    group or other write, so a launcher it turns down for that alone can still
+    be registered. Only the user's own files are ever changed, and none the
+    validator accepts. POSIX only; on Windows this is a no-op."""
     actions: list[str] = []
     seen: set[str] = set()
     for target in targets:
@@ -1240,24 +1239,25 @@ def _smooth_permissions(targets: list[Path]) -> list[str]:
         if key in seen:
             continue
         seen.add(key)
-        actions.extend(tighten_owned_writable_ancestors(target))
+        actions.extend(tighten_launcher_write_access(target))
     return actions
 
 
 def _smooth_user_permissions() -> list[str]:
-    """Smooth the one chain a fail-closed validator still walks: the launcher
-    the MCP command will be registered as.
+    """Smooth the one mode a fail-closed validator still reads: that of the
+    launcher the MCP command will be registered as.
 
     ``trusted_persistent_executable`` is the last check that refuses a path for
     its POSIX mode, and since #143 that mode is the launcher file's own: its
     ancestors are no longer refused for who else may write them, so a umask-002
-    home no longer has to be tightened for a registration to be possible.
+    home no longer has to be tightened for a registration to be possible, and
+    the file itself is accepted where its group is the owner's private group.
     Smoothing was once wider still because configured paths were mode-checked
     too; that check was removed whole, and chmod-ing a tree
     nothing validates any more would be this policy's remnant mutating an
-    operator's filesystem for no refusal it can prevent. The skill and the
-    user-level MCP config are therefore no longer touched, and neither is
-    anything project-side.
+    operator's filesystem for no refusal it can prevent. The launcher's
+    directories, the skill and the user-level MCP config are therefore not
+    touched, and neither is anything project-side.
     """
     targets: list[Path] = []
     for candidate in _mcp_command_candidates():
