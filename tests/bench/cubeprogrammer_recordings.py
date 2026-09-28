@@ -47,6 +47,23 @@ def sanitize_transcript(text: str, private_values: Iterable[str]) -> str:
     return text
 
 
+def configure_cubeprogrammer(server: Server, debugger_id: str, executable: Path) -> None:
+    """Select CubeProgrammer under reset in this run's temporary description."""
+    errored, changed = server.call(
+        "project_config_set",
+        {
+            "changes": [
+                {"key": f"debuggers.{debugger_id}.type", "value": "stlink"},
+                {"key": f"debuggers.{debugger_id}.executable", "value": str(executable)},
+                {"key": f"debuggers.{debugger_id}.connect_mode", "value": "under_reset"},
+            ]
+        },
+    )
+    assert not errored and changed.get("ok") is True, changed
+    errored, reloaded = server.call("project_config_reload_description")
+    assert not errored and reloaded.get("ok") is True, reloaded
+
+
 def programmer_recording(
     bench: Bench,
     debugger_id: str,
@@ -112,6 +129,7 @@ def programmer_recording(
             "run_id": run_id or None,
             "backend": "stlink",
             "scenario": "demo-flash",
+            "connect_mode": configuration["debuggers"][debugger_id].get("connect_mode"),
             "outcome": "success" if overall_success(result) else "failure",
             "cubeprogrammer_version": str(result.get("programmer_version") or "reported-by-debugger-info"),
             "executable": str(executable),
@@ -169,18 +187,7 @@ def test_cubeprogrammer_flashes_and_resets_demo_through_one_mcp_run(bench: Bench
 
         # This is the bench fixture's throwaway config, under its temp root.
         # Change only through MCP and reload the description in this same server.
-        errored, changed = server.call(
-            "project_config_set",
-            {
-                "changes": [
-                    {"key": f"debuggers.{debugger_id}.type", "value": "stlink"},
-                    {"key": f"debuggers.{debugger_id}.executable", "value": str(executable)},
-                ]
-            },
-        )
-        assert not errored and changed.get("ok") is True, changed
-        errored, reloaded = server.call("project_config_reload_description")
-        assert not errored and reloaded.get("ok") is True, reloaded
+        configure_cubeprogrammer(server, debugger_id, executable)
 
         errored, info = server.call("debugger_info")
         assert not errored and overall_success(info), info

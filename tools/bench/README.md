@@ -240,8 +240,9 @@ subdirectory; it does not need the optional CubeProgrammer archive. The
 CubeProgrammer stage runs its probe, flash, reset and capture recordings and
 writes to the attempt's `cubeprogrammer` subdirectory. It uses the pinned
 archive already in the runner's user-local cache; the workflow does not install
-the host toolchain. The build-time smoke check is not evidence of a hardware
-recording run.
+the host toolchain. Its temporary ST-Link description sets `connect_mode` to
+`under_reset` for flash; the Nucleo-F446RE's on-board ST-Link reset line is wired
+to NRST. The build-time smoke check is not evidence of a hardware recording run.
 
 The USB stage requests targeted `USBDEVFS_RESET` on the verified ST-Link node
 inside the existing unprivileged container, through the same MCP server and
