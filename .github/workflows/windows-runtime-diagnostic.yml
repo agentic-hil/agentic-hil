@@ -121,6 +121,72 @@ jobs:
           tests/test_debug_sessions.py::test_debug_session_full_cycle_breakpoint_symbol_and_ihex_dump
           'tests/test_debugger_processes.py::test_a_hanging_debugger_is_reaped_and_answers_timeout[openocd]'
 
+      # tests/conftest.py chooses its sandbox parent from tempfile.gettempdir()
+      # at import time, independently of pytest's --basetemp. Compare keeping
+      # that root at the Windows default with moving TEMP/TMP/TMPDIR to the
+      # already-existing runner temp root. These are step-scoped overrides.
+      - name: Profile runner basetemp only, repeat 1
+        if: matrix.os == 'windows-latest'
+        env:
+          AGENTIC_HIL_PHASE_PROFILE_ROOT: ${{ runner.temp }}/agentic-hil-phase-profile
+          AGENTIC_HIL_PHASE_PROFILE_SAMPLE: windows-basetemp-only-1
+        run: >-
+          python -m pytest -n 2 --durations=0 -p tools.ci_debug_phase_profile
+          --basetemp "${{ runner.temp }}\agentic-hil-pytest-basetemp-env-1"
+          tests/test_debug_session_run_state.py::test_a_failed_lookup_leaves_the_session_able_to_resume
+          tests/test_debug_session_run_state.py::test_a_failed_lookup_on_a_session_with_no_recorded_stop_records_none
+          tests/test_debug_session_run_state.py::test_an_interrupt_that_is_acknowledged_but_never_stops_the_target_still_quarantines
+          tests/test_debug_sessions.py::test_debug_session_full_cycle_breakpoint_symbol_and_ihex_dump
+          'tests/test_debugger_processes.py::test_a_hanging_debugger_is_reaped_and_answers_timeout[openocd]'
+
+      - name: Profile sandbox temp on RUNNER_TEMP, repeat 1
+        if: matrix.os == 'windows-latest'
+        env:
+          AGENTIC_HIL_PHASE_PROFILE_ROOT: ${{ runner.temp }}/agentic-hil-phase-profile
+          AGENTIC_HIL_PHASE_PROFILE_SAMPLE: windows-sandbox-temp-on-runner-1
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
+        run: >-
+          python -m pytest -n 2 --durations=0 -p tools.ci_debug_phase_profile
+          --basetemp "${{ runner.temp }}\agentic-hil-pytest-basetemp-env-2"
+          tests/test_debug_session_run_state.py::test_a_failed_lookup_leaves_the_session_able_to_resume
+          tests/test_debug_session_run_state.py::test_a_failed_lookup_on_a_session_with_no_recorded_stop_records_none
+          tests/test_debug_session_run_state.py::test_an_interrupt_that_is_acknowledged_but_never_stops_the_target_still_quarantines
+          tests/test_debug_sessions.py::test_debug_session_full_cycle_breakpoint_symbol_and_ihex_dump
+          'tests/test_debugger_processes.py::test_a_hanging_debugger_is_reaped_and_answers_timeout[openocd]'
+
+      - name: Profile runner basetemp only, repeat 2
+        if: matrix.os == 'windows-latest'
+        env:
+          AGENTIC_HIL_PHASE_PROFILE_ROOT: ${{ runner.temp }}/agentic-hil-phase-profile
+          AGENTIC_HIL_PHASE_PROFILE_SAMPLE: windows-basetemp-only-2
+        run: >-
+          python -m pytest -n 2 --durations=0 -p tools.ci_debug_phase_profile
+          --basetemp "${{ runner.temp }}\agentic-hil-pytest-basetemp-env-3"
+          tests/test_debug_session_run_state.py::test_a_failed_lookup_leaves_the_session_able_to_resume
+          tests/test_debug_session_run_state.py::test_a_failed_lookup_on_a_session_with_no_recorded_stop_records_none
+          tests/test_debug_session_run_state.py::test_an_interrupt_that_is_acknowledged_but_never_stops_the_target_still_quarantines
+          tests/test_debug_sessions.py::test_debug_session_full_cycle_breakpoint_symbol_and_ihex_dump
+          'tests/test_debugger_processes.py::test_a_hanging_debugger_is_reaped_and_answers_timeout[openocd]'
+
+      - name: Profile sandbox temp on RUNNER_TEMP, repeat 2
+        if: matrix.os == 'windows-latest'
+        env:
+          AGENTIC_HIL_PHASE_PROFILE_ROOT: ${{ runner.temp }}/agentic-hil-phase-profile
+          AGENTIC_HIL_PHASE_PROFILE_SAMPLE: windows-sandbox-temp-on-runner-2
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
+        run: >-
+          python -m pytest -n 2 --durations=0 -p tools.ci_debug_phase_profile
+          --basetemp "${{ runner.temp }}\agentic-hil-pytest-basetemp-env-4"
+          tests/test_debug_session_run_state.py::test_a_failed_lookup_leaves_the_session_able_to_resume
+          tests/test_debug_session_run_state.py::test_a_failed_lookup_on_a_session_with_no_recorded_stop_records_none
+          tests/test_debug_session_run_state.py::test_an_interrupt_that_is_acknowledged_but_never_stops_the_target_still_quarantines
+          tests/test_debug_sessions.py::test_debug_session_full_cycle_breakpoint_symbol_and_ihex_dump
+          'tests/test_debugger_processes.py::test_a_hanging_debugger_is_reaped_and_answers_timeout[openocd]'
+
       - name: Upload phase traces
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
