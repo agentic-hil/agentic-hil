@@ -330,7 +330,16 @@ class PyOCDBackend:
             return self._finish_log_audit(failure, audit_error)
         parsed = parse_pyocd_probes(completed.stdout)
         if not parsed["ok"]:
-            return {"tool": tool, "backend": self.backend_name, **parsed, **NOT_CONTACTED}
+            audit_error = self._write_log(log_path, command, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
+            failure: JsonObject = {
+                "tool": tool,
+                "backend": self.backend_name,
+                **parsed,
+                "log_path": display_path(self.config, log_path),
+                **programmer_output_fields(completed),
+                **NOT_CONTACTED,
+            }
+            return self._finish_log_audit(failure, audit_error)
         probes = parsed["probes"]
         return {
             "ok": True,

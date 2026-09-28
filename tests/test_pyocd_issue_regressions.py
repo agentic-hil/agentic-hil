@@ -10,6 +10,7 @@ from conftest import write_config
 
 from agentic_hil.backends.pyocd import PyOCDBackend
 from agentic_hil.config import load_config
+from agentic_hil.report import overall_success
 
 
 @pytest.fixture
@@ -184,3 +185,77 @@ def test_probe_enumeration_failure_preserves_json_and_stderr_diagnostics(backend
     assert result["programmer_output"]["stderr"].endswith("cannot open USB probe")
     log_path = Path(backend.config.workspace_root) / result["log_path"]
     assert json.loads(log_path.read_text(encoding="utf-8"))["stdout"] == raw_json
+
+
+@pytest.mark.parametrize(
+    ("stdout", "summary"),
+    [
+        ("pyOCD JSON warning\nnot-json\n", "pyOCD returned invalid probe-discovery JSON."),
+        ('{"status": 0, "boards": "not-a-list"}', "pyOCD reported a probe-discovery failure."),
+    ],
+)
+def test_zero_exit_probe_discovery_parse_refusal_keeps_output_and_action_log(
+    backend: PyOCDBackend,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stdout: str,
+    summary: str,
+) -> None:
+    from agentic_hil.backends.common import CompletedCommand
+
+    executable = tmp_path / "pyocd.exe"
+    stderr = "warning: probe enumeration returned an unusable response"
+    monkeypatch.setattr(backend, "_resolve_executable", lambda: {"ok": True, "executable_path": str(executable), "executable": str(executable)})
+    monkeypatch.setattr(
+        "agentic_hil.backends.pyocd.spawn_command",
+        lambda *args, **kwargs: CompletedCommand(stdout=stdout, stderr=stderr, returncode=0, timed_out=False, not_found=False),
+    )
+
+    result = backend._enumerate_probes("debugger_probes_list")
+
+    assert result["ok"] is False
+    assert result["error_type"] == "probe_discovery_failed"
+    assert result["summary"] == summary
+    assert result["target_contacted"] is False
+    assert result["side_effect_status"] == "not_started"
+    assert result["hardware_state"] == "unchanged"
+    assert result["retry_safe"] is True
+    assert result["programmer_output"] == {"stdout": stdout, "stderr": stderr, "returncode": 0}
+    log_path = Path(backend.config.workspace_root) / result["log_path"]
+    action_log = json.loads(log_path.read_text(encoding="utf-8"))
+    assert action_log["command"].endswith("json --probes --no-config")
+    assert action_log["returncode"] == 0
+    assert action_log["timed_out"] is False
+    assert action_log["stdout"] == stdout
+    assert action_log["stderr"] == stderr
+
+
+def test_zero_exit_probe_discovery_parse_refusal_still_propagates_log_audit_failure(
+    backend: PyOCDBackend,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from agentic_hil.backends.common import CompletedCommand
+
+    executable = tmp_path / "pyocd.exe"
+    stdout = "not-json"
+    stderr = "diagnostic stderr"
+    audit_error = OSError("could not persist pyOCD action log")
+    monkeypatch.setattr(backend, "_resolve_executable", lambda: {"ok": True, "executable_path": str(executable), "executable": str(executable)})
+    monkeypatch.setattr(
+        "agentic_hil.backends.pyocd.spawn_command",
+        lambda *args, **kwargs: CompletedCommand(stdout=stdout, stderr=stderr, returncode=0, timed_out=False, not_found=False),
+    )
+    monkeypatch.setattr(backend, "_write_log", lambda *args, **kwargs: audit_error)
+
+    result = backend._enumerate_probes("debugger_probes_list")
+
+    assert result["ok"] is False
+    assert result["error_type"] == "probe_discovery_failed"
+    assert result["programmer_output"] == {"stdout": stdout, "stderr": stderr, "returncode": 0}
+    assert result["audit_ok"] is False
+    assert result["target_contacted"] is False
+    assert result["side_effect_status"] == "not_started"
+    assert result["retry_safe"] is True
+    assert "could not persist pyOCD action log" in result["audit_error"]["backend_error"]
+    assert overall_success(result) is False
