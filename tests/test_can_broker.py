@@ -311,11 +311,11 @@ def reaped_brokers(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[subprocess.
             child.kill()
 
 
-def shared_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **kwargs):
+def shared_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, config_version: int | None = None, **kwargs):
     from agentic_hil.config import load_authoritative_config
 
     workspace = tmp_path / "project"
-    write_authoritative_config(workspace, monkeypatch, can_buses_yaml=shared_bus_yaml(**kwargs))
+    write_authoritative_config(workspace, monkeypatch, config_version=config_version, can_buses_yaml=shared_bus_yaml(**kwargs))
     return load_authoritative_config(workspace)
 
 
@@ -783,6 +783,95 @@ def test_successful_send_is_queued_for_matching_peers_without_adapter_echo(tmp_p
     assert received["frames_read"] == 1
     assert received["frames"][0] == {"id": 0x101, "extended": False, "rtr": False, "data_hex": "aa", "frame_seq": sent["frame_seq"], "origin": "participant_tx", "delivery_status": "adapter_accepted"}
     assert seated["alpha"].queue == [], "the sender must not receive its own frame through broker fanout"
+
+
+def test_read_free_config_allows_shared_physical_and_peer_frames_without_share_read_grant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shares = (
+        "      alpha:\n"
+        "        max_frames: 16\n"
+        "        permissions:\n"
+        "          allow_read: false\n"
+        "          allow_write: true\n"
+        "      beta:\n"
+        "        max_frames: 16\n"
+        "        permissions:\n"
+        "          allow_read: false\n"
+        "          allow_write: true\n"
+    )
+    config = shared_config(tmp_path, monkeypatch, config_version=2, shares=shares)
+    broker, seated = _inprocess_broker(tmp_path, config)
+
+    class _Adapter:
+        def __init__(self) -> None:
+            self.pending = [{"id": 0x201, "extended": False, "rtr": False, "data_hex": "beef"}]
+
+        def send(self, frame: object) -> dict:
+            return {"ok": True, "backend": "recording"}
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            pending, self.pending = self.pending, []
+            return {"ok": True, "frames": pending}
+
+    broker.adapter_session = _Adapter()
+    physical = broker._handle_read(seated["alpha"], {"max_frames": 1, "wait_timeout_s": 0.0})
+    assert physical["ok"] is True, physical
+    assert physical["frames"][0]["origin"] == "adapter_rx"
+
+    sent = broker._handle_send(seated["alpha"], {"frame": canbroker.frame_to_wire(0x202, b"\x01")})
+    peer = broker._handle_read(seated["beta"], {"max_frames": 4, "wait_timeout_s": 0.0})
+    assert sent["ok"] is True, sent
+    assert peer["ok"] is True, peer
+    assert [(frame["id"], frame["origin"]) for frame in peer["frames"]] == [(0x201, "adapter_rx"), (0x202, "participant_tx")]
+
+
+def test_legacy_shared_read_denial_remains_enforced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shares = (
+        "      alpha:\n"
+        "        permissions:\n"
+        "          allow_read: false\n"
+        "          allow_write: true\n"
+        "      beta:\n"
+        "        permissions:\n"
+        "          allow_read: false\n"
+        "          allow_write: true\n"
+    )
+    config = shared_config(tmp_path, monkeypatch, config_version=1, shares=shares)
+    broker, seated = _inprocess_broker(tmp_path, config)
+
+    class _Adapter:
+        def send(self, frame: object) -> dict:
+            return {"ok": True, "backend": "recording"}
+
+    broker.adapter_session = _Adapter()
+    assert broker._handle_send(seated["alpha"], {"frame": canbroker.frame_to_wire(0x201, b"\x01")})["ok"] is True
+    assert seated["beta"].queue == []
+    denied = broker._handle_read(seated["beta"], {"max_frames": 1, "wait_timeout_s": 0.0})
+    assert denied["error_type"] == "permission_denied", denied
+
+
+def test_shared_broker_disables_adapter_own_message_reception_without_changing_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = shared_config(tmp_path, monkeypatch)
+    bus = dataclasses.replace(config.can_buses["bench"], receive_own_messages=True)
+    config = dataclasses.replace(config, can_buses={**config.can_buses, "bench": bus})
+    observed: dict[str, object] = {}
+
+    class _Adapter:
+        def close(self) -> dict:
+            return {"ok": True}
+
+    def open_adapter(config_arg, bus_id, bus_config, clear_rx_queue):
+        observed["bus_config"] = bus_config
+        return {"ok": True, "session": _Adapter()}
+
+    monkeypatch.setattr("agentic_hil.can.open_adapter", open_adapter)
+    broker, _ = _inprocess_broker(tmp_path, config)
+    opened = broker.open_bus()
+    try:
+        assert opened["ok"] is True, opened
+        assert bus.receive_own_messages is True, "the authoritative config remains intact"
+        assert observed["bus_config"].receive_own_messages is False
+    finally:
+        broker.shutdown()
 
 
 def test_a_returned_send_failure_gates_the_bus_and_aborts_every_participant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:

@@ -104,9 +104,12 @@ bus by each holding a participant connection, not by racing for the bus lock.
   frames carry `origin: participant_tx` and
   `delivery_status: adapter_accepted`. This confirms adapter acceptance only,
   not physical receipt or an ACK. Frames read from the adapter carry
-  `origin: adapter_rx` and `delivery_status: adapter_received`. A driver-marked
-  own-transmit echo is logged as an echo and suppressed, since the accepted TX
-  was already delivered to peers.
+  `origin: adapter_rx` and `delivery_status: adapter_received`. For a shared
+  bus the broker opens its adapter with own-message reception disabled, because
+  participant TX is already routed to peers and the SocketCAN receive flag does
+  not identify which local socket sent a frame. This does not change the
+  authoritative configuration; exclusive sessions keep their configured
+  `receive_own_messages` behavior.
 
 ## Phases
 

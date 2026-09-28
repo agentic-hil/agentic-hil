@@ -641,6 +641,13 @@ class CanBroker:
         self.bus_frame_log = str(Path(logs_directory(self.config)) / f"can-bus-{timestamp_for_filename()}-{safe_filename(self.bus_id, 'bus')}.jsonl")
         safe_append_text(self.bus_frame_log, "")
         adapter_config = self.bus_config
+        if self.bus_config.shares:
+            # The broker already routes each accepted participant TX to its
+            # matching peer views and excludes the sender. Asking a backend to
+            # receive its own transmissions could duplicate those frames, while
+            # SocketCAN's is_rx flag cannot distinguish this socket from another
+            # local sender. Keep the caller's authoritative config untouched.
+            adapter_config = replace(adapter_config, receive_own_messages=False)
         if self.bus_config.listen_only and self.bus_config.listen_only_enforcement == "service":
             # `service` listen-only is the broker declining to forward writes
             # (`_listen_only_conflict` already refuses any participant that may
@@ -650,7 +657,7 @@ class CanBroker:
             # bench configured for the documented weaker mode would fail to open
             # wherever that controller proof is unavailable, while its own status
             # already reports software filtering as what backs the claim.
-            adapter_config = replace(self.bus_config, listen_only=False)
+            adapter_config = replace(adapter_config, listen_only=False)
         opened = open_adapter(self.config, self.bus_id, adapter_config, False)
         if not opened.get("ok"):
             return {key: value for key, value in opened.items() if key != "session"}
@@ -1122,7 +1129,7 @@ class CanBroker:
         return {"ok": True, "message": "sent", "frame_seq": seq, "participant": attached.name, "frame": wire, "frames_used": attached.frames_used, "max_frames": attached.share.max_frames}
 
     def _handle_read(self, attached: _Attached, message: JsonObject) -> JsonObject:
-        if not attached.share.permissions.allow_read:
+        if not self.config.read_free and not attached.share.permissions.allow_read:
             return {"ok": False, "error_type": "permission_denied", "summary": "Reading this CAN bus is disabled for this participant by the authoritative config.", "bus_id": self.bus_id, "participant": attached.name, "retry_safe": False, "side_effect_committed": False}
         try:
             max_frames = int(message.get("max_frames") or 1)
@@ -1167,9 +1174,6 @@ class CanBroker:
         with self._guard:
             for frame in frames:
                 wire = {"id": int(frame["id"]), "extended": bool(frame["extended"]), "rtr": bool(frame["rtr"]), "data_hex": str(frame["data_hex"])}
-                if frame.get("origin") == "adapter_tx_echo":
-                    self._log_bus({"event": "adapter_tx_echo", "direction": "echo", "bus_id": self.bus_id, "frame": wire, "suppressed": True, "reason": "driver_confirmed_own_transmit_echo"})
-                    continue
                 self.frame_seq += 1
                 seq = self.frame_seq
                 delivered, overflowed = self._queue_frame_for_participants(wire, seq, origin="adapter_rx", delivery_status="adapter_received")
@@ -1183,7 +1187,7 @@ class CanBroker:
         delivered: list[str] = []
         overflowed: list[str] = []
         for name, item in sorted(self.participants.items()):
-            if name == sender or not item.share.permissions.allow_read or not filter_accepts(item.share, int(wire["id"]), bool(wire["extended"])):
+            if name == sender or not (self.config.read_free or item.share.permissions.allow_read) or not filter_accepts(item.share, int(wire["id"]), bool(wire["extended"])):
                 continue
             if item.abort is not None:
                 continue

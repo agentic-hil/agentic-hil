@@ -1213,10 +1213,7 @@ class PythonCanAdapterSession:
                 message = self.bus.recv(timeout=timeout)
                 if message is None:
                     break
-                frame = {"id": message.arbitration_id, "id_hex": f"0x{message.arbitration_id:x}", "extended": bool(message.is_extended_id), "rtr": bool(message.is_remote_frame), "data_hex": bytes(message.data).hex(), "dlc": int(message.dlc)}
-                if getattr(message, "is_rx", None) is False:
-                    frame["origin"] = "adapter_tx_echo"
-                frames.append(frame)
+                frames.append({"id": message.arbitration_id, "id_hex": f"0x{message.arbitration_id:x}", "extended": bool(message.is_extended_id), "rtr": bool(message.is_remote_frame), "data_hex": bytes(message.data).hex(), "dlc": int(message.dlc)})
             return {"ok": True, "backend": self.adapter_name, "frames": frames}
         except Exception as error:
             # recv() transmits nothing: a failed direct-adapter read proves no
@@ -2352,7 +2349,7 @@ def normalize_received_frames(raw_frames: object) -> list[JsonObject] | None:
             if not isinstance(frame_seq, int) or isinstance(frame_seq, bool) or frame_seq < 1:
                 return None
             frame["frame_seq"] = frame_seq
-        if raw.get("origin") in {"adapter_tx_echo", "participant_tx", "adapter_rx"}:
+        if raw.get("origin") in {"participant_tx", "adapter_rx"}:
             frame["origin"] = raw["origin"]
         if raw.get("delivery_status") in {"adapter_accepted", "adapter_received"}:
             frame["delivery_status"] = raw["delivery_status"]

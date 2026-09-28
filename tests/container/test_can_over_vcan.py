@@ -1366,8 +1366,9 @@ def test_doctor_with_the_can_extra_installed_names_no_missing_python_can(tmp_pat
     assert "python-can" not in json.dumps(result.get("warnings", [])), result
 
 
-def test_named_participant_sessions_share_one_vcan_and_read_each_others_frames(tmp_path: Path, vcan: str) -> None:
-    """Two broker views share one live SocketCAN adapter and retain independent sessions."""
+@pytest.mark.parametrize("share_read", [True, False])
+def test_named_participant_sessions_share_one_vcan_and_read_each_others_frames(tmp_path: Path, vcan: str, share_read: bool) -> None:
+    """Two broker views share one live SocketCAN adapter, including read-free config."""
     entry = f'''  bus:
     adapter: socketcan
     channel: {vcan!r}
@@ -1379,11 +1380,11 @@ def test_named_participant_sessions_share_one_vcan_and_read_each_others_frames(t
     shares:
       ecu_a:
         permissions:
-          allow_read: true
+          allow_read: {str(share_read).lower()}
           allow_write: true
       ecu_b:
         permissions:
-          allow_read: true
+          allow_read: {str(share_read).lower()}
           allow_write: true
 '''
     project, config = can_project(tmp_path, entry)
@@ -1406,6 +1407,12 @@ def test_named_participant_sessions_share_one_vcan_and_read_each_others_frames(t
         received_a = server.call("can_read", {"bus_id": "bus", "participant": "ecu_a", "wait_timeout_s": 1.0})
         assert received_a["ok"] is True, received_a
         assert received_a["frames"][0]["id"] == 0x321, received_a
+        send_from_far_end(peer, 0x222, b"\x02")
+        received_external = server.call("can_read", {"bus_id": "bus", "participant": "ecu_b", "wait_timeout_s": 1.0})
+        assert received_external["ok"] is True, received_external
+        assert received_external["frames"][0]["id"] == 0x222, received_external
+        assert received_external["frames"][0]["origin"] == "adapter_rx", received_external
+        assert received_external["frames"][0]["delivery_status"] == "adapter_received", received_external
         stopped_a = server.call("can_session_stop", {"bus_id": "bus", "participant": "ecu_a"})
         assert stopped_a["ok"] is True, stopped_a
         assert server.call("can_session_stop", {"bus_id": "bus", "participant": "ecu_b"})["ok"] is True
