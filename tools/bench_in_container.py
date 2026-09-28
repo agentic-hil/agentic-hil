@@ -23,7 +23,7 @@ A run, in order:
 * runs the tier in a container that normally gets the probe's device nodes,
   the machine's device locks and a directory of the run's own for its report.
   The opt-in `--live-device-tree` mode instead bind mounts host `/dev` read only
-  for USB re-enumeration stages; neither mode gives the container network,
+  for USB re-enumeration and pyOCD discovery-reset stages; neither mode gives the container network,
   capabilities or the host process table;
 * copies the report alone out of that directory, as a regular file and without
   following a link, into the output directory, which the container never sees;
@@ -1288,7 +1288,7 @@ def parse_options(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--live-device-tree",
         action="store_true",
-        help="For a re-enumeration stage only: bind the host /dev tree read-only (rootless Podman only).",
+        help="For USB re-enumeration or pyOCD rediscovery: bind host /dev read-only (rootless Podman only).",
     )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER, help="After --: handed to pytest, replacing tests/bench -v.")
     return parser.parse_args(argv)

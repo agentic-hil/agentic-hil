@@ -22,8 +22,10 @@ import yaml
 from agentic_hil.report import overall_success
 from tests.support import scaled_time_bound
 
+from . import usb_reset_support as usb
 from .conftest import BENCH_ONLY, DEMO_IMAGE, Bench, built_where_it_stands
 from .test_bench_faults import Server
+from .usb_reset_reenumeration import USB_SYSFS, USBFS_ROOT, VISIBILITY_TIMEOUT_S
 
 pytestmark = [pytest.mark.bench, BENCH_ONLY]
 
@@ -145,6 +147,8 @@ def product_diagnostics(result: dict) -> dict:
             "error_type",
             "backend_error_type",
             "target_ok",
+            "target_contacted",
+            "retry_safe",
             "audit_ok",
             "cleanup_ok",
             "cleanup_required",
@@ -155,6 +159,113 @@ def product_diagnostics(result: dict) -> dict:
             "verify",
             "reset_after_flash",
         )
+    }
+
+
+def safe_initial_usb_timeout(result: dict) -> bool:
+    """Accept only a complete, retry-safe pre-target ST-Link timeout result."""
+    if result.get("target_ok") is False or result.get("cleanup_ok") is False:
+        return False
+    if any(
+        result.get(key) != expected
+        for key, expected in (
+            ("ok", False),
+            ("tool", "debugger_probes_list"),
+            ("backend", "pyocd"),
+            ("error_type", "probe_discovery_failed"),
+            ("target_contacted", False),
+            ("retry_safe", True),
+            ("audit_ok", True),
+            ("cleanup_required", False),
+            ("quarantined", False),
+            ("side_effect_status", "not_started"),
+            ("hardware_state", "unchanged"),
+        )
+    ):
+        return False
+    if result.get("lease_state") not in {"active", "released"}:
+        return False
+    output = result.get("programmer_output")
+    stdout = output.get("stdout") if isinstance(output, dict) else None
+    returncode = output.get("returncode") if isinstance(output, dict) else None
+    if not isinstance(returncode, int) or isinstance(returncode, bool) or returncode == 0:
+        return False
+    if not isinstance(stdout, str) or not stdout.strip():
+        return False
+    try:
+        document = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(document, dict):
+        return False
+    error = document.get("error")
+    return (
+        isinstance(document.get("status"), int)
+        and not isinstance(document.get("status"), bool)
+        and document["status"] != 0
+        and isinstance(error, str)
+        and "USBTimeoutError" in error
+        and "Errno 110" in error
+        and "Operation timed out" in error
+    )
+
+
+def pyocd_discovery_after_usb_reset(
+    server: Server,
+    bench: Bench,
+    *,
+    expected_serial: str,
+    usb_identity: usb.USBDeviceIdentity,
+    private_values: tuple[str, ...],
+    record_property,
+) -> dict:
+    """Record same-process pyOCD discovery on both sides of one verified USB reset."""
+    initial_pid = server.pid
+    _, initial_result = server.call("debugger_probes_list")
+    initial_evidence = pyocd_result_evidence(bench, initial_result, private_values)
+    record_property(
+        "pyocd_discovery_before_usb_reset_v1",
+        json.dumps(initial_evidence, sort_keys=True, separators=(",", ":")),
+    )
+    if initial_result.get("ok") is not True and not safe_initial_usb_timeout(initial_result):
+        require_success(initial_result, "initial debugger_probes_list", initial_evidence)
+        pytest.fail("initial pyOCD discovery failed without a complete safe USB timeout result", pytrace=False)
+    if initial_result.get("ok") is True:
+        require_success(initial_result, "initial debugger_probes_list", initial_evidence)
+
+    if server.pid != initial_pid or server.process.poll() is not None:
+        pytest.fail("the pyOCD MCP process exited before the USB reset diagnostic", pytrace=False)
+    usb.reset_usb_device(usb_identity)
+    usb.wait_for_usb_device(
+        sysfs_root=USB_SYSFS,
+        device_root=USBFS_ROOT,
+        expected_serial=expected_serial,
+        expected_vid=usb_identity.vid,
+        expected_pid=usb_identity.pid,
+        timeout_s=VISIBILITY_TIMEOUT_S,
+    )
+    if server.pid != initial_pid or server.process.poll() is not None:
+        pytest.fail("the same pyOCD MCP process did not remain live after the USB reset", pytrace=False)
+
+    _, after_result = server.call("debugger_probes_list")
+    after_evidence = pyocd_result_evidence(bench, after_result, private_values)
+    record_property(
+        "pyocd_discovery_after_usb_reset_v1",
+        json.dumps(after_evidence, sort_keys=True, separators=(",", ":")),
+    )
+    require_success(after_result, "debugger_probes_list after USB reset", after_evidence)
+    after_ids = {
+        str(item.get("probe_id") or "").casefold()
+        for item in after_result.get("probes", [])
+        if isinstance(item, dict)
+    }
+    if expected_serial.casefold() not in after_ids:
+        pytest.fail("pyOCD did not rediscover the configured probe after USB reset", pytrace=False)
+    return {
+        "initial": initial_evidence,
+        "after": after_evidence,
+        "mcp_process_same": True,
+        "usb_identity_reappeared": True,
     }
 
 
@@ -203,6 +314,139 @@ def read_boot_banner(server: Server, port_id: str, timeout_s: float = 15.0) -> s
         fragments.append(fragment)
         collected = "".join(fragments)
     return collected
+
+
+def test_pyocd_discovery_recovers_after_verified_usb_reset(bench: Bench, tmp_path: Path, record_property) -> None:
+    """Prove same-server pyOCD listing after a targeted usbfs reset, without target actions."""
+    build_error = built_where_it_stands(bench.project)
+    if build_error is not None:
+        pytest.fail("the bench image build prerequisite failed", pytrace=False)
+    executable, pyocd_version, pack_version = pyocd_provenance(pyocd_bench_environment(bench))
+    source_commit = os.environ.get("AGENTIC_HIL_BENCH_COMMIT")
+    run_id = os.environ.get("AGENTIC_HIL_BENCH_RUN_ID")
+    if source_commit is not None:
+        assert re.fullmatch(r"[0-9a-f]{40}", source_commit), source_commit
+    if run_id is not None:
+        assert re.fullmatch(r"[A-Za-z0-9_.-]+", run_id), run_id
+    record_property(
+        "pyocd_discovery_reset_recording_v1",
+        json.dumps(
+            {
+                "schema": RECORDING_SCHEMA,
+                "source_commit": source_commit,
+                "run_id": run_id,
+                "backend": "pyocd",
+                "scenario": "probe-discovery-after-verified-usb-reset",
+                "executable": executable,
+                "pyocd_version": pyocd_version,
+                "cmsis_pack": {"id": PACK_ID, "version": pack_version, "target_type": TARGET_TYPE},
+                "target_action_requested": False,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    debugger_id = bench.debugger_name()
+    ports = sorted(bench.configuration().get("com_ports") or {})
+    if not ports:
+        pytest.fail("the pyOCD USB reset diagnostic needs the probe's configured UART entry", pytrace=False)
+    port_id = ports[0]
+    variant = bench.config_root / "bench-pyocd-discovery-reset.yaml"
+    if variant.exists():
+        pytest.fail("refusing to overwrite an existing fixture config", pytrace=False)
+    variant.resolve().relative_to(bench.config_root.resolve())
+    original_config = bench.config.read_bytes()
+    document = bench.configuration()
+    debugger = document["debuggers"][debugger_id]
+    debugger["type"] = "pyocd"
+    debugger["executable"] = executable
+    debugger["target_type"] = TARGET_TYPE
+    debugger.pop("interface_cfg", None)
+    debugger.pop("target_cfg", None)
+    variant.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    variant_bench = PyOcdBench(replace(bench, config=variant))
+    server = Server(variant_bench, tmp_path / "pyocd-discovery-reset-mcp.stderr")
+    run_open = False
+    private_values = (
+        str(debugger.get("probe_id") or ""),
+        str(document["com_ports"][port_id].get("device") or ""),
+        str(bench.project),
+        bench.project.as_posix(),
+        str(bench.config_root),
+        bench.config_root.as_posix(),
+        str(bench.state_root),
+        bench.state_root.as_posix(),
+        str(Path.home()),
+        Path.home().as_posix(),
+    )
+    try:
+        server.greet()
+        _, info = server.call("debugger_info")
+        info_evidence = pyocd_result_evidence(bench, info, private_values)
+        record_property("pyocd_discovery_debugger_info_v1", json.dumps(info_evidence, sort_keys=True, separators=(",", ":")))
+        require_success(info, "debugger_info before discovery reset", info_evidence)
+        assert info.get("backend") == "pyocd", info_evidence
+        assert info.get("target_type") == TARGET_TYPE, info_evidence
+        assert isinstance(info.get("version"), str) and pyocd_version in info["version"], info_evidence
+
+        _, opened = server.call(
+            "bench_run_start",
+            {
+                "devices": [
+                    {"kind": "debugger", "id": debugger_id},
+                    {"kind": "uart", "id": port_id},
+                ],
+                "label": "pyocd-discovery-usb-reset-diagnostic",
+            },
+        )
+        require_success(opened, "bench_run_start for pyOCD discovery reset")
+        run_open = True
+
+        _, uart_listing = server.call("com_ports_list")
+        require_success(uart_listing, "com_ports_list before pyOCD discovery reset")
+        serial = str(debugger.get("probe_id") or "")
+        available = uart_listing.get("available_com_ports")
+        available_ports = available.get("ports") if isinstance(available, dict) else None
+        matches = [
+            item
+            for item in (available_ports if isinstance(available_ports, list) else [])
+            if isinstance(item, dict)
+            and str(item.get("serial_number") or "").casefold() == serial.casefold()
+            and isinstance(item.get("vid"), int)
+            and isinstance(item.get("pid"), int)
+        ]
+        if len(matches) != 1 or not serial:
+            pytest.fail("the UART inventory did not uniquely identify the configured probe", pytrace=False)
+        port_identity = matches[0]
+        usb_identity = usb.find_usb_device(
+            sysfs_root=USB_SYSFS,
+            device_root=USBFS_ROOT,
+            expected_serial=serial,
+            expected_vid=port_identity["vid"],
+            expected_pid=port_identity["pid"],
+        )
+        pyocd_discovery_after_usb_reset(
+            server,
+            bench,
+            expected_serial=serial,
+            usb_identity=usb_identity,
+            private_values=private_values,
+            record_property=record_property,
+        )
+    finally:
+        try:
+            if run_open and server.process.poll() is None:
+                stopped = server.try_call("bench_run_stop")
+                if not isinstance(stopped, dict) or stopped.get("ok") is not True:
+                    pytest.fail("Agentic HIL could not close the pyOCD discovery run", pytrace=False)
+        finally:
+            try:
+                server.close()
+            finally:
+                if bench.config.read_bytes() != original_config:
+                    pytest.fail("the original bench fixture config was modified", pytrace=False)
+                variant.unlink(missing_ok=True)
 
 
 def test_pyocd_f446re_probe_flash_reset_and_uart_recording(bench: Bench, tmp_path: Path, record_property) -> None:

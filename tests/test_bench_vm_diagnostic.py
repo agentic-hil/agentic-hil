@@ -261,12 +261,18 @@ def test_usb_reset_reenumeration_is_an_opt_in_stage_after_all_other_gates():
     assert usb["run"].endswith("-- tests/bench/usb_reset_reenumeration.py")
     assert "--cubeprogrammer-archive" not in usb["run"]
 
-    other_bench_runs = [
+    live_tree_runs = [
         step
         for step in steps
         if "bench_in_container.py" in step.get("run", "")
-        and "tests/bench/usb_reset_reenumeration.py" not in step.get("run", "")
+        and any(
+            module in step.get("run", "")
+            for module in ("tests/bench/usb_reset_reenumeration.py", "tests/bench/pyocd_recordings.py")
+        )
     ]
+    assert len(live_tree_runs) == 2
+    assert all("--live-device-tree" in step["run"] for step in live_tree_runs)
+    other_bench_runs = [step for step in steps if "bench_in_container.py" in step.get("run", "") and step not in live_tree_runs]
     assert other_bench_runs
     assert all("--live-device-tree" not in step["run"] for step in other_bench_runs)
 
@@ -302,6 +308,8 @@ def test_pyocd_recordings_are_an_independent_opt_in_stage_before_cube_and_usb():
     assert "--source ../under-test" in pyocd["run"]
     assert "--expected-commit" in pyocd["run"]
     assert '--output "$BENCH_RESULTS/pyocd"' in pyocd["run"]
+    assert "--runtime podman" in pyocd["run"]
+    assert "--live-device-tree" in pyocd["run"]
     assert pyocd["run"].endswith("-- tests/bench/pyocd_recordings.py")
     assert "--cubeprogrammer-archive" not in pyocd["run"]
 

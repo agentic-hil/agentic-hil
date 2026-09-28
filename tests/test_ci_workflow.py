@@ -974,6 +974,30 @@ def test_every_gate_stage_writes_under_the_one_run_scoped_upload_root() -> None:
         assert '--output "$BENCH_RESULTS' in step["run"], step
 
 
+def test_pyocd_recording_stage_gets_live_device_tree_for_bounded_usb_reset_diagnostic() -> None:
+    """Only stages that request USB re-enumeration receive the live device tree."""
+    runner_steps = {
+        step["name"]: step
+        for step in gate_job()["steps"]
+        if "bench_in_container.py" in step.get("run", "")
+    }
+    pyocd = runner_steps["Run pyOCD hardware recordings"]
+    usb_reset = runner_steps["Run USB reset and re-enumeration recording"]
+    default_tier = runner_steps["Run the bench tier in its container"]
+    cube = runner_steps["Run CubeProgrammer hardware recordings"]
+
+    for step in (pyocd, usb_reset):
+        command = shlex.split(run_lines({"steps": [step]})[0])
+        assert command[command.index("--runtime") + 1] == "podman", command
+        assert "--live-device-tree" in command, command
+    for step in (default_tier, cube):
+        command = shlex.split(run_lines({"steps": [step]})[0])
+        assert "--live-device-tree" not in command, command
+
+    assert "tests/bench/pyocd_recordings.py" in pyocd["run"]
+    assert "tests/bench/usb_reset_reenumeration.py" in usb_reset["run"]
+
+
 def test_run_attempt_scopes_upload_away_from_stale_skipped_stage_artifacts(tmp_path: Path) -> None:
     """A self-hosted workspace may retain an earlier run's optional stage folders."""
     job = gate_job()
