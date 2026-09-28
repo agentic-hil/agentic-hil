@@ -810,22 +810,38 @@ def test_without_a_wait_the_capture_waits_the_default_rather_than_not_at_all(tmp
         service.close()
 
 
-def test_without_until_the_capture_reads_until_max_bytes_and_the_report_keeps_the_default_wait(tmp_path: Path, board: Board) -> None:
+def test_without_until_the_capture_reads_until_max_bytes_and_the_report_keeps_the_default_wait(
+    tmp_path: Path, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """With nothing to match, the capture answers when `max_bytes` are buffered
     or the wait is over, not at the first fragment of a banner. The wait in
     force is in the report for every capture, `until` or not; the answer does
     not repeat it."""
     config = config_for(tmp_path)
     service, backend = service_for(config, board)
-    try:
+    read_observations: list[tuple[float, float]] = []
+    read_until = service.com_ports._read_until
+
+    def time_read_until(session, port_id, tool, max_bytes, wait_s, until):
         started = time.monotonic()
+        try:
+            return read_until(session, port_id, tool, max_bytes, wait_s, until)
+        finally:
+            read_observations.append((wait_s, time.monotonic() - started))
+
+    monkeypatch.setattr(service.com_ports, "_read_until", time_read_until)
+    try:
         result = service.call("flash_firmware", flash_args(tmp_path, max_bytes=len(BANNER)))
-        elapsed = time.monotonic() - started
 
         assert result["ok"] is True, result
         capture = capture_of(result)
         assert capture["data"] == data_result(BANNER, "utf-8"), capture
         assert "until_wait_s" not in capture, capture
+        # Time the read itself; durable run and report writes can take seconds
+        # on a Windows runner and say nothing about when max_bytes ended it.
+        assert len(read_observations) == 1, read_observations
+        wait_s, elapsed = read_observations[0]
+        assert wait_s == 10.0, read_observations
         assert elapsed < scaled_time_bound(4.0), elapsed
         report = service.call("get_last_report")["report"]
         assert report["capture"]["until_wait_s"] == 10.0, report["capture"]
