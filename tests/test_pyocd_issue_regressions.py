@@ -259,3 +259,51 @@ def test_zero_exit_probe_discovery_parse_refusal_still_propagates_log_audit_fail
     assert result["retry_safe"] is True
     assert "could not persist pyOCD action log" in result["audit_error"]["backend_error"]
     assert overall_success(result) is False
+
+
+def test_recorded_stlink_usb_timeout_replays_as_not_contacted_probe_discovery_failure(
+    backend: PyOCDBackend,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Replay the actual pyOCD USB-timeout transcript from the hosted VM capture."""
+    from agentic_hil.backends.common import CompletedCommand
+
+    fixture_path = Path(__file__).parent / "fixtures" / "pyocd_probe_discovery_usb_timeout_recording.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    recording = fixture["recording"]
+    assert recording["command"].endswith("pyocd json --probes --no-config")
+    assert recording["returncode"] == 1
+    executable = tmp_path / "pyocd.exe"
+    monkeypatch.setattr(backend, "_resolve_executable", lambda: {"ok": True, "executable_path": str(executable), "executable": str(executable)})
+    monkeypatch.setattr(
+        "agentic_hil.backends.pyocd.spawn_command",
+        lambda *args, **kwargs: CompletedCommand(
+            stdout=recording["stdout"],
+            stderr=recording["stderr"],
+            returncode=recording["returncode"],
+            timed_out=recording["timed_out"],
+            not_found=False,
+        ),
+    )
+
+    result = backend._enumerate_probes("debugger_probes_list")
+
+    assert result["ok"] is False
+    assert result["error_type"] == recording["result"]["error_type"]
+    assert result["summary"] == recording["result"]["summary"]
+    assert result["target_contacted"] is False
+    assert result["side_effect_status"] == "not_started"
+    assert result["hardware_state"] == "unchanged"
+    assert result["retry_safe"] is True
+    assert result["programmer_output"] == {
+        "stdout": recording["stdout"],
+        "stderr": recording["stderr"],
+        "returncode": recording["returncode"],
+    }
+    action_log = json.loads((Path(backend.config.workspace_root) / result["log_path"]).read_text(encoding="utf-8"))
+    assert action_log["command"].endswith("json --probes --no-config")
+    assert action_log["returncode"] == recording["returncode"]
+    assert action_log["timed_out"] is recording["timed_out"]
+    assert action_log["stdout"] == recording["stdout"]
+    assert action_log["stderr"] == recording["stderr"]

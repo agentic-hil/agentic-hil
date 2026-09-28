@@ -1,0 +1,29 @@
+{
+  "schema": "agentic-hil.pyocd-probe-discovery-recording/v1",
+  "provenance": {
+    "recorded_on": "2026-09-28",
+    "run_id": 36450978478,
+    "source_commit": "3cbdb087a7b8f963115b8cb0de0dfd213d5d44d3",
+    "tool": "pyOCD 0.45.1",
+    "capture_source": "JUnit testcase property pyocd_probe_result_v1; raw output copied from action_log and cross-checked byte-for-byte against programmer_output",
+    "operation": "probe_target called preliminary pyocd json --probes --no-config; probe discovery only",
+    "hardware_scope": "Target was not contacted; no flash or reset was requested. The captured USBTimeoutError is not an SWD No ACK result.",
+    "redactions": []
+  },
+  "recording": {
+    "command": "/work/.venv/bin/pyocd json --probes --no-config",
+    "returncode": 1,
+    "timed_out": false,
+    "stdout": "{\n    \"pyocd_version\": \"0.45.1\",\n    \"version\": {\n        \"major\": 1,\n        \"minor\": 0\n    },\n    \"status\": 1,\n    \"error\": \"Error occurred during processing.\\nTraceback (most recent call last):\\n  File \\\"/work/.venv/lib/python3.12/site-packages/pyocd/probe/stlink/usb.py\\\", line 259, in transfer\\n    data = self._read(readSize)\\n           ^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/work/.venv/lib/python3.12/site-packages/pyocd/probe/stlink/usb.py\\\", line 230, in _read\\n    data = self._ep_in.read(read_size, timeout)\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/work/.venv/lib/python3.12/site-packages/usb/core.py\\\", line 431, in read\\n    return self.device.read(self, size_or_buffer, timeout)\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/work/.venv/lib/python3.12/site-packages/usb/core.py\\\", line 1043, in read\\n    ret = fn(\\n          ^^^\\n  File \\\"/work/.venv/lib/python3.12/site-packages/usb/backend/libusb1.py\\\", line 850, in bulk_read\\n    return self.__read(self.lib.libusb_bulk_transfer,\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/work/.venv/lib/python3.12/site-packages/usb/backend/libusb1.py\\\", line 958, in __read\\n    _check(retval)\\n  File \\\"/work/.venv/lib/python3.12/site-packages/usb/backend/libusb1.py\\\", line 602, in _check\\n    raise USBTimeoutError(_strerror(ret), ret, _libusb_errno[ret])\\nusb.core.USBTimeoutError: [Errno 110] Operation timed out\\n\\nThe above exception was the direct cause of the following exception:\\n\\nTraceback (most recent call last):\\n  File \\\"/work/.venv/lib/python3.12/site-packages/pyocd/subcommands/json_cmd.py\\\", line 109, in invoke\\n    obj = ListGenerator.list_probes()\\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/work/.venv/lib/python3.12/site-packages/pyocd/tools/lists.py\\\", line 66, in list_probes\\n    board_info = probe.associated_board_info\\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/work/.venv/lib/python3.12/site-packages/pyocd/probe/stlink_probe.py\\\", line 142, in associated_board_info\\n    if (self.board_id is not None) and (self.board_id in BOARD_ID_TO_INFO):\\n        ^^^^^^^^^^^^^\\n  File \\\"/work/.venv/lib/python3.12/site-packages/pyocd/probe/stlink_probe.py\\\", line 73, in board_id\\n    self._board_id = self._get_board_id()\\n                     ^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/work/.venv/lib/python3.12/site-packages/pyocd/probe/stlink_probe.py\\\", line 79, in _get_board_id\\n    board_id = self._link.get_board_id()\\n               ^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/work/.venv/lib/python3.12/site-packages/pyocd/probe/stlink/stlink.py\\\", line 136, in get_board_id\\n    self.open()\\n  File \\\"/work/.venv/lib/python3.12/site-packages/pyocd/probe/stlink/stlink.py\\\", line 115, in open\\n    self.enter_idle()\\n  File \\\"/work/.venv/lib/python3.12/site-packages/pyocd/probe/stlink/stlink.py\\\", line 259, in enter_idle\\n    response = self._device.transfer([Commands.GET_CURRENT_MODE], readSize=2)\\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/work/.venv/lib/python3.12/site-packages/pyocd/probe/stlink/usb.py\\\", line 270, in transfer\\n    raise exceptions.ProbeError(\\\"USB Error: %s\\\" % exc) from exc\\npyocd.core.exceptions.ProbeError: USB Error: [Errno 110] Operation timed out\\n\"\n}\n",
+    "stderr": "",
+    "result": {
+      "ok": false,
+      "error_type": "probe_discovery_failed",
+      "summary": "pyOCD probe discovery command failed: pyocd.core.exceptions.ProbeError: USB Error: [Errno 110] Operation timed out",
+      "hardware_state": "unchanged",
+      "side_effect_status": "not_started",
+      "lease_state": "released",
+      "audit_ok": true
+    }
+  }
+}
