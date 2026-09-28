@@ -277,6 +277,26 @@ def test_the_ledger_is_kept_for_run_tests_alone() -> None:
     assert "runner.temp" in str(run_tests["env"][LEDGER_VARIABLE]), run_tests["env"]
 
 
+def test_the_suite_sandbox_temp_root_is_set_only_for_run_tests() -> None:
+    """The autouse fixture follows tempfile's root on Windows; POSIX keeps /tmp."""
+    temp_variables = ("TEMP", "TMP", "TMPDIR")
+    workflow = workflow_document(WORKFLOW)
+    carriers = [
+        (job_name, step.get("name"), variable)
+        for job_name, job in workflow["jobs"].items()
+        for step in job.get("steps", [])
+        for variable in temp_variables
+        if variable in (step.get("env") or {})
+    ]
+    run_tests = next(step for step in matrix_steps() if step.get("name") == "Run tests")
+
+    assert carriers == [("test", "Run tests", variable) for variable in temp_variables], carriers
+    assert all(run_tests["env"][variable] == "${{ runner.temp }}" for variable in temp_variables), run_tests["env"]
+    assert not any(variable in (workflow.get("env") or {}) for variable in temp_variables)
+    for job_name, job in workflow["jobs"].items():
+        assert not any(variable in (job.get("env") or {}) for variable in temp_variables), job_name
+
+
 def test_the_ledger_is_read_after_run_tests_fails() -> None:
     """The step that names the tests a leg ran out of time on runs on a failure.
 

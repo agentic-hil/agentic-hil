@@ -50,6 +50,23 @@ temp placement improvement, but do not explain the full-suite Windows cost. CI a
 uploads a per-test JUnit timing report for each OS/Python leg so future full
 runs can compare every testcase, beyond the thirty slowest printed in the log.
 
+The seven-test follow-up kept pytest's base under `runner.temp` on D: in both
+conditions, then moved Windows' `TEMP`, `TMP` and `TMPDIR` there for the second
+condition. The autouse fixture in `tests/conftest.py` resolves its sandbox
+parent from `tempfile.gettempdir()` on Windows, so this moved per-test HOME,
+config, state and sandbox I/O from C: to D:. The summed `test_total` durations
+were 15.449/15.225 seconds with the default sandbox root and 11.322/11.343
+with the D: root. Across 706 atomic writes, recorded `atomic_write_bytes`
+time was 4.661/4.555 versus 1.074/1.002 seconds. Across 713 `fsync` calls,
+time was 3.500/3.355 versus 0.247/0.200 seconds. Recorded MI stop waits were
+4.384/4.367 versus 4.417/4.469 seconds. Overall pytest wall time varied
+between 8.71/11.73 and 9.86/9.84 seconds, so the sample supports moving this
+selected suite's durable sandbox writes onto the runner temp volume; it does
+not claim a full-suite speedup. The paired [diagnostic run](https://github.com/agentic-hil/agentic-hil/actions/runs/36368993253)
+records the Windows drive letters and phase timings. POSIX still anchors the
+fixture sandbox at `/tmp` and is not redirected by this Windows-specific
+measurement.
+
 `AGENTIC_HIL_TEST_TIME_SCALE` multiplies every wall-clock bound the suite takes
 through `scaled_time_bound` by one factor, accepted from 1.0 to 100 and left at
 1.0 while the variable is unset, so a machine that is busy with something else

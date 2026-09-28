@@ -113,6 +113,9 @@ jobs:
         timeout-minutes: 40
         env:
           AGENTIC_HIL_TEST_LEDGER: ${{ runner.temp }}/suite-ledger
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
         run: >-
           pytest -n auto --durations=30
           --basetemp "${{ runner.temp }}/pytest-basetemp-${{ matrix.os }}-${{ matrix.python-version }}"
