@@ -38,7 +38,6 @@ id in front of it.
 
 from __future__ import annotations
 
-import posixpath
 import re
 import shlex
 import sys
@@ -754,8 +753,9 @@ GATE_RUNNER = "tools/bench_in_container.py"
 # Where the report and the log land, as the run steps say and the upload reads:
 # the tier's in the directory itself, the stage's without the device group in a
 # directory of its own inside it.
-GATE_RESULTS = "bench-results"
+GATE_RESULTS = "$BENCH_RESULTS"
 GATE_STAGE_RESULTS = f"{GATE_RESULTS}/without-device-group"
+GATE_UPLOAD_RESULTS = "${{ env.BENCH_RESULTS }}/"
 
 
 def gate_job() -> dict:
@@ -867,8 +867,8 @@ def test_the_gate_runs_the_runner_and_nothing_else() -> None:
         for word in ("pip", "agentic-hil", "podman", "docker", "sudo"):
             assert word not in command, command
     source_args = ["--source", "../under-test", "--expected-commit", "$(git -C ../under-test rev-parse HEAD)"]
-    assert tier[3:] == [*source_args, "--output", f"../{GATE_RESULTS}"], tier
-    assert stage[3:] == [*source_args, "--without-device-group", "--output", f"../{GATE_STAGE_RESULTS}"], stage
+    assert tier[3:] == [*source_args, "--output", GATE_RESULTS], tier
+    assert stage[3:] == [*source_args, "--without-device-group", "--output", GATE_STAGE_RESULTS], stage
 
 
 def test_the_stage_without_the_device_group_runs_after_the_tier_unless_the_run_was_cancelled() -> None:
@@ -948,23 +948,67 @@ def test_the_gate_uploads_the_tiers_report_whatever_the_run_did() -> None:
     assert len(upload) == 1, upload
     assert "always()" in upload[0]["if"]
     assert "!inputs.diagnose_only" in upload[0]["if"]
-    assert upload[0]["with"]["path"].strip() == f"{GATE_RESULTS}/"
+    assert upload[0]["with"]["path"].strip() == GATE_UPLOAD_RESULTS
     assert upload[0]["with"]["if-no-files-found"] == "warn"
     assert upload[0]["with"]["retention-days"] == 14
 
 
-def test_the_gate_uploads_the_stages_report_beside_the_tiers() -> None:
-    """Each run step writes where the one upload reads, and neither over the other.
-
-    The runner clears a report and a log out of the directory it is given, so
-    the stage writing into the tier's own directory would delete the tier's.
-    """
+def test_every_gate_stage_writes_under_the_one_run_scoped_upload_root() -> None:
+    """Each selected stage writes beneath the unique root the upload reads."""
     uploaded = next(step for step in gate_job()["steps"] if "upload-artifact" in str(step.get("uses", "")))["with"]["path"].strip()
-    landed = []
-    for step in gate_run_steps():
+    assert uploaded == GATE_UPLOAD_RESULTS
+    expected = {
+        "Run the bench tier in its container": GATE_RESULTS,
+        "Run the stage without the probe's device group": GATE_STAGE_RESULTS,
+        "Run pyOCD hardware recordings": f"{GATE_RESULTS}/pyocd",
+        "Run CubeProgrammer hardware recordings": f"{GATE_RESULTS}/cubeprogrammer",
+        "Run USB reset and re-enumeration recording": f"{GATE_RESULTS}/usb-reset",
+    }
+    runner_steps = [
+        step for step in gate_job()["steps"] if "bench_in_container.py" in step.get("run", "")
+    ]
+    assert {step["name"] for step in runner_steps} == set(expected)
+    for step in runner_steps:
         command = shlex.split(run_lines({"steps": [step]})[0])
-        written = posixpath.normpath(posixpath.join(step["working-directory"], command[command.index("--output") + 1]))
-        assert f"{written}/".startswith(uploaded), (written, uploaded)
-        landed.append(written)
+        assert command[command.index("--output") + 1] == expected[step["name"]], command
+        assert '--output "$BENCH_RESULTS' in step["run"], step
 
-    assert landed == [GATE_RESULTS, GATE_STAGE_RESULTS], landed
+
+def test_run_attempt_scopes_upload_away_from_stale_skipped_stage_artifacts(tmp_path: Path) -> None:
+    """A self-hosted workspace may retain an earlier run's optional stage folders."""
+    job = gate_job()
+    root_template = job.get("env", {}).get("BENCH_RESULTS")
+    assert root_template == "${{ github.workspace }}/bench-results/${{ github.run_id }}-${{ github.run_attempt }}"
+    upload = next(step for step in job["steps"] if "upload-artifact" in str(step.get("uses", "")))
+    assert upload["with"]["path"].strip() == GATE_UPLOAD_RESULTS
+
+    workspace = tmp_path / "workspace"
+
+    def run_root(run_id: str, run_attempt: str) -> Path:
+        expanded = (
+            root_template.replace("${{ github.workspace }}", str(workspace))
+            .replace("${{ github.run_id }}", run_id)
+            .replace("${{ github.run_attempt }}", run_attempt)
+        )
+        return Path(expanded)
+
+    run_id = "36446424113"
+    current_root = run_root(run_id, "2")
+    stale_roots = (run_root("36442634601", "1"), run_root(run_id, "1"))
+    upload_path = Path(upload["with"]["path"].strip().replace("${{ env.BENCH_RESULTS }}", str(current_root)).rstrip("/\\"))
+    stale_usb_files = []
+    for stale_root in stale_roots:
+        stale_usb = stale_root / "usb-reset" / "bench-junit.xml"
+        stale_usb.parent.mkdir(parents=True)
+        stale_usb.write_text("old skipped USB stage", encoding="utf-8")
+        stale_usb_files.append(stale_usb)
+    current_root.mkdir(parents=True)
+    current_standard = current_root / "bench-junit.xml"
+    current_standard.write_text("current standard stage", encoding="utf-8")
+
+    published = sorted(path.relative_to(upload_path).as_posix() for path in upload_path.rglob("*"))
+    assert published == ["bench-junit.xml"]
+    assert upload_path == current_root
+    assert run_root(run_id, "1") != current_root
+    assert run_root("36442634601", "1") != current_root
+    assert all(stale_usb.exists() and upload_path not in stale_usb.parents for stale_usb in stale_usb_files)

@@ -207,20 +207,24 @@ gh workflow run bench-gate.yml -f ref=<commit, branch or tag> -f run_pyocd_recor
 
 The ordinary tier and the stage without the probe's device group run first.
 Then the requested recordings run in this order, each in its own container
-invocation and only while all earlier stages have succeeded. The pyOCD stage
-uses the ordinary bench image and writes to `bench-results/pyocd`; it does not
-need the optional CubeProgrammer archive. The CubeProgrammer stage runs its
-probe, flash, reset and capture recordings and writes to
-`bench-results/cubeprogrammer`. It uses the pinned archive already in the
-runner's user-local cache; the workflow does not install the host toolchain.
-The build-time smoke check is not evidence of a hardware recording run.
+invocation and only while all earlier stages have succeeded. Every workflow
+attempt writes under `bench-results/<run-id>-<attempt>/`, and the upload reads
+only that directory. This keeps a skipped optional stage from publishing a
+report left by an earlier run in the persistent self-hosted workspace. The
+pyOCD stage uses the ordinary bench image and writes to the attempt's `pyocd`
+subdirectory; it does not need the optional CubeProgrammer archive. The
+CubeProgrammer stage runs its probe, flash, reset and capture recordings and
+writes to the attempt's `cubeprogrammer` subdirectory. It uses the pinned
+archive already in the runner's user-local cache; the workflow does not install
+the host toolchain. The build-time smoke check is not evidence of a hardware
+recording run.
 
 The USB stage requests targeted `USBDEVFS_RESET` on the verified ST-Link node
 inside the existing unprivileged container, through the same MCP server and
 bench run. It uses no `sudo` or privileged container. A reset request does not
 guarantee a physical USB disconnect. The report records whether enumeration
 changes were observed; it is not proof of a physical disconnect or of UART
-reopening. Its report is under `bench-results/usb-reset`.
+reopening. Its report is under the attempt's `usb-reset` subdirectory.
 
 The runner script is checked out from the branch the workflow is dispatched
 from, the default branch unless `--ref` names another, and the named commit

@@ -219,7 +219,7 @@ def test_cubeprogrammer_recordings_are_an_opt_in_step_after_the_standard_gates()
     assert cube["working-directory"] == "under-test"
     assert "--cubeprogrammer-archive" in cube["run"]
     assert "$HOME/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip" in cube["run"]
-    assert "--output ../bench-results/cubeprogrammer" in cube["run"]
+    assert '--output "$BENCH_RESULTS/cubeprogrammer"' in cube["run"]
     assert "-- tests/bench/cubeprogrammer_recordings.py" in cube["run"]
 
     standard = [step for step in bench_steps if step.get("name") in {"Run the bench tier in its container", "Run the stage without the probe's device group"}]
@@ -255,7 +255,7 @@ def test_usb_reset_reenumeration_is_an_opt_in_stage_after_all_other_gates():
     assert "bench_in_container.py" in usb["run"]
     assert "--source ../under-test" in usb["run"]
     assert "--expected-commit" in usb["run"]
-    assert "--output ../bench-results/usb-reset" in usb["run"]
+    assert '--output "$BENCH_RESULTS/usb-reset"' in usb["run"]
     assert usb["run"].endswith("-- tests/bench/usb_reset_reenumeration.py")
     assert "--cubeprogrammer-archive" not in usb["run"]
 
@@ -290,7 +290,7 @@ def test_pyocd_recordings_are_an_independent_opt_in_stage_before_cube_and_usb():
     assert "bench_in_container.py" in pyocd["run"]
     assert "--source ../under-test" in pyocd["run"]
     assert "--expected-commit" in pyocd["run"]
-    assert "--output ../bench-results/pyocd" in pyocd["run"]
+    assert '--output "$BENCH_RESULTS/pyocd"' in pyocd["run"]
     assert pyocd["run"].endswith("-- tests/bench/pyocd_recordings.py")
     assert "--cubeprogrammer-archive" not in pyocd["run"]
 

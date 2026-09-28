@@ -94,6 +94,11 @@ jobs:
     # The tier takes minutes on the board, and a build with a cold cache adds
     # more. The limit is margin, not an estimate.
     timeout-minutes: 60
+    # Self-hosted workspaces persist between jobs. Isolate reports and logs by
+    # workflow run and retry attempt so an always-upload step cannot publish a
+    # skipped stage's evidence from an earlier run.
+    env:
+      BENCH_RESULTS: ${{ github.workspace }}/bench-results/${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Check out the runner this workflow was dispatched with
@@ -138,7 +143,7 @@ jobs:
       - name: Run the bench tier in its container
         if: ${{ !inputs.diagnose_only }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output ../bench-results
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS"
 
       # The one stage the tier cannot hold: the probe attached and this user not
       # allowed to open it, as on a Linux account that has not joined the group
@@ -152,7 +157,7 @@ jobs:
       - name: Run the stage without the probe's device group
         if: ${{ !cancelled() && !inputs.diagnose_only }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --without-device-group --output ../bench-results/without-device-group
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --without-device-group --output "$BENCH_RESULTS/without-device-group"
 
       # Kept separate from the standard tier so the extra pyOCD hardware
       # recordings cannot change either hard gate. It uses the normal bench
@@ -160,7 +165,7 @@ jobs:
       - name: Run pyOCD hardware recordings
         if: ${{ success() && !inputs.diagnose_only && inputs.run_pyocd_recordings }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output ../bench-results/pyocd -- tests/bench/pyocd_recordings.py
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS/pyocd" -- tests/bench/pyocd_recordings.py
 
       # Kept separate from the standard tier and the without-device-group
       # stage so the extra hardware scenario cannot change either hard gate.
@@ -169,7 +174,7 @@ jobs:
       - name: Run CubeProgrammer hardware recordings
         if: ${{ success() && !inputs.diagnose_only && inputs.run_cubeprogrammer_recordings }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output ../bench-results/cubeprogrammer --cubeprogrammer-archive "$HOME/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip" -- tests/bench/cubeprogrammer_recordings.py
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS/cubeprogrammer" --cubeprogrammer-archive "$HOME/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip" -- tests/bench/cubeprogrammer_recordings.py
 
       # This opt-in requests USBDEVFS_RESET for the verified ST-Link device
       # through the existing isolated runner. A reset request is not proof of
@@ -178,7 +183,7 @@ jobs:
       - name: Run USB reset and re-enumeration recording
         if: ${{ success() && !inputs.diagnose_only && inputs.run_usb_reset_reenumeration }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output ../bench-results/usb-reset -- tests/bench/usb_reset_reenumeration.py
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS/usb-reset" -- tests/bench/usb_reset_reenumeration.py
 
       # `if: always()` because a red or cancelled run's report is the one worth
       # reading, and `warn` because a run that never reached pytest has already
@@ -189,7 +194,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bench-tier
-          path: bench-results/
+          path: ${{ env.BENCH_RESULTS }}/
           if-no-files-found: warn
           retention-days: 14
 
