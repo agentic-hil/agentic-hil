@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -88,6 +89,22 @@ def test_pyocd_bench_environment_restores_the_image_pack_data_home() -> None:
     assert environment["XDG_CONFIG_HOME"] == "/bench-config"
     assert environment["XDG_STATE_HOME"] == "/bench-state"
     assert isolated_environment["XDG_DATA_HOME"] == "/tmp/pytest-home/.local/share"
+
+
+def test_libusb_diagnostic_environment_is_scoped_and_preserves_existing_setting() -> None:
+    base = {"PATH": "/usr/bin", "HOME": "/tmp/bench-home"}
+    bench = SimpleNamespace(environment=lambda **_overrides: base.copy())
+
+    child = pyocd_recordings.PyOcdBench(bench, libusb_debug=True).environment()
+
+    assert child["LIBUSB_DEBUG"] == "4"
+    assert "LIBUSB_DEBUG" not in base
+    existing = {**base, "LIBUSB_DEBUG": "2"}
+    existing_bench = SimpleNamespace(environment=lambda **_overrides: existing.copy())
+    preserved = pyocd_recordings.PyOcdBench(existing_bench, libusb_debug=True).environment()
+    assert preserved["LIBUSB_DEBUG"] == "2"
+    assert existing["LIBUSB_DEBUG"] == "2"
+    assert preserved is not existing
 
 
 def test_pyocd_failure_evidence_keeps_redacted_diagnostics_and_real_transcript(tmp_path: Path) -> None:
@@ -360,6 +377,36 @@ def test_pyocd_run_stop_capture_keeps_after_status_and_original_failure_if_stop_
         "recovery": None,
     }
     assert pyocd_recordings.run_stop_succeeded(captured["run_stop"]) is False
+
+
+def test_pyocd_discovery_closure_records_unavailable_status_and_preserves_original_failure() -> None:
+    server = FakeLeaseStatusServer(
+        [
+            {"ok": True, "lease_state": "active"},
+            {"ok": True, "released_devices": ["debugger:dut", "uart:uart"]},
+            {"ok": False, "error_type": "status_unavailable", "summary": "status read failed"},
+        ]
+    )
+    properties: dict[str, str] = {}
+    closure = None
+
+    with pytest.raises(AssertionError, match="original discovery error"):
+        try:
+            raise AssertionError("original discovery error")
+        finally:
+            closure = pyocd_recordings.capture_pyocd_discovery_run_closure(
+                server,
+                ("STLINK123", "/dev/ttyACM0"),
+                record_property=lambda name, value: properties.__setitem__(name, value),
+            )
+            if not pyocd_recordings.run_closure_succeeded(closure) and sys.exc_info()[0] is None:
+                pytest.fail("discovery run did not close cleanly", pytrace=False)
+
+    assert server.calls == ["hardware_lease_status", "bench_run_stop", "hardware_lease_status"]
+    assert closure["lease_status_after_stop"]["available"] is False
+    assert pyocd_recordings.run_closure_succeeded(closure) is False
+    assert properties["pyocd_discovery_run_closure_v1"]
+    assert "/dev/ttyACM0" not in properties["pyocd_discovery_run_closure_v1"]
 
 
 def _clean_run_closure_evidence() -> dict:

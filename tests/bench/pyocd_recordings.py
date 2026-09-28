@@ -72,8 +72,15 @@ def temporary_pyocd_traceback_environment(
 class PyOcdBench:
     """Use the image's CMSIS pack data root only for this opt-in test's commands."""
 
-    def __init__(self, bench: Bench, *, traceback_project_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        bench: Bench,
+        *,
+        traceback_project_dir: Path | None = None,
+        libusb_debug: bool = False,
+    ) -> None:
         self._bench = bench
+        self._libusb_debug = libusb_debug
         self._traceback_context = None
         self._environment: dict[str, str] | None = None
         if traceback_project_dir is not None:
@@ -87,6 +94,8 @@ class PyOcdBench:
 
     def environment(self, **overrides: str) -> dict[str, str]:
         environment = dict(self._environment) if self._environment is not None else pyocd_bench_environment(self._bench)
+        if self._libusb_debug:
+            environment = libusb_diagnostic_environment(environment)
         environment.update(overrides)
         return environment
 
@@ -94,6 +103,13 @@ class PyOcdBench:
         if self._traceback_context is not None:
             context, self._traceback_context = self._traceback_context, None
             context.__exit__(None, None, None)
+
+
+def libusb_diagnostic_environment(base_environment: Mapping[str, str]) -> dict[str, str]:
+    """Enable libusb C diagnostics in a copied child environment, preserving operator settings."""
+    environment = dict(base_environment)
+    environment.setdefault("LIBUSB_DEBUG", "4")
+    return environment
 
 
 def pyocd_provenance(environment: dict[str, str]) -> tuple[str, str, str]:
@@ -353,6 +369,16 @@ def capture_run_stop_with_lease_evidence(server: Server, private_values: tuple[s
         "run_stop": run_stop_evidence(stop_result, private_values),
         "lease_status_after_stop": lease_status_evidence(after_result, private_values),
     }
+
+
+def capture_pyocd_discovery_run_closure(server: Server, private_values: tuple[str, ...], *, record_property) -> dict:
+    """Capture and record the complete stop/lease verdict for the discovery run."""
+    evidence = capture_run_stop_with_lease_evidence(server, private_values)
+    record_property(
+        "pyocd_discovery_run_closure_v1",
+        json.dumps(evidence, sort_keys=True, separators=(",", ":")),
+    )
+    return evidence
 
 
 def safe_initial_usb_timeout(result: dict) -> bool:
@@ -653,7 +679,14 @@ def test_pyocd_discovery_recovers_after_verified_usb_reset(bench: Bench, tmp_pat
     variant.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
     variant_bench = PyOcdBench(
-        replace(bench, config=variant), traceback_project_dir=tmp_path / "pyocd-discovery-traceback-project"
+        replace(bench, config=variant),
+        traceback_project_dir=tmp_path / "pyocd-discovery-traceback-project",
+        libusb_debug=True,
+    )
+    effective_libusb_debug = variant_bench.environment().get("LIBUSB_DEBUG")
+    record_property(
+        "pyocd_discovery_libusb_debug_v1",
+        json.dumps({"effective_value": effective_libusb_debug}, sort_keys=True, separators=(",", ":")),
     )
     server = Server(variant_bench, tmp_path / "pyocd-discovery-reset-mcp.stderr")
     run_open = False
@@ -725,10 +758,14 @@ def test_pyocd_discovery_recovers_after_verified_usb_reset(bench: Bench, tmp_pat
         )
     finally:
         try:
-            if run_open and server.process.poll() is None:
-                stopped = server.try_call("bench_run_stop")
-                if not isinstance(stopped, dict) or stopped.get("ok") is not True:
-                    pytest.fail("Agentic HIL could not close the pyOCD discovery run", pytrace=False)
+            if run_open:
+                closure = capture_pyocd_discovery_run_closure(
+                    server,
+                    private_values,
+                    record_property=record_property,
+                )
+                if not run_closure_succeeded(closure) and sys.exc_info()[0] is None:
+                    pytest.fail("Agentic HIL discovery run closure failed its continue predicate", pytrace=False)
         finally:
             try:
                 server.close()
