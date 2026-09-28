@@ -51,7 +51,7 @@ from result_text import assert_text_projects
 from support import scaled_time_bound
 
 from agentic_hil.backends.gdbdebug import resolve_gdb_executable
-from agentic_hil.config import load_authoritative_config
+from agentic_hil.config import load_config
 
 from .conftest import BENCH_ONLY, DEMO_IMAGE, Bench, BoardImages, child_command
 
@@ -560,6 +560,15 @@ def assert_stopped_in_the_fault(document: dict) -> None:
 GDB_MI_FULLNAME_FIELD = re.compile(r'fullname="(?:\\.|[^"\\])*"')
 
 
+def resolve_bench_gdb_executable(config_path: Path, workspace: Path, backend: str) -> str:
+    """Resolve GDB from this bench's generated config, independent of pytest's environment."""
+    configuration = load_config(str(config_path), work_dir=str(workspace))
+    resolution = resolve_gdb_executable(configuration, backend)
+    executable = resolution.get("executable")
+    assert isinstance(executable, str), resolution
+    return executable
+
+
 def record_gdb_stop_evidence(bench: Bench, log_path: str, scenario: str, record_property) -> None:
     """Publish genuine MI stop records with run identity and paths removed.
 
@@ -574,10 +583,7 @@ def record_gdb_stop_evidence(bench: Bench, log_path: str, scenario: str, record_
     assert all(isinstance(line, str) and line.startswith("*stopped,") for line in raw_records), raw_records
     assert any(f'func="{FAULT_HANDLER}"' in line for line in raw_records), raw_records
 
-    configuration = load_authoritative_config(bench.project)
-    resolution = resolve_gdb_executable(configuration, backend_type(bench))
-    gdb_executable = resolution.get("executable")
-    assert isinstance(gdb_executable, str), resolution
+    gdb_executable = resolve_bench_gdb_executable(bench.config, bench.project, backend_type(bench))
     version = subprocess.run([str(gdb_executable), "--version"], capture_output=True, text=True, timeout=10, check=False)
     assert version.returncode == 0, (version.returncode, version.stderr)
     version_line = next((line.strip() for line in version.stdout.splitlines() if line.strip()), "")
