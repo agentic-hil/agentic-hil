@@ -197,6 +197,32 @@ board is attached to, for one commit named when it is started, on
 gh workflow run bench-gate.yml -f ref=<commit, branch or tag>
 ```
 
+The two hardware recording stages are off by default. To opt in, set
+`run_cubeprogrammer_recordings` and/or `run_usb_reset_reenumeration` to `true`
+when dispatching:
+
+```
+gh workflow run bench-gate.yml -f ref=<commit, branch or tag> -f run_cubeprogrammer_recordings=true -f run_usb_reset_reenumeration=true
+```
+
+The ordinary tier and the stage without the probe's device group always run
+first. `run_cubeprogrammer_recordings` then runs the CubeProgrammer probe,
+flash, reset and capture recordings in their own container invocation. It uses
+the pinned archive already in the runner's user-local cache; the workflow does
+not install the host toolchain. The optional test is not part of the image's
+build-time smoke check, and that check is not evidence of a hardware recording
+run.
+
+`run_usb_reset_reenumeration` runs after the CubeProgrammer stage if it was
+requested, and only if all preceding gates succeeded. It exercises the
+targeted `USBDEVFS_RESET` against the verified ST-Link node in the existing
+unprivileged container, through the same MCP server and bench run. It uses no
+`sudo` or privileged container. USB reset asks the device to reset; it does not
+guarantee a physical disconnect. The recording reports the actual USB
+re-enumeration changes it observed, so a result must be read as those observed
+changes rather than as proof of a disconnect. The stage has a separate report
+under `bench-results/usb-reset`.
+
 The runner script is checked out from the branch the workflow is dispatched
 from, the default branch unless `--ref` names another, and the named commit
 beside it. The runner receives that candidate checkout explicitly with
@@ -208,7 +234,11 @@ probe are that commit's to drive, which is the decision a dispatch makes.
 
 The gate runs the tier, and then `--without-device-group` on the image the
 tier's run built: after a red tier too, because what the stage proves does not
-depend on what the tier found, and never after a cancelled run.
+depend on what the tier found, and never after a cancelled run. The opt-in
+CubeProgrammer and USB re-enumeration recordings each get their own invocation
+and output directory after the standard stages; they run only when the earlier
+gates succeeded. No hardware result for either opt-in stage is implied by the
+container build or its smoke test.
 
 The gate shares its concurrency group with `.github/workflows/hardware-bench.yml`,
 so the two never hold the board at once and neither cancels the other. A group

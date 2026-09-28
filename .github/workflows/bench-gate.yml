@@ -60,6 +60,11 @@ on:
         required: false
         default: false
         type: boolean
+      run_usb_reset_reenumeration:
+        description: Run the opt-in USB authorization and re-enumeration hardware recording
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -152,6 +157,15 @@ jobs:
         if: ${{ success() && !inputs.diagnose_only && inputs.run_cubeprogrammer_recordings }}
         working-directory: under-test
         run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output ../bench-results/cubeprogrammer --cubeprogrammer-archive "$HOME/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip" -- tests/bench/cubeprogrammer_recordings.py
+
+      # This opt-in exercises the kernel authorization path through the
+      # existing isolated runner after all requested gates have passed. The
+      # USB disappearance is recorded as a transport interruption; the test
+      # does not claim it is equivalent to a physical SWD fault.
+      - name: Run USB reset and re-enumeration recording
+        if: ${{ success() && !inputs.diagnose_only && inputs.run_usb_reset_reenumeration }}
+        working-directory: under-test
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output ../bench-results/usb-reset -- tests/bench/usb_reset_reenumeration.py
 
       # `if: always()` because a red or cancelled run's report is the one worth
       # reading, and `warn` because a run that never reached pytest has already

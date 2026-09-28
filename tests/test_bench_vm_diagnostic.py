@@ -234,3 +234,37 @@ def test_diagnostic_only_run_does_not_upload_stale_bench_results():
     assert len(upload) == 1
     assert "always()" in upload[0]["if"]
     assert "!inputs.diagnose_only" in upload[0]["if"]
+
+
+def test_usb_reset_reenumeration_is_an_opt_in_stage_after_all_other_gates():
+    workflow = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    job = workflow["jobs"]["bench-tier"]
+    steps = job["steps"]
+    usb_steps = [step for step in steps if "tests/bench/usb_reset_reenumeration.py" in step.get("run", "")]
+
+    assert inputs["run_usb_reset_reenumeration"]["type"] == "boolean"
+    assert inputs["run_usb_reset_reenumeration"]["default"] == "false"
+    assert len(usb_steps) == 1, usb_steps
+    usb = usb_steps[0]
+    assert "success()" in usb["if"]
+    assert "!inputs.diagnose_only" in usb["if"]
+    assert "inputs.run_usb_reset_reenumeration" in usb["if"]
+    assert "run_cubeprogrammer_recordings" not in usb["if"]
+    assert usb["working-directory"] == "under-test"
+    assert "bench_in_container.py" in usb["run"]
+    assert "--source ../under-test" in usb["run"]
+    assert "--expected-commit" in usb["run"]
+    assert "--output ../bench-results/usb-reset" in usb["run"]
+    assert usb["run"].endswith("-- tests/bench/usb_reset_reenumeration.py")
+    assert "--cubeprogrammer-archive" not in usb["run"]
+
+    step_names = [step.get("name") for step in steps]
+    assert step_names.index("Run CubeProgrammer hardware recordings") < step_names.index(usb["name"])
+    assert step_names.index("Run the bench tier in its container") < step_names.index(usb["name"])
+    assert step_names.index("Run the stage without the probe's device group") < step_names.index(usb["name"])
+    assert job["runs-on"] == ["self-hosted", "agentic-hil", "nucleo-f446re"]
+    assert "permissions" not in job
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"] == {"group": "nucleo-f446re-bench", "cancel-in-progress": "false"}
+    assert set(workflow["jobs"]) == {"bench-tier", "provision-cubeprogrammer"}

@@ -142,7 +142,7 @@ COPY build-inputs/cubeprogrammer.zip /tmp/cubeprogrammer.zip
 COPY tools/bench/install_cubeprogrammer.sh /tmp/install_cubeprogrammer.sh
 COPY tools/bench/cubeprogrammer-auto-install.xml /tmp/cubeprogrammer-auto-install.xml
 RUN --network=none sh /tmp/install_cubeprogrammer.sh /tmp/cubeprogrammer.zip /tmp/cubeprogrammer-auto-install.xml
-RUN --network=none python -m pytest -q tests/container/cubeprogrammer_without_a_probe.py
+RUN --network=none python -m pytest -q -s tests/container/cubeprogrammer_without_a_probe.py
 
 # Keep the standard bench image the implicit last stage. An ordinary build
 # never needs the licensed payload or evaluates the optional COPY above.

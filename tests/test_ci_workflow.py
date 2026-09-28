@@ -773,6 +773,7 @@ def gate_run_steps() -> list[dict]:
         if "run" in step
         and "bench_vm_diagnostic.py" not in step.get("run", "")
         and "cubeprogrammer_recordings.py" not in step.get("run", "")
+        and "usb_reset_reenumeration.py" not in step.get("run", "")
     ]
     assert len(running) == 2, running
     return running
@@ -796,7 +797,7 @@ def test_the_gate_is_started_by_hand_and_by_nothing_else() -> None:
 def test_the_gate_asks_which_commit_to_run() -> None:
     inputs = triggers(workflow_document(GATE_WORKFLOW))["workflow_dispatch"]["inputs"]
 
-    assert set(inputs) == {"ref", "diagnose_only", "cubeprogrammer_asset_id", "run_cubeprogrammer_recordings"}, inputs
+    assert set(inputs) == {"ref", "diagnose_only", "cubeprogrammer_asset_id", "run_cubeprogrammer_recordings", "run_usb_reset_reenumeration"}, inputs
     assert inputs["ref"]["required"] is True
     assert inputs["ref"]["type"] == "string"
     assert inputs["diagnose_only"]["default"] is False
@@ -804,6 +805,8 @@ def test_the_gate_asks_which_commit_to_run() -> None:
     assert inputs["cubeprogrammer_asset_id"]["required"] is False
     assert inputs["run_cubeprogrammer_recordings"]["default"] is False
     assert inputs["run_cubeprogrammer_recordings"]["type"] == "boolean"
+    assert inputs["run_usb_reset_reenumeration"]["default"] is False
+    assert inputs["run_usb_reset_reenumeration"]["type"] == "boolean"
 
 
 def test_the_gate_runs_on_the_nightlys_board_and_queues_with_it() -> None:

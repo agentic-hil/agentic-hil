@@ -21,6 +21,54 @@ from agentic_hil.tools import AgenticHILToolService
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "stm32cubeprogrammer_2_23_0_recordings.json"
 CUBE_CLI = Path("/opt/st/cubeprogrammer-2.23.0/bin/STM32_Programmer_CLI")
+NO_STLINK_NOTICE = "ST-LINK error (DEV_NO_STLINK)"
+
+
+def output_matches_recording(name: str, observed: str) -> bool:
+    """Match the recording, with one exact VM-observed no-probe notice variant.
+
+    The VM's CubeProgrammer build adds this one line immediately before its
+    existing no-probe message. It is accepted only for probe listing and only
+    at that exact position; all other transcript differences remain visible.
+    """
+    expected = json.loads(FIXTURE.read_text(encoding="utf-8"))["recordings"][name]["stdout"]
+    if observed == expected:
+        return True
+    if name != "list_no_probe" or expected.count("No ST-Link detected!") != 1:
+        return False
+    with_notice = expected.replace(
+        "No ST-Link detected!",
+        f"{NO_STLINK_NOTICE}\nNo ST-Link detected!",
+        1,
+    )
+    return observed == with_notice
+
+
+def run_cli_smoke(records: dict) -> dict:
+    """Capture every real CLI result before checking any one transcript."""
+    observed = {}
+    for name, record in records.items():
+        process = subprocess.run(
+            [str(CUBE_CLI), *record["argv"]],
+            capture_output=True,
+            text=True,
+            timeout=scaled_time_bound(60),
+            check=False,
+        )
+        observed[name] = {
+            "argv": record["argv"],
+            "returncode": process.returncode,
+            "stdout": process.stdout,
+            "stderr": process.stderr,
+        }
+    print(json.dumps({"schema": "agentic-hil.cubeprogrammer-probe-free-smoke/v1", "recordings": observed}))
+
+    for name, record in records.items():
+        result = observed[name]
+        assert result["returncode"] == record["returncode"], (record["argv"], result)
+        assert output_matches_recording(name, result["stdout"]), (record["argv"], result["stdout"])
+        assert result["stderr"] == record["stderr"], (record["argv"], result["stderr"])
+    return observed
 
 
 def _configuration(workspace: Path, config_file: Path, state_root: Path) -> Path:
@@ -77,17 +125,7 @@ def test_installed_cubeprogrammer_matches_recorded_usb_free_results_and_product_
     assert captured["provenance"]["version"] == "2.23.0"
     assert CUBE_CLI.is_file(), f"optional CubeProgrammer target did not install {CUBE_CLI}"
 
-    for record in records.values():
-        process = subprocess.run(
-            [str(CUBE_CLI), *record["argv"]],
-            capture_output=True,
-            text=True,
-            timeout=scaled_time_bound(60),
-            check=False,
-        )
-        assert process.returncode == record["returncode"], (record["argv"], process.returncode, process.stdout, process.stderr)
-        assert process.stdout == record["stdout"], (record["argv"], process.stdout)
-        assert process.stderr == record["stderr"], (record["argv"], process.stderr)
+    observed = run_cli_smoke(records)
 
     workspace = tmp_path / "project"
     workspace.mkdir()
@@ -107,9 +145,9 @@ def test_installed_cubeprogrammer_matches_recorded_usb_free_results_and_product_
     assert refusal["ok"] is False, refusal
     assert refusal["backend_error_type"] == "probe_not_found", refusal
     assert refusal["error_type"] == "adapter_not_found", refusal
-    assert refusal["programmer_output"]["stdout"] == records["connect_no_probe"]["stdout"], refusal
+    assert refusal["programmer_output"]["stdout"] == observed["connect_no_probe"]["stdout"], refusal
     assert refusal["target_contacted"] is False, refusal
     assert refusal["side_effect_status"] == "not_started" and refusal["retry_safe"] is True, refusal
     log_path = workspace / refusal["log_path"]
     log = json.loads(log_path.read_text(encoding="utf-8"))
-    assert log["stdout"] == records["connect_no_probe"]["stdout"], log
+    assert log["stdout"] == observed["connect_no_probe"]["stdout"], log
