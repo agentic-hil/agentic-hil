@@ -1994,6 +1994,17 @@ class CanRunner(SessionDevice):
         if name is None or name not in config.can_buses:
             return None
         participant = step.arguments.get("participant")
+        bus = config.can_buses[name]
+        # Lock planning runs before reactor preflight. An invalid participant is
+        # a plan error for `name_refusal` to report, not a device-construction
+        # error that should escape before the structured report can be written.
+        # Leave it out of the lock set; preflight will refuse before any step
+        # touches the bus. Valid share views still receive their participant
+        # scoped lock, and an unshared bus keeps its whole-bus lock.
+        if bus.shares and (not isinstance(participant, str) or participant not in bus.shares):
+            return None
+        if not bus.shares and participant is not None:
+            return None
         return can_device(config, name, participant if isinstance(participant, str) else None)
 
     @classmethod
