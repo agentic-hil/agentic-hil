@@ -382,10 +382,12 @@ def test_the_container_gets_the_board_and_nothing_of_the_machine_besides(machine
     assert option_values(command, "--label") == [f"{bench_in_container.RUN_LABEL}={UID}"]
 
 
-def test_the_tier_finds_the_machines_device_locks_under_its_own_home(machine: SimpleNamespace) -> None:
+def test_the_tier_finds_the_machines_device_locks_under_its_own_home(machine: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     """The device locks are the backstop against every other run on this
     machine, and the tier keeps HOME to reach them. So the container's home is
     where the machine's lock directory is mounted, and only that directory."""
+    monkeypatch.setenv("GITHUB_RUN_ID", "742001")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
     assert run(machine) == 0
 
     command = machine.runtime.tier
@@ -396,6 +398,8 @@ def test_the_tier_finds_the_machines_device_locks_under_its_own_home(machine: Si
     environment = option_values(command, "-e")
     assert f"HOME={bench_in_container.CONTAINER_HOME}" in environment
     assert "AGENTIC_HIL_BENCH=1" in environment
+    assert f"AGENTIC_HIL_BENCH_COMMIT={COMMIT}" in environment
+    assert "AGENTIC_HIL_BENCH_RUN_ID=742001-2" in environment
 
 
 def test_the_tier_writes_its_report_into_a_directory_of_the_runs_own(machine: SimpleNamespace) -> None:
@@ -1161,6 +1165,80 @@ def test_the_committed_tree_is_staged_without_the_checkouts_own_state(tmp_path: 
     assert (destination / "tools" / "bench" / "Dockerfile").is_file()
     assert (destination / "tools" / "bench" / "Dockerfile.dockerignore").is_file()
     assert not (destination / ".git").exists()
+
+
+def test_source_and_expected_commit_select_the_under_test_checkout_before_building(
+    machine: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A trusted harness can build the candidate from a separate checkout."""
+    harness = tmp_path / "harness"
+    candidate = tmp_path / "under-test"
+    harness.mkdir()
+    candidate.mkdir()
+    harness_commit = "1" * 40
+    candidate_commit = "2" * 40
+    roots: list[Path] = []
+
+    def current_commit(root: Path) -> str:
+        return {harness: harness_commit, candidate: candidate_commit}[root]
+
+    def stage_candidate(root: Path, commit: str, destination: Path) -> None:
+        roots.append(root)
+        assert commit == candidate_commit
+        stage(root, commit, destination)
+
+    monkeypatch.setattr(bench_in_container, "repository_root", lambda: harness)
+    monkeypatch.setattr(bench_in_container, "current_commit", current_commit)
+    monkeypatch.setattr(bench_in_container, "uncommitted_changes", lambda root: "")
+    monkeypatch.setattr(bench_in_container, "stage_committed_tree", stage_candidate)
+
+    status = run(
+        machine,
+        "--build-only",
+        "--source",
+        str(candidate),
+        "--expected-commit",
+        candidate_commit,
+    )
+
+    assert status == 0
+    assert roots == [candidate]
+    assert machine.runtime.issued("build")
+
+
+def test_source_commit_mismatch_refuses_before_build_or_container_run(
+    machine: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    harness = tmp_path / "harness"
+    candidate = tmp_path / "under-test"
+    harness.mkdir()
+    candidate.mkdir()
+    monkeypatch.setattr(bench_in_container, "repository_root", lambda: harness)
+    monkeypatch.setattr(
+        bench_in_container,
+        "current_commit",
+        lambda root: "1" * 40 if root == harness else "2" * 40,
+    )
+    monkeypatch.setattr(bench_in_container, "uncommitted_changes", lambda root: "")
+
+    def hardware_or_runtime_must_not_be_checked(*args: object, **kwargs: object) -> None:
+        raise AssertionError("source SHA mismatch must be refused before runtime or hardware discovery")
+
+    for name in ("pick_runtime", "check_this_machine", "the_devices", "check_access", "device_lock_directory"):
+        monkeypatch.setattr(bench_in_container, name, hardware_or_runtime_must_not_be_checked)
+
+    status = run(
+        machine,
+        "--source",
+        str(candidate),
+        "--expected-commit",
+        "3" * 40,
+    )
+
+    assert status == bench_in_container.EXIT_BUILD_FAILED
+    assert machine.runtime.issued("build") == []
+    assert machine.runtime.issued("run") == []
+    assert "expected commit" in capsys.readouterr().err.lower()
 
 
 # What the image gives the runner.

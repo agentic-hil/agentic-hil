@@ -1,8 +1,7 @@
 # CAN as a Service: One Bus Owner, Named Participants
 
-Design for #146. This document settles the questions the issue lists; the
-implementation follows it in phases. Nothing here changes existing
-single-owner configurations.
+Design for #146 and the participant-session completion in #500. A bus without
+`shares:` keeps its existing single-owner behavior.
 
 ## Problem
 
@@ -21,10 +20,12 @@ everything the single-owner model enforces keeps being enforced, by one
 process, exactly once. It opens the adapter once.
 
 Participants are named connections to the broker. Each attaches under
-`<bus-key>#<name>`, carries its own identifier filter and frame view, and
-declares itself in a run the way a device does today. Runs in different
-projects share the bus by each holding a participant connection, not by
-racing for the device lock.
+`<bus-key>#<name>`, carries its own identifier filter and frame view, and is
+selected explicitly by `participant` on session start, stop, send and read.
+Each run declares that same participant as a CAN device selector. This keeps a
+run's resource key equal to the participant connection it opens, so a run
+declaring `ecu_a` cannot reach `ecu_b`. Runs in different projects share the
+bus by each holding a participant connection, not by racing for the bus lock.
 
 ## Rules
 
@@ -35,6 +36,8 @@ racing for the device lock.
 - Participants take logical participant locks (`<bus-key>#<name>`), so two
   runs may not share one participant name, while any number of distinctly
   named participants proceed in parallel.
+- A shared bus session without a participant name is refused. An unshared bus
+  accepts no participant name and keeps its original exclusive lock.
 - Operations that change the whole bus (bitrate change, adapter
   reconfiguration, diagnostics that must own the medium) need the bus
   exclusively: they are refused while any other participant is attached.
@@ -80,22 +83,41 @@ racing for the device lock.
 
 - A physical-bus incident (adapter gone, controller error) belongs to the
   bus: every participant's run aborts into its recovery action, and the
-  incident gates bus-wide.
+  broker gates bus-wide. The CAN service forwards that scope into the
+  participant lease using the existing `can_send_effect_unconfirmed` or
+  `can_read_effect_unconfirmed` recovery reason, so the coordinator retains the
+  unresolved effect with the run's declared participant resource.
 - A participant-scoped failure (its own filter, its own declared step) aborts
   that participant's run only; the bus and the other participants keep
-  running.
+  running. The service reports that failure on the participant session without
+  turning it into a bus incident.
+- Detaching a participant confirms only that connection's removal. The service
+  releases its participant lease without claiming to have reaped the shared
+  broker process; the broker closes itself when its last participant leaves.
 
 ### Audit
 
 - The broker writes the whole-bus frame log; each participant's report keeps
   its own view beside it. A frame a participant sent is attributable in both.
+- After the adapter accepts a participant's send, the broker queues that frame
+  for matching, read-enabled peer participants; it excludes the sender. Those
+  frames carry `origin: participant_tx` and
+  `delivery_status: adapter_accepted`. This confirms adapter acceptance only,
+  not physical receipt or an ACK. Frames read from the adapter carry
+  `origin: adapter_rx` and `delivery_status: adapter_received`. For a shared
+  bus the broker opens its adapter with own-message reception disabled, because
+  participant TX is already routed to peers and the SocketCAN receive flag does
+  not identify which local socket sent a frame. This does not change the
+  authoritative configuration; exclusive sessions keep their configured
+  `receive_own_messages` behavior.
 
 ## Phases
 
-1. **Broker with participant views**: several projects, one bus, the rules
-   above. The adapter abstraction underneath is unchanged.
+1. **Broker with participant views and sessions**: several projects, one bus,
+   the rules above. The adapter abstraction underneath is unchanged.
 2. **Per-participant stimulus/expect vocabulary in the test reactor**: CAN
-   steps address a participant, not the raw bus.
+   steps address a participant, not the raw bus. Participant steps use plan
+   format version 6; older plans remain valid for exclusive buses.
 3. **Exclusive-mode operations** (bitrate, diagnostics) behind the
    all-detached gate.
 

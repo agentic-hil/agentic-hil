@@ -85,7 +85,10 @@ jobs:
           path: under-test
           persist-credentials: false
 
-      # `exec`, so the runner script is the step's process. A cancelled or timed
+      # The source and SHA are read from the checked-out candidate, never from
+      # the harness checkout this script belongs to. The tool verifies that
+      # exact HEAD before checking hardware or building. `exec`, so the runner
+      # script is the step's process. A cancelled or timed
       # out run sends the step SIGINT, and the script answers it by stopping the
       # container with SIGINT, the signal the tier tears down on and puts the
       # demo back on the board after; a shell in between would take the signal
@@ -94,7 +97,7 @@ jobs:
       # run waits for it before it builds anything.
       - name: Run the bench tier in its container
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --output ../bench-results
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output ../bench-results
 
       # `if: always()` because a red or cancelled run's report is the one worth
       # reading, and `warn` because a run that never reached pytest has already

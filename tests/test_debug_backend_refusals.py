@@ -27,7 +27,10 @@ What the issue found unpinned, in its order:
 * pyOCD's post-flash reset failure as a partial, non-retry-safe result.
 * a debug server that exits before its GDB port is ready, and a GDB that dies
   under a session.
-* the GDB stop reasons the fake had never produced.
+* GDB stop reasons recorded from the real Nucleo-F446RE bench. The captured
+  HardFault, reset-handler and expected breakpoint records are replayed through
+  the stop classifier from ``fixtures/gdb_mi_stop_recordings.json``; missing
+  ``reason`` fields remain missing in the recording.
 * the ``.hex`` and ``.bin`` plausibility refusals TROUBLESHOOTING promises.
 """
 
@@ -659,7 +662,7 @@ def test_pyocd_flash_then_failed_reset_is_partial(tmp_path: Path) -> None:
     assert result["side_effect_status"] == "partial", result
     assert result["retry_safe"] is False, result
     assert result["reset_after_flash"] is False, result
-    assert result["verify"] is True, result
+    assert result["verify"] is False, result
     assert result["artifact"]["path"] == "build/firmware.elf", result
     assert "reset failed" in result["programmer_output"]["stderr"], result["programmer_output"]
     # The firmware is on the board, so the failure is not one of the refusals
@@ -676,7 +679,7 @@ def test_pyocd_flash_without_a_reset_never_meets_the_failing_reset(tmp_path: Pat
 
     assert result["ok"] is True, result
     assert result["reset_after_flash"] is False, result
-    assert result["summary"] == "Firmware flashed and verified. Target was not reset.", result
+    assert result["summary"] == "Firmware flashed. Target was not reset.", result
 
 
 # ---------------------------------------------------------------------------
@@ -1029,10 +1032,10 @@ MI_ROWS = [
 
 @pytest.mark.parametrize(("line", "stop_reason", "exception_type"), MI_ROWS, ids=[f"{row[1]}-{index}" for index, row in enumerate(MI_ROWS)])
 def test_stop_reason_mapping_from_mi_stopped_records(tmp_path: Path, line: str, stop_reason: str, exception_type: str | None) -> None:
-    """The mapping itself, one documented GDB/MI record at a time.
+    """The mapping for the documented MI cases not already covered by bench recordings.
 
-    The record shapes are the GDB manual's; a bench recording of a real fault
-    and a real reset over arm-none-eabi-gdb is owed and would replace them.
+    The separate real-recording fixture covers the board's HardFault, reset
+    handler and main breakpoint stops exactly as Debian GDB emitted them.
     """
     stop = stop_reason_of(tmp_path, line)
 

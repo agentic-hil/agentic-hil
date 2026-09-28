@@ -7,7 +7,7 @@
   "required": ["version", "steps"],
   "$comment": "Additions this schema marks `x-since-version` belong to that plan format version and later. A plan is held to what its own `version:` contains, so a version 2 plan reaching for a version 3 action or key is refused by name rather than quietly accepted here and rejected by an older install elsewhere.",
   "properties": {
-    "version": { "enum": [2, 3, 4, 5], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions (a serial line's on `uart_read`, a bus's on `can_read`), `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional. Version 4 adds the `repeat` block step, which runs a nested subset of steps by count or by wall time. Version 5 adds the `read_symbol` action and the numeric `comparator:` it carries, which is the first claim in this format about a value in target memory rather than about text a device sent." },
+    "version": { "enum": [2, 3, 4, 5, 6], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions (a serial line's on `uart_read`, a bus's on `can_read`), `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional. Version 4 adds the `repeat` block step, which runs a nested subset of steps by count or by wall time. Version 5 adds the `read_symbol` action and the numeric `comparator:` it carries, which is the first claim in this format about a value in target memory rather than about text a device sent. Version 6 adds the named `participant:` selector to CAN steps on buses configured with `shares:`." },
     "name": { "type": "string", "minLength": 1 },
     "steps": { "$ref": "#/$defs/steps" }
   },
@@ -44,6 +44,7 @@
     "debugger": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a debuggers.<name> entry. Optional when the project configures exactly one debugger; required when it configures several." },
     "portId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a com_ports.<name> entry." },
     "busId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a can_buses.<name> entry." },
+    "participant": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_.-]+$", "x-since-version": 6, "description": "Name of a configured shares.<participant> view on this CAN bus. Required for steps on a bus configured with shares:." },
     "path": { "type": "string", "minLength": 1, "description": "A file this step reads or writes. A relative path resolves against `workspace_root`, and no permission relaxes containment: a traversal segment, or a path that resolves outside the workspace by any route including a link, is refused before the run starts rather than on a board that is already halted." },
     "symbol": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$", "description": "The name of a symbol in the flashed image, in the one spelling every symbol tool here accepts. A plan may name only a symbol the bench allows: `debug.allowed_symbols` is the operator's statement about what may be read off this board, and a step naming anything outside it is refused before the run starts unless the configuration sets `debug.allow_all_symbols`." },
     "timeout": { "type": "number", "minimum": 0, "description": "How long this step waits, in seconds. Zero is allowed here and asks for no wait at all, which is a reading a step can have when waiting is not the whole of what it does. A step that exists in order to wait refuses zero instead, and says so on its own `timeout_s`." },
@@ -278,8 +279,9 @@
       "properties": {
         "device": { "$ref": "#/$defs/device" },
         "bus_id": { "$ref": "#/$defs/busId" },
+        "participant": { "$ref": "#/$defs/participant" },
         "action": { "const": "can_open" },
-        "clear_rx_queue": { "type": "boolean", "default": true, "description": "Drain the receive queue before the plan reads. Requires permissions.allow_read on the bus." }
+        "clear_rx_queue": { "type": "boolean", "default": true, "description": "Drain the receive queue before the plan reads on an exclusive bus. A named participant starts with a fresh private queue and never drains another participant's frames." }
       }
     },
     "canClose": {
@@ -291,6 +293,7 @@
       "properties": {
         "device": { "$ref": "#/$defs/device" },
         "bus_id": { "$ref": "#/$defs/busId" },
+        "participant": { "$ref": "#/$defs/participant" },
         "action": { "const": "can_close" }
       }
     },
@@ -303,6 +306,7 @@
       "properties": {
         "device": { "$ref": "#/$defs/device" },
         "bus_id": { "$ref": "#/$defs/busId" },
+        "participant": { "$ref": "#/$defs/participant" },
         "action": { "const": "can_send" },
         "frame_id": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "string", "pattern": "^(?:0[xX][0-9A-Fa-f]+|[0-9]+)$" }], "description": "The identifier this frame carries, as an integer or a hexadecimal string such as `0x123`. The two spellings are the same number; the string is there because a protocol document writes identifiers in hexadecimal and a plan should be diffable against it." },
         "extended": { "type": "boolean", "default": false, "description": "Which identifier namespace the frame is sent in. A standard 0x123 and an extended 0x123 are two different frames on the wire, so a receiver waiting for one never sees the other." },
@@ -319,6 +323,7 @@
       "properties": {
         "device": { "$ref": "#/$defs/device" },
         "bus_id": { "$ref": "#/$defs/busId" },
+        "participant": { "$ref": "#/$defs/participant" },
         "action": { "const": "can_read" },
         "comparator": { "$ref": "#/$defs/canComparator" },
         "max_frames": { "type": "integer", "minimum": 1, "description": "Defaults to the bus's configured max_buffer_frames, which is also the ceiling. With a `comparator:` this is how many frames one read drains, not how many the step may look at: it reads again until the claim is met or the deadline passes." },

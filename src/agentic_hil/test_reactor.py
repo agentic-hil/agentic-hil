@@ -608,7 +608,7 @@ class PlanState:
     # rather than per probe: flashing is refused while *any* session is open.
     debug_session: str | None = None
     # (kind, config entry) of every session the plan has opened and not closed.
-    open_sessions: set[tuple[str, str]] = field(default_factory=set)
+    open_sessions: set[tuple[str, str, str | None]] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -1509,7 +1509,13 @@ class SessionDevice(StepDevice):
     def __init__(self, config_id: str, device: Device, service: AgenticHILToolService, **kwargs: Any):
         super().__init__(config_id, device, service, **kwargs)
         # True while this plan holds the session it opened.
-        self._owns_session = False
+        self._owned_sessions: set[object] = set()
+
+    def session_identity(self, step: TestStep) -> object:
+        return self.id
+
+    def cleanup_session_arguments(self, identity: object) -> JsonObject:
+        return {str(self.device_class.scope_field): self.id}
 
     @classmethod
     def preflight(cls, reactor: TestReactor, location: StepLocation, step: TestStep, state: PlanState) -> JsonObject | None:
@@ -1517,7 +1523,8 @@ class SessionDevice(StepDevice):
         refusal = cls.permission_refusal(reactor, location, step, cls.config_entries(reactor.config)[name], name)
         if refusal is not None:
             return refusal
-        key = (cls.kind, name)
+        participant = step.arguments.get("participant") if cls.kind == "can" else None
+        key = (cls.kind, name, participant if isinstance(participant, str) else None)
         if step.action == cls.open_action:
             if key in state.open_sessions:
                 return preflight_error(location, step, "action", f"{cls.session_noun} session is already open in this test plan.")
@@ -1550,13 +1557,16 @@ class SessionDevice(StepDevice):
         iteration and leave cleanup with nothing to close, which is a session
         left open by the run that opened it."""
         result = self.call_tool(step)
-        self._owns_session = self._owns_session or (result.get("ok") is True and not result.get("already_active", False))
+        identity = self.session_identity(step)
+        if result.get("ok") is True and not result.get("already_active", False):
+            self._owned_sessions.add(identity)
         return result
 
     def close_session(self, step: TestStep) -> JsonObject:
         """Close, but only a session this plan is the one holding. The body of
         every kind's `role="close"` action."""
-        if not self._owns_session:
+        identity = self.session_identity(step)
+        if identity not in self._owned_sessions:
             return {
                 "ok": False,
                 "tool": "test_reactor",
@@ -1566,16 +1576,17 @@ class SessionDevice(StepDevice):
             }
         result = self.call_tool(step)
         if result.get("ok") is True:
-            self._owns_session = False
+            self._owned_sessions.discard(identity)
         return result
 
     def cleanup(self) -> list[JsonObject]:
-        if not self._owns_session:
-            return []
-        result = self.cleanup_call(str(self.step_action_specs[self.close_action].tool), {str(self.device_class.scope_field): self.id})
-        if result.get("ok") is True:
-            self._owns_session = False
-        return [self.cleanup_record(self.close_action, result)]
+        records: list[JsonObject] = []
+        for identity in list(self._owned_sessions):
+            result = self.cleanup_call(str(self.step_action_specs[self.close_action].tool), self.cleanup_session_arguments(identity))
+            if result.get("ok") is True:
+                self._owned_sessions.discard(identity)
+            records.append(self.cleanup_record(self.close_action, result))
+        return records
 
 
 class UartRunner(SessionDevice):
@@ -1977,6 +1988,50 @@ class CanRunner(SessionDevice):
     def build_device(cls, config: AgenticHILConfig, config_id: str) -> Device:
         return can_device(config, config_id)
 
+    @classmethod
+    def identify(cls, config: AgenticHILConfig, step: TestStep) -> Device | None:
+        name = cls.step_config_id(config, step)
+        if name is None or name not in config.can_buses:
+            return None
+        participant = step.arguments.get("participant")
+        bus = config.can_buses[name]
+        # Lock planning runs before reactor preflight. An invalid participant is
+        # a plan error for `name_refusal` to report, not a device-construction
+        # error that should escape before the structured report can be written.
+        # Leave it out of the lock set; preflight will refuse before any step
+        # touches the bus. Valid share views still receive their participant
+        # scoped lock, and an unshared bus keeps its whole-bus lock.
+        if bus.shares and (not isinstance(participant, str) or participant not in bus.shares):
+            return None
+        if not bus.shares and participant is not None:
+            return None
+        return can_device(config, name, participant if isinstance(participant, str) else None)
+
+    @classmethod
+    def name_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep) -> JsonObject | None:
+        refusal = super().name_refusal(reactor, location, step)
+        if refusal is not None:
+            return refusal
+        name = str(cls.step_config_id(reactor.config, step))
+        bus = reactor.config.can_buses[name]
+        participant = step.arguments.get("participant")
+        if bus.shares and not isinstance(participant, str):
+            return preflight_error(location, step, "participant", "This bus declares shares:, so every CAN step must name the participant view it uses.", {"configured_participants": sorted(bus.shares)})
+        if bus.shares and participant not in bus.shares:
+            return preflight_error(location, step, "participant", "The authoritative config declares no such participant view on this CAN bus.", {"configured_participants": sorted(bus.shares)})
+        if not bus.shares and participant is not None:
+            return preflight_error(location, step, "participant", "This bus declares no shares:, so its session uses the whole bus without a participant name.")
+        return None
+
+    def session_identity(self, step: TestStep) -> object:
+        return step.arguments.get("participant")
+
+    def cleanup_session_arguments(self, identity: object) -> JsonObject:
+        result: JsonObject = {"bus_id": self.id}
+        if isinstance(identity, str):
+            result["participant"] = identity
+        return result
+
     # --- the actions this kind serves ------------------------------------
 
     @step_action("can_open", schema="canOpen", tool="can_session_start", defaults={"clear_rx_queue": True}, role="open")
@@ -2004,7 +2059,7 @@ class CanRunner(SessionDevice):
         raw = step.arguments.get("comparator")
         if not raw:
             return self.call_tool(step)
-        return self._compare(CanFrameComparator(raw), step.arguments.get("max_frames"), float(step.arguments["timeout_s"]))
+        return self._compare(CanFrameComparator(raw), step.arguments.get("max_frames"), float(step.arguments["timeout_s"]), step.arguments.get("participant"))
 
     @classmethod
     def tool_calls(cls, config: AgenticHILConfig, step: TestStep) -> list[tuple[str, JsonObject]]:
@@ -2015,6 +2070,8 @@ class CanRunner(SessionDevice):
         if step.action != "can_read" or not step.arguments.get("comparator") or name is None:
             return super().tool_calls(config, step)
         arguments: JsonObject = {"bus_id": name, "wait_timeout_s": step.arguments["timeout_s"]}
+        if isinstance(step.arguments.get("participant"), str):
+            arguments["participant"] = step.arguments["participant"]
         if step.arguments.get("max_frames") is not None:
             arguments["max_frames"] = step.arguments["max_frames"]
         return [("can_read", arguments)]
@@ -2044,18 +2101,34 @@ class CanRunner(SessionDevice):
     @classmethod
     def permission_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, entry: Any, name: str) -> JsonObject | None:
         readable = reactor.config.can_read_allowed(entry)
+        participant = step.arguments.get("participant")
+        share = entry.shares.get(participant) if isinstance(participant, str) else None
+        share_readable = share is not None and (reactor.config.read_free or share.permissions.allow_read)
+        share_writable = share is not None and share.permissions.allow_write
         if step.action == cls.open_action:
+            if entry.shares:
+                if not readable and not entry.permissions.allow_write:
+                    return permission_preflight_error(location, step, "action", "Reading and writing this CAN bus are disabled by the authoritative config.", cls.config_section, name, "allow_read")
+                if share is not None and not share_readable and not share_writable:
+                    return participant_permission_preflight_error(location, step, name, str(participant), "allow_read", "Reading and writing this CAN participant are disabled by the authoritative config.")
+                return None
             if not readable and not entry.permissions.allow_write:
                 return permission_preflight_error(location, step, "action", "Reading and writing this CAN bus are disabled by the authoritative config.", cls.config_section, name, "allow_read")
             if step.arguments.get("clear_rx_queue", True) and not readable:
                 return permission_preflight_error(location, step, "clear_rx_queue", "Clearing this CAN bus receive queue requires permissions.allow_read on the bus.", cls.config_section, name, "allow_read")
             return None
-        if step.action == "can_read" and not readable:
-            return permission_preflight_error(location, step, "action", "Reading this CAN bus is disabled by the authoritative config.", cls.config_section, name, "allow_read")
+        if step.action == "can_read":
+            if not readable:
+                return permission_preflight_error(location, step, "action", "Reading this CAN bus is disabled by the authoritative config.", cls.config_section, name, "allow_read")
+            if entry.shares and not share_readable:
+                return participant_permission_preflight_error(location, step, name, str(participant), "allow_read", "Reading this CAN participant is disabled by the authoritative config.")
+            return None
         if step.action != "can_send":
             return None
         if not entry.permissions.allow_write:
             return permission_preflight_error(location, step, "action", "Writing to this CAN bus is disabled by the authoritative config.", cls.config_section, name, "allow_write")
+        if entry.shares and not share_writable:
+            return participant_permission_preflight_error(location, step, name, str(participant), "allow_write", "Writing to this CAN participant is disabled by the authoritative config.")
         if entry.listen_only:
             # `listen_only: true` is not an obstacle standing in the way of the
             # send: it is the claim that observing this bus sends nothing, which
@@ -2085,12 +2158,12 @@ class CanRunner(SessionDevice):
 
     # --- reading the bus -------------------------------------------------
 
-    def _compare(self, comparator: CanFrameComparator, max_frames: object | None, timeout_s: float) -> JsonObject:
+    def _compare(self, comparator: CanFrameComparator, max_frames: object | None, timeout_s: float, participant: object = None) -> JsonObject:
         """Read until a frame meets the comparator, or fail saying which frames
         the bus did carry, and, for a range, which value was captured against
         which bounds."""
         met, unmet = CAN_COMPARATOR_SUMMARIES[comparator.claim]
-        outcome = self._read_until(comparator, max_frames, timeout_s)
+        outcome = self._read_until(comparator, max_frames, timeout_s, participant)
         if outcome.read_failure is not None:
             return outcome.read_failure
         common = {"bus_id": self.id, **comparator.report(), "timeout_s": timeout_s, "frames_read": outcome.frames_read, "reads": outcome.reads}
@@ -2098,7 +2171,7 @@ class CanRunner(SessionDevice):
             return {"ok": True, "tool": "test_reactor", "summary": met, **common, "frame": outcome.frame}
         return {"ok": False, "tool": "test_reactor", "error_type": "comparator_unmet", "summary": unmet, **common, **outcome.tail_result}
 
-    def _read_until(self, comparator: CanFrameComparator, max_frames: object | None, timeout_s: float) -> CanReadOutcome:
+    def _read_until(self, comparator: CanFrameComparator, max_frames: object | None, timeout_s: float, participant: object = None) -> CanReadOutcome:
         """Read this bus until a frame meets the claim or the deadline passes.
 
         The plan's own read path and nothing else: each pass is one `can_read`
@@ -2117,6 +2190,8 @@ class CanRunner(SessionDevice):
         reads = 0
         while True:
             arguments: JsonObject = {"bus_id": self.id, "wait_timeout_s": max(0.0, deadline - time.monotonic())}
+            if isinstance(participant, str):
+                arguments["participant"] = participant
             if max_frames is not None:
                 arguments["max_frames"] = int(max_frames)  # type: ignore[arg-type]
             result = self.service.call("can_read", arguments)
@@ -3505,6 +3580,11 @@ def permission_preflight_error(
         permission_denied_summary(summary, permission),
         {"error_type": PERMISSION_DENIED_ERROR, **permission_denied_fields(permission), **(details or {})},
     )
+
+
+def participant_permission_preflight_error(location: StepLocation, step: TestStep, bus_id: str, participant: str, key: str, summary: str) -> JsonObject:
+    permission = f"can_buses.{bus_id}.shares.{participant}.permissions.{key}"
+    return preflight_error(location, step, "action", permission_denied_summary(summary, permission), {"error_type": PERMISSION_DENIED_ERROR, **permission_denied_fields(permission)})
 
 
 def exclusive_permission_preflight_error(
