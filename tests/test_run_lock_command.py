@@ -251,6 +251,29 @@ def test_take_queues_behind_a_live_holder_and_says_whom_without_naming_this_mach
     assert names_this_machine(said) == []
 
 
+def test_the_record_says_when_the_machine_was_taken_rather_than_when_the_wait_began(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A take can wait hours for the machine, and the run queued behind it is
+    told when its holder started: a time from before the wait would tell it
+    the holder had been on the board all along."""
+    state = tmp_path / "run-lock.json"
+    a_lock_held_by(4242)
+    monkeypatch.setattr(run_lock, "process_is_running", lambda pid: pid in {4242, os.getppid()})
+    now = ["2026-09-28T00:24:09Z"]
+    monkeypatch.setattr(run_lock, "utc_now_iso", lambda: now[0])
+
+    def the_holder_finishes_later(seconds: float) -> None:
+        now[0] = "2026-09-28T01:11:40Z"
+        run_lock.lock_path().unlink()
+
+    monkeypatch.setattr(run_lock, "wait_for_the_holder", the_holder_finishes_later)
+
+    assert take(state) == 0
+
+    assert the_record()["started_at"] == "2026-09-28T01:11:40Z"
+
+
 def test_take_with_no_wait_refuses_a_held_machine(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
