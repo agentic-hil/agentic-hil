@@ -214,3 +214,106 @@ jobs:
             examples/nucleo-f446re_demo/.agentic-hil/logs/
           if-no-files-found: warn
           retention-days: 14
+
+  # The bench tier, tests/bench, on every distribution other than the default
+  # image's that tools/bench_in_container.py builds the tier's image on, one
+  # after another on the same board once the demo's job is done. Each image
+  # carries that distribution's own OpenOCD, cross compiler, GDB, CMake and
+  # Python under the checkout's own product and tests, so a night's four
+  # verdicts say which of those the commit still works with. How the images
+  # are composed, and what each distribution packaged when it was measured, is
+  # in tools/bench/README.md.
+  distributions:
+    name: Run the bench tier on the other distributions
+    needs: bench
+    # After a red demo too, because what the tier proves on a distribution does
+    # not depend on what the demo found; never after a cancelled run, and never
+    # in a fork, for the reason the job above gives.
+    if: ${{ !cancelled() && github.repository == 'agentic-hil/agentic-hil' }}
+    runs-on: [self-hosted, agentic-hil, nucleo-f446re]
+    # Forty minutes for each distribution and ten for the checkout and the four
+    # uploads, which took seconds on the bench. A step's forty minutes count its
+    # wait for the machine too, as the gate's do. Measured on the bench, the
+    # slowest distribution, Fedora 44, held the machine for 19m26s from the start
+    # of its build to its verdict, so a whole run of the tier started on the
+    # machine itself in front of it still leaves it its own time. A step still
+    # waiting when its limit comes fails with nothing run on the board; one cut
+    # short in the tier is interrupted as a cancelled gate is, which tears the
+    # tier down and puts the demo back on the board.
+    timeout-minutes: 170
+
+    steps:
+      # Credentials are not kept in the checkout: the image is built from the
+      # committed tree and nothing here pushes, as in the gate.
+      - name: Check out the commit this run is about
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Each step is the gate's command with the distribution named: it queues
+      # on the machine's run lock itself, so it waits for anything else on the
+      # machine rather than meeting it at the board, builds the image, runs the
+      # whole tier and reads its verdict. `exec` for the gate's reason: the
+      # runner script is the step's process, and the SIGINT a cancelled or timed
+      # out step sends reaches it rather than a shell, so the tier tears down and
+      # puts the demo back on the board. After a red distribution the next still
+      # runs; after a cancel, none. Each report goes into a directory of its own,
+      # since the runner clears the one it is given of an earlier report.
+      - name: Run the bench tier on Ubuntu 22.04
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: exec python3 tools/bench_in_container.py --distribution ubuntu-22.04 --output bench-results/ubuntu-22.04
+
+      # Right after its run and whatever it did, so a later distribution's limit
+      # cannot cost an earlier one its report. The report and the log have the
+      # probe's serial numbers and the machine's names withheld.
+      - name: Upload the Ubuntu 22.04 tier's report and log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench-tier-ubuntu-22.04
+          path: bench-results/ubuntu-22.04/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Run the bench tier on Ubuntu 24.04
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: exec python3 tools/bench_in_container.py --distribution ubuntu-24.04 --output bench-results/ubuntu-24.04
+
+      - name: Upload the Ubuntu 24.04 tier's report and log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench-tier-ubuntu-24.04
+          path: bench-results/ubuntu-24.04/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Run the bench tier on Debian 12
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: exec python3 tools/bench_in_container.py --distribution debian-12 --output bench-results/debian-12
+
+      - name: Upload the Debian 12 tier's report and log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench-tier-debian-12
+          path: bench-results/debian-12/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Run the bench tier on Fedora 44
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: exec python3 tools/bench_in_container.py --distribution fedora-44 --output bench-results/fedora-44
+
+      - name: Upload the Fedora 44 tier's report and log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench-tier-fedora-44
+          path: bench-results/fedora-44/
+          if-no-files-found: warn
+          retention-days: 14
