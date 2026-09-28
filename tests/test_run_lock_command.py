@@ -29,6 +29,7 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
 
@@ -64,6 +65,26 @@ def a_machine_of_this_tests_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("HOME", str(home))
     return home
+
+
+@pytest.fixture(autouse=True)
+def a_job_started_this_command(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
+    """A live process of the test's own, as the parent of a `take` called here.
+
+    A `take` called in this process would otherwise follow this suite's own
+    parent, which the test does not choose: in the Linux container that runs
+    the suite it is pid 1, which `take` rightly refuses as a process that lives
+    as long as the machine. A sleeping process stands in for the job whose step
+    started the command, and lives until the test ends. That a real step's
+    parent is the job is what the tests below that start a job of their own
+    show.
+    """
+    job = subprocess.Popen([PYTHON, "-c", "import time; time.sleep(600)"])
+    monkeypatch.setattr(os, "getppid", lambda: job.pid)
+    try:
+        yield job.pid
+    finally:
+        stop(job)
 
 
 def a_lock_held_by(pid: int, **fields: object) -> Path:
