@@ -164,6 +164,57 @@ def test_every_leg_prints_its_slowest_tests() -> None:
     assert option_value(command, "--durations") == "30", command
 
 
+def test_the_suite_uses_a_dedicated_pytest_temp_root_per_matrix_leg() -> None:
+    """Windows pytest temp I/O is measurably faster on the hosted runner's D: drive.
+
+    A temp root beneath `runner.temp` keeps suite scratch off Windows' default
+    C: temp drive, outside the checkout, and gives every OS/Python leg its own
+    directory. It cannot collide with another matrix leg's files.
+    """
+    command = hosted_step("Run tests")
+    basetemp = option_value(command, "--basetemp")
+
+    assert basetemp is not None, command
+    assert "runner.temp" in basetemp, basetemp
+    assert "matrix.os" in basetemp and "matrix.python-version" in basetemp, basetemp
+    assert "github.workspace" not in basetemp and "GITHUB_WORKSPACE" not in basetemp, basetemp
+
+
+def test_the_suite_keeps_all_testcase_durations_in_an_external_junit_report() -> None:
+    """The slowest-30 console list cannot identify aggregate per-test cost."""
+    command = hosted_step("Run tests")
+    junit_path = option_value(command, "--junitxml")
+
+    assert junit_path is not None, command
+    assert "runner.temp" in junit_path, junit_path
+    assert "matrix.os" in junit_path and "matrix.python-version" in junit_path, junit_path
+    assert "github.workspace" not in junit_path and "GITHUB_WORKSPACE" not in junit_path, junit_path
+
+
+def test_each_leg_uploads_its_junit_report_even_after_a_test_failure() -> None:
+    """The timing report remains available when a test fails, with unique artifact names."""
+    steps = matrix_steps()
+    run_index = next(index for index, step in enumerate(steps) if step.get("name") == "Run tests")
+    uploads = [
+        (index, step)
+        for index, step in enumerate(steps)
+        if "actions/upload-artifact" in str(step.get("uses", ""))
+        and "pytest-timings" in str((step.get("with") or {}).get("name", ""))
+    ]
+
+    assert len(uploads) == 1, uploads
+    upload_index, upload = uploads[0]
+    settings = upload["with"]
+    junit_path = option_value(hosted_step("Run tests"), "--junitxml")
+    assert upload.get("if") == "always()", upload
+    assert upload_index > run_index, (run_index, upload_index)
+    assert settings["path"] == junit_path, (settings, junit_path)
+    assert "pytest-${{ matrix.os }}-${{ matrix.python-version }}.xml" in settings["path"], settings
+    assert "${{ matrix.os }}" in settings["name"] and "${{ matrix.python-version }}" in settings["name"], settings
+    assert settings.get("if-no-files-found") == "warn", settings
+    assert settings.get("retention-days") == 14, settings
+
+
 def test_every_leg_names_its_worker_count() -> None:
     """pytest-xdist names the workers it started only at the default verbosity.
 
@@ -224,6 +275,26 @@ def test_the_ledger_is_kept_for_run_tests_alone() -> None:
             assert LEDGER_VARIABLE not in step.get("run", ""), (job_name, step.get("name"))
     run_tests = [step for step in matrix_steps() if step.get("name") == "Run tests"][0]
     assert "runner.temp" in str(run_tests["env"][LEDGER_VARIABLE]), run_tests["env"]
+
+
+def test_the_suite_sandbox_temp_root_is_set_only_for_run_tests() -> None:
+    """The autouse fixture follows tempfile's root on Windows; POSIX keeps /tmp."""
+    temp_variables = ("TEMP", "TMP", "TMPDIR")
+    workflow = workflow_document(WORKFLOW)
+    carriers = [
+        (job_name, step.get("name"), variable)
+        for job_name, job in workflow["jobs"].items()
+        for step in job.get("steps", [])
+        for variable in temp_variables
+        if variable in (step.get("env") or {})
+    ]
+    run_tests = next(step for step in matrix_steps() if step.get("name") == "Run tests")
+
+    assert carriers == [("test", "Run tests", variable) for variable in temp_variables], carriers
+    assert all(run_tests["env"][variable] == "${{ runner.temp }}" for variable in temp_variables), run_tests["env"]
+    assert not any(variable in (workflow.get("env") or {}) for variable in temp_variables)
+    for job_name, job in workflow["jobs"].items():
+        assert not any(variable in (job.get("env") or {}) for variable in temp_variables), job_name
 
 
 def test_the_ledger_is_read_after_run_tests_fails() -> None:

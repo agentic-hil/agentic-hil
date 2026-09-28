@@ -113,7 +113,13 @@ jobs:
         timeout-minutes: 40
         env:
           AGENTIC_HIL_TEST_LEDGER: ${{ runner.temp }}/suite-ledger
-        run: pytest -n auto --durations=30
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
+        run: >-
+          pytest -n auto --durations=30
+          --basetemp "${{ runner.temp }}/pytest-basetemp-${{ matrix.os }}-${{ matrix.python-version }}"
+          --junitxml "${{ runner.temp }}/pytest-${{ matrix.os }}-${{ matrix.python-version }}.xml"
 
       # A suite stopped from outside prints no summary, so a leg that ran out of
       # time names no test: its log ends in a row of dots. This reads the ledger
@@ -127,6 +133,19 @@ jobs:
       - name: Name the tests the suite was stopped in
         if: failure()
         run: python tests/suite_ledger.py "${{ runner.temp }}/suite-ledger"
+
+      # Keep every testcase's total duration so a hosted Windows/Unix pairing
+      # can be compared beyond the thirty slowest entries in the console log.
+      # If the test step ran out of time before pytest could write the report,
+      # retain the hard timeout verdict and let the missing report be a warning.
+      - name: Keep per-test timing report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pytest-timings-${{ matrix.os }}-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/pytest-${{ matrix.os }}-${{ matrix.python-version }}.xml
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Check package build
         run: python -m build
