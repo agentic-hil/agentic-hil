@@ -20,12 +20,16 @@ Nothing in this module touches hardware or sets the tier's own variable.
 from __future__ import annotations
 
 import ast
+import importlib.util
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from support import scaled_time_bound
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 BENCH_CONFTEST = REPOSITORY_ROOT / "tests" / "bench" / "conftest.py"
@@ -159,11 +163,12 @@ class AnItem:
 
 
 class AConfig:
-    """What the selection hook reaches through `config`: the deselection report."""
+    """What the selection hook reaches through `config`: the deselection report, and the stash it keeps its reasons in."""
 
     def __init__(self) -> None:
         self.deselected: list[AnItem] = []
         self.hook = SimpleNamespace(pytest_deselected=lambda items: self.deselected.extend(items))
+        self.stash: dict[object, object] = {}
 
 
 def the_items() -> list[AnItem]:
@@ -252,3 +257,182 @@ def test_the_index_mark_is_declared_where_strict_markers_look(pytestconfig: pyte
     declared = pytestconfig.getini("markers")
 
     assert [line for line in declared if line.startswith(f"{NEEDS_THE_WHEELHOUSE}:")], declared
+
+
+# -- the account those tests install into, and the images it cannot install on --
+
+STAGE = "tests/bench/test_bench_without_device_group.py::test_probe"
+REST = ["tests/bench/test_bench_serial.py::test_echo", "tests/test_config.py::test_load"]
+INSTALLING = "tests/bench/test_bench_first_run.py::test_upgrade"
+
+
+def test_a_clean_account_is_started_without_this_tiers_interpreter_on_its_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A login shell keeps the PATH it is started with unless the distribution's
+    profile sets one of its own. On the bench, Debian's did and Ubuntu's and
+    Fedora's did not, so there the account's first new shell found the tier's
+    own launcher, and the quick start's first line passed on an installation
+    that was never the account's."""
+    from tests.bench import test_bench_first_run as first_run
+
+    skeleton = tmp_path / "skel"
+    skeleton.mkdir()
+    (tmp_path / "account").mkdir()
+    own = str(Path(sys.executable).parent)
+    system = str(tmp_path / "system")
+    monkeypatch.setattr(first_run, "SKELETON", skeleton)
+    monkeypatch.setenv("PATH", os.pathsep.join([own, system, own]))
+
+    _, environment = first_run.an_account_of_its_own(tmp_path / "account", tmp_path / "index")
+
+    assert environment["PATH"].split(os.pathsep) == [system]
+
+
+def in_a_bench_image(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, distribution: str | None, stdout: str, returncode: int = 0
+) -> list[str]:
+    """This run in the bench image with its index, naming `distribution` or none,
+    where a clean account's login shell prints `stdout`; what that shell is asked."""
+    from tests.bench import conftest
+
+    monkeypatch.setenv(conftest.BENCH_ENV, "1")
+    monkeypatch.delenv(conftest.DEVICE_GROUPS_ENV, raising=False)
+    image = tmp_path / "bench-test-image"
+    image.write_text("The bench tier runs here.\n", encoding="utf-8")
+    named = tmp_path / "bench-distribution"
+    if distribution is not None:
+        named.write_text(f"{distribution}\n", encoding="utf-8")
+    index = tmp_path / "wheelhouse"
+    index.mkdir()
+    monkeypatch.setattr(conftest, "BENCH_IMAGE", image)
+    monkeypatch.setattr(conftest, "DISTRIBUTION_NAME", named)
+    monkeypatch.setattr(conftest, "WHEELHOUSE", index)
+    asked: list[str] = []
+
+    def login(script: str) -> subprocess.CompletedProcess[str]:
+        asked.append(script)
+        return subprocess.CompletedProcess(["bash", "-lc", script], returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(conftest, "a_clean_login_runs_python", login)
+    return asked
+
+
+def selected_beside_an_index_test() -> tuple[list[str], list[str], object]:
+    """What the selection keeps and deselects of the usual items and one index test, and the line it reports after collection."""
+    from tests.bench import conftest
+
+    items, config = [*the_items(), AnItem(INSTALLING, "bench", conftest.NEEDS_THE_WHEELHOUSE)], AConfig()
+    conftest.pytest_collection_modifyitems(config, items)
+    said = conftest.pytest_report_collectionfinish(config)
+    return [item.nodeid for item in items], [item.nodeid for item in config.deselected], said
+
+
+def a_login_answer(tmp_path: Path, *, pip: bool, managed: bool) -> tuple[str, str, str]:
+    """What the question prints, for an interpreter and a marker of this test's own."""
+    python, marker = str(tmp_path / "bin" / "python"), str(tmp_path / "lib" / "EXTERNALLY-MANAGED")
+    return json.dumps({"python": python, "pip": pip, "managed": marker if managed else ""}) + "\n", python, marker
+
+
+@pytest.mark.parametrize(
+    ("pip", "managed", "lacking"),
+    [
+        (False, False, "has no pip"),
+        (True, True, "is marked externally managed by {marker}"),
+        (False, True, "has no pip and is marked externally managed by {marker}"),
+    ],
+)
+def test_on_a_distribution_where_a_clean_account_cannot_install_for_itself_the_index_tests_are_deselected_and_one_line_says_why(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pip: bool, managed: bool, lacking: str
+) -> None:
+    """The quick start's install line is `python -m pip install --user`. Where a
+    new login shell's `python` has no pip, or is marked as the distribution's
+    to manage, no newcomer gets past that line, and the stage is left out:
+    deselected, since a skip fails the tier, with the image and the reason in
+    one line."""
+    from tests.bench import conftest
+
+    stdout, python, marker = a_login_answer(tmp_path, pip=pip, managed=managed)
+    asked = in_a_bench_image(monkeypatch, tmp_path, distribution="a-distribution", stdout=stdout)
+
+    kept, deselected, said = selected_beside_an_index_test()
+
+    assert asked == [conftest.ASK_ABOUT_A_USER_INSTALL]
+    assert (kept, deselected) == (REST, [STAGE, INSTALLING])
+    assert isinstance(said, str) and "\n" not in said, said
+    assert said.startswith(f"tests marked {conftest.NEEDS_THE_WHEELHOUSE}: deselected on a-distribution, "), said
+    assert "`python -m pip install --user`" in said, said
+    assert said.endswith(f"its login shell's `python`, {python}, {lacking.format(marker=marker)}"), said
+
+
+def test_on_a_distribution_where_a_clean_account_can_install_for_itself_the_index_tests_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stdout, _, _ = a_login_answer(tmp_path, pip=True, managed=False)
+    in_a_bench_image(monkeypatch, tmp_path, distribution="a-distribution", stdout=stdout)
+
+    kept, deselected, said = selected_beside_an_index_test()
+
+    assert (kept, deselected, said) == ([*REST, INSTALLING], [STAGE], None)
+
+
+@pytest.mark.parametrize(("stdout", "returncode"), [("", 127), ("not an answer\n", 0), ("[]\n", 0)])
+def test_a_login_whose_answer_cannot_be_read_leaves_the_index_tests_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stdout: str, returncode: int
+) -> None:
+    """Only a reason that was measured leaves the stage out. Without one it runs,
+    and fails on whatever stopped the login, which is then in its report."""
+    in_a_bench_image(monkeypatch, tmp_path, distribution="a-distribution", stdout=stdout, returncode=returncode)
+
+    kept, deselected, said = selected_beside_an_index_test()
+
+    assert (kept, deselected, said) == ([*REST, INSTALLING], [STAGE], None)
+
+
+def test_the_default_image_runs_the_index_tests_whatever_it_lacks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """It names no distribution, and nothing there leaves the stage out: not a
+    login `python` without pip, and not a missing index. The image the gate runs
+    in cannot lose the stage without the stage failing."""
+    from tests.bench import conftest
+
+    stdout, _, _ = a_login_answer(tmp_path, pip=False, managed=True)
+    asked = in_a_bench_image(monkeypatch, tmp_path, distribution=None, stdout=stdout)
+    conftest.WHEELHOUSE.rmdir()
+
+    kept, deselected, said = selected_beside_an_index_test()
+
+    assert asked == []
+    assert (kept, deselected, said) == ([*REST, INSTALLING], [STAGE], None)
+
+
+def test_outside_the_bench_image_the_index_tests_are_deselected_and_one_line_says_why(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.bench import conftest
+
+    monkeypatch.setenv(conftest.BENCH_ENV, "1")
+    monkeypatch.delenv(conftest.DEVICE_GROUPS_ENV, raising=False)
+    monkeypatch.setattr(conftest, "BENCH_IMAGE", tmp_path / "bench-test-image")
+    monkeypatch.setattr(conftest, "WHEELHOUSE", tmp_path / "wheelhouse")
+
+    kept, deselected, said = selected_beside_an_index_test()
+
+    assert (kept, deselected) == (REST, [STAGE, INSTALLING])
+    assert isinstance(said, str) and "\n" not in said, said
+    assert said.startswith(f"tests marked {conftest.NEEDS_THE_WHEELHOUSE}: deselected, "), said
+    assert conftest.WHEELHOUSE.as_posix() in said, said
+
+
+def test_the_question_a_clean_login_is_asked_is_answered_by_the_interpreter_that_runs_it() -> None:
+    """What it prints is what the selection reads: the interpreter, whether it
+    has pip, and the marker that has its distribution manage it, if one does."""
+    from tests.bench.conftest import ASK_ABOUT_A_USER_INSTALL
+
+    answered = subprocess.run([sys.executable, "-c", ASK_ABOUT_A_USER_INSTALL], capture_output=True, text=True, timeout=scaled_time_bound(120), check=False)
+
+    assert answered.returncode == 0, answered.stderr
+    answer = json.loads(answered.stdout)
+    assert set(answer) == {"python", "pip", "managed"}, answer
+    assert answer["python"] == sys.executable
+    assert answer["pip"] is (importlib.util.find_spec("pip") is not None)
+    assert answer["managed"] == "" or Path(answer["managed"]).name == "EXTERNALLY-MANAGED", answer

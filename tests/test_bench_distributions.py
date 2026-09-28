@@ -210,6 +210,30 @@ def test_each_head_installs_without_recommendations(distribution: str) -> None:
     assert "--no-install-recommends" in install or "install_weak_deps=False" in install, install
 
 
+@pytest.mark.parametrize("distribution", sorted(BASES))
+def test_each_head_names_its_distribution_where_the_bench_tier_reads_it(distribution: str) -> None:
+    """The tier leaves a stage out on a distribution that cannot run it, under
+    the name the image gives, and never on an image that names none. A head
+    that named nothing would have its image held to every stage the default
+    image runs."""
+    from tests.bench.conftest import DISTRIBUTION_NAME
+
+    named = [line for line in instructions(head_text(distribution)) if DISTRIBUTION_NAME.as_posix() in line]
+
+    assert named == [
+        f"RUN mkdir -p {DISTRIBUTION_NAME.parent.as_posix()} && printf '%s\\n' {distribution} > {DISTRIBUTION_NAME.as_posix()}"
+    ], named
+
+
+def test_the_default_image_names_no_distribution() -> None:
+    """An image that names none is held to every stage, which is what keeps the
+    image the gate runs in from losing one without failing it. The shared part
+    is in every distribution's image too, so it names none either."""
+    from tests.bench.conftest import DISTRIBUTION_NAME
+
+    assert DISTRIBUTION_NAME.as_posix() not in DOCKERFILE.read_text(encoding="utf-8")
+
+
 def test_every_package_of_the_default_image_is_accounted_for() -> None:
     """A package added to the default image has to be added to every head too."""
     assert default_packages() == set(EQUIVALENTS), sorted(default_packages() ^ set(EQUIVALENTS))
