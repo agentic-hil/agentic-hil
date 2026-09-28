@@ -80,6 +80,7 @@ python3 tools/bench_in_container.py -- tests/bench/test_bench_serial.py -x
 python3 tools/bench_in_container.py --runtime docker
 python3 tools/bench_in_container.py --without-device-group
 python3 tools/bench_in_container.py --runtime podman --live-device-tree -- tests/bench/usb_reset_reenumeration.py
+python3 tools/bench_in_container.py --distribution debian-12
 python3 tools/bench_in_container.py --build-only         # the image alone, anywhere
 python3 tools/bench_in_container.py --cubeprogrammer-archive ~/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip --build-only
 ```
@@ -146,6 +147,15 @@ apply.
   the machine's device-lock directory, `~/.agentic-hil/device-locks`, is mounted
   into the container at the same place under its home, so the tier and every
   other run on the machine still meet at the board's own lock.
+- Anything else that drives the board from the machine itself takes the same
+  lock with `tools/run_lock.py`: `python3 tools/run_lock.py run -- <command>`
+  holds it for one command's life, queued like these tools, and exits with the
+  command's status, and `take` and `give-back` hold it across a workflow's
+  steps, as the nightly does. A run that holds the board without it meets the
+  tier as `device_busy` in the middle of what it was doing.
+- `--distribution` builds the image on another distribution, with that
+  distribution's OpenOCD, compilers and Python; see "Other distributions"
+  below.
 - `--usb-device` and `--serial-device` name the probe's nodes instead of
   finding them. They go together, and each can be given more than once.
 - `--without-device-group` runs the one stage the tier cannot hold,
@@ -287,6 +297,22 @@ keeps one pending run: a second dispatch while one waits takes its place. The re
 every path, including a red or cancelled run, and kept for fourteen days; the
 stage's are in its `without-device-group` directory inside it.
 
+## The nightly
+
+`.github/workflows/hardware-bench.yml` runs every night on the same runner. Its
+first job drives the release installed on the machine itself through the demo:
+doctor, the build, the demo's plan and the pytest plugin. It takes the machine's
+run lock with `tools/run_lock.py take` before doctor, queued behind whoever holds
+it, for the life of the job's process, and gives it back with `give-back` after
+the pytest plugin's run whatever happened, so a tier started on the machine
+meanwhile waits for the job instead of meeting it on the board.
+
+Its second job runs this tool once for every distribution `--distribution`
+offers, one after another, after the first job whatever it found: each run
+queues on the lock itself, as the gate's does, and each distribution's report
+and log are uploaded as `bench-tier-<distribution>`, whatever the run did, and
+kept for fourteen days.
+
 ## What is in the image
 
 - The base image, pinned by digest, with the tag it was resolved from on the
@@ -317,3 +343,49 @@ version; the install itself is not a hash-pinned pack download.
 `AGENTIC_HIL_BENCH` is deliberately not set in the image. It is the statement
 that a probe and a board are attached, which an image cannot know, and the
 runner sets it on the run that hands the devices in.
+
+## Other distributions
+
+`--distribution` builds the tier's image on another distribution than the
+default image's: `ubuntu-22.04`, `ubuntu-24.04`, `debian-12` or `fedora-44`.
+Everything else about a run is the same, the lock, the devices, the verdict and
+the output included.
+
+Each has a head of its own, `tools/bench/distributions/<distribution>.Dockerfile`:
+the distribution's base image, pinned by digest with the tag it was resolved
+from beside it, as `tools/bench/Dockerfile` pins its own, and one install of the
+packages the default image installs, under that distribution's names, with its
+Python. The runner builds the head followed by `tools/bench/Dockerfile` from its
+first `WORKDIR` on, so the checkout, its locked dependencies, the marker, the
+stop signal and the entry point are the default image's own, and what differs
+is what the distribution packages: its OpenOCD, its cross compiler and C
+library, its GDB, its CMake and its Python. Such an image is tagged
+`agentic-hil-bench-tier:<distribution>`; without `--distribution`,
+`tools/bench/Dockerfile` is built as it stands. Whatever every image needs goes
+into `tools/bench/Dockerfile` after that first `WORKDIR`, and the file keeps a
+single stage, as a test holds it to, since the composition knows of one: a
+second would be missing from the composed file, or would put the default base
+image in the distribution's place.
+
+What the distributions packaged when the tier was run on each of them, on
+2026-09-27 and 2026-09-28:
+
+| Distribution | OpenOCD | GCC for Arm | GDB | CMake | Python |
+| --- | --- | --- | --- | --- | --- |
+| `ubuntu-22.04` | 0.11.0 | 10.3-2021.07 | 12.1 | 3.22.1 | 3.10.12 |
+| `ubuntu-24.04` | 0.12.0 | 13.2.rel1 | 15.1 | 3.28.3 | 3.12.3 |
+| `debian-12` | 0.12.0 | 12.2.rel1 | 13.1 | 3.25.1 | 3.11.2 |
+| `fedora-44` | 0.12.0, snapshot cb52502 | 15.2.0 | 17.2 | 4.3.0 | 3.14.7 |
+
+The whole tier passed on `ubuntu-24.04`, `debian-12` and `fedora-44`. From the
+start of the build to the verdict, each image built afresh, the runs took
+12m42s, 11m43s and 19m26s: on Fedora 44 the tier itself took 17 minutes, where
+it took 10 to 11 on the others. The nightly's limits are set from these runs.
+
+OpenOCD 0.11, Ubuntu 22.04's, has no `adapter serial`, which is how the OpenOCD
+backend selects the probe when a configuration binds it by serial number, as
+the tier's does. It refuses the command before it opens the probe, with
+`invalid subcommand "serial <serial>"`, and the product reports that as
+`debugger_command_rejected` naming `adapter serial`: the board was not touched
+and stays in service. Every test that reaches the board through OpenOCD fails
+there on that refusal, so the tier on `ubuntu-22.04` is red.
