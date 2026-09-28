@@ -3799,6 +3799,75 @@ def test_a_linux_process_of_another_installation_is_still_not_claimed(
     assert _processes_holding_installation() == []
 
 
+PIP_USER_SERVER_RECORDING = Path(__file__).resolve().parent / "fixtures" / "pip_user_mcp_server_process_recording.json"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader needs the symlinks a POSIX host makes without privileges")
+def test_a_linux_server_started_through_a_user_installations_console_script_is_found(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The recorded bench run: a `pip install --user` server nobody was named for.
+
+    A user installation owns no prefix. Its interpreter is the system one, so the
+    image is the same for every Python program on the host, and there is no
+    `VIRTUAL_ENV` to read. With the account's server holding the board,
+    `agentic-hil upgrade` answered no `restart_required_by` at all. What names
+    that server is the console script the kernel passed as argv[1] when it ran
+    the script's `#!` line. The scripts pip installed beside it, run the same
+    way, are the neighbours that stay unclaimed, and so is the upgrade, which
+    runs through the very same console script.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    recording = json.loads(PIP_USER_SERVER_RECORDING.read_text(encoding="utf-8"))["recording"]
+    server, interpreter = recording["server"], recording["interpreter"]
+    home = tmp_path / "home"
+
+    def here(recorded: str) -> Path:
+        """A recorded path on this machine: the account's home and the root both under `tmp_path`."""
+        return home / recorded.removeprefix("<home>/") if recorded.startswith("<home>/") else tmp_path / recorded.lstrip("/")
+
+    def launched(argv: list[str]) -> tuple[str, ...]:
+        return tuple(str(here(argument)) if argument.startswith(("/", "<home>/")) else argument for argument in argv)
+
+    image = here(server["exe"])
+    image.parent.mkdir(parents=True)
+    image.write_text("", encoding="utf-8")
+    python = here(interpreter["executable"])
+    python.symlink_to(image)
+    user_scripts = here(interpreter["user_scripts"])
+    user_scripts.mkdir(parents=True)
+    for name in recording["scripts_beside"]:
+        (user_scripts / name).write_text(f"#!{python}\n", encoding="utf-8")
+    project = here(server["cwd"])
+    project.mkdir(parents=True)
+    proc = tmp_path / "proc"
+    _proc_entry(proc, 4242, exe=image, cmdline=launched(server["argv"]))
+    (proc / "4242" / "cwd").symlink_to(project)
+    neighbours = [name for name in recording["scripts_beside"] if name != "agentic-hil"]
+    for pid, name in enumerate(neighbours, start=4300):
+        _proc_entry(proc, pid, exe=image, cmdline=(str(python), str(user_scripts / name)))
+    _proc_entry(proc, 4100, exe=image, cmdline=(str(python), str(user_scripts / "agentic-hil"), "upgrade", "--json"))
+    scripts_of = {None: here(interpreter["prefix"]) / "bin", "posix_user": user_scripts}
+    real_get_path = sysconfig.get_path
+
+    def get_path(name: str, scheme: str | None = None, *more: object, **named: object) -> str:
+        if name == "scripts" and scheme in scripts_of:
+            return str(scripts_of[scheme])
+        return real_get_path(name, *([scheme] if scheme else []), *more, **named)
+
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+    monkeypatch.setattr("agentic_hil.upgrade.owning_manager", lambda: recording["upgrade"]["manager"])
+    monkeypatch.setattr("agentic_hil.upgrade.sysconfig.get_path", get_path)
+    monkeypatch.setattr(sys, "prefix", str(here(interpreter["prefix"])))
+    monkeypatch.setattr(sys, "executable", str(python))
+    monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 4100)
+    _proc_lists_the_reader(proc)
+
+    assert _processes_holding_installation() == [{"pid": 4242, "image": str(image), "working_directory": str(project)}]
+
+
 def test_a_relative_command_line_is_never_read_against_this_process_own_directory(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -1195,21 +1195,31 @@ def _belongs_to_installation(entry: ProcessImage, owned_prefixes: tuple[str, ...
     installation's process. Both are read with the same tolerance the image gets:
     a process that answers neither is a process this cannot claim, never a
     failure.
+
+    A system or `--user` installation owns no prefix, since its interpreter runs
+    every other Python program on the machine too, so neither of those can speak
+    for it. Its console script is its own all the same, and the kernel names it
+    as argv[1] when it runs the script's `#!` line, which is how an agent host
+    starts the server it registered. Measured on a bench with a
+    `pip install --user` installation: the server holding the board ran as
+    `/usr/local/bin/python <home>/.local/bin/agentic-hil mcp-stdio` with no
+    `VIRTUAL_ENV`, and `agentic-hil upgrade` named nobody.
     """
     if _under_owned_prefix(entry.image, owned_prefixes):
-        return True
-    if any(spelling in scripts for spelling in _location_spellings(entry.image)):
-        return True
-    if not owned_prefixes:
-        return False
-    if entry.virtual_env and any(spelling.rstrip("/") + "/" in owned_prefixes for spelling in _location_spellings(entry.virtual_env)):
         return True
     # Absolute arguments only. A relative one is relative to *that* process's
     # working directory, which nothing here has, and making it absolute uses this
     # process's instead: run `agentic-hil upgrade` from inside the tool
     # environment and every process started as `bash` or `python3` would be
     # claimed as a holder of it.
-    return any(_under_owned_prefix(argument, owned_prefixes) for argument in entry.launch_arguments if argument and os.path.isabs(argument))
+    invoked_by = [argument for argument in entry.launch_arguments if argument and os.path.isabs(argument)]
+    if any(spelling in scripts for path in (entry.image, *invoked_by) for spelling in _location_spellings(path)):
+        return True
+    if not owned_prefixes:
+        return False
+    if entry.virtual_env and any(spelling.rstrip("/") + "/" in owned_prefixes for spelling in _location_spellings(entry.virtual_env)):
+        return True
+    return any(_under_owned_prefix(argument, owned_prefixes) for argument in invoked_by)
 
 
 def _upgrading_process_and_its_launchers(by_pid: dict[int, ProcessImage], owned_prefixes: tuple[str, ...], scripts: tuple[str, ...]) -> set[int]:
