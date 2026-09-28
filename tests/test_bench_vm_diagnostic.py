@@ -314,7 +314,7 @@ def test_pyocd_recordings_are_an_independent_opt_in_stage_before_cube_and_usb():
     assert '--output "$BENCH_RESULTS/pyocd"' in pyocd["run"]
     assert "--runtime podman" in pyocd["run"]
     assert "--live-device-tree" in pyocd["run"]
-    assert pyocd["run"].endswith("-- tests/bench/pyocd_recordings.py")
+    assert pyocd["run"].endswith("-- -x tests/bench/pyocd_recordings.py")
     assert "--cubeprogrammer-archive" not in pyocd["run"]
 
     standard = [step for step in steps if step.get("name") in {"Run the bench tier in its container", "Run the stage without the probe's device group"}]

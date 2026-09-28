@@ -513,12 +513,17 @@ def _safe_pyocd_usb_timeout() -> dict:
     }
 
 
-def _run_pyocd_discovery_reset(monkeypatch, results: list[dict]):
+def _run_pyocd_discovery_reset(monkeypatch, results: list[dict], sleep_fn=None):
     events: list[tuple] = []
     server = FakePyOcdServer(results, events)
     bench = SimpleNamespace(project=Path("."), state_root=Path("."))
     properties: dict[str, str] = {}
-    identity = SimpleNamespace(serial_number="SERIAL-7", vid="0483", pid="374b")
+    identity = SimpleNamespace(
+        serial_number="SERIAL-7", vid="0483", pid="374b", sysfs_path=Path("/sys/bus/usb/devices/1-2")
+    )
+    reappeared_identity = SimpleNamespace(
+        serial_number="SERIAL-7", vid="0483", pid="374b", sysfs_path=Path("/sys/bus/usb/devices/1-2-new")
+    )
     monkeypatch.setattr(
         usb_reset_support,
         "reset_usb_device",
@@ -527,7 +532,19 @@ def _run_pyocd_discovery_reset(monkeypatch, results: list[dict]):
     monkeypatch.setattr(
         usb_reset_support,
         "wait_for_usb_device",
-        lambda **kwargs: events.append(("wait", kwargs["expected_serial"], kwargs["expected_vid"], kwargs["expected_pid"])),
+        lambda **kwargs: (
+            events.append(("wait", kwargs["expected_serial"], kwargs["expected_vid"], kwargs["expected_pid"]))
+            or reappeared_identity
+        ),
+    )
+    snapshot_identities: list[Path] = []
+    monkeypatch.setattr(
+        pyocd_recordings,
+        "usb_power_snapshot",
+        lambda actual: (
+            snapshot_identities.append(actual.sysfs_path)
+            or {"control": {"value": "auto"}, "runtime_status": {"value": "active"}}
+        ),
     )
 
     recording = pyocd_recordings.pyocd_discovery_after_usb_reset(
@@ -537,18 +554,23 @@ def _run_pyocd_discovery_reset(monkeypatch, results: list[dict]):
         usb_identity=identity,
         private_values=("SERIAL-7",),
         record_property=lambda name, value: properties.__setitem__(name, value),
+        sleep_fn=sleep_fn or (lambda seconds: events.append(("sleep", seconds))),
     )
-    return events, properties, recording
+    return events, properties, recording, snapshot_identities
 
 
 def test_pyocd_discovery_reset_records_initial_timeout_and_same_process_recovery(monkeypatch) -> None:
     initial = _safe_pyocd_usb_timeout()
     recovered = _pyocd_listing("SERIAL-7", '{"boards":[{"unique_id":"SERIAL-7"}]}')
 
-    events, properties, recording = _run_pyocd_discovery_reset(monkeypatch, [initial, recovered])
+    events, properties, recording, snapshot_identities = _run_pyocd_discovery_reset(
+        monkeypatch,
+        [initial, recovered, recovered, recovered],
+    )
 
-    assert [event[0] for event in events] == ["mcp", "reset", "wait", "mcp"]
-    assert [event[1] for event in events if event[0] == "mcp"] == ["debugger_probes_list"] * 2
+    assert [event[0] for event in events] == ["mcp", "reset", "wait", "mcp", "mcp", "sleep", "mcp"]
+    assert ("sleep", 3.0) in events
+    assert [event[1] for event in events if event[0] == "mcp"] == ["debugger_probes_list"] * 4
     assert recording["mcp_process_same"] is True
     assert recording["initial"]["result"]["target_contacted"] is False
     assert recording["initial"]["result"]["target_ok"] is None
@@ -556,18 +578,83 @@ def test_pyocd_discovery_reset_records_initial_timeout_and_same_process_recovery
     assert recording["initial"]["result"]["cleanup_ok"] is None
     assert "USB Error: [Errno 110] Operation timed out" in recording["initial"]["programmer_output"]["stdout"]
     assert recording["after"]["result"]["ok"] is True
+    assert recording["immediate_repeat"]["result"]["ok"] is True
+    assert recording["delayed_repeat"]["result"]["ok"] is True
+    assert recording["delay_s"] == 3.0
+    assert set(recording["power"]) == {"initial", "after_reset", "immediate_repeat", "delayed_repeat"}
+    assert snapshot_identities[:2] == [Path("/sys/bus/usb/devices/1-2")] * 2
+    assert snapshot_identities[2:] == [Path("/sys/bus/usb/devices/1-2-new")] * 6
     assert properties["pyocd_discovery_before_usb_reset_v1"]
     assert properties["pyocd_discovery_after_usb_reset_v1"]
     assert "SERIAL-7" not in json.dumps(properties)
 
 
-def test_pyocd_discovery_reset_is_still_performed_after_an_initial_success(monkeypatch) -> None:
-    events, _, recording = _run_pyocd_discovery_reset(
-        monkeypatch,
-        [_pyocd_listing("OTHER-PROBE"), _pyocd_listing("SERIAL-7")],
+def test_pyocd_discovery_repeat_list_does_not_recover_after_a_second_listing_fails(monkeypatch) -> None:
+    initial = _pyocd_listing("SERIAL-7")
+    first_after = _pyocd_listing("SERIAL-7")
+    second = _safe_pyocd_usb_timeout()
+    second["summary"] = "second same-process listing timed out"
+    events: list[tuple] = []
+    server = FakePyOcdServer([initial, first_after, second], events)
+    properties: dict[str, str] = {}
+    identity = SimpleNamespace(
+        serial_number="SERIAL-7", vid="0483", pid="374b", sysfs_path=Path("/sys/bus/usb/devices/1-2")
+    )
+    monkeypatch.setattr(usb_reset_support, "reset_usb_device", lambda _identity: events.append(("reset",)))
+    monkeypatch.setattr(
+        usb_reset_support,
+        "wait_for_usb_device",
+        lambda **_kwargs: identity,
+    )
+    monkeypatch.setattr(
+        pyocd_recordings,
+        "usb_power_snapshot",
+        lambda _identity: {"control": {"value": "auto"}},
+        raising=False,
     )
 
-    assert [event[0] for event in events] == ["mcp", "reset", "wait", "mcp"]
+    with pytest.raises(pytest.fail.Exception, match="second same-process debugger_probes_list"):
+        pyocd_recordings.pyocd_discovery_after_usb_reset(
+            server,
+            SimpleNamespace(project=Path("."), state_root=Path(".")),
+            expected_serial="SERIAL-7",
+            usb_identity=identity,
+            private_values=("SERIAL-7",),
+            record_property=lambda name, value: properties.__setitem__(name, value),
+            sleep_fn=lambda seconds: events.append(("sleep", seconds)),
+        )
+
+    assert [event[0] for event in events] == ["mcp", "reset", "mcp", "mcp"]
+    repeat = json.loads(properties["pyocd_discovery_repeat_listing_v1"])
+    assert repeat["second_after"]["result"]["summary"] == "second same-process listing timed out"
+    assert "third_after" not in repeat
+    power = json.loads(properties["pyocd_discovery_usb_power_v1"])
+    assert set(power) == {"initial", "after_reset", "immediate_repeat"}
+
+
+def test_usb_power_snapshot_reports_missing_attributes_as_unavailable(tmp_path: Path) -> None:
+    identity = SimpleNamespace(sysfs_path=tmp_path / "1-2")
+    power = identity.sysfs_path / "power"
+    power.mkdir(parents=True)
+    (power / "control").write_text("auto\n", encoding="ascii")
+
+    snapshot = pyocd_recordings.usb_power_snapshot(identity)
+
+    assert snapshot["control"] == {"value": "auto"}
+    assert snapshot["runtime_status"]["available"] is False
+    assert snapshot["runtime_status"]["error_type"] == "FileNotFoundError"
+    assert snapshot["runtime_status"]["errno"] is not None
+    assert snapshot["autosuspend_delay_ms"]["available"] is False
+    assert "value" not in snapshot["autosuspend_delay_ms"]
+
+
+def test_pyocd_discovery_reset_is_still_performed_after_an_initial_success(monkeypatch) -> None:
+    events, _, recording, _ = _run_pyocd_discovery_reset(
+        monkeypatch,
+        [_pyocd_listing("OTHER-PROBE"), _pyocd_listing("SERIAL-7"), _pyocd_listing("SERIAL-7"), _pyocd_listing("SERIAL-7")],
+    )
+
+    assert [event[0] for event in events] == ["mcp", "reset", "wait", "mcp", "mcp", "sleep", "mcp"]
     assert recording["initial"]["result"]["ok"] is True
     assert recording["after"]["result"]["ok"] is True
 
@@ -594,6 +681,8 @@ def test_pyocd_discovery_reset_retains_post_reset_failure_evidence(monkeypatch) 
 
     assert [event[0] for event in events] == ["mcp", "reset", "wait", "mcp"]
     assert "post-reset discovery still timed out" in properties["pyocd_discovery_after_usb_reset_v1"]
+    power = json.loads(properties["pyocd_discovery_usb_power_v1"])
+    assert set(power) == {"initial", "after_reset"}
 
 
 @pytest.mark.parametrize("failure", ["pid_changed", "process_exited"])

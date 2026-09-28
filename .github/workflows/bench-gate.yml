@@ -177,7 +177,7 @@ jobs:
       - name: Run pyOCD hardware recordings
         if: ${{ success() && !inputs.diagnose_only && inputs.run_pyocd_recordings }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --runtime podman --live-device-tree --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS/pyocd" -- tests/bench/pyocd_recordings.py
+        run: exec python3 ../harness/tools/bench_in_container.py --runtime podman --live-device-tree --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS/pyocd" -- -x tests/bench/pyocd_recordings.py
 
       # Kept separate from the standard tier and the without-device-group
       # stage so the extra hardware scenario cannot change either hard gate.

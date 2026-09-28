@@ -411,11 +411,42 @@ def pyocd_discovery_after_usb_reset(
     usb_identity: usb.USBDeviceIdentity,
     private_values: tuple[str, ...],
     record_property,
+    sleep_fn=time.sleep,
 ) -> dict:
-    """Record same-process pyOCD discovery on both sides of one verified USB reset."""
+    """Record repeated same-process discovery around one verified USB reset."""
     initial_pid = server.pid
-    _, initial_result = server.call("debugger_probes_list")
-    initial_evidence = pyocd_result_evidence(bench, initial_result, private_values)
+    power: dict[str, dict] = {}
+
+    def listing(phase: str, identity):
+        power[phase] = {"before": usb_power_snapshot(identity)}
+        try:
+            _, result = server.call("debugger_probes_list")
+        except Exception as error:
+            power[phase]["call_error"] = redact(f"{type(error).__name__}: {error}", private_values)
+            raise
+        finally:
+            power[phase]["after"] = usb_power_snapshot(identity)
+            record_property(
+                "pyocd_discovery_usb_power_v1",
+                json.dumps(power, sort_keys=True, separators=(",", ":")),
+            )
+        evidence = pyocd_result_evidence(bench, result, private_values)
+        return result, evidence
+
+    def same_server() -> None:
+        if server.pid != initial_pid or server.process.poll() is not None:
+            pytest.fail("the same pyOCD MCP process did not remain live during the discovery diagnostic", pytrace=False)
+
+    def require_expected_probe(result: dict, phase: str, evidence: dict) -> None:
+        probe_ids = {
+            str(item.get("probe_id") or "").casefold()
+            for item in result.get("probes", [])
+            if isinstance(item, dict)
+        }
+        if expected_serial.casefold() not in probe_ids:
+            pytest.fail(f"pyOCD did not list the configured probe during {phase}: {evidence}", pytrace=False)
+
+    initial_result, initial_evidence = listing("initial", usb_identity)
     record_property(
         "pyocd_discovery_before_usb_reset_v1",
         json.dumps(initial_evidence, sort_keys=True, separators=(",", ":")),
@@ -426,10 +457,9 @@ def pyocd_discovery_after_usb_reset(
     if initial_result.get("ok") is True:
         require_success(initial_result, "initial debugger_probes_list", initial_evidence)
 
-    if server.pid != initial_pid or server.process.poll() is not None:
-        pytest.fail("the pyOCD MCP process exited before the USB reset diagnostic", pytrace=False)
+    same_server()
     usb.reset_usb_device(usb_identity)
-    usb.wait_for_usb_device(
+    reappeared_identity = usb.wait_for_usb_device(
         sysfs_root=USB_SYSFS,
         device_root=USBFS_ROOT,
         expected_serial=expected_serial,
@@ -437,29 +467,93 @@ def pyocd_discovery_after_usb_reset(
         expected_pid=usb_identity.pid,
         timeout_s=VISIBILITY_TIMEOUT_S,
     )
-    if server.pid != initial_pid or server.process.poll() is not None:
-        pytest.fail("the same pyOCD MCP process did not remain live after the USB reset", pytrace=False)
+    same_server()
 
-    _, after_result = server.call("debugger_probes_list")
-    after_evidence = pyocd_result_evidence(bench, after_result, private_values)
+    after_result, after_evidence = listing("after_reset", reappeared_identity)
     record_property(
         "pyocd_discovery_after_usb_reset_v1",
         json.dumps(after_evidence, sort_keys=True, separators=(",", ":")),
     )
     require_success(after_result, "debugger_probes_list after USB reset", after_evidence)
-    after_ids = {
-        str(item.get("probe_id") or "").casefold()
-        for item in after_result.get("probes", [])
-        if isinstance(item, dict)
-    }
-    if expected_serial.casefold() not in after_ids:
-        pytest.fail("pyOCD did not rediscover the configured probe after USB reset", pytrace=False)
+
+    require_expected_probe(after_result, "post-reset discovery", after_evidence)
+    same_server()
+    second_result, second_evidence = listing("immediate_repeat", reappeared_identity)
+    record_property(
+        "pyocd_discovery_immediate_repeat_v1",
+        json.dumps(second_evidence, sort_keys=True, separators=(",", ":")),
+    )
+    record_property(
+        "pyocd_discovery_repeat_listing_v1",
+        json.dumps(
+            {"second_after": second_evidence, "power": power}, sort_keys=True, separators=(",", ":")
+        ),
+    )
+    require_success(second_result, "second same-process debugger_probes_list", second_evidence)
+    require_expected_probe(second_result, "immediate repeat", second_evidence)
+
+    sleep_fn(3.0)
+    same_server()
+    third_result, third_evidence = listing("delayed_repeat", reappeared_identity)
+    record_property(
+        "pyocd_discovery_delayed_repeat_v1",
+        json.dumps(third_evidence, sort_keys=True, separators=(",", ":")),
+    )
+    record_property(
+        "pyocd_discovery_repeat_listing_v1",
+        json.dumps(
+            {
+                "second_after": second_evidence,
+                "third_after": third_evidence,
+                "delay_s": 3.0,
+                "power": power,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    require_success(third_result, "third same-process debugger_probes_list after bounded delay", third_evidence)
+    require_expected_probe(third_result, "delayed repeat", third_evidence)
+    same_server()
     return {
         "initial": initial_evidence,
         "after": after_evidence,
+        "immediate_repeat": second_evidence,
+        "delayed_repeat": third_evidence,
+        "power": power,
+        "delay_s": 3.0,
         "mcp_process_same": True,
         "usb_identity_reappeared": True,
     }
+
+
+def usb_power_snapshot(identity) -> dict:
+    """Read available runtime power attributes for the identified USB device."""
+    attributes = (
+        "control",
+        "runtime_status",
+        "autosuspend_delay_ms",
+        "runtime_active_time",
+        "runtime_suspended_time",
+    )
+    snapshot = {}
+    sysfs_path = getattr(identity, "sysfs_path", None)
+    for name in attributes:
+        try:
+            if not isinstance(sysfs_path, Path):
+                raise AttributeError("the reappeared USB identity has no sysfs path")
+            value = (sysfs_path / "power" / name).read_text(encoding="ascii").strip()
+        except OSError as error:
+            snapshot[name] = {
+                "available": False,
+                "error_type": type(error).__name__,
+                "errno": error.errno,
+            }
+        except AttributeError as error:
+            snapshot[name] = {"available": False, "error_type": type(error).__name__, "errno": None}
+        else:
+            snapshot[name] = {"value": value}
+    return snapshot
 
 
 def pyocd_result_evidence(bench: Bench, result: dict, private_values: tuple[str, ...]) -> dict:
