@@ -190,6 +190,11 @@ OPENOCD_INIT_PREFIX = f'init; echo "{OPENOCD_INIT_STAGE_MARKER}"; '
 # interpreter, before handle_init_command opens the probe.
 OPENOCD_UNREGISTERED_COMMAND = re.compile(r'invalid command name "([^"]+)"', re.IGNORECASE)
 OPENOCD_WRONG_STAGE_COMMAND = re.compile(r"the '([^']+)' command must be used (?:after|before) 'init'", re.IGNORECASE)
+# OpenOCD 0.11's answer to a group asked for a subcommand it does not have, which
+# names the words after the group: `invalid subcommand "serial <serial>"` for the
+# `adapter serial <serial>` this backend selects a probe by, recorded on Ubuntu
+# 22.04's package (tests/fixtures/openocd_0_11_bench_recordings.json).
+OPENOCD_UNKNOWN_SUBCOMMAND = re.compile(r'invalid subcommand "([^"]+)"', re.IGNORECASE)
 
 # The adapter scripts whose probes this host can enumerate without OpenOCD's
 # help. OpenOCD ships one family of them under that prefix (`stlink.cfg`,
@@ -587,11 +592,12 @@ class OpenOCDBackend:
         if not resolved["ok"]:
             return {"tool": tool, "backend": self.backend_name, "started_at": started_at, **resolved, "finished_at": utc_now_iso(), "elapsed_ms": int((time.perf_counter() - start) * 1000)}
 
+        probe_selection = self._probe_selection_commands()
         args = [
             *invocation(str(resolved["executable_path"])),
             "-f",
             self.config.debugger.interface_cfg,
-            *self._probe_selection_commands(),
+            *probe_selection,
             "-f",
             self.config.debugger.target_cfg,
             *[item for command in OPENOCD_DISABLE_TCP_SERVER_COMMANDS for item in ["-c", command]],
@@ -622,7 +628,9 @@ class OpenOCDBackend:
             return self._finish_log_audit({"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}, audit_error)
 
         output = f"{completed.stdout}{completed.stderr}"
-        rejected = rejected_openocd_commands(openocd_command, output)
+        # The probe selection's own `-c` values, which OpenOCD evaluates before
+        # the target script and before `openocd_command`.
+        rejected = rejected_openocd_commands(openocd_command, output, tuple(probe_selection[1::2]))
         init_reached = OPENOCD_INIT_STAGE_MARKER in output
         if completed.returncode == 0:
             marker_printed = success_marker is not None and success_marker in output
@@ -966,7 +974,7 @@ def openocd_reset_command(mode: str, marker: str) -> str:
     return f'{OPENOCD_INIT_PREFIX}reset {mode}; echo "{marker}"; shutdown'
 
 
-def rejected_openocd_commands(openocd_command: str, output: str) -> list[str]:
+def rejected_openocd_commands(openocd_command: str, output: str, configuration_commands: tuple[str, ...] = ()) -> list[str]:
     """The commands OpenOCD refused to evaluate, when it refused before `init`.
 
     An empty list means: assume nothing. Two conditions have to hold together
@@ -984,6 +992,14 @@ def rejected_openocd_commands(openocd_command: str, output: str) -> list[str]:
     configuration script after the adapter was already open cannot be read as an
     untouched target.
 
+    `configuration_commands` are the `-c` values this backend puts on the
+    command line ahead of `openocd_command`, the probe selection. OpenOCD
+    evaluates its arguments in order and stops at the first that fails, so one
+    of them refused is proof that the `init` in `openocd_command` never ran.
+    OpenOCD 0.11 refuses `adapter serial` that way, naming only the words after
+    the group, so the command is the one whose words after its first are
+    exactly the words OpenOCD quoted, named by its group and subcommand.
+
     Everything else stays unconfirmed and keeps quarantining: an adapter that
     would not open, a target that would not answer, a reset that was issued and
     not confirmed, a timeout. None of those can prove where they stopped."""
@@ -991,7 +1007,9 @@ def rejected_openocd_commands(openocd_command: str, output: str) -> list[str]:
         return []
     sent = {segment.strip().split(" ", 1)[0].strip() for segment in openocd_command.split(";")}
     named = {match.group(1) for pattern in (OPENOCD_UNREGISTERED_COMMAND, OPENOCD_WRONG_STAGE_COMMAND) for match in pattern.finditer(output)}
-    return sorted(named & sent)
+    quoted = {match.group(1) for match in OPENOCD_UNKNOWN_SUBCOMMAND.finditer(output)}
+    subcommands = {f"{group} {words.split(' ', 1)[0]}" for group, _, words in (command.strip().partition(" ") for command in configuration_commands) if words in quoted}
+    return sorted((named & sent) | subcommands)
 
 
 def openocd_path_for_command(value: str) -> str:
