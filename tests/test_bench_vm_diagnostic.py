@@ -268,3 +268,37 @@ def test_usb_reset_reenumeration_is_an_opt_in_stage_after_all_other_gates():
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["concurrency"] == {"group": "nucleo-f446re-bench", "cancel-in-progress": "false"}
     assert set(workflow["jobs"]) == {"bench-tier", "provision-cubeprogrammer"}
+
+
+def test_pyocd_recordings_are_an_independent_opt_in_stage_before_cube_and_usb():
+    workflow = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    job = workflow["jobs"]["bench-tier"]
+    steps = job["steps"]
+    pyocd_steps = [step for step in steps if "tests/bench/pyocd_recordings.py" in step.get("run", "")]
+
+    assert inputs["run_pyocd_recordings"]["type"] == "boolean"
+    assert inputs["run_pyocd_recordings"]["default"] == "false"
+    assert len(pyocd_steps) == 1, pyocd_steps
+    pyocd = pyocd_steps[0]
+    assert "success()" in pyocd["if"]
+    assert "!inputs.diagnose_only" in pyocd["if"]
+    assert "inputs.run_pyocd_recordings" in pyocd["if"]
+    assert "run_cubeprogrammer_recordings" not in pyocd["if"]
+    assert "run_usb_reset_reenumeration" not in pyocd["if"]
+    assert pyocd["working-directory"] == "under-test"
+    assert "bench_in_container.py" in pyocd["run"]
+    assert "--source ../under-test" in pyocd["run"]
+    assert "--expected-commit" in pyocd["run"]
+    assert "--output ../bench-results/pyocd" in pyocd["run"]
+    assert pyocd["run"].endswith("-- tests/bench/pyocd_recordings.py")
+    assert "--cubeprogrammer-archive" not in pyocd["run"]
+
+    standard = [step for step in steps if step.get("name") in {"Run the bench tier in its container", "Run the stage without the probe's device group"}]
+    assert len(standard) == 2
+    assert all("run_pyocd_recordings" not in step.get("if", "") for step in standard)
+    step_names = [step.get("name") for step in steps]
+    assert step_names.index("Run the bench tier in its container") < step_names.index(pyocd["name"])
+    assert step_names.index("Run the stage without the probe's device group") < step_names.index(pyocd["name"])
+    assert step_names.index(pyocd["name"]) < step_names.index("Run CubeProgrammer hardware recordings")
+    assert step_names.index(pyocd["name"]) < step_names.index("Run USB reset and re-enumeration recording")

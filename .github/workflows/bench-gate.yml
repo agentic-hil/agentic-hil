@@ -60,8 +60,13 @@ on:
         required: false
         default: false
         type: boolean
+      run_pyocd_recordings:
+        description: Run pyOCD recordings after the standard bench gates
+        required: false
+        default: false
+        type: boolean
       run_usb_reset_reenumeration:
-        description: Run the opt-in USB authorization and re-enumeration hardware recording
+        description: Run the opt-in USBDEVFS_RESET and USB re-enumeration observation
         required: false
         default: false
         type: boolean
@@ -149,6 +154,14 @@ jobs:
         working-directory: under-test
         run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --without-device-group --output ../bench-results/without-device-group
 
+      # Kept separate from the standard tier so the extra pyOCD hardware
+      # recordings cannot change either hard gate. It uses the normal bench
+      # image and does not require the optional CubeProgrammer layer.
+      - name: Run pyOCD hardware recordings
+        if: ${{ success() && !inputs.diagnose_only && inputs.run_pyocd_recordings }}
+        working-directory: under-test
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output ../bench-results/pyocd -- tests/bench/pyocd_recordings.py
+
       # Kept separate from the standard tier and the without-device-group
       # stage so the extra hardware scenario cannot change either hard gate.
       # The image reads the already verified, user-local cache through the
@@ -158,10 +171,10 @@ jobs:
         working-directory: under-test
         run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output ../bench-results/cubeprogrammer --cubeprogrammer-archive "$HOME/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip" -- tests/bench/cubeprogrammer_recordings.py
 
-      # This opt-in exercises the kernel authorization path through the
-      # existing isolated runner after all requested gates have passed. The
-      # USB disappearance is recorded as a transport interruption; the test
-      # does not claim it is equivalent to a physical SWD fault.
+      # This opt-in requests USBDEVFS_RESET for the verified ST-Link device
+      # through the existing isolated runner. A reset request is not proof of
+      # a physical disconnect; the recording reports only the observations it
+      # actually made.
       - name: Run USB reset and re-enumeration recording
         if: ${{ success() && !inputs.diagnose_only && inputs.run_usb_reset_reenumeration }}
         working-directory: under-test

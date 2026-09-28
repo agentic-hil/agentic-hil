@@ -12,6 +12,8 @@ import json
 import shutil
 import subprocess
 
+from tests.support import scaled_time_bound
+
 
 def test_pyocd_reports_both_f446_target_types_from_an_installed_pack() -> None:
     pyocd = shutil.which("pyocd")
@@ -21,14 +23,14 @@ def test_pyocd_reports_both_f446_target_types_from_an_installed_pack() -> None:
         [pyocd, "json", "--targets", "--no-config"],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=scaled_time_bound(60),
         check=False,
     )
     packs_result = subprocess.run(
         [pyocd, "pack", "show"],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=scaled_time_bound(60),
         check=False,
     )
     assert targets_result.returncode == 0, (targets_result.stdout, targets_result.stderr)
