@@ -1,4 +1,4 @@
-"""Contracts for the manually invoked, read-only bench VM diagnostic."""
+"""Contracts for the manually invoked, read-only bench diagnostic."""
 
 from __future__ import annotations
 
@@ -13,13 +13,13 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "bench-gate.yml"
-HELPER = ROOT / "tools" / "bench_vm_diagnostic.py"
+HELPER = ROOT / "tools" / "bench_diagnostic.py"
 EXPECTED_ARCHIVE_SHA256 = "6a9e60a5a048c45eb3241f9bb66bdc2e6cbd0119fb2e42568dc059fc6167442a"
 
 
 def _load_helper():
     assert HELPER.is_file(), "diagnostic helper has not been implemented"
-    spec = importlib.util.spec_from_file_location("bench_vm_diagnostic", HELPER)
+    spec = importlib.util.spec_from_file_location("bench_diagnostic", HELPER)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -41,7 +41,7 @@ def test_gate_has_explicit_read_only_dispatch_mode_and_optional_asset_transfer()
     assert "cancel-in-progress: false" in source
     assert "contents: read" in source
     assert "agentic-hil/agentic-hil" in source
-    assert "bench_vm_diagnostic.py" in source
+    assert "bench_diagnostic.py" in source
     assert "github.token" in source
 
 
@@ -134,7 +134,7 @@ def test_asset_id_must_be_a_positive_decimal_number():
             raise AssertionError(f"invalid asset id accepted: {invalid!r}")
 
 
-def test_vm_diagnostic_reports_only_sanitized_capability_results(monkeypatch):
+def test_bench_diagnostic_reports_only_sanitized_capability_results(monkeypatch):
     helper = _load_helper()
     monkeypatch.setattr(helper, "discover_bench_probes", lambda: [SimpleNamespace(where="bus 1 device 2 (sysfs 1-2)", serial_numbers=("SECRET-SERIAL",))])
     monkeypatch.setattr(

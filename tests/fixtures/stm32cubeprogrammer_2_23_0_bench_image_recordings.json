@@ -6,7 +6,7 @@
     "workflow_run_id": 36440193292,
     "source_commit": "cc96acb2a7a65211c75f65c09343d97f9f45f753",
     "installer_archive_sha256": "6a9e60a5a048c45eb3241f9bb66bdc2e6cbd0119fb2e42568dc059fc6167442a",
-    "environment": "Optional CubeProgrammer smoke in the Podman-built bench-tier-cubeprogrammer image on the self-hosted Agentic HIL VM; no USB device nodes passed through and build step used --network=none. The image was built from the pinned Python base image and its Debian packages.",
+    "environment": "Optional CubeProgrammer smoke in the Podman-built bench-tier-cubeprogrammer image on the self-hosted bench runner; no USB device nodes passed through and build step used --network=none. The image was built from the pinned Python base image and its Debian packages.",
     "capture_source": "GitHub Actions run 36440193292, step output from tests/container/cubeprogrammer_without_a_probe.py before transcript assertions."
   },
   "recordings": {

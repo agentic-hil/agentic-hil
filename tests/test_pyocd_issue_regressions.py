@@ -372,7 +372,7 @@ def test_recorded_stlink_usb_timeout_replays_as_not_contacted_probe_discovery_fa
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Replay the actual pyOCD USB-timeout transcript from the hosted VM capture."""
+    """Replay the actual pyOCD USB-timeout transcript from the bench capture."""
     from agentic_hil.backends.common import CompletedCommand
 
     fixture_path = Path(__file__).parent / "fixtures" / "pyocd_probe_discovery_usb_timeout_recording.json"

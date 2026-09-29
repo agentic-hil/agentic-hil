@@ -21,7 +21,7 @@ from agentic_hil.config import load_config
 from agentic_hil.tools import AgenticHILToolService
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "stm32cubeprogrammer_2_23_0_recordings.json"
-VM_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "stm32cubeprogrammer_2_23_0_vm_36440193292_recordings.json"
+BENCH_IMAGE_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "stm32cubeprogrammer_2_23_0_bench_image_recordings.json"
 CUBE_CLI = Path("/opt/st/cubeprogrammer-2.23.0/bin/STM32_Programmer_CLI")
 
 
@@ -40,7 +40,7 @@ def output_matches_recording(name: str, observed_stdout: str, observed_stderr: s
     match one of the recorded pairs.
     """
     observed = (observed_stdout, _normalized_usb_device_path(observed_stderr))
-    for fixture_path in (FIXTURE, VM_FIXTURE):
+    for fixture_path in (FIXTURE, BENCH_IMAGE_FIXTURE):
         expected = json.loads(fixture_path.read_text(encoding="utf-8"))["recordings"][name]
         recorded = (expected["stdout"], _normalized_usb_device_path(expected["stderr"]))
         if observed == recorded:

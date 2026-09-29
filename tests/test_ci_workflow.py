@@ -771,7 +771,7 @@ def gate_run_steps() -> list[dict]:
     running = [
         step for step in gate_job()["steps"]
         if "run" in step
-        and "bench_vm_diagnostic.py" not in step.get("run", "")
+        and "bench_diagnostic.py" not in step.get("run", "")
         and "recovery_check.py" not in step.get("run", "")
         and "pyocd_recordings.py" not in step.get("run", "")
         and "cubeprogrammer_recordings.py" not in step.get("run", "")
@@ -935,7 +935,7 @@ def test_the_named_commit_never_reaches_a_shell() -> None:
 
 def test_diagnostic_mode_skips_all_bench_tier_commands_and_never_modifies_sysfs() -> None:
     steps = gate_job()["steps"]
-    diagnostic = [step for step in steps if "bench_vm_diagnostic.py" in step.get("run", "")]
+    diagnostic = [step for step in steps if "bench_diagnostic.py" in step.get("run", "")]
 
     assert len(diagnostic) == 1, diagnostic
     assert "inputs.diagnose_only" in diagnostic[0]["if"]

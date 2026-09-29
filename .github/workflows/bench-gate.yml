@@ -47,7 +47,7 @@ on:
         required: true
         type: string
       diagnose_only:
-        description: Read VM USB/sudo/runtime capabilities without running the bench tier
+        description: Read the bench machine's USB, sudo and runtime capabilities without running the bench tier
         required: false
         default: false
         type: boolean
@@ -123,18 +123,19 @@ jobs:
           path: under-test
           persist-credentials: false
 
-      # This branch answers only whether the existing Linux VM could perform a
-      # future selective kernel USB disconnect. It reads the bench runner's
-      # allowlisted sysfs inventory, reports permissions and rootless runtimes,
-      # and never writes sysfs or calls a debugger. This read-only branch runs
-      # only without an asset ID; a download gets a separate write-scoped job.
-      - name: Read VM capabilities
+      # This branch answers only whether the existing Linux bench machine could
+      # perform a future selective kernel USB disconnect. It reads the bench
+      # runner's allowlisted sysfs inventory, reports permissions and rootless
+      # runtimes, and never writes sysfs or calls a debugger. This read-only
+      # branch runs only without an asset ID; a download gets a separate
+      # write-scoped job.
+      - name: Read bench capabilities
         if: ${{ inputs.diagnose_only && inputs.cubeprogrammer_asset_id == '' }}
         working-directory: harness
         env:
           GH_TOKEN: ${{ github.token }}
           CUBEPROGRAMMER_ASSET_ID: ${{ inputs.cubeprogrammer_asset_id }}
-        run: python3 tools/bench_vm_diagnostic.py --asset-id "$CUBEPROGRAMMER_ASSET_ID"
+        run: python3 tools/bench_diagnostic.py --asset-id "$CUBEPROGRAMMER_ASSET_ID"
 
       # The source and SHA are read from the checked-out candidate, never from
       # the harness checkout this script belongs to. The tool verifies that
@@ -211,7 +212,7 @@ jobs:
           retention-days: 14
 
   provision-cubeprogrammer:
-    name: Cache the private CubeProgrammer archive on the bench VM
+    name: Cache the private CubeProgrammer archive on the bench machine
     if: ${{ github.repository == 'agentic-hil/agentic-hil' && inputs.diagnose_only && inputs.cubeprogrammer_asset_id != '' }}
     runs-on: [self-hosted, agentic-hil, nucleo-f446re]
     permissions:
@@ -224,9 +225,9 @@ jobs:
           path: harness
           persist-credentials: false
 
-      - name: Read VM capabilities and cache the pinned private asset
+      - name: Read bench capabilities and cache the pinned private asset
         working-directory: harness
         env:
           GH_TOKEN: ${{ github.token }}
           CUBEPROGRAMMER_ASSET_ID: ${{ inputs.cubeprogrammer_asset_id }}
-        run: python3 tools/bench_vm_diagnostic.py --asset-id "$CUBEPROGRAMMER_ASSET_ID"
+        run: python3 tools/bench_diagnostic.py --asset-id "$CUBEPROGRAMMER_ASSET_ID"
