@@ -1748,9 +1748,12 @@ class UartRunner(SessionDevice):
     def _matcher(field_name: str, expected: str) -> Callable[[str, bool], bool]:
         """What counts as a match for one of the two v2 expectation kinds.
 
-        A pattern is `re.search`, so it is anchored where it is written and
-        nowhere else: a plan that means "the line starts this way" writes the
-        `^` itself. Compiled once per step rather than per read: the pattern
+        A pattern is `re.search` over the window of text this step has read, so
+        it is anchored where it is written and nowhere else. The window rarely
+        starts where a line does (a step can begin in the middle of a line, and
+        a long read slides the window), so a bare `^` is the start of the window
+        and not of a line: a plan that means "a line starts this way" writes
+        `(?m)^`. Compiled once per step rather than per read: the pattern
         already compiled cleanly at preflight, so this cannot raise. Neither kind
         judges the last pass differently, so both ignore `final`."""
         if field_name == "text":
