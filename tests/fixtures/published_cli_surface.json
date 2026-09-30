@@ -1,8 +1,8 @@
 {
   "what": "The argparse command surface of the agentic-hil release the shipped CI examples pin: every subcommand, with its option strings and positional names and without help text. tests/test_ci_examples.py refuses an example that invokes a subcommand this surface does not define, and tools/record_cli_surface.py takes it.",
-  "version": "0.21.5",
-  "source": "Installed agentic-hil==0.21.5 from https://pypi.org/simple/ into a throwaway virtual environment and walked its parser with tools/record_cli_surface.py.",
-  "recorded_on": "2026-09-25",
+  "version": "0.22.0",
+  "source": "Walked from the agentic-hil 0.22.0 source tree on its release commit with tools/record_cli_surface.py --from-tree, before the release reached the package index.",
+  "recorded_on": "2026-09-30",
   "surface": {
     "options": [
       "--help",
