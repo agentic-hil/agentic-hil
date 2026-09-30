@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import traceback
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -41,11 +42,28 @@ SCRIPT_SCENARIOS = ("script-explicit-agent", "script-auto-detect")
 SCENARIOS = WHEEL_SCENARIOS + SCRIPT_SCENARIOS
 SCENARIOS_BY_MODE = {"wheel": WHEEL_SCENARIOS, "script": SCRIPT_SCENARIOS, "all": SCENARIOS}
 REPORT_PREFIX = "AGENT_REGISTRATION_GATE="
+PYPI_PROJECT_JSON = "https://pypi.org/pypi/agentic-hil/json"
 
 
 def require(condition: object, detail: str) -> None:
     if not condition:
         raise AssertionError(detail)
+
+
+def published_release() -> tuple[int, ...]:
+    """The newest release the index serves, read from the index install.sh downloads from."""
+    with urllib.request.urlopen(PYPI_PROJECT_JSON, timeout=30) as response:
+        version = json.load(response)["info"]["version"]
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    require(match is not None, f"the index names no release as its newest: {version!r}")
+    return tuple(map(int, match.groups()))
+
+
+def release_floor(stamped: tuple[int, ...], published: tuple[int, ...]) -> tuple[int, ...]:
+    """install.sh installs the newest release the index serves, and RELEASE is the
+    floor it holds an installation to. A release commit stamps RELEASE before the
+    index can serve it, so until the publish the floor is the newest release it does."""
+    return min(stamped, published)
 
 
 def validate_report(report: dict, *, mode: str = "all") -> None:
@@ -284,7 +302,8 @@ class ScriptCase(Case):
         release = re.search(r'^RELEASE="(\d+)\.(\d+)\.(\d+)"$', script.read_text(), re.MULTILINE)
         installed = re.match(r"^(\d+)\.(\d+)\.(\d+)", self.version)
         require(release is not None and installed is not None, "script or installed package did not report a version")
-        require(tuple(map(int, installed.groups())) >= tuple(map(int, release.groups())), "install.sh installed below its release floor")
+        floor = release_floor(tuple(map(int, release.groups())), published_release())
+        require(tuple(map(int, installed.groups())) >= floor, f"install.sh installed {self.version}, below its release floor {'.'.join(map(str, floor))}")
         # Read the installed distribution's declaration through its interpreter.
         # The release downloaded by install.sh need not have the development
         # checkout's tool list or skill version. This does not register anything.
