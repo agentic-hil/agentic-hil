@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- A server started outside any project asks the host which folder it has open. `mcp-stdio` found its configuration only from its working directory, and VS Code starts a server registered in its user profile in the home directory and resolves no `${workspaceFolder}` there, so the VS Code registration `docs/mcp-hosts.md` printed did not start, and without its `cwd` it served no project. When the working directory has no configuration and the host declared `roots` at initialize, the server sends `roots/list` after `notifications/initialized` and serves the folder the answer names: one local folder is that folder, configured or not, and several are narrowed to the one whose configuration loads. A tool call that arrives before the answer waits for it, a changed folder list is asked again until a configuration is bound, and a working directory with a configuration is served as before, without asking. Such a server greets the host with the instructions of a configured one, because the folder is not known yet when `initialize` is answered and "start with `project_config_create`" would regenerate a configuration the folder may have. The VS Code registration in `docs/mcp-hosts.md` drops `cwd`.
+
 ## [0.22.0] - 2026-09-30
 
 ### Added

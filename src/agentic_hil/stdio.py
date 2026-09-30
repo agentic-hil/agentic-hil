@@ -8,7 +8,7 @@ from typing import BinaryIO, TextIO
 from agentic_hil.config import ConfigError, load_authoritative_config
 from agentic_hil.mcp import handle_mcp_message, oversized_message_response, parse_error_response
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
-from agentic_hil.types import AgenticHILConfig
+from agentic_hil.types import AgenticHILConfig, JsonObject
 
 DEFAULT_MAX_MESSAGE_CHARS = 10 * 1024 * 1024
 MESSAGE_OVERHEAD_CHARS = 1024 * 1024
@@ -51,6 +51,7 @@ def run_stdio_server(
             raise ValueError("run_stdio_server needs either a configuration or a prepared tool service.")
         tools = AgenticHILToolService(config, frontend="mcp")
     limit = max_message_chars or (message_size_limit(config) if config is not None else DEFAULT_MAX_MESSAGE_CHARS)
+    roots = HostRoots(tools)
     primary_error: BaseException | None = None
     try:
         while True:
@@ -80,9 +81,24 @@ def run_stdio_server(
             except (json.JSONDecodeError, ValueError):
                 write_message(output_stream, parse_error_response())
                 continue
-            response = handle_mcp_message(message, tools)
-            if response is not None:
-                write_message(output_stream, response)
+            message, answered = roots.take_answers(message)
+            if answered:
+                # The folder may be bound now, and a start in that folder would
+                # have sized the limit from its configuration.
+                if max_message_chars is None and isinstance(tools, UnprovisionedToolService) and tools.config is not None:
+                    limit = message_size_limit(tools.config)
+                if not roots.asking():
+                    for waiting in roots.release():
+                        dispatch(waiting, tools, output_stream)
+            if message is None:
+                continue
+            if roots.asking() and needs_folder(message):
+                roots.hold(message)
+                continue
+            dispatch(message, tools, output_stream)
+            question = roots.question_after(message)
+            if question is not None:
+                write_message(output_stream, question)
     except BaseException as error:
         primary_error = error
     cleanup_error: BaseException | None = None
@@ -97,6 +113,106 @@ def run_stdio_server(
     if cleanup_error is not None:
         raise cleanup_error
     return 0
+
+
+def dispatch(message: object, tools: AgenticHILToolService | UnprovisionedToolService, output_stream: TextIO) -> None:
+    response = handle_mcp_message(message, tools)  # type: ignore[arg-type]
+    if response is not None:
+        write_message(output_stream, response)
+
+
+def needs_folder(message: object) -> bool:
+    """Whether answering this message depends on which folder the server serves.
+
+    Only a tool call does: every list, prompt and resource is the same in every
+    folder. A batch is held whole, so its replies keep their order."""
+    if isinstance(message, list):
+        return any(needs_folder(item) for item in message)
+    return isinstance(message, dict) and message.get("method") == "tools/call" and "id" in message
+
+
+class HostRoots:
+    """Asks the host which folder it has open, while the server has no project.
+
+    A server started where there is no configuration, the home directory a
+    user-wide registration starts in above all, serves the folder the host names
+    in its answer to `roots/list`. It asks only a host that declared `roots` at
+    initialize, only once that host has sent `notifications/initialized` (the
+    first moment MCP lets a server send a request), and again on
+    `notifications/roots/list_changed`, but never once a configuration is bound.
+
+    A tool call that arrives while a question is open is held until the answer,
+    because run at once it would run against the directory the server started
+    in. A host that hangs up with a call still held gets no answer to it and the
+    call is not run: nobody is reading the result, and a hardware call nobody
+    reads is the one thing this server must not start.
+    """
+
+    ID_PREFIX = "agentic-hil-roots-"
+
+    def __init__(self, tools: AgenticHILToolService | UnprovisionedToolService):
+        self._tools = tools if isinstance(tools, UnprovisionedToolService) else None
+        self._open: set[str] = set()
+        self._held: list[object] = []
+        self._count = 0
+
+    def asking(self) -> bool:
+        return bool(self._open)
+
+    def hold(self, message: object) -> None:
+        self._held.append(message)
+
+    def release(self) -> list[object]:
+        held, self._held = self._held, []
+        return held
+
+    def question_after(self, message: object) -> JsonObject | None:
+        """The `roots/list` request this message calls for, if any."""
+        tools = self._tools
+        if tools is None or not isinstance(message, dict) or "id" in message:
+            return None
+        if message.get("method") not in ("notifications/initialized", "notifications/roots/list_changed"):
+            return None
+        # `config` binds a configuration the working directory has, which ends
+        # the question before it is asked.
+        if not tools.host_names_folders or tools.config is not None or not tools.movable:
+            return None
+        self._count += 1
+        request_id = f"{self.ID_PREFIX}{self._count}"
+        self._open.add(request_id)
+        return {"jsonrpc": "2.0", "id": request_id, "method": "roots/list"}
+
+    def take_answers(self, message: object) -> tuple[object | None, bool]:
+        """Take the host's answers to this server's questions out of a message.
+
+        Returns what is left to dispatch, None when nothing is, and whether an
+        answer was taken. A batch keeps the entries that are not answers."""
+        if isinstance(message, list):
+            rest = [item for item in message if not self._take_answer(item)]
+            if len(rest) == len(message):
+                return message, False
+            return rest or None, True
+        if self._take_answer(message):
+            return None, True
+        return message, False
+
+    def _take_answer(self, message: object) -> bool:
+        """Consume the host's answer to a question this server asked, and act on it.
+
+        An answer is never answered. One that is an error, or that names no
+        single folder, leaves the workspace where it was."""
+        if self._tools is None or not isinstance(message, dict) or "method" in message:
+            return False
+        request_id = message.get("id")
+        if not isinstance(request_id, str) or request_id not in self._open:
+            return False
+        self._open.discard(request_id)
+        result = message.get("result")
+        listed = result.get("roots") if isinstance(result, dict) else None
+        if isinstance(listed, list):
+            uris = [root["uri"] for root in listed if isinstance(root, dict) and isinstance(root.get("uri"), str)]
+            self._tools.serve_host_roots(uris)
+        return True
 
 
 def utf8_request_stream() -> TextIO | BinaryIO:
