@@ -2,11 +2,13 @@
 
 The account is not in the group the probe's udev rule gives its USB device to,
 or no rule is installed, and the serial port belongs to a group the account has
-not joined either. The probe is plugged in and the configuration is right;
-`init` and `doctor` say so, because they read sysfs and open nothing. The first
-call that opens a device is refused by the device node's mode, and what the
-product says then decides whether the newcomer changes their account or goes
-looking for a probe that is already there.
+not joined either. The probe is plugged in and the configuration is right, and
+`init` binds both. `doctor` fails its device-access check for the probe and the
+port, naming the group each node belongs to, and `init` warns in the same words;
+both ask the kernel and open nothing. The first call that opens a device is
+refused by the device node's mode, and what the product says then decides
+whether the newcomer changes their account or goes looking for a probe that is
+already there.
 
 This stage runs only in `tools/bench_in_container.py --without-device-group`,
 which hands the container the probe's nodes and withholds every group they are
@@ -31,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import subprocess
 import threading
 from collections.abc import Iterator
@@ -38,10 +41,21 @@ from contextlib import suppress
 from pathlib import Path
 
 import pytest
+import yaml
 from fixtures.fake_openocd_access_denied import RECORDED_ACCESS_DENIED_RETURNCODE, RECORDED_ACCESS_DENIED_STDERR
 from support import scaled_time_bound
 
-from .conftest import BENCH_ONLY, WITHOUT_DEVICE_GROUP, Bench, child_command, refuse
+from .conftest import (
+    BENCH_ONLY,
+    COMMAND_TIMEOUT_S,
+    DEMO,
+    WITHOUT_DEVICE_GROUP,
+    Bench,
+    child_command,
+    isolated_environment,
+    outside_this_runs_root,
+    refuse,
+)
 
 pytestmark = [pytest.mark.bench, getattr(pytest.mark, WITHOUT_DEVICE_GROUP), BENCH_ONLY]
 
@@ -214,3 +228,73 @@ def test_a_serial_session_names_the_group_the_port_was_refused_for(bench: Bench,
     assert "Errno 13" in result["backend_error"], result
     assert "group" in result["likely_causes"][0], result["likely_causes"]
     assert not any("another program" in cause for cause in result["likely_causes"]), result["likely_causes"]
+
+
+def group_of(node: str) -> str:
+    """The name of the group that owns a node as this process sees it, or its number where it has none."""
+    import grp  # POSIX only, and this module is collected everywhere.
+
+    gid = os.stat(node).st_gid
+    try:
+        return grp.getgrgid(gid).gr_name
+    except KeyError:
+        return str(gid)
+
+
+def test_doctor_fails_the_device_access_check_for_the_probe_and_the_port(bench: Bench) -> None:
+    """Both nodes named, each with the group that owns it, before any call opens either."""
+    code, report = bench.document("doctor")
+
+    assert code != 0, report
+    assert "device_access" in report["unhealthy"], report["unhealthy"]
+    port = bench.configuration()["com_ports"][bench.com_port_name()]["device"]
+    checks = [report["debuggers"][bench.debugger_name()]["device_access"], report["com_ports"][bench.com_port_name()]["device_access"]]
+    assert checks[0]["node"].startswith(f"{USB_NODES}/"), checks[0]
+    assert checks[1]["node"] == os.path.realpath(port), checks[1]
+    for check in checks:
+        assert check["ok"] is False, check
+        assert check["error_type"] == "device_access_denied", check
+        assert check["group"] == group_of(check["node"]), check
+        assert check["node"] in check["summary"], check["summary"]
+        assert check["group"] in check["summary"], check["summary"]
+        assert check["remediation"] and all(isinstance(step, str) and step for step in check["remediation"]), check
+        assert check["summary"] in report["summary"], report["summary"]
+
+
+def test_init_binds_the_probe_and_the_port_and_warns_this_account_may_not_open_them(tmp_path: Path) -> None:
+    """The bind stands, and the run's warnings carry the check's own words for each node."""
+    project = tmp_path / DEMO.name
+    shutil.copytree(DEMO, project, ignore=shutil.ignore_patterns("build", ".agentic-hil"))
+    config_root = tmp_path / "config"
+    environment = isolated_environment(config_root, tmp_path / "state")
+    environment.pop("AGENTIC_HIL_CONFIG", None)
+
+    written = subprocess.run(
+        child_command("init", "--json"),
+        capture_output=True,
+        text=True,
+        cwd=str(project),
+        env=environment,
+        timeout=COMMAND_TIMEOUT_S,
+        check=False,
+    )
+
+    assert written.returncode == 0, written.stdout or written.stderr
+    result = json.loads(written.stdout)
+    strayed = outside_this_runs_root(Path(result["config_path"]), config_root)
+    assert strayed is None, strayed
+    assert result["ok"] is True, result
+    step = result["steps"]["doctor"]
+    assert "device_access" in step["unhealthy"], step["unhealthy"]
+    failed = [
+        entry["device_access"]
+        for section in ("debuggers", "com_ports")
+        for entry in step[section].values()
+        if isinstance(entry.get("device_access"), dict) and entry["device_access"].get("ok") is False
+    ]
+    assert len(failed) == 2, failed
+    for check in failed:
+        assert check["summary"] in result["warnings"], result.get("warnings")
+    written_config = yaml.safe_load(Path(result["config_path"]).read_text(encoding="utf-8"))
+    assert any(entry.get("probe_id") for entry in written_config["debuggers"].values()), written_config["debuggers"]
+    assert any(entry.get("device") for entry in written_config["com_ports"].values()), written_config["com_ports"]

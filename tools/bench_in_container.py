@@ -54,6 +54,16 @@ to naming that refusal for what it is. The machine is checked as for a full
 run: a user who cannot open the probe even through those groups is refused,
 because the refusal the stage measures would then be the machine's.
 
+Other distributions. `--distribution` builds the image on Ubuntu 22.04, Ubuntu
+24.04, Debian 12 or Fedora 44 instead, each with the OpenOCD, cross compiler,
+GDB, CMake and Python that release packages, which is what a newcomer on it
+has. The distribution's part of the image, its base pinned by digest and its
+packages, is a head under tools/bench/distributions; the rest is the default
+Dockerfile's from its first WORKDIR on, composed after the head outside the
+staged tree, so the committed context is what builds on every distribution.
+Each image is tagged with its distribution's name, and a commit without a
+head for the distribution named is refused rather than built as the default.
+
 Device passthrough. The probe is found through sysfs by its public USB identity,
 the vendor and product ids the product itself recognises an in-circuit debugger
 or programmer by, and never by a serial number: idVendor and idProduct under
@@ -120,6 +130,7 @@ Usage, from a checkout on the machine the board is attached to:
     python3 tools/bench_in_container.py --runtime docker
     python3 tools/bench_in_container.py --source ../candidate --expected-commit <full-sha>
     python3 tools/bench_in_container.py --without-device-group
+    python3 tools/bench_in_container.py --distribution ubuntu-22.04
     python3 tools/bench_in_container.py --build-only         # the image alone, anywhere
 
 Everything after `--` goes to pytest and replaces the default selection,
@@ -187,6 +198,16 @@ IMAGE = "agentic-hil-bench-tier"
 CUBEPROGRAMMER_ARCHIVE_SHA256 = "6a9e60a5a048c45eb3241f9bb66bdc2e6cbd0119fb2e42568dc059fc6167442a"
 CUBEPROGRAMMER_CONTEXT_PATH = Path("build-inputs") / "cubeprogrammer.zip"
 CUBEPROGRAMMER_BUILD_TARGET = "bench-tier-cubeprogrammer"
+# The distributions the tier's image is also built on, each from a head of its
+# own under tools/bench/distributions: the base image and the packages that
+# distribution carries OpenOCD, the cross compiler, GDB, CMake and Python in.
+# Everything from the default Dockerfile's first WORKDIR on follows the head
+# unchanged, so the checkout, its locked dependencies, the marker and the entry
+# point are the default image's on every distribution. Each is tagged with its
+# name, so building one leaves the others and the default image in place.
+DISTRIBUTIONS = ("ubuntu-22.04", "ubuntu-24.04", "debian-12", "fedora-44")
+DISTRIBUTION_HEADS = "tools/bench/distributions"
+SHARED_PART_STARTS = "WORKDIR "
 # The label tools/bench/Dockerfile puts on the image. Earlier builds lose the
 # tag to the newest and are pruned by it; nothing else carries it.
 IMAGE_LABEL = "agentic-hil.image=bench-tier"
@@ -886,6 +907,51 @@ def stage_cubeprogrammer_archive(archive: Path, context: Path) -> Path:
     return destination
 
 
+def image_name(distribution: str | None) -> str:
+    """The tag a build gets: the default image's name, or it with the distribution's."""
+    return IMAGE if distribution is None else f"{IMAGE}:{distribution}"
+
+
+def compose_dockerfile(default: str, head: str) -> str:
+    """A distribution's head, then the default file from its first WORKDIR on.
+
+    The default file's part before that line is its own distribution's: the
+    base image and the packages installed on it. What follows is what every
+    image the tier runs in shares, and taking it from the default file rather
+    than copying it into each head is what keeps a change to it, a new layer or
+    a new file the tier needs, from reaching the default image alone.
+    """
+    lines = default.splitlines()
+    starts = [index for index, line in enumerate(lines) if line.startswith(SHARED_PART_STARTS)]
+    if not starts:
+        raise ValueError(f"the default Dockerfile has no {SHARED_PART_STARTS.strip()} line, where the part every image shares starts")
+    return head.rstrip("\n") + "\n\n" + "\n".join(lines[starts[0] :]) + "\n"
+
+
+def dockerfile_for(context: Path, commit: str, distribution: str | None, workdir: Path) -> Path:
+    """The file to build with: the committed default, or a distribution's composed beside the context.
+
+    The composed file is written outside the staged tree, so the context stays
+    exactly what was committed.
+    """
+    default = context / "tools" / "bench" / "Dockerfile"
+    if distribution is None:
+        return default
+    head = context / DISTRIBUTION_HEADS / f"{distribution}.Dockerfile"
+    if not head.is_file():
+        raise Refused(
+            EXIT_BUILD_FAILED,
+            f"commit {commit[:12]} carries no {DISTRIBUTION_HEADS}/{distribution}.Dockerfile to build the image on {distribution} with",
+        )
+    try:
+        composed = compose_dockerfile(default.read_text(encoding="utf-8"), head.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        raise Refused(EXIT_BUILD_FAILED, f"the image on {distribution} could not be composed from commit {commit[:12]}: {error}") from None
+    path = workdir / f"Dockerfile.{distribution}"
+    path.write_text(composed, encoding="utf-8")
+    return path
+
+
 def build_image(
     runtime: str,
     root: Path,
@@ -893,6 +959,7 @@ def build_image(
     workdir: Path,
     voice: Voice,
     cubeprogrammer_archive: Path | None = None,
+    distribution: str | None = None,
 ) -> str:
     """Build the image from the committed tree; the id the build wrote."""
     context = workdir / "context"
@@ -907,14 +974,15 @@ def build_image(
         raise Refused(EXIT_BUILD_FAILED, f"commit {commit[:12]} carries no tools/bench/Dockerfile.dockerignore to build with")
     for name in (".dockerignore", ".containerignore"):
         shutil.copyfile(ignore, context / name)
+    dockerfile = dockerfile_for(context, commit, distribution, workdir)
     image_id_file = workdir / "image-id"
     command = [
         runtime,
         "build",
         "--file",
-        str(context / "tools" / "bench" / "Dockerfile"),
+        str(dockerfile),
         "--tag",
-        IMAGE,
+        image_name(distribution),
         "--label",
         f"org.opencontainers.image.revision={commit}",
         "--iidfile",
@@ -923,7 +991,8 @@ def build_image(
     if cubeprogrammer_archive is not None:
         command.extend(("--target", CUBEPROGRAMMER_BUILD_TARGET))
     command.append(str(context))
-    voice(f"building the bench tier's image from commit {commit[:12]} with {runtime}")
+    on = "" if distribution is None else f" on {distribution}"
+    voice(f"building the bench tier's image{on} from commit {commit[:12]} with {runtime}")
     environment = {**os.environ, "DOCKER_BUILDKIT": "1"} if runtime == "docker" else None
     process = subprocess.Popen(
         command,
@@ -1281,6 +1350,12 @@ def parse_options(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--no-wait", action="store_true", help="Refuse instead of queueing when another run holds this machine.")
     parser.add_argument("--build-only", action="store_true", help="Build the image and stop; needs no probe and runs anywhere.")
     parser.add_argument(
+        "--distribution",
+        choices=DISTRIBUTIONS,
+        default=None,
+        help=f"Build the image on this distribution, from its head under {DISTRIBUTION_HEADS} (default: tools/bench/Dockerfile as it stands).",
+    )
+    parser.add_argument(
         "--without-device-group",
         action="store_true",
         help="Withhold the groups the probe's nodes are opened through, and run the stage about that alone.",
@@ -1346,7 +1421,13 @@ def main(argv: list[str] | None = None) -> int:
         tool=TOOL_NAME,
         runs_for=RUNS_FOR,
         root=root,
-        details={"image": IMAGE, "commit": commit, "runtime": runtime, "pytest_args": pytest_args if running else []},
+        details={
+            "image": image_name(options.distribution),
+            "distribution": options.distribution,
+            "commit": commit,
+            "runtime": runtime,
+            "pytest_args": pytest_args if running else [],
+        },
         announce=voice,
     )
     try:
@@ -1369,10 +1450,18 @@ def main(argv: list[str] | None = None) -> int:
         if running:
             output = prepare_output(options.output)
             sweep_leftovers(runtime, user_ids()[0], voice)
-        image_id = build_image(runtime, root, commit, workdir, voice, options.cubeprogrammer_archive)
+        image_id = build_image(
+            runtime,
+            root,
+            commit,
+            workdir,
+            voice,
+            cubeprogrammer_archive=options.cubeprogrammer_archive,
+            distribution=options.distribution,
+        )
         prune_images(runtime, voice)
         if not running:
-            voice(f"built {image_id} from commit {commit[:12]} with {runtime}; --build-only, so nothing ran")
+            voice(f"built {image_name(options.distribution)} as {image_id} from commit {commit[:12]} with {runtime}; --build-only, so nothing ran")
             return 0
 
         # Again, now: the wait for the machine can be long, and a probe that

@@ -1,0 +1,41 @@
+{
+  "what": "How the kernel shows an MCP server started out of a `pip install --user` installation, read while `agentic-hil upgrade` ran beside it: the system interpreter as the image, the installation's console script as the second argument of the `#!` line the kernel ran, and no VIRTUAL_ENV, because a user installation has no environment of its own. It is the installation the quick start's `python -m pip install --user agentic-hil` line makes, and `agentic-hil upgrade` named nobody under `restart_required_by` for it.",
+  "recorded_on": "2026-09-28",
+  "how": "agentic-hil 0.21.6.dev0 installed with `python -m pip install --user agentic-hil` into an account of its own made from Debian's /etc/skel, from the package index tools/bench/Dockerfile builds into the bench image (python:3.12-slim by digest, rootless container), on a Linux bench. The server is `agentic-hil mcp-stdio` started through the launcher the account's agent registrations name, holding the board through a COM session, and it is read out of /proc/<pid>/exe, cmdline, environ and cwd. `interpreter` is what that interpreter says about itself, `scripts_beside` is the user scheme's script directory after the install, and `upgrade` is the manager and command `agentic-hil upgrade --json` answered with. The account's home directory is replaced by <home>; nothing else is changed.",
+  "recording": {
+    "server": {
+      "exe": "/usr/local/bin/python3.12",
+      "argv": [
+        "/usr/local/bin/python",
+        "<home>/.local/bin/agentic-hil",
+        "mcp-stdio"
+      ],
+      "virtual_env": "",
+      "cwd": "<home>/firmware/nucleo-f446re_demo"
+    },
+    "interpreter": {
+      "executable": "/usr/local/bin/python",
+      "prefix": "/usr/local",
+      "user_scripts": "<home>/.local/bin",
+      "user_purelib": "<home>/.local/lib/python3.12/site-packages"
+    },
+    "scripts_beside": [
+      "agentic-hil",
+      "jsonschema",
+      "pyserial-miniterm",
+      "pyserial-ports"
+    ],
+    "upgrade": {
+      "manager": "pip",
+      "command": [
+        "/usr/local/bin/python",
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "--user",
+        "agentic-hil"
+      ]
+    }
+  }
+}

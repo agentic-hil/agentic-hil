@@ -736,42 +736,32 @@ def ensure_safe_state_root(workspace: Path, config_target: Path | None = None) -
     return []
 
 
-def tighten_owned_writable_ancestors(target: str | Path) -> list[str]:
-    """Remove group/other write from the *current user's own* directories (and a
-    final regular file such as a launcher) along ``target``'s chain, so the
-    fail-closed executable trust check accepts a launcher an installer wrote
-    under a umask-002 / private-group home without the operator hand-fixing
-    permissions. Since #143 that check reads the mode of the launcher itself and
-    not of its ancestors, so the file is what this still has to reach.
+def tighten_launcher_write_access(target: str | Path) -> list[str]:
+    """Remove group/other write from the current user's own launcher file, and
+    only where the executable trust check would refuse the file for it.
 
-    Only components owned by the current user are ever changed; the walk stops at
-    the first foreign-owned or symlinked ancestor (e.g. ``/home``, ``/``), so it
-    never touches shared or system directories. Sticky world-writable dirs (e.g.
-    ``/tmp``) are left as-is. Returns a list of the changes made. POSIX only; on
+    That check reads one mode: the launcher's own, since #143 no ancestor's, and
+    it accepts group write through the owner's user-private group, so the
+    ``-rwxrwxr-x`` script and ``drwxrwxr-x`` directories a default Debian or
+    Ubuntu ``umask 0002`` produces are registered as they stand. A chmod beyond
+    what the check refuses prevents no refusal and only changes an operator's
+    filesystem, so this reads the same rule, ``untrusted_write_access``, and
+    changes nothing it accepts. A directory, a symlink and a file owned by
+    anybody else are never changed. Returns the changes made. POSIX only; on
     Windows the ACL model differs and this is a no-op."""
     if os.name == "nt":
         return []
-    actions: list[str] = []
     path = Path(os.path.abspath(os.path.expanduser(str(target))))
-    euid = os.geteuid()
-    existing = path
-    while not os.path.lexists(existing) and existing != existing.parent:
-        existing = existing.parent
-    for component in (existing, *existing.parents):
-        try:
-            info = os.lstat(component)
-        except OSError:
-            break
-        if stat.S_ISLNK(info.st_mode):
-            break  # never chmod through a symlinked component; the validator rejects it
-        if info.st_uid != euid:
-            break  # never touch directories we do not own (e.g. /home, /)
-        mode = stat.S_IMODE(info.st_mode)
-        if mode & 0o022 and not (stat.S_ISDIR(info.st_mode) and mode & stat.S_ISVTX):
-            with suppress(OSError):
-                os.chmod(component, mode & ~0o022)
-                actions.append(f"removed group/other write on {component}")
-    return actions
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return []
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or untrusted_write_access(info) is None:
+        return []
+    with suppress(OSError):
+        os.chmod(path, stat.S_IMODE(info.st_mode) & ~0o022)
+        return [f"removed group/other write on {path}"]
+    return []
 
 
 def project_state_directory(config: AgenticHILConfig) -> Path:

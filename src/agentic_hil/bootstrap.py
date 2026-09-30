@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from agentic_hil.backends.common import find_stm32_programmer_cli, invocation, spawn_command
+from agentic_hil.backends.openocd import openocd_probe_selection, probe_selection_unsupported_reason
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids, stlink_target_info
 from agentic_hil.comports import (
     DISCOVERED_BY_USB_INVENTORY,
@@ -214,8 +215,8 @@ def _usb_enumeration(available: JsonObject, timeout_s: float) -> JsonObject:
     installed, which on a Linux workstation is the ordinary case: OpenOCD is one
     `apt install` and STM32CubeProgrammer is a registration wall. The probe
     serial is read out of the USB descriptor the probe published to the host,
-    which is the same string `adapter serial` takes, so nothing is invented
-    here and nothing is said to a board.
+    which is the same string OpenOCD selects the probe by, so nothing is
+    invented here and nothing is said to a board.
 
     ``timeout_s`` is accepted and unused: no process is spawned. It is in the
     signature so both halves are called the same way and a caller does not have
@@ -424,7 +425,9 @@ def _openocd_target_identity(
     of a target is the one that does not happen.
 
     OpenOCD second, and read-only: `init`, `targets`, `shutdown`, with the
-    probe selected by `adapter serial`, through the same reaped-with-a-timeout
+    probe selected by serial the way this OpenOCD selects one (`adapter serial`
+    from 0.12, the adapter driver's own selector before, see
+    `openocd_probe_selection`), through the same reaped-with-a-timeout
     spawn every other process in this repository goes through. No flash, no
     erase, no reset and no `reset halt`; `init` examines the target the scripts
     declared and stops. It is the same class of contact the ST-Link HOTPLUG
@@ -444,13 +447,30 @@ def _openocd_target_identity(
             "summary": f"The target was named by this workspace's {PROJECT_PROFILE} rather than read off the board.",
         }
     interface_cfg, target_cfg = profile_openocd_scripts(profile)
+    selection = openocd_probe_selection(executable, interface_cfg, probe_id, timeout_s)
+    if not selection.supported:
+        # Never read without a selector: OpenOCD would open whichever probe it
+        # found first, which need not be the one this discovery is about. The
+        # two reads that decided this ran at OpenOCD's configuration stage and
+        # opened no adapter, so the probe is still written down, untouched, with
+        # the controller left for a person to name.
+        return None, {
+            "source": "openocd",
+            "interface_cfg": interface_cfg,
+            "target_cfg": target_cfg,
+            "openocd_version": selection.version,
+            "adapter_driver": selection.adapter_driver,
+            "summary": (
+                f"{probe_selection_unsupported_reason(selection, interface_cfg)}, so the target was not read and the "
+                "controller was not identified. Nothing was said to the board."
+            ),
+        }
     probed = spawn_command(
         [
             *invocation(executable),
             "-f",
             interface_cfg,
-            "-c",
-            f"adapter serial {probe_id}",
+            *selection.commands,
             "-f",
             target_cfg,
             "-c",

@@ -483,6 +483,26 @@ def _no_host_stm32_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_host_device_access(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`doctor` asks nothing of the device nodes on the machine running the suite.
+
+    Off Windows, `doctor` and `init` ask the kernel whether this account may open
+    the configured probe's USB device and serial port. Left to the machine, that
+    question is answered by the developer's own groups and whatever board is
+    plugged in: green on a bare CI container, red on a bench account without
+    `plugdev`, and the same assertions answering differently per developer. A
+    test about the check hands it a recorded host, and that patch runs after
+    this one. The bench tier is unaffected: its commands run as children."""
+    from agentic_hil import device_access
+
+    class NotAsked(device_access.LocalHost):
+        def asks(self) -> bool:
+            return False
+
+    monkeypatch.setattr(device_access, "HOST", NotAsked())
+
+
+@pytest.fixture(autouse=True)
 def _no_release_index_request(monkeypatch: pytest.MonkeyPatch) -> None:
     """No test asks the index what the newest release is.
 
