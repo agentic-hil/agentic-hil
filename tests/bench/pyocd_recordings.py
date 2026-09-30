@@ -26,7 +26,7 @@ from agentic_hil.report import overall_success
 from tests.support import scaled_time_bound
 
 from . import usb_reset_support as usb
-from .conftest import BENCH_ONLY, DEMO_IMAGE, Bench, built_where_it_stands
+from .conftest import BENCH_ONLY, DEMO_IMAGE, Bench, BoardImages, built_where_it_stands
 from .test_bench_faults import Server
 from .usb_reset_reenumeration import USB_SYSFS, USBFS_ROOT, VISIBILITY_TIMEOUT_S
 
@@ -153,6 +153,20 @@ def pyocd_provenance(environment: dict[str, str]) -> tuple[str, str, str]:
     assert len(versions) == 1, packs_run.stdout
     assert versions[0] == "3.1.1", packs_run.stdout
     return executable, targets_document["pyocd_version"], versions[0]
+
+
+PROGRAMMED_BYTES = re.compile(r"\bprogrammed (\d+) bytes \(")
+
+
+def programmed_byte_count(stderr: str) -> int | None:
+    """The bytes pyOCD's flash summary says it wrote, or None when it printed no summary.
+
+    pyOCD compares every page with the board before it writes and skips the ones
+    that already match, so a flash of the image the board already runs writes
+    nothing and still succeeds.
+    """
+    counts = [int(match.group(1)) for match in PROGRAMMED_BYTES.finditer(stderr)]
+    return sum(counts) if counts else None
 
 
 def redact(value: str, private_values: tuple[str, ...]) -> str:
@@ -778,13 +792,23 @@ def test_pyocd_discovery_recovers_after_verified_usb_reset(bench: Bench, tmp_pat
                     variant.unlink(missing_ok=True)
 
 
-def test_pyocd_f446re_probe_flash_reset_and_uart_recording(bench: Bench, tmp_path: Path, record_property) -> None:
+def test_pyocd_f446re_probe_flash_reset_and_uart_recording(
+    bench: Bench, board_images: BoardImages, tmp_path: Path, record_property
+) -> None:
     """Capture one genuine healthy pyOCD connect/flash/reset/boot through MCP."""
     build_error = built_where_it_stands(bench.project)
     assert build_error is None, f"the demo ELF needed for the pyOCD baseline did not build:\n{build_error}"
     image = bench.project / DEMO_IMAGE
     assert image.is_file(), f"the demo build left no ELF at {image}"
     executable, pyocd_version, pack_version = pyocd_provenance(pyocd_bench_environment(bench))
+
+    # The stages before this one leave the demo on the board, and pyOCD skips
+    # every page that already matches, so a flash of the demo would write nothing
+    # and the banner after it would prove nothing. The image that prints nothing
+    # goes on first, through the bench's own plan; the board_images fixture puts
+    # the demo back after the test, whatever became of it.
+    displaced = board_images.put("silent")
+    assert displaced.get("ok") is True, f"the silent image did not go on the board before pyOCD's flash: {displaced.get('summary')}"
 
     debugger_id = bench.debugger_name()
     ports = sorted(bench.configuration().get("com_ports") or {})
@@ -882,6 +906,9 @@ def test_pyocd_f446re_probe_flash_reset_and_uart_recording(bench: Bench, tmp_pat
         if run_id:
             assert re.fullmatch(r"[A-Za-z0-9_.-]+", run_id), run_id
         recorded_transcript = transcript(bench, flash_result, private_values)
+        action_log = recorded_transcript.get("action_log")
+        flash_stderr = str(action_log.get("stderr") or "") if isinstance(action_log, dict) else ""
+        programmed = programmed_byte_count(flash_stderr)
         record_property(
             "pyocd_recording_v1",
             json.dumps(
@@ -891,6 +918,8 @@ def test_pyocd_f446re_probe_flash_reset_and_uart_recording(bench: Bench, tmp_pat
                     "run_id": run_id or None,
                     "backend": "pyocd",
                     "scenario": "healthy-demo-flash-reset-uart-boot",
+                    "board_before_flash": "silent",
+                    "programmed_bytes": programmed,
                     "outcome": "success" if overall_success(flash_result) else "failure",
                     "executable": executable,
                     "pyocd_version": pyocd_version,
@@ -919,6 +948,7 @@ def test_pyocd_f446re_probe_flash_reset_and_uart_recording(bench: Bench, tmp_pat
         assert isinstance(capture, dict) and capture.get("until_matched") is True, capture
         assert capture.get("matched") == BOOT_BANNER, capture
         assert flash_result.get("verify") is False, flash_result
+        assert programmed is not None and programmed > 0, f"pyOCD's flash wrote nothing to the board:\n{flash_stderr}"
 
         _, uart_opened = server.call("com_session_start", {"port_id": port_id, "clear_buffer": True})
         require_success(uart_opened, "com_session_start before reset")

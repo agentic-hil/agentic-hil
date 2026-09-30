@@ -33,6 +33,24 @@ def test_pyocd_timeout_safety_accepts_the_recorded_null_optional_status_fields()
     assert pyocd_recordings.safe_initial_usb_timeout(result) is True
 
 
+def test_a_pyocd_flash_of_the_image_the_board_already_runs_counts_as_nothing_programmed() -> None:
+    """pyOCD skips every page that already matches, so its summary is what says whether a flash wrote.
+
+    The lines are the pyOCD stage's own recording from the reference board, when
+    the board already ran the demo the stage flashed: the flash succeeded, the
+    banner came, and pyOCD had written nothing.
+    """
+    recorded = (
+        "0001016 I Loading /tmp/ahil-pt-2/d82d92282ad7/tmp/agentic-hil-artifacts-zsqbvscs/stage-1bj_ehgk/nucleo-f446re_demo.elf [load_cmd]\n"
+        "0001018 I Erasing... [loader]\n"
+        "0001337 I Programming... [loader]\n"
+        "0001379 I Erased 0 bytes (0 sectors), programmed 0 bytes (0 pages), identical 11264 bytes (11 pages) at 30.49 kB/s [loader]\n"
+    )
+
+    assert pyocd_recordings.programmed_byte_count(recorded) == 0
+    assert pyocd_recordings.programmed_byte_count(recorded.split("0001379")[0]) is None
+
+
 def test_pyocd_metadata_commands_use_the_explicit_bench_environment(monkeypatch) -> None:
     environment = {
         "HOME": "/bench-home",
