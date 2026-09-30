@@ -1,5 +1,5 @@
 /*
- * A board that answers: the serial counterparty of the bench tier.
+ * A board that answers: the serial and CAN counterparty of the bench tier.
  *
  * The demo prints one line and reads nothing, so over the real line it can
  * prove a banner and nothing a caller sends. This image is the other end of
@@ -99,6 +99,94 @@
  * half a second is dropped rather than waited for, and no wait in here is
  * without a limit.
  *
+ * CAN. bxCAN CAN1 on PB8 (RX) and PB9 (TX), alternate function 9, with the
+ * pull-up on PB8, so that with nothing on the pin it reads recessive. 500
+ * kbit/s from the image's APB1 clock, which is the reset clock, HSI at 16 MHz:
+ * a prescaler of 2 makes the time quantum 125 ns, and a bit is 16 quanta, one
+ * for synchronisation, 13 before the sample point and 2 after it, which puts
+ * the sample point at 87.5% of the bit. The resynchronisation jump width is
+ * one quantum (CAN_BTR 0x001C0001 before the mode bits). Classic CAN only:
+ * bxCAN has no CAN FD, and the CAN statistics say `fd=unsupported` rather
+ * than leave it to be found out.
+ *
+ * Modes. From boot and after a reset the controller runs in silent loopback
+ * (LBKM and SILM set): it hears every frame it sends, its answers included,
+ * and drives nothing on PB9, so it needs neither a transceiver nor a second
+ * node. Normal mode is the one a transceiver on PB8 and PB9 needs: the peer
+ * then hears the other nodes and answers them, and no longer hears itself. A
+ * frame no node acknowledges is sent again until one does. Switching the mode
+ * restarts the controller: whatever was not sent by then is dropped and
+ * counted as unsent, and the rules, the filters and the statistics stay.
+ *
+ * The CAN answer table is the container tier's CAN peer's
+ * (tests/container/can_peer.py), spelled as its --reply takes it:
+ * ID/DATA=ID/DATA, identifiers in hexadecimal with or without 0x, payloads as
+ * pairs of hexadecimal digits, eight bytes at most, an empty payload written
+ * as nothing (0x200/=0x201/ff). A standard data frame with a rule's
+ * identifier and payload is answered with the rule's standard data frame,
+ * extended and remote frames are heard, counted and never answered, and a
+ * later rule for the same frame replaces the earlier one, all as there. What
+ * loopback adds: the peer hears its own answers, so an answer that is itself
+ * a frame some rule names is answered in turn.
+ *
+ * CAN control lines are answered like the others, `@peer ok can <command>...`
+ * or `@peer error can <command> <reason>`, and `@peer error can syntax` when
+ * the command is none of these:
+ *
+ *   @peer can mode loopback|normal   switch the controller to that mode
+ *   @peer can rule ID/DATA=ID/DATA   answer that frame (8 rules at most)
+ *   @peer can unrule ID/DATA         forget the rule for that frame
+ *   @peer can clear                  forget every rule
+ *   @peer can send [extended] ID/DATA [COUNT]
+ *                                    send the frame COUNT times (1 to 100000,
+ *                                    1 when left out), answered
+ *                                    `@peer ok can send COUNT` once queued;
+ *                                    DATA written R or R0 to R8 is a remote
+ *                                    frame of that length. 8 sends wait at
+ *                                    most, and answers go out before them
+ *   @peer can filter [extended] ID MASK
+ *                                    hear only what the acceptance filters
+ *                                    take: a bxCAN filter bank in 32-bit mask
+ *                                    mode each, taking the frames whose
+ *                                    identifier equals ID in every bit MASK
+ *                                    sets. A standard filter takes standard
+ *                                    frames, an extended one extended frames,
+ *                                    data and remote alike (14 at most)
+ *   @peer can filter off             hear every frame again, as from boot
+ *   @peer can stats                  `@peer ok can stats mode=M queued=N
+ *                                    sent=N received=N answered=N
+ *                                    digest=HHHHHHHH lost=N unsent=N tec=N
+ *                                    rec=N state=S fd=unsupported`
+ *   @peer can last                   the last frame heard, spelled the way a
+ *                                    send spells it, or `none`
+ *
+ * Reasons: `syntax`, `range` (an identifier or mask over 0x7ff, or over
+ * 0x1fffffff for an extended one, a remote length over 8, a count out of
+ * bounds), `long` (a payload over 8 bytes), `full` (no free rule, filter or
+ * send), `absent` (no such rule), `init` (the controller did not take the
+ * mode, and runs in silent loopback again).
+ *
+ * CAN statistics, since boot or the last reset: `mode` loopback or normal, or
+ * failed for a controller that would not start; `queued` the frames waiting
+ * to be sent, the ones in the mailboxes included; `sent` the frames the
+ * controller confirmed; `received` the frames heard; `answered` the frames a
+ * rule answered; `lost` the frames heard and not kept (a receive FIFO
+ * overrun, or the receive ring full); `unsent` the frames that will never be
+ * sent (an answer that found 16 waiting, or what a mode switch dropped);
+ * `tec` and `rec` the controller's error counters; `state` active, warning,
+ * passive or busoff. `digest` covers every frame heard, in whatever order:
+ * the sum modulo 2^32 of one CRC-32 per frame, as zlib.crc32 computes it,
+ * over the frame's identifier word (4 bytes, most significant first, plus
+ * 0x80000000 for an extended identifier and 0x40000000 for a remote frame),
+ * its length code, and its data bytes, none for a remote frame. A sum,
+ * because in loopback a frame and the answers to the frames before it meet in
+ * an order nothing decides.
+ *
+ * The CAN receive ring holds 64 frames and is filled by the CAN1 RX0
+ * interrupt, and every wait on the controller ends after 10 ms at most. The
+ * acceptance filters are rewritten once the mailboxes are empty, so none of
+ * the peer's own frames is on the bus meanwhile.
+ *
  * Built by the bench tier as the demo's main.c, with the demo's startup code,
  * linker script and toolchain file, and put on the board through the product.
  */
@@ -130,6 +218,33 @@
 #define SYST_CSR (*(volatile uint32_t *)0xE000E010U)
 #define SYST_RVR (*(volatile uint32_t *)0xE000E014U)
 #define SYST_CVR (*(volatile uint32_t *)0xE000E018U)
+#define RCC_APB1RSTR (*(volatile uint32_t *)0x40023820U)
+#define GPIOB_MODER (*(volatile uint32_t *)0x40020400U)
+#define GPIOB_PUPDR (*(volatile uint32_t *)0x4002040CU)
+#define GPIOB_AFRH (*(volatile uint32_t *)0x40020424U)
+#define NVIC_ISER0 (*(volatile uint32_t *)0xE000E100U)
+#define CAN1_MCR (*(volatile uint32_t *)0x40006400U)
+#define CAN1_MSR (*(volatile uint32_t *)0x40006404U)
+#define CAN1_TSR (*(volatile uint32_t *)0x40006408U)
+#define CAN1_RF0R (*(volatile uint32_t *)0x4000640CU)
+#define CAN1_IER (*(volatile uint32_t *)0x40006414U)
+#define CAN1_ESR (*(volatile uint32_t *)0x40006418U)
+#define CAN1_BTR (*(volatile uint32_t *)0x4000641CU)
+#define CAN1_TIR(box) (*(volatile uint32_t *)(0x40006580U + 0x10U * (box)))
+#define CAN1_TDTR(box) (*(volatile uint32_t *)(0x40006584U + 0x10U * (box)))
+#define CAN1_TDLR(box) (*(volatile uint32_t *)(0x40006588U + 0x10U * (box)))
+#define CAN1_TDHR(box) (*(volatile uint32_t *)(0x4000658CU + 0x10U * (box)))
+#define CAN1_RI0R (*(volatile uint32_t *)0x400065B0U)
+#define CAN1_RDT0R (*(volatile uint32_t *)0x400065B4U)
+#define CAN1_RDL0R (*(volatile uint32_t *)0x400065B8U)
+#define CAN1_RDH0R (*(volatile uint32_t *)0x400065BCU)
+#define CAN1_FMR (*(volatile uint32_t *)0x40006600U)
+#define CAN1_FM1R (*(volatile uint32_t *)0x40006604U)
+#define CAN1_FS1R (*(volatile uint32_t *)0x4000660CU)
+#define CAN1_FFA1R (*(volatile uint32_t *)0x40006614U)
+#define CAN1_FA1R (*(volatile uint32_t *)0x4000661CU)
+#define CAN1_FR1(bank) (*(volatile uint32_t *)(0x40006640U + 8U * (bank)))
+#define CAN1_FR2(bank) (*(volatile uint32_t *)(0x40006644U + 8U * (bank)))
 
 #define GPIOAEN (1U << 0)
 #define USART2EN (1U << 17)
@@ -166,6 +281,47 @@
 #define SYST_CSR_TICKINT (1U << 1)
 #define SYST_CSR_CLKSOURCE (1U << 2)
 #define SYSTICK_1MS_AT_16MHZ (16000U - 1U)
+#define GPIOBEN (1U << 1)
+#define CAN1EN (1U << 25)
+#define CAN1RST (1U << 25)
+#define CAN_RX_PIN 8U
+#define CAN_TX_PIN 9U
+#define GPIO_PUPDR_MASK(pin) (3U << ((pin) * 2U))
+#define GPIO_PUPDR_UP(pin) (1U << ((pin) * 2U))
+#define GPIO_AFRH_AF9(pin) (9U << (((pin) - 8U) * 4U))
+#define GPIO_AFRH_MASK(pin) (0xFU << (((pin) - 8U) * 4U))
+#define CAN1_RX0_IRQ_BIT (1U << 20)
+#define CAN_MCR_INRQ (1U << 0)
+#define CAN_MCR_TXFP (1U << 2)
+#define CAN_MCR_DBF (1U << 16)
+#define CAN_MSR_INAK (1U << 0)
+#define CAN_MSR_SLAK (1U << 1)
+#define CAN_TSR_RQCP0 (1U << 0)
+#define CAN_TSR_TXOK0 (1U << 1)
+#define CAN_TSR_ABRQ0 (1U << 7)
+#define CAN_TSR_TME0 (1U << 26)
+#define CAN_TSR_TME_ALL (7U << 26)
+#define CAN_RF0R_FMP0 (3U << 0)
+#define CAN_RF0R_FOVR0 (1U << 4)
+#define CAN_RF0R_RFOM0 (1U << 5)
+#define CAN_IER_FMPIE0 (1U << 1)
+#define CAN_ESR_EWGF (1U << 0)
+#define CAN_ESR_EPVF (1U << 1)
+#define CAN_ESR_BOFF (1U << 2)
+#define CAN_BTR_LBKM (1U << 30)
+#define CAN_BTR_SILM (1U << 31)
+#define CAN_ID_TXRQ (1U << 0)
+#define CAN_ID_RTR (1U << 1)
+#define CAN_ID_IDE (1U << 2)
+#define CAN_FMR_FINIT (1U << 0)
+/* 500 kbit/s from PCLK1 at 16 MHz: prescaler 2 (125 ns quanta), 13 quanta
+ * before the sample point and 2 after it, a jump width of 1 (0x001C0001). */
+#define CAN_BTR_PRESCALER 2U
+#define CAN_BTR_SEGMENT1 13U
+#define CAN_BTR_SEGMENT2 2U
+#define CAN_BTR_JUMP 1U
+#define CAN_BTR_500K (((CAN_BTR_JUMP - 1U) << 24) | ((CAN_BTR_SEGMENT2 - 1U) << 20) | \
+                      ((CAN_BTR_SEGMENT1 - 1U) << 16) | (CAN_BTR_PRESCALER - 1U))
 
 #define PCLK1_HZ 16000000U
 #define BOOT_BAUD 115200U
@@ -186,6 +342,28 @@
 #define FLOOD_MAX 100000000U
 #define TEMPERATURE_SAMPLES 16U
 #define ADC_WAIT_MS 5U
+#define CAN_MAILBOXES 3U
+#define CAN_RX_RING 64U
+#define CAN_RULES 8U
+#define CAN_ANSWERS 16U
+#define CAN_SENDS 8U
+#define CAN_FILTERS 14U
+#define CAN_DATA_MAX 8U
+#define CAN_STANDARD_MAX 0x7FFU
+#define CAN_EXTENDED_MAX 0x1FFFFFFFU
+#define CAN_SEND_MAX 100000U
+#define CAN_WAIT_MS 10U
+#define CAN_EXTENDED_FLAG 0x80000000U
+#define CAN_REMOTE_FLAG 0x40000000U
+
+#define CAN_MODE_LOOPBACK 0U
+#define CAN_MODE_NORMAL 1U
+#define CAN_MODE_FAILED 2U
+
+#define CAN_OK 0U
+#define CAN_SYNTAX 1U
+#define CAN_RANGE 2U
+#define CAN_LONG 3U
 
 #define ESCAPE_BAD (-1)
 #define ESCAPE_LONG (-2)
@@ -1044,6 +1222,888 @@ static void command_temp(const uint8_t *arguments, uint32_t len, int has_argumen
     reply_end();
 }
 
+struct can_frame {
+    uint32_t identifier;
+    uint8_t extended;
+    uint8_t remote;
+    /* The length code as sent or received: the data bytes of a data frame,
+     * the requested length of a remote frame. */
+    uint8_t length;
+    uint8_t data[CAN_DATA_MAX];
+};
+
+/* A frame as the receive interrupt takes it out of FIFO 0. */
+struct can_received {
+    uint32_t identifier_register;
+    uint32_t length_register;
+    uint32_t low;
+    uint32_t high;
+};
+
+struct can_rule {
+    uint8_t used;
+    struct can_frame heard;
+    struct can_frame answer;
+};
+
+struct can_send {
+    struct can_frame frame;
+    uint32_t remaining;
+};
+
+struct can_filter {
+    uint8_t extended;
+    uint32_t identifier;
+    uint32_t mask;
+};
+
+static const char can_hex[] = "0123456789abcdef";
+
+static volatile struct can_received can_rx_ring[CAN_RX_RING];
+static volatile uint32_t can_rx_head;
+static volatile uint32_t can_rx_tail;
+static volatile uint32_t can_lost;
+static struct can_rule can_rules[CAN_RULES];
+static struct can_frame can_answers[CAN_ANSWERS];
+static uint32_t can_answers_first;
+static uint32_t can_answers_count;
+static struct can_send can_sends[CAN_SENDS];
+static uint32_t can_sends_first;
+static uint32_t can_sends_count;
+static struct can_filter can_filters[CAN_FILTERS];
+static uint32_t can_filter_count;
+static uint32_t can_mode;
+static uint32_t can_sent;
+static uint32_t can_received;
+static uint32_t can_answered;
+static uint32_t can_digest;
+static uint32_t can_unsent;
+static uint8_t can_heard_any;
+static struct can_frame can_last;
+static uint32_t can_crc_table[256];
+
+void CAN1_RX0_IRQHandler(void)
+{
+    for (uint32_t taken = 0U; taken < 3U && (CAN1_RF0R & CAN_RF0R_FMP0) != 0U; taken++) {
+        uint32_t head = can_rx_head;
+
+        if (head - can_rx_tail < CAN_RX_RING) {
+            can_rx_ring[head % CAN_RX_RING].identifier_register = CAN1_RI0R;
+            can_rx_ring[head % CAN_RX_RING].length_register = CAN1_RDT0R;
+            can_rx_ring[head % CAN_RX_RING].low = CAN1_RDL0R;
+            can_rx_ring[head % CAN_RX_RING].high = CAN1_RDH0R;
+            can_rx_head = head + 1U;
+        } else {
+            can_lost++;
+        }
+        CAN1_RF0R = CAN_RF0R_RFOM0;
+        /* FMP0 counts the frame just released until the release is done, a
+         * few clock cycles; waited for, so no frame is read twice. */
+        for (uint32_t wait = 0U; wait < 64U && (CAN1_RF0R & CAN_RF0R_RFOM0) != 0U; wait++) {
+        }
+    }
+    if ((CAN1_RF0R & CAN_RF0R_FOVR0) != 0U) {
+        CAN1_RF0R = CAN_RF0R_FOVR0;
+        can_lost++;
+    }
+}
+
+/* Wait until the bits `mask` of a controller register read `value`, at most
+ * CAN_WAIT_MS; 0 when they did not. */
+static int can_wait(volatile uint32_t *reg, uint32_t mask, uint32_t value)
+{
+    uint32_t started = uptime_ms;
+
+    while ((*reg & mask) != value) {
+        if (uptime_ms - started > CAN_WAIT_MS) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static uint32_t can_data_length(const struct can_frame *frame)
+{
+    if (frame->remote) {
+        return 0U;
+    }
+    return frame->length > CAN_DATA_MAX ? CAN_DATA_MAX : frame->length;
+}
+
+static uint32_t can_crc_byte(uint32_t crc, uint8_t byte)
+{
+    return can_crc_table[(crc ^ byte) & 0xFFU] ^ (crc >> 8);
+}
+
+/* The frame's CRC-32 as the digest counts it: identifier word, length code, data. */
+static uint32_t can_frame_crc(const struct can_frame *frame)
+{
+    uint32_t word = frame->identifier | (frame->extended ? CAN_EXTENDED_FLAG : 0U) | (frame->remote ? CAN_REMOTE_FLAG : 0U);
+    uint32_t crc = 0xFFFFFFFFU;
+
+    for (int32_t shift = 24; shift >= 0; shift -= 8) {
+        crc = can_crc_byte(crc, (uint8_t)(word >> (uint32_t)shift));
+    }
+    crc = can_crc_byte(crc, frame->length);
+    for (uint32_t index = 0U; index < can_data_length(frame); index++) {
+        crc = can_crc_byte(crc, frame->data[index]);
+    }
+    return ~crc;
+}
+
+static int can_same_frame(const struct can_frame *left, const struct can_frame *right)
+{
+    if (left->identifier != right->identifier || left->extended != right->extended || left->remote != right->remote) {
+        return 0;
+    }
+    if (left->remote) {
+        return left->length == right->length;
+    }
+    return same_bytes(left->data, can_data_length(left), right->data, can_data_length(right));
+}
+
+/* Every mailbox whose request completed counted, as sent or as unsent (an
+ * abort), and made ready for the next frame. */
+static void can_account(void)
+{
+    uint32_t status = CAN1_TSR;
+    uint32_t done = 0U;
+
+    for (uint32_t box = 0U; box < CAN_MAILBOXES; box++) {
+        uint32_t shift = 8U * box;
+
+        if ((status & (CAN_TSR_RQCP0 << shift)) != 0U) {
+            if ((status & (CAN_TSR_TXOK0 << shift)) != 0U) {
+                can_sent++;
+            } else {
+                can_unsent++;
+            }
+            done |= CAN_TSR_RQCP0 << shift;
+        }
+    }
+    if (done != 0U) {
+        CAN1_TSR = done;
+    }
+}
+
+static uint32_t can_mailboxes_busy(void)
+{
+    uint32_t status = CAN1_TSR;
+    uint32_t busy = 0U;
+
+    for (uint32_t box = 0U; box < CAN_MAILBOXES; box++) {
+        if ((status & (CAN_TSR_TME0 << box)) == 0U) {
+            busy++;
+        }
+    }
+    return busy;
+}
+
+static uint32_t can_queued(void)
+{
+    uint32_t queued = can_answers_count + can_mailboxes_busy();
+
+    for (uint32_t index = 0U; index < can_sends_count; index++) {
+        queued += can_sends[(can_sends_first + index) % CAN_SENDS].remaining;
+    }
+    return queued;
+}
+
+static void can_queue_answer(const struct can_frame *answer)
+{
+    if (can_answers_count == CAN_ANSWERS) {
+        can_unsent++;
+        return;
+    }
+    can_answers[(can_answers_first + can_answers_count) % CAN_ANSWERS] = *answer;
+    can_answers_count++;
+    can_answered++;
+}
+
+/* Every frame the receive interrupt kept: counted, added to the digest, and
+ * answered when it is a standard data frame a rule names. */
+static void can_take_received(void)
+{
+    while (can_rx_tail != can_rx_head) {
+        uint32_t slot = can_rx_tail % CAN_RX_RING;
+        uint32_t identifier_register = can_rx_ring[slot].identifier_register;
+        uint32_t low = can_rx_ring[slot].low;
+        uint32_t high = can_rx_ring[slot].high;
+        struct can_frame frame;
+
+        frame.extended = (identifier_register & CAN_ID_IDE) != 0U ? 1U : 0U;
+        frame.remote = (identifier_register & CAN_ID_RTR) != 0U ? 1U : 0U;
+        frame.identifier = frame.extended ? identifier_register >> 3 : identifier_register >> 21;
+        frame.length = (uint8_t)(can_rx_ring[slot].length_register & 0xFU);
+        for (uint32_t index = 0U; index < 4U; index++) {
+            frame.data[index] = (uint8_t)(low >> (8U * index));
+            frame.data[index + 4U] = (uint8_t)(high >> (8U * index));
+        }
+        can_rx_tail = can_rx_tail + 1U;
+
+        can_received++;
+        can_digest += can_frame_crc(&frame);
+        can_last = frame;
+        can_heard_any = 1U;
+        if (!frame.extended && !frame.remote) {
+            for (uint32_t index = 0U; index < CAN_RULES; index++) {
+                if (can_rules[index].used && can_same_frame(&can_rules[index].heard, &frame)) {
+                    can_queue_answer(&can_rules[index].answer);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/* The next frame to send: an answer when one waits, else the next send. */
+static int can_next_frame(struct can_frame *frame)
+{
+    if (can_answers_count > 0U) {
+        *frame = can_answers[can_answers_first];
+        can_answers_first = (can_answers_first + 1U) % CAN_ANSWERS;
+        can_answers_count--;
+        return 1;
+    }
+    if (can_sends_count > 0U) {
+        struct can_send *send = &can_sends[can_sends_first];
+
+        *frame = send->frame;
+        send->remaining--;
+        if (send->remaining == 0U) {
+            can_sends_first = (can_sends_first + 1U) % CAN_SENDS;
+            can_sends_count--;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static void can_load(uint32_t box, const struct can_frame *frame)
+{
+    uint32_t identifier_register = frame->extended ? ((frame->identifier << 3) | CAN_ID_IDE) : (frame->identifier << 21);
+
+    if (frame->remote) {
+        identifier_register |= CAN_ID_RTR;
+    }
+    CAN1_TIR(box) = identifier_register;
+    CAN1_TDTR(box) = frame->length;
+    CAN1_TDLR(box) = (uint32_t)frame->data[0] | ((uint32_t)frame->data[1] << 8) | ((uint32_t)frame->data[2] << 16) |
+                     ((uint32_t)frame->data[3] << 24);
+    CAN1_TDHR(box) = (uint32_t)frame->data[4] | ((uint32_t)frame->data[5] << 8) | ((uint32_t)frame->data[6] << 16) |
+                     ((uint32_t)frame->data[7] << 24);
+    CAN1_TIR(box) = identifier_register | CAN_ID_TXRQ;
+}
+
+/* Every empty mailbox given the next frame. TXFP is set, so the controller
+ * sends them in the order they were loaded. */
+static void can_fill_mailboxes(void)
+{
+    for (uint32_t box = 0U; box < CAN_MAILBOXES; box++) {
+        uint32_t status = CAN1_TSR;
+        struct can_frame frame;
+
+        if ((status & (CAN_TSR_TME0 << box)) == 0U) {
+            continue;
+        }
+        if ((status & (CAN_TSR_RQCP0 << (8U * box))) != 0U) {
+            /* Loading the mailbox clears its completion, so it is counted first. */
+            can_account();
+        }
+        if (!can_next_frame(&frame)) {
+            return;
+        }
+        can_load(box, &frame);
+    }
+}
+
+static void can_serve(void)
+{
+    can_account();
+    can_take_received();
+    can_fill_mailboxes();
+}
+
+/* The acceptance filters into the filter banks, CAN1's 0 to 13, each in
+ * 32-bit mask mode and to FIFO 0; with none, bank 0 takes every frame. */
+static void can_write_filters(void)
+{
+    uint32_t banks = 1U;
+
+    CAN1_FMR |= CAN_FMR_FINIT;
+    CAN1_FA1R = 0U;
+    CAN1_FM1R = 0U;
+    CAN1_FFA1R = 0U;
+    if (can_filter_count == 0U) {
+        CAN1_FR1(0U) = 0U;
+        CAN1_FR2(0U) = 0U;
+    } else {
+        banks = 0U;
+        for (uint32_t bank = 0U; bank < can_filter_count; bank++) {
+            const struct can_filter *filter = &can_filters[bank];
+
+            if (filter->extended) {
+                CAN1_FR1(bank) = (filter->identifier << 3) | CAN_ID_IDE;
+                CAN1_FR2(bank) = (filter->mask << 3) | CAN_ID_IDE;
+            } else {
+                CAN1_FR1(bank) = filter->identifier << 21;
+                CAN1_FR2(bank) = (filter->mask << 21) | CAN_ID_IDE;
+            }
+            banks |= 1U << bank;
+        }
+    }
+    CAN1_FS1R = banks;
+    CAN1_FA1R = banks;
+    CAN1_FMR &= ~CAN_FMR_FINIT;
+}
+
+/* The controller reset through RCC, set up again from what the peer keeps
+ * (the mode asked for, the filters) and started; 0 when it would not start. */
+static int can_start(uint32_t mode)
+{
+    RCC_APB1RSTR |= CAN1RST;
+    RCC_APB1RSTR &= ~CAN1RST;
+    interrupts_off();
+    can_rx_tail = can_rx_head;
+    interrupts_on();
+
+    /* Out of sleep and into initialization, where the timing can be set. */
+    CAN1_MCR = CAN_MCR_DBF | CAN_MCR_TXFP | CAN_MCR_INRQ;
+    if (!can_wait(&CAN1_MSR, CAN_MSR_INAK | CAN_MSR_SLAK, CAN_MSR_INAK)) {
+        return 0;
+    }
+    CAN1_BTR = CAN_BTR_500K | (mode == CAN_MODE_LOOPBACK ? (CAN_BTR_LBKM | CAN_BTR_SILM) : 0U);
+    can_write_filters();
+    CAN1_IER = CAN_IER_FMPIE0;
+    /* Leaving initialization takes 11 recessive bits on the receive side:
+     * the controller's own in loopback, PB8 in normal mode. */
+    CAN1_MCR &= ~CAN_MCR_INRQ;
+    return can_wait(&CAN1_MSR, CAN_MSR_INAK, 0U);
+}
+
+static void can_drop_queues(void)
+{
+    can_unsent += can_answers_count;
+    for (uint32_t index = 0U; index < can_sends_count; index++) {
+        can_unsent += can_sends[(can_sends_first + index) % CAN_SENDS].remaining;
+    }
+    can_answers_first = 0U;
+    can_answers_count = 0U;
+    can_sends_first = 0U;
+    can_sends_count = 0U;
+}
+
+/* Whatever was not sent dropped and counted, what was heard kept, and the
+ * controller restarted in `mode`; 0 when it would not take it, and then it
+ * runs in silent loopback again. */
+static int can_switch(uint32_t mode)
+{
+    CAN1_TSR = CAN_TSR_ABRQ0 | (CAN_TSR_ABRQ0 << 8) | (CAN_TSR_ABRQ0 << 16);
+    (void)can_wait(&CAN1_TSR, CAN_TSR_TME_ALL, CAN_TSR_TME_ALL);
+    can_account();
+    can_take_received();
+    can_unsent += can_mailboxes_busy();
+    can_drop_queues();
+    if (can_start(mode)) {
+        can_mode = mode;
+        return 1;
+    }
+    can_mode = can_start(CAN_MODE_LOOPBACK) ? CAN_MODE_LOOPBACK : CAN_MODE_FAILED;
+    return 0;
+}
+
+/* The filters rewritten once the mailboxes are empty, so none of the peer's
+ * own frames is on the bus while the banks change. */
+static void can_apply_filters(void)
+{
+    (void)can_wait(&CAN1_TSR, CAN_TSR_TME_ALL, CAN_TSR_TME_ALL);
+    can_account();
+    can_take_received();
+    can_write_filters();
+}
+
+static void can_clear_rules(void)
+{
+    for (uint32_t index = 0U; index < CAN_RULES; index++) {
+        can_rules[index].used = 0U;
+    }
+}
+
+/* The CAN half at its boot defaults: silent loopback, no rules, no filters,
+ * nothing queued, the statistics zeroed. */
+static void can_reset(void)
+{
+    can_clear_rules();
+    can_answers_first = 0U;
+    can_answers_count = 0U;
+    can_sends_first = 0U;
+    can_sends_count = 0U;
+    can_filter_count = 0U;
+    can_mode = can_start(CAN_MODE_LOOPBACK) ? CAN_MODE_LOOPBACK : CAN_MODE_FAILED;
+    can_sent = 0U;
+    can_received = 0U;
+    can_answered = 0U;
+    can_digest = 0U;
+    can_unsent = 0U;
+    can_lost = 0U;
+    can_heard_any = 0U;
+}
+
+static void can_init(void)
+{
+    RCC_AHB1ENR |= GPIOBEN;
+    RCC_APB1ENR |= CAN1EN;
+    GPIOB_AFRH = (GPIOB_AFRH & ~(GPIO_AFRH_MASK(CAN_RX_PIN) | GPIO_AFRH_MASK(CAN_TX_PIN))) |
+                 GPIO_AFRH_AF9(CAN_RX_PIN) | GPIO_AFRH_AF9(CAN_TX_PIN);
+    GPIOB_PUPDR = (GPIOB_PUPDR & ~GPIO_PUPDR_MASK(CAN_RX_PIN)) | GPIO_PUPDR_UP(CAN_RX_PIN);
+    GPIOB_MODER = (GPIOB_MODER & ~(GPIO_MODER_MASK(CAN_RX_PIN) | GPIO_MODER_MASK(CAN_TX_PIN))) |
+                  GPIO_MODER_AF(CAN_RX_PIN) | GPIO_MODER_AF(CAN_TX_PIN);
+    for (uint32_t index = 0U; index < 256U; index++) {
+        can_crc_table[index] = crc32_step(0U, (uint8_t)index);
+    }
+    NVIC_ISER0 = CAN1_RX0_IRQ_BIT;
+    can_reset();
+}
+
+/* Whether text starts with `word` and a space; if so, both are taken off it. */
+static int take_word(const uint8_t **text, uint32_t *len, const char *word)
+{
+    uint32_t index = 0U;
+
+    while (word[index] != '\0') {
+        if (index >= *len || (*text)[index] != (uint8_t)word[index]) {
+            return 0;
+        }
+        index++;
+    }
+    if (index >= *len || (*text)[index] != ' ') {
+        return 0;
+    }
+    *text += index + 1U;
+    *len -= index + 1U;
+    return 1;
+}
+
+static const char *can_reason(uint32_t code)
+{
+    if (code == CAN_RANGE) {
+        return "range";
+    }
+    if (code == CAN_LONG) {
+        return "long";
+    }
+    return "syntax";
+}
+
+/* An identifier or mask as the container peer's int(text, 16) reads the
+ * spellings its table documents: 0x or 0X or nothing, then hex digits. */
+static uint32_t can_parse_number(const uint8_t *text, uint32_t len, uint32_t max, uint32_t *value)
+{
+    uint32_t at = 0U;
+    uint32_t result = 0U;
+    int over = 0;
+
+    if (len >= 2U && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+        at = 2U;
+    }
+    if (at == len) {
+        return CAN_SYNTAX;
+    }
+    for (; at < len; at++) {
+        uint32_t digit;
+
+        if (!hex_digit(text[at], &digit)) {
+            return CAN_SYNTAX;
+        }
+        if (result > 0x0FFFFFFFU) {
+            over = 1;
+        }
+        result = (result << 4) | digit;
+    }
+    if (over || result > max) {
+        return CAN_RANGE;
+    }
+    *value = result;
+    return CAN_OK;
+}
+
+/* A payload as bytes.fromhex reads it: pairs of hex digits, none for an empty one. */
+static uint32_t can_parse_data(const uint8_t *text, uint32_t len, struct can_frame *frame)
+{
+    uint32_t value;
+
+    for (uint32_t index = 0U; index < len; index++) {
+        if (!hex_digit(text[index], &value)) {
+            return CAN_SYNTAX;
+        }
+    }
+    if (len % 2U != 0U) {
+        return CAN_SYNTAX;
+    }
+    if (len / 2U > CAN_DATA_MAX) {
+        return CAN_LONG;
+    }
+    for (uint32_t index = 0U; index < len / 2U; index++) {
+        (void)hex_value(text, len, 2U * index, 2U, &value);
+        frame->data[index] = (uint8_t)value;
+    }
+    frame->length = (uint8_t)(len / 2U);
+    return CAN_OK;
+}
+
+/* ID/DATA into a frame; DATA as R or R<length> is a remote frame where `remote_allowed`. */
+static uint32_t can_parse_frame(const uint8_t *text, uint32_t len, uint8_t extended, int remote_allowed, struct can_frame *frame)
+{
+    uint32_t split = 0U;
+    uint32_t code;
+
+    frame->identifier = 0U;
+    frame->extended = extended;
+    frame->remote = 0U;
+    frame->length = 0U;
+    for (uint32_t index = 0U; index < CAN_DATA_MAX; index++) {
+        frame->data[index] = 0U;
+    }
+    while (split < len && text[split] != '/') {
+        split++;
+    }
+    if (split == len) {
+        return CAN_SYNTAX;
+    }
+    code = can_parse_number(text, split, extended ? CAN_EXTENDED_MAX : CAN_STANDARD_MAX, &frame->identifier);
+    if (code != CAN_OK) {
+        return code;
+    }
+    text += split + 1U;
+    len -= split + 1U;
+    if (remote_allowed && len > 0U && text[0] == 'R') {
+        uint32_t length = 0U;
+
+        if (len > 1U && !parse_decimal(text + 1U, len - 1U, &length)) {
+            return CAN_SYNTAX;
+        }
+        if (length > CAN_DATA_MAX) {
+            return CAN_RANGE;
+        }
+        frame->remote = 1U;
+        frame->length = (uint8_t)length;
+        return CAN_OK;
+    }
+    return can_parse_data(text, len, frame);
+}
+
+static void put_hex_short(uint32_t value)
+{
+    int32_t shift = 28;
+
+    while (shift > 0 && ((value >> (uint32_t)shift) & 0xFU) == 0U) {
+        shift -= 4;
+    }
+    for (; shift >= 0; shift -= 4) {
+        tx_put((uint8_t)can_hex[(value >> (uint32_t)shift) & 0xFU]);
+    }
+}
+
+/* A frame spelled the way `can send` takes it. */
+static void put_frame(const struct can_frame *frame)
+{
+    if (frame->extended) {
+        put_text("extended ");
+    }
+    put_text("0x");
+    put_hex_short(frame->identifier);
+    put_text("/");
+    if (frame->remote) {
+        put_text("R");
+        put_decimal(frame->length);
+        return;
+    }
+    for (uint32_t index = 0U; index < can_data_length(frame); index++) {
+        tx_put((uint8_t)can_hex[frame->data[index] >> 4]);
+        tx_put((uint8_t)can_hex[frame->data[index] & 0xFU]);
+    }
+}
+
+static void can_command_mode(const uint8_t *arguments, uint32_t len)
+{
+    uint32_t mode;
+
+    if (is_word(arguments, len, "loopback")) {
+        mode = CAN_MODE_LOOPBACK;
+    } else if (is_word(arguments, len, "normal")) {
+        mode = CAN_MODE_NORMAL;
+    } else {
+        reply_error("can mode", "syntax");
+        return;
+    }
+    if (!can_switch(mode)) {
+        reply_error("can mode", "init");
+        return;
+    }
+    reply_ok(mode == CAN_MODE_LOOPBACK ? "can mode loopback" : "can mode normal");
+    reply_end();
+}
+
+static void can_command_rule(const uint8_t *arguments, uint32_t len)
+{
+    uint32_t split = 0U;
+    uint32_t slot = CAN_RULES;
+    uint32_t code;
+    struct can_frame heard;
+    struct can_frame answer;
+
+    while (split < len && arguments[split] != '=') {
+        split++;
+    }
+    if (split == len) {
+        reply_error("can rule", "syntax");
+        return;
+    }
+    code = can_parse_frame(arguments, split, 0U, 0, &heard);
+    if (code == CAN_OK) {
+        code = can_parse_frame(arguments + split + 1U, len - split - 1U, 0U, 0, &answer);
+    }
+    if (code != CAN_OK) {
+        reply_error("can rule", can_reason(code));
+        return;
+    }
+    for (uint32_t index = 0U; index < CAN_RULES; index++) {
+        if (can_rules[index].used && can_same_frame(&can_rules[index].heard, &heard)) {
+            slot = index;
+            break;
+        }
+    }
+    if (slot == CAN_RULES) {
+        for (uint32_t index = 0U; index < CAN_RULES; index++) {
+            if (!can_rules[index].used) {
+                slot = index;
+                break;
+            }
+        }
+    }
+    if (slot == CAN_RULES) {
+        reply_error("can rule", "full");
+        return;
+    }
+    can_rules[slot].heard = heard;
+    can_rules[slot].answer = answer;
+    can_rules[slot].used = 1U;
+    reply_ok("can rule");
+    reply_end();
+}
+
+static void can_command_unrule(const uint8_t *arguments, uint32_t len)
+{
+    struct can_frame heard;
+    uint32_t code = can_parse_frame(arguments, len, 0U, 0, &heard);
+
+    if (code != CAN_OK) {
+        reply_error("can unrule", can_reason(code));
+        return;
+    }
+    for (uint32_t index = 0U; index < CAN_RULES; index++) {
+        if (can_rules[index].used && can_same_frame(&can_rules[index].heard, &heard)) {
+            can_rules[index].used = 0U;
+            reply_ok("can unrule");
+            reply_end();
+            return;
+        }
+    }
+    reply_error("can unrule", "absent");
+}
+
+static void can_command_send(const uint8_t *arguments, uint32_t len)
+{
+    uint8_t extended = 0U;
+    uint32_t end = 0U;
+    uint32_t count = 1U;
+    uint32_t code;
+    struct can_frame frame;
+
+    if (take_word(&arguments, &len, "extended")) {
+        extended = 1U;
+    }
+    while (end < len && arguments[end] != ' ') {
+        end++;
+    }
+    code = can_parse_frame(arguments, end, extended, 1, &frame);
+    if (code == CAN_OK && end < len) {
+        if (!parse_decimal(arguments + end + 1U, len - end - 1U, &count)) {
+            code = CAN_SYNTAX;
+        } else if (count == 0U || count > CAN_SEND_MAX) {
+            code = CAN_RANGE;
+        }
+    }
+    if (code != CAN_OK) {
+        reply_error("can send", can_reason(code));
+        return;
+    }
+    if (can_sends_count == CAN_SENDS) {
+        reply_error("can send", "full");
+        return;
+    }
+    can_sends[(can_sends_first + can_sends_count) % CAN_SENDS].frame = frame;
+    can_sends[(can_sends_first + can_sends_count) % CAN_SENDS].remaining = count;
+    can_sends_count++;
+    reply_ok("can send ");
+    put_decimal(count);
+    reply_end();
+}
+
+static void can_command_filter(const uint8_t *arguments, uint32_t len)
+{
+    uint8_t extended = 0U;
+    uint32_t split = 0U;
+    uint32_t max;
+    uint32_t identifier = 0U;
+    uint32_t mask = 0U;
+    uint32_t code;
+
+    if (is_word(arguments, len, "off")) {
+        can_filter_count = 0U;
+        can_apply_filters();
+        reply_ok("can filter off");
+        reply_end();
+        return;
+    }
+    if (take_word(&arguments, &len, "extended")) {
+        extended = 1U;
+    }
+    max = extended ? CAN_EXTENDED_MAX : CAN_STANDARD_MAX;
+    while (split < len && arguments[split] != ' ') {
+        split++;
+    }
+    if (split == len) {
+        reply_error("can filter", "syntax");
+        return;
+    }
+    code = can_parse_number(arguments, split, max, &identifier);
+    if (code == CAN_OK) {
+        code = can_parse_number(arguments + split + 1U, len - split - 1U, max, &mask);
+    }
+    if (code != CAN_OK) {
+        reply_error("can filter", can_reason(code));
+        return;
+    }
+    if (can_filter_count == CAN_FILTERS) {
+        reply_error("can filter", "full");
+        return;
+    }
+    can_filters[can_filter_count].extended = extended;
+    can_filters[can_filter_count].identifier = identifier;
+    can_filters[can_filter_count].mask = mask;
+    can_filter_count++;
+    can_apply_filters();
+    reply_ok("can filter");
+    reply_end();
+}
+
+static void can_command_stats(void)
+{
+    uint32_t errors;
+
+    can_account();
+    can_take_received();
+    errors = CAN1_ESR;
+    reply_ok("can stats mode=");
+    if (can_mode == CAN_MODE_LOOPBACK) {
+        put_text("loopback");
+    } else if (can_mode == CAN_MODE_NORMAL) {
+        put_text("normal");
+    } else {
+        put_text("failed");
+    }
+    put_text(" queued=");
+    put_decimal(can_queued());
+    put_text(" sent=");
+    put_decimal(can_sent);
+    put_text(" received=");
+    put_decimal(can_received);
+    put_text(" answered=");
+    put_decimal(can_answered);
+    put_text(" digest=");
+    put_hex32(can_digest);
+    put_text(" lost=");
+    put_decimal(can_lost);
+    put_text(" unsent=");
+    put_decimal(can_unsent);
+    put_text(" tec=");
+    put_decimal((errors >> 16) & 0xFFU);
+    put_text(" rec=");
+    put_decimal((errors >> 24) & 0xFFU);
+    put_text(" state=");
+    if ((errors & CAN_ESR_BOFF) != 0U) {
+        put_text("busoff");
+    } else if ((errors & CAN_ESR_EPVF) != 0U) {
+        put_text("passive");
+    } else if ((errors & CAN_ESR_EWGF) != 0U) {
+        put_text("warning");
+    } else {
+        put_text("active");
+    }
+    put_text(" fd=unsupported");
+    reply_end();
+}
+
+static void can_command_last(void)
+{
+    can_account();
+    can_take_received();
+    reply_ok("can last ");
+    if (can_heard_any) {
+        put_frame(&can_last);
+    } else {
+        put_text("none");
+    }
+    reply_end();
+}
+
+static void command_can(const uint8_t *text, uint32_t len)
+{
+    uint32_t word = 0U;
+    const uint8_t *arguments = text;
+    uint32_t arguments_len = 0U;
+    int has_arguments = 0;
+
+    while (word < len && text[word] != ' ') {
+        word++;
+    }
+    if (word < len) {
+        arguments = text + word + 1U;
+        arguments_len = len - word - 1U;
+        has_arguments = 1;
+    }
+
+    if (is_word(text, word, "mode") && has_arguments) {
+        can_command_mode(arguments, arguments_len);
+    } else if (is_word(text, word, "rule") && has_arguments) {
+        can_command_rule(arguments, arguments_len);
+    } else if (is_word(text, word, "unrule") && has_arguments) {
+        can_command_unrule(arguments, arguments_len);
+    } else if (is_word(text, word, "clear") && !has_arguments) {
+        can_clear_rules();
+        reply_ok("can clear");
+        reply_end();
+    } else if (is_word(text, word, "send") && has_arguments) {
+        can_command_send(arguments, arguments_len);
+    } else if (is_word(text, word, "filter") && has_arguments) {
+        can_command_filter(arguments, arguments_len);
+    } else if (is_word(text, word, "stats") && !has_arguments) {
+        can_command_stats();
+    } else if (is_word(text, word, "last") && !has_arguments) {
+        can_command_last();
+    } else if (is_word(text, word, "mode") || is_word(text, word, "rule") || is_word(text, word, "unrule") ||
+               is_word(text, word, "clear") || is_word(text, word, "send") || is_word(text, word, "filter") ||
+               is_word(text, word, "stats") || is_word(text, word, "last")) {
+        put_text("@peer error can ");
+        put_bytes(text, word);
+        put_text(" syntax");
+        reply_end();
+    } else {
+        reply_error("can", "syntax");
+    }
+}
+
 static void command_stats(void)
 {
     reply_ok("stats bytes=");
@@ -1077,6 +2137,7 @@ static void command_reset(void)
     stat_lines = 0U;
     stat_overlong = 0U;
     rx_lost = 0U;
+    can_reset();
     reply_ok("reset");
     reply_end();
     if (baud != BOOT_BAUD) {
@@ -1127,6 +2188,12 @@ static void control(const uint8_t *text, uint32_t len)
         command_stats();
     } else if (is_word(text, word, "reset") && !has_arguments) {
         command_reset();
+    } else if (is_word(text, word, "can")) {
+        if (has_arguments) {
+            command_can(arguments, arguments_len);
+        } else {
+            reply_error("can", "syntax");
+        }
     } else if (is_word(text, word, "rule") || is_word(text, word, "unrule") || is_word(text, word, "delay") ||
                is_word(text, word, "announce") || is_word(text, word, "echo") || is_word(text, word, "flood") ||
                is_word(text, word, "baud") || is_word(text, word, "silence")) {
@@ -1273,6 +2340,7 @@ int main(void)
     led_init();
     usart2_init();
     adc_init();
+    can_init();
 
     put_text("@peer ready");
     reply_end();
@@ -1291,5 +2359,6 @@ int main(void)
         serve_pending();
         serve_announcement();
         serve_flood();
+        can_serve();
     }
 }

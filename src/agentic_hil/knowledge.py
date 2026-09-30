@@ -2075,7 +2075,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "log in again; on Windows, bind the correct USB driver to it (ST-Link needs the ST driver, not WinUSB, "
             "unless the config selects a WinUSB interface).",
             "Set `debuggers.<name>.probe_id` to the serial number of the intended probe when more than one is attached; "
-            "it is passed as `adapter serial`.",
+            "OpenOCD 0.12.0 and newer are passed it as `adapter serial`, older releases as the adapter driver's own "
+            "serial command (`hla_serial` for `interface/stlink.cfg`).",
             "Close whatever else holds the probe.",
         ),
     ),
@@ -2096,6 +2097,61 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "so a shortened value can select a board you did not name.",
             "Connect the probe, or install the udev rule (Linux) or USB driver (Windows) for it.",
             "Close whatever else holds the probe.",
+        ),
+    ),
+    # `doctor`'s device-access check, which `init` repeats as a warning. It asks
+    # the kernel with `os.access` and opens nothing, so these are the refusals the
+    # first hardware call would meet, said before it is made.
+    "device_access_denied:probe": ErrorRemedy(
+        meaning=(
+            "This account may not open the probe's USB device for reading and writing. `doctor` asked the kernel, "
+            "which applies the node's mode, group and ACL to this process, and opened nothing. The first flash, reset "
+            "or probe of the target would be refused as `adapter_not_found` with `backend_error_type: "
+            "adapter_access_denied`. The check names the node, its owner, group and mode, whether this account is in "
+            "that group in the account database, and whether this login holds it."
+        ),
+        remediation=(
+            "Where `account_in_group` is true and `login_in_group` false, the account joined the group after this "
+            "login began: log in again (a new SSH session or desktop login) and nothing else has to change.",
+            "Otherwise an administrator adds this account to the group the check names, once (`sudo usermod -aG "
+            "<group> <account>`; the probe's udev rule gives it to plugdev on Debian and Ubuntu), and the account "
+            "logs in again.",
+            "A node owned by root:root means no udev rule applies to the probe: install its rule (OpenOCD's "
+            "60-openocd.rules, or the one ST ships with its tools), replug the probe, join the group the rule names "
+            "and log in again.",
+            "`ls -l` on the node shows its owner, group and mode; run `agentic-hil doctor` again after the change. "
+            "TROUBLESHOOTING.md section 6 is the rest of it.",
+        ),
+        do_not=(
+            "Do not run Agentic HIL, OpenOCD or the agent as root to get past this: the refusal is about this "
+            "account, and a root process leaves root-owned files in the state root that the account cannot clean up.",
+            "Do not chmod the node. udev creates it again at the next replug or boot, and a mode that admits this "
+            "account admits every account on the machine.",
+        ),
+    ),
+    "device_access_denied:com_port": ErrorRemedy(
+        meaning=(
+            "This account may not open the configured serial port's device node for reading and writing. `doctor` "
+            "asked the kernel at the node the configured path resolves to, a /dev/serial/by-id link followed to its "
+            "tty, and opened nothing. The first serial session on the port would be refused as "
+            "`com_port_open_failed`. The check names the node, its owner, group and mode, whether this account is in "
+            "that group in the account database, and whether this login holds it."
+        ),
+        remediation=(
+            "Where `account_in_group` is true and `login_in_group` false, the account joined the group after this "
+            "login began: log in again (a new SSH session or desktop login) and nothing else has to change.",
+            "Otherwise an administrator adds this account to the group the check names, once (`sudo usermod -aG "
+            "<group> <account>`; dialout on Debian and Ubuntu, uucp on Arch), and the account logs in again.",
+            "A node owned by root:root means no udev rule applies to the adapter: install a udev rule for it, replug "
+            "it, join the group the rule names and log in again.",
+            "`ls -l` on the node shows its owner, group and mode; run `agentic-hil doctor` again after the change. "
+            "TROUBLESHOOTING.md section 11 is the rest of it.",
+        ),
+        do_not=(
+            "Do not run Agentic HIL or the agent as root to get past this: the refusal is about this account, and a "
+            "root process leaves root-owned files in the state root that the account cannot clean up.",
+            "Do not chmod the node. udev creates it again at the next replug or boot, and a mode that admits this "
+            "account admits every account on the machine.",
         ),
     ),
     "probe_inventory_incomplete": ErrorRemedy(
@@ -2640,6 +2696,45 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "breakpoint anyway. That bypasses the policy this refusal comes from and takes the probe out from under "
             "the bench's own coordination.",
             "Do not swap the probe. The probe is not what refused; the backend the configuration names for it is.",
+        ),
+    ),
+    # Not a missing capability of the backend but of the installed OpenOCD: the
+    # release decides whether the configured probe can be selected by serial.
+    "not_supported:openocd_probe_selection": ErrorRemedy(
+        meaning=(
+            "This configuration names its probe by `probe_id`, and the installed OpenOCD has no way to select that "
+            "probe by its serial. OpenOCD 0.12.0 and newer select every adapter driver's probe with `adapter serial`. "
+            "Older releases, such as the 0.11 Ubuntu 22.04 packages, select one only through a command of the adapter "
+            "driver's own: `hla_serial` for the hla driver `interface/stlink.cfg` loads, `st-link serial` for the "
+            "st-link driver, `cmsis_dap_serial` for cmsis-dap. So the OpenOCD backend asks the installed OpenOCD which "
+            "release it is and, before 0.12, which driver `interface_cfg` loads, both at OpenOCD's configuration stage "
+            "where no adapter is opened, and uses that driver's command. `openocd_version` and `adapter_driver` on the "
+            "result say what it was told: a driver with no command that takes this serial (`jlink serial` takes numbers "
+            "only), or `undefined` for an interface script that loads no driver at all.\n\n"
+            "The call was refused rather than sent without a selector, because without one OpenOCD opens whichever "
+            "probe it finds first, and that need not be the board this configuration binds. Nothing was sent to the "
+            "bench for this refusal. The target is exactly as the last call that did reach it left it."
+        ),
+        remediation=(
+            "Read `openocd_version` and `adapter_driver` on the result: they are what the installed OpenOCD said about "
+            "itself and about `debuggers.<name>.interface_cfg`. `debugger_info` reports the same release.",
+            "Install OpenOCD 0.12.0 or newer, which selects every adapter driver's probe with `adapter serial`, and "
+            "have `debuggers.<name>.executable` or PATH name it. Which OpenOCD a bench runs is the operator's "
+            "decision, so report the refusal and get their word before changing it.",
+            "If the probe is one an older OpenOCD can select by serial, an interface script for that driver does it on "
+            "this release as well: `interface/stlink.cfg` (hla) or `interface/stlink-dap.cfg` (st-link) for an "
+            "ST-Link, `interface/cmsis-dap.cfg` for a CMSIS-DAP probe. `debuggers.<name>.interface_cfg` changes "
+            "through `project_config_set` behind `allow_config_description_write`, with the operator's word.",
+            "Retry the call once the cause is fixed. The bench was not driven, so nothing has to be inspected or "
+            "recovered first.",
+        ),
+        do_not=(
+            "Do not remove `probe_id` to get past this refusal. Without a selector OpenOCD opens whichever probe it "
+            "finds first, which is the wrong-board risk `probe_id` exists to rule out.",
+            "Do not reach for `openocd` or a raw debugger command to select the probe by hand. That bypasses the "
+            "policy this refusal comes from and takes the probe out from under the bench's own coordination.",
+            "Do not inspect the hardware or run `agentic-hil recover` for this result. It is a refused call, not an "
+            "unconfirmed target state.",
         ),
     ),
     # -- The debugger that is not a probe, in the two states it goes missing in --
@@ -3580,7 +3675,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "tool": "openocd",
         "type": {"status": "optional", "value": "openocd", "note": "Default. Omit only if no other backend is meant. Settable over MCP behind allow_config_description_write, and switching an entry to this backend has to carry interface_cfg and target_cfg in the same call, because OpenOCD reaches the board through no other route; an entry that does not name them is refused rather than left half switched. Send executable in that call too, or `null` to have OpenOCD discovered on PATH: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to `openocd` on PATH, except on the untouched starter entry, which stays inert until somebody names a toolchain in it. An absolute path or a value containing a separator is resolved against workspace_root and must exist."},
-        "probe_id": {"status": "optional", "note": "Adapter serial number, passed as `adapter serial <probe_id>`. Required once more than one debugger is configured."},
+        "probe_id": {"status": "optional", "note": "Adapter serial number. OpenOCD 0.12.0 and newer are passed `adapter serial <probe_id>`; an older release is passed the adapter driver's own serial command (`hla_serial`, `st-link serial` or `cmsis_dap_serial`), and a call whose driver has none is refused `not_supported` before OpenOCD is started for it. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "OpenOCD selects the target through target_cfg."},
         "interface": {"status": "ignored", "note": "OpenOCD selects the transport through interface_cfg."},
         "interface_cfg": {"status": "required", "default": "interface/stlink.cfg", "note": "OpenOCD script, passed as `-f`. Either an OpenOCD search name such as `interface/stlink.cfg`, which OpenOCD resolves against its own script path and which therefore does not have to exist on this host, or an absolute path to an existing file outside the workspace. A path under the system temporary directory is refused: it is cleared without warning and the configuration would stop describing this bench."},
@@ -3659,7 +3754,7 @@ BOOTSTRAP_DISCOVERY_RULE = {
     ),
     "usb_serial_inventory": (
         "A host serial port whose USB vendor is 0483 and whose product is one of the ST-Link ids publishes the probe "
-        "serial in its descriptor, which is the string OpenOCD's `adapter serial` takes. The toolchain is the "
+        "serial in its descriptor, which is the string OpenOCD selects the probe by. The toolchain is the "
         "`openocd` on PATH, and the generated entry is `type: openocd` with its interface_cfg and target_cfg. This is "
         "the path on an ordinary Linux workstation, which normally has OpenOCD and not STM32CubeProgrammer."
     ),
@@ -3681,7 +3776,7 @@ BOOTSTRAP_DISCOVERY_RULE = {
     ),
     "target_identity_without_the_cli": (
         "The workspace profile's `target.controller` when it names one, which is exact and says nothing to the board; "
-        "otherwise a read-only OpenOCD `init`, `targets`, `shutdown` against the selected adapter serial, which "
+        "otherwise a read-only OpenOCD `init`, `targets`, `shutdown` against the probe selected by that serial, which "
         "reports the target script's family rather than the part number. Neither flashes, erases, resets nor halts. A "
         "probe whose target could not be named is still written down, with `target.controller` left at the "
         "placeholder."
@@ -3703,7 +3798,7 @@ BOOTSTRAP_DISCOVERY_RULE = {
 
 UNNAMED_PROBE_RULE = {
     "rule": "Once `debuggers` holds more than one entry, the bound one must carry a probe_id before a probe-addressing tool (flash_firmware, reset_target, probe_target, the typed debug tools) will drive it.",
-    "why": "the bound entry's name alone does not prove which physical probe a call reaches once another configured entry could just as easily be meant; probe_id is what pyOCD and ST-Link verify against the attached hardware, and what OpenOCD opens by adapter serial.",
+    "why": "the bound entry's name alone does not prove which physical probe a call reaches once another configured entry could just as easily be meant; probe_id is what pyOCD and ST-Link verify against the attached hardware, and the serial OpenOCD selects the probe by.",
     "enforced_at": "each probe-addressing tool call, as error_type `not_supported`",
     "single_debugger_exemption": (
         "A lone configured debugger does not have to carry a probe_id: it has no other entry to be confused with, so "

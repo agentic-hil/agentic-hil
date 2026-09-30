@@ -230,7 +230,18 @@ pull request gate: `.github/workflows/ci.yml` is the gate, and this is the
 nightly proof on real hardware. The runner is identified in that file by its
 labels alone, the same way the examples above identify yours, and the evidence
 it uploads carries the configuration digest and the logical device names rather
-than any hardware identity.
+than any hardware identity. The job takes the machine's run lock,
+`tools/run_lock.py`, before its first step on the board and gives it back after
+its last, queued behind whatever else holds the machine, so a run started on
+the machine itself waits for the job instead of meeting it as `device_busy` in
+the middle of a plan.
+
+After that job, the same workflow runs this repository's bench tier on the same
+board once for each distribution `tools/bench_in_container.py --distribution`
+builds the tier's image on, Ubuntu 22.04, Ubuntu 24.04, Debian 12 and Fedora 44,
+one after another, each with that distribution's own OpenOCD, cross compiler,
+GDB, CMake and Python, and uploads each one's report and log under the
+distribution's name.
 
 Beside it, `.github/workflows/bench-gate.yml` runs this repository's own bench
 tier, `tests/bench`, on the same board for one commit named when it is

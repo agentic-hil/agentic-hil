@@ -18,10 +18,32 @@ rather than meet the first at the device locks, which stay the backstop.
 All three are standalone scripts run from checkouts that may not be installed,
 so this is stdlib only and lives beside them.
 
-Who reads the lock file: those three scripts, and nothing else. It is written by
-one of them on an operator's own machine, read by the next run of any of them on
-that machine, and understood by neither the MCP server nor any other tool in
-this repository.
+As a command, for the callers that cannot import it: a workflow whose steps
+drive the board one after another, and a run by hand of something that is not
+one of those tools. Anything that holds the board without this lock is met by
+the others as `device_busy` in the middle of what it was doing.
+
+    python3 tools/run_lock.py take --state FILE --for-the-life-of PID [--tool T] [--runs-for R] [--no-wait]
+    python3 tools/run_lock.py give-back --state FILE
+    python3 tools/run_lock.py run [--tool T] [--runs-for R] [--no-wait] -- COMMAND...
+
+`take` queues like the tools do and records as the holder the process that
+started it, which `--for-the-life-of` must name: a workflow step runs it with
+`exec` and names `$PPID`, the job's own process, so the lock outlives the step
+that took it, and a job that dies however it dies leaves a record the next run
+breaks as stale. `give-back` returns it from a later step and fails when the
+lock was taken from the job meanwhile, since the job may then have shared the
+board. `run` holds it for one command's life and exits with the command's
+status. Their lines withhold this machine's name, home directory and user the
+way `bench_in_container.py` withholds its own, because a workflow's log is
+public. Exit statuses: 0 done, 1 the lock was lost before `give-back`, 2
+refused, 5 `--no-wait` met a held machine, 127 the command could not start,
+130 interrupted while waiting, and otherwise the command's own.
+
+Who reads the lock file: those three scripts and this module's own command,
+and nothing else. It is written by one of them on an operator's own machine,
+read by the next run of any of them on that machine, and understood by neither
+the MCP server nor any other tool in this repository.
 
 It is deliberately *not* a device lock. The bench mutex lives one level further
 down, in `~/.agentic-hil/device-locks/`, is owned by the server, and is the one
@@ -55,10 +77,13 @@ writes both, because the holder is the only run that knows what it started.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import secrets
+import signal
 import socket
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -471,6 +496,10 @@ class RunLock:
     script that is holding the machine, and the scale of the wait it is asking
     for. `details` is whatever else that tool wants a queued operator to see; it
     can never overwrite a field the queue judges by.
+
+    `pid` is the process whose life the lock follows: this one, unless the
+    holder is a process that outlives it, as the job is for the command that
+    takes the lock for a workflow's later steps and exits.
     """
 
     def __init__(
@@ -481,6 +510,7 @@ class RunLock:
         details: dict[str, object] | None = None,
         path: Path | None = None,
         root: Path | None = None,
+        pid: int | None = None,
         announce: Callable[[str], None] = announce,
     ):
         self.path = lock_path() if path is None else path
@@ -491,7 +521,7 @@ class RunLock:
         self.record: dict[str, object] = {
             "version": LOCK_RECORD_VERSION,
             "owner_id": secrets.token_hex(8),
-            "pid": os.getpid(),
+            "pid": os.getpid() if pid is None else pid,
             "host": socket.gethostname(),
             "started_at": utc_now_iso(),
             "root": "" if root is None else root.as_posix(),
@@ -658,6 +688,9 @@ class RunLock:
         returns False, re-reads under the guard, and recognises the record there.
         """
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # The time the machine is taken, not the time this run began to wait
+        # for it: a run queued behind this one is told how long it has held it.
+        self.record["started_at"] = utc_now_iso()
         staging = self.path.with_name(f"{self.path.name}.{self.record['owner_id']}.new")
         descriptor = os.open(staging, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         try:
@@ -689,3 +722,226 @@ class RunLock:
         """
         with suppress(FileNotFoundError):
             os.unlink(self.path)
+
+
+# The lock as a command.
+
+EXIT_LOST = 1
+EXIT_REFUSED = 2
+EXIT_LOCKED = 5
+EXIT_NOT_STARTED = 127
+EXIT_INTERRUPTED = 130
+# The checkout this command runs from, which a queued operator is told is holding
+# the machine, as the tools beside it name theirs.
+CHECKOUT = Path(__file__).resolve().parent.parent
+
+
+def withheld_voice() -> Callable[[str], None]:
+    """This command's lines, on stderr, with this machine's identities withheld.
+
+    A notice names the holder's host and its checkout, under a home directory,
+    and a workflow's log is public. The withholding is `bench_in_container.py`'s
+    own, so a line about the machine says no more in the nightly's log than in
+    the gate's; imported here rather than at the top, because that module
+    imports this one.
+    """
+    from bench_in_container import Redactor, host_identities
+
+    redact = Redactor(host_identities())
+
+    def say(text: str) -> None:
+        print(f"run lock: {redact(text)}", file=sys.stderr, flush=True)
+
+    return say
+
+
+def write_state(path: Path, state: dict[str, object]) -> None:
+    """What `give-back` needs to recognise the record `take` published, written whole."""
+    staging = path.with_name(f"{path.name}.new")
+    staging.write_text(json.dumps(state) + "\n", encoding="utf-8")
+    os.replace(staging, path)
+
+
+def take(options: argparse.Namespace, say: Callable[[str], None]) -> int:
+    """Hold the machine for the life of the process that started this command."""
+    state = Path(options.state)
+    if state.exists():
+        say(
+            f"{state} already records a take. Give that one back with `give-back --state {state}` first: "
+            "a second take would forget the lock the first one holds, and nothing could return it"
+        )
+        return EXIT_REFUSED
+    started_by = os.getppid()
+    pid = options.for_the_life_of
+    if started_by <= 1:
+        say(f"this command's parent is pid {started_by}, which lives as long as the machine, so there is no job the lock could follow")
+        return EXIT_REFUSED
+    if pid != started_by:
+        say(
+            f"--for-the-life-of names pid {pid}, and the process that started this command is pid {started_by}. The lock "
+            "follows the life of the process that started it: run this with exec from a job's step and name $PPID "
+            "there, the job's own process, which lives until the job ends"
+        )
+        return EXIT_REFUSED
+    lock = RunLock(tool=options.tool, runs_for=options.runs_for, root=CHECKOUT, pid=pid, announce=say)
+    # Written before the lock is taken: the record is published before this
+    # command could say it holds it, and a take stopped in between leaves a
+    # record only this owner id lets `give-back` recognise.
+    write_state(state, {"owner_id": lock.record["owner_id"], "held": False})
+    try:
+        lock.acquire(wait=not options.no_wait)
+    except RunLockBusy as busy:
+        with suppress(OSError):
+            state.unlink()
+        say(f"{busy}; nothing was taken")
+        return EXIT_LOCKED
+    except KeyboardInterrupt:
+        say(f"interrupted while waiting for the machine; `give-back --state {state}` returns anything it published")
+        return EXIT_INTERRUPTED
+    write_state(state, {"owner_id": lock.record["owner_id"], "held": True})
+    say(f"took the machine for the life of pid {pid}, the process that started this command; `give-back --state {state}` returns it")
+    return 0
+
+
+def give_back(options: argparse.Namespace, say: Callable[[str], None]) -> int:
+    """Return what `take` took, and nothing that is not its own."""
+    state = Path(options.state)
+    kept = read_lock_record(state)
+    if kept is None:
+        say(f"no take is recorded in {state}, so there is nothing to give back")
+        return 0
+    try:
+        path = lock_path()
+        record = read_lock_record(path)
+        if record and record.get("owner_id") == kept.get("owner_id"):
+            with suppress(FileNotFoundError):
+                os.unlink(path)
+            say("gave the machine back")
+            return 0
+        if kept.get("held") is True:
+            now = f"it is held by {describe_holder(record)}" if record else "the lock file is gone"
+            say(
+                f"the lock this job took is no longer its own ({now}), so another run may have used the machine "
+                "while this job believed it held it"
+            )
+            return EXIT_LOST
+        say("the take was stopped before it held the machine, so there is nothing to give back")
+        return 0
+    finally:
+        with suppress(OSError):
+            state.unlink()
+
+
+def run_holding(command: list[str], say: Callable[[str], None]) -> int:
+    """Run `command` to its end; its status, as a shell reports it.
+
+    This process must not end before the command does, or the machine would be
+    handed on while the command still uses it. An interrupt from a terminal
+    reaches the command too, as part of the foreground process group, so it is
+    the command's to act on, and this keeps waiting while the command cleans
+    up. A termination sent to this process alone is passed on, and the wait
+    goes on the same way. Only a kill ends this first, and the record then
+    names a dead process, which the next run breaks as stale.
+    """
+    child: subprocess.Popen[bytes] | None = None
+    pending: list[int] = []
+
+    def keep_waiting(signum: int, frame: object) -> None:
+        return None
+
+    def pass_on(signum: int, frame: object) -> None:
+        if child is None:
+            pending.append(signum)
+            return
+        with suppress(OSError):
+            child.send_signal(signum)
+
+    # Handlers rather than SIG_IGN, installed before the command starts: an
+    # ignored signal would be inherited by the command, a handler is not.
+    previous = {signal.SIGINT: signal.signal(signal.SIGINT, keep_waiting)}
+    if os.name != "nt":
+        previous[signal.SIGTERM] = signal.signal(signal.SIGTERM, pass_on)
+    try:
+        try:
+            child = subprocess.Popen(command)
+        except OSError as error:
+            say(f"{command[0]} could not be started: {error}")
+            return EXIT_NOT_STARTED
+        for signum in pending:
+            with suppress(OSError):
+                child.send_signal(signum)
+        returncode = child.wait()
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    return returncode if returncode >= 0 else 128 - returncode
+
+
+def run(options: argparse.Namespace, say: Callable[[str], None]) -> int:
+    """Hold the machine for one command's life."""
+    lock = RunLock(tool=options.tool, runs_for=options.runs_for, root=CHECKOUT, announce=say)
+    try:
+        lock.acquire(wait=not options.no_wait)
+    except RunLockBusy as busy:
+        say(f"{busy}; nothing was run")
+        return EXIT_LOCKED
+    except KeyboardInterrupt:
+        lock.release()
+        say("interrupted while waiting for the machine; nothing was run")
+        return EXIT_INTERRUPTED
+    try:
+        return run_holding(options.command, say)
+    finally:
+        lock.release()
+
+
+def parse_options(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="run_lock.py",
+        description="Take this machine's run lock, the one the container tools queue on, from outside them.",
+    )
+    actions = parser.add_subparsers(dest="action", required=True)
+
+    taking = actions.add_parser("take", help="Hold the machine for the life of the process that started this command.")
+    taking.add_argument("--state", required=True, help="Where to record the take, for give-back.")
+    taking.add_argument(
+        "--for-the-life-of",
+        type=int,
+        required=True,
+        metavar="PID",
+        help="The process that started this command, whose end ends the hold: $PPID in a step that runs this with exec.",
+    )
+    taking.add_argument("--tool", default="tools/run_lock.py take", help="What a queued run is told holds the machine.")
+    taking.add_argument("--runs-for", default="", help="How long the hold usually lasts, for a queued run.")
+    taking.add_argument("--no-wait", action="store_true", help="Refuse instead of queueing when another run holds the machine.")
+
+    giving = actions.add_parser("give-back", help="Return what take took.")
+    giving.add_argument("--state", required=True, help="The file take recorded itself in.")
+
+    running = actions.add_parser("run", help="Hold the machine for one command's life.")
+    running.add_argument("--tool", default="tools/run_lock.py run", help="What a queued run is told holds the machine.")
+    running.add_argument("--runs-for", default="", help="How long the command usually runs, for a queued run.")
+    running.add_argument("--no-wait", action="store_true", help="Refuse instead of queueing when another run holds the machine.")
+    running.add_argument("command", nargs=argparse.REMAINDER, help="After --: the command to run.")
+
+    options = parser.parse_args(argv)
+    if options.action == "run":
+        if options.command[:1] == ["--"]:
+            options.command = options.command[1:]
+        if not options.command:
+            running.error("name the command to run after --")
+    return options
+
+
+def main(argv: list[str] | None = None) -> int:
+    options = parse_options(argv)
+    say = withheld_voice()
+    if options.action == "take":
+        return take(options, say)
+    if options.action == "give-back":
+        return give_back(options, say)
+    return run(options, say)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -85,7 +85,7 @@ from agentic_hil.config import (
     load_config,
     project_config_directory,
     project_config_path,
-    tighten_owned_writable_ancestors,
+    tighten_launcher_write_access,
     trusted_persistent_executable,
     untrusted_launcher_directory,
     untrusted_launcher_file,
@@ -3797,6 +3797,75 @@ def test_a_linux_process_of_another_installation_is_still_not_claimed(
     _proc_lists_the_reader(proc)
 
     assert _processes_holding_installation() == []
+
+
+PIP_USER_SERVER_RECORDING = Path(__file__).resolve().parent / "fixtures" / "pip_user_mcp_server_process_recording.json"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader needs the symlinks a POSIX host makes without privileges")
+def test_a_linux_server_started_through_a_user_installations_console_script_is_found(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The recorded bench run: a `pip install --user` server nobody was named for.
+
+    A user installation owns no prefix. Its interpreter is the system one, so the
+    image is the same for every Python program on the host, and there is no
+    `VIRTUAL_ENV` to read. With the account's server holding the board,
+    `agentic-hil upgrade` answered no `restart_required_by` at all. What names
+    that server is the console script the kernel passed as argv[1] when it ran
+    the script's `#!` line. The scripts pip installed beside it, run the same
+    way, are the neighbours that stay unclaimed, and so is the upgrade, which
+    runs through the very same console script.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    recording = json.loads(PIP_USER_SERVER_RECORDING.read_text(encoding="utf-8"))["recording"]
+    server, interpreter = recording["server"], recording["interpreter"]
+    home = tmp_path / "home"
+
+    def here(recorded: str) -> Path:
+        """A recorded path on this machine: the account's home and the root both under `tmp_path`."""
+        return home / recorded.removeprefix("<home>/") if recorded.startswith("<home>/") else tmp_path / recorded.lstrip("/")
+
+    def launched(argv: list[str]) -> tuple[str, ...]:
+        return tuple(str(here(argument)) if argument.startswith(("/", "<home>/")) else argument for argument in argv)
+
+    image = here(server["exe"])
+    image.parent.mkdir(parents=True)
+    image.write_text("", encoding="utf-8")
+    python = here(interpreter["executable"])
+    python.symlink_to(image)
+    user_scripts = here(interpreter["user_scripts"])
+    user_scripts.mkdir(parents=True)
+    for name in recording["scripts_beside"]:
+        (user_scripts / name).write_text(f"#!{python}\n", encoding="utf-8")
+    project = here(server["cwd"])
+    project.mkdir(parents=True)
+    proc = tmp_path / "proc"
+    _proc_entry(proc, 4242, exe=image, cmdline=launched(server["argv"]))
+    (proc / "4242" / "cwd").symlink_to(project)
+    neighbours = [name for name in recording["scripts_beside"] if name != "agentic-hil"]
+    for pid, name in enumerate(neighbours, start=4300):
+        _proc_entry(proc, pid, exe=image, cmdline=(str(python), str(user_scripts / name)))
+    _proc_entry(proc, 4100, exe=image, cmdline=(str(python), str(user_scripts / "agentic-hil"), "upgrade", "--json"))
+    scripts_of = {None: here(interpreter["prefix"]) / "bin", "posix_user": user_scripts}
+    real_get_path = sysconfig.get_path
+
+    def get_path(name: str, scheme: str | None = None, *more: object, **named: object) -> str:
+        if name == "scripts" and scheme in scripts_of:
+            return str(scripts_of[scheme])
+        return real_get_path(name, *([scheme] if scheme else []), *more, **named)
+
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+    monkeypatch.setattr("agentic_hil.upgrade.owning_manager", lambda: recording["upgrade"]["manager"])
+    monkeypatch.setattr("agentic_hil.upgrade.sysconfig.get_path", get_path)
+    monkeypatch.setattr(sys, "prefix", str(here(interpreter["prefix"])))
+    monkeypatch.setattr(sys, "executable", str(python))
+    monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 4100)
+    _proc_lists_the_reader(proc)
+
+    assert _processes_holding_installation() == [{"pid": 4242, "image": str(image), "working_directory": str(project)}]
 
 
 def test_a_relative_command_line_is_never_read_against_this_process_own_directory(
@@ -9608,55 +9677,99 @@ def test_a_uv_tool_layout_under_a_private_group_registers_end_to_end(tmp_path: P
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission smoothing")
-def test_tighten_owned_writable_ancestors_tightens_dirs_and_launcher_file(tmp_path: Path) -> None:
-    state_dir = tmp_path / "home" / ".local" / "state" / "agentic-hil"
-    state_dir.mkdir(parents=True)
-    for directory in (tmp_path / "home", tmp_path / "home" / ".local", tmp_path / "home" / ".local" / "state"):
-        directory.chmod(0o775)
-    launcher = tmp_path / "home" / ".local" / "bin" / "agentic-hil"
+def test_smoothing_leaves_a_private_group_layout_as_it_stands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The layout the trust check accepts is the layout that stays on disk.
+
+    A default Debian or Ubuntu `umask 0002` writes the console script
+    `-rwxrwxr-x` and its directories `drwxrwxr-x`, group-writable through the
+    owner's own private group. The check registers that script as it stands and
+    has read no directory's mode since #143, so `setup` has nothing to tighten:
+    a chmod here would change an operator's tree for no refusal it prevents."""
+    home = tmp_path / "home"
+    launcher = home / ".local" / "bin" / "agentic-hil"
     launcher.parent.mkdir(parents=True)
-    launcher.parent.chmod(0o775)
     launcher.write_text("#!/bin/sh\n", encoding="utf-8")
     launcher.chmod(0o775)
+    chain = (launcher.parent, home / ".local", home)
+    for directory in chain:
+        directory.chmod(0o775)
+    owned = launcher.stat()
+    _identity_database(
+        monkeypatch,
+        users={owned.st_uid: ("alice", owned.st_gid)},
+        groups={owned.st_gid: ("alice", owned.st_gid, [])},
+    )
+    monkeypatch.setattr("agentic_hil.cli._mcp_command_candidates", lambda: [str(launcher)])
 
-    actions = tighten_owned_writable_ancestors(launcher)
-
-    assert actions, "expected the group-writable components to be reported"
-    launcher_mode = launcher.stat().st_mode
-    assert not (launcher_mode & 0o022), "launcher must lose group/other write"
-    assert launcher_mode & 0o100, "launcher must stay owner-executable"
-    for directory in (launcher.parent, tmp_path / "home" / ".local", tmp_path / "home"):
-        assert not (directory.stat().st_mode & 0o022), f"{directory} still group/other-writable"
+    assert _smooth_user_permissions() == []
+    assert stat.S_IMODE(launcher.stat().st_mode) == 0o775
+    for directory in chain:
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o775, directory
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission smoothing")
-def test_smoothing_covers_the_launcher_chain_and_nothing_else(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """One validator walks modes, so one chain is smoothed.
+def test_smoothing_tightens_the_launcher_the_check_refuses_and_nothing_else(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One mode is still read, so one file is smoothed.
 
-    `trusted_persistent_executable` refuses an MCP launcher that group or other
-    may write, and it is the last check that reads a POSIX mode at all.
-    Smoothing exists to keep a launcher an installer wrote under a umask-002 /
-    private-group home from failing it; anything beyond that chain is a chmod
-    with no refusal behind it."""
-    launcher = tmp_path / "profile" / ".local" / "bin" / "agentic-hil"
+    `trusted_persistent_executable` refuses a launcher that a group other than
+    the owner's private group may write, and it is the last check that reads a
+    POSIX mode at all. That file loses group and other write so it can still be
+    registered; the directories above it and a sibling of the chain keep theirs,
+    because nothing refuses them for it."""
+    profile = tmp_path / "profile"
+    launcher = profile / ".local" / "bin" / "agentic-hil"
     launcher.parent.mkdir(parents=True)
     launcher.write_text("#!/bin/sh\n", encoding="utf-8")
     launcher.chmod(0o775)
-    for directory in (tmp_path / "profile", tmp_path / "profile" / ".local", launcher.parent):
+    chain = (launcher.parent, profile / ".local", profile)
+    for directory in chain:
         directory.chmod(0o775)
-    elsewhere = tmp_path / "profile" / ".config" / "agentic-hil"
+    elsewhere = profile / ".config" / "agentic-hil"
     elsewhere.mkdir(parents=True)
     elsewhere.chmod(0o775)
+    owned = launcher.stat()
+    # A group carrying another name is nobody's private group.
+    _identity_database(
+        monkeypatch,
+        users={owned.st_uid: ("alice", owned.st_gid)},
+        groups={owned.st_gid: ("staff", owned.st_gid, [])},
+    )
     monkeypatch.setattr("agentic_hil.cli._mcp_command_candidates", lambda: [str(launcher)])
 
-    actions = _smooth_user_permissions()
+    assert _smooth_user_permissions() == [f"removed group/other write on {launcher}"]
+    assert stat.S_IMODE(launcher.stat().st_mode) == 0o755
+    for directory in (*chain, elsewhere):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o775, directory
 
-    assert actions, "the launcher chain is still smoothed"
-    assert not (launcher.stat().st_mode & 0o022)
-    assert not (launcher.parent.stat().st_mode & 0o022)
-    # A sibling of the chain, of the shape the removed configured-path check
-    # used to reach for: off the walk, so untouched.
-    assert stat.S_IMODE(elsewhere.stat().st_mode) == 0o775
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission smoothing and symlinks")
+def test_smoothing_removes_world_write_from_the_target_and_never_through_the_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """World write is refused whatever the group says, so it goes, from the
+    script the launcher symlink resolves to; the link itself is never chmod-ed
+    through, and the directory it sits in keeps its mode."""
+    target = tmp_path / "tools" / "agentic-hil" / "bin" / "agentic-hil"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o777)
+    link = tmp_path / "bin" / "agentic-hil"
+    link.parent.mkdir()
+    link.parent.chmod(0o775)
+    link.symlink_to(target)
+    owned = target.stat()
+    _identity_database(
+        monkeypatch,
+        users={owned.st_uid: ("alice", owned.st_gid)},
+        groups={owned.st_gid: ("alice", owned.st_gid, [])},
+    )
+
+    assert tighten_launcher_write_access(link) == []
+    assert stat.S_IMODE(target.stat().st_mode) == 0o777
+
+    monkeypatch.setattr("agentic_hil.cli._mcp_command_candidates", lambda: [str(link)])
+
+    assert _smooth_user_permissions() == [f"removed group/other write on {Path(os.path.realpath(target))}"]
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+    assert stat.S_IMODE(link.parent.stat().st_mode) == 0o775
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")

@@ -444,7 +444,7 @@ class Battery:
         return self.judge(check, answered, {"plans": plans}, ok, str(result.get("summary", "")).splitlines()[0] if result else answered.stdout[:200])
 
     def check_doctor(self) -> Check:
-        check = self.record(Check("doctor", "the configuration loads and every device it declares names hardware"))
+        check = self.record(Check("doctor", "the configuration loads, every device it declares names hardware, and off Windows this account may open the probe and the serial port"))
         answered = self.run("doctor")
         ok = answered.returncode == 0
         return self.judge(check, answered, {"bound": ok}, ok, self.first_printed_line(answered))

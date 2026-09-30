@@ -61,7 +61,7 @@ the repository, not about a filesystem, which does not.
 **Expectations are a `comparator`.** A feedback action (`uart_read` on a serial
 line, `can_read` on a bus) takes an optional `comparator:` object: `equals` for
 a complete decoded match, `pattern` for a Python regular expression (`re.search`
-semantics), or `pattern` with a single capture group plus `range: {min, max}` to
+semantics over what the step has read, so the start of a line is `(?m)^`), or `pattern` with a single capture group plus `range: {min, max}` to
 bound the numeric value it extracts. Exactly one of `equals`/`pattern` per
 comparator; a range without a capturing pattern, or a pattern that does not
 compile, is refused before the run starts. A bus comparator also names the

@@ -1,0 +1,294 @@
+{
+  "what": "What OpenOCD 0.11 answers when the OpenOCD backend selects its probe by serial, recorded on the bench. Ubuntu 22.04 packages OpenOCD 0.11, which has no `adapter serial`: the generic selector came with 0.12, and 0.11 has one selector per adapter driver. `reset_target_run` is 0.11 refusing `adapter serial`: it prints the usage of the `adapter` group, names the words it could not place, and exits 1. `version` is its `--version`. Each `adapter_driver_*` is what `adapter name` answers once an interface script is loaded, at the configuration stage, where no adapter is opened; `adapter_driver_undefined` loaded none, and `adapter_driver_missing_script` named one that is not there. Each `selector_*` is one driver's own selector given a probe serial at the configuration stage. `probe_target_hla_serial` and `reset_target_run_hla_serial` are the product's own calls with the probe selected by `hla_serial`, on the board, and `probe_target_hla_serial_no_such_probe` is the same read selecting a serial no attached probe carries. The unit tier replays the streams byte for byte, so the selection is held to this release's own words.",
+  "recorded_on": "2026-09-27 and 2026-09-28",
+  "how": "The bench tier's test_a_real_reset_over_the_probe_is_a_success_and_carries_whatever_openocd_said, run by `tools/bench_in_container.py --distribution ubuntu-22.04` with `-vv -l`, one Nucleo-F446RE attached through its on-board debugger, agentic-hil 0.21.6.dev0 at commit 0ce1f8e. The streams are the product's own `programmer_output` for `reset_target` in mode `run`, as the tier printed the report. The runner withholds the probe serial in every line it prints; it is replaced here by the suite's synthetic serial 066BFF505050505050505050, and nothing else is changed. Every other entry was recorded on 2026-09-28 by a throwaway pytest module in tests/bench, run by `tools/bench_in_container.py --distribution ubuntu-22.04` against the same board, agentic-hil 0.21.6.dev0 at commit 94e2dfb. The module ran each `argv` through the product's own spawn in the project the tier configured, and ran `probe_target` and `reset_target` through the product's tool service with the probe selection replaced by `hla_serial <serial>`, taking OpenOCD's streams out of the log the product wrote for each call. `<scratch>` stands for the module's temporary directory, where it wrote the one-line interface scripts `adapter driver dummy` and `adapter driver remote_bitbang`. The bench's probe serial is replaced by the synthetic serial as above; `probe_target_hla_serial_no_such_probe` and the `selector_*` entries selected the synthetic serial itself, which no attached probe carries.",
+  "tool_versions": {
+    "openocd": "Open On-Chip Debugger 0.11.0",
+    "openocd_ubuntu_package": "0.11.0-1"
+  },
+  "probe_serial": "066BFF505050505050505050",
+  "recordings": {
+    "reset_target_run": {
+      "tool": "reset_target",
+      "arguments": {
+        "mode": "run"
+      },
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nadapter\n  adapter assert |deassert [srst|trst [assert|deassert srst|trst]]\n  adapter deassert |assert [srst|trst [deassert|assert srst|trst]]\n  adapter driver driver_name\n  adapter list\n  adapter name\n  adapter speed [khz]\n  adapter srst\n    adapter srst delay [milliseconds]\n    adapter srst pulse_width [milliseconds]\n  adapter transports transport ... \n  adapter usb\n    adapter usb location [<bus>-port[.port]...]\nhla_command <command>\nhla_device_desc description_string\nhla_layout layout_name\nhla_serial serial_string\nhla_vid_pid (vid pid)* \nreset_config [none|trst_only|srst_only|trst_and_srst]\n          [srst_pulls_trst|trst_pulls_srst|combined|separate]\n          [srst_gates_jtag|srst_nogate] [trst_push_pull|trst_open_drain]\n          [srst_push_pull|srst_open_drain]\n          [connect_deassert_srst|connect_assert_srst]\nError: invalid subcommand \"serial 066BFF505050505050505050\"\n\n"
+    },
+    "version": {
+      "argv": [
+        "openocd",
+        "--version"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\n"
+    },
+    "adapter_driver_hla": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/stlink.cfg",
+        "-c",
+        "echo \"AGENTIC_HIL_ADAPTER_DRIVER:[adapter name]\"",
+        "-c",
+        "shutdown"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nAGENTIC_HIL_ADAPTER_DRIVER:hla\nshutdown command invoked\n"
+    },
+    "adapter_driver_st_link": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/stlink-dap.cfg",
+        "-c",
+        "echo \"AGENTIC_HIL_ADAPTER_DRIVER:[adapter name]\"",
+        "-c",
+        "shutdown"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nAGENTIC_HIL_ADAPTER_DRIVER:st-link\nshutdown command invoked\n"
+    },
+    "adapter_driver_cmsis_dap": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/cmsis-dap.cfg",
+        "-c",
+        "echo \"AGENTIC_HIL_ADAPTER_DRIVER:[adapter name]\"",
+        "-c",
+        "shutdown"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nAGENTIC_HIL_ADAPTER_DRIVER:cmsis-dap\nshutdown command invoked\n"
+    },
+    "adapter_driver_jlink": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/jlink.cfg",
+        "-c",
+        "echo \"AGENTIC_HIL_ADAPTER_DRIVER:[adapter name]\"",
+        "-c",
+        "shutdown"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nAGENTIC_HIL_ADAPTER_DRIVER:jlink\nshutdown command invoked\n"
+    },
+    "adapter_driver_dummy": {
+      "argv": [
+        "openocd",
+        "-f",
+        "<scratch>/dummy.cfg",
+        "-c",
+        "echo \"AGENTIC_HIL_ADAPTER_DRIVER:[adapter name]\"",
+        "-c",
+        "shutdown"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nInfo : only one transport option; autoselect 'jtag'\nAGENTIC_HIL_ADAPTER_DRIVER:dummy\nshutdown command invoked\n"
+    },
+    "adapter_driver_remote_bitbang": {
+      "argv": [
+        "openocd",
+        "-f",
+        "<scratch>/remote_bitbang.cfg",
+        "-c",
+        "echo \"AGENTIC_HIL_ADAPTER_DRIVER:[adapter name]\"",
+        "-c",
+        "shutdown"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nInfo : only one transport option; autoselect 'jtag'\nAGENTIC_HIL_ADAPTER_DRIVER:remote_bitbang\nshutdown command invoked\n"
+    },
+    "adapter_driver_undefined": {
+      "argv": [
+        "openocd",
+        "-c",
+        "echo \"AGENTIC_HIL_ADAPTER_DRIVER:[adapter name]\"",
+        "-c",
+        "shutdown"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nAGENTIC_HIL_ADAPTER_DRIVER:undefined\nshutdown command invoked\n"
+    },
+    "adapter_driver_missing_script": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/agentic-hil-no-such-adapter.cfg",
+        "-c",
+        "echo \"AGENTIC_HIL_ADAPTER_DRIVER:[adapter name]\"",
+        "-c",
+        "shutdown"
+      ],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nembedded:startup.tcl:26: Error: Can't find interface/agentic-hil-no-such-adapter.cfg\nin procedure 'script' \nat file \"embedded:startup.tcl\", line 26\n"
+    },
+    "probe_target_hla_serial": {
+      "tool": "probe_target",
+      "arguments": {},
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/stlink.cfg",
+        "-c",
+        "hla_serial 066BFF505050505050505050",
+        "-f",
+        "target/stm32f4x.cfg",
+        "-c",
+        "gdb_port disabled",
+        "-c",
+        "tcl_port disabled",
+        "-c",
+        "telnet_port disabled",
+        "-c",
+        "init; echo \"AGENTIC_HIL_STAGE:init:ok\"; targets; echo \"AGENTIC_HIL_RESULT:probe_target:ok\"; shutdown"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nInfo : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.\nInfo : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD\nInfo : clock speed 2000 kHz\nInfo : STLINK V2J30M19 (API v2) VID:PID 0483:374B\nInfo : Target voltage: 3.259513\nInfo : stm32f4x.cpu: hardware has 6 breakpoints, 4 watchpoints\nInfo : gdb port disabled\nAGENTIC_HIL_STAGE:init:ok\nAGENTIC_HIL_RESULT:probe_target:ok\nshutdown command invoked\n"
+    },
+    "reset_target_run_hla_serial": {
+      "tool": "reset_target",
+      "arguments": {
+        "mode": "run"
+      },
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/stlink.cfg",
+        "-c",
+        "hla_serial 066BFF505050505050505050",
+        "-f",
+        "target/stm32f4x.cfg",
+        "-c",
+        "gdb_port disabled",
+        "-c",
+        "tcl_port disabled",
+        "-c",
+        "telnet_port disabled",
+        "-c",
+        "init; echo \"AGENTIC_HIL_STAGE:init:ok\"; reset run; echo \"AGENTIC_HIL_RESULT:reset_target:ok\"; shutdown"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nInfo : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.\nInfo : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD\nInfo : clock speed 2000 kHz\nInfo : STLINK V2J30M19 (API v2) VID:PID 0483:374B\nInfo : Target voltage: 3.259513\nInfo : stm32f4x.cpu: hardware has 6 breakpoints, 4 watchpoints\nInfo : gdb port disabled\nAGENTIC_HIL_STAGE:init:ok\nInfo : Unable to match requested speed 2000 kHz, using 1800 kHz\nInfo : Unable to match requested speed 2000 kHz, using 1800 kHz\nAGENTIC_HIL_RESULT:reset_target:ok\nshutdown command invoked\n"
+    },
+    "probe_target_hla_serial_no_such_probe": {
+      "tool": "probe_target",
+      "arguments": {},
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/stlink.cfg",
+        "-c",
+        "hla_serial 066BFF505050505050505050",
+        "-f",
+        "target/stm32f4x.cfg",
+        "-c",
+        "gdb_port disabled",
+        "-c",
+        "tcl_port disabled",
+        "-c",
+        "telnet_port disabled",
+        "-c",
+        "init; echo \"AGENTIC_HIL_STAGE:init:ok\"; targets; echo \"AGENTIC_HIL_RESULT:probe_target:ok\"; shutdown"
+      ],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nInfo : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.\nInfo : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD\nInfo : clock speed 2000 kHz\nInfo : No device matches the serial string\nError: open failed\n\n\n"
+    },
+    "selector_hla_serial": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/stlink.cfg",
+        "-c",
+        "hla_serial 066BFF505050505050505050",
+        "-c",
+        "echo \"AGENTIC_HIL_SELECTOR:accepted\"",
+        "-c",
+        "shutdown"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nAGENTIC_HIL_SELECTOR:accepted\nshutdown command invoked\n"
+    },
+    "selector_st_link_serial": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/stlink-dap.cfg",
+        "-c",
+        "st-link serial 066BFF505050505050505050",
+        "-c",
+        "echo \"AGENTIC_HIL_SELECTOR:accepted\"",
+        "-c",
+        "shutdown"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nAGENTIC_HIL_SELECTOR:accepted\nshutdown command invoked\n"
+    },
+    "selector_cmsis_dap_serial": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/cmsis-dap.cfg",
+        "-c",
+        "cmsis_dap_serial 066BFF505050505050505050",
+        "-c",
+        "echo \"AGENTIC_HIL_SELECTOR:accepted\"",
+        "-c",
+        "shutdown"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nAGENTIC_HIL_SELECTOR:accepted\nshutdown command invoked\n"
+    },
+    "selector_jlink_serial": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/jlink.cfg",
+        "-c",
+        "jlink serial 066BFF505050505050505050",
+        "-c",
+        "echo \"AGENTIC_HIL_SELECTOR:accepted\"",
+        "-c",
+        "shutdown"
+      ],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nInvalid serial number: 066BFF505050505050505050.\n"
+    },
+    "selector_hla_serial_with_jlink": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/jlink.cfg",
+        "-c",
+        "hla_serial 066BFF505050505050505050",
+        "-c",
+        "echo \"AGENTIC_HIL_SELECTOR:accepted\"",
+        "-c",
+        "shutdown"
+      ],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.11.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\ninvalid command name \"hla_serial\"\n"
+    }
+  }
+}
