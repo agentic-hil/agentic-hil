@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import subprocess
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -138,18 +140,92 @@ def test_script_floor_is_the_stamped_release_once_the_index_serves_it(stamped: t
     assert release_floor(stamped, published) == floor
 
 
-def test_published_release_is_read_from_the_index(monkeypatch: pytest.MonkeyPatch) -> None:
-    def answer(version: str):
-        def urlopen(url: str, timeout: float) -> io.BytesIO:
-            assert url == "https://pypi.org/pypi/agentic-hil/json"
-            return io.BytesIO(json.dumps({"info": {"version": version}}).encode())
-        return urlopen
+def an_index_answering(version: str):
+    def urlopen(url: str, timeout: float) -> io.BytesIO:
+        assert url == "https://pypi.org/pypi/agentic-hil/json"
+        return io.BytesIO(json.dumps({"info": {"version": version}}).encode())
 
-    monkeypatch.setattr("evals.install.registration_gate.urllib.request.urlopen", answer("0.21.5"))
+    return urlopen
+
+
+def test_published_release_is_read_from_the_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("evals.install.registration_gate.urllib.request.urlopen", an_index_answering("0.21.5"))
     assert published_release() == (0, 21, 5)
-    monkeypatch.setattr("evals.install.registration_gate.urllib.request.urlopen", answer("0.22.0rc1"))
+    monkeypatch.setattr("evals.install.registration_gate.urllib.request.urlopen", an_index_answering("0.22.0rc1"))
     with pytest.raises(AssertionError, match="0.22.0rc1"):
         published_release()
+
+
+@pytest.mark.parametrize(
+    ("served", "release"),
+    [
+        # Every spelling of a final release the index can name as its newest.
+        # None of these is a reason to fail a gate about install.sh: it installs
+        # whichever of them the index serves, and the floor is the three fields.
+        ("0.22.1.post1", (0, 22, 1)),
+        ("0.22.1-1", (0, 22, 1)),
+        ("0.22.1+local.1", (0, 22, 1)),
+        ("1.0", (1, 0, 0)),
+        ("2", (2, 0, 0)),
+        ("v0.22.1", (0, 22, 1)),
+        ("0.22.1.2", (0, 22, 1)),
+        (" 0.22.1 ", (0, 22, 1)),
+    ],
+)
+def test_a_final_release_the_index_serves_is_a_floor_whatever_its_spelling(
+    monkeypatch: pytest.MonkeyPatch, served: str, release: tuple[int, ...]
+) -> None:
+    """An X.Y.Z-only regex reintroduced the false red it was fixing.
+
+    `require` failed outright on anything with a fourth field, so a `0.22.1.post1`
+    on the index would turn every script case red with nothing wrong under
+    install.sh, and the message named the index answer rather than the installer,
+    so it read like a gate bug. `release_floor` then caps the floor at RELEASE, so
+    no index answer can raise it out of reach either way.
+    """
+    monkeypatch.setattr("evals.install.registration_gate.urllib.request.urlopen", an_index_answering(served))
+
+    assert published_release() == release
+
+
+@pytest.mark.parametrize("served", ["", "not-a-version", "latest", "0.22.0rc1", "0.22.0.dev3", "0.22.0a1", "0.22.0-beta2"])
+def test_an_index_answer_that_is_no_floor_at_all_is_still_refused(monkeypatch: pytest.MonkeyPatch, served: str) -> None:
+    """The two answers that really are not a floor: not a version, and a release
+    `install.sh` would not install. `uv tool install` takes the newest final
+    release, so comparing what it installed against a pre-release floor is the
+    same false red from the other side."""
+    monkeypatch.setattr("evals.install.registration_gate.urllib.request.urlopen", an_index_answering(served))
+
+    with pytest.raises(AssertionError):
+        published_release()
+
+
+def test_an_index_that_cannot_be_reached_turns_the_gate_red(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The property the whole floor rests on, pinned rather than read off the call chain.
+
+    `published_release` is called inside a case's `exercise`, whose exceptions
+    `main` catches to leave `row["status"]` at `"failed"`. Nothing asserted that,
+    so a refactor that caught the network error nearer the call site would turn
+    the gate into a no-op with no test failing: an unreachable index would answer
+    a floor of nothing and every case would pass.
+    """
+    import evals.install.registration_gate as gate
+
+    def refuse(url: str, timeout: float):
+        raise urllib.error.URLError("no route to the index")
+
+    monkeypatch.setattr("evals.install.registration_gate.urllib.request.urlopen", refuse)
+
+    with pytest.raises(urllib.error.URLError):
+        gate.published_release()
+
+    # And `main`'s own handler is what that reaches: a case whose body raises is
+    # recorded failed, and `validate_report` refuses the report over it.
+    row = {"agent": "codex", "scenario": "script-explicit-agent", "status": "failed"}
+    report = {"ok": False, "mode": "script", "versions": dict.fromkeys(gate.AGENTS, "1.0.0"), "cases": [row]}
+    with pytest.raises(AssertionError):
+        gate.validate_report(report, mode="script")
+    assert "except Exception:" in inspect.getsource(gate.main), "main no longer records a raising case as failed"
 
 
 def test_required_ci_cannot_skip_registration_gate() -> None:

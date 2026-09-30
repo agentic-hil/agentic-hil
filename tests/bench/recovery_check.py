@@ -103,7 +103,14 @@ def run_recovery_check(server: Server, debugger_id: str, bench: Bench, private_v
         raise RecoveryCheckRefused("bench_run_start call failed", evidence) from error
     evidence["run_start"] = redact_values(opened, private_values)
     if not overall_success(opened):
-        raise RecoveryCheckRefused(f"bench_run_start failed its continue predicate: {opened}", evidence)
+        # The redacted copy, which is the one every sibling path here raises with.
+        # pytest writes this message into the JUnit `<failure>` body, and a
+        # `bench_run_start` refusal names its resources: a debugger resource with
+        # a `probe_id` locks as `probe:<folded serial>`, so the raw result can
+        # carry the probe serial. `collect_report` redacts the whole file again
+        # when bench_in_container.py runs this, and the three `--live-device-tree`
+        # gate steps run the module without it.
+        raise RecoveryCheckRefused(f"bench_run_start failed its continue predicate: {evidence['run_start']}", evidence)
 
     failure: RecoveryCheckRefused | None = None
     try:
