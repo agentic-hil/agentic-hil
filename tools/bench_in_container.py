@@ -1397,6 +1397,24 @@ def main(argv: list[str] | None = None) -> int:
                     EXIT_BUILD_FAILED,
                     f"source checkout HEAD is {commit}, not the expected commit {expected}; nothing was built or run",
                 )
+        if options.cubeprogrammer_archive is not None and options.distribution is not None:
+            # Refused here, before the lock and before any build, the way
+            # --live-device-tree is refused below. The optional CubeProgrammer
+            # stage is part of the shared half of the default Dockerfile, so
+            # `compose_dockerfile` carries it onto every distribution's head and
+            # --cubeprogrammer-archive asks for it by `--target`. Its package
+            # install is Debian's: `apt-get` is not on Fedora at all, and
+            # `libglib2.0-0t64` is not in Ubuntu 22.04 or Debian 12 either, so
+            # three of the four distributions cannot satisfy this combination and
+            # the fourth is the default image's own base anyway. Left to run, it
+            # builds the whole shared part first, several minutes, and fails at
+            # the last stage: loud, but paid for.
+            raise Refused(
+                EXIT_CANNOT_RUN_HERE,
+                f"--cubeprogrammer-archive cannot be combined with --distribution {options.distribution}: the optional "
+                "CubeProgrammer layer installs its packages with the default image's own package manager and names a "
+                "Debian trixie library, which no distribution head here carries; nothing was built",
+            )
         runtime = pick_runtime(options.runtime)
         if options.live_device_tree and runtime != "podman":
             raise Refused(

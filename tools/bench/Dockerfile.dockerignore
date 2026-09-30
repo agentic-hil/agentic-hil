@@ -11,10 +11,23 @@
 !requirements
 !src
 !tests
-!build-inputs/
+# A directory let back in admits its whole subtree, and not only itself: the
+# matcher un-ignores a path when a pattern matches that path or any of its
+# parents, and the trailing slash is dropped before the comparison. So a bare
+# `!tools/` let the entire tools tree into the context and made the leaves under
+# it redundant, which is not the allowlist this file opens by claiming to be.
+# Each directory on the way to a file the image needs is therefore let back in
+# and then emptied again, and the leaves after it are the whole of what these two
+# trees contribute. `tools/bench/Dockerfile` and this file are not among them:
+# the build reads the Dockerfile through `--file` and bench_in_container.py copies
+# this list to the context root itself.
+!build-inputs
+build-inputs/*
 !build-inputs/cubeprogrammer.zip
-!tools/
-!tools/bench/
+!tools
+tools/*
+!tools/bench
+tools/bench/*
 !tools/bench/install_cubeprogrammer.sh
 !tools/bench/cubeprogrammer-auto-install.xml
 # The tier copies, builds and flashes this demo, and builds its own images out
