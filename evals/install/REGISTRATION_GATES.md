@@ -20,7 +20,10 @@ between the two stages:
   The harness then checks what the script registered; it never invokes
   `agent-install` or `setup` to repair a missing script registration. The report
   records the installed release and the exact installer SHA-256 and rejects a
-  script that differs from the checkout. Network/download failures fail the gate.
+  script that differs from the checkout. The installed release must reach the
+  script's `RELEASE` once PyPI serves it; on a release commit, before the
+  publish, it must reach the newest release PyPI serves instead.
+  Network/download failures fail the gate.
 - **Current wheel (network disabled):** an image builds the **current working
   tree**, including uncommitted changes, into a wheel. Each case installs it
   through pipx from the prepared wheel directory, then checks the current

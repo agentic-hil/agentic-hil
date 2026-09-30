@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 from pathlib import Path
@@ -9,7 +10,15 @@ from pathlib import Path
 import pytest
 import yaml
 
-from evals.install.registration_gate import AGENTS, REPORT_PREFIX, SCENARIOS, SCENARIOS_BY_MODE, SCRIPT_SCENARIOS
+from evals.install.registration_gate import (
+    AGENTS,
+    REPORT_PREFIX,
+    SCENARIOS,
+    SCENARIOS_BY_MODE,
+    SCRIPT_SCENARIOS,
+    published_release,
+    release_floor,
+)
 from tools.test_agent_registration import combine_reports, container_command, main, read_report, run_logged
 
 
@@ -113,6 +122,34 @@ def test_timeout_is_not_converted_to_success(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setattr("tools.test_agent_registration.subprocess.run", timeout)
     with pytest.raises(subprocess.TimeoutExpired):
         run_logged(["docker", "run", "test-image"], tmp_path / "container.log", 30)
+
+
+@pytest.mark.parametrize(
+    ("stamped", "published", "floor"),
+    [
+        # A release commit before its publish: the index cannot serve the stamped release yet.
+        ((0, 22, 0), (0, 21, 5), (0, 21, 5)),
+        # Once published, and on every commit after, the stamped release is the floor.
+        ((0, 22, 0), (0, 22, 0), (0, 22, 0)),
+        ((0, 22, 0), (0, 23, 1), (0, 22, 0)),
+    ],
+)
+def test_script_floor_is_the_stamped_release_once_the_index_serves_it(stamped: tuple, published: tuple, floor: tuple) -> None:
+    assert release_floor(stamped, published) == floor
+
+
+def test_published_release_is_read_from_the_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    def answer(version: str):
+        def urlopen(url: str, timeout: float) -> io.BytesIO:
+            assert url == "https://pypi.org/pypi/agentic-hil/json"
+            return io.BytesIO(json.dumps({"info": {"version": version}}).encode())
+        return urlopen
+
+    monkeypatch.setattr("evals.install.registration_gate.urllib.request.urlopen", answer("0.21.5"))
+    assert published_release() == (0, 21, 5)
+    monkeypatch.setattr("evals.install.registration_gate.urllib.request.urlopen", answer("0.22.0rc1"))
+    with pytest.raises(AssertionError, match="0.22.0rc1"):
+        published_release()
 
 
 def test_required_ci_cannot_skip_registration_gate() -> None:

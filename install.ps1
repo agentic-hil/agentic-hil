@@ -31,7 +31,7 @@ $ErrorActionPreference = 'Stop'
 # Deliberately not a capability floor either: step 4 registers the skill out of
 # whatever copy step 1 left in place, so a floor left a returning user on an old
 # package and an old skill at once.
-$Release = '0.21.5'
+$Release = '0.22.0'
 $StepTotal = 5
 
 # The PATH this run was handed, recorded before anything of ours has prepended to
@@ -647,8 +647,8 @@ function Install-UvInsteadOfPip {
 # loosening it, which is the intended failure mode. Refreshing them is a release
 # chore, written down in docs/release-strategy.md, not something an install
 # decides on the operator's machine.
-$UvInstallerVersion = '0.12.10'
-$UvInstallerSha256 = 'a4925067919bb02c1b2a5d3b4471e8cf20da76567197ab67d451a08d95421c78'
+$UvInstallerVersion = '0.12.21'
+$UvInstallerSha256 = '47385decce28406617801b01da9e8dd05b278fcd6d6f4adeec0c007b8312bad3'
 
 function Get-Sha256Hex {
     param([byte[]]$Bytes)
@@ -677,7 +677,7 @@ function Install-Uv {
     # here than on the POSIX side. This pin vouches for the installer, not for the
     # uv binaries it goes on to fetch. Astral's POSIX installer carries a SHA-256
     # per release artifact and verifies the archive it downloaded against it;
-    # their PowerShell installer, as of the pinned 0.12.10, downloads the archive
+    # their PowerShell installer, as of the pinned 0.12.21, downloads the archive
     # and unpacks it with no checksum step at all. So on Windows this pin is not a
     # belt beside their braces, it is the only integrity check between astral.sh
     # and an executed script, which is the strongest reason of all to keep it.

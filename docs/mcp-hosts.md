@@ -3,7 +3,7 @@
 Agentic Hardware-in-the-Loop (Agentic HIL) exposes the same local MCP stdio server and the same tool semantics in every host. Only the host configuration syntax changes.
 
 Every block below was verified against the linked host documentation on
-2026-09-07. Moving that date is a release chore, described under "The Host
+2026-09-30. Moving that date is a release chore, described under "The Host
 Documentation Check" in [Release Strategy](release-strategy.md), because a date
 nobody moves invites more trust than it can carry.
 
@@ -126,9 +126,9 @@ Use this server shape in the operator-controlled VS Code user-profile MCP config
 }
 ```
 
-Run **MCP: List Servers**, start `agentic-hil`, and approve the workspace server after reviewing it. VS Code uses `servers`, not `mcpServers`. Prefer its user-profile MCP configuration for the operator-controlled registration; the configured `cwd` enables automatic config discovery.
+Run **MCP: List Servers**, start `agentic-hil`, and approve the workspace server after reviewing it. VS Code's own `mcp.json` uses `servers`, not `mcpServers`; the `mcpServers` shape it also reads belongs to the portable `.mcp.json` and `~/.copilot/mcp-config.json`, a different file. Prefer its user-profile MCP configuration for the operator-controlled registration; the configured `cwd` enables automatic config discovery.
 
-Sources: [VS Code MCP configuration reference](https://code.visualstudio.com/docs/agents/reference/mcp-configuration) and [GitHub Copilot MCP setup](https://docs.github.com/en/copilot/how-tos/provide-context/use-mcp-in-your-ide/extend-copilot-chat-with-mcp).
+Sources: [VS Code MCP configuration reference](https://code.visualstudio.com/docs/agents/reference/mcp-configuration) and [GitHub Copilot MCP setup](https://docs.github.com/en/copilot/how-tos/copilot-in-your-ide/customize-copilot/extend-copilot-with-tools-and-context/extend-copilot-chat-with-mcp).
 
 ## JetBrains AI Assistant in CLion
 
@@ -166,7 +166,7 @@ If CLion uses the GitHub Copilot plugin instead of JetBrains AI Assistant, open 
 
 The AI Assistant and Copilot plugin use different JSON containers. Their server and tool semantics remain identical.
 
-Sources: [JetBrains AI Assistant MCP setup](https://www.jetbrains.com/help/ai-assistant/mcp.html) and [GitHub Copilot MCP setup for JetBrains IDEs](https://docs.github.com/en/copilot/how-tos/provide-context/use-mcp-in-your-ide/extend-copilot-chat-with-mcp?tool=jetbrains). JetBrains renamed its own page to `mcp.html`; the address this file used before still redirects there.
+Sources: [JetBrains AI Assistant MCP setup](https://www.jetbrains.com/help/ai-assistant/mcp.html) and [GitHub Copilot MCP setup for JetBrains IDEs](https://docs.github.com/en/copilot/how-tos/copilot-in-your-ide/customize-copilot/extend-copilot-with-tools-and-context/extend-copilot-chat-with-mcp?tool=jetbrains). JetBrains renamed its own page to `mcp.html`; the address this file used before still redirects there.
 
 ## OpenAI Codex
 
