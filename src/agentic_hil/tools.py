@@ -341,12 +341,23 @@ class AgenticHILToolService:
         unknown or partial hardware effect) drops it rather than resolve a
         symbol against an image the board may no longer be running.
 
+        "Confirmed" is `overall_success`, the documented predicate, and not `ok`
+        on its own. A result may carry `ok: true` and still fail one of the other
+        markers, and such a result proves nothing about the image on the board:
+        one of them was a probe listing a pyOCD flash never got past, still
+        wearing the `ok: true` of the enumeration that succeeded, which made an
+        ELF the board never received this bench's proven symbol source, which is
+        the exact outcome the paragraph above exists to prevent. Where such a
+        result does prove the flash never started, the third branch keeps the
+        source the board is still running; where it does not, the image is
+        unproven and the source is dropped.
+
         The pre-staging artifact is kept, not the staged copy: staging is
         released as soon as the backend returns, while this path stays readable
         for as long as the file does. Its digest is kept with it and revalidated
         at dump time, so a rebuild that replaces the file cannot be read while
         the result still claims the flashed image's bytes."""
-        if result.get("ok") is True:
+        if overall_success(result):
             self._symbol_elf = artifact if Path(str(artifact["resolved_path"])).suffix.lower() == ".elf" else None
             return
         if result.get("side_effect_status") != "not_started":
@@ -399,6 +410,15 @@ class AgenticHILToolService:
             with suppress(BaseException):
                 state["sessions"].append(self.com_ports.session_stop(port_id))
             raise
+        # `ok` rather than `overall_success`, and deliberately: the wait asks
+        # whether output is coming, which is a fact about the flash and its reset
+        # and not about whether the call may be reported as a success. A flash
+        # that reached the board and could then not be audited did reset it, so
+        # the banner is on its way, and not waiting would answer with an empty
+        # capture about a board that booted while the audit failure it is really
+        # about is reported anyway. What must not reach here as `ok: true` is a
+        # gate that refused before the flash: those are refusals in their own
+        # right (the pyOCD backend's `_listing_refusal`), so they arrive false.
         capture, stop = self.com_ports.capture_finish(checked, "flash_firmware", wait=result.get("ok") is True)
         state["sessions"].append(stop)
         state.update(capture=capture, stop=stop)
