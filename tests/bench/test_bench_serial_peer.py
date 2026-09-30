@@ -173,9 +173,11 @@ EXPECT_TIMEOUT_PLAN = [
 ]
 V2_EXPECT_PLAN = [
     {"action": "uart_open"},
-    {"action": "uart_expect", "pattern": "^v(\\d+)\\.\\d+\\.\\d+", "timeout_s": 5},
+    {"action": "uart_expect", "pattern": "(?m)^v(\\d+)\\.\\d+\\.\\d+", "timeout_s": 5},
     {"action": "uart_close"},
 ]
+
+
 # The one claim a pseudo-terminal cannot be asked: a number the board measured.
 TEMPERATURE_PATTERN = "TEMP=(-?\\d+\\.\\d) RAW=\\d+"
 TEMPERATURE_PLAN = [
@@ -1427,7 +1429,7 @@ def test_a_version_2_plan_waits_for_a_pattern_the_line_says_on_its_own(bench: Be
     assert [step["action"] for step in result["steps"]] == actions(V2_EXPECT_PLAN), result["steps"]
     expect = result["steps"][1]["result"]
     assert expect["ok"] is True, expect
-    assert expect["expected_pattern"] == "^v(\\d+)\\.\\d+\\.\\d+", expect
+    assert expect["expected_pattern"] == "(?m)^v(\\d+)\\.\\d+\\.\\d+", expect
     assert expect["bytes_received"] >= len(b"v1.2.3\r\n"), expect
     assert expect["summary"] == "Expected pattern matched the COM port output.", expect
 

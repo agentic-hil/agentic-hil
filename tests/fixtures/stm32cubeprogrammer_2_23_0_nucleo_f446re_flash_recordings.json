@@ -1,0 +1,39 @@
+{
+  "provenance": {
+    "tool": "STM32CubeProgrammer",
+    "version": "2.23.0",
+    "recorded_on": "2026-09-28",
+    "workflow_run_id": 36452927761,
+    "source_commit": "4ec029092ee06fd382c9599c95ac290d047f0076",
+    "hardware": "Nucleo-F446RE, ST-LINK firmware V2J30M19, 3.26 V, STM32F446xx device 0x421 revision A",
+    "capture_source": "JUnit properties cubeprogrammer_recording_v1 and cubeprogrammer_recovery_recording_v1 from the optional CubeProgrammer hardware recording in GitHub Actions run 36452927761.",
+    "redactions": [
+      "ST-LINK serial number"
+    ],
+    "limitations": "The initial HOTPLUG flash attempt failed while erasing sector 0. Agentic HIL marked flash contents unknown and quarantined the target; its approved auto-recovery and retry then completed, verified, and reset the firmware. The transcript does not establish why the first erase failed or whether any sector was erased before refusal."
+  },
+  "recordings": {
+    "flash_erase_refused": {
+      "command": "/opt/st/cubeprogrammer-2.23.0/bin/STM32_Programmer_CLI -q -c port=SWD mode=HOTPLUG sn=[redacted] -w /tmp/ahil-pt-2/56517b3f2cd7/tmp/agentic-hil-artifacts-lshgpjts/stage-l2qq6jyi/nucleo-f446re_demo.elf -v -rst",
+      "returncode": 1,
+      "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V2J30M19\nBoard       : NUCLEO-F446RE\nVoltage     : 3.26V\nSWD freq    : 4000 KHz\nConnect mode: Hot Plug\nReset mode  : Software reset\nDevice ID   : 0x421\nRevision ID : Rev A\nDevice name : STM32F446xx\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M4\nBL Version  : 0x90\n\n\n\nOpening and parsing file: nucleo-f446re_demo.elf\n\n\nMemory Programming ...\n  File          : nucleo-f446re_demo.elf\n  Size          : 9.99 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sector 0\nError: failed to erase memory\n\n\nError: failed to erase memory\n",
+      "stderr": "",
+      "error_type": "flash_erase_failed",
+      "summary": "STM32CubeProgrammer refused to erase the target's flash; its output reports no completed write, but whether any sector was erased before the refusal is not established, so the flash contents are unconfirmed.",
+      "side_effect_status": "unknown",
+      "cleanup_required": true,
+      "quarantined": true
+    },
+    "flash_recovery_succeeded": {
+      "command": "/opt/st/cubeprogrammer-2.23.0/bin/STM32_Programmer_CLI -q -c port=SWD mode=HOTPLUG sn=[redacted] -w /tmp/ahil-pt-2/56517b3f2cd7/tmp/agentic-hil-artifacts-lshgpjts/stage-873v0in2/nucleo-f446re_demo.elf -v -rst",
+      "returncode": 0,
+      "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V2J30M19\nBoard       : NUCLEO-F446RE\nVoltage     : 3.26V\nSWD freq    : 4000 KHz\nConnect mode: Hot Plug\nReset mode  : Software reset\nDevice ID   : 0x421\nRevision ID : Rev A\nDevice name : STM32F446xx\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M4\nBL Version  : 0x90\n\n\n\nOpening and parsing file: nucleo-f446re_demo.elf\n\n\nMemory Programming ...\n  File          : nucleo-f446re_demo.elf\n  Size          : 9.99 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sector 0\nErasing memory corresponding to segment 1:\nErasing internal memory sector 0\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:01.448\n\n\n\nVerifying...\n\n\n\n\nTime elapsed during verifying operation: 00:00:00.116\n\n\nDownload verified successfully\n\n\n\nMCU Reset\n\nSoftware reset is performed\n",
+      "stderr": "",
+      "error_type": null,
+      "summary": "Firmware flashed, verified, and target reset.",
+      "side_effect_status": "committed",
+      "cleanup_required": false,
+      "quarantined": false
+    }
+  }
+}

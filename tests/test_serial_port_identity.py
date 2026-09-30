@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import time
 from pathlib import Path
 
 import pytest
 import yaml
 from conftest import write_authoritative_config, write_config
 from jsonschema import Draft202012Validator
+from support import scaled_time_bound
 
 from agentic_hil import comports
 from agentic_hil.adopt import plan_adoption
@@ -605,6 +608,125 @@ def test_a_successful_open_carries_the_identity_it_was_opened_on(tmp_path: Path,
 
     assert result["error_type"] == "com_port_open_failed"
     assert verify_port_identity(config, "dut_uart", "com_session_start")["identity"]["status"] == "confirmed"
+
+
+def test_a_reenumerated_uart_reopens_on_the_same_service_after_a_reader_io_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A USB unplug/replug is handled by later calls in this live service.
+
+    The reader sees the actual fake-handle I/O failure, the host inventory is
+    then absent, and finally the same by-id device returns under a new kernel
+    name. No server or service reconstruction participates in recovery.
+    """
+    import serial
+
+    class FakeSerial:
+        def __init__(self) -> None:
+            self.port = ""
+            self.baudrate = 0
+            self.timeout = 0.1
+            self.write_timeout = 0.1
+            self.dtr = False
+            self.rts = False
+            self.exclusive = False
+            self.is_open = False
+            self._incoming: queue.Queue[bytes | OSError] = queue.Queue()
+            self._remainder = b""
+
+        @property
+        def in_waiting(self) -> int:
+            return len(self._remainder)
+
+        def open(self) -> None:
+            self.is_open = True
+
+        def read(self, size: int) -> bytes:
+            if self._remainder:
+                result, self._remainder = self._remainder[:size], self._remainder[size:]
+                return result
+            try:
+                item = self._incoming.get(timeout=self.timeout)
+            except queue.Empty:
+                return b""
+            if isinstance(item, OSError):
+                raise item
+            result, self._remainder = item[:size], item[size:]
+            return result
+
+        def reset_input_buffer(self) -> None:
+            self._remainder = b""
+            while True:
+                try:
+                    self._incoming.get_nowait()
+                except queue.Empty:
+                    break
+
+        def close(self) -> None:
+            self.is_open = False
+            self._incoming.put(OSError("serial handle closed"))
+
+        def disconnect(self) -> None:
+            self._incoming.put(OSError("USB device disconnected"))
+
+        def feed(self, data: bytes) -> None:
+            self._incoming.put(data)
+
+    handles: list[FakeSerial] = []
+
+    def make_serial() -> FakeSerial:
+        handle = FakeSerial()
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(serial, "Serial", make_serial)
+    config = config_for(
+        tmp_path,
+        com_ports_yaml=com_ports_yaml(
+            device=BY_ID_A,
+            serial_number=BOARD_A,
+            vid=STLINK_VID,
+            pid=STLINK_PID,
+        ),
+    )
+    host_inventory = inventory(host_port("/dev/ttyACM0", BOARD_A, BY_ID_A, STLINK_VID, STLINK_PID))
+    monkeypatch.setattr(comports, "list_available_com_ports", lambda tool="com_ports_available": host_inventory)
+    service = ComPortService(config)
+
+    try:
+        first = service.session_start("dut_uart")
+        assert first["ok"] is True, first
+        assert len(handles) == 1
+        first_session = service.sessions["dut_uart"]
+        assert first_session.reader is not None
+
+        handles[0].disconnect()
+        deadline = time.monotonic() + scaled_time_bound(1.0)
+        while first_session.reader_error is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert first_session.reader_error is not None, "the reader must observe the fake transport's I/O error"
+
+        host_inventory = inventory()
+        absent = service.session_start("dut_uart")
+        assert absent["ok"] is False, absent
+        assert absent["error_type"] == COM_PORT_IDENTITY_UNVERIFIED
+        assert absent["retry_safe"] is True
+        assert len(handles) == 1, "a missing port must not be reopened"
+
+        host_inventory = inventory(host_port("/dev/ttyACM1", BOARD_A, BY_ID_A, STLINK_VID, STLINK_PID))
+        reconnected = service.session_start("dut_uart")
+        assert reconnected["ok"] is True, reconnected
+        assert reconnected["already_active"] is False
+        assert reconnected["identity"]["status"] == "confirmed"
+        assert len(handles) == 2
+        assert handles[1].port == BY_ID_A
+
+        handles[1].feed(b"reconnected UART")
+        received = service.read("dut_uart", wait_timeout_s=scaled_time_bound(1.0))
+        assert received["ok"] is True, received
+        assert received["data"]["text"] == "reconnected UART"
+    finally:
+        service.close()
 
 
 # --- the type beside the unit ----------------------------------------------

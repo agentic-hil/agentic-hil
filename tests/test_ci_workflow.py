@@ -38,7 +38,6 @@ id in front of it.
 
 from __future__ import annotations
 
-import posixpath
 import re
 import shlex
 import sys
@@ -754,8 +753,9 @@ GATE_RUNNER = "tools/bench_in_container.py"
 # Where the report and the log land, as the run steps say and the upload reads:
 # the tier's in the directory itself, the stage's without the device group in a
 # directory of its own inside it.
-GATE_RESULTS = "bench-results"
+GATE_RESULTS = "$BENCH_RESULTS"
 GATE_STAGE_RESULTS = f"{GATE_RESULTS}/without-device-group"
+GATE_UPLOAD_RESULTS = "${{ env.BENCH_RESULTS }}/"
 
 
 def gate_job() -> dict:
@@ -768,7 +768,15 @@ def gate_checkouts() -> list[dict]:
 
 def gate_run_steps() -> list[dict]:
     """The tier's step, then the step of the stage that withholds the probe's groups."""
-    running = [step for step in gate_job()["steps"] if "run" in step]
+    running = [
+        step for step in gate_job()["steps"]
+        if "run" in step
+        and "bench_diagnostic.py" not in step.get("run", "")
+        and "recovery_check.py" not in step.get("run", "")
+        and "pyocd_recordings.py" not in step.get("run", "")
+        and "cubeprogrammer_recordings.py" not in step.get("run", "")
+        and "usb_reset_reenumeration.py" not in step.get("run", "")
+    ]
     assert len(running) == 2, running
     return running
 
@@ -791,9 +799,20 @@ def test_the_gate_is_started_by_hand_and_by_nothing_else() -> None:
 def test_the_gate_asks_which_commit_to_run() -> None:
     inputs = triggers(workflow_document(GATE_WORKFLOW))["workflow_dispatch"]["inputs"]
 
-    assert set(inputs) == {"ref"}, inputs
+    assert set(inputs) == {"ref", "diagnose_only", "run_recovery_check", "cubeprogrammer_asset_id", "run_pyocd_recordings", "run_cubeprogrammer_recordings", "run_usb_reset_reenumeration"}, inputs
     assert inputs["ref"]["required"] is True
     assert inputs["ref"]["type"] == "string"
+    assert inputs["diagnose_only"]["default"] is False
+    assert inputs["diagnose_only"]["type"] == "boolean"
+    assert inputs["run_recovery_check"]["default"] is False
+    assert inputs["run_recovery_check"]["type"] == "boolean"
+    assert inputs["cubeprogrammer_asset_id"]["required"] is False
+    assert inputs["run_pyocd_recordings"]["default"] is False
+    assert inputs["run_pyocd_recordings"]["type"] == "boolean"
+    assert inputs["run_cubeprogrammer_recordings"]["default"] is False
+    assert inputs["run_cubeprogrammer_recordings"]["type"] == "boolean"
+    assert inputs["run_usb_reset_reenumeration"]["default"] is False
+    assert inputs["run_usb_reset_reenumeration"]["type"] == "boolean"
 
 
 def test_the_gate_runs_on_the_nightlys_board_and_queues_with_it() -> None:
@@ -807,7 +826,9 @@ def test_the_gate_runs_on_the_nightlys_board_and_queues_with_it() -> None:
     job = gate_job()
 
     assert job["runs-on"] == BENCH_LABELS
-    assert " ".join(job["if"].split()) == "github.repository == 'agentic-hil/agentic-hil'"
+    assert "github.repository == 'agentic-hil/agentic-hil'" in job["if"]
+    assert "inputs.diagnose_only" in job["if"]
+    assert "inputs.cubeprogrammer_asset_id" in job["if"]
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["concurrency"]["group"] == BENCH_CONCURRENCY_GROUP
     assert workflow["concurrency"]["cancel-in-progress"] is False
@@ -832,7 +853,12 @@ def test_the_gate_runs_the_runner_and_nothing_else() -> None:
     probe is opened through can put the product in, and which every other test
     of the tier would fail in.
     """
-    lines = run_lines(gate_job())
+    lines = [
+        line
+        for step in gate_run_steps()
+        for line in step.get("run", "").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
 
     assert len(lines) == 2, lines
     tier, stage = (shlex.split(line) for line in lines)
@@ -844,8 +870,8 @@ def test_the_gate_runs_the_runner_and_nothing_else() -> None:
         for word in ("pip", "agentic-hil", "podman", "docker", "sudo"):
             assert word not in command, command
     source_args = ["--source", "../under-test", "--expected-commit", "$(git -C ../under-test rev-parse HEAD)"]
-    assert tier[3:] == [*source_args, "--output", f"../{GATE_RESULTS}"], tier
-    assert stage[3:] == [*source_args, "--without-device-group", "--output", f"../{GATE_STAGE_RESULTS}"], stage
+    assert tier[3:] == [*source_args, "--output", GATE_RESULTS], tier
+    assert stage[3:] == [*source_args, "--without-device-group", "--output", GATE_STAGE_RESULTS], stage
 
 
 def test_the_stage_without_the_device_group_runs_after_the_tier_unless_the_run_was_cancelled() -> None:
@@ -858,9 +884,12 @@ def test_the_stage_without_the_device_group_runs_after_the_tier_unless_the_run_w
     """
     tier, stage = gate_run_steps()
 
-    assert "if" not in tier, tier
+    assert "if" in tier and "diagnose_only" in tier["if"], tier
     # Wrapped, because YAML reads a bare leading `!` as a tag.
-    assert stage["if"] == "${{ !cancelled() }}", stage
+    assert stage["if"] == (
+        chr(36)
+        + "{{ !cancelled() && !inputs.diagnose_only && (!inputs.run_recovery_check || steps.recovery_check.outcome == 'success') }}"
+    ), stage
 
 
 def test_the_commit_under_test_runs_only_inside_the_container() -> None:
@@ -904,29 +933,115 @@ def test_the_named_commit_never_reaches_a_shell() -> None:
         assert "${{" not in step.get("run", ""), step
 
 
+def test_diagnostic_mode_skips_all_bench_tier_commands_and_never_modifies_sysfs() -> None:
+    steps = gate_job()["steps"]
+    diagnostic = [step for step in steps if "bench_diagnostic.py" in step.get("run", "")]
+
+    assert len(diagnostic) == 1, diagnostic
+    assert "inputs.diagnose_only" in diagnostic[0]["if"]
+    assert "inputs.cubeprogrammer_asset_id" in diagnostic[0]["if"]
+    assert "GH_TOKEN" in diagnostic[0]["env"]
+    assert "CUBEPROGRAMMER_ASSET_ID" in diagnostic[0]["env"]
+    assert all("diagnose_only" in step.get("if", "") for step in gate_run_steps())
+    assert "authorized" not in diagnostic[0].get("run", "")
+    assert "bind" not in diagnostic[0].get("run", "")
+
+
 def test_the_gate_uploads_the_tiers_report_whatever_the_run_did() -> None:
     """The red run's report is the one that matters most, and it is kept."""
     upload = [step for step in gate_job()["steps"] if "upload-artifact" in str(step.get("uses", ""))]
 
     assert len(upload) == 1, upload
-    assert upload[0]["if"] == "always()"
-    assert upload[0]["with"]["path"].strip() == f"{GATE_RESULTS}/"
+    assert "always()" in upload[0]["if"]
+    assert "!inputs.diagnose_only" in upload[0]["if"]
+    assert upload[0]["with"]["path"].strip() == GATE_UPLOAD_RESULTS
     assert upload[0]["with"]["if-no-files-found"] == "warn"
     assert upload[0]["with"]["retention-days"] == 14
 
 
-def test_the_gate_uploads_the_stages_report_beside_the_tiers() -> None:
-    """Each run step writes where the one upload reads, and neither over the other.
-
-    The runner clears a report and a log out of the directory it is given, so
-    the stage writing into the tier's own directory would delete the tier's.
-    """
+def test_every_gate_stage_writes_under_the_one_run_scoped_upload_root() -> None:
+    """Each selected stage writes beneath the unique root the upload reads."""
     uploaded = next(step for step in gate_job()["steps"] if "upload-artifact" in str(step.get("uses", "")))["with"]["path"].strip()
-    landed = []
-    for step in gate_run_steps():
+    assert uploaded == GATE_UPLOAD_RESULTS
+    expected = {
+        "Run the bench tier in its container": GATE_RESULTS,
+        "Run the stage without the probe's device group": GATE_STAGE_RESULTS,
+        "Run the opt-in incident recovery check": f"{GATE_RESULTS}/recovery-check",
+        "Run pyOCD hardware recordings": f"{GATE_RESULTS}/pyocd",
+        "Run CubeProgrammer hardware recordings": f"{GATE_RESULTS}/cubeprogrammer",
+        "Run USB reset and re-enumeration recording": f"{GATE_RESULTS}/usb-reset",
+    }
+    runner_steps = [
+        step for step in gate_job()["steps"] if "bench_in_container.py" in step.get("run", "")
+    ]
+    assert {step["name"] for step in runner_steps} == set(expected)
+    for step in runner_steps:
         command = shlex.split(run_lines({"steps": [step]})[0])
-        written = posixpath.normpath(posixpath.join(step["working-directory"], command[command.index("--output") + 1]))
-        assert f"{written}/".startswith(uploaded), (written, uploaded)
-        landed.append(written)
+        assert command[command.index("--output") + 1] == expected[step["name"]], command
+        assert '--output "$BENCH_RESULTS' in step["run"], step
 
-    assert landed == [GATE_RESULTS, GATE_STAGE_RESULTS], landed
+
+def test_pyocd_recording_stage_gets_live_device_tree_for_bounded_usb_reset_diagnostic() -> None:
+    """Only stages that request USB re-enumeration receive the live device tree."""
+    runner_steps = {
+        step["name"]: step
+        for step in gate_job()["steps"]
+        if "bench_in_container.py" in step.get("run", "")
+    }
+    pyocd = runner_steps["Run pyOCD hardware recordings"]
+    recovery = runner_steps["Run the opt-in incident recovery check"]
+    usb_reset = runner_steps["Run USB reset and re-enumeration recording"]
+    default_tier = runner_steps["Run the bench tier in its container"]
+    cube = runner_steps["Run CubeProgrammer hardware recordings"]
+
+    for step in (pyocd, usb_reset, recovery):
+        command = shlex.split(run_lines({"steps": [step]})[0])
+        assert command[command.index("--runtime") + 1] == "podman", command
+        assert "--live-device-tree" in command, command
+    for step in (default_tier, cube):
+        command = shlex.split(run_lines({"steps": [step]})[0])
+        assert "--live-device-tree" not in command, command
+
+    assert "tests/bench/pyocd_recordings.py" in pyocd["run"]
+    assert "tests/bench/usb_reset_reenumeration.py" in usb_reset["run"]
+    assert "tests/bench/recovery_check.py" in recovery["run"]
+
+
+def test_run_attempt_scopes_upload_away_from_stale_skipped_stage_artifacts(tmp_path: Path) -> None:
+    """A self-hosted workspace may retain an earlier run's optional stage folders."""
+    job = gate_job()
+    root_template = job.get("env", {}).get("BENCH_RESULTS")
+    assert root_template == "${{ github.workspace }}/bench-results/${{ github.run_id }}-${{ github.run_attempt }}"
+    upload = next(step for step in job["steps"] if "upload-artifact" in str(step.get("uses", "")))
+    assert upload["with"]["path"].strip() == GATE_UPLOAD_RESULTS
+
+    workspace = tmp_path / "workspace"
+
+    def run_root(run_id: str, run_attempt: str) -> Path:
+        expanded = (
+            root_template.replace("${{ github.workspace }}", str(workspace))
+            .replace("${{ github.run_id }}", run_id)
+            .replace("${{ github.run_attempt }}", run_attempt)
+        )
+        return Path(expanded)
+
+    run_id = "36446424113"
+    current_root = run_root(run_id, "2")
+    stale_roots = (run_root("36442634601", "1"), run_root(run_id, "1"))
+    upload_path = Path(upload["with"]["path"].strip().replace("${{ env.BENCH_RESULTS }}", str(current_root)).rstrip("/\\"))
+    stale_usb_files = []
+    for stale_root in stale_roots:
+        stale_usb = stale_root / "usb-reset" / "bench-junit.xml"
+        stale_usb.parent.mkdir(parents=True)
+        stale_usb.write_text("old skipped USB stage", encoding="utf-8")
+        stale_usb_files.append(stale_usb)
+    current_root.mkdir(parents=True)
+    current_standard = current_root / "bench-junit.xml"
+    current_standard.write_text("current standard stage", encoding="utf-8")
+
+    published = sorted(path.relative_to(upload_path).as_posix() for path in upload_path.rglob("*"))
+    assert published == ["bench-junit.xml"]
+    assert upload_path == current_root
+    assert run_root(run_id, "1") != current_root
+    assert run_root("36442634601", "1") != current_root
+    assert all(stale_usb.exists() and upload_path not in stale_usb.parents for stale_usb in stale_usb_files)

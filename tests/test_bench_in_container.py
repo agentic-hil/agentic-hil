@@ -31,6 +31,7 @@ there for.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -183,6 +184,7 @@ class Runtime:
         self.interrupted = False
         self.during_run: Callable[[list[str]], None] | None = None
         self.context: dict[str, str] = {}
+        self.context_inputs: dict[str, str] = {}
 
     @staticmethod
     def verb(command: list[str]) -> str:
@@ -219,6 +221,9 @@ class Runtime:
             for name in (".dockerignore", ".containerignore"):
                 path = context / name
                 self.context[name] = path.read_text(encoding="utf-8") if path.is_file() else ""
+            archive = context / bench_in_container.CUBEPROGRAMMER_CONTEXT_PATH
+            if archive.is_file():
+                self.context_inputs[archive.relative_to(context).as_posix()] = hashlib.sha256(archive.read_bytes()).hexdigest()
             if self.build_returncode == 0:
                 Path(command[command.index("--iidfile") + 1]).write_text(f"{IMAGE_ID}\n", encoding="utf-8")
             return FakeProcess(self.build_output, self.build_returncode)
@@ -358,6 +363,25 @@ def test_docker_runs_the_tier_as_the_invoking_user_with_the_nodes_groups(machine
     assert option_values(command, "--group-add") == [str(SERIAL_GROUP), str(USB_GROUP)]
     assert "keep-groups" not in command
     assert option_values(command, "--device") == [USB_NODE, TTY_NODE]
+
+
+def test_live_device_tree_mode_mounts_dev_read_only_without_static_device_nodes(machine: SimpleNamespace) -> None:
+    assert run(machine, "--runtime", "podman", "--live-device-tree") == 0
+
+    command = machine.runtime.tier
+    assert command[:4] == ["podman", "--runtime", "crun", "run"]
+    assert option_values(command, "-v").count("/dev:/dev:ro") == 1
+    assert option_values(command, "--device") == []
+    assert not [value for value in option_values(command, "-v") if "/dev/serial/by-id" in value]
+    assert option_values(command, "--network") == ["none"]
+    assert option_values(command, "--cap-drop") == ["ALL"]
+
+
+def test_live_device_tree_mode_refuses_docker_before_build_or_run(machine: SimpleNamespace, capsys: pytest.CaptureFixture) -> None:
+    assert run(machine, "--runtime", "docker", "--live-device-tree") == bench_in_container.EXIT_CANNOT_RUN_HERE
+
+    assert machine.runtime.commands == []
+    assert "rootless Podman" in capsys.readouterr().err
 
 
 def test_without_the_device_group_podman_keeps_none_of_this_users_groups(machine: SimpleNamespace) -> None:
@@ -594,6 +618,23 @@ def test_the_image_is_built_from_the_committed_tree_with_the_tiers_own_ignore_fi
     committed = IGNORE_FILE.read_text(encoding="utf-8")
     assert machine.runtime.context == {".dockerignore": committed, ".containerignore": committed}
     assert not context.exists()
+
+
+def test_a_cubeprogrammer_archive_selects_its_separate_image_target(
+    machine: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "SetupSTM32CubeProgrammer_linux_64.zip"
+    archive.write_bytes(b"test installer archive")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    monkeypatch.setattr(bench_in_container, "CUBEPROGRAMMER_ARCHIVE_SHA256", digest)
+
+    assert run(machine, "--build-only", "--cubeprogrammer-archive", str(archive)) == 0
+
+    build = machine.runtime.issued("build")[0]
+    assert option_values(build, "--target") == [bench_in_container.CUBEPROGRAMMER_BUILD_TARGET]
+    assert machine.runtime.context_inputs == {
+        bench_in_container.CUBEPROGRAMMER_CONTEXT_PATH.as_posix(): digest
+    }
 
 
 def test_earlier_images_of_the_tier_are_pruned_after_the_build(machine: SimpleNamespace) -> None:
@@ -1385,12 +1426,130 @@ def test_the_image_carries_the_tools_the_tier_builds_and_debugs_with() -> None:
     assert {"openocd", "gcc-arm-none-eabi", "libnewlib-arm-none-eabi", "gdb-multiarch", "cmake", "ninja-build", "tini"} <= packages
 
 
+def test_the_f446_pack_install_checks_its_own_result_and_starts_over_from_an_empty_store() -> None:
+    """pyOCD's pack installer exits 0 whether or not the pack arrived, so the install step checks for the target itself.
+
+    A failed download does not change `pyocd pack install`'s exit status, and a
+    pack file already in the store is not downloaded again, whatever the
+    response that wrote it held. An install step that ran the installer alone
+    passed with only pyOCD's builtin targets and was kept as a cached layer,
+    and only the offline check after it failed the image. The step asks
+    pyOCD's own target listing for the F446, empties the pack store and
+    installs again when it is missing, three times at most, and fails itself
+    when no attempt brought it.
+    """
+    text = dockerfile()
+    install = text.index("pyocd pack install stm32f446retx")
+    end = text.index("\n\n", install)
+    step = text[text.rindex("\nRUN ", 0, install) + 1 : end]
+
+    assert "pyocd json --targets --no-config" in step, step
+    assert '"name": "stm32f446retx"' in step, step
+    assert "pyocd pack clean" in step, step
+    assert "for attempt in 1 2 3" in step, step
+    assert step.rstrip().endswith("exit 1"), step
+    check = "RUN --network=none python -m pytest --noconftest -q -p no:cacheprovider tests/container/pyocd_f446_support.py"
+    assert text.index(check) > end, "the offline check must follow the install step"
+
+
 def test_the_build_context_is_an_allowlist_of_what_the_tier_reads() -> None:
     ignore = [line.strip() for line in IGNORE_FILE.read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
 
     assert ignore[0] == "**", ignore
     admitted = {line.lstrip("!") for line in ignore if line.startswith("!")}
-    assert {"pyproject.toml", "src", "tests", "requirements", "examples/nucleo-f446re_demo"} <= admitted, admitted
+    assert {
+        "pyproject.toml",
+        "src",
+        "tests",
+        "requirements",
+        "examples/nucleo-f446re_demo",
+        "build-inputs/cubeprogrammer.zip",
+        "tools/bench/install_cubeprogrammer.sh",
+        "tools/bench/cubeprogrammer-auto-install.xml",
+    } <= admitted, admitted
+
+
+def test_cubeprogrammer_installer_is_an_optional_offline_image_layer() -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    dockerignore = IGNORE_FILE.read_text(encoding="utf-8")
+
+    assert "AS bench-tier" in dockerfile
+    assert f"FROM bench-tier AS {bench_in_container.CUBEPROGRAMMER_BUILD_TARGET}" in dockerfile
+    assert "COPY build-inputs/cubeprogrammer.zip" in dockerfile
+    assert "tools/bench/install_cubeprogrammer.sh" in dockerfile
+    assert "https://" not in dockerfile
+    assert "!build-inputs/cubeprogrammer.zip" in dockerignore
+    assert "!tools/bench/install_cubeprogrammer.sh" in dockerignore
+    assert "!tools/bench/cubeprogrammer-auto-install.xml" in dockerignore
+    assert dockerfile.rstrip().endswith("FROM bench-tier AS bench-tier-default"), "the ZIP-dependent stage must not become the default build"
+    base, optional = dockerfile.split(f"FROM bench-tier AS {bench_in_container.CUBEPROGRAMMER_BUILD_TARGET}", 1)
+    assert "libglib2.0-0t64" not in base and "unzip" not in base
+    assert "libglib2.0-0t64 unzip" in optional
+
+
+def test_cubeprogrammer_installer_is_digest_checked_headless_and_runs_from_extracted_directory() -> None:
+    installer = (REPOSITORY_ROOT / "tools" / "bench" / "install_cubeprogrammer.sh").read_text(encoding="utf-8")
+    auto_install = (REPOSITORY_ROOT / "tools" / "bench" / "cubeprogrammer-auto-install.xml").read_text(encoding="utf-8")
+
+    assert bench_in_container.CUBEPROGRAMMER_ARCHIVE_SHA256 in installer
+    assert "sha256sum" in installer
+    assert "SetupSTM32CubeProgrammer-2.23.0.exe" in installer
+    assert "auto-check.xml" in installer
+    assert "installpath>/opt/st/cubeprogrammer-2.23.0</installpath>" in auto_install
+    assert "libglib2.0-0t64" in DOCKERFILE.read_text(encoding="utf-8")
+
+
+def test_a_verified_cubeprogrammer_archive_is_staged_only_in_the_temporary_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A licensed runner-local input reaches Docker without entering the commit or checkout."""
+    archive = tmp_path / "SetupSTM32CubeProgrammer_linux_64.zip"
+    archive.write_bytes(b"test installer archive")
+    context = tmp_path / "temporary-build-context"
+    context.mkdir()
+    expected_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+    monkeypatch.setattr(bench_in_container, "CUBEPROGRAMMER_ARCHIVE_SHA256", expected_sha256, raising=False)
+
+    staged = bench_in_container.stage_cubeprogrammer_archive(archive, context)
+
+    assert staged == context / "build-inputs" / "cubeprogrammer.zip"
+    assert staged.read_bytes() == archive.read_bytes()
+    assert not (REPOSITORY_ROOT / "build-inputs" / "cubeprogrammer.zip").exists()
+
+
+def test_a_cubeprogrammer_archive_with_a_different_digest_is_refused_without_staging_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "SetupSTM32CubeProgrammer_linux_64.zip"
+    archive.write_bytes(b"not the licensed archive")
+    context = tmp_path / "temporary-build-context"
+    context.mkdir()
+    monkeypatch.setattr(bench_in_container, "CUBEPROGRAMMER_ARCHIVE_SHA256", "0" * 64, raising=False)
+
+    with pytest.raises(bench_in_container.Refused, match="SHA-256"):
+        bench_in_container.stage_cubeprogrammer_archive(archive, context)
+
+    assert not (context / "build-inputs" / "cubeprogrammer.zip").exists()
+
+
+def test_cubeprogrammer_digest_covers_the_staged_bytes_and_removes_a_tampered_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "SetupSTM32CubeProgrammer_linux_64.zip"
+    archive.write_bytes(b"verified source bytes")
+    context = tmp_path / "temporary-build-context"
+    context.mkdir()
+    monkeypatch.setattr(bench_in_container, "CUBEPROGRAMMER_ARCHIVE_SHA256", hashlib.sha256(archive.read_bytes()).hexdigest())
+
+    def swapped_payload(source: Path, destination: Path) -> None:
+        Path(destination).write_bytes(b"different bytes landed in the build context")
+
+    monkeypatch.setattr(bench_in_container.shutil, "copyfile", swapped_payload)
+
+    with pytest.raises(bench_in_container.Refused, match="SHA-256"):
+        bench_in_container.stage_cubeprogrammer_archive(archive, context)
+
+    assert not (context / "build-inputs" / "cubeprogrammer.zip").exists()
 
 
 def test_the_page_the_refusals_point_at_says_what_the_machine_provides_once() -> None:

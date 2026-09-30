@@ -79,13 +79,57 @@ python3 tools/bench_in_container.py                      # the whole tier
 python3 tools/bench_in_container.py -- tests/bench/test_bench_serial.py -x
 python3 tools/bench_in_container.py --runtime docker
 python3 tools/bench_in_container.py --without-device-group
+python3 tools/bench_in_container.py --runtime podman --live-device-tree -- tests/bench/usb_reset_reenumeration.py
 python3 tools/bench_in_container.py --build-only         # the image alone, anywhere
+python3 tools/bench_in_container.py --cubeprogrammer-archive ~/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip --build-only
 ```
+
+The licensed STM32CubeProgrammer layer is opt-in. Its archive stays outside the
+checkout in the runner cache at
+`~/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip`; the runner obtains
+it through authenticated access to the unpublished release asset. The helper
+checks the supplied archive against SHA-256
+`6a9e60a5a048c45eb3241f9bb66bdc2e6cbd0119fb2e42568dc059fc6167442a` before
+copying it into the temporary build context, which is removed when the command
+finishes. The binary is never committed or published as a public release.
+
+With `--cubeprogrammer-archive`, the build selects the separate
+`bench-tier-cubeprogrammer` stage. It installs CubeProgrammer 2.23.0 at
+`/opt/st/cubeprogrammer-2.23.0` and runs the dedicated USB-free recording smoke
+test during the build. The CLI is not added to `PATH`, so an ordinary `init`
+continues to discover OpenOCD by default; a test that needs CubeProgrammer names
+the installed executable explicitly. The installer log reported all three
+packages installed, including TrustedPackageCreator, even though the unattended
+XML marked that pack unselected.
 
 A run finds the probe through sysfs by its USB vendor and product ids, never by
 a serial number; takes this machine's run lock; builds the image; runs the tier
 with the probe's nodes handed in; copies the JUnit report out; and reads pytest's
 summary line as the verdict.
+
+The USB reset re-enumeration stage, pyOCD discovery diagnostic, and opt-in
+incident recovery check are the exceptions to static device-node mounts. They
+run with
+`--runtime podman --live-device-tree`: the rootless
+container receives the host `/dev` directory as a read-only bind mount, so a
+kernel-recreated tty node and updated `/dev/serial/by-id` links can be resolved
+by the same MCP server after USB reset or during the recovery check's reset and
+probe. The first test in the pyOCD stage
+records native probe-listing evidence, requests one identity-checked USB reset,
+then requires the same MCP process to list the configured probe again; that
+diagnostic does not connect to or alter the target. The existing healthy pyOCD
+baseline runs next and still connects, flashes and verifies the demo boot over
+UART. This mode does not add per-node
+`--device` mounts or stage by-id links, and Docker is refused before build or
+run because its device-cgroup policy for newly registered nodes is unsupported.
+The read-only bind protects directory entries from container changes; it does
+not make character devices read-only. Processes in the container may perform
+device I/O that the invoking user is permitted to perform, and can see other
+host `/dev` entries that this user may access. The gate uses this broader view
+only for explicitly selected pyOCD, USB reset, or incident recovery checks.
+Network remains disabled, capabilities remain dropped, and the existing
+non-root and crun checks still
+apply.
 
 - The image is built from the commit checked out, never from the working tree.
   Uncommitted changes are named, and are not what runs.
@@ -113,11 +157,13 @@ summary line as the verdict.
   the container could still open fails the stage by name. Every other run leaves
   the stage out, as deselected rather than skipped.
 
-The container gets the probe's device nodes, the machine's device-lock
-directory, the serial port's `/dev/serial/by-id` links read only, and the
-directory the report is written to, and nothing else of the machine: no network,
-no capabilities, and a process table and a host name of its own. A run as root
-is refused, because root's device locks are not the ones the board's user takes.
+In ordinary stages, the container gets only the probe's device nodes, the
+machine's device-lock directory, the serial port's `/dev/serial/by-id` links
+read only, and the directory the report is written to. The USB live-device-tree
+stage instead gets the host `/dev` directory read only, as described above. The
+container has no network or capabilities, and has a process table and host name
+of its own. A run as root is refused, because root's device locks are not the
+ones the board's user takes.
 
 ## Interrupting a run
 
@@ -178,6 +224,44 @@ board is attached to, for one commit named when it is started, on
 gh workflow run bench-gate.yml -f ref=<commit, branch or tag>
 ```
 
+The optional hardware stages are off by default. Enable the status-gated reset
+preflight with `run_recovery_check`, and recordings independently with
+`run_pyocd_recordings`, `run_cubeprogrammer_recordings`, or
+`run_usb_reset_reenumeration`:
+
+```
+gh workflow run bench-gate.yml -f ref=<commit, branch or tag> -f run_pyocd_recordings=true -f run_cubeprogrammer_recordings=true -f run_usb_reset_reenumeration=true
+```
+
+When selected, the recovery check runs before the standard tier in the default
+image. It reads lease status first and refuses a failed audit or any standing
+incident; otherwise it declares the debugger, requests reset into halt, and
+probes the target through MCP. A failed check stops the standard gates. The
+withheld-device-group diagnostic still runs after an ordinary red standard
+tier, but only when the selected recovery check succeeded.
+
+The ordinary tier and the stage without the probe's device group run first.
+Then the requested recordings run in this order, each in its own container
+invocation and only while all earlier stages have succeeded. Every workflow
+attempt writes under `bench-results/<run-id>-<attempt>/`, and the upload reads
+only that directory. This keeps a skipped optional stage from publishing a
+report left by an earlier run in the persistent self-hosted workspace. The
+pyOCD stage uses the ordinary bench image and writes to the attempt's `pyocd`
+subdirectory; it does not need the optional CubeProgrammer archive. The
+CubeProgrammer stage runs its probe, flash, reset and capture recordings and
+writes to the attempt's `cubeprogrammer` subdirectory. It uses the pinned
+archive already in the runner's user-local cache; the workflow does not install
+the host toolchain. Its temporary ST-Link description sets `connect_mode` to
+`under_reset` for flash; the Nucleo-F446RE's on-board ST-Link reset line is wired
+to NRST. The build-time smoke check is not evidence of a hardware recording run.
+
+The USB stage requests targeted `USBDEVFS_RESET` on the verified ST-Link node
+inside the existing unprivileged container, through the same MCP server and
+bench run. It uses no `sudo` or privileged container. A reset request does not
+guarantee a physical USB disconnect. The report records whether enumeration
+changes were observed; it is not proof of a physical disconnect or of UART
+reopening. Its report is under the attempt's `usb-reset` subdirectory.
+
 The runner script is checked out from the branch the workflow is dispatched
 from, the default branch unless `--ref` names another, and the named commit
 beside it. The runner receives that candidate checkout explicitly with
@@ -189,7 +273,11 @@ probe are that commit's to drive, which is the decision a dispatch makes.
 
 The gate runs the tier, and then `--without-device-group` on the image the
 tier's run built: after a red tier too, because what the stage proves does not
-depend on what the tier found, and never after a cancelled run.
+depend on what the tier found, and never after a cancelled run. The opt-in
+pyOCD, CubeProgrammer and USB reset recordings each get their own invocation
+and output directory after the standard stages; they run only when the earlier
+gates succeeded. No hardware result for an opt-in stage is implied by the
+container build or its smoke test.
 
 The gate shares its concurrency group with `.github/workflows/hardware-bench.yml`,
 so the two never hold the board at once and neither cancels the other. A group
@@ -213,6 +301,16 @@ stage's are in its `without-device-group` directory inside it.
   checkout on top with `--no-deps`.
 - `/etc/agentic-hil/bench-test-image`, written by this build and by nothing
   else, which is the marker a verdict needs.
+
+The image installs the STM32F4 CMSIS pack with pyOCD's supported
+`pyocd pack install stm32f446retx` command. The pack is stored under
+`/bench-home/.local/share/cmsis-pack-manager`, matching the image's runtime
+`HOME`. This installer resolves the current vendor index at build time; an
+offline image check requires the reviewed `Keil.STM32F4xx_DFP` version 3.1.1
+and verifies that both `stm32f446re` and `stm32f446retx` are listed from a
+pack. That check reads software metadata only and opens no probe. A change in
+the vendor index therefore requires reviewing and updating the expected
+version; the install itself is not a hash-pinned pack download.
 
 `AGENTIC_HIL_BENCH` is deliberately not set in the image. It is the statement
 that a probe and a board are attached, which an image cannot know, and the

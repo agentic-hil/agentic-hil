@@ -5,11 +5,12 @@ touched, against a process that says the tool's own words. Where the words are
 OpenOCD's or pyOCD's they are the recording in
 ``fixtures/debugger_refusal_recordings.json``, taken in the container test
 image with nothing on USB (the file names the versions and the date), played
-back byte for byte by ``fixtures/fake_debugger_transcript.py``. Where the
-words are STM32CubeProgrammer's, which does not run in the image, or are what
-a tool prints only with a probe attached, the transcript is the phrase the
-issue quotes or the phrase the classifier's own table names, each row says
-which, and the recording that would replace it is listed as owed.
+back byte for byte by ``fixtures/fake_debugger_transcript.py``. The genuine
+STM32CubeProgrammer 2.23.0 USB-free records live in
+``fixtures/stm32cubeprogrammer_2_23_0_recordings.json`` and are replayed here;
+the optional Docker target reruns them against the installed binary. What a
+tool prints only with a probe attached remains an issue phrase until captured
+from hardware.
 
 What the issue found unpinned, in its order:
 
@@ -20,7 +21,8 @@ What the issue found unpinned, in its order:
 * OpenOCD's missing target script named as ``target_config_not_found`` and as
   the field, a generic missing script as ``config_file_not_found``, and a
   flash that failed without reaching its marker as ``flash_failed``.
-* STM32CubeProgrammer exiting 0 while printing an error.
+* STM32CubeProgrammer exiting 0 while printing an error, plus version and
+  USB-free probe refusals recorded from its licensed optional image.
 * every ST-Link and pyOCD phrase the classifier has a bucket for, driven
   through the tool result, the quarantine it opens or refuses, and the
   remediation it selects.
@@ -126,9 +128,41 @@ def recording(name: str) -> dict:
     return RECORDINGS["recordings"][name]
 
 
+def cube_recording(name: str) -> dict:
+    path = FIXTURES / "stm32cubeprogrammer_2_23_0_recordings.json"
+    return json.loads(path.read_text(encoding="utf-8"))["recordings"][name]
+
+
+def cube_bench_image_recording(name: str) -> dict:
+    path = FIXTURES / "stm32cubeprogrammer_2_23_0_bench_image_recordings.json"
+    return json.loads(path.read_text(encoding="utf-8"))["recordings"][name]
+
+
 def play_recording(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     """Have the transcript fake replay one recorded run, byte for byte."""
     monkeypatch.setenv("AGENTIC_HIL_FAKE_TRANSCRIPT_RECORDING", name)
+
+
+def play_cube_recording(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Replay a real CubeProgrammer recording without requiring its licensed binary."""
+    transcript = cube_recording(name)
+    play_transcript(
+        monkeypatch,
+        stdout=transcript["stdout"],
+        stderr=transcript["stderr"],
+        returncode=transcript["returncode"],
+    )
+
+
+def play_cube_bench_image_recording(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Replay a real CubeProgrammer transcript captured in the bench image build."""
+    transcript = cube_bench_image_recording(name)
+    play_transcript(
+        monkeypatch,
+        stdout=transcript["stdout"],
+        stderr=transcript["stderr"],
+        returncode=transcript["returncode"],
+    )
 
 
 def play_transcript(monkeypatch: pytest.MonkeyPatch, *, stdout: str = "", stderr: str = "", returncode: int = 1) -> None:
@@ -350,6 +384,81 @@ def test_debugger_info_reads_the_version_the_real_tool_prints(tmp_path: Path, mo
     assert result["summary"] == AVAILABLE_SUMMARY[backend_name]
 
 
+def test_stlink_debugger_info_reads_cubeprogrammer_223_from_its_real_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    play_cube_recording(monkeypatch, "version")
+    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+
+    result = call(config, "debugger_info")
+
+    assert result["ok"] is True, result
+    assert "2.23.0" in result["version"], result
+    assert result["summary"] == AVAILABLE_SUMMARY["stlink"]
+
+
+def test_stlink_probe_listing_accepts_cubeprogrammers_real_empty_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    play_cube_recording(monkeypatch, "list_no_probe")
+    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+
+    result = call(config, "debugger_probes_list")
+
+    assert result["ok"] is True, result
+    assert result["probes"] == [], result
+    assert result.get("target_contacted") is not True, result
+    assert result["side_effect_status"] == "not_started", result
+    assert result["retry_safe"] is True, result
+
+
+def test_stlink_probe_target_classifies_cubes_real_no_probe_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    transcript = cube_recording("connect_no_probe")
+    play_cube_recording(monkeypatch, "connect_no_probe")
+    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+
+    result = call(config, "probe_target")
+
+    assert result["ok"] is False, result
+    assert result["backend_error_type"] == "probe_not_found", result
+    assert result["error_type"] == "adapter_not_found", result
+    assert result["programmer_output"]["stdout"] == transcript["stdout"], result
+    assert_refused_before_contact(result, config)
+
+
+def test_stlink_probe_listing_accepts_bench_recorded_libusb_no_probe_diagnostic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    play_cube_bench_image_recording(monkeypatch, "list_no_probe")
+    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+
+    result = call(config, "debugger_probes_list")
+
+    assert result["ok"] is True, result
+    assert result["probes"] == [], result
+    assert result.get("target_contacted") is not True, result
+    assert result["side_effect_status"] == "not_started", result
+    assert result["retry_safe"] is True, result
+
+
+def test_stlink_probe_target_classifies_bench_recorded_dev_no_stlink_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    transcript = cube_bench_image_recording("connect_no_probe")
+    play_cube_bench_image_recording(monkeypatch, "connect_no_probe")
+    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+
+    result = call(config, "probe_target")
+
+    assert result["ok"] is False, result
+    assert result["backend_error_type"] == "probe_not_found", result
+    assert result["error_type"] == "adapter_not_found", result
+    assert result["programmer_output"]["stdout"] == transcript["stdout"], result
+    assert result["programmer_output"]["stderr"] == transcript["stderr"], result
+    assert_refused_before_contact(result, config)
+
+
+def test_stlink_probe_target_does_not_generalize_a_neighboring_vendor_error_code(tmp_path: Path) -> None:
+    transcript = cube_bench_image_recording("connect_no_probe")
+    output = transcript["stdout"].replace("DEV_NO_STLINK", "DEV_NO_STLINK_OTHER") + transcript["stderr"]
+    config = load_config(str(write_config(tmp_path, debugger_type="stlink")))
+    backend = STLinkBackend(config)
+
+    assert backend._classify_output(output, "probe_target") == "config_file_not_found"
+
+
 def test_doctor_reports_the_classified_version_failure_and_exits_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The operator's view of the same check: a document that carries the classification, and exit 1.
 
@@ -493,7 +602,7 @@ def test_a_zero_exit_with_error_text_is_a_failure(tmp_path: Path, monkeypatch: p
 # Every phrase the two classifiers have a bucket for.
 
 # (backend, tool, transcript, expected bucket, where the words come from).
-# `recorded`: the container recording. `in tree`: a phrase an existing fixture
+# `recorded`: a real tool recording. `in tree`: a phrase an existing fixture
 # already prints, typed from the tool by whoever wrote it. `issue`: the phrase
 # #506 quotes. `rule`: the classifier's own table words, with no recording
 # behind them; each of those rows is a recording owed.

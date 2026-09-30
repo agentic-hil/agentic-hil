@@ -32,7 +32,7 @@
 # alias table the machine may not have and otherwise asks which registry to use,
 # which a run with no terminal cannot answer. Docker reads the same reference as
 # the short name it has always used.
-FROM docker.io/library/python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+FROM docker.io/library/python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS bench-tier
 # ^ python:3.12-slim
 
 # OpenOCD is the debugger backend the tier flashes, resets and debugs the board
@@ -109,6 +109,28 @@ ENV HOME=/bench-home \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# Install the Nucleo-F446RE CMSIS pack through pyOCD's supported installer.
+# The command resolves the vendor index at build time; the offline check below
+# records the expected pack release and target names so index drift is visible.
+#
+# The installer exits 0 whether or not the pack arrived: a failed download does
+# not change its exit status, and a pack file already in the store is not
+# downloaded again, whatever the response that wrote it held. So the step asks
+# pyOCD's own target listing for the F446 and, when it is missing, empties the
+# pack store and installs again, three times at most. It fails itself when no
+# attempt brought the target, so an install that did not work never becomes a
+# cached layer the next build of the same tree would start from.
+RUN for attempt in 1 2 3; do \
+        pyocd pack install stm32f446retx \
+            && pyocd json --targets --no-config | grep -q '"name": "stm32f446retx"' \
+            && exit 0; \
+        pyocd pack clean; \
+        sleep 10; \
+    done; \
+    exit 1
+
+RUN --network=none python -m pytest --noconftest -q -p no:cacheprovider tests/container/pyocd_f446_support.py
+
 # Deliberately not set here: AGENTIC_HIL_BENCH. It is the statement that a probe
 # and a board are attached, and an image cannot know that; the runner sets it on
 # the run that hands the devices in.
@@ -128,3 +150,22 @@ LABEL agentic-hil.image="bench-tier"
 STOPSIGNAL SIGINT
 ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
 CMD ["python", "-m", "pytest", "tests/bench", "-p", "no:cacheprovider"]
+
+# Optional software-only layer for reproducing STM32CubeProgrammer's actual
+# USB-free CLI output. The runner adds the licensed, digest-pinned archive to
+# its throwaway build context only when this target is requested. The build-time
+# smoke test runs without a USB device and validates the captured refusal text
+# through both the CLI and Agentic HIL. This target is never the default image.
+FROM bench-tier AS bench-tier-cubeprogrammer
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes libglib2.0-0t64 unzip \
+    && rm -rf /var/lib/apt/lists/*
+COPY build-inputs/cubeprogrammer.zip /tmp/cubeprogrammer.zip
+COPY tools/bench/install_cubeprogrammer.sh /tmp/install_cubeprogrammer.sh
+COPY tools/bench/cubeprogrammer-auto-install.xml /tmp/cubeprogrammer-auto-install.xml
+RUN --network=none sh /tmp/install_cubeprogrammer.sh /tmp/cubeprogrammer.zip /tmp/cubeprogrammer-auto-install.xml
+RUN --network=none python -m pytest -q -s tests/container/cubeprogrammer_without_a_probe.py
+
+# Keep the standard bench image the implicit last stage. An ordinary build
+# never needs the licensed payload or evaluates the optional COPY above.
+FROM bench-tier AS bench-tier-default

@@ -20,10 +20,11 @@ A run, in order:
   the source is this tool's checkout; `--source` selects another checkout and
   `--expected-commit` can bind it to a full SHA before any hardware check or
   build. Uncommitted changes are named, and are not what runs;
-* runs the tier in a container that gets the probe's device nodes, the
-  machine's device locks and a directory of the run's own for its report, and
-  nothing else of the machine: no network, no capabilities, no host process
-  table;
+* runs the tier in a container that normally gets the probe's device nodes,
+  the machine's device locks and a directory of the run's own for its report.
+  The opt-in `--live-device-tree` mode instead bind mounts host `/dev` read only
+  for USB re-enumeration and pyOCD discovery-reset stages; neither mode gives the container network,
+  capabilities or the host process table;
 * copies the report alone out of that directory, as a regular file and without
   following a link, into the output directory, which the container never sees;
 * reads pytest's summary line as the verdict.
@@ -136,6 +137,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import os
 import re
 import secrets
@@ -179,6 +181,12 @@ EXIT_INTERRUPTED = 130
 
 RUNTIMES = ("podman", "docker")
 IMAGE = "agentic-hil-bench-tier"
+# The licensed STM32CubeProgrammer installer archive supplied for the bench
+# image. It is provisioned on the runner outside the checkout and copied into
+# the temporary Docker context only after its digest is checked.
+CUBEPROGRAMMER_ARCHIVE_SHA256 = "6a9e60a5a048c45eb3241f9bb66bdc2e6cbd0119fb2e42568dc059fc6167442a"
+CUBEPROGRAMMER_CONTEXT_PATH = Path("build-inputs") / "cubeprogrammer.zip"
+CUBEPROGRAMMER_BUILD_TARGET = "bench-tier-cubeprogrammer"
 # The label tools/bench/Dockerfile puts on the image. Earlier builds lose the
 # tag to the newest and are pruned by it; nothing else carries it.
 IMAGE_LABEL = "agentic-hil.image=bench-tier"
@@ -842,13 +850,58 @@ def sweep_leftovers(runtime: str, uid: int, voice: Voice) -> None:
         raise LeftBehind(runtime, unresolved)
 
 
-def build_image(runtime: str, root: Path, commit: str, workdir: Path, voice: Voice) -> str:
+def stage_cubeprogrammer_archive(archive: Path, context: Path) -> Path:
+    """Copy the verified licensed payload into this run's throwaway build context."""
+    try:
+        metadata = archive.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise Refused(EXIT_BUILD_FAILED, "the CubeProgrammer archive must be a regular file")
+    except OSError:
+        raise Refused(EXIT_BUILD_FAILED, "the CubeProgrammer archive could not be checked") from None
+    destination = context / CUBEPROGRAMMER_CONTEXT_PATH
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        shutil.copyfile(archive, destination)
+        staged_metadata = destination.lstat()
+        if not stat.S_ISREG(staged_metadata.st_mode):
+            raise Refused(EXIT_BUILD_FAILED, "the staged CubeProgrammer archive is not a regular file")
+        digest = hashlib.sha256()
+        with destination.open("rb") as staged:
+            while chunk := staged.read(1024 * 1024):
+                digest.update(chunk)
+        actual = digest.hexdigest()
+        if actual != CUBEPROGRAMMER_ARCHIVE_SHA256:
+            raise Refused(
+                EXIT_BUILD_FAILED,
+                f"the staged CubeProgrammer archive has SHA-256 {actual}, expected {CUBEPROGRAMMER_ARCHIVE_SHA256}",
+            )
+    except OSError:
+        with suppress(OSError):
+            destination.unlink()
+        raise Refused(EXIT_BUILD_FAILED, "the CubeProgrammer archive could not be staged and verified") from None
+    except Refused:
+        with suppress(OSError):
+            destination.unlink()
+        raise
+    return destination
+
+
+def build_image(
+    runtime: str,
+    root: Path,
+    commit: str,
+    workdir: Path,
+    voice: Voice,
+    cubeprogrammer_archive: Path | None = None,
+) -> str:
     """Build the image from the committed tree; the id the build wrote."""
     context = workdir / "context"
     try:
         stage_committed_tree(root, commit, context)
     except (OSError, subprocess.SubprocessError, tarfile.TarError) as error:
         raise Refused(EXIT_BUILD_FAILED, f"the tree of {commit[:12]} could not be staged: {error}") from None
+    if cubeprogrammer_archive is not None:
+        stage_cubeprogrammer_archive(cubeprogrammer_archive, context)
     ignore = context / "tools" / "bench" / "Dockerfile.dockerignore"
     if not ignore.is_file():
         raise Refused(EXIT_BUILD_FAILED, f"commit {commit[:12]} carries no tools/bench/Dockerfile.dockerignore to build with")
@@ -866,8 +919,10 @@ def build_image(runtime: str, root: Path, commit: str, workdir: Path, voice: Voi
         f"org.opencontainers.image.revision={commit}",
         "--iidfile",
         str(image_id_file),
-        str(context),
     ]
+    if cubeprogrammer_archive is not None:
+        command.extend(("--target", CUBEPROGRAMMER_BUILD_TARGET))
+    command.append(str(context))
     voice(f"building the bench tier's image from commit {commit[:12]} with {runtime}")
     environment = {**os.environ, "DOCKER_BUILDKIT": "1"} if runtime == "docker" else None
     process = subprocess.Popen(
@@ -929,6 +984,7 @@ def tier_command(
     run_id: str,
     *,
     withhold_groups: bool = False,
+    live_device_tree: bool = False,
 ) -> list[str]:
     uid, gid = user_ids()
     command = [runtime]
@@ -960,10 +1016,13 @@ def tier_command(
         if not withhold_groups:
             for group in docker_groups(devices):
                 command += ["--group-add", str(group)]
-    for node in devices.nodes:
-        command += ["--device", node]
+    if live_device_tree:
+        command += ["-v", "/dev:/dev:ro"]
+    else:
+        for node in devices.nodes:
+            command += ["--device", node]
     command += ["-v", f"{locks}:{CONTAINER_LOCKS}", "-v", f"{results}:{RESULTS}"]
-    if stable_names is not None:
+    if stable_names is not None and not live_device_tree:
         command += ["-v", f"{stable_names}:{CONTAINER_SERIAL_BY_ID}:ro"]
     for key, value in ENVIRONMENT.items():
         command += ["-e", f"{key}={value}"]
@@ -1212,12 +1271,24 @@ def parse_options(argv: list[str] | None) -> argparse.Namespace:
         metavar="SHA",
         help="Require the selected source checkout's HEAD to equal this full commit SHA before doing any work.",
     )
+    parser.add_argument(
+        "--cubeprogrammer-archive",
+        type=Path,
+        default=None,
+        metavar="ZIP",
+        help="Build the optional STM32CubeProgrammer image layer from this runner-local, SHA-256-pinned licensed archive.",
+    )
     parser.add_argument("--no-wait", action="store_true", help="Refuse instead of queueing when another run holds this machine.")
     parser.add_argument("--build-only", action="store_true", help="Build the image and stop; needs no probe and runs anywhere.")
     parser.add_argument(
         "--without-device-group",
         action="store_true",
         help="Withhold the groups the probe's nodes are opened through, and run the stage about that alone.",
+    )
+    parser.add_argument(
+        "--live-device-tree",
+        action="store_true",
+        help="For USB re-enumeration or pyOCD rediscovery: bind host /dev read-only (rootless Podman only).",
     )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER, help="After --: handed to pytest, replacing tests/bench -v.")
     return parser.parse_args(argv)
@@ -1252,6 +1323,11 @@ def main(argv: list[str] | None = None) -> int:
                     f"source checkout HEAD is {commit}, not the expected commit {expected}; nothing was built or run",
                 )
         runtime = pick_runtime(options.runtime)
+        if options.live_device_tree and runtime != "podman":
+            raise Refused(
+                EXIT_CANNOT_RUN_HERE,
+                "--live-device-tree requires rootless Podman; Docker's device cgroup policy is not supported for a live /dev tree",
+            )
         if running:
             check_this_machine(runtime)
             devices = the_devices(options.usb_device, options.serial_device)
@@ -1293,7 +1369,7 @@ def main(argv: list[str] | None = None) -> int:
         if running:
             output = prepare_output(options.output)
             sweep_leftovers(runtime, user_ids()[0], voice)
-        image_id = build_image(runtime, root, commit, workdir, voice)
+        image_id = build_image(runtime, root, commit, workdir, voice, options.cubeprogrammer_archive)
         prune_images(runtime, voice)
         if not running:
             voice(f"built {image_id} from commit {commit[:12]} with {runtime}; --build-only, so nothing ran")
@@ -1304,7 +1380,7 @@ def main(argv: list[str] | None = None) -> int:
         devices = the_devices(options.usb_device, options.serial_device)
         voice.withhold(devices.serial_numbers)
         check_access(runtime, devices)
-        stable_names = stage_stable_names(devices.serial_ports, workdir / "by-id")
+        stable_names = None if options.live_device_tree else stage_stable_names(devices.serial_ports, workdir / "by-id")
         # The one directory the tier writes to, and it is the run's own: the
         # output directory, which a gate uploads, is never mounted.
         results = workdir / "results"
@@ -1315,6 +1391,7 @@ def main(argv: list[str] | None = None) -> int:
         command = tier_command(
             runtime, image_id, name, devices, locks, results, stable_names, pytest_args,
             commit, f"{run_id}-{run_attempt}", withhold_groups=options.without_device_group,
+            live_device_tree=options.live_device_tree,
         )
         voice(f"$ {shlex.join(command)}")
         returncode, printed, interrupted = run_tier(runtime, name, command, output / LOG_NAME, voice.redact, voice, signals)
