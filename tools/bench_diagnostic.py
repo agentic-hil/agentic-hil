@@ -9,14 +9,17 @@ configuration.
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import importlib.util
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -108,6 +111,44 @@ def cache_cubeprogrammer_archive(
         return {"downloaded": True, "sha256": actual_sha256, "size_bytes": size}
     finally:
         partial.unlink(missing_ok=True)
+
+
+def host_identities() -> list[str]:
+    """What names this machine in a line of output: host, home and user.
+
+    The same three values `bench_in_container.py` withholds, for the same reason:
+    the only surface this helper has is a public workflow log."""
+    names: list[str] = []
+    with suppress(OSError):
+        host = socket.gethostname()
+        names += [host, host.split(".")[0]]
+    home = os.path.expanduser("~")
+    names += [home, Path(home).as_posix()]
+    with suppress(Exception):
+        names.append(getpass.getuser())
+    return [name for name in (value.strip() for value in names) if len(name) >= 4]
+
+
+def withheld(text: object) -> str:
+    """One error's own words, with every value that names this machine taken out.
+
+    Redacted, never removed. Collapsing a failure to `type(exc).__name__` made
+    four unlike outcomes read alike: a pinned-digest mismatch, a size mismatch, a
+    missing token and a URL that is not the GitHub API all printed `ValueError`,
+    and the first of those is the one signal in this file worth acting on
+    differently from every other. Three of the four are this file's own literals
+    with no host identity in them at all; the case the caution was written for is
+    an `OSError` whose message embeds a path under the home directory, and that is
+    what this takes out rather than the sentence around it.
+
+    Values are matched whole and case-insensitively, the way the bench runner
+    matches them: a letter or a digit on either side makes it part of a longer
+    word, which is left alone.
+    """
+    line = " ".join(str(text).split())
+    for value in sorted(host_identities(), key=lambda name: (-len(name), name)):
+        line = re.sub(rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])", "[withheld]", line, flags=re.IGNORECASE)
+    return line
 
 
 def _run_quietly(command: list[str], *, timeout: int = 15) -> subprocess.CompletedProcess[str] | None:
@@ -246,8 +287,8 @@ def main(argv: list[str] | None = None) -> int:
     status = 0
     try:
         report["diagnostic"] = collect_read_only_diagnostic()
-    except Exception as exc:  # sanitized category only; subprocess detail can contain host identity
-        report["diagnostic"] = {"ok": False, "error": type(exc).__name__, "writes_performed": False}
+    except Exception as exc:  # the class, plus its own words with this machine's names withheld
+        report["diagnostic"] = {"ok": False, "error": type(exc).__name__, "error_detail": withheld(exc), "writes_performed": False}
         status = 1
     if args.asset_id:
         try:
@@ -255,7 +296,11 @@ def main(argv: list[str] | None = None) -> int:
             target = Path.home() / ".cache" / "agentic-hil" / "toolchains" / "cubeprogrammer-2.23.0.zip"
             report["cubeprogrammer_cache"] = cache_cubeprogrammer_archive(args.asset_id, token, target)
         except Exception as exc:
-            safe_error: dict[str, Any] = {"downloaded": False, "error": type(exc).__name__}
+            # The decisive line, not only the class. A pinned-digest mismatch is
+            # the supply-chain signal this whole path exists to raise, and as a
+            # bare `ValueError` it was indistinguishable from a secret that was
+            # never set. `withheld` is what keeps the workflow's public log clean.
+            safe_error: dict[str, Any] = {"downloaded": False, "error": type(exc).__name__, "error_detail": withheld(exc)}
             if isinstance(exc, HTTPError):
                 safe_error["http_status"] = exc.code
             elif isinstance(exc, URLError) and isinstance(exc.reason, HTTPError):

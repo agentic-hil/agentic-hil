@@ -364,3 +364,67 @@ def test_incident_recovery_check_is_an_explicit_preflight_before_the_standard_ga
     assert "!inputs.run_recovery_check" in withheld["if"]
     assert "steps.recovery_check.outcome == 'success'" in withheld["if"]
     assert "success()" not in withheld["if"]
+
+
+def test_a_pinned_digest_mismatch_names_itself_in_the_step_the_operator_reads(tmp_path, monkeypatch, capsys):
+    """The one signal in this file worth acting on differently, in the only surface it has.
+
+    `main` reported `{"downloaded": false, "error": "ValueError"}` and exit 1 for
+    all four of the provisioning failures: a pinned-digest mismatch, a size
+    mismatch, a missing token and a URL that is not the GitHub API. The workflow
+    step's log is the whole of what an operator gets, so a supply-chain signal was
+    indistinguishable from a secret that was never set. The function level already
+    said "SHA-256"; `main` threw it away.
+    """
+    helper = _load_helper()
+    monkeypatch.setattr(helper.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(helper, "collect_read_only_diagnostic", lambda: {"ok": True, "writes_performed": False})
+    monkeypatch.setattr(helper, "_download_release_asset", lambda asset_id, token, destination: destination.write_bytes(b"not the asset"))
+
+    status = helper.main(["--asset-id", "595488871"])
+
+    assert status == 1
+    report = json.loads(capsys.readouterr().out)["cubeprogrammer_cache"]
+    assert report["downloaded"] is False
+    assert report["error"] == "ValueError"
+    assert "SHA-256" in report["error_detail"], report
+    assert "pinned digest" in report["error_detail"], report
+
+
+def test_an_error_message_never_carries_this_machines_home_or_user(monkeypatch):
+    """Redacted, never removed, which is the rule the dropped message was breaking.
+
+    The case the caution was written for is an `OSError` whose text embeds a path
+    under the home directory. The values are matched whole, so a longer word that
+    merely contains one is left alone.
+    """
+    helper = _load_helper()
+    monkeypatch.setattr(helper.os.path, "expanduser", lambda path: "/home/benchrunner")
+    monkeypatch.setattr(helper.getpass, "getuser", lambda: "benchrunner")
+    monkeypatch.setattr(helper.socket, "gethostname", lambda: "bench-1.example.invalid")
+
+    line = helper.withheld(OSError(13, "Permission denied", "/home/benchrunner/.cache/agentic-hil/x.zip"))
+
+    assert "benchrunner" not in line, line
+    assert "bench-1" not in line, line
+    assert "Permission denied" in line, line
+    assert "[withheld]" in line, line
+    # Whole values only: a longer name that contains one is not this machine.
+    assert helper.withheld("benchrunnerless said no") == "benchrunnerless said no"
+
+
+def test_the_read_only_half_carries_its_own_error_line_too(monkeypatch, capsys):
+    """The sibling path at the top of `main`, for the same reason: a sysfs scan that
+    failed says why, and the class alone said nothing an operator could act on."""
+    helper = _load_helper()
+
+    def refuse():
+        raise RuntimeError("bench runner discovery is unavailable")
+
+    monkeypatch.setattr(helper, "collect_read_only_diagnostic", refuse)
+
+    assert helper.main([]) == 1
+
+    report = json.loads(capsys.readouterr().out)["diagnostic"]
+    assert (report["ok"], report["error"]) == (False, "RuntimeError")
+    assert report["error_detail"] == "bench runner discovery is unavailable"
