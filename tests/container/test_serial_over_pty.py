@@ -597,7 +597,7 @@ steps:
   - {port_id: dut, action: uart_write, text: "PING\\r\\n"}
   - {port_id: dut, action: uart_expect, text: "PONG", timeout_s: 5}
   - {port_id: dut, action: uart_write, text: "VERSION\\r\\n"}
-  - {port_id: dut, action: uart_read, comparator: {pattern: "^v(\\\\d+)\\\\.2\\\\.3", range: {min: 1, max: 9}}, timeout_s: 5}
+  - {port_id: dut, action: uart_read, comparator: {pattern: "(?m)^v(\\\\d+)\\\\.2\\\\.3", range: {min: 1, max: 9}}, timeout_s: 5}
   - {port_id: dut, action: uart_read}
   - {port_id: dut, action: uart_close}
 """
@@ -1116,7 +1116,7 @@ name: pty-claim-shapes
 steps:
   - {port_id: dut, action: uart_open}
   - {port_id: dut, action: uart_write, text: "VERSION\\r\\n"}
-  - {port_id: dut, action: uart_read, comparator: {pattern: "^v\\\\d+\\\\.\\\\d+\\\\.\\\\d+"}, timeout_s: 5}
+  - {port_id: dut, action: uart_read, comparator: {pattern: "(?m)^v\\\\d+\\\\.\\\\d+\\\\.\\\\d+"}, timeout_s: 5}
   - {port_id: dut, action: uart_write, text: "VERSION\\r\\n"}
   - {port_id: dut, action: uart_read, comparator: {equals: "v1.2.3"}, timeout_s: 5}
   - {port_id: dut, action: uart_write, text: "COUNT\\r\\n"}
@@ -1152,7 +1152,7 @@ V2_EXPECT_PLAN = """version: 2
 name: pty-v2-expect
 steps:
   - {port_id: dut, action: uart_open}
-  - {port_id: dut, action: uart_expect, pattern: "^v(\\\\d+)\\\\.\\\\d+\\\\.\\\\d+", timeout_s: 5}
+  - {port_id: dut, action: uart_expect, pattern: "(?m)^v(\\\\d+)\\\\.\\\\d+\\\\.\\\\d+", timeout_s: 5}
   - {port_id: dut, action: uart_close}
 """
 
@@ -1185,7 +1185,7 @@ def test_a_pattern_an_equals_and_a_range_claim_are_each_met_by_the_line_they_des
     assert all(step["result"]["ok"] is True for step in result["steps"]), result["steps"]
 
     by_pattern = result["steps"][2]["result"]
-    assert by_pattern["comparator"] == {"pattern": "^v\\d+\\.\\d+\\.\\d+"}, by_pattern
+    assert by_pattern["comparator"] == {"pattern": "(?m)^v\\d+\\.\\d+\\.\\d+"}, by_pattern
     assert by_pattern["matched_text"]["text"] == "v1.2.3", by_pattern
     assert by_pattern["summary"] == "Expected pattern matched the COM port output.", by_pattern
 
@@ -1290,6 +1290,6 @@ def test_a_version_2_plan_waits_for_a_pattern_the_line_says_on_its_own(pty_pair:
     assert [step["action"] for step in result["steps"]] == ["uart_open", "uart_expect", "uart_close"], result["steps"]
     expect = result["steps"][1]["result"]
     assert expect["ok"] is True, expect
-    assert expect["expected_pattern"] == "^v(\\d+)\\.\\d+\\.\\d+", expect
+    assert expect["expected_pattern"] == "(?m)^v(\\d+)\\.\\d+\\.\\d+", expect
     assert expect["bytes_received"] >= len(b"v1.2.3\r\n"), expect
     assert expect["summary"] == "Expected pattern matched the COM port output.", expect
