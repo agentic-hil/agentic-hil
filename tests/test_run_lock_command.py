@@ -106,6 +106,35 @@ def a_lock_held_by(pid: int, **fields: object) -> Path:
     return path
 
 
+def a_lock_left_for_cleanup(pid: int, detail: str) -> Path:
+    """The record a run leaves when it could not confirm its container removed.
+
+    Written as `RunLock.retain_for_cleanup` writes it, the cleanup mark and the
+    version that makes an older checkout fail closed together, because both are
+    what the next run meets on the machine.
+    """
+    return a_lock_held_by(pid, cleanup_required=detail, version=run_lock.LOCK_CLEANUP_RECORD_VERSION)
+
+
+def a_lock_that_carries_no_owner_id(pid: int) -> Path:
+    """A holder record with no owner id: a legacy one, or one an edit has mangled.
+
+    Nothing this tool writes is missing the field, so the file is built here by
+    taking it back out again rather than by naming one of the tools that could
+    have left it.
+    """
+    path = a_lock_held_by(pid)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    del record["owner_id"]
+    path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def never_waits(seconds: float) -> None:
+    """The poll seam, for the locks no run may ever queue on."""
+    raise AssertionError("the run queued on a lock that only an operator can clear")
+
+
 def the_record() -> dict:
     return json.loads(run_lock.lock_path().read_text(encoding="utf-8"))
 
@@ -290,6 +319,46 @@ def test_take_with_no_wait_refuses_a_held_machine(
     assert names_this_machine(said) == []
 
 
+def test_take_refuses_a_cleanup_required_lock_rather_than_queueing_on_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The one holder a take is refused by even though it asked to queue.
+
+    Queueing works because a holder finishes. A cleanup-required record is left
+    by a run that has already finished and could not confirm its container gone:
+    its pid is provably dead, the machine is in use anyway, and nothing a waiting
+    run can wait for ever clears it. Only an operator who has stopped that
+    container does. A take that queued on it would poll until its step's limit
+    and fail with nothing having reached the board, every night, so it is refused
+    in seconds instead, carrying the record's own line about what is still on the
+    machine and the one step that clears it. The record is left standing: it is
+    still never broken, only never queued on.
+    """
+    state = tmp_path / "run-lock.json"
+    left_behind = "container agentic-hil-bench-0badc0de still exists after removal, so it may still hold the board."
+    a_lock_left_for_cleanup(4242, left_behind)
+    # Nothing at all is running, so the mark is the only thing holding the
+    # machine, and a wait here would be a wait that could never end.
+    monkeypatch.setattr(run_lock, "process_is_running", lambda pid: False)
+    monkeypatch.setattr(run_lock, "wait_for_the_holder", never_waits)
+
+    assert take(state) == 5
+
+    assert the_record()[run_lock.CLEANUP_REQUIRED_FIELD] == left_behind
+    assert not state.exists()
+    said = capsys.readouterr().err
+    # The decisive line the record holds, and what the operator has to do, all
+    # the way out to what this command leaves on stderr. The container's name is
+    # matched from its run id on, because the withholding rewrites whatever of it
+    # happens to be one of this machine's own names: on a machine whose user is
+    # called bench, that word is taken out of every line this command prints.
+    assert "0badc0de still exists after removal, so it may still hold the board." in said
+    assert "could not confirm removed" in said
+    assert "remove the lock file by hand" in said
+    assert "nothing was taken" in said
+    assert names_this_machine(said) == []
+
+
 # give-back
 
 
@@ -337,6 +406,53 @@ def test_give_back_never_removes_another_runs_lock_and_says_the_machine_was_lost
     said = capsys.readouterr().err
     assert "pid 4242" in said
     assert names_this_machine(said) == []
+
+
+def test_give_back_never_removes_a_lock_when_neither_side_carries_an_owner_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two missing owner ids are not a match, and are not treated as one.
+
+    `give-back` returns what the take took and nothing that is not its own, and
+    the only thing that tells one lock from another is the owner id. A state file
+    without one and a holder record without one compare equal if they are simply
+    compared, so this would delete a lock it cannot prove is the take's: another
+    run's machine given away while it is mid-container, reported as a clean give
+    back. It declines instead, says which side left it unable to tell, and fails
+    the job, because a take that recorded holding the machine and cannot now
+    prove it may have shared the board.
+    """
+    state = tmp_path / "run-lock.json"
+    state.write_text(json.dumps({"held": True}) + "\n", encoding="utf-8")
+    a_lock_that_carries_no_owner_id(4242)
+
+    assert run_lock.main(["give-back", "--state", str(state)]) == 1
+
+    assert the_record()["pid"] == 4242
+    said = capsys.readouterr().err
+    assert "no owner id" in said
+    assert "gave the machine back" not in said
+    assert names_this_machine(said) == []
+
+
+def test_give_back_of_a_take_with_no_owner_id_that_never_held_the_machine_removes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same guard where the take never got the machine: nothing to give back,
+    and still nothing here may remove a lock it cannot recognise. The take is
+    over either way, so this does not fail the job; it says why it left the file
+    standing rather than reporting a give back it did not perform."""
+    state = tmp_path / "run-lock.json"
+    state.write_text(json.dumps({"held": False}) + "\n", encoding="utf-8")
+    a_lock_that_carries_no_owner_id(4242)
+
+    assert run_lock.main(["give-back", "--state", str(state)]) == 0
+
+    assert the_record()["pid"] == 4242
+    assert not state.exists()
+    said = capsys.readouterr().err
+    assert "no owner id" in said
+    assert "gave the machine back" not in said
 
 
 def test_give_back_without_a_take_has_nothing_to_do(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -475,6 +591,32 @@ def test_run_with_no_wait_behind_a_live_holder_runs_nothing(
     assert names_this_machine(capsys.readouterr().err) == []
 
 
+def test_run_refuses_a_cleanup_required_lock_and_runs_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same refusal on the other command, and without `--no-wait` here too:
+    a command wrapped by `run` would otherwise wait out a record only an operator
+    can clear, which is a wait with no end, while the board it was going to drive
+    is held by a container nobody can see."""
+    ran = tmp_path / "ran"
+    left_behind = "container agentic-hil-loop-0badc0de still exists after removal."
+    a_lock_left_for_cleanup(4242, left_behind)
+    monkeypatch.setattr(run_lock, "process_is_running", lambda pid: False)
+    monkeypatch.setattr(run_lock, "wait_for_the_holder", never_waits)
+
+    status = run_lock.main(["run", "--", sys.executable, "-c", f"open({str(ran)!r}, 'w').close()"])
+
+    assert status == 5
+    assert not ran.exists()
+    assert the_record()[run_lock.CLEANUP_REQUIRED_FIELD] == left_behind
+    said = capsys.readouterr().err
+    # From the run id on, for the reason the take's own test gives.
+    assert "0badc0de still exists after removal." in said
+    assert "remove the lock file by hand" in said
+    assert "nothing was run" in said
+    assert names_this_machine(said) == []
+
+
 @pytest.mark.parametrize("argv", [["run"], ["run", "--"]])
 def test_run_without_a_command_is_refused(argv: list[str]) -> None:
     with pytest.raises(SystemExit) as refused:
@@ -495,7 +637,9 @@ def test_run_of_a_command_that_cannot_start_gives_the_machine_back(
 
 
 # A command that waits to be told to stop, and takes its time over it, the
-# way the tier puts the demo back on the board when it is interrupted.
+# way the tier puts the demo back on the board when it is interrupted. It
+# answers both of the signals a supervisor stops a step with, because both are
+# passed on to it and the cleanup it does is the same either way.
 A_COMMAND_THAT_CLEANS_UP = """
 import signal, sys, time
 from pathlib import Path
@@ -503,14 +647,15 @@ def stopping(signum, frame):
     time.sleep(1)
     Path(sys.argv[1]).write_text("cleaned up", encoding="utf-8")
     sys.exit(7)
+signal.signal(signal.SIGINT, stopping)
 signal.signal(signal.SIGTERM, stopping)
 Path(sys.argv[2]).write_text("started", encoding="utf-8")
 time.sleep(600)
 """
 
 
-@pytest.mark.skipif(os.name == "nt", reason="SIGTERM on Windows is TerminateProcess, which no process can answer")
-def test_run_passes_a_termination_on_and_holds_the_machine_until_the_command_is_done(tmp_path: Path) -> None:
+def a_run_of_a_command_that_cleans_up(tmp_path: Path) -> tuple[subprocess.Popen, Path, Path]:
+    """`run --` over the command above: the wrapper, and the two files it writes."""
     cleaned, started = tmp_path / "cleaned", tmp_path / "started"
     wrapper = subprocess.Popen(
         [
@@ -526,10 +671,47 @@ def test_run_passes_a_termination_on_and_holds_the_machine_until_the_command_is_
         ],
         stderr=subprocess.DEVNULL,
     )
+    return wrapper, cleaned, started
+
+
+@pytest.mark.skipif(os.name == "nt", reason="SIGTERM on Windows is TerminateProcess, which no process can answer")
+def test_run_passes_a_termination_on_and_holds_the_machine_until_the_command_is_done(tmp_path: Path) -> None:
+    wrapper, cleaned, started = a_run_of_a_command_that_cleans_up(tmp_path)
     try:
         eventually(started.exists, "the command started under the lock")
         wrapper.send_signal(signal.SIGTERM)
         # The command is still cleaning up, and the machine is still held.
+        time.sleep(0.3)
+        assert wrapper.poll() is None
+        assert the_record()["pid"] == wrapper.pid
+        assert wrapper.wait(timeout=scaled_time_bound(30)) == 7
+    finally:
+        stop(wrapper)
+
+    assert cleaned.read_text(encoding="utf-8") == "cleaned up"
+    assert not run_lock.lock_path().exists()
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="a Windows interrupt is a console event every process on the console gets, which is what that platform relies on",
+)
+def test_run_passes_an_interrupt_on_and_holds_the_machine_until_the_command_is_done(tmp_path: Path) -> None:
+    """An interrupt sent to this wrapper alone has to reach the command.
+
+    The interrupt is sent here to the wrapper's pid and to nothing else, which is
+    how a supervisor that stops one process stops it: a runner cancelling or
+    timing out a step sends SIGINT that way first, and only later a termination
+    and a kill. A wrapper that discarded it would leave the command running
+    untouched for the whole of that grace window, so a board command would not
+    begin to put the board back until the kill arrived, and then could not. It is
+    passed on instead, and the machine stays held while the command cleans up,
+    exactly as a termination is.
+    """
+    wrapper, cleaned, started = a_run_of_a_command_that_cleans_up(tmp_path)
+    try:
+        eventually(started.exists, "the command started under the lock")
+        wrapper.send_signal(signal.SIGINT)
         time.sleep(0.3)
         assert wrapper.poll() is None
         assert the_record()["pid"] == wrapper.pid
