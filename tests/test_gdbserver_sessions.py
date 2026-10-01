@@ -39,6 +39,7 @@ from agentic_hil.backends.common import invocation
 from agentic_hil.backends.pyocd import SESSIONLESS_DEBUG_READS, pack_install_commands
 from agentic_hil.backends.stlink import SESSIONLESS_DEBUG_READS as ST_LINK_SESSIONLESS_DEBUG_READS
 from agentic_hil.config import load_config, resolve_work_path
+from agentic_hil.gdbmi import GdbMiCommandResult
 from agentic_hil.tools import AgenticHILToolService
 
 IMAGE = "<image>"
@@ -52,6 +53,11 @@ OPENOCD_SESSION_PROLOGUE = [
     f"-file-exec-and-symbols {IMAGE}",
     f"-target-select extended-remote localhost:{PORT}",
 ]
+# What a session takes its breakpoints off the target with, on a server that is
+# ended before GDB detaches: the backend's own list, a delete per number it
+# reports, and the list read back. OpenOCD sends none of it, because its detach
+# carries the removal and its server is still there to carry it.
+BREAKPOINT_REMOVAL = ["-break-list", "-break-delete 1", "-break-list"]
 
 
 def session_log(service, started: dict) -> dict:
@@ -269,7 +275,14 @@ def test_pyocd_sessions_send_no_openocd_command(tmp_path: Path, monkeypatch: pyt
     answers an unknown monitor command with `^done` after an `Error:` record
     (scenario `unknown_monitor_command`), so sending it would have looked like
     success. No command takes its place, because the guard here is the server
-    ending before GDB does."""
+    ending before GDB does.
+
+    What does take the place of the detach is the breakpoint removal: a GDB that
+    detaches takes its breakpoints off the target, and a GDB whose server was
+    ended under it cannot, so the session deletes them and reads the backend's
+    list back before the server goes. `BREAKPOINT_REMOVAL` is that, and
+    `test_a_session_takes_its_breakpoints_off_the_target_before_its_server_is_ended`
+    pins it against the moment the server is ended."""
     service, _ = pyocd_session_service(tmp_path, monkeypatch)
     try:
         started = run_breakpoint_cycle(service, mode)
@@ -281,6 +294,7 @@ def test_pyocd_sessions_send_no_openocd_command(tmp_path: Path, monkeypatch: pyt
         *after_connect,
         '-break-insert "test_done"',
         "-exec-continue",
+        *BREAKPOINT_REMOVAL,
         "-gdb-exit",
     ]
 
@@ -644,7 +658,9 @@ def test_st_link_sessions_send_no_openocd_command(tmp_path: Path, monkeypatch: p
     option`, then `Protocol error with Rcmd`, scenario `session_attach_connect`),
     and so is the detach guard, as any monitor command it does not know. No
     command takes the guard's place: the guard here is the server being gone
-    before GDB detaches."""
+    before GDB detaches, which is also why the session takes its breakpoints off
+    the target itself (`BREAKPOINT_REMOVAL`), where a detach GDB got to finish
+    would have carried that."""
     service, _ = st_link_session_service(tmp_path, monkeypatch)
     try:
         started = run_breakpoint_cycle(service, mode)
@@ -656,6 +672,7 @@ def test_st_link_sessions_send_no_openocd_command(tmp_path: Path, monkeypatch: p
         *after_connect,
         '-break-insert "test_done"',
         "-exec-continue",
+        *BREAKPOINT_REMOVAL,
         "-gdb-exit",
     ]
 
@@ -1005,3 +1022,149 @@ def test_st_link_ready_line_is_the_line_the_port_was_listening_by() -> None:
     assert lines[-1] == ST_LINK_READY_LINE
     assert ST_LINK_GDB_SERVER_STEPS.is_ready_line(lines[-1], port) is True
     assert [line for line in lines[:-1] if ST_LINK_GDB_SERVER_STEPS.is_ready_line(line, port)] == []
+
+
+# --- Breakpoints on a server that is ended before GDB detaches ----------------
+#
+# Both servers above resume the core when their GDB client leaves, and neither
+# has a command that stops that, so both are ended while GDB is still connected.
+# That also ends the detach, and a GDB that detaches is what takes its
+# breakpoints off the target: a comparator left in the core is what the next
+# opener of the probe meets. So the session deletes them itself, reconciled
+# against the backend's own list, before its server goes. OpenOCD's teardown
+# sends none of that and is held to its unchanged sequence above.
+
+NEXT_CONNECT_RECORDING = Path(__file__).parent / "fixtures" / "pyocd_0_45_1_gdbserver_next_connect_recordings.json"
+
+
+def commands_by_each_server_end(service, monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """The GDB/MI commands the session had sent by the time each of its servers was ended, in order.
+
+    Read off the live session while the end runs, because the claim is about the
+    order of two processes: a delete GDB sends once its server is gone reaches
+    no target at all."""
+    terminate = gdbdebug.terminate_process_tree
+    sent: list[list[str]] = []
+
+    def recorded(process, timeout_s, **kwargs):
+        session = service.backend._debug.session
+        if session is not None and process is session.server and session.gdb is not None:
+            sent.append([str(entry["command"]) for entry in session.gdb.history()])
+        return terminate(process, timeout_s, **kwargs)
+
+    monkeypatch.setattr(gdbdebug, "terminate_process_tree", recorded)
+    return sent
+
+
+@pytest.mark.parametrize("session_service", [pyocd_session_service, st_link_session_service], ids=["pyocd", "stlink"])
+def test_a_session_takes_its_breakpoints_off_the_target_before_its_server_is_ended(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session_service) -> None:
+    """The delete and the list that confirms it are sent while the server is still there, and the stop says so.
+
+    By the time the server is ended, GDB has deleted every breakpoint the
+    backend reported and read the list back empty, and it has not exited yet:
+    the removal travelled over a connection that still had a server behind it.
+    The stop then reports the removal confirmed, carries no breakpoints, and the
+    session log holds what was cleared."""
+    service, _ = session_service(tmp_path, monkeypatch)
+    ends = commands_by_each_server_end(service, monkeypatch)
+    try:
+        started = start_debug_session(service, mode="attach")
+        assert started["ok"] is True, started
+        assert service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}})["ok"] is True
+        stopped = service.call("debug_stop_session")
+    finally:
+        service.close()
+
+    assert stopped["ok"] is True, stopped
+    assert stopped["breakpoints_removed_confirmed"] is True, stopped
+    assert stopped["safe_state_confirmed"] is True, stopped
+    assert stopped["session"]["breakpoints"] == [], stopped
+    assert ends, "the session ended no debug server"
+    assert ends[0][-len(BREAKPOINT_REMOVAL) :] == BREAKPOINT_REMOVAL, ends[0]
+    assert "-gdb-exit" not in ends[0], ends[0]
+    assert session_log(service, started)["breakpoint_removal"] == {
+        "kind": "breakpoints_removed_before_server_end",
+        "confirmed": True,
+        "stage": "removed",
+        "cleared": 1,
+    }
+
+
+@pytest.mark.parametrize("session_service", [pyocd_session_service, st_link_session_service], ids=["pyocd", "stlink"])
+def test_a_breakpoint_removal_the_backend_does_not_confirm_is_not_reported_as_a_clean_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session_service) -> None:
+    """A backend that still reports a breakpoint after the delete: the stop keeps the session instead of claiming it is clean.
+
+    The confirming list is answered with the breakpoint still in it, which is
+    the one answer that proves the removal did not take. The halt is still
+    confirmed and the server still goes before GDB, so the one thing the stop
+    cannot say is that nothing was left on the target, and it says that in the
+    same unconfirmed-teardown vocabulary a halt or a guard that could not be
+    proved uses."""
+    service, _ = session_service(tmp_path, monkeypatch)
+    try:
+        started = start_debug_session(service, mode="attach")
+        assert started["ok"] is True, started
+        assert service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}})["ok"] is True
+        debug = service.backend._debug
+        original = debug._gdb_command
+        first_list: dict[str, str | None] = {"line": None}
+
+        def the_breakpoint_is_still_there(session, command: str, timeout_s=None, **kwargs):
+            response = original(session, command, timeout_s, **kwargs)
+            if not command.startswith("-break-list"):
+                return response
+            if first_list["line"] is None:
+                first_list["line"] = str(response.line)
+                return response
+            # The list GDB answered before the delete, given again as the answer
+            # after it: a backend that still reports the breakpoint, in GDB's
+            # own words rather than in words made up here.
+            return GdbMiCommandResult(result_class="done", line=str(first_list["line"]))
+
+        monkeypatch.setattr(debug, "_gdb_command", the_breakpoint_is_still_there)
+        stopped = service.call("debug_stop_session")
+        status = service.call("debug_get_session_status")
+    finally:
+        close_unsettled(service)
+
+    assert stopped["ok"] is False, stopped
+    assert stopped["error_type"] == "breakpoints_not_removed", stopped
+    assert stopped["breakpoints_removed_confirmed"] is False, stopped
+    assert stopped["halt_not_confirmed"] is False, stopped
+    assert stopped["safe_state_confirmed"] is False, stopped
+    assert stopped["hardware_state"] == "unknown", stopped
+    assert stopped["cleanup_required"] is True, stopped
+    assert "breakpoints could not be confirmed removed" in stopped["summary"], stopped
+    assert stopped["session"]["breakpoints"], stopped
+    assert status["quarantined"] is True, status
+    removal = session_log(service, started)["breakpoint_removal"]
+    assert removal["confirmed"] is False, removal
+    assert removal["stage"] == "confirm", removal
+    assert removal["remaining_backend_breakpoints"] == ["1"], removal
+
+
+def test_the_recorded_next_connect_is_why_a_deleted_breakpoint_is_deleted_before_the_server_goes() -> None:
+    """The committed pyOCD next-connect recording: the comparator of a deleted breakpoint outlives its delete.
+
+    The recorded cycle deleted the breakpoint through GDB while the server was
+    still there, then ended the server under GDB and closed GDB, the way a
+    session on this backend ends. The first connect after that found the core at
+    the address the breakpoint stopped it at, with the firmware's own uptime
+    counter unmoved, and only the connect after that one found it running:
+    pyOCD takes the comparator out on a later resume. The halt by interrupt in
+    the same recording is the control, where the first connect already found the
+    core running on.
+
+    That is the recorded reason the delete has to reach the server at all, which
+    a session whose server is killed first can no longer do."""
+    scenarios = json.loads(NEXT_CONNECT_RECORDING.read_text(encoding="utf-8"))["scenarios"]
+    deleted = scenarios["halted_on_a_deleted_breakpoint"]
+    interrupted = scenarios["halted_by_interrupt"]
+
+    assert [step["command"] for step in deleted["halted"]["steps"]].count("-break-delete") == 1, deleted["halted"]["steps"]
+    assert deleted["server_terminated"]["was_running"] is True, deleted["server_terminated"]
+    assert deleted["next_connects"][0]["pc"] == deleted["halted"]["pc"], deleted["next_connects"]
+    assert deleted["next_connects"][0]["uptime_ms"] == deleted["halted"]["uptime_ms"], deleted["next_connects"]
+    assert deleted["next_connects"][1]["pc"] != deleted["halted"]["pc"], deleted["next_connects"]
+    assert interrupted["next_connects"][0]["pc"] != interrupted["halted"]["pc"], interrupted["next_connects"]
+    assert interrupted["next_connects"][0]["uptime_ms"] > interrupted["halted"]["uptime_ms"], interrupted["next_connects"]

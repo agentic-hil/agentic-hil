@@ -64,6 +64,12 @@ SHARED_PORT_VARIABLE = "FAKE_ST_LINK_SHARED_PORT"
 # reads a refusal from its lines.
 STOPS_RECORDING = Path(__file__).with_name("st_link_gdbserver_7_14_0_linux_session_stops_recordings.json")
 USB_REFUSAL_SCENARIO = "start_refused_over_usb_after_a_killed_server"
+# A server that is still running when the start's wait runs out: set this and the
+# fake prints the recorded startup up to the ready line, then neither listens nor
+# says it does, and keeps running until it is ended. No recorded start hung, so
+# this prints no line the recording has not got: it stops where the product's
+# wait begins, which is the one case a running server's end has to be read in.
+NEVER_READY_VARIABLE = "FAKE_ST_LINK_GDBSERVER_NEVER_READY"
 output_lock = threading.Lock()
 shared_connections: list[socket.socket] = []
 
@@ -197,11 +203,12 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, terminated)
     startup = scenarios[STARTUP_SCENARIO]
+    never_ready = os.environ.get(NEVER_READY_VARIABLE) == "1"
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     for entry in startup["output"]:
         line = str(entry["line"])
-        if line in SHUTDOWN_LINES:
+        if line in SHUTDOWN_LINES or (never_ready and line == READY_LINE):
             break
         if line == READY_LINE:
             # Listening before the line says so. The real server listens on
@@ -213,7 +220,13 @@ def main() -> int:
         if PORT_WORDS in line:
             line = line.replace(f"{PORT_WORDS}{recorded_port(startup)}", f"{PORT_WORDS}{port}")
         say(line, str(entry["stream"]))
-    threading.Thread(target=serve_one_client, args=(listener, port), daemon=True).start()
+    if never_ready:
+        # Nothing to serve: the port never listened, and this server is still
+        # running when the start's wait runs out, which is the only way the end
+        # of a running server gets read at all.
+        event("never_listening", port=port)
+    else:
+        threading.Thread(target=serve_one_client, args=(listener, port), daemon=True).start()
     while True:
         time.sleep(3600)
 

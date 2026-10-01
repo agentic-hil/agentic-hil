@@ -350,6 +350,16 @@ DIRECT_PROBE_STOP_RISK = (
 )
 
 
+def direct_probe_companion(record: JsonObject) -> ServerCompanion:
+    """The companion of a session whose GDB server opens the probe's USB itself.
+
+    No process of its own, the reason it came to this in `record`, and the risk
+    every one of them carries. `stop_leaves_probe_unconfirmed` is what the
+    session layer reads that risk off: a start that fails and has to kill this
+    server cannot report the probe as untouched (`DIRECT_PROBE_STOP_RISK`)."""
+    return ServerCompanion(None, {"mode": "direct", **record, "stop_risk": DIRECT_PROBE_STOP_RISK}, stop_leaves_probe_unconfirmed=True)
+
+
 def find_stlink_server() -> str | None:
     """The stlink-server on this host's PATH, as `shutil.which` names it."""
     return shutil.which("stlink-server")
@@ -1153,14 +1163,14 @@ class STLinkBackend:
             return ServerCompanion(None, {"mode": "shared", "started_by_session": False, "port": port, "ended": False})
         executable = find_stlink_server()
         if executable is None:
-            return ServerCompanion(None, {"mode": "direct", "reason": "No stlink-server was found on PATH, so ST-LINK_gdbserver opens the probe's USB itself.", "stop_risk": DIRECT_PROBE_STOP_RISK})
+            return direct_probe_companion({"reason": "No stlink-server was found on PATH, so ST-LINK_gdbserver opens the probe's USB itself."})
         log_path = Path(logs_directory(self.config)) / f"stlink-server-{timestamp_for_filename()}.log"
         began = time.monotonic()
         try:
             with open(log_path, "wb") as log:
                 process = spawn_managed_process([*invocation(executable)], cwd=str(Path(executable).parent), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         except OSError as error:
-            return ServerCompanion(None, {"mode": "direct", "reason": f"stlink-server could not be started ({type(error).__name__}: {error}), so ST-LINK_gdbserver opens the probe's USB itself.", "executable": executable, "stop_risk": DIRECT_PROBE_STOP_RISK})
+            return direct_probe_companion({"reason": f"stlink-server could not be started ({type(error).__name__}: {error}), so ST-LINK_gdbserver opens the probe's USB itself.", "executable": executable})
         deadline = began + max(0.0, min(timeout_s, STLINK_SERVER_LISTEN_TIMEOUT_S))
         while True:
             if stlink_server_listening(port):
@@ -1188,17 +1198,14 @@ class STLinkBackend:
             if exited
             else f"stlink-server did not listen on port {port} within {int(min(timeout_s, STLINK_SERVER_LISTEN_TIMEOUT_S))} s and was ended"
         )
-        return ServerCompanion(
-            None,
+        return direct_probe_companion(
             {
-                "mode": "direct",
                 "reason": f"{reason}, so ST-LINK_gdbserver opens the probe's USB itself.",
                 "executable": executable,
                 "returncode": process.returncode,
                 "output_tail": output_tail(log_path),
                 "log_path": display_path(self.config, str(log_path)),
-                "stop_risk": DIRECT_PROBE_STOP_RISK,
-            },
+            }
         )
 
     def _debug_start_failure(self, output: str, server_args: list[str]) -> JsonObject | None:

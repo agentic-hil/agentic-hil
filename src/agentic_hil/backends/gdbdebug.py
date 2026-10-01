@@ -106,20 +106,51 @@ OUTPUT_TAIL_CHARS = 65536
 # this many times in all, and names every connect it retried.
 ATTACH_CONNECT_ATTEMPTS = 3
 DROPPED_CONNECT_PREFIX = "Remote communication error.  Target disconnected"
-# Keyed by (halt unconfirmed, detach-guard unconfirmed). A retry that could not
-# gather new evidence reports both as unconfirmed even when only one was the
-# original cause, so the phrasing has to make sense for that combination too,
-# not just for whichever single proof failed on the attempt that discovered it.
-_UNCONFIRMED_TEARDOWN_PROOFS = {
-    (True, False): "the target's halt could not be reconfirmed",
-    (False, True): "the backend's auto-resume-on-detach override could not be confirmed installed",
-    (True, True): "neither the target's halt nor the backend's auto-resume-on-detach override could be reconfirmed",
-}
-_UNCONFIRMED_TEARDOWN_CLOSE_REASONS = {
-    (True, False): "the target was halted",
-    (False, True): "the backend's auto-resume-on-detach override was installed",
-    (True, True): "the target was halted or the backend's auto-resume-on-detach override was installed",
-}
+@dataclass(frozen=True)
+class _TeardownProof:
+    """One thing a session teardown has to prove: the `error_type` a result that
+    did not get it carries, the words that result names it by, and the words
+    `close()` raises with."""
+
+    error_type: str
+    unconfirmed: str
+    close_reason: str
+
+
+# In the order a teardown takes them. The first proof missing names the error;
+# every missing one is named in the summary. A retry that could not gather new
+# evidence reports all of them as unconfirmed even when only one was the original
+# cause, so the phrasing has to make sense for any combination, not just for
+# whichever single proof failed on the attempt that discovered it.
+_TEARDOWN_PROOFS = (
+    _TeardownProof("halt_not_confirmed", "the target's halt could not be reconfirmed", "the target was halted"),
+    _TeardownProof(
+        "breakpoints_not_removed",
+        "this session's breakpoints could not be confirmed removed from the target",
+        "this session's breakpoints were removed from the target",
+    ),
+    _TeardownProof(
+        "detach_resume_not_confirmed",
+        "the backend's auto-resume-on-detach override could not be confirmed installed",
+        "the backend's auto-resume-on-detach override was installed",
+    ),
+)
+
+
+def _unconfirmed_teardown_proofs(confirmed: tuple[bool, ...]) -> list[_TeardownProof]:
+    """The proofs a teardown did not get, in the order it took them."""
+    return [proof for proof, proven in zip(_TEARDOWN_PROOFS, confirmed, strict=True) if not proven]
+
+
+def _joined_clauses(clauses: list[str], conjunction: str) -> str:
+    """The clauses as one sentence fragment, joined by `conjunction`."""
+    if len(clauses) == 1:
+        return clauses[0]
+    if len(clauses) == 2:
+        return f"{clauses[0]} {conjunction} {clauses[1]}"
+    return f"{', '.join(clauses[:-1])}, {conjunction} {clauses[-1]}"
+
+
 MONITOR_RESET_HALT_COMMAND = '-interpreter-exec console "monitor reset halt"'
 # The phases a start is in before GDB has connected: the debug server may be
 # running, but nothing has reached the target through GDB yet.
@@ -204,11 +235,19 @@ class ServerCompanion:
     the probe directly. `record` is what the session reports about it, as
     `probe_server` beside the session, and gains `ended` and `returncode` once
     the session has ended the process. That is only ever after the GDB server
-    has exited, so the server is never cut off from the probe while it runs."""
+    has exited, so the server is never cut off from the probe while it runs.
+
+    `stop_leaves_probe_unconfirmed` is the backend's own statement that ending
+    this session's GDB server can leave the in-circuit debugger or programmer
+    refusing its next opener, which the record names in `stop_risk`
+    (ST-LINK_gdbserver killed while it held the probe's USB itself, recorded).
+    A start that failed and had to end such a server therefore cannot report
+    the hardware as untouched: see `_startup_effect_fields`."""
 
     process: subprocess.Popen | None
     record: JsonObject
     ended: bool = False
+    stop_leaves_probe_unconfirmed: bool = False
 
 
 def console_output(records: list[str]) -> list[str]:
@@ -259,6 +298,15 @@ class GdbDebugSession:
         # GDB detached, and whether it was gone. Logged with the session, so the
         # evidence for a guard confirmed this way is the server's own exit.
         self.detach_guard: JsonObject | None = None
+        # What the teardown of a server that goes before GDB detaches did about
+        # this session's breakpoints, while GDB could still reach the target.
+        # Logged with the session: see `_remove_breakpoints_before_end`.
+        self.breakpoint_removal: JsonObject | None = None
+        # Whether this session itself ended a debug server that was still
+        # running, rather than finding one that had exited on its own. What such
+        # an end can leave behind is the backend's to say
+        # (`ServerCompanion.stop_leaves_probe_unconfirmed`).
+        self.server_ended_while_running = False
         # The server this session's GDB server reaches the probe through, where
         # its backend starts one (see ServerCompanion).
         self.companion: ServerCompanion | None = None
@@ -449,7 +497,7 @@ class GdbDebugSessions:
                 raise
             result = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debug_session_setup_failed", "summary": "Debug server output readers could not be started.", "backend_error": str(error)}
             if cleanup_error is not None:
-                result.update({"cleanup_required": True, "cleanup_error": cleanup_error})
+                result.update({"cleanup_required": True, "cleanup_error": cleanup_error, **self._probe_server_fields(session)})
             else:
                 result.update({"cleanup_confirmed": True, **self._startup_effect_fields(session)})
                 if result.get("cleanup_required") is True:
@@ -467,6 +515,7 @@ class GdbDebugSessions:
             if cleanup_error is not None:
                 failure["cleanup_error"] = cleanup_error
                 failure["cleanup_required"] = True
+                failure.update(self._probe_server_fields(session))
                 session.status = "cleanup_required"
             else:
                 failure.update({"cleanup_confirmed": True, **self._startup_effect_fields(session, timed_out=True)})
@@ -491,7 +540,7 @@ class GdbDebugSessions:
                 raise
             result = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "gdb_start_failed", "summary": "GDB/MI process could not be initialized.", "backend_error": str(error)}
             if cleanup_error is not None:
-                result.update({"cleanup_required": True, "cleanup_error": cleanup_error})
+                result.update({"cleanup_required": True, "cleanup_error": cleanup_error, **self._probe_server_fields(session)})
             else:
                 result.update({"cleanup_confirmed": True, **self._startup_effect_fields(session)})
                 if result.get("cleanup_required") is True:
@@ -546,10 +595,14 @@ class GdbDebugSessions:
             timeout = min(timeout, max(0.1, timeout_s))
         # Fixed sequence, in this order, every time a session ends: confirm the
         # target is halted (reconfirming with an explicit interrupt if the last
-        # known state does not already say so), tell the backend not to resume it
-        # on its own once this connection goes away, and only then tear the
-        # connection down. See `_confirm_halted_before_end` and
-        # `_pin_no_resume_on_detach` for why each step exists.
+        # known state does not already say so), take this session's breakpoints
+        # off the target while GDB can still reach it, tell the backend not to
+        # resume it on its own once this connection goes away, and only then
+        # tear the connection down. See `_confirm_halted_before_end`,
+        # `_remove_breakpoints_before_end` and `_pin_no_resume_on_detach` for
+        # why each step exists, and why the breakpoints go before the guard: on
+        # a server that is ended as its guard, the guard is also the moment the
+        # removal can no longer be carried to the target.
         #
         # Skipped when the session already entered as cleanup_required *and*
         # that state was left by a plain process-cleanup failure, not by a
@@ -561,32 +614,37 @@ class GdbDebugSessions:
         #
         # A target-state incident is different: nothing about retrying this
         # call can manufacture new evidence about a connection that is
-        # already, permanently gone, so `halt_confirmed`/`detach_pinned` stay
-        # false and the incident is preserved every time this is called again,
-        # until an operator's recovery or a later machine action that resets
-        # and rereads the target establishes the board state. That is tracked
-        # at the lease level, not synthesized here from a retry alone.
+        # already, permanently gone, so every proof stays false and the
+        # incident is preserved every time this is called again, until an
+        # operator's recovery or a later machine action that resets and rereads
+        # the target establishes the board state. That is tracked at the lease
+        # level, not synthesized here from a retry alone.
         already_unsettled = session.status == "cleanup_required"
         retry_without_new_evidence = already_unsettled and session.hardware_state_unconfirmed
         if retry_without_new_evidence:
-            halt_confirmed = False
-            detach_pinned = False
+            proofs = (False, False, False)
         elif already_unsettled:
-            halt_confirmed = True
-            detach_pinned = True
+            proofs = (True, True, True)
         else:
-            halt_confirmed = self._confirm_halted_before_end(session, timeout)
-            detach_pinned = self._pin_no_resume_on_detach(session, timeout)
+            # One statement each, in the order the sequence above describes: the
+            # guard is also the end of the connection the removal travels over.
+            halted = self._confirm_halted_before_end(session, timeout)
+            removed = self._remove_breakpoints_before_end(session, timeout)
+            pinned = self._pin_no_resume_on_detach(session, timeout)
+            proofs = (halted, removed, pinned)
+        halt_confirmed, breakpoints_removed, detach_pinned = proofs
+        teardown_fields: JsonObject = {"halt_not_confirmed": not halt_confirmed, "breakpoints_removed_confirmed": breakpoints_removed, "detach_resume_guard_confirmed": detach_pinned}
+        unconfirmed = _unconfirmed_teardown_proofs(proofs)
         cleanup_error = self._cleanup_session(session, timeout)
         if cleanup_error is not None:
             session.status = "cleanup_required"
-            if not halt_confirmed or not detach_pinned:
+            if unconfirmed:
                 session.hardware_state_unconfirmed = True
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": True, "status": "cleanup_required", "hardware_state": "unknown", "cleanup_required": True, "safe_state_confirmed": False, "halt_not_confirmed": not halt_confirmed, "detach_resume_guard_confirmed": detach_pinned, "error_type": "cleanup_failed", "cleanup_error": cleanup_error, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session cleanup failed; ownership is retained for retry."})
-        if not halt_confirmed or not detach_pinned:
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": True, "status": "cleanup_required", "hardware_state": "unknown", "cleanup_required": True, "safe_state_confirmed": False, **teardown_fields, "error_type": "cleanup_failed", "cleanup_error": cleanup_error, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session cleanup failed; ownership is retained for retry."})
+        if unconfirmed:
             session.status = "cleanup_required"
             session.hardware_state_unconfirmed = True
-            unconfirmed_what = _UNCONFIRMED_TEARDOWN_PROOFS[(not halt_confirmed, not detach_pinned)]
+            unconfirmed_what = _joined_clauses([proof.unconfirmed for proof in unconfirmed], "and")
             return self._report({
                 "ok": False,
                 "tool": tool,
@@ -596,9 +654,8 @@ class GdbDebugSessions:
                 "hardware_state": "unknown",
                 "cleanup_required": True,
                 "safe_state_confirmed": False,
-                "halt_not_confirmed": not halt_confirmed,
-                "detach_resume_guard_confirmed": detach_pinned,
-                "error_type": "halt_not_confirmed" if not halt_confirmed else "detach_resume_not_confirmed",
+                **teardown_fields,
+                "error_type": unconfirmed[0].error_type,
                 "session": self._session_status(session),
                 "log_path": display_path(self.config, session.log_path),
                 "summary": f"Debug session processes were cleaned up, but {unconfirmed_what} before the session ended; ownership is retained for retry.",
@@ -606,7 +663,7 @@ class GdbDebugSessions:
         session.status = "stopped"
         session.hardware_state_unconfirmed = False
         self.session = None
-        return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "safe_state_confirmed": True, "halt_not_confirmed": False, "detach_resume_guard_confirmed": True, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session stopped with the target confirmed halted."})
+        return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "safe_state_confirmed": True, **teardown_fields, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session stopped with the target confirmed halted."})
 
     def get_session_status(self) -> JsonObject:
         session = self.session
@@ -682,22 +739,15 @@ class GdbDebugSessions:
         # would spuriously short-circuit the next debug_continue. Clearing
         # breakpoints does not change target execution state.
         prior_stop_reason = session.stop_reason
-        # Reconcile from the backend's authoritative list FIRST and delete only
-        # numbers GDB actually reports. Driving deletes from the local list would
-        # re-issue `-break-delete N` for an id GDB already removed after a lost
-        # ACK, and real GDB answers "No breakpoint number N", wedging every retry.
-        remaining = self._backend_breakpoint_numbers(session)
-        if remaining is None:
+        removal = self._remove_backend_breakpoints(session)
+        if removal["stage"] == "list":
             return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "breakpoint_reconciliation_failed", "summary": "Backend breakpoint list could not be read; cleanup remains unconfirmed.", "cleanup_required": True, "side_effect_status": "unknown", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
-        cleared = 0
-        for number in remaining:
-            response = self._gdb_command(session, f"-break-delete {number}")
-            if not response.ok and not _is_missing_breakpoint_error(response):
-                return self._report({**self._gdb_failure(tool, session, response.error_message, response.timed_out, response=response), "side_effect_status": "unknown", "cleanup_required": True})
-            cleared += 1
-        confirm = self._backend_breakpoint_numbers(session)
-        if confirm is None or confirm:
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "breakpoint_reconciliation_failed", "summary": "Backend still reports breakpoints after cleanup.", "remaining_backend_breakpoints": confirm, "cleanup_required": True, "side_effect_status": "unknown", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
+        if removal["stage"] == "delete":
+            response = removal["response"]
+            return self._report({**self._gdb_failure(tool, session, response.error_message, response.timed_out, response=response), "side_effect_status": "unknown", "cleanup_required": True})
+        if removal["stage"] == "confirm":
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "breakpoint_reconciliation_failed", "summary": "Backend still reports breakpoints after cleanup.", "remaining_backend_breakpoints": removal["remaining"], "cleanup_required": True, "side_effect_status": "unknown", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)})
+        cleared = int(removal["cleared"])
         # The backend is authoritatively empty; only now is the local list safe
         # to drop, including provisional entries whose ACK was lost.
         session.breakpoints.clear()
@@ -711,8 +761,35 @@ class GdbDebugSessions:
             result.update({"ok": False, "error_type": "audit_broken", "cleanup_required": True, "quarantined": True})
         return self._report(result)
 
-    def _backend_breakpoint_numbers(self, session: GdbDebugSession) -> list[str] | None:
-        response = self._gdb_command(session, "-break-list")
+    def _remove_backend_breakpoints(self, session: GdbDebugSession, timeout_s: float | None = None, *, containment: bool = False) -> JsonObject:
+        """Delete every breakpoint the backend reports, reconciled against its own list.
+
+        `{"stage": "removed", "cleared": N}` once the backend reports none, and
+        otherwise the stage that did not get there: `list` (its list could not
+        be read), `delete` (a delete the backend refused, with its `response`)
+        or `confirm` (breakpoints it still reports, as `remaining`).
+
+        Reconciles from the backend's authoritative list FIRST and deletes only
+        numbers GDB actually reports. Driving deletes from the local list would
+        re-issue `-break-delete N` for an id GDB already removed after a lost
+        ACK, and real GDB answers "No breakpoint number N", wedging every retry.
+        """
+        remaining = self._backend_breakpoint_numbers(session, timeout_s, containment=containment)
+        if remaining is None:
+            return {"stage": "list"}
+        cleared = 0
+        for number in remaining:
+            response = self._gdb_command(session, f"-break-delete {number}", timeout_s, containment=containment)
+            if not response.ok and not _is_missing_breakpoint_error(response):
+                return {"stage": "delete", "response": response}
+            cleared += 1
+        confirm = self._backend_breakpoint_numbers(session, timeout_s, containment=containment)
+        if confirm is None or confirm:
+            return {"stage": "confirm", "remaining": confirm}
+        return {"stage": "removed", "cleared": cleared}
+
+    def _backend_breakpoint_numbers(self, session: GdbDebugSession, timeout_s: float | None = None, *, containment: bool = False) -> list[str] | None:
+        response = self._gdb_command(session, "-break-list", timeout_s, containment=containment)
         if not response.ok:
             return None
         # Only top-level breakpoint numbers; multi-location rows use N.M ids that
@@ -929,24 +1006,25 @@ class GdbDebugSessions:
             already_unsettled = session.status == "cleanup_required"
             retry_without_new_evidence = already_unsettled and session.hardware_state_unconfirmed
             if retry_without_new_evidence:
-                halt_confirmed = False
-                detach_pinned = False
+                proofs = (False, False, False)
             elif already_unsettled:
-                halt_confirmed = True
-                detach_pinned = True
+                proofs = (True, True, True)
             else:
-                halt_confirmed = self._confirm_halted_before_end(session, CLOSE_SESSION_TIMEOUT_S)
-                detach_pinned = self._pin_no_resume_on_detach(session, CLOSE_SESSION_TIMEOUT_S)
+                halted = self._confirm_halted_before_end(session, CLOSE_SESSION_TIMEOUT_S)
+                removed = self._remove_breakpoints_before_end(session, CLOSE_SESSION_TIMEOUT_S)
+                pinned = self._pin_no_resume_on_detach(session, CLOSE_SESSION_TIMEOUT_S)
+                proofs = (halted, removed, pinned)
+            unconfirmed = _unconfirmed_teardown_proofs(proofs)
             cleanup_error = self._cleanup_session(session, CLOSE_SESSION_TIMEOUT_S)
             if cleanup_error is not None:
                 session.status = "cleanup_required"
-                if not halt_confirmed or not detach_pinned:
+                if unconfirmed:
                     session.hardware_state_unconfirmed = True
                 raise RuntimeError(f"Debug session cleanup failed: {cleanup_error}")
-            if not halt_confirmed or not detach_pinned:
+            if unconfirmed:
                 session.status = "cleanup_required"
                 session.hardware_state_unconfirmed = True
-                reason = _UNCONFIRMED_TEARDOWN_CLOSE_REASONS[(not halt_confirmed, not detach_pinned)]
+                reason = _joined_clauses([proof.close_reason for proof in unconfirmed], "or")
                 raise RuntimeError(f"Debug session closed without reconfirming {reason}.")
             session.status = "stopped"
             session.hardware_state_unconfirmed = False
@@ -1040,7 +1118,7 @@ class GdbDebugSessions:
             response = self._gdb_command(session, command, min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
             if not response.ok:
                 if command == MI_ASYNC_COMMAND and not response.timed_out and not getattr(response, "audit_failure", False):
-                    return {
+                    refusal = {
                         **self._gdb_failure("debug_start_session", session, response.error_message, False, response=response),
                         "error_type": "gdb_async_unsupported",
                         "summary": f"GDB refused `{MI_ASYNC_COMMAND}`, and a debug session needs asynchronous MI to interrupt a running target; this GDB cannot run one.",
@@ -1052,6 +1130,16 @@ class GdbDebugSessions:
                         "side_effect_status": "not_started",
                         "retry_safe": True,
                     }
+                    if self._server_end_leaves_probe_unconfirmed(session):
+                        # GDB refused before it was pointed at the target, but
+                        # this start still has a running server of its own to
+                        # end, and on this backend that end can leave the
+                        # in-circuit debugger or programmer refusing its next
+                        # opener. A refusal would be claiming that away.
+                        refusal.pop("target_contacted", None)
+                        refusal.pop("side_effect_committed", None)
+                        refusal.update(self._unknown_after_server_end_fields(session))
+                    return refusal
                 return {**self._gdb_failure("debug_start_session", session, response.error_message or f"GDB startup command failed: {command}", response.timed_out, response=response), **self._startup_effect_fields(session, response.timed_out)}
         session.load_phase = "target_connect_started"
         target = self._gdb_command(session, f"-target-select extended-remote localhost:{session.gdb_port}", min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
@@ -1143,16 +1231,57 @@ class GdbDebugSessions:
         return {"backend_error": result["summary"], "log_path": result["log_path"]}
 
     def _startup_effect_fields(self, session: GdbDebugSession, timed_out: bool = False) -> JsonObject:
-        fields: JsonObject = {"load_phase": session.load_phase, "firmware_load_status": session.firmware_load_status}
+        """What a failed start says it left behind.
+
+        A start that never got through to the target can refuse instead of
+        quarantining a board, but only on evidence: the phase says what GDB had
+        reached, and the backend says what ending this start's own server can
+        leave on the in-circuit debugger or programmer
+        (`_server_end_leaves_probe_unconfirmed`). Where either is unaccounted
+        for, the start reports unknown state, refuses a retry of its own accord
+        and keeps the session for cleanup."""
+        # Every answer a start gives once its companion was chosen names it,
+        # because what a failed start left behind is partly that choice: the risk
+        # a direct-mode end carries is in that record, and a startup failure
+        # carries no session block to read it off.
+        fields: JsonObject = {"load_phase": session.load_phase, "firmware_load_status": session.firmware_load_status, **self._probe_server_fields(session)}
         # Before GDB connects, an attach has done nothing to the target, and
         # neither has a reset mode on a server whose reset is GDB's command.
         resets_before_connect = session.mode != "attach" and self._server_steps.server_resets_at_start
-        if not resets_before_connect and session.load_phase in _BEFORE_GDB_CONNECT_PHASES:
+        if not resets_before_connect and session.load_phase in _BEFORE_GDB_CONNECT_PHASES and not self._server_end_leaves_probe_unconfirmed(session):
             return {**fields, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
         if session.load_phase in {"download_started", "download_confirmed", "post_load_reset_started", "post_load_reset_confirmed"}:
             status = "unknown" if timed_out else "partial"
             return {**fields, "side_effect_committed": True, "side_effect_status": status, "retry_safe": False, "target_state": "unknown", "hardware_state": "unknown", "cleanup_required": True, "command_timed_out": timed_out}
-        return {**fields, "side_effect_status": "unknown", "retry_safe": False, "target_state": "unknown", "hardware_state": "unknown", "cleanup_required": True, "command_timed_out": timed_out}
+        return {**fields, **self._unknown_after_server_end_fields(session), "command_timed_out": timed_out}
+
+    def _probe_server_fields(self, session: GdbDebugSession) -> JsonObject:
+        """The companion record a start's own answer carries, where one was chosen."""
+        return {} if session.companion is None else {"probe_server": dict(session.companion.record)}
+
+    def _unknown_after_server_end_fields(self, session: GdbDebugSession) -> JsonObject:
+        """What a failed start says about state it cannot account for: nothing is settled and nothing may be retried on its word."""
+        return {"side_effect_status": "unknown", "retry_safe": False, "target_state": "unknown", "hardware_state": "unknown", "cleanup_required": True, **self._probe_server_fields(session)}
+
+    def _server_end_leaves_probe_unconfirmed(self, session: GdbDebugSession) -> bool:
+        """Whether ending this session's own GDB server leaves the in-circuit debugger or programmer unaccounted for.
+
+        True only where the backend says so for the companion this start chose
+        (`ServerCompanion.stop_leaves_probe_unconfirmed`) and this session has
+        to end, or already ended, a server that was still running: on the
+        STM32CubeProgrammer backend without stlink-server, the GDB server holds
+        the probe's USB itself, and the kill that ends it left the probe
+        refusing its next opener in 8 of 99 recorded stops. A start that ran
+        into that cannot report the hardware as untouched merely because its
+        reset is a GDB command it never sent.
+
+        A server that exited on its own is a different matter: nothing killed
+        it, and what it said on the way out is what the backend's reading of its
+        output answers for."""
+        companion = session.companion
+        if companion is None or not companion.stop_leaves_probe_unconfirmed:
+            return False
+        return session.server_ended_while_running or session.server.poll() is None
 
     def _require_session(self, tool: str) -> JsonObject:
         session = self.session
@@ -1459,6 +1588,54 @@ class GdbDebugSessions:
             session.stop_reason = {"stop_reason": "timeout", "backend_stop_reason": "timeout", "halt_confirmed": False}
         return confirmed
 
+    def _remove_breakpoints_before_end(self, session: GdbDebugSession, timeout_s: float) -> bool:
+        """Take this session's breakpoints off the target while GDB can still reach it, and report whether that was confirmed.
+
+        GDB removes its own breakpoints from the target when it detaches, which
+        is the proof on a server that is still there to carry the removal:
+        OpenOCD's teardown sends no delete of its own and still sends none. A
+        server that has to be ended before GDB detaches
+        (`_end_server_before_detach`) leaves that detach nothing to remove them
+        through, and what stays behind is a hardware comparator the next opener
+        of the probe meets: the committed pyOCD recording shows a core stopping
+        again on a breakpoint GDB had deleted, because the comparator goes only
+        on a later resume. So on those servers the breakpoints are deleted and
+        reconciled against the backend's own list here, before the server is
+        ended, and a removal the backend does not confirm is reported as
+        unconfirmed rather than tidied away as a clean stop.
+
+        Nothing is sent for a session with no breakpoints of its own, so the
+        ends recorded for a session that set none are byte for byte what they
+        were. The deletes go as containment, the way the halt reconfirmation
+        does: a teardown that may not reach the target is how breakpoints are
+        left armed on it, and a broken audit latch is still reported by
+        `_report` either way.
+
+        Never allowed to overturn a halt already confirmed, for the reason
+        `_pin_no_resume_on_detach` gives: a failed command marks a fresh
+        ``debugger_error`` stop, and that is not evidence about where the core
+        is, so the state this was called with is restored.
+        """
+        if self._server_steps.detach_guard_command is not None or not session.breakpoints:
+            return True
+        if session.gdb is None or not session.gdb.is_running():
+            return False
+        prior_stop_reason = session.stop_reason
+        prior_status = session.status
+        removal = self._remove_backend_breakpoints(session, timeout_s, containment=True)
+        confirmed = removal["stage"] == "removed"
+        session.breakpoint_removal = {"kind": "breakpoints_removed_before_server_end", "confirmed": confirmed, "stage": str(removal["stage"])}
+        if confirmed:
+            session.breakpoint_removal["cleared"] = int(removal["cleared"])
+            session.breakpoints.clear()
+        elif removal["stage"] == "confirm":
+            session.breakpoint_removal["remaining_backend_breakpoints"] = removal["remaining"]
+        if session.stop_reason is not prior_stop_reason and str((session.stop_reason or {}).get("stop_reason")) == "debugger_error":
+            session.stop_reason = prior_stop_reason
+            session.status = prior_status
+        self._write_session_log(session)
+        return confirmed
+
     def _pin_no_resume_on_detach(self, session: GdbDebugSession, timeout_s: float) -> bool:
         """Keep the debug server from resuming the target once this GDB
         connection goes away, and report whether that was confirmed.
@@ -1542,6 +1719,12 @@ class GdbDebugSessions:
     def _end_server_process(self, session: GdbDebugSession, timeout_s: float) -> None:
         """End the debug server's process tree, killing it outright when its
         backend's own shutdown would resume the core."""
+        if session.server.poll() is None:
+            # Recorded before the end rather than read off the process
+            # afterwards, where an exit of its own and an end of ours look
+            # alike. What this end can leave on the probe is the backend's to
+            # say: see `_server_end_leaves_probe_unconfirmed`.
+            session.server_ended_while_running = True
         if self._server_steps.graceful_server_shutdown:
             terminate_process_tree(session.server, timeout_s)
         else:
@@ -1721,6 +1904,8 @@ class GdbDebugSessions:
             "load_phase": session.load_phase,
             "firmware_load_status": session.firmware_load_status,
         }
+        if session.breakpoint_removal is not None:
+            payload["breakpoint_removal"] = session.breakpoint_removal
         if session.detach_guard is not None:
             payload["detach_guard"] = session.detach_guard
         if session.companion is not None:

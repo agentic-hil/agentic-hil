@@ -25,6 +25,8 @@ import time
 from pathlib import Path
 
 import pytest
+from fixtures.fake_gdb import MI_ASYNC_UNSUPPORTED, ST_LINK_GDBSERVER
+from fixtures.fake_st_link_gdbserver import NEVER_READY_VARIABLE as ST_LINK_NEVER_READY_VARIABLE
 from fixtures.fake_st_link_gdbserver import SHARED_PORT_VARIABLE
 from fixtures.fake_stlink_server import EVENTS_VARIABLE as STLINK_SERVER_EVENTS_VARIABLE
 from fixtures.fake_stlink_server import PORT_VARIABLE as STLINK_SERVER_PORT_VARIABLE
@@ -35,6 +37,10 @@ from test_gdbserver_sessions import server_events, session_log, st_link_session_
 from agentic_hil.backends import gdbdebug, stlink
 
 FAKE_STLINK_SERVER = Path(__file__).parent / "fixtures" / "fake_stlink_server.py"
+# The deadline of a start whose server never says its port listens. The fake has
+# printed every other recorded startup line long before it runs out, so a start
+# that took one of them for the ready line would have connected already.
+NEVER_READY_TIMEOUT_S = scaled_time_bound(2.0)
 
 
 def free_port() -> int:
@@ -176,10 +182,15 @@ def test_st_link_session_without_stlink_server_reaches_the_probe_itself_and_says
 
 
 def test_stlink_server_that_exits_without_listening_is_reported_and_the_session_reaches_the_probe_itself(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A found stlink-server that ends before its port listens: the session says how it ended and runs as one without it."""
+    """A found stlink-server that ends before its port listens: the session says how it ended and runs as one without it.
+
+    No stlink-server failure has been recorded, so the stand-in prints nothing
+    at all and only exits: what is asserted is the product's own reading of that
+    exit, its status and the empty tail of the log it kept, and not words no
+    recording has."""
     exits = tmp_path / "exits.py"
-    exits.write_text("import sys\nprint('no listening here', file=sys.stderr)\nsys.exit(3)\n", encoding="utf-8")
-    use_stlink_server(tmp_path, monkeypatch, str(exits))
+    exits.write_text("import sys\n\nsys.exit(3)\n", encoding="utf-8")
+    port, _ = use_stlink_server(tmp_path, monkeypatch, str(exits))
     service, _ = st_link_session_service(tmp_path, monkeypatch)
     try:
         started = start_debug_session(service, mode="attach")
@@ -192,7 +203,9 @@ def test_stlink_server_that_exits_without_listening_is_reported_and_the_session_
     direct = started["session"]["probe_server"]
     assert direct["mode"] == "direct", direct
     assert direct["returncode"] == 3, direct
-    assert "no listening here" in direct["output_tail"], direct
+    assert direct["output_tail"] == [], direct
+    assert direct["reason"] == f"stlink-server exited with status 3 before it listened on port {port}, so ST-LINK_gdbserver opens the probe's USB itself.", direct
+    assert (Path(service.config.work_dir) / direct["log_path"]).read_bytes() == b"", direct
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the Windows end: each process ends with its Job Object")
@@ -254,3 +267,103 @@ def test_the_recorded_stop_cycles_back_the_shared_mode() -> None:
     assert shared["cli_refused_in_cycles"] == [], shared
     assert shared["ran_ms_over_the_stop"] and set(shared["ran_ms_over_the_stop"]) == {0}, shared
     assert shared["ran_ms_over_the_attach_stop"] and set(shared["ran_ms_over_the_attach_stop"]) == {0}, shared
+
+
+def never_ready_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """A start whose GDB server never says its port listens, so the start runs out its time and ends a running server.
+
+    The fake prints the recorded startup up to the ready line and then keeps
+    running, which is the one way the end of a running server is reached at
+    start: what that end can leave on the probe is what the two tests below
+    differ in."""
+    monkeypatch.setenv(ST_LINK_NEVER_READY_VARIABLE, "1")
+    service, _ = st_link_session_service(tmp_path, monkeypatch)
+    try:
+        started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": NEVER_READY_TIMEOUT_S})
+        return {"started": started, "status": service.call("debug_get_session_status")}
+    finally:
+        with contextlib.suppress(RuntimeError):
+            service.close()
+        service.coordinator.close()
+
+
+def test_a_start_that_times_out_through_stlink_server_reports_the_probe_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shared mode: the kill that ends the timed-out server never reached the probe's USB, so the start refuses rather than quarantining.
+
+    ST-LINK_gdbserver with `-t` holds no probe of its own, and the recorded
+    shared stop round killed 120 of these over 40 cycles without one start or
+    one STM32_Programmer_CLI call being refused afterwards. The reset of a reset
+    mode is a GDB command this start never got to send either, so there is
+    nothing left to settle and the next call may have the bench."""
+    use_stlink_server(tmp_path, monkeypatch, str(FAKE_STLINK_SERVER))
+    answers = never_ready_start(tmp_path, monkeypatch)
+    started, status = answers["started"], answers["status"]
+
+    assert started["ok"] is False, started
+    assert started["error_type"] == "timeout", started
+    assert started["backend_error_type"] == "gdb_server_not_ready", started
+    assert started["cleanup_confirmed"] is True, started
+    assert started["side_effect_status"] == "not_started", started
+    assert started["retry_safe"] is True, started
+    assert started.get("cleanup_required") is not True, started
+    assert started["probe_server"]["mode"] == "shared", started["probe_server"]
+    assert started["probe_server"]["ended"] is True, started["probe_server"]
+    assert status["active"] is False, status
+
+
+def test_a_start_that_times_out_on_the_probes_usb_itself_reports_the_hardware_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Direct mode: the kill that ends the timed-out server held the probe's USB, which the recordings say can leave it refusing.
+
+    Nothing about the reset belonging to GDB says anything about that: 8 of 99
+    recorded direct stops left the probe refusing its next opener, and this
+    start's own cleanup is such a stop. So the answer reports the hardware and
+    the side effect as unknown, refuses to call a retry safe, keeps the session
+    for cleanup, and carries the companion record with the risk it names."""
+    use_stlink_server(tmp_path, monkeypatch, None)
+    answers = never_ready_start(tmp_path, monkeypatch)
+    started, status = answers["started"], answers["status"]
+
+    assert started["ok"] is False, started
+    assert started["error_type"] == "timeout", started
+    assert started["backend_error_type"] == "gdb_server_not_ready", started
+    assert started["cleanup_confirmed"] is True, started
+    assert started["side_effect_status"] == "unknown", started
+    assert started["retry_safe"] is False, started
+    assert started["hardware_state"] == "unknown", started
+    assert started["target_state"] == "unknown", started
+    assert started["cleanup_required"] is True, started
+    assert started["probe_server"]["mode"] == "direct", started["probe_server"]
+    assert "Target USB comms error" in started["probe_server"]["stop_risk"], started["probe_server"]
+    assert status["active"] is True, status
+    assert status["quarantined"] is True, status
+
+
+def test_a_gdb_refusal_before_the_connect_still_reports_a_direct_probe_unaccounted_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A GDB that cannot do asynchronous MI is refused before `-target-select`, and in direct mode that refusal still ends a running server.
+
+    The refusal itself is unchanged: it names the setting and what GDB
+    answered, and GDB never reached the target. What it may not add is that the
+    bench is as it was, because ending the server holding the probe's USB is
+    the recorded way to leave the probe refusing its next opener. So the answer
+    keeps the session for cleanup and carries the companion record that says
+    which way it reached the probe."""
+    use_stlink_server(tmp_path, monkeypatch, None)
+    monkeypatch.setenv("FAKE_GDB_BEHAVIOR", MI_ASYNC_UNSUPPORTED)
+    service, _ = st_link_session_service(tmp_path, monkeypatch, behavior=f"{ST_LINK_GDBSERVER}+{MI_ASYNC_UNSUPPORTED}")
+    try:
+        started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": NEVER_READY_TIMEOUT_S})
+    finally:
+        with contextlib.suppress(RuntimeError):
+            service.close()
+        service.coordinator.close()
+
+    assert started["ok"] is False, started
+    assert started["error_type"] == "gdb_async_unsupported", started
+    assert "mi-async" in started["summary"], started
+    assert started["side_effect_status"] == "unknown", started
+    assert started["retry_safe"] is False, started
+    assert started["hardware_state"] == "unknown", started
+    assert started["cleanup_required"] is True, started
+    assert "target_contacted" not in started, started
+    assert started["probe_server"]["mode"] == "direct", started["probe_server"]
+    assert "Target USB comms error" in started["probe_server"]["stop_risk"], started["probe_server"]
