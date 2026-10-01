@@ -1,0 +1,41 @@
+{
+  "model": "claude-haiku-4-5-20251001",
+  "cli_version": "2.1.258",
+  "spec_commit": "b9881b0cfec88969e42672c92544487ca191a992",
+  "spec_version": "1.3",
+  "prompt_sha256": {
+    "coherence_system": "30f1d5c5666c2501195bca2ce1b8768d8d119f0ac6a773f5f1d561809d404cfe",
+    "coherence_user": "a050ef3935d6c20f5a375ce6386cc70c35cfe832f6b8f382270a8b03a15fb89f",
+    "tool_system": "d576e3fcc085c458f152d64fe494c7a00be3c600f53e5eda7883b4230fd369a7",
+    "tool_user": "5f3fcdaa7b141e3092f0cbbd332bf1ba1bcb67f447f78598ae06e7cef04ae6b1"
+  },
+  "dimension_weights": {
+    "purpose_clarity": 25,
+    "usage_guidelines": 20,
+    "behavioral_transparency": 20,
+    "parameter_semantics": 15,
+    "conciseness_structure": 10,
+    "contextual_completeness": 10
+  },
+  "description_quality_weights": {
+    "mean": 60,
+    "minimum": 40
+  },
+  "overall_weights": {
+    "description_quality": 70,
+    "coherence": 30
+  },
+  "tier_thresholds": {
+    "A": 3.5,
+    "B": 3.0,
+    "C": 2.0,
+    "D": 1.0
+  },
+  "retries": 2,
+  "confirmation": {
+    "version": 1,
+    "initial_pairs": 1,
+    "confirmation_pairs_on_drop": 2,
+    "statistic": "median_per_side"
+  }
+}

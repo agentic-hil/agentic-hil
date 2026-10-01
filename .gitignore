@@ -31,3 +31,4 @@ evals/install/artifacts/
 
 # Editor/agent-local configuration, never part of the product
 .claude/
+.tool-definition-score/

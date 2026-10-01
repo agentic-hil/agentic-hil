@@ -49,7 +49,9 @@ def test_the_real_model_scores_every_tool_of_this_checkout() -> None:
     for result in scored["tools"].values():
         assert set(result["justifications"]) == set(tds.DIMENSIONS)
         assert all(1 <= score <= 5 for score in result["scores"].values())
-    assert set(tds.COHERENCE_DIMENSIONS) <= set(scored["coherence"])
+    coherence = scored["coherence"]
+    assert set(coherence["coherenceJustifications"]) == set(tds.COHERENCE_DIMENSIONS)
+    assert all(isinstance(coherence[tds.COHERENCE_FIELDS[d]], int) and 1 <= coherence[tds.COHERENCE_FIELDS[d]] <= 5 for d in tds.COHERENCE_DIMENSIONS)
     assert scored["rollups"]["scoredToolCount"] == len(names)
     report = tds.report_from_pairs(exported, exported, record, [(scored, scored)])
     assert report["decision"] == "pass"

@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-pytest_plugins = ["pytester", "suite_ledger"]
+pytest_plugins = ["pytester", "suite_ledger", "tdqs_model_selection"]
 
 from support import (  # noqa: E402
     hold_the_process_table,
