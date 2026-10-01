@@ -11,6 +11,14 @@ than a board, so any board behind such a probe runs the same software.
 Start with [Installation](installation.md) (two commands and a first real run
 on a Nucleo-F446RE, the reference this path is proved on), then bind your bench
 in [Configuration](configuration.md).
+
+Three use-case pages walk through the loop with real output, the release it
+came from and where it stops:
+
+- [Flash and reset](use-cases/flash-and-reset.md): a coding agent flashes and resets the board through narrow tools instead of a debugger shell.
+- [UART and CAN feedback](use-cases/uart-and-can.md): a claim about the board's answer, judged on the run, and what holds a CAN bus to listen-only.
+- [Plans without a board](use-cases/check-plan.md): hardware test plans checked in CI before a board is involved, and what only the board shows.
+
 The repository's [README](https://github.com/agentic-hil/agentic-hil#readme) is the
 short tour; the pages here carry the depth:
 
