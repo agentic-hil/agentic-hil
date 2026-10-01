@@ -1,9 +1,10 @@
-"""What `com_session_start`, `com_session_stop` and `com_write` tell an agent.
+"""What `com_session_start`, `com_session_stop`, `com_write` and `com_read` tell an agent.
 
-The three definitions said what the tools are and little else: nothing about
+The definitions said what the tools are and little else: nothing about
 which port a `port_id` names, what a repeated start does, what stop leaves
 behind, whether a write adds a line ending, how large it may be, or which tool
-reads the reply. These tests ask the definitions a host receives through
+reads the reply; and nothing about how long a read waits, how much it returns,
+or what it leaves for the next one. These tests ask the definitions a host receives through
 `tools/list` to say those things, and every claim they ask for is first shown
 to be what the code does, through `tools/call`, against a recording stand-in
 for pyserial. No port, adapter or board is touched.
@@ -36,6 +37,7 @@ from support import scaled_time_bound
 from test_read_until import DIE, ScriptedSerialHandle, close, tools_call
 
 import agentic_hil
+from agentic_hil import comports
 from agentic_hil.config import load_config
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.tools import AgenticHILToolService
@@ -981,3 +983,412 @@ def test_a_reply_that_arrives_before_com_read_is_buffered_for_it(bench: SimpleNa
     assert received["data"]["text"] == "PONG", received
     assert rest["data"]["text"] == "\r\nidle\r\n", rest
     assert stopped["was_active"] is True, stopped
+
+
+# ---------------------------------------------------------------------------
+# com_read: what it needs, how long it waits, how much it returns, what it
+# leaves for the next read.
+
+READ_TOOL = "com_read"
+READ_PROPERTIES = ("port_id", "max_bytes", "wait_timeout_s", "until")
+# The config default of a com_ports entry's max_buffer_bytes (src/agentic_hil/config.py).
+DEFAULT_MAX_BUFFER_BYTES = 65536
+# The waits com_read applies: none by default without until, ten seconds by
+# default with it, and never more than sixty either way (src/agentic_hil/comports.py,
+# src/agentic_hil/readuntil.py).
+UNTIL_DEFAULT_WAIT_S = 10.0
+WAIT_CAP_S = 60.0
+# Ports of the com_read tests that need a setting COM_PORTS_YAML does not carry.
+BUFFER_PORT_ID = "tooldef_buffer"
+WRITE_ONLY_PORT_ID = "tooldef_write_only"
+READ_DEVICES = {BUFFER_PORT_ID: "/dev/ttyTOOLDEF11", WRITE_ONLY_PORT_ID: "/dev/ttyTOOLDEF12"}
+SMALL_MAX_BUFFER_BYTES = 64
+
+# `until` named on its own, not as "without until" or "no until".
+WITH_UNTIL = r"(?<!without )(?<!no )\buntil\b"
+WITHOUT_UNTIL = r"\b(?:without|no)\s+until\b"
+# A wait that ends on the first bytes to arrive, whatever they are.
+FIRST_BYTES = (
+    r"\bfirst\b[^.;]*\b(?:bytes?|data|feedback|output|chunk)\b"
+    r"|\bas soon as\b[^.;]*\b(?:bytes?|data|feedback|output|anything)\b"
+    r"|\bany\b[^.;]*\b(?:bytes?|data|feedback|output)\b[^.;]*\barriv"
+)
+# An until entry that was not seen before the wait ended.
+MISS = (
+    r"\bno match\b|\bnot (?:seen|found|matched)\b|\bwithout (?:a )?match\b|\bunmatched\b|\bnothing matches\b"
+    r"|\bnever (?:seen|appears|arrives|matches)\b|\bmiss(?:es|ed)?\b|\btime[sd]? out\b|\btimeout\b|\bwait (?:ends|runs out|expires)\b"
+)
+RETURNED = r"\breturn\w*|\bhand(?:s|ed)? out\b|\bgives?\b|\bgiven\b|\bwith\b"
+RECEIVED_BYTES = r"\b(?:bytes|data|feedback|output)\b|\barrived\b|\bbuffered\b|\breceived\b|\bso far\b"
+# Each byte is handed out once: a read takes what it returns off the buffer.
+CONSUMES = (
+    r"\bremov\w*|\bconsum\w*|\bdelet\w*|\bdrain\w*|\bonce\b|\bnot (?:returned|read|handed out) again\b"
+    r"|\btakes?\b[^.;]*\b(?:off|out of|from)\b[^.;]*\bbuffer"
+)
+READING_ALLOWED = (
+    r"\ballow_read\b"
+    r"|\bread(?:ing)?\b[^.;]*\b(?:allow\w*|permit\w*|disabled|grant\w*|off|denied)\b"
+    r"|\b(?:allow\w*|permit\w*|disabled|grant\w*)\b[^.;]*\bread(?:ing)?\b"
+)
+# What until is: text compared as it is, not a pattern language. A word for
+# "as it is" counts unless it is itself negated ("not plain text").
+LITERAL = (
+    r"(?<!not )(?<!never )\b(?:literal(?:ly)?|exact(?:ly)?|plain|verbatim|as is|case-sensitive)\b"
+    r"|\bnot (?:as )?an? reg(?:ular expression|ex)\b"
+)
+PATTERN_LANGUAGE = r"\breg(?:ular expression|ex(?:es)?)\b|\bwildcards?\b|\bglob\b"
+
+
+def test_com_read_is_listed_and_every_input_describes_itself_within_the_budget(listed: dict[str, dict]) -> None:
+    tool = listed[READ_TOOL]
+    description = tool.get("description")
+    assert isinstance(description, str) and description.strip(), tool
+    assert len(description) <= DESCRIPTION_LIMIT, len(description)
+    properties = tool["inputSchema"]["properties"]
+    assert set(READ_PROPERTIES) <= set(properties), sorted(properties)
+    undescribed = sorted(key for key in properties if not property_text(tool, key).strip())
+    assert not undescribed, f"com_read: input properties without a description: {undescribed}"
+    oversized = {key: len(property_text(tool, key)) for key in properties if len(property_text(tool, key)) > PROPERTY_DESCRIPTION_LIMIT}
+    assert not oversized, f"com_read: property descriptions over {PROPERTY_DESCRIPTION_LIMIT} characters: {oversized}"
+
+
+def test_com_read_port_id_is_a_configured_entry_and_not_a_device(listed: dict[str, dict]) -> None:
+    """The same name com_session_start took, chosen from com_ports; an unknown
+    name is refused as com_port_not_configured."""
+    described = property_text(listed[READ_TOOL], "port_id")
+    assert not names(described, "com_ports", "com_ports_list"), described
+    assert claims(described, r"\bnot\b[^.;]*\bdevice\b"), described
+    assert not names(definition_text(listed[READ_TOOL]), "com_port_not_configured"), definition_text(listed[READ_TOOL])
+
+
+def test_max_bytes_names_its_default_and_that_the_rest_stays_buffered(listed: dict[str, dict]) -> None:
+    """Without max_bytes a read returns up to the port's max_buffer_bytes, which
+    is everything the buffer can hold; with a smaller value the bytes past it
+    stay for the next read rather than being lost."""
+    described = property_text(listed[READ_TOOL], "max_bytes")
+    parts = clauses(described)
+    assert one_of(parts, r"\bmax_buffer_bytes\b", r"\bdefault"), described
+    # 65536 is the default of max_buffer_bytes, which a port may change; it is
+    # not a limit of max_bytes.
+    if re.search(rf"\b{DEFAULT_MAX_BUFFER_BYTES}\b", described):
+        assert one_of(parts, rf"\b{DEFAULT_MAX_BUFFER_BYTES}\b", r"\bdefault|\bunless\b|\bconfigured\b"), described
+    assert not claims(described, rf"\b(?:at most|up to|maximum(?: of)?|limit(?:ed)? (?:of|to))\s+{DEFAULT_MAX_BUFFER_BYTES}\b"), described
+    rest = r"\b(?:rest|remainder|remaining|beyond|past|excess|more|left)\b"
+    assert one_of(parts, rest, r"\bbuffer\w*|\bnext\b|\blater\b"), described
+    assert not one_of(parts, r"\b(?:rest|remainder|remaining|beyond|past|excess)\b", r"\b(?:discard\w*|drop\w*|lost|lose|delet\w*|truncat\w*)"), described
+
+
+def test_wait_timeout_s_names_both_defaults_the_cap_and_its_unit(listed: dict[str, dict]) -> None:
+    """The issue in one property: without until a read does not wait unless
+    told to, with until it waits ten seconds unless told otherwise, and no
+    wait is longer than sixty. The two defaults are tied to their condition,
+    and neither is stated the other way round."""
+    described = property_text(listed[READ_TOOL], "wait_timeout_s")
+    parts = clauses(described)
+    assert claims(described, r"\bseconds?\b|\b\d+(?:\.\d+)?\s?s\b"), described
+    assert one_of(parts, WITHOUT_UNTIL, r"\b0(?:\.0)?\s?s?\b|\bzero\b|\bdoes not wait\b|\bno wait\b|\bwithout waiting\b", r"\bdefault"), described
+    assert one_of(parts, WITH_UNTIL, rf"\b{UNTIL_DEFAULT_WAIT_S:g}(?:\.0)?\s?s?\b", r"\bdefault"), described
+    # Not inverted: ten seconds without until, or nothing with it.
+    assert not any(claims(part, WITHOUT_UNTIL) and claims(part, r"\b10\b") and not claims(part, r"\b0\b") for part in parts), described
+    assert not any(claims(part, r"\bwith\s+until\b") and claims(part, r"\b0\b") and not claims(part, r"\b10\b") for part in parts), described
+    # The cap is applied, not refused.
+    assert one_of(parts, rf"\b{WAIT_CAP_S:g}(?:\.0)?\s?s?\b", r"\bat most\b|\bcap\w*|\bmax(?:imum)?\b|\blimit\w*|\bup to\b|\bno more than\b|\bclamp\w*|\bceiling\b"), described
+    assert not claims(described, r"\b60\b[^.;]*\b(?:refus|reject|invalid|error)|\b(?:refus|reject|invalid|error)\w*\b[^.;]*\b60\b"), described
+
+
+def test_a_wait_without_until_is_said_to_end_at_the_first_bytes(listed: dict[str, dict]) -> None:
+    """A plain read with a wait returns as soon as anything is buffered, which
+    may be part of a line; only until waits on for more. The clause that says
+    so is not one about until."""
+    text = definition_text(listed[READ_TOOL])
+    first_bytes = [part for part in clauses(text) if claims(part, r"\bwait") and claims(part, FIRST_BYTES)]
+    assert any(not claims(part, WITH_UNTIL) for part in first_bytes), text
+
+
+def test_until_names_how_it_matches_and_what_it_leaves(listed: dict[str, dict]) -> None:
+    """Literal text, compared as the bytes the port's encoding gives it; the
+    answer runs through the first match and what follows stays buffered."""
+    described = property_text(listed[READ_TOOL], "until")
+    parts = clauses(described)
+    assert one_of(parts, r"\bbytes?\b", r"\bencod\w*", r"\bport'?s?\b|\bconfigured\b"), described
+    assert claims(described, LITERAL), described
+    # A pattern language is named only to be denied: each mention follows a
+    # negation in its own clause ("not a regex"), unlike "a regex, not plain text".
+    asserted = [part for part in parts for found in re.finditer(PATTERN_LANGUAGE, part, re.IGNORECASE) if not claims(part[: found.start()], NEGATION)]
+    assert not asserted, asserted
+    assert one_of(parts, r"\bthrough\b|\bup to\b|\bending\b|\bincluding\b", r"\bfirst\b", r"\bmatch"), described
+    assert one_of(parts, r"\brest\b|\bafter\b|\bfollow\w*|\bbeyond\b|\bremainder\b", r"\bbuffer\w*|\bnext\b"), described
+
+
+def test_a_missed_until_is_said_to_be_an_ok_answer_with_until_matched_false(listed: dict[str, dict]) -> None:
+    """No match before the wait ends is feedback about the board, not a failed
+    call: the answer is ok, until_matched is false, and the bytes that did
+    arrive are returned."""
+    text = definition_text(listed[READ_TOOL])
+    parts = clauses(text)
+    assert not names(text, "until_matched"), text
+    assert one_of(parts, MISS, r"\buntil_matched\b", r"\bfalse\b"), text
+    assert not one_of(parts, MISS, r"\buntil_matched\b", r"\btrue\b"), text
+    assert one_of(parts, MISS, r"\bok\b|\bsucce\w*|\bnot an? (?:error|failure|refusal)\b|\bstill (?:returns|answers)\b"), text
+    assert one_of(parts, MISS, RETURNED, RECEIVED_BYTES), text
+
+
+def test_com_read_says_what_it_needs_what_it_takes_and_what_it_returns(listed: dict[str, dict]) -> None:
+    """The session com_session_start opened (else session_not_active), reading
+    allowed (else permission_denied, never a matter of allow_write), each byte
+    returned once, as text and as hex, with what is left counted."""
+    text = definition_text(listed[READ_TOOL])
+    units = sentences(text)
+    parts = clauses(text)
+    missing = names(text, "com_session_start", "session_not_active", "permission_denied", "buffer_remaining_bytes")
+    assert not missing, (missing, text)
+    assert one_of(units, r"\bcom_session_start\b", r"\b(?:else|otherwise|without|unless|fails?|returns?|gives?|answers?)\b[^.;]*\bsession_not_active\b"), text
+    assert not claims(text, r"\bnever\b[^.;]*\bsession_not_active\b|\bsession_not_active\b[^.;]*\bnever\b"), text
+    assert one_of(units, r"\bpermission_denied\b", READING_ALLOWED), text
+    assert not claims(text, r"\bpermission_denied\b[^.;]*\ballow_write\b|\ballow_write\b[^.;]*\bpermission_denied\b"), text
+    assert one_of(parts, CONSUMES, r"\bbytes?\b|\bbuffer\w*|\bfeedback\b|\bdata\b"), text
+    assert not claims(text, r"\b(?:does not|doesn't|never|without)\s+(?:remov|consum|delet|clear|drain)\w*"), text
+    assert one_of(parts, r"\btext\b", r"\bhex\b"), text
+    # A read: nothing it does reaches the board.
+    assert not claims(text, r"\b(?:writes?|sends?|transmits?)\b[^.;]*\bto the (?:board|target|port|device)\b"), text
+    assert listed[READ_TOOL]["annotations"]["readOnlyHint"] is True
+    assert listed[READ_TOOL]["annotations"]["openWorldHint"] is False
+
+
+def test_every_identifier_the_com_read_definition_names_is_real(listed: dict[str, dict]) -> None:
+    com_properties = {key for name, tool in listed.items() if name.startswith("com_") for key in tool["inputSchema"]["properties"]}
+    vocabulary = set(listed) | com_properties | config_vocabulary() | answer_vocabulary()
+    assert {"until_matched", "buffer_remaining_bytes", "max_buffer_bytes"} <= vocabulary, "the source vocabulary is read whole"
+
+    unknown = sorted(set(SNAKE_CASE.findall(re.sub(QUOTED, " ", definition_text(listed[READ_TOOL])))) - vocabulary)
+    assert not unknown, unknown
+
+
+# ---------------------------------------------------------------------------
+# What com_read does, as the code answers it today.
+
+
+class SimulatedWait:
+    """`time` as comports.py sees it, with the calling thread's waits simulated.
+
+    The test thread's sleeps advance `now` instead of passing, so a read that
+    waits a minute is measured in a moment, and `now` is how long it waited.
+    Every other thread, the session's reader among them, keeps real time.
+    """
+
+    def __init__(self) -> None:
+        self.thread = threading.current_thread()
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now if threading.current_thread() is self.thread else time.monotonic()
+
+    def sleep(self, seconds: float) -> None:
+        if threading.current_thread() is self.thread:
+            self.now += seconds
+        else:
+            time.sleep(seconds)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(time, name)
+
+
+def test_com_read_needs_a_session_on_a_configured_port_and_opens_nothing(bench: SimpleNamespace) -> None:
+    service, line = bench.service, bench.line
+
+    without_session = read(service, SPARE_PORT_ID)
+    unknown = read(service, UNKNOWN_PORT_ID)
+
+    assert without_session["error_type"] == "session_not_active", without_session
+    assert "com_session_start" in without_session["summary"], without_session
+    assert unknown["error_type"] == "com_port_not_configured", unknown
+    assert PORT_ID in unknown["configured_ports"], unknown
+    assert line.handles == [], "a read never opens the port itself"
+
+
+@pytest.mark.parametrize(
+    ("config_version", "permissions", "reads"),
+    [
+        pytest.param(None, "{allow_read: false, allow_write: true}", False, id="v1-read-withheld"),
+        pytest.param(None, "{allow_read: true, allow_write: true}", True, id="v1-read-granted"),
+        pytest.param(2, "{allow_write: true}", True, id="v2-reading-needs-no-grant"),
+    ],
+)
+def test_com_read_needs_reading_allowed_not_allow_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_version: int | None, permissions: str, reads: bool) -> None:
+    """A session a write grant opened is still refused a read where reading is
+    withheld, which only a version 1 configuration can do, and the refusal
+    names allow_read. Such a session runs no reader, so there is nothing for
+    it to buffer."""
+    line = install_line(monkeypatch)
+    device = READ_DEVICES[WRITE_ONLY_PORT_ID]
+    com_ports_yaml = f'com_ports:\n  {WRITE_ONLY_PORT_ID}:\n    device: "{device}"\n    permissions: {permissions}\n'
+    service = new_service(tmp_path / "workspace", com_ports_yaml=com_ports_yaml, config_version=config_version)
+    try:
+        started(service, WRITE_ONLY_PORT_ID)
+        if reads:
+            line.on_device(device).deliver(b"banner\r\n")
+
+        result = read(service, WRITE_ONLY_PORT_ID)
+
+        if reads:
+            assert result["ok"] is True, result
+            assert result["data"]["text"] == "banner\r\n", result
+            return
+        assert result["error_type"] == "permission_denied", result
+        assert "allow_read" in result["summary"], result
+        assert "allow_write" not in result["summary"], result
+        assert write(service, WRITE_ONLY_PORT_ID, text="PING")["ok"] is True, "the session itself is usable for writing"
+    finally:
+        close(service)
+
+
+@pytest.mark.parametrize(
+    "max_buffer_bytes",
+    [pytest.param(None, id="65536-by-default"), pytest.param(SMALL_MAX_BUFFER_BYTES, id="as-configured")],
+)
+def test_without_max_bytes_a_read_returns_up_to_the_ports_max_buffer_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, max_buffer_bytes: int | None) -> None:
+    """A full buffer is returned whole by one read without max_bytes. The
+    buffer itself holds max_buffer_bytes at most: older bytes past that are
+    dropped and counted in overflow_bytes, and the newest are what a read
+    returns."""
+    line = install_line(monkeypatch)
+    limit = DEFAULT_MAX_BUFFER_BYTES if max_buffer_bytes is None else max_buffer_bytes
+    device = READ_DEVICES[BUFFER_PORT_ID]
+    setting = "" if max_buffer_bytes is None else f"    max_buffer_bytes: {max_buffer_bytes}\n"
+    service = new_service(tmp_path / "workspace", com_ports_yaml=f'com_ports:\n  {BUFFER_PORT_ID}:\n    device: "{device}"\n{setting}')
+    full = (b"0123456789abcdef" * (limit // 16 + 1))[:limit]
+    try:
+        started(service, BUFFER_PORT_ID)
+        handle = line.on_device(device)
+
+        handle.deliver(full)
+        whole = read(service, BUFFER_PORT_ID)
+
+        assert whole["bytes_read"] == limit, whole["bytes_read"]
+        assert whole["data"]["hex"] == full.hex()
+        assert whole["buffer_remaining_bytes"] == 0, whole["buffer_remaining_bytes"]
+        assert whole["overflow_bytes"] == 0, whole["overflow_bytes"]
+
+        handle.deliver(b"OLDER" + full)
+        newest = read(service, BUFFER_PORT_ID)
+
+        assert newest["bytes_read"] == limit, newest["bytes_read"]
+        assert newest["data"]["hex"] == full.hex()
+        assert newest["overflow_bytes"] == len(b"OLDER"), newest["overflow_bytes"]
+    finally:
+        close(service)
+
+
+def test_a_read_returns_each_byte_once_oldest_first_and_max_bytes_leaves_the_rest(bench: SimpleNamespace) -> None:
+    service, line = bench.service, bench.line
+    started(service)
+    line.handle(PORT_ID).deliver(b"0123456789")
+
+    first = read(service, max_bytes=4)
+    second = read(service)
+    third = read(service)
+
+    assert (first["data"]["text"], first["bytes_read"], first["buffer_remaining_bytes"]) == ("0123", 4, 6), first
+    assert (second["data"]["text"], second["bytes_read"], second["buffer_remaining_bytes"]) == ("456789", 6, 0), second
+    assert third["ok"] is True, third
+    assert (third["data"]["text"], third["bytes_read"]) == ("", 0), third
+
+
+@pytest.mark.parametrize(
+    ("port_id", "line_bytes", "text"),
+    [
+        pytest.param(LATIN1_PORT_ID, b"caf\xe9\r\n", "café\r\n", id="text-in-the-ports-encoding"),
+        pytest.param(PORT_ID, b"ok\xff\r\n", "ok�\r\n", id="undecodable-byte-replaced-in-text-kept-in-hex"),
+    ],
+)
+def test_a_read_returns_the_bytes_as_hex_and_as_text_in_the_ports_encoding(bench: SimpleNamespace, port_id: str, line_bytes: bytes, text: str) -> None:
+    service, line = bench.service, bench.line
+    started(service, port_id)
+    line.handle(port_id).deliver(line_bytes)
+
+    result = read(service, port_id)
+
+    encoding = "latin-1" if port_id == LATIN1_PORT_ID else "utf-8"
+    assert result["data"] == {"hex": line_bytes.hex(), "text": text, "encoding": encoding}, result
+
+
+@pytest.mark.parametrize(
+    ("arguments", "waited_s"),
+    [
+        pytest.param({}, 0.0, id="no-until-returns-at-once-by-default"),
+        pytest.param({"wait_timeout_s": 2.5}, 2.5, id="no-until-waits-as-asked"),
+        pytest.param({"wait_timeout_s": 600}, WAIT_CAP_S, id="no-until-wait-capped-at-60s"),
+        pytest.param({"until": "PASS"}, UNTIL_DEFAULT_WAIT_S, id="until-waits-10s-by-default"),
+        pytest.param({"until": "PASS", "wait_timeout_s": 2.5}, 2.5, id="until-waits-as-asked"),
+        pytest.param({"until": "PASS", "wait_timeout_s": 0}, 0.0, id="until-with-no-wait-returns-at-once"),
+        pytest.param({"until": "PASS", "wait_timeout_s": 600}, WAIT_CAP_S, id="until-wait-capped-at-60s"),
+    ],
+)
+def test_how_long_a_read_waits_on_a_quiet_line(bench: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, arguments: dict, waited_s: float) -> None:
+    """Nothing arrives, so every read waits out the wait in force: none without
+    until unless asked, ten seconds with until unless asked, and a wait asked
+    past sixty seconds is cut to sixty rather than refused. The answer is an
+    ok read of nothing either way."""
+    service = bench.service
+    started(service)
+    clock = SimulatedWait()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(comports, "time", clock)
+        result = read(service, **arguments)
+
+    assert result["ok"] is True, result
+    assert result["bytes_read"] == 0, result
+    assert waited_s <= clock.now <= waited_s + 0.02, clock.now
+    if "until" in arguments:
+        assert result["until_matched"] is False, result
+
+
+def test_a_wait_without_until_ends_at_the_first_bytes_and_until_waits_on_for_its_match(bench: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same buffered bytes end a plain read's 30 s wait at once, and do not
+    end a read with until: it waits the 30 s out for a match that never comes,
+    then answers ok with until_matched false and the bytes it has, which are
+    gone from the buffer like any other bytes a read returned."""
+    service, line = bench.service, bench.line
+    started(service)
+    clock = SimulatedWait()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(comports, "time", clock)
+        line.handle(PORT_ID).deliver(b"boot\r\n")
+        plain = read(service, wait_timeout_s=30)
+        plain_waited = clock.now
+        line.handle(PORT_ID).deliver(b"boot\r\n")
+        missed = read(service, until="PASS", wait_timeout_s=30)
+        missed_waited = clock.now - plain_waited
+    after_miss = read(service)
+
+    assert plain["data"]["text"] == "boot\r\n", plain
+    assert plain_waited == 0.0, plain_waited
+    assert 30.0 <= missed_waited <= 30.02, missed_waited
+    assert missed["ok"] is True, missed
+    assert missed["until_matched"] is False, missed
+    assert "matched" not in missed, missed
+    assert missed["data"]["text"] == "boot\r\n", missed
+    assert missed["buffer_remaining_bytes"] == 0, missed
+    assert after_miss["bytes_read"] == 0, after_miss
+
+
+@pytest.mark.parametrize(
+    ("until", "until_matched"),
+    [
+        pytest.param("PASS", True, id="the-text-itself"),
+        pytest.param("P.SS", False, id="a-dot-is-a-dot"),
+        pytest.param("PAS+", False, id="a-plus-is-a-plus"),
+        pytest.param("pass", False, id="case-counts"),
+    ],
+)
+def test_until_is_matched_as_literal_text(bench: SimpleNamespace, until: str, until_matched: bool) -> None:
+    service, line = bench.service, bench.line
+    started(service)
+    line.handle(PORT_ID).deliver(b"result: PASS\r\n")
+
+    result = read(service, until=until, wait_timeout_s=0)
+
+    assert result["ok"] is True, result
+    assert result["until_matched"] is until_matched, result
