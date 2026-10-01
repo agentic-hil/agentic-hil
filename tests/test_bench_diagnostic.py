@@ -424,15 +424,18 @@ def test_a_value_too_common_to_name_a_machine_is_left_in_the_error_line(monkeypa
     sentence came out with a word missing.
     """
     helper = _load_helper()
-    monkeypatch.setattr(helper.os.path, "expanduser", lambda path: "/home/runner")
+    # Not /home/runner, although that is the hosted runner's home: the patch
+    # reaches every `expanduser` in the process, and the suite's own guard
+    # rightly reads a profile path equal to the real one as an escape.
+    monkeypatch.setattr(helper.os.path, "expanduser", lambda path: "/srv/runner")
     monkeypatch.setattr(helper.getpass, "getuser", lambda: "runner")
     monkeypatch.setattr(helper.socket, "gethostname", lambda: "bench")
 
     assert helper.withheld("bench runner discovery is unavailable") == "bench runner discovery is unavailable"
     # The home directory is still a value worth withholding, word for word, even
     # though the account name inside it is not.
-    line = helper.withheld(OSError(13, "Permission denied", "/home/runner/.cache/agentic-hil/x.zip"))
-    assert "/home/runner" not in line, line
+    line = helper.withheld(OSError(13, "Permission denied", "/srv/runner/.cache/agentic-hil/x.zip"))
+    assert "/srv/runner" not in line, line
     assert "Permission denied" in line, line
 
 
