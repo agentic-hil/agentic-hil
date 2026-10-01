@@ -561,6 +561,18 @@ def st_link_recording() -> dict:
     return json.loads(ST_LINK_RECORDING.read_text(encoding="utf-8"))
 
 
+def test_st_link_linux_recording_names_the_commit_it_was_recorded_from() -> None:
+    """The first Linux recording was made before the recorder wrote the commit in.
+
+    The bench checkout was on this commit from before the recording file was
+    written until after it, so it is the recording's source."""
+    recording = st_link_recording()
+
+    assert recording["source_commit"] == "0b519bbb2871d4f2099e91e8d350751e2e15ee0f"
+    assert any(line.endswith("version: 7.14.0") for line in recording["version"]["stdout"])
+    assert recording["recorded_on"] == "2026-10-01"
+
+
 def st_link_session_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, behavior: str = ST_LINK_GDBSERVER, interface: str = "SWD", **config_kwargs):
     """A bench on the stlink backend with the fake server and the fake GDB replaying the recording.
 
