@@ -193,6 +193,24 @@ class GdbServerSteps:
         return re.search(re.escape(expected) + r"(?!\d)", text) is not None
 
 
+@dataclass
+class ServerCompanion:
+    """The server a backend's GDB server reaches the probe through, for one session (#624).
+
+    ST-LINK_gdbserver started with `-t` reaches the probe through stlink-server
+    instead of holding the probe's USB itself. `process` is the one the session
+    started, or None where it started none: one already running is shared and
+    left to whoever started it, and a backend without one runs its server on
+    the probe directly. `record` is what the session reports about it, as
+    `probe_server` beside the session, and gains `ended` and `returncode` once
+    the session has ended the process. That is only ever after the GDB server
+    has exited, so the server is never cut off from the probe while it runs."""
+
+    process: subprocess.Popen | None
+    record: JsonObject
+    ended: bool = False
+
+
 def console_output(records: list[str]) -> list[str]:
     """The lines a GDB/MI command's console records printed, unescaped, in order."""
     lines: list[str] = []
@@ -241,6 +259,9 @@ class GdbDebugSession:
         # GDB detached, and whether it was gone. Logged with the session, so the
         # evidence for a guard confirmed this way is the server's own exit.
         self.detach_guard: JsonObject | None = None
+        # The server this session's GDB server reaches the probe through, where
+        # its backend starts one (see ServerCompanion).
+        self.companion: ServerCompanion | None = None
 
 
 class _AuditRefusedResponse:
@@ -277,6 +298,7 @@ class GdbDebugSessions:
         server_steps: GdbServerSteps,
         read_start_failure: Callable[[str, list[str]], JsonObject | None] | None = None,
         read_start_context: Callable[[JsonObject], JsonObject | None] | None = None,
+        start_server_companion: Callable[[float], ServerCompanion | None] | None = None,
     ):
         self.config = config
         self.backend_name = backend_name
@@ -300,6 +322,11 @@ class GdbDebugSessions:
         # nothing to add, so it rides out on the start that timed out as well,
         # which is the one surface the reading above cannot reach.
         self._read_start_context = read_start_context
+        # What a backend starts before each GDB server, given the start's
+        # timeout: the server that one reaches the probe through, or None. Called
+        # ahead of `build_server_args`, so the arguments can say how the server
+        # reaches the probe. See ServerCompanion.
+        self._start_server_companion = start_server_companion
         self.session: GdbDebugSession | None = None
         # Permanent audit latch: once evidence persistence breaks, it stays
         # broken for this service instance; it is never consumed by reporting.
@@ -361,13 +388,18 @@ class GdbDebugSessions:
         return self._report(result)
 
     def _start_attempt(self, tool: str, artifact: JsonObject, mode: str, resolved_server: JsonObject, resolved_gdb: JsonObject, timeout: float, started_at: str, start: float) -> JsonObject:
-        reservation = reserve_tcp_port()
-        gdb_port = reservation.port
+        companion = self._start_server_companion(timeout) if self._start_server_companion is not None else None
         try:
-            server_args = self._build_server_args(str(resolved_server["executable_path"]), gdb_port, mode != "attach")
-            log_path = str(Path(logs_directory(self.config)) / f"gdb-debug-{timestamp_for_filename()}.json")
-        except BaseException:
-            reservation.release()
+            reservation = reserve_tcp_port()
+            gdb_port = reservation.port
+            try:
+                server_args = self._build_server_args(str(resolved_server["executable_path"]), gdb_port, mode != "attach")
+                log_path = str(Path(logs_directory(self.config)) / f"gdb-debug-{timestamp_for_filename()}.json")
+            except BaseException:
+                reservation.release()
+                raise
+        except BaseException as error:
+            self._end_companion_after_failed_start(companion, error)
             raise
         # The server binds this port by number, so the reservation has to go
         # first; releasing it here, immediately before the spawn, is the shortest
@@ -389,9 +421,17 @@ class GdbDebugSessions:
             # nothing was started that could have touched the target. Marked as
             # such so the failed call refuses instead of quarantining a board
             # it provably never reached.
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debugger_not_found", "summary": "Debug server process could not be started.", "backend_error": str(error), "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+            result = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "debugger_not_found", "summary": "Debug server process could not be started.", "backend_error": str(error), "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+            try:
+                self._end_companion_after_failed_start(companion, error, raise_cleanup_error=True)
+            except Exception as cleanup_error:
+                result.update({"cleanup_required": True, "cleanup_error": f"probe_server: {type(cleanup_error).__name__}: {cleanup_error}"})
+            if companion is not None:
+                result["probe_server"] = dict(companion.record)
+            return result
 
         session = GdbDebugSession(f"debug-{timestamp_for_filename()}", artifact, mode, gdb_port, server, server_args, log_path)
+        session.companion = companion
         session.load_phase = "server_spawned"
         session.server_ready_line = self._server_steps.ready_line_for(gdb_port)
         self.session = session
@@ -1506,6 +1546,31 @@ class GdbDebugSessions:
             terminate_process_tree(session.server, timeout_s)
         else:
             terminate_process_tree(session.server, timeout_s, graceful=False)
+        # The server the GDB server reached the probe through goes only once the
+        # GDB server is gone, so it never cuts that one off from the probe.
+        if session.companion is not None and session.server.poll() is not None:
+            self._end_companion(session.companion, timeout_s)
+
+    def _end_companion(self, companion: ServerCompanion | None, timeout_s: float) -> None:
+        """End the probe server a session started, once; one it found running is left to its owner."""
+        if companion is None or companion.ended or companion.process is None:
+            return
+        terminate_process_tree(companion.process, timeout_s)
+        companion.ended = True
+        companion.record["ended"] = True
+        companion.record["returncode"] = companion.process.returncode
+
+    def _end_companion_after_failed_start(self, companion: ServerCompanion | None, error: BaseException, *, raise_cleanup_error: bool = False) -> None:
+        """End the probe server of a start that failed before its GDB server ran.
+
+        A cleanup error while `error` is on its way out is added to that one's
+        arguments rather than masking it, unless the caller reports it itself."""
+        try:
+            self._end_companion(companion, STOP_SESSION_TIMEOUT_CAP_S)
+        except BaseException as cleanup_error:
+            if raise_cleanup_error:
+                raise
+            error.args = (*error.args, f"probe_server cleanup: {type(cleanup_error).__name__}: {cleanup_error}")
 
     def _cleanup_session(self, session: GdbDebugSession, timeout_s: float) -> str | None:
         errors: list[tuple[str, BaseException]] = []
@@ -1636,6 +1701,7 @@ class GdbDebugSessions:
             "gdb_port": session.gdb_port,
             "load_phase": session.load_phase,
             "firmware_load_status": session.firmware_load_status,
+            **({"probe_server": dict(session.companion.record)} if session.companion is not None else {}),
         }
 
     def _write_session_log(self, session: GdbDebugSession) -> None:
@@ -1657,6 +1723,8 @@ class GdbDebugSessions:
         }
         if session.detach_guard is not None:
             payload["detach_guard"] = session.detach_guard
+        if session.companion is not None:
+            payload["probe_server"] = dict(session.companion.record)
         error = write_audit_log(self.config, session.log_path, json.dumps(payload, indent=2) + "\n")
         if error is not None:
             self._audit_broken = error

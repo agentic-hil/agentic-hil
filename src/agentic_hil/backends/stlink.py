@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import socket
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -30,6 +32,7 @@ from agentic_hil.backends.common import (
 from agentic_hil.backends.gdbdebug import (
     GdbDebugSessions,
     GdbServerSteps,
+    ServerCompanion,
     decode_symbol_value,
     offline_symbol_info,
     resolve_symbol_offline,
@@ -51,6 +54,7 @@ from agentic_hil.knowledge import (
     permission_key,
     remediation_fields,
 )
+from agentic_hil.process import spawn_managed_process, terminate_process_tree
 from agentic_hil.report import (
     classify_failure_report,
     logs_directory,
@@ -287,6 +291,12 @@ ERASE_ABORT_POINT_UNREADABLE = "abort_point_unreadable"
 #   killed server left the core halted where it was, three times out of three,
 #   read back by servers killed the same way. So the server is killed, with no
 #   SIGTERM first, before GDB detaches.
+# * Probe: killed while it held the probe's USB itself, the server left the
+#   probe refusing the next opener after some stops (the direct stop round of
+#   st_link_gdbserver_7_14_0_linux_session_stops_recordings.json). Started with
+#   `-t`, it reaches the probe through stlink-server instead, and killed the same
+#   way it never did (the shared round). So a session runs it with `-t` whenever
+#   an stlink-server is there or can be started (`_start_probe_server`).
 ST_LINK_GDB_SERVER_STEPS = GdbServerSteps(
     ready_line="Waiting for debugger connection...",
     ready_line_ends_the_line=True,
@@ -306,6 +316,11 @@ ST_LINK_GDB_SERVER_REFUSALS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # `No ST-LINK found. Please check ST-LINK USB cable.` with nothing on USB,
     # and `ST-LINK: <serial> not found.` for a serial no connected probe has.
     ("probe_not_found", re.compile(r"no st-link found|st-link: \S+ not found", re.IGNORECASE)),
+    # `Target USB comms error`, then `Error in initializing ST-LINK device.` and
+    # `Reason: USB communication error. Please reconnect the ST-LINK USB cable
+    # and try again.`, from a probe a killed server had held (the direct stop
+    # round of st_link_gdbserver_7_14_0_linux_session_stops_recordings.json).
+    ("adapter_usb_error", re.compile(r"target usb comms error|usb communication error", re.IGNORECASE)),
     # `Failed to connect to device. Please check power and cabling to target.`
     # for a probe another server holds, and `Unknown MCU found on target.` for a
     # JTAG connect to the reference board's SWD-only wiring. A target that is
@@ -317,6 +332,42 @@ ST_LINK_GDB_SERVER_REFUSALS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 # The refusals that end the server before any probe carried anything.
 ST_LINK_GDB_SERVER_PRE_CONTACT = frozenset({"probe_not_found", "stm32_programmer_cli_not_found"})
+
+# stlink-server, which STM32CubeCLT ships to share one probe between its tools,
+# and the port its clients reach it on (ST-LINK_gdbserver `-t`). It needs no
+# options and listens on loopback; version 2.1.1 refused `--auto-exit` and ended
+# at once on SIGTERM, with exit status -15 (recorded).
+STLINK_SERVER_PORT = 7184
+STLINK_SERVER_LISTEN_TIMEOUT_S = 10.0
+STLINK_SERVER_OUTPUT_TAIL_LINES = 20
+# What a session stop risks when the GDB server holds the probe's USB itself:
+# the direct stop round (st_link_gdbserver_7_14_0_linux_session_stops_recordings.json).
+DIRECT_PROBE_STOP_RISK = (
+    "A session stop kills ST-LINK_gdbserver while it holds the probe's USB itself. In the recorded direct stop round "
+    "on the reference board, 8 of 99 such stops left the probe refusing its next opener: 4 server starts with "
+    "`Target USB comms error` and 4 STM32_Programmer_CLI calls with `ST-LINK error (DEV_USB_COMM_ERR)`. "
+    "Every stop still confirmed the core halted. Put stlink-server on PATH so sessions reach the probe through it."
+)
+
+
+def find_stlink_server() -> str | None:
+    """The stlink-server on this host's PATH, as `shutil.which` names it."""
+    return shutil.which("stlink-server")
+
+
+def stlink_server_listening(port: int) -> bool:
+    """Whether something accepts connections on `port` on loopback."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.5)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
+def output_tail(path: Path) -> list[str]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as error:
+        return [f"{path.name} could not be read: {error}"]
+    return lines[-STLINK_SERVER_OUTPUT_TAIL_LINES:]
 
 
 def classify_gdb_server_output(output: str) -> str:
@@ -353,6 +404,9 @@ class STLinkBackend:
         # The directory of the STM32_Programmer_CLI the session being started
         # resolved, which its server is given as `-cp`.
         self._programmer_directory: str | None = None
+        # Whether the session being started reaches the probe through
+        # stlink-server, which its server is then told with `-t`.
+        self._shared_probe = False
         self._debug = GdbDebugSessions(
             config,
             backend_name=self.backend_name,
@@ -361,6 +415,7 @@ class STLinkBackend:
             classify_server_output=classify_gdb_server_output,
             server_steps=ST_LINK_GDB_SERVER_STEPS,
             read_start_failure=self._debug_start_failure,
+            start_server_companion=self._start_probe_server,
         )
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
@@ -1070,7 +1125,8 @@ class STLinkBackend:
         (`ST_LINK_GDB_SERVER_STEPS`), so `-g` connects without one, as an
         attach must. `-d` for an SWD entry: without it the server connects over
         JTAG, which the reference board's SWD-only wiring refused as an unknown
-        MCU. Never `-e`, which keeps the server up after its client leaves."""
+        MCU. Never `-e`, which keeps the server up after its client leaves.
+        `-t` last, where the session reaches the probe through stlink-server."""
         args = [*invocation(executable_path), "-p", str(gdb_port)]
         if self.config.debugger.interface.upper() == "SWD":
             args.append("-d")
@@ -1078,7 +1134,72 @@ class STLinkBackend:
         if self.config.debugger.probe_id is not None:
             args.extend(["-i", self.config.debugger.probe_id])
         args.append("-g")
+        if self._shared_probe:
+            args.append("-t")
         return args
+
+    def _start_probe_server(self, timeout_s: float) -> ServerCompanion:
+        """How the session's GDB server reaches the probe: through stlink-server where it can, itself otherwise.
+
+        One already listening is shared and left running: another tool's session
+        may be using it. Otherwise the stlink-server on PATH is started for this
+        session, which ends it once the GDB server is gone. Without one, or when
+        the one found ends before it listens, the GDB server opens the probe's
+        USB itself, and the record says so with what that risks at the stop."""
+        port = STLINK_SERVER_PORT
+        self._shared_probe = False
+        if stlink_server_listening(port):
+            self._shared_probe = True
+            return ServerCompanion(None, {"mode": "shared", "started_by_session": False, "port": port, "ended": False})
+        executable = find_stlink_server()
+        if executable is None:
+            return ServerCompanion(None, {"mode": "direct", "reason": "No stlink-server was found on PATH, so ST-LINK_gdbserver opens the probe's USB itself.", "stop_risk": DIRECT_PROBE_STOP_RISK})
+        log_path = Path(logs_directory(self.config)) / f"stlink-server-{timestamp_for_filename()}.log"
+        began = time.monotonic()
+        try:
+            with open(log_path, "wb") as log:
+                process = spawn_managed_process([*invocation(executable)], cwd=str(Path(executable).parent), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+        except OSError as error:
+            return ServerCompanion(None, {"mode": "direct", "reason": f"stlink-server could not be started ({type(error).__name__}: {error}), so ST-LINK_gdbserver opens the probe's USB itself.", "executable": executable, "stop_risk": DIRECT_PROBE_STOP_RISK})
+        deadline = began + max(0.0, min(timeout_s, STLINK_SERVER_LISTEN_TIMEOUT_S))
+        while True:
+            if stlink_server_listening(port):
+                self._shared_probe = True
+                return ServerCompanion(
+                    process,
+                    {
+                        "mode": "shared",
+                        "started_by_session": True,
+                        "port": port,
+                        "executable": executable,
+                        "listening_after_ms": int((time.monotonic() - began) * 1000),
+                        "log_path": display_path(self.config, str(log_path)),
+                        "ended": False,
+                    },
+                )
+            if process.poll() is not None or time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        exited = process.poll() is not None
+        if not exited:
+            terminate_process_tree(process, STLINK_SERVER_LISTEN_TIMEOUT_S)
+        reason = (
+            f"stlink-server exited with status {process.returncode} before it listened on port {port}"
+            if exited
+            else f"stlink-server did not listen on port {port} within {int(min(timeout_s, STLINK_SERVER_LISTEN_TIMEOUT_S))} s and was ended"
+        )
+        return ServerCompanion(
+            None,
+            {
+                "mode": "direct",
+                "reason": f"{reason}, so ST-LINK_gdbserver opens the probe's USB itself.",
+                "executable": executable,
+                "returncode": process.returncode,
+                "output_tail": output_tail(log_path),
+                "log_path": display_path(self.config, str(log_path)),
+                "stop_risk": DIRECT_PROBE_STOP_RISK,
+            },
+        )
 
     def _debug_start_failure(self, output: str, server_args: list[str]) -> JsonObject | None:
         """What a server that exited at start said, in its own words.
@@ -1120,6 +1241,11 @@ class STLinkBackend:
         lower = output.lower()
         if "st-link error (dev_no_stlink)" in lower:
             return "probe_not_found"
+        # A probe that enumerates and whose USB link refused the CLI, recorded
+        # after a killed ST-LINK_gdbserver had held it (the direct stop round of
+        # st_link_gdbserver_7_14_0_linux_session_stops_recordings.json).
+        if "st-link error (dev_usb_comm_err)" in lower:
+            return "adapter_usb_error"
         if contains_any(lower, ["no st-link", "no stlink", "st-link not found", "stlink not found", "no debug probe"]):
             return "probe_not_found"
         if contains_any(lower, ["no stm32 target found", "cannot connect to target", "can not connect to target", "failed to connect"]):
@@ -1161,7 +1287,7 @@ class STLinkBackend:
         return BACKEND_ERROR_TO_PUBLIC_ERROR.get(backend_error_type, backend_error_type)
 
     def _summary_for_error(self, error_type: str) -> str:
-        return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "target_not_detected": "Debugger could not detect the target.", "target_state_unconfirmed": "STM32CubeProgrammer exited without confirming the operation, so the target's state is unknown.", "flash_failed": "Debugger failed to flash the firmware.", "flash_erase_failed": "STM32CubeProgrammer could not erase the target's flash, so its contents are unconfirmed.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "memory_read_failed": "Debugger failed to read the requested target memory.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
+        return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "adapter_usb_error": "The in-circuit debugger or programmer enumerates, but its USB link refused communication.", "target_not_detected": "Debugger could not detect the target.", "target_state_unconfirmed": "STM32CubeProgrammer exited without confirming the operation, so the target's state is unknown.", "flash_failed": "Debugger failed to flash the firmware.", "flash_erase_failed": "STM32CubeProgrammer could not erase the target's flash, so its contents are unconfirmed.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "memory_read_failed": "Debugger failed to read the requested target memory.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
 
     def _erase_failure_summary(self, reading: str) -> str:
         """The erase-failure summary the transcript reading actually supports.
@@ -1179,7 +1305,7 @@ class STLinkBackend:
         }.get(reading, self._summary_for_error("flash_erase_failed"))
 
     def _likely_causes(self, error_type: str) -> list[str]:
-        return {"target_not_detected": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"], "target_state_unconfirmed": ["STM32CubeProgrammer exited successfully without printing every line that confirms the operation; operation_result names which of them did print","debuggers.<name>.executable is a wrapper that discards the CLI's output", "this STM32CubeProgrammer version words its confirmation differently"], "adapter_not_found": ["debug probe is not connected", "debuggers.<name>.probe_id does not match a connected ST-Link serial number", "debug probe driver is missing", "debug probe is already in use"], "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"], "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"], "flash_erase_failed": ["the core was running from flash when the programmer connected under hot plug, so it defeated the erase; an immediate retry usually succeeds", "the sectors this image covers are protected (write protection, PCROP, or a read-out protection level that refuses the erase)", "an earlier flash operation had not finished and left the flash controller busy"], "reset_failed": ["reset line wiring issue", "target is not responding"], "memory_read_failed": ["STM32CubeProgrammer exited without printing 'Data read successfully', so the read is unconfirmed", "the symbol's address is not readable memory on this target", "debug probe or target stopped responding mid-read"], "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"], "debugger_not_found": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"], "config_file_not_found": ["firmware artifact path is missing", "STM32CubeProgrammer CLI path is incomplete"]}.get(error_type, ["inspect the debugger log for details"])
+        return {"target_not_detected": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"], "target_state_unconfirmed": ["STM32CubeProgrammer exited successfully without printing every line that confirms the operation; operation_result names which of them did print","debuggers.<name>.executable is a wrapper that discards the CLI's output", "this STM32CubeProgrammer version words its confirmation differently"], "adapter_usb_error": ["an ST-LINK_gdbserver killed while it held the probe's USB itself left it refusing (recorded after session stops without stlink-server)", "the USB link to the probe failed"], "adapter_not_found": ["debug probe is not connected", "debuggers.<name>.probe_id does not match a connected ST-Link serial number", "debug probe driver is missing", "debug probe is already in use"], "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"], "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"], "flash_erase_failed": ["the core was running from flash when the programmer connected under hot plug, so it defeated the erase; an immediate retry usually succeeds", "the sectors this image covers are protected (write protection, PCROP, or a read-out protection level that refuses the erase)", "an earlier flash operation had not finished and left the flash controller busy"], "reset_failed": ["reset line wiring issue", "target is not responding"], "memory_read_failed": ["STM32CubeProgrammer exited without printing 'Data read successfully', so the read is unconfirmed", "the symbol's address is not readable memory on this target", "debug probe or target stopped responding mid-read"], "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"], "debugger_not_found": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"], "config_file_not_found": ["firmware artifact path is missing", "STM32CubeProgrammer CLI path is incomplete"]}.get(error_type, ["inspect the debugger log for details"])
 
 
 def erase_abort_point(output: str) -> JsonObject:

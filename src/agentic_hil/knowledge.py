@@ -3409,6 +3409,32 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Close whatever else holds the probe.",
         ),
     ),
+    # The probe enumerates and its USB link refuses every opener: recorded on the
+    # reference board after an ST-LINK_gdbserver killed while it held the probe's
+    # USB itself, in the direct stop round of
+    # tests/fixtures/st_link_gdbserver_7_14_0_linux_session_stops_recordings.json,
+    # with what gave the probe back measured in the same cycles.
+    "adapter_usb_error:stlink": ErrorRemedy(
+        meaning=(
+            "The in-circuit debugger or programmer enumerates, but its USB link refused STM32CubeProgrammer's tools: "
+            "ST-LINK_gdbserver printed `Target USB comms error`, STM32_Programmer_CLI `ST-LINK error (DEV_USB_COMM_ERR)`. "
+            "It was recorded after an ST-LINK_gdbserver had been killed while it held the probe's USB itself."
+        ),
+        remediation=(
+            "Call reset_target through an OpenOCD debugger entry for the same probe. In the recorded cycles that gave "
+            "the probe back every time (8 of 8), although the reset itself answered `target_not_detected`; it resets "
+            "the target, which then runs its firmware.",
+            "An OpenOCD probe_target alone does not give it back: after one, ST-LINK_gdbserver answered "
+            "`Target unknown error 19` and STM32_Programmer_CLI `ST-LINK error (DEV_TARGET_CMD_ERR)` until the reset.",
+            "ST-LINK_gdbserver's own advice is to reconnect the probe's USB cable; that was not measured.",
+            "To keep it from coming back, put stlink-server (STM32CubeCLT ships it) on PATH: debug sessions then reach "
+            "the probe through it, and in the recorded shared round no session stop left the probe refusing.",
+        ),
+        do_not=(
+            "Retry the same call unchanged: in every recorded cycle (8 of 8) the next server start and the next "
+            "STM32_Programmer_CLI call were refused again until the reset.",
+        ),
+    ),
     # `doctor`'s device-access check, which `init` repeats as a warning. It asks
     # the kernel with `os.access` and opens nothing, so these are the refusals the
     # first hardware call would meet, said before it is made.

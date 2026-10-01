@@ -1,4 +1,4 @@
-"""Take STM32_Programmer_CLI and ST-LINK_gdbserver out of the STM32CubeCLT installer without running it.
+"""Take STM32_Programmer_CLI, ST-LINK_gdbserver and stlink-server out of the STM32CubeCLT installer without running it.
 
 The bench image's optional `bench-tier-cubeclt` stage runs this on the licensed
 STM32CubeCLT for Linux archive that tools/bench_in_container.py staged after
@@ -11,6 +11,11 @@ read for where the payload starts and how it is packed, and the two directories
 the bench drives are extracted from the inner tree with the tarfile `data`
 filter, which keeps the owner's executable bits and refuses links that leave the
 destination.
+
+stlink-server, which a debug session on the stlink backend reaches the probe
+through, is not in the tree: the payload carries its own makeself installer,
+which setup.sh runs as root. Its header is read the same way, and the one
+program is taken out of its plain tar into `stlink-server/` of the destination.
 
     python extract_cubeclt.py ARCHIVE.zip DESTINATION
 """
@@ -44,6 +49,11 @@ UNPACKED_THROUGH = re.compile(r'MS_dd\w*\s+"\$0"\s+\$offset\s+\$s\s*\|\s*eval\s+
 # few thousand is not a makeself installer.
 HEADER_SEARCH_LINES = 4096
 INNER_TREE = re.compile(r"(?:\./)?stm32cubeclt_[^/]*-Lin\.tar\.gz")
+# stlink-server's installer beside the tree (1.22.0: st-stlink-server.2.1.1-1-
+# linux-amd64.install.sh), the program in its payload, and where it goes.
+STLINK_SERVER_INSTALLER = re.compile(r"(?:\./)?st-stlink-server\.[^/]*-linux-amd64\.install\.sh")
+STLINK_SERVER_PROGRAM = "stlink-server"
+STLINK_SERVER_PART = "stlink-server"
 
 
 class ExtractionRefused(Exception):
@@ -106,8 +116,27 @@ def wanted(tree: tarfile.TarFile, found: set[str]) -> Iterator[tarfile.TarInfo]:
             yield member
 
 
+def extract_stlink_server(installer: bytes, destination: Path) -> None:
+    """stlink-server out of its own makeself installer, into DESTINATION/stlink-server/, without running the installer."""
+    import io
+
+    stream = io.BytesIO(installer)
+    read_header(stream)
+    with tarfile.open(fileobj=stream, mode="r|") as package:
+        for member in package:
+            name = member.name[2:] if member.name.startswith("./") else member.name
+            if name != STLINK_SERVER_PROGRAM:
+                continue
+            if not member.isfile():
+                raise ExtractionRefused(f"{member.name} in stlink-server's installer is not a file")
+            member.name = f"{STLINK_SERVER_PART}/{STLINK_SERVER_PROGRAM}"
+            package.extract(member, destination, filter="data")
+            return
+    raise ExtractionRefused(f"stlink-server's installer carries no ./{STLINK_SERVER_PROGRAM}")
+
+
 def extract(archive: Path, destination: Path, expected_sha256: str = EXPECTED_SHA256) -> list[str]:
-    """Extract PARTS into DESTINATION; nothing is left there unless all of it arrived."""
+    """Extract PARTS and stlink-server into DESTINATION; nothing is left there unless all of it arrived."""
     actual = sha256_of(archive)
     if actual != expected_sha256:
         raise ExtractionRefused(f"{archive.name} has SHA-256 {actual}, expected {expected_sha256}")
@@ -117,11 +146,21 @@ def extract(archive: Path, destination: Path, expected_sha256: str = EXPECTED_SH
     shutil.rmtree(partial, ignore_errors=True)
     found: set[str] = set()
     try:
+        tree_seen = False
+        stlink_server_installer: bytes | None = None
         with zipfile.ZipFile(archive) as zipped, zipped.open(the_installer(zipped)) as installer:
             read_header(installer)
             with tarfile.open(fileobj=installer, mode="r|") as payload:
                 for entry in payload:
-                    if not INNER_TREE.fullmatch(entry.name):
+                    if STLINK_SERVER_INSTALLER.fullmatch(entry.name):
+                        # Before or after the tree: kept until the tree is out,
+                        # since a streamed tar is read once, front to back.
+                        packed = payload.extractfile(entry)
+                        if packed is None:
+                            raise ExtractionRefused(f"{entry.name} is not a file")
+                        stlink_server_installer = packed.read()
+                        continue
+                    if tree_seen or not INNER_TREE.fullmatch(entry.name):
                         continue
                     inner = payload.extractfile(entry)
                     if inner is None:
@@ -129,12 +168,16 @@ def extract(archive: Path, destination: Path, expected_sha256: str = EXPECTED_SH
                     partial.mkdir(parents=True)
                     with tarfile.open(fileobj=inner, mode="r|gz") as tree:
                         tree.extractall(partial, members=wanted(tree, found), filter="data")
-                    break
-                else:
-                    raise ExtractionRefused("the payload carries no stm32cubeclt_*-Lin.tar.gz tree")
+                    tree_seen = True
+        if not tree_seen:
+            raise ExtractionRefused("the payload carries no stm32cubeclt_*-Lin.tar.gz tree")
         missing = [part for part in PARTS if part not in found]
         if missing:
             raise ExtractionRefused(f"the tree carries no {', '.join(missing)}")
+        if stlink_server_installer is None:
+            raise ExtractionRefused("the payload carries no st-stlink-server.*-linux-amd64.install.sh, so no stlink-server")
+        extract_stlink_server(stlink_server_installer, partial)
+        found.add(STLINK_SERVER_PART)
         partial.rename(destination)
     except BaseException:
         shutil.rmtree(partial, ignore_errors=True)

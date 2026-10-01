@@ -191,8 +191,10 @@ RUN --network=none python -m pytest -q -s tests/container/cubeprogrammer_without
 # requested. The installer inside it is never run, so nothing goes into system
 # locations, no service is installed and no device rule changes: the extraction
 # reads its header for where the payload starts and takes the two directories
-# out of the tree. The variable names the tree to the bench tier, whose session
-# tests are deselected wherever none is named. The libraries are the ones `ldd`
+# out of the tree, and stlink-server out of its own installer's plain tar. The
+# variable names the tree to the bench tier, whose session tests are deselected
+# wherever none is named; stlink-server goes on PATH, where a session on the
+# stlink backend looks for it to reach the probe through. The libraries are the ones `ldd`
 # lists for the two programs beyond the C runtime and the tree's own; most come
 # with this base already, and they are named so the layer does not lean on that.
 FROM bench-tier AS bench-tier-cubeclt
@@ -203,6 +205,7 @@ COPY build-inputs/cubeclt.zip /tmp/cubeclt.zip
 COPY tools/bench/extract_cubeclt.py /tmp/extract_cubeclt.py
 RUN --network=none python /tmp/extract_cubeclt.py /tmp/cubeclt.zip /opt/st/stm32cubeclt_1.22.0
 ENV AGENTIC_HIL_BENCH_CUBECLT=/opt/st/stm32cubeclt_1.22.0
+ENV PATH=/opt/st/stm32cubeclt_1.22.0/stlink-server:$PATH
 RUN --network=none python -m pytest -q -s tests/container/st_link_gdbserver_in_the_image.py
 
 # Keep the standard bench image the implicit last stage. An ordinary build
