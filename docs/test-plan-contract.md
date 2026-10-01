@@ -292,11 +292,13 @@ make the plan wrong the first time a board is swapped.
 
 **What a backend can do travels only as far as that backend.** A typed debug
 session (`debug_start`, `run_until_breakpoint`, `debug_stop`) runs on a
-debugger of type `openocd` or `pyocd`, each through its own GDB server, and is
-refused on `stlink` with that backend's `not_supported`; `reset` with
-`mode: init` is OpenOCD-only, refused by the other backends the same way. A
-flash-and-serial plan runs on all three backends; a plan that opens a debug
-session states, implicitly, that its bench runs OpenOCD or pyOCD.
+debugger of type `openocd` or `pyocd`, each through its own GDB server, and on
+`stlink` through ST-LINK_gdbserver wherever the configuration names one or
+finds it beside STM32_Programmer_CLI; an `stlink` entry without one refuses it
+with that backend's `not_supported`. `reset` with `mode: init` is OpenOCD-only,
+refused by the other backends the same way. A flash-and-serial plan runs on all
+three backends; a plan that opens a debug session states, implicitly, that its
+bench has a GDB server for its probe: OpenOCD, pyOCD or ST-LINK_gdbserver.
 
 The two memory reads are the deliberate exception. A plan may carry
 `dump_memory` and `read_symbol` with no `debug_start` before them on a backend
@@ -304,8 +306,8 @@ that serves those reads with no session behind it, which ST-Link and pyOCD do,
 because STM32CubeProgrammer's memory read and pyOCD's `savemem` attach and read
 on their own. On OpenOCD the same two steps run inside the session the plan
 opened, unchanged, and a read outside one is refused there as it always has
-been, because opening one is what would fix it. On pyOCD a plan that did open a
-session reads through it, so the read and the breakpoint share one connection. Which backends serve a read standalone is read off the backend
+been, because opening one is what would fix it. On pyOCD and STM32CubeProgrammer
+a plan that did open a session reads through it, so the read and the breakpoint share one connection. Which backends serve a read standalone is read off the backend
 rather than off a list of type names, so a backend that gains the ability serves
 these plans with nothing in the format or the reactor to change. A bench with
 neither the session nor the standalone read refuses the plan before the run,
