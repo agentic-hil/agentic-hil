@@ -4,20 +4,21 @@
 `test_reactor_status`, `test_reactor_stop` and `hardware_lease_status` are read
 here the way a host reads them: through a real `tools/list` request answered by
 the server. What they must carry is what the code does today. Which devices a
-run declares and how a selector names one, how long a run is held and what ends
-it, what a refused start leaves held, what a repeated call answers, what a stop
-releases and what it leaves to a session, where a plan is read from and which
-refusals come before any step, what a detached run answers, what a run handle
-looks like and which states a run passes through, what a stop asks of a run,
-which incident needs hardware_recover, and where each tool's view of the bench
-ends.
+run declares and how each field of a selector names one, how long a run is held
+and what ends it, what a refused start leaves held, what a repeated call
+answers, what a stop releases and what it leaves to a session, what recovery a
+failure gets and who decides it, where a plan is read from and which refusals
+come before any step, what a detached run waits for, what a run handle looks
+like and which states a run passes through, which field is the verdict and
+which report stays, what a stop asks of a run, which incident needs
+hardware_recover, and where each tool's view of the bench ends.
 
 The checks are about meaning, not wording. A fact that could be stated the
-wrong way round (held or taken, required or never required, `false` or
-`true`, at once or after a wait, finishes the step or kills it) is checked as a
-relation inside one sentence or clause, and every such check is run against its
-own inverted statement as well, which it must refuse. A test never pins a
-sentence.
+wrong way round (held or taken, and or or, required or never required, `false`
+or `true`, always or as the policy allows, at once or after a wait, finishes
+the step or kills it) is checked as a relation inside one sentence or clause,
+and every such check is run against its own inverted statement as well, which
+it must refuse. A test never pins a sentence.
 
 The second half holds the behaviour those definitions describe where no
 existing test already holds it. The rest is held elsewhere and not repeated: a
@@ -27,25 +28,28 @@ service closes, refuses a bad `wait_s` or an unknown device before it locks
 anything, gives back what it took when a later device is held, and names a
 session's lease that outlives it (tests/test_devices.py); a shared bus that
 needs a participant in a selector (tests/test_can_participant_sessions.py); a
-stop that recovers a run left with an incident (tests/test_run_abort_recovery.py);
-a lease read that leaves its incident and agrees with `agentic-hil lease-status`
+stop that recovers a run left with an incident, and the recovery a policy
+withholds or narrows (tests/test_run_abort_recovery.py); a lease read that
+leaves its incident and agrees with `agentic-hil lease-status`
 (tests/test_lease_status_tool.py); a run's devices in `bench_held` and
 `held_devices` (tests/test_coordination.py); a plan run, a detached run, status,
 stop, a plan outside the workspace, a permission refusal and an unprovisioned
 workspace over MCP (tests/test_reactor_mcp_tools.py); the default plan, a plan
 naming a device the bench lacks, a plan inside a declared run and a stop on an
-ended run (tests/test_tool_descriptions.py); and a malformed or unknown handle
-read through the run lifecycle module (tests/test_run_lifecycle.py).
+ended run (tests/test_tool_descriptions.py); and a malformed or unknown handle,
+a delay a stop ends early and a detached worker that never publishes, read
+through the run lifecycle module (tests/test_run_lifecycle.py).
 """
 
 from __future__ import annotations
 
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
+from conftest import FAKE_OPENOCD
 from support import scaled_time_bound
 from test_devices import config_for, mcp_call
 from test_reactor_mcp_tools import RESET_PLAN, bound_service
@@ -64,8 +68,10 @@ from test_tool_definition_can import (
 from test_tool_descriptions import DESCRIPTION_LIMIT, PROPERTY_DESCRIPTION_LIMIT
 
 import agentic_hil
+import agentic_hil.runlifecycle as runlifecycle
 from agentic_hil.bench import MAX_WAIT_S, BenchMutex
-from agentic_hil.config import load_authoritative_config
+from agentic_hil.config import bind_debugger, load_authoritative_config
+from agentic_hil.devices import debugger_device
 from agentic_hil.knowledge import DEFAULT_TEST_CONFIG_PATH
 from agentic_hil.runlifecycle import (
     RUN_FINISHED,
@@ -74,6 +80,8 @@ from agentic_hil.runlifecycle import (
     RUN_STARTING,
     RUN_STOPPED,
     RUN_WORKER_GONE,
+    WORKER_PUBLISH_TIMEOUT_S,
+    worker_publish_window_s,
 )
 from agentic_hil.test_reactor import declared_devices, load_test_config
 from agentic_hil.tools import AgenticHILToolService
@@ -100,9 +108,12 @@ ANNOTATIONS = {
     LEASE: {"title": "Bench lease status", "readOnlyHint": True, "openWorldHint": False},
 }
 
-# The input schemas as they stand, every `description` left out. Describing an
-# input must not change what a call may pass: the schema is the gate in front of
-# the code, and a narrower or wider one is a runtime change.
+# The input schemas as they stand, every annotation keyword left out. Describing
+# an input must not change what a call may pass: the schema is the gate in front
+# of the code, and a narrower or wider one is a runtime change. A `description`
+# or a `default` changes nothing a call may pass (contracts.py:640 validates
+# with `iter_errors`, which applies no default), so they are compared apart:
+# descriptions by the checks below, defaults against the code that applies them.
 NONEMPTY = {"type": "string", "minLength": 1}
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
 SCHEMAS = {
@@ -127,10 +138,24 @@ SCHEMAS = {
     },
     RUN_STOP: EMPTY,
     RUN_STATUS: EMPTY,
-    PLAN_RUN: {"type": "object", "properties": {"test_config_path": NONEMPTY, "detach": {"type": "boolean", "default": False}}, "additionalProperties": False},
+    PLAN_RUN: {"type": "object", "properties": {"test_config_path": NONEMPTY, "detach": {"type": "boolean"}}, "additionalProperties": False},
     PLAN_STATUS: {"type": "object", "properties": {"run": NONEMPTY}, "additionalProperties": False},
     PLAN_STOP: {"type": "object", "properties": {"run": NONEMPTY}, "additionalProperties": False, "required": ["run"]},
     LEASE: EMPTY,
+}
+
+# Keywords that say something about a value without deciding whether a call
+# may pass it (JSON Schema's annotation vocabulary).
+ANNOTATION_KEYWORDS = frozenset({"description", "default", "examples", "title", "$comment"})
+
+# The default each input is documented with, as the code applies it when the
+# input is absent: only `detach: true` detaches (tools.py:1577), and an absent
+# `wait_s` is no wait (tools.py:1436). Both are held in behaviour: a plan run
+# without detach answers with its steps (tests/test_reactor_mcp_tools.py:77-97)
+# and a start without wait_s fails at once (below).
+IMPLEMENTED_DEFAULTS: dict[tuple[str, str], object] = {
+    (PLAN_RUN, "/detach"): False,
+    (RUN_START, "/wait_s"): 0,
 }
 
 
@@ -139,12 +164,38 @@ def listed(tmp_path_factory: pytest.TempPathFactory) -> dict[str, dict]:
     return listed_tools(tmp_path_factory.mktemp("td5-tools-list"))
 
 
-def without_descriptions(node: object) -> object:
+def what_a_call_may_pass(node: object, *, naming_properties: bool = False) -> object:
+    """The schema with every annotation keyword left out, at every level.
+
+    Only where a keyword stands as one: the keys under `properties` are property
+    names, and a property called `title` or `default` is kept."""
     if isinstance(node, dict):
-        return {key: without_descriptions(value) for key, value in node.items() if key != "description"}
+        if naming_properties:
+            return {name: what_a_call_may_pass(child) for name, child in node.items()}
+        return {key: what_a_call_may_pass(value, naming_properties=key == "properties") for key, value in node.items() if key not in ANNOTATION_KEYWORDS}
     if isinstance(node, list):
-        return [without_descriptions(item) for item in node]
+        return [what_a_call_may_pass(item) for item in node]
     return node
+
+
+def every_property(node: object, where: str = "") -> Iterator[tuple[str, dict]]:
+    """Every property an input schema declares, at any depth, by its path."""
+    if isinstance(node, dict):
+        for key, child in node.items():
+            if key == "properties" and isinstance(child, dict):
+                for name, schema in child.items():
+                    yield f"{where}/{name}", schema
+                    yield from every_property(schema, f"{where}/{name}")
+            else:
+                yield from every_property(child, f"{where}/{key}")
+    elif isinstance(node, list):
+        for child in node:
+            yield from every_property(child, where)
+
+
+def selector_text(tool: dict, name: str) -> str:
+    """One field of the device selector `bench_run_start` takes in `devices`."""
+    return str(tool["inputSchema"]["properties"]["devices"]["items"]["properties"][name].get("description", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -152,12 +203,22 @@ def without_descriptions(node: object) -> object:
 # check, so the controls below can show it refuses the inverted claim.
 
 AT_ONCE = r"\b(at once|immediately|no wait|without waiting|does not wait)\b"
+POLICY = r"auto_recover|\bpolic(y|ies)\b"
+REPORTED = r"\b(reported|result|answers?|returns?)\b"
+UNCONDITIONAL = r"\balways\b|\bguarantee|\bnever\b|\bno recovery\b|\bwhatever\b|\bregardless\b|\bleft alone\b"
+MISLEADING_VERDICT = r"`?\bok`? (is|means|gives|carries) the (test |run |plan )?(verdict|result)\b|\bfinished\b[^.;]*\b(means|=)\b[^.;]*\bpass"
 
 
 def run_held_until_stop_or_exit(text: str) -> bool:
     """coordination.py:875-901 (`run_status`) and tests/test_devices.py:930: a run
-    holds its devices until bench_run_stop, or until the server closes."""
-    return stated(text, r"\buntil\b", r"bench_run_stop", r"\b(server|process)\b", unless=r"\bsurviv|\boutlives?\b|\bpersists?\b")
+    holds its devices until bench_run_stop or until the server closes, whichever
+    comes first (coordination.py:894)."""
+    return stated(
+        text,
+        r"\buntil\b",
+        r"bench_run_stop`?,? or\b[^.;]*\b(server|process)\b|\b(server|process)\b[^.;]*\bor\b[^.;]*bench_run_stop",
+        unless=r"\bsurviv|\boutlives?\b|\bpersists?\b",
+    )
 
 
 def run_has_no_timeout(text: str) -> bool:
@@ -184,25 +245,58 @@ def second_start_refused(text: str) -> bool:
     return stated(text, r"\b(second|another|repeat(ed)?|again)\b", r"run_already_active", unless=r"\bnever\b|\breplac|\babsorb|\bjoins?\b")
 
 
+def resolved_before_any_is_locked(text: str) -> bool:
+    """devices.py:826-833 (`resolve_devices`): every selector is resolved before anything is locked."""
+    return stated(text, r"\bresolv|\bchecked\b|\bvalidated\b", r"\bbefore\b", r"\block|\btaken\b|\bheld\b", unless=r"\bafter\b|\bone at a time\b|\bas (it goes|each is)\b")
+
+
 def wait_defaults_to_failing_at_once(text: str) -> bool:
     """tools.py:1436 and bench.py:646-676: `wait_s` defaults to 0, and with no wait a held device is `device_busy` at once."""
     return stated(text, r"\bdefault", r"(?<![\d.])0(?![\d.])", r"device_busy", AT_ONCE, unless=r"\b(forever|indefinitely|unbounded|until (it is )?free)\b")
 
 
 def wait_is_bounded_in_seconds(text: str) -> bool:
-    """bench.py:63 and 646-676: seconds, at most 900."""
-    return stated(text, r"\b900\b", r"\b(seconds?|s)\b", unless=r"\bunbounded|\bno (limit|maximum)\b")
-
-
-def debugger_id_may_be_left_out_with_one_configured(text: str) -> bool:
-    """devices.py:792-808 and 710-731: only a debugger selector may omit `id`, and only with one debugger configured."""
+    """bench.py:63 and 666-670: seconds, finite, from 0 up to 900."""
     return stated(
         text,
-        r"\bomit|\boptional\b|\bleft out\b|\bleave (it )?out\b|\bwithout (an )?id\b",
+        r"(?<![\d.])0(?![\d.])\s*(to|-|and|through)\s*900\b|\bbetween 0 and 900\b|\bat most 900\b|\bup to 900\b",
+        r"\b(seconds?|s)\b",
+        unless=r"\bat least 900\b|\bunbounded|\bno (limit|maximum)\b",
+    )
+
+
+def label_is_optional_with_no_default(text: str) -> bool:
+    """tools.py:1442: an absent label is None; nothing stands in for it."""
+    return stated(text, r"\boptional\b", r"\bno default\b", unless=r"\brequired\b|\bdefaults? to (the|a)\b")
+
+
+def the_board_is_not_a_device(text: str) -> bool:
+    """devices.py:766-770 and 821: the board under test is what the devices drive, not a kind."""
+    return stated(text, r"\b(board|target|dut)\b", r"\bnot\b|\bno\b", r"\bkind\b|\bdevice\b")
+
+
+def id_required_for_uart_and_can(text: str) -> bool:
+    """devices.py:797-807: a uart or can selector without an id is `invalid_argument`."""
+    return stated(text, r"\b(required|must)\b", r"\buart\b", r"\bcan\b", unless=r"\b(not|never)\s+(be\s+)?required\b|\boptional\b|\bmay (be )?(omit|left out|leave)")
+
+
+def debugger_id_may_be_left_out_for_the_bound_or_only_debugger(text: str) -> bool:
+    """devices.py:710-731 and 792-795: only a debugger selector may omit `id`, and
+    it then means the debugger this server is bound to or the only one configured
+    (devices.py:715); configreload.py:257 keeps the binding when another appears."""
+    return stated(
+        text,
+        r"\bomit|\bleft out\b|\bleave (it )?out\b|\bwithout (an )?id\b",
         r"\bdebugger\b",
-        r"\b(exactly one|only one|one configured|the one|single|sole)\b",
+        r"\bbound\b",
+        r"\b(only|sole|single|exactly one)\b",
         unless=r"\b(uart|ports?|any kind|every kind|all kinds)\b",
     )
+
+
+def participant_only_for_can(text: str) -> bool:
+    """devices.py:792-793: a participant on any other kind is `invalid_argument`."""
+    return stated(text, r"\bonly\b", r"\bcan\b", r"invalid_argument", unless=r"\b(any|every|all) kinds?\b|\buart\b|\bdebugger\b")
 
 
 def no_run_answers_run_was_active_false(text: str) -> bool:
@@ -222,10 +316,18 @@ def a_session_keeps_its_own_device(text: str) -> bool:
     )
 
 
-def an_open_incident_triggers_recovery(text: str) -> bool:
-    """tools.py:1466-1467, 1482-1484 and 1846-1890: an incident still open once the devices
-    are back runs the recovery (reset into halt, probe re-read), reported in `recovery`."""
-    return stated(text, r"\bincident\b", r"`?recovery`?", r"\b(halt|reset)", unless=r"\bnever\b|\bnot (touched|driven|reset|halted)\b|\bno recovery\b")
+def an_open_incident_runs_the_recovery_its_policy_allows(text: str) -> bool:
+    """tools.py:1466-1467 and 1469-1484: an incident still open once the devices are
+    back runs the recovery, which `recovery.auto_recover` may withhold
+    (tools.py:1912), narrow to a probe re-read (tools.py:1953) or leave unconfirmed
+    (tools.py:1958); the `recovery` block says which."""
+    return stated(text, r"\bincident\b", r"\brecovery\b", POLICY, REPORTED, unless=UNCONDITIONAL)
+
+
+def a_failing_step_runs_the_recovery_its_policy_allows(text: str) -> bool:
+    """test_reactor.py:3284-3298 and tools.py:1846-1928: a failed step or cleanup
+    runs the recovery the policy and the probe's grants allow, in `recovery`."""
+    return stated(text, r"\bfail", r"\brecovery\b", POLICY, REPORTED, unless=UNCONDITIONAL)
 
 
 def lease_status_sees_other_holders(text: str) -> bool:
@@ -245,8 +347,14 @@ def default_plan_named(text: str) -> bool:
 
 
 def plan_held_to_the_workspace(text: str) -> bool:
-    """test_reactor.py:629-651: a path is read relative to workspace_root and must resolve inside it."""
-    return stated(text, r"workspace_root", r"\b(inside|within|under|relative|outside)\b", unless=r"\banywhere\b|\bany path\b")
+    """test_reactor.py:629-651: a path is read relative to workspace_root, and one
+    that resolves outside it is refused (test_reactor.py:633)."""
+    return stated(
+        text,
+        r"workspace_root",
+        r"\b(inside|within|under)\b|\boutside\b[^.;]*\b(fails?|refused|test_config_invalid)\b",
+        unless=r"\banywhere\b|\bany path\b|\b(allowed|accepted|permitted)\b",
+    )
 
 
 def missing_plan_not_found(text: str) -> bool:
@@ -279,29 +387,36 @@ def permission_refused_before_any_step(text: str) -> bool:
     return stated(text, r"permission_denied", r"\bbefore\b|\bno step\b")
 
 
-def a_failing_step_halts_the_target(text: str) -> bool:
-    """tests/test_run_abort_recovery.py:232-256: a failed step aborts into a reset into halt where the policy allows."""
-    return stated(text, r"\bfail", r"\bhalt", unless=r"\b(never|not|no)\b[^.;]*\bhalt|\bleaves? the target running\b")
-
-
 def detach_defaults_to_false(text: str) -> bool:
     """contracts.py `detach` default and tools.py:1577-1579."""
     return stated(text, r"\bdefault", r"\bfalse\b", unless=r"\bdefault(s)?\b[^.;]*\btrue\b")
 
 
-def a_plain_run_returns_the_report(text: str) -> bool:
-    """reactorrun.py `run_plan`: without detach the call ends with the plan and answers with its steps and report."""
+def a_plain_run_answers_at_the_plans_end(text: str) -> bool:
+    """reactorrun.py `run_plan`: without detach the call ends with the plan and answers with its steps and verdict."""
     return stated(
         text,
-        r"\bfalse\b|\bwithout detach\b|\bsynchronous|\b(when|until) the plan (ends|finishes)\b",
-        r"`?steps`?|`?report_path`?",
+        r"\bfalse\b|\bwithout detach\b|\bsynchronous",
+        r"\b(when|until|once) the plan (ends|finishes|has ended)\b|\bplan'?s end\b|\bend of the plan\b",
+        r"\bsteps\b|\breport\b|\bverdict\b",
         unless=r"\b(at once|immediately)\b",
     )
 
 
-def a_detached_run_answers_at_once_with_a_handle(text: str) -> bool:
-    """runlifecycle.py:703-717 and 720-822: detached, the call answers with `run` once the worker holds its devices."""
-    return stated(text, r"\btrue\b|\bdetach", r"\b(at once|immediately)\b", r"`run`|\bhandle\b", unless=r"\bwaits? (for|until) the plan\b")
+def detach_waits_for_the_worker_not_the_plan(text: str) -> bool:
+    """runlifecycle.py:703-717 and 720-822: detached, the call waits for the worker
+    to publish, at most 30 s with no device wait (runlifecycle.py:63, 759), never
+    for the plan's end, and answers with `run` and `state` (or, for a run that
+    already ended, its verdict, runlifecycle.py:805)."""
+    return stated(
+        text,
+        r"\btrue\b|\bdetach",
+        r"\b(not|without|never)\b[^.;]*\bplan\b|\bbefore the plan\b",
+        r"\bworker\b",
+        r"\b30 ?s\b|\b30 seconds\b",
+        r"\bstate\b|\bhandle\b",
+        unless=r"\bwaits? (for|until) the plan\b|\b(at once|immediately)\b",
+    )
 
 
 def handle_shape_named(text: str) -> bool:
@@ -324,9 +439,41 @@ def worker_gone_means_the_process_died(text: str) -> bool:
     return stated(text, r"worker_gone", r"\b(died|dead|gone|exited|crashed)\b|hardware_lease_status")
 
 
+def run_ok_is_the_verdict(text: str) -> bool:
+    """runlifecycle.py:1026 and 647: status `ok` says the read worked; `run_ok` is
+    the run's verdict once it ended, and `finished` is not a pass."""
+    return stated(text, r"run_ok", r"\bverdict\b|\bpass(ed)?\b") and not any(names(MISLEADING_VERDICT, clause) for clause in clauses(text))
+
+
+def canonical_report_outlives_the_mirror(text: str) -> bool:
+    """runlifecycle.py:1034-1047: `canonical_report_path` is the run's own report;
+    `report_path` is a mirror the next run overwrites."""
+    return stated(text, r"canonical_report_path", r"\b(own|stays|kept|keeps|stable)\b", unless=r"\bnext run\b|\bmirror\b|\boverwrit") and stated(
+        text, r"(?<!\w)report_path\b", r"\bmirror\b|\boverwrit|\bnext run\b", unless=r"canonical_report_path"
+    )
+
+
+def stop_writes_a_request_the_run_reads(text: str) -> bool:
+    """runlifecycle.py:1115-1121 and 1160-1161: the call writes a request file the
+    run reads; nothing reaches the process."""
+    return stated(
+        text,
+        r"\bwrit(es?|ing)\b",
+        r"\brequest\b",
+        r"\breads?\b",
+        unless=r"\b(signals?|signalling|kills?|killing|terminates?|terminating)\b",
+    )
+
+
 def stop_finishes_the_step_first(text: str) -> bool:
     """runlifecycle.py:1117-1121 and 1166-1167: cooperative, the run finishes its current step."""
     return stated(text, r"\b(finish|finishes|completes|after)\b", r"\bstep\b", unless=r"\b(kill|kills|killed|abort|aborts|interrupt|interrupts|mid-step)\b")
+
+
+def a_waiting_step_ends_early(text: str) -> bool:
+    """test_reactor.py:1417-1450 and runlifecycle.py:1118-1120: a delay, and a wait
+    for a device another run holds, read the request and end early."""
+    return stated(text, r"\b(delay|wait)", r"\bends? early\b|\bcut short\b", unless=r"\b(not|never)\b[^.;]*\b(early|short)\b|\bruns? (out|to (its|the) end)\b")
 
 
 def stop_closes_devices_and_writes_the_report(text: str) -> bool:
@@ -342,6 +489,12 @@ def a_starting_run_ends_before_any_step(text: str) -> bool:
 def ended_run_answers_stop_requested_false(text: str) -> bool:
     """runlifecycle.py:1136-1144."""
     return stated(text, r"\b(ended|finished|already|over|done)\b", r"stop_requested" + FALSE)
+
+
+def a_repeat_on_a_live_run_answers_true(text: str) -> bool:
+    """runlifecycle.py:1160-1177: a run not yet ended that is asked again has its
+    request written anew and answers `stop_requested: true` again."""
+    return stated(text, r"\b(repeat(ed)?|again|second)\b", r"stop_requested" + TRUE, unless=r"stop_requested" + FALSE + r"|\brefused\b|\bfails?\b")
 
 
 def stop_answers_before_the_run_ends(text: str) -> bool:
@@ -367,7 +520,7 @@ def only_a_standing_incident_needs_recover(text: str) -> bool:
         r"\bstand|incident_stands",
         r"\b(needs?|requires?|takes?|calls? for)\b",
         r"hardware_recover",
-        unless=r"\bwithout hardware_recover\b|\b(every|any|all) (open )?incidents?\b",
+        unless=r"\bwithout hardware_recover\b|\b(every|any|all) (open )?incidents?\b|incident_stands" + FALSE + r"|\b(does not|doesn't|never) stand",
     )
 
 
@@ -401,44 +554,108 @@ def reads_without_driving(text: str) -> bool:
 
 RELATIONS: list[tuple[Callable[[str], bool], str, str]] = [
     (run_held_until_stop_or_exit, "It holds them until bench_run_stop or server exit.", "It holds them until bench_run_stop and survives a server exit."),
+    (run_held_until_stop_or_exit, "It holds them until bench_run_stop or server exit.", "It holds them until bench_run_stop and server exit."),
     (run_has_no_timeout, "Held with no timeout.", "The run times out after 15 minutes."),
     (acquisition_is_all_or_nothing, "All or nothing: a refused start holds none.", "A refused start keeps the devices it got and waits for the rest."),
     (acquisition_is_all_or_nothing, "Nothing is held when one device is busy.", "Not all or nothing: it keeps what it took."),
     (undeclared_device_refused, "Other devices fail `undeclared_device`.", "It may touch any device; `undeclared_device` is never returned."),
     (second_start_refused, "A second start fails `run_already_active`.", "A second start replaces the open run instead of `run_already_active`."),
+    (resolved_before_any_is_locked, "All resolved before any is locked.", "Each is locked as it is resolved, one at a time."),
     (wait_defaults_to_failing_at_once, "Default 0: a held device fails `device_busy` at once.", "Default 0 waits until it is free, then `device_busy`."),
     (wait_defaults_to_failing_at_once, "Default 0, so `device_busy` comes immediately.", "Default 900: `device_busy` at once only after the wait."),
+    (wait_defaults_to_failing_at_once, "Default 0: `device_busy` at once.", "Default 10: `device_busy` at once."),
     (wait_is_bounded_in_seconds, "Seconds to wait, 0 to 900.", "Seconds to wait; no maximum, 900 is only typical."),
-    (debugger_id_may_be_left_out_with_one_configured, "id may be omitted only for a debugger when exactly one is configured.", "id is optional for a uart when one port is configured, or a debugger."),
-    (debugger_id_may_be_left_out_with_one_configured, "Only the one configured debugger may be left out.", "Any kind may omit id when exactly one debugger is configured."),
+    (wait_is_bounded_in_seconds, "Seconds to wait, at most 900.", "Seconds to wait, at least 900."),
+    (wait_is_bounded_in_seconds, "Seconds to wait, 0 to 900.", "Seconds to wait, 900 to 0."),
+    (label_is_optional_with_no_default, "Optional, no default: free text.", "Optional; defaults to the project name."),
+    (label_is_optional_with_no_default, "Optional, no default.", "Required, no default."),
+    (the_board_is_not_a_device, "The board under test is not a kind.", "The board under test is a kind too."),
+    (id_required_for_uart_and_can, "Required for uart and can.", "Optional for uart and can."),
+    (
+        debugger_id_may_be_left_out_for_the_bound_or_only_debugger,
+        "A debugger may leave it out, meaning the one this server is bound to or the only one configured.",
+        "A debugger may leave it out only when exactly one is configured.",
+    ),
+    (
+        debugger_id_may_be_left_out_for_the_bound_or_only_debugger,
+        "id may be omitted for a debugger: the bound one, or the only one.",
+        "id may be omitted for a uart or a debugger: the bound one, or the only one.",
+    ),
+    (participant_only_for_can, "Only for can, else `invalid_argument`.", "Any kind may carry one; `invalid_argument` only for a uart."),
     (no_run_answers_run_was_active_false, "With no run open it answers `run_was_active: false`.", "With no run open it answers `run_was_active: true`."),
     (no_run_answers_run_was_active_false, "Safe with no run open: `run_was_active: false`.", "With no run open it fails `run_not_active`."),
     (a_session_keeps_its_own_device, "A session still open keeps its own device: `open_leases`, `still_held_devices`.", "It also closes every open session; `still_held_devices` is then empty."),
-    (an_open_incident_triggers_recovery, "With an incident still open it resets the target into halt, reported in `recovery`.", "An open incident is left alone; `recovery` is never attempted and the target is not reset."),
+    (
+        an_open_incident_runs_the_recovery_its_policy_allows,
+        "With an incident open it runs the recovery `recovery.auto_recover` allows, reported in `recovery`.",
+        "With an incident open it always resets the target into halt, reported in `recovery`.",
+    ),
+    (
+        an_open_incident_runs_the_recovery_its_policy_allows,
+        "An open incident gets the recovery the policy allows, reported in `recovery`.",
+        "An open incident gets no recovery, whatever the policy, reported in `recovery`.",
+    ),
+    (
+        a_failing_step_runs_the_recovery_its_policy_allows,
+        "A failing step runs the recovery `recovery.auto_recover` allows, result `recovery`.",
+        "A failing step always resets the target into halt.",
+    ),
+    (
+        a_failing_step_runs_the_recovery_its_policy_allows,
+        "A failing step runs the recovery the policy allows, reported in `recovery`.",
+        "A failing step halts the target whatever the policy, reported in `recovery`.",
+    ),
     (lease_status_sees_other_holders, "What another process holds shows in hardware_lease_status.", "hardware_lease_status shows the same as this."),
     (default_plan_named, "Default `.agentic-hil/testconfig.yaml`.", "Required: there is no `.agentic-hil/testconfig.yaml` fallback."),
     (plan_held_to_the_workspace, "A path inside workspace_root.", "Any path works, inside workspace_root or anywhere."),
+    (plan_held_to_the_workspace, "Outside workspace_root fails `test_config_invalid`.", "Paths outside workspace_root are allowed."),
     (missing_plan_not_found, "Missing: `test_config_not_found`.", "A missing plan is `test_config_invalid`; `test_config_not_found` is never returned."),
     (bad_plan_invalid, "Outside it or malformed: `test_config_invalid`.", "`test_config_invalid` is never returned for a malformed plan."),
     (inside_a_declared_run_refused, "Inside a bench_run_start run it fails `run_already_active`.", "Inside a bench_run_start run it uses the run's devices, never `run_already_active`."),
     (held_device_fails_at_once, "A device held elsewhere fails `device_busy` at once.", "It waits for a held device, up to 900 s, then `device_busy`."),
     (permission_refused_before_any_step, "A step whose permission is off fails `permission_denied` before any step runs.", "A step whose permission is off fails `permission_denied` when reached, after the earlier steps ran."),
-    (a_failing_step_halts_the_target, "A failing step resets the target into halt.", "A failing step does not halt the target."),
     (detach_defaults_to_false, "Default false: returns when the plan ends.", "Default true: answers at once."),
     (detach_defaults_to_false, "Default false.", "Default true, false waits."),
-    (a_plain_run_returns_the_report, "Default false: returns when the plan ends, with `steps` and `report_path`.", "Default false: answers at once with a handle; `steps` come from test_reactor_status."),
-    (a_detached_run_answers_at_once_with_a_handle, "True: answers at once with `run` and `state`.", "True: waits until the plan ends, then gives a handle."),
+    (a_plain_run_answers_at_the_plans_end, "Default false: returns when the plan ends, with `steps` and `report_path`.", "Default false: answers at once with a handle; `steps` come from test_reactor_status."),
+    (a_plain_run_answers_at_the_plans_end, "Default false: answers at the plan's end with `ok`, `steps`.", "Default false: answers with `ok`, `steps` from the first step."),
+    (
+        detach_waits_for_the_worker_not_the_plan,
+        "True: once a worker holds the devices (30 s max), not at the plan's end: `run`, `state`.",
+        "True: waits until the plan ends, then gives `run` and `state`.",
+    ),
+    (
+        detach_waits_for_the_worker_not_the_plan,
+        "True: once its worker publishes, within 30 s, not when the plan ends: `run`, `state`.",
+        "True: answers at once with `run` and `state`, not at the plan's end.",
+    ),
     (handle_shape_named, "`run-` and 16 hex digits.", "Any text naming the run."),
     (without_a_handle_lists_runs, "Without run, lists this bench's runs: `runs`, `active_runs`.", "Without run it fails `invalid_argument`."),
     (worker_gone_means_the_process_died, "worker_gone: its process died.", "worker_gone means the run is still starting."),
+    (run_ok_is_the_verdict, "`ok` means the read worked; `run_ok` is the verdict once ended.", "`ok` is the test verdict; `run_ok` is the verdict too."),
+    (run_ok_is_the_verdict, "`run_ok` is the verdict once ended.", "`run_ok` is the verdict; finished means it passed."),
+    (
+        canonical_report_outlives_the_mirror,
+        "`canonical_report_path` is its own report; `report_path` is a mirror the next run overwrites.",
+        "`canonical_report_path` is a mirror the next run overwrites; `report_path` is its own report.",
+    ),
+    (stop_writes_a_request_the_run_reads, "Ask a run to stop by writing a request it reads between steps.", "Stop a run by signalling its process, which reads no request it writes."),
+    (stop_writes_a_request_the_run_reads, "It writes a request the run reads.", "It kills the run's process; the run reads nothing."),
     (stop_finishes_the_step_first, "It finishes the step it is in.", "It kills the run at once, mid-step."),
+    (a_waiting_step_ends_early, "A delay or device wait ends early.", "A delay runs to its end before the run stops."),
     (stop_closes_devices_and_writes_the_report, "It closes its devices and writes its report.", "It stops with its devices held and no report."),
     (a_starting_run_ends_before_any_step, "A run still taking its devices ends before any step.", "A starting run runs its first step, then stops."),
     (ended_run_answers_stop_requested_false, "An ended run answers `stop_requested: false`.", "An ended run answers `stop_requested: true`."),
+    (a_repeat_on_a_live_run_answers_true, "Answers at once `stop_requested: true`, also on a repeat.", "A repeat answers `stop_requested: false`."),
+    (
+        a_repeat_on_a_live_run_answers_true,
+        "Asked again, a live run answers `stop_requested: true`.",
+        "Asked again, a live run fails `stop_already_requested`; the first answered `stop_requested: true`.",
+    ),
     (stop_answers_before_the_run_ends, "Answers at once with `stop_requested: true`.", "It waits until the run has stopped."),
     (worker_gone_refusal, "`run_worker_gone` when its process died.", "`run_worker_gone` means the stop was delivered."),
     (only_a_standing_incident_needs_recover, "Only an incident that stands needs hardware_recover.", "Every open incident needs hardware_recover, standing or not."),
     (only_a_standing_incident_needs_recover, "Only `incident_stands: true` needs hardware_recover.", "Only an incident that stands is cleared without hardware_recover."),
+    (only_a_standing_incident_needs_recover, "Only `incident_stands: true` needs hardware_recover.", "Only `incident_stands: false` needs hardware_recover."),
     (other_incidents_settle_at_the_next_call, "Otherwise the next hardware call settles it or stands it down.", "Until hardware_recover runs, the next call is refused."),
     (held_devices_cover_every_process, "`bench_held` and `held_devices` cover any process.", "`held_devices` lists only this server's devices."),
     (standing_incidents_belong_to_others, "`standing_incidents` are other projects' incidents.", "`standing_incidents` lists this project's incidents."),
@@ -457,21 +674,49 @@ def test_each_relation_check_refuses_its_inverted_statement(check: Callable[[str
 
 
 @pytest.mark.parametrize("tool_name", TOOLS)
-def test_every_input_carries_its_own_description_within_the_limits(listed: dict[str, dict], tool_name: str) -> None:
+def test_every_input_at_any_depth_carries_its_own_description_within_the_limits(listed: dict[str, dict], tool_name: str) -> None:
+    """A property inside an array's items is an input a host shows like any
+    other, so the selector's `kind`, `id` and `participant` owe a description as
+    much as `devices` does."""
     tool = listed[tool_name]
-    properties = tool["inputSchema"]["properties"]
+    found = dict(every_property(tool["inputSchema"]))
 
-    undescribed = sorted(name for name, schema in properties.items() if not str(schema.get("description", "")).strip())
+    undescribed = sorted(path for path, schema in found.items() if not str(schema.get("description", "")).strip())
     assert undescribed == [], f"{tool_name}: {undescribed}"
-    over = {name: len(schema["description"]) for name, schema in properties.items() if len(schema["description"]) > PROPERTY_DESCRIPTION_LIMIT}
+    over = {path: len(schema["description"]) for path, schema in found.items() if len(schema["description"]) > PROPERTY_DESCRIPTION_LIMIT}
     assert over == {}, over
     assert len(tool["description"]) <= DESCRIPTION_LIMIT, len(tool["description"])
 
 
+def test_the_walk_reaches_the_selector_fields(listed: dict[str, dict]) -> None:
+    found = {path for path, _ in every_property(listed[RUN_START]["inputSchema"])}
+
+    assert found == {"/devices", "/devices/items/kind", "/devices/items/id", "/devices/items/participant", "/label", "/wait_s"}, found
+
+
 @pytest.mark.parametrize("tool_name", TOOLS)
 def test_describing_an_input_leaves_what_a_call_may_pass_unchanged(listed: dict[str, dict], tool_name: str) -> None:
-    assert without_descriptions(listed[tool_name]["inputSchema"]) == SCHEMAS[tool_name]
+    assert what_a_call_may_pass(listed[tool_name]["inputSchema"]) == SCHEMAS[tool_name]
     assert "outputSchema" not in listed[tool_name]
+
+
+def test_annotation_keywords_are_left_out_only_where_they_stand_as_keywords() -> None:
+    schema = {"type": "object", "default": {}, "properties": {"title": {"type": "string", "title": "x", "default": "a"}}}
+
+    assert what_a_call_may_pass(schema) == {"type": "object", "properties": {"title": {"type": "string"}}}
+
+
+def test_every_documented_default_is_the_one_the_code_applies(listed: dict[str, dict]) -> None:
+    """A `default` a host reads is a value it may leave out on that promise, so
+    it has to be the value the code uses when the input is absent, of the same
+    kind: `0` is not `false`."""
+    documented = {(tool_name, path): schema["default"] for tool_name in TOOLS for path, schema in every_property(listed[tool_name]["inputSchema"]) if "default" in schema}
+
+    assert (PLAN_RUN, "/detach") in documented, documented
+    for key, value in documented.items():
+        assert key in IMPLEMENTED_DEFAULTS, key
+        expected = IMPLEMENTED_DEFAULTS[key]
+        assert (isinstance(value, bool), value) == (isinstance(expected, bool), expected), (key, value)
 
 
 @pytest.mark.parametrize("tool_name", TOOLS)
@@ -505,6 +750,53 @@ def test_no_definition_speaks_in_command_line_flags(listed: dict[str, dict], too
     assert not re.search(r"(?<![\w-])--[a-z]", text), text
 
 
+# Every refusal a tool answers that a caller can act on, by the branch that
+# answers it. A definition that leaves one out leaves the caller to meet it
+# unexplained.
+REFUSALS: dict[str, tuple[str, ...]] = {
+    # devices.py:716-731 and 734-758 (unknown_device), bench.py:487-531
+    # (device_busy), coordination.py:739-740 (run_already_active), 940-951
+    # (undeclared_device) and 747 (resource_quarantined); devices.py:792-793,
+    # 797-807 and 715-728 (invalid_argument), 809-810 (can_participant_required)
+    # and 746 (can_participant_not_configured).
+    RUN_START: (
+        "unknown_device",
+        "device_busy",
+        "run_already_active",
+        "undeclared_device",
+        "resource_quarantined",
+        "invalid_argument",
+        "can_participant_required",
+        "can_participant_not_configured",
+    ),
+    # test_reactor.py:652-655 (not_found), 642-651 and 676-695 (invalid), 658
+    # (unreadable); tests/test_reactor_mcp_tools.py:206-249 (permission_denied);
+    # tools.py:1547-1566 (run_already_active); reactorrun.py:118-145
+    # (device_busy); runlifecycle.py:784-797 (run_worker_unresponsive).
+    PLAN_RUN: (
+        "test_config_not_found",
+        "test_config_invalid",
+        "test_config_unreadable",
+        "permission_denied",
+        "run_already_active",
+        "device_busy",
+        "run_worker_unresponsive",
+    ),
+    # runlifecycle.py:989-998 (run_not_found), 195-215 (run_state_invalid),
+    # 132-139 (invalid_argument).
+    PLAN_STATUS: ("run_not_found", "run_state_invalid", "invalid_argument"),
+    # runlifecycle.py:1124-1133, 1145-1159, 195-215 and 132-139.
+    PLAN_STOP: ("run_not_found", "run_worker_gone", "run_state_invalid", "invalid_argument"),
+}
+
+
+@pytest.mark.parametrize(("tool_name", "error_type"), [(tool_name, code) for tool_name, codes in REFUSALS.items() for code in codes])
+def test_every_refusal_a_tool_answers_is_named_in_its_definition(listed: dict[str, dict], tool_name: str, error_type: str) -> None:
+    text = definition(listed[tool_name])
+
+    assert names(rf"\b{error_type}\b", text), (error_type, text)
+
+
 # ---------------------------------------------------------------------------
 # bench_run_start: what a run declares, holds and refuses.
 
@@ -523,41 +815,69 @@ def test_bench_run_start_says_how_long_a_run_holds_and_what_it_may_touch(listed:
     assert second_start_refused(text), text
 
 
-def test_bench_run_start_names_its_result_fields_and_refusals(listed: dict[str, dict]) -> None:
-    """Success carries `declared_devices` and `run_label` (coordination.py:815-831);
-    a name the configuration lacks is `unknown_device` (devices.py:716-731 and
-    734-758); a device another holder has is `device_busy` (bench.py:487-531)."""
+def test_bench_run_start_names_its_result_fields(listed: dict[str, dict]) -> None:
+    """Success carries `declared_devices` and `run_label` (coordination.py:815-831)."""
     text = definition(listed[RUN_START])
 
-    for token in ("declared_devices", "run_label", "unknown_device", "device_busy"):
-        assert f"`{token}`" in text, (token, text)
+    for token in ("declared_devices", "run_label"):
+        assert names(rf"\b{token}\b", text), (token, text)
 
 
-def test_devices_says_how_a_selector_names_a_device(listed: dict[str, dict]) -> None:
-    """kind is debugger, uart or can (contracts.py DEVICE_SELECTOR); id names
-    the config entry (devices.py:796-811); only a debugger may omit it, and only
-    with one configured (devices.py:710-731, 792-795); a bus with `shares`
-    requires a participant (devices.py:809-810)."""
+def test_devices_says_what_the_run_holds_and_when_it_is_checked(listed: dict[str, dict]) -> None:
     text = property_text(listed[RUN_START], "devices")
 
-    for kind in ("debugger", "uart", "can"):
-        assert names(rf"\b{kind}\b", text), (kind, text)
-    assert stated(text, r"\bid\b", r"\b(config|configuration)\b|\bentry\b"), text
-    assert debugger_id_may_be_left_out_with_one_configured(text), text
+    assert names(r"\bdeclared_devices\b", text), text
+    assert resolved_before_any_is_locked(text), text
+
+
+def test_kind_says_which_config_section_each_kind_names(listed: dict[str, dict]) -> None:
+    """contracts.py DEVICE_SELECTOR and devices.py:761-770 (`config_devices`):
+    a debugger is a `debuggers` entry, a uart a `com_ports` one, a can a
+    `can_buses` one; the board under test is none of them (devices.py:821)."""
+    text = selector_text(listed[RUN_START], "kind")
+
+    assert names(r"\bdebugger\b[^,;.]*\bdebuggers\b", text), text
+    assert names(r"\buart\b[^,;.]*\bcom_ports\b", text), text
+    assert names(r"\bcan\b[^,;.]*\bcan_buses\b", text), text
+    assert the_board_is_not_a_device(text), text
+
+
+def test_id_says_what_it_names_and_when_it_may_be_left_out(listed: dict[str, dict]) -> None:
+    """A name the configuration lacks is `unknown_device` (devices.py:716-758); a
+    uart or can needs one (devices.py:797-807); a debugger may leave it out for
+    the bound debugger or the only one, else `invalid_argument` (devices.py:715-728)."""
+    text = selector_text(listed[RUN_START], "id")
+
+    assert stated(text, r"\b(config|configuration)\b", r"\b(entry|name)\b"), text
+    assert names(r"\bunknown_device\b", text), text
+    assert id_required_for_uart_and_can(text), text
+    assert debugger_id_may_be_left_out_for_the_bound_or_only_debugger(text), text
+    assert names(r"\binvalid_argument\b", text), text
+
+
+def test_participant_says_where_it_belongs_and_what_a_shared_bus_needs(listed: dict[str, dict]) -> None:
+    """devices.py:792-793 (only for can), 809-810 (a bus with `shares` needs one)
+    and 746 (a name the bus lacks)."""
+    text = selector_text(listed[RUN_START], "participant")
+
+    assert participant_only_for_can(text), text
     assert participant_required_on_a_shared_bus(text), text
+    for code in ("can_participant_required", "can_participant_not_configured"):
+        assert names(rf"\b{code}\b", text), (code, text)
 
 
-def test_label_says_where_it_appears(listed: dict[str, dict]) -> None:
-    """The label is the run's `run_label` and the holder label another owner is
-    refused with (coordination.py:812-813, bench.py:496-503), both held by
-    tests/test_devices.py:841-880."""
+def test_label_says_it_is_optional_and_where_it_appears(listed: dict[str, dict]) -> None:
+    """No label is None (tools.py:1442); a label is the run's `run_label` and the
+    holder label another owner is refused with (coordination.py:812-813,
+    bench.py:496-503), both held by tests/test_devices.py:841-880."""
     text = property_text(listed[RUN_START], "label")
 
-    assert "run_label" in text, text
+    assert label_is_optional_with_no_default(text), text
+    assert names(r"\brun_label\b", text), text
     assert names(r"\bholder\b|\bdevice_busy\b", text), text
 
 
-def test_wait_s_names_its_unit_bound_and_default(listed: dict[str, dict]) -> None:
+def test_wait_s_names_its_unit_range_and_default(listed: dict[str, dict]) -> None:
     text = property_text(listed[RUN_START], "wait_s")
 
     assert MAX_WAIT_S == 900.0
@@ -573,14 +893,15 @@ def test_bench_run_stop_says_what_it_releases_and_what_it_leaves(listed: dict[st
     """`released_devices` (coordination.py:846); `run_was_active: false` with no
     run open (coordination.py:846, tests/test_devices.py:917-928); a session keeps
     its own device (coordination.py:849-873); an incident still open runs the
-    recovery and reports it in `recovery` (tools.py:1466-1467)."""
+    recovery its policy allows and reports it in `recovery` (tools.py:1466-1467,
+    1905-1928, tests/test_run_abort_recovery.py)."""
     text = listed[RUN_STOP]["description"]
 
     assert RUN_START in text, text
-    assert "`released_devices`" in text, text
+    assert names(r"\breleased_devices\b", text), text
     assert no_run_answers_run_was_active_false(text), text
     assert a_session_keeps_its_own_device(text), text
-    assert an_open_incident_triggers_recovery(text), text
+    assert an_open_incident_runs_the_recovery_its_policy_allows(text), text
 
 
 def test_bench_run_status_names_its_fields_and_where_its_view_ends(listed: dict[str, dict]) -> None:
@@ -590,7 +911,7 @@ def test_bench_run_status_names_its_fields_and_where_its_view_ends(listed: dict[
     text = listed[RUN_STATUS]["description"]
 
     for token in ("run_active", "declared_devices", "run_label", "held_devices"):
-        assert f"`{token}`" in text, (token, text)
+        assert names(rf"\b{token}\b", text), (token, text)
     assert names(r"\bthis (server|process)\b|\bin[- ]memory\b", text), text
     assert lease_status_sees_other_holders(text), text
 
@@ -621,24 +942,31 @@ def test_test_reactor_run_names_the_refusals_that_come_before_any_step(listed: d
     assert held_device_fails_at_once(text), text
 
 
-def test_test_reactor_run_says_what_a_failing_plan_leaves_on_the_board(listed: dict[str, dict]) -> None:
+def test_test_reactor_run_says_what_recovery_a_failing_plan_gets(listed: dict[str, dict]) -> None:
+    """A failed step aborts into the recovery the policy and the probe's grants
+    allow: withheld (tools.py:1912, 1923), a probe re-read only (tools.py:1953)
+    or a reset into halt that may go unconfirmed (tools.py:1958), named in the
+    result's `recovery` block (test_reactor.py:3298)."""
     text = definition(listed[PLAN_RUN])
 
-    assert a_failing_step_halts_the_target(text), text
+    assert a_failing_step_runs_the_recovery_its_policy_allows(text), text
 
 
 def test_detach_names_its_default_and_what_each_value_answers(listed: dict[str, dict]) -> None:
-    """Default false: the call returns with the plan's report, `ok`, `steps`,
-    `run` and `report_path` (tests/test_reactor_mcp_tools.py:77-97). True: it
-    answers with `run` and `state` once the worker holds its devices
-    (runlifecycle.py:806-822)."""
+    """Default false: the call returns at the plan's end with `ok` and `steps`
+    (tests/test_reactor_mcp_tools.py:77-97). True: it waits for the worker to
+    publish, at most 30 s over MCP, which passes no device wait (tools.py:1577,
+    reactorrun.py:37-45), and answers with `run` and `state`, or with the verdict
+    of a run that already ended (runlifecycle.py:805), or `run_worker_unresponsive`
+    (runlifecycle.py:784-797)."""
     text = property_text(listed[PLAN_RUN], "detach")
 
+    assert worker_publish_window_s(0.0) == WORKER_PUBLISH_TIMEOUT_S == 30.0
     assert detach_defaults_to_false(text), text
-    assert a_plain_run_returns_the_report(text), text
-    assert a_detached_run_answers_at_once_with_a_handle(text), text
-    for token in ("ok", "steps", "run", "report_path", "state"):
-        assert f"`{token}`" in definition(listed[PLAN_RUN]), (token, definition(listed[PLAN_RUN]))
+    assert a_plain_run_answers_at_the_plans_end(text), text
+    assert detach_waits_for_the_worker_not_the_plan(text), text
+    assert names(r"\bverdict\b|\balready (ended|finished)\b", text), text
+    assert names(r"\brun_worker_unresponsive\b", text), text
 
 
 # ---------------------------------------------------------------------------
@@ -652,7 +980,6 @@ def test_run_says_what_a_handle_is_and_where_it_comes_from(listed: dict[str, dic
     assert RUN_HANDLE_PATTERN.pattern == r"^run-[0-9a-f]{16}$"
     assert handle_shape_named(text), text
     assert PLAN_RUN in text, text
-    assert "invalid_argument" in definition(listed[tool_name]), definition(listed[tool_name])
 
 
 def test_test_reactor_status_names_the_states_a_run_passes_through(listed: dict[str, dict]) -> None:
@@ -664,35 +991,49 @@ def test_test_reactor_status_names_the_states_a_run_passes_through(listed: dict[
 
 
 def test_test_reactor_status_names_its_fields_and_the_listing(listed: dict[str, dict]) -> None:
-    """A named run answers `state`, `stop_requested_at` and, once ended, `run_ok`
-    and `report_path` (runlifecycle.py:1023-1031, the record written at 646-647);
-    a handle the bench never issued is `run_not_found` (runlifecycle.py:989-998);
-    without a handle the bench's runs are listed (runlifecycle.py:1073-1113)."""
+    """A named run answers `state`, `stop_requested_at` and, once ended, `run_ok`,
+    `canonical_report_path` and `report_path` (runlifecycle.py:1023-1047, the
+    record written at 646-647); without a handle the bench's runs are listed
+    (runlifecycle.py:1073-1113)."""
     text = definition(listed[PLAN_STATUS])
 
-    for token in ("state", "stop_requested_at", "run_ok", "report_path", "run_not_found", "active_runs"):
-        assert f"`{token}`" in text, (token, text)
+    for token in ("state", "stop_requested_at", "run_ok", "canonical_report_path", "report_path", "active_runs"):
+        assert names(rf"\b{token}\b", text), (token, text)
     assert without_a_handle_lists_runs(text), text
 
 
+def test_test_reactor_status_tells_the_read_from_the_verdict_and_the_report_from_its_mirror(listed: dict[str, dict]) -> None:
+    """The status call's `ok` says the record was read (runlifecycle.py:1026);
+    `run_ok` is the verdict (runlifecycle.py:647); the run's own report is
+    `canonical_report_path`, and `report_path` is the mirror the next run
+    overwrites (runlifecycle.py:1034-1047)."""
+    text = definition(listed[PLAN_STATUS])
+
+    assert run_ok_is_the_verdict(text), text
+    assert canonical_report_outlives_the_mirror(text), text
+
+
 def test_test_reactor_stop_says_what_it_asks_of_the_run(listed: dict[str, dict]) -> None:
-    """Cooperative (runlifecycle.py:1117-1121): the run finishes its step, closes
-    its devices and writes its report, and one still taking its devices ends
-    before any step (runlifecycle.py:1162-1167). The call answers once the request
-    is written (runlifecycle.py:1160-1177)."""
+    """Cooperative (runlifecycle.py:1115-1121): the call writes a request the run
+    reads; the run finishes its step, a waiting step ends early
+    (test_reactor.py:1417-1450), it closes its devices and writes its report, and
+    one still taking its devices ends before any step (runlifecycle.py:1162-1167).
+    The call answers once the request is written (runlifecycle.py:1160-1177)."""
     text = definition(listed[PLAN_STOP])
 
+    assert stop_writes_a_request_the_run_reads(text), text
     assert stop_finishes_the_step_first(text), text
+    assert a_waiting_step_ends_early(text), text
     assert stop_closes_devices_and_writes_the_report(text), text
     assert a_starting_run_ends_before_any_step(text), text
     assert stop_answers_before_the_run_ends(text), text
 
 
-def test_test_reactor_stop_names_what_a_repeat_and_a_lost_run_answer(listed: dict[str, dict]) -> None:
+def test_test_reactor_stop_names_what_a_repeat_an_ended_run_and_a_lost_run_answer(listed: dict[str, dict]) -> None:
     text = definition(listed[PLAN_STOP])
 
+    assert a_repeat_on_a_live_run_answers_true(text), text
     assert ended_run_answers_stop_requested_false(text), text
-    assert "run_not_found" in text, text
     assert worker_gone_refusal(text), text
 
 
@@ -731,8 +1072,8 @@ def test_hardware_lease_status_says_it_drives_nothing_and_never_that_it_writes_n
 # ---------------------------------------------------------------------------
 # The behaviour those definitions describe, where nothing else holds it yet.
 
-# Device locks are machine-wide, so the ports here carry resource ids no other
-# test module names.
+# Device locks are machine-wide, so the ports and probes here carry resource
+# ids no other test module names.
 TWO_PORTS = """com_ports:
   td5_a:
     device: "COM_TD5_A"
@@ -743,6 +1084,13 @@ TWO_PORTS = """com_ports:
 """
 LOCK_A = "physical:td5-board-a"
 LOCK_B = "physical:td5-board-b"
+SECOND_DEBUGGER = f"""debuggers:
+  td5_second:
+    type: openocd
+    probe_id: "TD5-PROBE-SECOND"
+    resource_id: "td5-probe-second"
+    executable: "{FAKE_OPENOCD.as_posix()}"
+"""
 
 
 def test_bench_run_status_reports_the_open_runs_label_and_what_this_server_holds(tmp_path: Path) -> None:
@@ -790,6 +1138,33 @@ def test_bench_run_start_without_wait_s_fails_at_once_on_a_held_device_and_takes
     assert status["run_active"] is False, status
 
 
+def test_a_debugger_selector_without_an_id_means_the_bound_debugger_among_several(tmp_path: Path) -> None:
+    """With two debuggers configured, a selector naming none means the one this
+    server is bound to (devices.py:715); unbound, it is `invalid_argument` naming
+    the configured debuggers (devices.py:716-728)."""
+    config = config_for(tmp_path, probe_id="TD5-PROBE-DUT", debuggers_yaml=SECOND_DEBUGGER)
+    assert sorted(config.debuggers) == ["dut", "td5_second"] and config.debugger_id is None, (sorted(config.debuggers), config.debugger_id)
+    bound = bind_debugger(config, "td5_second")
+
+    unbound_service = AgenticHILToolService(config, frontend="mcp")
+    try:
+        refused = mcp_call(unbound_service, RUN_START, {"devices": [{"kind": "debugger"}]})
+    finally:
+        unbound_service.close()
+    service = AgenticHILToolService(bound, frontend="mcp")
+    try:
+        started = mcp_call(service, RUN_START, {"devices": [{"kind": "debugger"}]})
+        stopped = mcp_call(service, RUN_STOP)
+    finally:
+        service.close()
+
+    assert refused["ok"] is False and refused["error_type"] == "invalid_argument", refused
+    assert refused["configured_debuggers"] == ["dut", "td5_second"], refused
+    assert started["ok"] is True, started
+    assert started["declared_devices"] == sorted(debugger_device(bound, "td5_second").lock_keys), started
+    assert stopped["run_was_active"] is True, stopped
+
+
 def test_a_plan_run_over_mcp_does_not_wait_for_a_device_another_holder_has(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The MCP tool passes no wait to the run (tools.py:1577-1579), so a plan
     whose device is held answers `device_busy` with no step run, at once."""
@@ -831,8 +1206,29 @@ def test_a_handle_the_tools_cannot_read_is_refused_by_field_over_mcp(tmp_path: P
     assert unknown["ok"] is False and unknown["error_type"] == "run_not_found", unknown
 
 
+def test_a_repeated_stop_on_a_live_run_answers_true_again_and_writes_the_request_anew(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """runlifecycle.py:1160-1177: a run that has not ended, asked again, has its
+    request file written again and answers `stop_requested: true` both times. The
+    worker is reported alive, as the lock a running worker holds would report it."""
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, RESET_PLAN)
+    config = load_authoritative_config(workspace)
+    handle = "run-00000000000000d5"
+    runlifecycle.write_run_record(config, handle, {"version": runlifecycle.RUN_RECORD_VERSION, "state": RUN_RUNNING, "name": "testconfig"})
+    monkeypatch.setattr(runlifecycle, "worker_is_gone", lambda *_: False)
+    service = bound_service(workspace)
+    try:
+        first = mcp_call(service, PLAN_STOP, {"run": handle})
+        second = mcp_call(service, PLAN_STOP, {"run": handle})
+    finally:
+        service.close()
+
+    assert first["ok"] is True and first["stop_requested"] is True, first
+    assert second["ok"] is True and second["stop_requested"] is True, second
+    assert runlifecycle.stop_requested_at(config, handle) == second["stop_requested_at"], second
+
+
 def test_clauses_are_the_unit_every_relation_is_read_in() -> None:
     """The relations above read one sentence or semicolon clause at a time, so a
     fact split across two clauses is not one the check accepts."""
     assert clauses("Default false; returns `steps`.") == ["Default false;", "returns `steps`."]
-    assert not a_plain_run_returns_the_report("Default false. It answers at once; `steps` come later.")
+    assert not a_plain_run_answers_at_the_plans_end("Default false. It answers at once; `steps` come later.")
