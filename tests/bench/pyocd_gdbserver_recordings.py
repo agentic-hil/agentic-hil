@@ -1,0 +1,418 @@
+"""Opt-in recording of pyOCD's GDB server against the bench's board (#624).
+
+Typed debug sessions on the pyOCD backend run `pyocd gdbserver`, and every fake
+the deterministic tests use for it comes from what this module records: the
+lines a starting server prints, the ports it listens on, its failures, the
+answer to the monitor commands a session sends, and what each way of ending a
+session leaves the core doing. Nothing here goes through the product's session
+layer, because recording what that layer has to be built against is the point;
+the server and GDB are driven directly, under the bench lock and the run lock,
+and nothing is written to the board's flash.
+
+Selected explicitly, like the other recorders: the file is not named `test_*`.
+With `AGENTIC_HIL_RECORDING_OUT` set to a directory, the recording is written
+there as `pyocd-gdbserver-recording.json`; it is always attached to the test
+report as a property as well.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+from agentic_hil.backends.gdbdebug import reserve_tcp_port
+from agentic_hil.config import GDB_AUTODETECT_CANDIDATES
+from agentic_hil.gdbmi import GdbMiClient, mi_field, mi_string
+from agentic_hil.process import spawn_managed_process, terminate_process_tree
+
+from .conftest import BENCH_ONLY, Bench, put_on_board
+from .pyocd_recordings import PACK_ID, TARGET_TYPE, pyocd_bench_environment, pyocd_provenance, redact_values
+
+pytestmark = [pytest.mark.bench, BENCH_ONLY]
+
+RECORDING_SCHEMA = "agentic-hil.pyocd-gdbserver-recording/v1"
+OUTPUT_DIRECTORY_ENV = "AGENTIC_HIL_RECORDING_OUT"
+OUTPUT_NAME = "pyocd-gdbserver-recording.json"
+STARTUP_TIMEOUT_S = 45.0
+COMMAND_TIMEOUT_S = 10.0
+STOP_TIMEOUT_S = 10.0
+EXIT_WAIT_S = 10.0
+# Long enough that a core left running moves the demo's millisecond counter by
+# thousands, short enough to keep the recorder quick.
+SETTLE_S = 2.0
+UNKNOWN_UID = "AGENTICHILNOSUCHPROBE0"
+UNKNOWN_TARGET = "agentic_hil_no_such_target"
+COUNTER = "uptime_ms"
+HANDLER = "SysTick_Handler"
+STDIO_OFF = ["-O", "stdio_mode=off"]
+
+
+class GdbServer:
+    """One `pyocd gdbserver` process and everything it printed, with when."""
+
+    def __init__(self, argv: list[str], environment: dict[str, str], cwd: str) -> None:
+        self.argv = argv
+        self.started = time.monotonic()
+        self.lines: list[dict] = []
+        self.lock = threading.Lock()
+        self.process = spawn_managed_process(
+            argv,
+            cwd=cwd,
+            env=environment,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.readers = [
+            threading.Thread(target=self._read, args=(self.process.stdout, "stdout"), daemon=True),
+            threading.Thread(target=self._read, args=(self.process.stderr, "stderr"), daemon=True),
+        ]
+        for reader in self.readers:
+            reader.start()
+
+    def _read(self, stream, name: str) -> None:
+        for line in stream:
+            with self.lock:
+                self.lines.append({"stream": name, "at_s": round(time.monotonic() - self.started, 2), "line": line.rstrip("\r\n")})
+
+    def output(self) -> list[dict]:
+        with self.lock:
+            return [dict(line) for line in self.lines]
+
+    def wait_for_line(self, pattern: re.Pattern[str], timeout_s: float) -> dict | None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            for line in self.output():
+                if pattern.search(line["line"]):
+                    return line
+            if self.process.poll() is not None:
+                break
+            time.sleep(0.05)
+        return None
+
+    def wait_for_exit(self, timeout_s: float) -> int | None:
+        try:
+            return self.process.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def terminate(self) -> dict:
+        """The product's own teardown of a server process: SIGTERM to its group, then SIGKILL."""
+        running = self.process.poll() is None
+        terminate_process_tree(self.process, 5.0)
+        for reader in self.readers:
+            reader.join(timeout=5.0)
+        return {"was_running": running, "returncode": self.process.returncode}
+
+
+def free_port() -> int:
+    reservation = reserve_tcp_port()
+    port = reservation.port
+    reservation.release()
+    return port
+
+
+def listening_ports(pid: int) -> list[int]:
+    """The TCP ports a process listens on, read from /proc: the socket inodes it holds, matched to LISTEN rows."""
+    inodes = set()
+    fd_root = Path(f"/proc/{pid}/fd")
+    for fd in fd_root.iterdir():
+        try:
+            target = os.readlink(fd)
+        except OSError:
+            continue
+        match = re.fullmatch(r"socket:\[(\d+)\]", target)
+        if match:
+            inodes.add(match.group(1))
+    ports = set()
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            rows = Path(table).read_text(encoding="ascii").splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            fields = row.split()
+            if len(fields) > 9 and fields[3] == "0A" and fields[9] in inodes:
+                ports.add(int(fields[1].rsplit(":", 1)[1], 16))
+    return sorted(ports)
+
+
+def listening_addresses(pid: int) -> list[str]:
+    """The local addresses of the same LISTEN rows, so a recording shows whether a port is loopback only."""
+    inodes = set()
+    for fd in Path(f"/proc/{pid}/fd").iterdir():
+        try:
+            match = re.fullmatch(r"socket:\[(\d+)\]", os.readlink(fd))
+        except OSError:
+            continue
+        if match:
+            inodes.add(match.group(1))
+    addresses = []
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            rows = Path(table).read_text(encoding="ascii").splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            fields = row.split()
+            if len(fields) > 9 and fields[3] == "0A" and fields[9] in inodes:
+                address_hex, port_hex = fields[1].rsplit(":", 1)
+                if len(address_hex) == 8:
+                    address = ".".join(str(int(address_hex[index : index + 2], 16)) for index in (6, 4, 2, 0))
+                else:
+                    address = "ipv6:" + address_hex
+                addresses.append(f"{address}:{int(port_hex, 16)}")
+    return sorted(addresses)
+
+
+class Recorder:
+    def __init__(self, bench: Bench, executable: str, gdb: str, image: Path, uid: str, environment: dict[str, str]) -> None:
+        self.bench = bench
+        self.executable = executable
+        self.gdb = gdb
+        self.image = image
+        self.uid = uid
+        self.environment = environment
+        self.cwd = str(Path(executable).parent)
+        self.live: list[GdbServer] = []
+        self.clients: list[GdbMiClient] = []
+
+    def server_argv(self, port: int, *, uid: str | None = None, target: str = TARGET_TYPE, extra: list[str] | None = None) -> list[str]:
+        return [self.executable, "gdbserver", "--port", str(port), *(extra or []), "--uid", uid or self.uid, "--target", target, "-W"]
+
+    def start(self, argv: list[str]) -> GdbServer:
+        server = GdbServer(argv, self.environment, self.cwd)
+        self.live.append(server)
+        return server
+
+    def started(self, extra: list[str] | None = None) -> tuple[GdbServer, dict | None]:
+        port = free_port()
+        server = self.start(self.server_argv(port, extra=extra))
+        ready = server.wait_for_line(re.compile(rf"\blistening on port {port}\b", re.IGNORECASE), STARTUP_TIMEOUT_S)
+        return server, ready
+
+    def connect(self, port: int) -> tuple[GdbMiClient, list[dict]]:
+        client = GdbMiClient(self.gdb, str(self.bench.project))
+        self.clients.append(client)
+        transcript = []
+        for command in ("-gdb-set pagination off", "-gdb-set confirm off", "-gdb-set mi-async on", f"-file-exec-and-symbols {mi_string(str(self.image))}", f"-target-select extended-remote localhost:{port}"):
+            transcript.append(self.command(client, command))
+        return client, transcript
+
+    def command(self, client: GdbMiClient, command: str, timeout_s: float = COMMAND_TIMEOUT_S) -> dict:
+        result = client.command(command, timeout_s)
+        return {"command": command, "result_class": result.result_class, "line": result.line, "records": list(result.records), "timed_out": result.timed_out, "error": result.error_message}
+
+    def stop(self, client: GdbMiClient, timeout_s: float = STOP_TIMEOUT_S) -> dict:
+        stop = client.wait_for_stop(timeout_s)
+        return {"line": stop.line, "reason": stop.reason, "timed_out": stop.timed_out, "error": stop.error_message}
+
+    def value(self, client: GdbMiClient, expression: str) -> tuple[dict, str | None]:
+        answer = self.command(client, f"-data-evaluate-expression {expression}")
+        return answer, mi_field(answer["line"], "value") if answer["result_class"] == "done" else None
+
+    def close_client(self, client: GdbMiClient) -> dict:
+        history_before = len(client.history())
+        try:
+            client.close(5.0)
+            closed = {"closed": True}
+        except Exception as error:  # recorded, not raised: the recording is what was asked for
+            closed = {"closed": False, "error": f"{type(error).__name__}: {error}"}
+        closed["commands"] = client.history()[history_before:]
+        if client in self.clients:
+            self.clients.remove(client)
+        return closed
+
+    def finish(self, server: GdbServer) -> dict:
+        exited = server.wait_for_exit(EXIT_WAIT_S)
+        result = {"exited_on_its_own": exited is not None, "returncode": exited}
+        if exited is None:
+            result["terminated"] = server.terminate()
+        else:
+            for reader in server.readers:
+                reader.join(timeout=5.0)
+        if server in self.live:
+            self.live.remove(server)
+        result["output"] = server.output()
+        return result
+
+    def cleanup(self) -> None:
+        for client in list(self.clients):
+            self.close_client(client)
+        for server in list(self.live):
+            server.terminate()
+            self.live.remove(server)
+
+    # Scenarios -----------------------------------------------------------
+
+    def startup(self, extra: list[str], label: str) -> dict:
+        """A server started and torn down by the product's own teardown with no GDB ever connected."""
+        server, ready = self.started(extra)
+        record: dict = {"scenario": label, "argv_tail": server.argv[1:], "ready_line": ready}
+        if ready is not None and server.process.poll() is None:
+            record["listening_ports"] = listening_ports(server.process.pid)
+            record["listening_addresses"] = listening_addresses(server.process.pid)
+            record["gdb_port"] = int(server.argv[server.argv.index("--port") + 1])
+        record["terminated"] = server.terminate()
+        self.live.remove(server)
+        record["output"] = server.output()
+        return record
+
+    def tcp_probe(self) -> dict:
+        """What the server does when something connects to its GDB port and closes without speaking GDB's protocol."""
+        server, ready = self.started(STDIO_OFF)
+        port = int(server.argv[server.argv.index("--port") + 1])
+        record: dict = {"scenario": "connect_and_close_without_gdb", "argv_tail": server.argv[1:], "ready_line": ready}
+        with socket.create_connection(("127.0.0.1", port), timeout=5.0):
+            time.sleep(0.5)
+        record.update(self.finish(server))
+        return record
+
+    def counter_after_a_fresh_connect(self) -> dict:
+        """The demo's counter and PC as a new server and GDB find them, ended so the core stays where it is."""
+        server, ready = self.started(STDIO_OFF)
+        port = int(server.argv[server.argv.index("--port") + 1])
+        client, connect = self.connect(port)
+        counter_answer, counter = self.value(client, COUNTER)
+        pc_answer, pc = self.value(client, "$pc")
+        terminated = server.terminate()
+        self.live.remove(server)
+        closed = self.close_client(client)
+        return {"ready_line": ready, "connect": connect, COUNTER: counter, "pc": pc, "answers": [counter_answer, pc_answer], "server_terminated_first": terminated, "gdb_closed": closed, "output": server.output()}
+
+    def halted_at_handler(self, client: GdbMiClient) -> dict:
+        """Run to the SysTick handler and leave the core stopped there with no breakpoint left."""
+        steps = [self.command(client, f"-break-insert {HANDLER}"), self.command(client, "-exec-continue")]
+        stop = self.stop(client)
+        steps.append(self.command(client, "-break-delete"))
+        counter_answer, counter = self.value(client, COUNTER)
+        pc_answer, pc = self.value(client, "$pc")
+        steps.extend([counter_answer, pc_answer])
+        return {"steps": steps, "stop": stop, COUNTER: counter, "pc": pc}
+
+    def session_ended_by_gdb_exit(self) -> dict:
+        """A session through the commands the product sends, ended the way OpenOCD sessions are: GDB exits first."""
+        server, ready = self.started(STDIO_OFF)
+        port = int(server.argv[server.argv.index("--port") + 1])
+        client, connect = self.connect(port)
+        record: dict = {"scenario": "session_ended_by_gdb_exit", "argv_tail": server.argv[1:], "ready_line": ready, "connect": connect}
+        record["listening_ports_with_gdb_connected"] = listening_ports(server.process.pid)
+        record["reset_halt"] = self.command(client, '-interpreter-exec console "monitor reset halt"')
+        record["reset_halt_stop_poll"] = self.stop(client, 1.0)
+        record["after_reset"] = {"counter_answer": self.value(client, COUNTER)[0], "pc_answer": self.value(client, "$pc")[0]}
+        record["run_and_interrupt"] = [self.command(client, "-exec-continue")]
+        time.sleep(0.5)
+        record["run_and_interrupt"].append(self.command(client, "-exec-interrupt --all"))
+        record["run_and_interrupt_stop"] = self.stop(client)
+        record["interrupt_when_halted"] = self.command(client, "-exec-interrupt --all")
+        record["interrupt_when_halted_stop_poll"] = self.stop(client, 1.0)
+        record["at_handler"] = self.halted_at_handler(client)
+        record["unknown_monitor_command"] = self.command(client, '-interpreter-exec console "monitor agentic_hil_no_such_command"')
+        record["gdb_exit"] = self.close_client(client)
+        record["server_after_gdb_exit"] = self.finish(server)
+        time.sleep(SETTLE_S)
+        record["settle_s"] = SETTLE_S
+        record["fresh_connect"] = self.counter_after_a_fresh_connect()
+        return record
+
+    def session_ended_by_terminating_the_server(self) -> dict:
+        """The same session ended the other way round: the server is terminated while GDB is still connected."""
+        server, ready = self.started(STDIO_OFF)
+        port = int(server.argv[server.argv.index("--port") + 1])
+        client, connect = self.connect(port)
+        record: dict = {"scenario": "session_ended_by_terminating_the_server", "argv_tail": server.argv[1:], "ready_line": ready, "connect": connect}
+        record["at_handler"] = self.halted_at_handler(client)
+        record["server_terminated"] = server.terminate()
+        self.live.remove(server)
+        record["server_output"] = server.output()
+        record["gdb_exit"] = self.close_client(client)
+        time.sleep(SETTLE_S)
+        record["settle_s"] = SETTLE_S
+        record["fresh_connect"] = self.counter_after_a_fresh_connect()
+        return record
+
+    def failure(self, label: str, argv: list[str]) -> dict:
+        server = self.start(argv)
+        record: dict = {"scenario": label, "argv_tail": argv[1:]}
+        record.update(self.finish(server))
+        return record
+
+    def busy_probe(self) -> dict:
+        holder, ready = self.started(STDIO_OFF)
+        port = free_port()
+        record = self.failure("probe_already_held_by_another_server", self.server_argv(port, extra=STDIO_OFF))
+        record["holder_ready_line"] = ready
+        record["holder_terminated"] = holder.terminate()
+        self.live.remove(holder)
+        record["holder_output"] = holder.output()
+        return record
+
+
+def gdb_executable(environment: dict[str, str]) -> str:
+    for candidate in GDB_AUTODETECT_CANDIDATES:
+        found = shutil.which(candidate, path=environment.get("PATH"))
+        if found:
+            return found
+    pytest.fail("no GDB candidate is on the bench's PATH", pytrace=False)
+
+
+def gdb_version(gdb: str) -> str:
+    answered = subprocess.run([gdb, "--version"], capture_output=True, text=True, timeout=30, check=False)
+    return answered.stdout.splitlines()[0] if answered.stdout else ""
+
+
+def test_record_pyocd_gdbserver(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
+    environment = pyocd_bench_environment(bench)
+    executable, pyocd_version, pack_version = pyocd_provenance(environment)
+    gdb_path = gdb_executable(environment)
+    debugger = bench.configuration()["debuggers"][bench.debugger_name()]
+    uid = str(debugger.get("probe_id") or "")
+    assert uid, "the bench configuration names no probe"
+    recorder = Recorder(bench, executable, gdb_path, firmware, uid, environment)
+    private_values = (uid, str(bench.project), str(bench.config_root), str(bench.state_root), str(tmp_path), str(Path.home()), str(firmware.parent))
+    recording: dict = {
+        "schema": RECORDING_SCHEMA,
+        "recorded_on": time.strftime("%Y-%m-%d", time.gmtime()),
+        "source_commit": os.environ.get("AGENTIC_HIL_BENCH_COMMIT"),
+        "pyocd_version": pyocd_version,
+        "cmsis_pack": {"id": PACK_ID, "version": pack_version, "target_type": TARGET_TYPE},
+        "gdb_version": gdb_version(gdb_path),
+        "probe": "the bench's in-circuit debugger, its unique ID redacted",
+        "image": "the demo firmware the tier builds",
+        "scenarios": {},
+    }
+    help_text = subprocess.run([executable, "gdbserver", "--help"], capture_output=True, text=True, env=environment, timeout=60, check=False)
+    recording["gdbserver_help"] = {"returncode": help_text.returncode, "stdout": help_text.stdout.splitlines()}
+    scenarios = recording["scenarios"]
+    try:
+        scenarios["startup_default_options"] = recorder.startup([], "startup_default_options")
+        scenarios["startup_stdio_off"] = recorder.startup(STDIO_OFF, "startup_stdio_off")
+        scenarios["connect_and_close_without_gdb"] = recorder.tcp_probe()
+        scenarios["session_ended_by_gdb_exit"] = recorder.session_ended_by_gdb_exit()
+        scenarios["session_ended_by_terminating_the_server"] = recorder.session_ended_by_terminating_the_server()
+        scenarios["unknown_probe_uid"] = recorder.failure("unknown_probe_uid", recorder.server_argv(free_port(), uid=UNKNOWN_UID, extra=STDIO_OFF))
+        scenarios["unknown_target_type"] = recorder.failure("unknown_target_type", recorder.server_argv(free_port(), target=UNKNOWN_TARGET, extra=STDIO_OFF))
+        scenarios["probe_already_held_by_another_server"] = recorder.busy_probe()
+    finally:
+        recorder.cleanup()
+        redacted = redact_values(recording, private_values)
+        text = json.dumps(redacted, indent=2, sort_keys=True) + "\n"
+        directory = os.environ.get(OUTPUT_DIRECTORY_ENV)
+        if directory:
+            Path(directory).mkdir(parents=True, exist_ok=True)
+            (Path(directory) / OUTPUT_NAME).write_text(text, encoding="utf-8")
+        record_property("pyocd_gdbserver_recording_v1", json.dumps(redacted, sort_keys=True, separators=(",", ":")))
+        restored = put_on_board(bench, firmware)
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
