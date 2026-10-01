@@ -312,7 +312,10 @@ doctor, the build, the demo's plan and the pytest plugin. It takes the machine's
 run lock with `tools/run_lock.py take` before doctor, queued behind whoever holds
 it, for the life of the job's process, and gives it back with `give-back` after
 the pytest plugin's run whatever happened, so a tier started on the machine
-meanwhile waits for the job instead of meeting it on the board.
+meanwhile waits for the job instead of meeting it on the board. Each of those
+commands prints through `tools/withhold.py`, and the evidence is withheld in
+place before it is uploaded, so the job's log and its artifact name the probe's
+serial number and the machine's names as `[withheld]`, as this tool's do.
 
 Its second job runs this tool once for every distribution `--distribution`
 offers, one after another, after the first job whatever it found: each run
