@@ -4153,7 +4153,7 @@ def test_debug_server_cleanup_runs_after_leader_exit(monkeypatch: pytest.MonkeyP
     sessions._audit_broken = None
     sessions._server_steps = OPENOCD_GDB_SERVER_STEPS
     sessions._write_session_log = lambda session: None
-    session = SimpleNamespace(gdb=None, server=child)
+    session = SimpleNamespace(gdb=None, server=child, companion=None)
     calls: list[object] = []
     monkeypatch.setattr("agentic_hil.backends.gdbdebug.terminate_process_tree", lambda process, timeout: calls.append(process))
 
