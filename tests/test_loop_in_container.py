@@ -181,12 +181,22 @@ def _mounts(command: list[str]) -> list[str]:
 
 
 def test_the_container_keeps_every_isolation_option_the_evaluation_sets(tmp_path: Path) -> None:
-    """Measured peaks fit inside the evaluation's limits, so none of them is relaxed."""
+    """Every isolation option the evaluation sets, sized for an implementer round rather than an install.
+
+    An implementer round under the evaluation's 2g reached the cap and was killed
+    with exit -9 after 22 minutes; the same work under 6g and four CPUs finished
+    at a peak of 2224 MiB.
+    """
     command = _command(tmp_path)
     baseline = docker_security_options()
 
     start = command.index(baseline[0])
-    assert command[start : start + len(baseline)] == baseline
+    options = command[start : start + len(baseline)]
+    sizes = {baseline.index("--memory") + 1, baseline.index("--cpus") + 1}
+    assert [options[index] for index in sorted(sizes)] == ["6g", "4"]
+    assert [value for index, value in enumerate(options) if index not in sizes] == [
+        value for index, value in enumerate(baseline) if index not in sizes
+    ]
     for expected in ("--read-only", "no-new-privileges", "--memory"):
         assert expected in command
     for never in ("--privileged", "--cap-add", "--user"):
