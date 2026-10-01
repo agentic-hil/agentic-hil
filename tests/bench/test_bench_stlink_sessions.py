@@ -96,6 +96,27 @@ def said(answer: object) -> str:
     return json.dumps(answer, indent=1, sort_keys=True, default=str)
 
 
+def said_with_logs(bench: Bench, answer: dict) -> str:
+    """The answer, then the session log it names and the end of the stlink-server log that one names.
+
+    A refused start says only its last line; the lines before it are in those
+    two files, which a container run removes with the container."""
+    parts = [said(answer)]
+    session_log = bench.project / str(answer.get("log_path") or "")
+    if answer.get("log_path") and session_log.is_file():
+        text = session_log.read_text(encoding="utf-8", errors="replace")
+        parts.append(f"session log {answer['log_path']}:{chr(10)}{text}")
+        try:
+            server_log_path = (json.loads(text).get("probe_server") or {}).get("log_path")
+        except ValueError:
+            server_log_path = None
+        server_log = bench.project / str(server_log_path or "")
+        if server_log_path and server_log.is_file():
+            lines = server_log.read_text(encoding="utf-8", errors="replace").splitlines()
+            parts.append(f"stlink-server log {server_log_path}, last 60 lines:{chr(10)}" + chr(10).join(lines[-60:]))
+    return chr(10).join(parts)
+
+
 def cubeclt_root() -> Path:
     """The STM32CubeCLT tree this run was given; the `cubeclt` mark deselects the module without one."""
     return Path(os.environ[CUBECLT_ENV])
@@ -133,7 +154,7 @@ def the_demo_runs_afterwards(bench: Bench, firmware: Path) -> Iterator[None]:
     yield
     report = put_on_board(bench, firmware)
     if report.get("ok") is not True:
-        pytest.fail(f"the demo firmware could not be put back on the board after the ST-LINK_gdbserver sessions: {report.get('summary')}", pytrace=False)
+        pytest.fail(f"the demo firmware could not be put back on the board after the ST-LINK_gdbserver sessions: {report.get('summary')}{chr(10)}{said(report)}", pytrace=False)
 
 
 @pytest.fixture
@@ -213,7 +234,7 @@ def test_a_reset_halt_session_runs_to_a_breakpoint_halts_and_stops(stlink_server
 
     started = server.tool("debug_start_session", {"image_path": workspace_image(stlink_bench, firmware), "mode": "reset_halt"})
 
-    assert started["ok"] is True, said(started)
+    assert started["ok"] is True, said_with_logs(stlink_bench, started)
     assert started["backend"] == "stlink", said(started)
     assert started["mode"] == "reset_halt", said(started)
     session = started["session"]
@@ -270,7 +291,7 @@ def test_a_resume_nothing_stops_is_interrupted_and_the_core_does_not_run_once_th
     server = stlink_servers()
     image = workspace_image(stlink_bench, firmware)
     started = server.tool("debug_start_session", {"image_path": image, "mode": "reset_halt"})
-    assert started["ok"] is True, said(started)
+    assert started["ok"] is True, said_with_logs(stlink_bench, started)
 
     timed_out = server.tool("debug_continue", {"timeout_s": UNREACHABLE_STOP_TIMEOUT_S})
     assert timed_out["ok"] is False, said(timed_out)
@@ -290,7 +311,7 @@ def test_a_resume_nothing_stops_is_interrupted_and_the_core_does_not_run_once_th
     time.sleep(SETTLE_S)
 
     attached = server.tool("debug_start_session", {"image_path": image, "mode": "attach"})
-    assert attached["ok"] is True, said(attached)
+    assert attached["ok"] is True, said_with_logs(stlink_bench, attached)
     assert attached["session"]["load_phase"] == "target_connected", said(attached["session"])
     after = server.tool("debug_symbol_value", {"symbol": COUNTER})
     assert after["ok"] is True, said(after)
@@ -312,7 +333,7 @@ def test_a_load_session_writes_the_demo_through_st_link_gdbserver_and_says_the_l
 
     started = server.tool("debug_start_session", {"image_path": workspace_image(stlink_bench, firmware), "mode": "load"})
 
-    assert started["ok"] is True, said(started)
+    assert started["ok"] is True, said_with_logs(stlink_bench, started)
     session = started["session"]
     assert session["status"] == "halted", said(session)
     assert session["firmware_load_status"] == "committed", said(session)
@@ -333,7 +354,7 @@ def test_a_server_that_ends_with_an_stlink_session_open_hands_the_board_to_the_n
     the same probe."""
     abandoned = stlink_servers()
     started = abandoned.tool("debug_start_session", {"image_path": workspace_image(stlink_bench, firmware), "mode": "attach"})
-    assert started["ok"] is True, said(started)
+    assert started["ok"] is True, said_with_logs(stlink_bench, started)
     first_session_id = started["session"]["session_id"]
 
     assert abandoned.shut_down(stop_session=False) == 0, abandoned.diagnosis()
@@ -345,7 +366,7 @@ def test_a_server_that_ends_with_an_stlink_session_open_hands_the_board_to_the_n
 
     successor = stlink_servers()
     reopened = successor.tool("debug_start_session", {"image_path": workspace_image(stlink_bench, firmware), "mode": "attach"})
-    assert reopened["ok"] is True, said(reopened) + chr(10) + successor.diagnosis()
+    assert reopened["ok"] is True, said_with_logs(stlink_bench, reopened) + chr(10) + successor.diagnosis()
     assert reopened["session"]["status"] == "halted", said(reopened["session"])
     assert reopened["session"]["session_id"] != first_session_id, said(reopened["session"])
 
