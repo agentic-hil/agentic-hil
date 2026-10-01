@@ -6,6 +6,30 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- A pyOCD command whose probe listing succeeded but could not be written to the action log is refused as `audit_unavailable`, with `target_contacted: false` and the listing kept underneath. It answered `ok: true` with the listing's "1 connected debugger probe(s) detected.", so a flash that never ran read as a success, the bench recorded an ELF the board never received as its symbol source, and a boot capture waited its whole timeout for a banner.
+
+- An STM32CubeProgrammer flash that loses its probe after a download phase began no longer reports `probe_not_found` with `target_contacted: false`, `hardware_state: unchanged` and `retry_safe: true`. `ST-LINK error (DEV_NO_STLINK)` can come at any point of a run, so a write phase in the transcript now leaves the flash unconfirmed; a read keeps the no-contact claim.
+
+- `agentic-hil upgrade` names under `restart_required_by` only a running MCP server of the installation it upgrades. Off Windows a process counts only when it is an interpreter running the console script in the place a `#!` line puts it, so an editor or a `cp` holding the script's path is no longer asked to restart, and the console scripts considered are read off the installed distribution's own install scheme, so upgrading an editable checkout no longer names the `--user` installation's server, nor the reverse.
+
+- The device access check of `agentic-hil doctor` answers what it is asked on every host. A debugger entry without `probe_id` is checked only when its backend opens an ST-Link (STM32CubeProgrammer, or OpenOCD with an ST-Link interface script), so a pyOCD entry no longer inherits the verdict of an unrelated ST-Link on the same workstation, and in a file with several debuggers one probe's verdict is no longer copied onto every entry without a serial. A refused `stat` (`EACCES`, `EPERM`) is reported as the denial it is instead of adding no entry; a device name the host cannot look up is reported instead of ending `doctor` and `init` on a traceback; the udev advice is given on Linux only and only for a group really named `root`; an account database that cannot be read says so and names both remedies instead of claiming the account is outside the group; and a node owned by a group the user namespace does not map, which shows as the overflow group, is named as unmapped with the remedy of mapping it in, instead of advice to add the account to `nogroup`.
+
+- On OpenOCD before 0.12, a failed read of the installed release or of the adapter driver is published. Every failed result whose probe selection rested on that read carries `probe_selection_read_failure` with the decisive line and leads `likely_causes` with it, ahead of the causes for the error the result carries, and so does a debug server start, including one that timed out; a wrapper set as `debuggers.<name>.executable` that swallows `--version` was named nowhere. A debug session started with `attach` whose server stopped at a rejected `-c` command now answers `debugger_command_rejected` naming the command instead of `unknown_debugger_error`.
+
+- `tools/run_lock.py` refuses at once a lock record that carries `cleanup_required`, with the record's decisive line, instead of polling it until the step timed out: only an operator who has stopped the leftover container clears it, so one wedged container made every nightly wait four hours and fail. `run --` passes SIGINT on to its command as well as SIGTERM, so a cancelled step stops the board command, and `give-back` leaves the lock standing when the take it gives back carries no owner id to match it by.
+
+- The bench image's build context is an allowlist again. `!tools/` and `!build-inputs/` let both trees back in whole, so all of `tools/` was baked into every bench image. `tools/bench_in_container.py` refuses `--distribution` with `--cubeprogrammer-archive` before it takes the run lock, naming each distribution's own reason, where the build failed after minutes of base build.
+
+- After a USB reset the bench tier waits for the debugger's re-enumerated nodes to be openable, not only present. The usbfs node is opened read-write within the wait and the serial port is asked with `os.access` before the session starts, so udev applying its mode and group after the node appears no longer fails the stage on a permission error.
+
+- The bench's CAN peer image counts the frames a mode switch discards in `lost`, and documents `lost` as a lower bound once the receive FIFO overran, since the controller reports an overrun as one flag however many frames it dropped.
+
+- Bench and gate surfaces say what failed. `tools/bench_diagnostic.py` reports the message of a failed pinned-asset download (digest or size mismatch, missing token, unexpected URL) with the machine's host, home and user withheld, where it printed only `ValueError`; the recovery check's refused run start is redacted like its siblings before it reaches the JUnit report; the registration gate reads a published release from any PEP 440 spelling, so a `.post1` on the index no longer turns every script case red; and five bench plan patterns that meant a line start now write `(?m)^`, whose absence failed the Debian 12 leg.
+
+- `evals/tls_proxy/container/Dockerfile` fetches the uv installer at the version and digest `install.sh` pins, as its comment says, and the static test and the release chore now hold all three sites together.
+
 ## [0.22.0] - 2026-09-30
 
 ### Added
