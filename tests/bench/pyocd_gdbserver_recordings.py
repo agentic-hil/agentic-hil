@@ -12,7 +12,9 @@ and nothing is written to the board's flash.
 Selected explicitly, like the other recorders: the file is not named `test_*`.
 With `AGENTIC_HIL_RECORDING_OUT` set to a directory, the recording is written
 there as `pyocd-gdbserver-recording.json`; it is always attached to the test
-report as a property as well.
+report as a property as well. A second, smaller recording,
+`pyocd-gdbserver-next-connect-recording.json`, follows a core a session left
+halted through the servers that connect after it.
 """
 
 from __future__ import annotations
@@ -66,6 +68,16 @@ TERMINATE_HALTED_CYCLES = 3
 # How many fresh starts are tried after the server was terminated while the
 # core ran, to see whether and when the probe answers again.
 STARTS_AFTER_TERMINATE_RUNNING = 3
+# The second recording: what the next server to connect does to a core that a
+# session left halted, one connect after another.
+NEXT_CONNECT_SCHEMA = "agentic-hil.pyocd-gdbserver-next-connect-recording/v1"
+NEXT_CONNECT_OUTPUT_NAME = "pyocd-gdbserver-next-connect-recording.json"
+NEXT_CONNECTS = 3
+# How long a resume runs before it is interrupted: past the demo's start, so the
+# counter is moving and the core stops wherever it is, on no breakpoint.
+RUN_BEFORE_INTERRUPT_S = 1.0
+# The core debug register a CMSIS-Pack's DebugCoreStart sequence writes.
+DHCSR_ADDRESS = "0xE000EDF0"
 
 
 class GdbServer:
@@ -316,6 +328,39 @@ class Recorder:
         steps.extend([counter_answer, pc_answer])
         return {"steps": steps, "stop": stop, COUNTER: counter, "pc": pc}
 
+    def halted_by_interrupt(self, client: GdbMiClient) -> dict:
+        """Resume with no breakpoint set and interrupt it, so the core stops wherever it was."""
+        steps = [self.command(client, "-exec-continue")]
+        time.sleep(RUN_BEFORE_INTERRUPT_S)
+        steps.append(self.command(client, "-exec-interrupt --all"))
+        stop = self.stop(client)
+        counter_answer, counter = self.value(client, COUNTER)
+        pc_answer, pc = self.value(client, "$pc")
+        steps.extend([counter_answer, pc_answer])
+        return {"steps": steps, "stop": stop, COUNTER: counter, "pc": pc}
+
+    def next_connects(self, label: str, halt) -> dict:
+        """A session halted one way and ended by terminating its server under GDB, then servers connecting one after another.
+
+        Each later server is started, connected to and read the way
+        `counter_after_a_fresh_connect` does, after a pause in which a core
+        left running would move the counter by thousands."""
+        server, ready = self.started(CONSOLE_OFF)
+        port = int(server.argv[server.argv.index("--port") + 1])
+        client, connect = self.connect(port)
+        record: dict = {"scenario": label, "argv_tail": server.argv[1:], "ready_line": ready, "connect": connect}
+        record["halted"] = halt(client)
+        record["server_terminated"] = server.terminate()
+        self.live.remove(server)
+        record["server_output"] = server.output()
+        record["gdb_exit"] = self.close_client(client)
+        record["settle_s"] = SETTLE_S
+        record["next_connects"] = []
+        for _ in range(NEXT_CONNECTS):
+            time.sleep(SETTLE_S)
+            record["next_connects"].append(self.counter_after_a_fresh_connect())
+        return record
+
     def session_ended_by_gdb_exit(self) -> dict:
         """A session through the commands the product sends, ended the way OpenOCD sessions are: GDB exits first."""
         server, ready = self.started(CONSOLE_OFF)
@@ -410,6 +455,27 @@ def gdb_version(gdb: str) -> str:
     return answered.stdout.splitlines()[0] if answered.stdout else ""
 
 
+def debug_core_start_dhcsr_writes(environment: dict[str, str], pack_version: str) -> list[str]:
+    """The lines of the pack's DebugCoreStart sequence that write DHCSR, read out of the installed pack description.
+
+    pyOCD runs that sequence every time it connects to a part the pack
+    describes, in place of its own write that keeps the halt bit."""
+    description = Path(environment["XDG_DATA_HOME"]) / "cmsis-pack-manager" / f"{PACK_ID}.{pack_version}.pdsc"
+    text = description.read_text(encoding="utf-8")
+    sequence = text.split('<sequence name="DebugCoreStart">', 1)[1].split("</sequence>", 1)[0]
+    return [line.strip() for line in sequence.splitlines() if DHCSR_ADDRESS in line]
+
+
+def write_recording(recording: dict, private_values: tuple[str, ...], output_name: str, property_name: str, record_property) -> None:
+    redacted = redact_values(recording, private_values)
+    text = json.dumps(redacted, indent=2, sort_keys=True) + "\n"
+    directory = os.environ.get(OUTPUT_DIRECTORY_ENV)
+    if directory:
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        (Path(directory) / output_name).write_text(text, encoding="utf-8")
+    record_property(property_name, json.dumps(redacted, sort_keys=True, separators=(",", ":")))
+
+
 def test_record_pyocd_gdbserver(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
     environment = pyocd_bench_environment(bench)
     executable, pyocd_version, pack_version = pyocd_provenance(environment)
@@ -446,12 +512,44 @@ def test_record_pyocd_gdbserver(bench: Bench, firmware: Path, gdb: None, tmp_pat
         scenarios["probe_already_held_by_another_server"] = recorder.busy_probe()
     finally:
         recorder.cleanup()
-        redacted = redact_values(recording, private_values)
-        text = json.dumps(redacted, indent=2, sort_keys=True) + "\n"
-        directory = os.environ.get(OUTPUT_DIRECTORY_ENV)
-        if directory:
-            Path(directory).mkdir(parents=True, exist_ok=True)
-            (Path(directory) / OUTPUT_NAME).write_text(text, encoding="utf-8")
-        record_property("pyocd_gdbserver_recording_v1", json.dumps(redacted, sort_keys=True, separators=(",", ":")))
+        write_recording(recording, private_values, OUTPUT_NAME, "pyocd_gdbserver_recording_v1", record_property)
+        restored = put_on_board(bench, firmware)
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+
+
+def test_record_what_the_next_pyocd_connect_does_to_a_halted_core(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
+    """A core left halted by a session, as each later `pyocd gdbserver` finds it.
+
+    Two ways a session leaves the core halted: interrupted wherever it was, and
+    stopped on a breakpoint GDB then deleted. Each session is ended the way the
+    product ends one, its server terminated under a connected GDB, and three
+    servers then connect one after another, each after a pause, and read the
+    demo's counter and the PC. The pack's DHCSR write is recorded beside them."""
+    environment = pyocd_bench_environment(bench)
+    executable, pyocd_version, pack_version = pyocd_provenance(environment)
+    gdb_path = gdb_executable(environment)
+    debugger = bench.configuration()["debuggers"][bench.debugger_name()]
+    uid = str(debugger.get("probe_id") or "")
+    assert uid, "the bench configuration names no probe"
+    recorder = Recorder(bench, executable, gdb_path, firmware, uid, environment)
+    private_values = (uid, str(bench.project), str(bench.config_root), str(bench.state_root), str(tmp_path), str(Path.home()), str(firmware.parent))
+    recording: dict = {
+        "schema": NEXT_CONNECT_SCHEMA,
+        "recorded_on": time.strftime("%Y-%m-%d", time.gmtime()),
+        "source_commit": os.environ.get("AGENTIC_HIL_BENCH_COMMIT"),
+        "pyocd_version": pyocd_version,
+        "cmsis_pack": {"id": PACK_ID, "version": pack_version, "target_type": TARGET_TYPE, "debug_core_start_dhcsr_writes": debug_core_start_dhcsr_writes(environment, pack_version)},
+        "gdb_version": gdb_version(gdb_path),
+        "probe": "the bench's in-circuit debugger, its unique ID redacted",
+        "image": "the demo firmware the tier builds",
+        "scenarios": {},
+    }
+    scenarios = recording["scenarios"]
+    try:
+        scenarios["halted_by_interrupt"] = recorder.next_connects("halted_by_interrupt", recorder.halted_by_interrupt)
+        scenarios["halted_on_a_deleted_breakpoint"] = recorder.next_connects("halted_on_a_deleted_breakpoint", recorder.halted_at_handler)
+    finally:
+        recorder.cleanup()
+        write_recording(recording, private_values, NEXT_CONNECT_OUTPUT_NAME, "pyocd_gdbserver_next_connect_recording_v1", record_property)
         restored = put_on_board(bench, firmware)
         assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
