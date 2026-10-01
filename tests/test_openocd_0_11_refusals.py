@@ -183,6 +183,44 @@ def test_a_debug_session_the_same_refusal_stops_is_read_as_the_rejected_command_
     assert status.get("active") is not True, status
 
 
+def test_the_start_names_the_configuration_stage_read_that_sent_it_to_adapter_serial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The start is a result the probe selection feeds, so it carries the read that failed.
+
+    `OpenOCDProbeSelection.read_failure` is what tells the two `adapter serial`
+    fallbacks apart: the release really is 0.12.0 or newer, or nothing here could
+    find out. The tool path puts it on every failure of the call it shaped and the
+    `not_supported` refusal publishes it itself; the start built its result from
+    `rejected_openocd_commands` alone, so on the debug path the wrapper that
+    swallowed `--version`, an explicitly supported `debuggers.<name>.executable`,
+    was named nowhere: the session log holds the server's output, not the release
+    read's.
+
+    The fake answers the read with the same non-zero exit it answers everything
+    with, which is the whole of the scenario: the release read really did fail
+    here, and `adapter serial` really was the fallback the server was started
+    with.
+    """
+    from test_debug_sessions import debug_service, start_debug_session
+
+    play(monkeypatch, RESET)
+    service = debug_service(tmp_path, debugger_executable=FAKE_TRANSCRIPT, probe_id=SERIAL)
+    try:
+        started = start_debug_session(service, "attach")
+    finally:
+        service.close()
+
+    assert started["ok"] is False, started
+    read_failure = started["probe_selection_read_failure"]
+    assert "OpenOCD release read" in read_failure, read_failure
+    # First, because the release and the driver the generic causes talk about are
+    # what could not be read: this is the repair.
+    assert started["likely_causes"][0] == read_failure, started
+    # And the rejected command is still there, unchanged.
+    assert started["rejected_commands"] == ["adapter serial"], started
+
+
 def test_a_server_that_died_for_another_reason_keeps_the_reading_it_had(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

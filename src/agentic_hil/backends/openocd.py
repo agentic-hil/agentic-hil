@@ -822,13 +822,28 @@ class OpenOCDBackend:
         place the tool path's own command sits, and every `-c` ahead of it is a
         configuration command. Split that way so this asks exactly the question
         the tool path asks.
+
+        It also carries the configuration-stage read that answered nothing, where
+        one did, which is why the selection was `adapter serial` in the first
+        place. That line is about this start whatever the output says, so it is
+        published on its own where nothing was rejected. A start that timed out
+        does not reach here at all: the server is still running, and `gdbdebug`
+        asks this only of one that stopped.
         """
+        # The read that shaped this server's own `-c` values, where one failed:
+        # the same two lines the tool path puts on every failure of the call it
+        # shaped, so the wrapper that swallowed `--version` is named on this path
+        # too. The line is about the start whether or not a command was rejected,
+        # and `likely_causes` it leads is what an agent reads back.
+        stored = self._debug_probe_selection
+        read_failure = stored[1].read_failure if stored is not None else None
+        carried: JsonObject = {} if not read_failure else {"probe_selection_read_failure": read_failure, "likely_causes": [read_failure]}
         values = [server_args[index + 1] for index, item in enumerate(server_args) if item == "-c" and index + 1 < len(server_args)]
         if not values:
-            return None
+            return carried or None
         rejected = rejected_openocd_commands(values[-1], output, tuple(values[:-1]))
         if not rejected:
-            return None
+            return carried or None
         backend_error_type = "command_rejected_before_init"
         error_type = self._public_error_type(backend_error_type)
         return {
@@ -836,6 +851,7 @@ class OpenOCDBackend:
             "backend_error_type": backend_error_type,
             "summary": f"Debug server exited before the GDB port became ready: {self._failure_summary(backend_error_type, error_type)}",
             "rejected_commands": rejected,
+            **carried,
         }
 
     def _resolve_executable(self) -> JsonObject:
