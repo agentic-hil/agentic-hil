@@ -388,6 +388,68 @@ def test_a_timed_out_server_that_exits_before_the_cleanup_still_reports_the_hard
     assert status["quarantined"] is True, status
 
 
+@pytest.mark.parametrize(("failing_step", "error_type"), [("output_readers", "debug_session_setup_failed"), ("gdb", "gdb_start_failed")])
+def test_a_server_gone_before_a_failed_start_reads_it_still_reports_the_hardware_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing_step: str, error_type: str) -> None:
+    """Direct mode, with the server already gone when a step of the start fails and the start reads whether it still runs.
+
+    The two steps that fail with the server spawned and nothing of its output
+    read for an exit: the readers of that output, and GDB, which starts once
+    the recorded server has said its port listens. The start did not end this
+    server, but the server held the probe's USB itself, and no reading of what
+    it said on the way out places its exit before any contact: its output was
+    never read to the end, or it had said its port listens, which it only does
+    once it has the probe. So the answer is the same as for a server the start
+    ended, and the session is kept for cleanup."""
+    use_stlink_server(tmp_path, monkeypatch, None)
+    service, _ = st_link_session_service(tmp_path, monkeypatch)
+    sessions = service.backend._debug
+    server_gone_before_the_read: list[bool] = []
+
+    def end_the_server() -> None:
+        server = sessions.session.server
+        gdbdebug.terminate_process_tree(server, scaled_time_bound(10), graceful=False)
+        server_gone_before_the_read.append(server.poll() is not None)
+
+    if failing_step == "output_readers":
+
+        def readers_do_not_start(session) -> None:
+            end_the_server()
+            raise RuntimeError("injected: the output readers do not start")
+
+        sessions._start_output_readers = readers_do_not_start
+    else:
+
+        def gdb_does_not_start(*args, **kwargs):
+            end_the_server()
+            raise OSError("injected: GDB does not start")
+
+        monkeypatch.setattr(gdbdebug, "GdbMiClient", gdb_does_not_start)
+    try:
+        started = start_debug_session(service, mode="attach")
+        status = service.call("debug_get_session_status")
+    finally:
+        with contextlib.suppress(RuntimeError):
+            service.close()
+        service.coordinator.close()
+
+    # The window this is about: the server was gone before the start read it.
+    assert server_gone_before_the_read == [True], server_gone_before_the_read
+    assert started["ok"] is False, started
+    assert started["error_type"] == error_type, started
+    assert started["cleanup_confirmed"] is True, started
+    assert started["side_effect_status"] == "unknown", started
+    assert started["retry_safe"] is False, started
+    assert started["hardware_state"] == "unknown", started
+    assert started["target_state"] == "unknown", started
+    assert started["cleanup_required"] is True, started
+    assert started["lease_state"] == "cleanup_required", started
+    assert "target_contacted" not in started, started
+    assert started["probe_server"]["mode"] == "direct", started["probe_server"]
+    assert "Target USB comms error" in started["probe_server"]["stop_risk"], started["probe_server"]
+    assert status["active"] is True, status
+    assert status["quarantined"] is True, status
+
+
 def test_a_gdb_refusal_before_the_connect_still_reports_a_direct_probe_unaccounted_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A GDB that cannot do asynchronous MI is refused before `-target-select`, and in direct mode that refusal still ends a running server.
 

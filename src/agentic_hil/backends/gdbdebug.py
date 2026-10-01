@@ -490,7 +490,7 @@ class GdbDebugSessions:
         try:
             self._start_output_readers(session)
         except BaseException as error:
-            self._note_server_running_at_failure(session)
+            running = self._note_server_running_at_failure(session)
             cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
             if cleanup_error is not None:
                 session.status = "cleanup_required"
@@ -504,7 +504,7 @@ class GdbDebugSessions:
             if cleanup_error is not None:
                 result.update({"cleanup_required": True, "cleanup_error": cleanup_error, **self._probe_server_fields(session)})
             else:
-                result.update({"cleanup_confirmed": True, **self._startup_effect_fields(session)})
+                result.update({"cleanup_confirmed": True, **self._startup_effect_fields(session, server_exit=self._unread_server_exit(session, running))})
                 if result.get("cleanup_required") is True:
                     session.status = "cleanup_required"
                     self.session = session
@@ -543,7 +543,7 @@ class GdbDebugSessions:
         try:
             session.gdb = GdbMiClient(str(resolved_gdb["executable"]), str(Path(str(resolved_gdb["executable"])).parent))
         except BaseException as error:
-            self._note_server_running_at_failure(session)
+            running = self._note_server_running_at_failure(session)
             cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
             if cleanup_error is not None:
                 session.status = "cleanup_required"
@@ -557,7 +557,7 @@ class GdbDebugSessions:
             if cleanup_error is not None:
                 result.update({"cleanup_required": True, "cleanup_error": cleanup_error, **self._probe_server_fields(session)})
             else:
-                result.update({"cleanup_confirmed": True, **self._startup_effect_fields(session)})
+                result.update({"cleanup_confirmed": True, **self._startup_effect_fields(session, server_exit=self._unread_server_exit(session, running))})
                 if result.get("cleanup_required") is True:
                     session.status = "cleanup_required"
                     self.session = session
@@ -1265,7 +1265,8 @@ class GdbDebugSessions:
         (`_server_end_leaves_probe_unconfirmed`), and `server_exit`, the
         classified failure of a server that ended by itself, carries the
         backend's reading of the words it ended on
-        (`_pre_gdb_contact_is_accounted_for`). Where any of them is unaccounted
+        (`_pre_gdb_contact_is_accounted_for`), or what is left of one where
+        nobody read them (`_unread_server_exit`). Where any of them is unaccounted
         for, the start reports unknown state, refuses a retry of its own accord
         and keeps the session for cleanup."""
         # Every answer a start gives once its companion was chosen names it,
@@ -1325,11 +1326,32 @@ class GdbDebugSessions:
         backend's to say (`_server_end_leaves_probe_unconfirmed`), and that
         answer may not be lost to the moment the exit happened to fall in.
 
-        Returns the reading, which a timeout is also told from a self-exit by."""
+        Returns the reading, which a timeout is also told from a self-exit by,
+        and a self-exit nobody read is told by (`_unread_server_exit`)."""
         running = session.server.poll() is None
         if running:
             session.server_ended_while_running = True
         return running
+
+    def _unread_server_exit(self, session: GdbDebugSession, running: bool) -> JsonObject | None:
+        """The evidence about its server's exit a start has that gave up on it without reading what the server said last.
+
+        None where the server was still running when the start gave up on it,
+        since what ending it leaves is `_server_end_leaves_probe_unconfirmed`'s
+        to say, and None where the backend says ending this server leaves
+        nothing unaccounted for, which leaves the phase to answer as before.
+
+        Otherwise the server held the in-circuit debugger or programmer's USB
+        itself and exited on its own, and no reading of its words places that
+        exit before any contact: its output was never read to the end (the
+        readers did not start), or it had already said its port listens, which
+        it only does once it has the probe, and the backend's reading is of a
+        server that ended before that. So nothing is settled (CONTACT_UNPROVEN),
+        as for a server this start ended."""
+        companion = session.companion
+        if running or companion is None or not companion.stop_leaves_probe_unconfirmed:
+            return None
+        return dict(CONTACT_UNPROVEN)
 
     def _server_end_leaves_probe_unconfirmed(self, session: GdbDebugSession) -> bool:
         """Whether ending this session's own GDB server leaves the in-circuit debugger or programmer unaccounted for.
