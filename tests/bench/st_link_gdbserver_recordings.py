@@ -115,9 +115,17 @@ END_RUN_S = 0.3
 # `kill` is GDB's own end of the inferior (the `k` or `vKill` packet),
 # `-target-disconnect` closes the connection without detaching, and the signals
 # are the server's own shutdown (SIGINT, SIGTERM) or none of it (SIGKILL).
+# A GDB command and then a signal sends the signal to a server that is still
+# running `GDB_THEN_SIGNAL_WAIT_S` after the command was answered.
 # `-r` is the server's "Minimum delay in seconds for hardware status refresh".
+GDB_KILL = '-interpreter-exec console "kill"'
+GDB_THEN_SIGNAL_WAIT_S = 1.0
 END_CANDIDATES: dict[str, tuple[tuple[str, ...], str, object]] = {
-    "gdb_kill": ((), "gdb", '-interpreter-exec console "kill"'),
+    "gdb_kill": ((), "gdb", GDB_KILL),
+    "gdb_kill_sigterm": ((), "gdb_then_signal", (GDB_KILL, signal.SIGTERM)),
+    "gdb_kill_sigint": ((), "gdb_then_signal", (GDB_KILL, signal.SIGINT)),
+    "gdb_kill_sigkill": ((), "gdb_then_signal", (GDB_KILL, signal.SIGKILL)),
+    "gdb_kill_sigterm_verbose": (("-v",), "gdb_then_signal", (GDB_KILL, signal.SIGTERM)),
     "gdb_disconnect": ((), "gdb", "-target-disconnect"),
     "sigint": ((), "signal", signal.SIGINT),
     "sigterm": ((), "signal", signal.SIGTERM),
@@ -465,12 +473,18 @@ class StLinkRecorder(Recorder):
         log turned on for a GDB command; the other cycles keep the result only."""
         _, kind, what = END_CANDIDATES[how]
         record: dict = {"how": how}
-        if kind == "gdb" and whole:
+        if kind in ("gdb", "gdb_then_signal") and whole:
             record["debug_remote"] = self.command(client, "-gdb-set debug remote 1")
         began = time.monotonic()
-        if kind == "gdb":
-            answer = self.command(client, str(what))
+        if kind in ("gdb", "gdb_then_signal"):
+            command, number = (what, None) if kind == "gdb" else what  # type: ignore[misc]
+            answer = self.command(client, str(command))
             record["answer"] = answer if whole else {key: answer[key] for key in ("result_class", "line", "timed_out", "error")}
+            if number is not None:
+                record["exited_before_the_signal"] = server.wait_for_exit(GDB_THEN_SIGNAL_WAIT_S)
+                if record["exited_before_the_signal"] is None:
+                    began = time.monotonic()
+                    self.signal_group(server, int(number))
         else:
             self.signal_group(server, int(what))  # type: ignore[call-overload]
         returncode = server.wait_for_exit(EXIT_WAIT_S)
