@@ -1471,7 +1471,11 @@ class GdbDebugSessions:
         core kept halted where it was when pyOCD's server was ended under it. So
         the server is ended while GDB is still connected, and the guard is
         confirmed by the server having exited: asking it to is not the proof,
-        its exit is. What happened is logged with the session either way."""
+        its exit is. What happened is logged with the session either way.
+
+        Halted is what the core stays until another pyOCD opens the probe; what
+        that one does to it at connect is pyOCD's, and recorded beside
+        `PYOCD_GDB_SERVER_STEPS`."""
         terminate_error: str | None = None
         try:
             terminate_process_tree(session.server, timeout_s)

@@ -13,12 +13,12 @@ What only the board can say about a session on this backend:
   printed by the server this bench runs.
 * whether a breakpoint set through pyOCD's server is the one the core stops on,
   and whether a resume that nothing stops is interrupted and contained.
-* whether ending a session leaves the core where it was. pyOCD resumes the core
-  when its GDB client leaves, and the product ends pyOCD's server under a
-  connected GDB instead; that this keeps the core halted is a claim about the
-  probe and the core, and the counter the demo's SysTick drives is what proves
-  it: read before the session ends, read again a while later through a new
-  session, and the same number both times.
+* whether ending a session leaves the core halted. pyOCD resumes the core when
+  its GDB client leaves, and the product ends pyOCD's server under a connected
+  GDB instead; that this keeps the core halted is a claim about the probe and
+  the core, and the counter the demo's SysTick drives is what proves it: read
+  before the session ends, read again after a pause through a new session, and
+  moved by no more than the next connect itself moves it.
 * whether a server that ends with a session open gives the probe back, so the
   next server can open one.
 
@@ -61,8 +61,16 @@ REACHABLE_STOP_TIMEOUT_S = 15.0
 UNREACHABLE_STOP_TIMEOUT_S = 3.0
 # How long the core is left alone between the end of one session and the start
 # of the next. The demo's counter moves by a thousand a second on a running
-# core, so a core that was resumed in between cannot read the same number.
+# core, so a core that was resumed in between reads at least this many
+# milliseconds further on.
 SETTLE_S = 2.0
+# What the next session's own connect may move the counter by. pyOCD runs the
+# pack's DebugCoreStart sequence at every connect, which clears the halt bit,
+# and halts the core again a few tens of milliseconds later: 21 to 27 ms in
+# tests/fixtures/pyocd_0_45_1_gdbserver_next_connect_recordings.json, 21 to 37
+# ms on this bench since. A quarter of the pause, so a core left running
+# through it cannot pass for one the connect moved.
+NEXT_CONNECT_RUN_BOUND_MS = 500
 # How the product records the end of a pyOCD session: the server is ended under
 # a connected GDB, because pyOCD resumes the core when GDB leaves.
 SERVER_ENDED_BEFORE_DETACH = "server_terminated_before_gdb_detach"
@@ -222,7 +230,7 @@ def test_a_reset_halt_session_runs_to_a_breakpoint_halts_and_stops(pyocd_servers
     assert_ended_with_the_core_held(stopped, pyocd_bench)
 
 
-def test_a_resume_nothing_stops_is_interrupted_and_the_core_stays_where_the_session_left_it(
+def test_a_resume_nothing_stops_is_interrupted_and_the_core_does_not_run_once_the_session_ends(
     pyocd_servers, pyocd_bench: PyocdBench, gdb: None, firmware: Path
 ) -> None:
     """The interrupt through pyOCD's server, and the teardown guarantee, measured on the counter.
@@ -230,10 +238,11 @@ def test_a_resume_nothing_stops_is_interrupted_and_the_core_stays_where_the_sess
     A resume with no breakpoint runs out, and the product halts the core before
     it answers. The counter the demo's SysTick drives is then read through the
     session, the session is ended, and after a pause a new session attaches and
-    reads it again. An attach does not reset, so the two readings agree only if
-    the core stayed halted from the end of the first session to the start of
-    the second. pyOCD resumes a core whose GDB leaves; a teardown that let it
-    would show here as a counter thousands of milliseconds further on."""
+    reads it again. An attach does not reset, so the second reading is the
+    first plus whatever the core ran in between. pyOCD resumes a core whose GDB
+    leaves; a teardown that let it would show here as the whole pause on the
+    counter. What the new session's connect itself runs, pyOCD's and recorded,
+    is all the reading may add."""
     server = pyocd_servers()
     image = workspace_image(pyocd_bench, firmware)
     started = server.tool("debug_start_session", {"image_path": image, "mode": "reset_halt"})
@@ -261,7 +270,8 @@ def test_a_resume_nothing_stops_is_interrupted_and_the_core_stays_where_the_sess
     assert attached["session"]["load_phase"] == "target_connected", attached["session"]
     after = server.tool("debug_symbol_value", {"symbol": COUNTER})
     assert after["ok"] is True, after
-    assert after["value_unsigned"] == before["value_unsigned"], (before["value_unsigned"], after["value_unsigned"])
+    ran_ms = after["value_unsigned"] - before["value_unsigned"]
+    assert 0 <= ran_ms < NEXT_CONNECT_RUN_BOUND_MS, (before["value_unsigned"], after["value_unsigned"], SETTLE_S)
 
     assert_ended_with_the_core_held(server.tool("debug_stop_session"), pyocd_bench)
 

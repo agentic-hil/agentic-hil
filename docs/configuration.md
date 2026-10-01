@@ -215,7 +215,7 @@ Three notes on that call:
 
 A changed `type` is a device description like any other, so the running server keeps answering out of the configuration it loaded until `project_config_reload_description` or a restart.
 
-What the switch keeps: `openocd` and `pyocd` both open typed debug sessions, each through its own GDB server (OpenOCD's, and `pyocd gdbserver` on a port the server reserves for the session), so moving between those two keeps every session tool with the same payloads; only `reset_target` mode `init` stays with OpenOCD. Moving to `stlink` keeps flashing, resets, probing and the three symbol reads, and the session tools refuse there with `not_supported`, naming the way back.
+What the switch keeps: `openocd` and `pyocd` both open typed debug sessions, each through its own GDB server (OpenOCD's, and `pyocd gdbserver` on a port the server reserves for the session), so moving between those two keeps every session tool with the same payloads; only `reset_target` mode `init` stays with OpenOCD. One difference shows on a core that is already halted when a session opens: pyOCD runs the part's CMSIS-Pack `DebugCoreStart` sequence at every connect, and on the reference board that sequence lets the core run for a few tens of milliseconds before pyOCD halts it again, so an `attach` session finds it slightly further on, where OpenOCD's finds it where it was. Moving to `stlink` keeps flashing, resets, probing and the three symbol reads, and the session tools refuse there with `not_supported`, naming the way back.
 
 ### Naming the GDB this bench reads with
 

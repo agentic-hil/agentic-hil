@@ -216,6 +216,15 @@ SESSIONLESS_DEBUG_READS = frozenset({"debug_dump_symbol_ihex", "debug_symbol_val
 #   not know, with an `Error:` record and `^done`. Ended while GDB is still
 #   connected, the server left the core halted where it was, three times out of
 #   three. So the server is ended before GDB detaches.
+# * The next connect: the core stays halted until another pyOCD opens the
+#   probe, and that one lets it run for a few tens of milliseconds before it
+#   halts it again. At every connect pyOCD runs the pack's DebugCoreStart
+#   sequence, whose `Write32(0xE000EDF0, 0xA05F0001)` sets DHCSR without the
+#   halt bit, in place of its own write that keeps it. A core stopped on a
+#   breakpoint GDB deleted is the exception once: pyOCD removes the comparator
+#   only on the next resume, so the core stops on it again at once (the three
+#   above). Recorded in tests/fixtures/pyocd_0_45_1_gdbserver_next_connect_
+#   recordings.json; OpenOCD's next session finds the core where it was.
 PYOCD_GDB_SERVER_STEPS = GdbServerSteps(
     ready_line="GDB server listening on port {port}",
     ready_line_ends_the_line=False,
