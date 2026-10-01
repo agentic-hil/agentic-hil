@@ -1138,6 +1138,20 @@ def run_agent(
         raise AgentError(f"{prefix} exited with {returncode}; see {log_path}")
 
 
+def ignored(repo: Path, relative: str) -> bool:
+    """Whether git ignores `relative` already, so `git add -A` leaves it alone unasked.
+
+    `git check-ignore` exits 1 for a path it does not ignore. When git cannot
+    answer at all the reading is the same: an exclusion that was not needed
+    costs nothing, a missing one commits the run's paperwork.
+    """
+    try:
+        git(repo, "check-ignore", "-q", "--", relative)
+    except AgentError:
+        return False
+    return True
+
+
 def excluding(repo: Path, paths: tuple[Path, ...]) -> list[str]:
     """Pathspecs adding everything in `repo` except the loop's own directories.
 
@@ -1146,13 +1160,17 @@ def excluding(repo: Path, paths: tuple[Path, ...]) -> list[str]:
     elsewhere, and a salvage commit that carries a review of itself is not the
     round's work. Directories outside the repository are dropped rather than
     named: git rejects a pathspec that leaves the work tree, and refusing the
-    whole commit over one would defeat the point of making it.
+    whole commit over one would defeat the point of making it. Directories git
+    already ignores are dropped too: an exclusion naming a path under an ignored
+    directory makes `git add` exit 1 with "The following paths are ignored",
+    after staging everything else, and the salvage took that for a refusal and
+    left a killed round's work uncommitted.
     """
     pathspecs = ["--", "."]
     for path in paths:
         with contextlib.suppress(ValueError, OSError):
             relative = path.resolve().relative_to(repo.resolve())
-            if relative != Path("."):
+            if relative != Path(".") and not ignored(repo, relative.as_posix()):
                 pathspecs.append(f":!{relative.as_posix()}")
     return pathspecs
 

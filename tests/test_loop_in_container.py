@@ -2882,6 +2882,30 @@ def test_the_salvage_commit_leaves_the_runs_own_paperwork_out_of_it(
     assert list((repository / ".agentic-loop" / "logs").rglob("round-01-claude.log"))
 
 
+def test_a_round_cut_short_is_committed_where_the_repository_ignores_the_loops_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """This repository ignores `.agentic-loop/`, and there the salvage commit was refused.
+
+    An exclusion naming a path under an ignored directory makes `git add` exit 1
+    with "The following paths are ignored", after staging everything else, and
+    the salvage took that for git refusing the commit: a killed round's work was
+    left in the tree to be committed by hand.
+    """
+    repository = _repository(tmp_path)
+    (repository / ".gitignore").write_text(".agentic-loop/\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-q", "-m", "ignore the loop"], check=True)
+
+    exit_code = _cut_short(repository, _slow_agent(tmp_path), monkeypatch)
+
+    assert exit_code == agent_review_loop.EXIT_FAILED
+    assert "could not commit what round 1 left behind" not in capsys.readouterr().err
+    assert _in(repository, "log", "-1", "--format=%s").startswith("wip(review-loop): round 1")
+    assert _in(repository, "show", "--name-only", "--format=", "HEAD").split() == ["half-done.py"]
+    assert _in(repository, "status", "--porcelain").strip() == ""
+
+
 def test_the_loops_own_directory_ignores_itself_where_the_repository_ignores_nothing(tmp_path: Path) -> None:
     """`*` covers the directory holding it, that .gitignore included, so nothing is left to report."""
     repository = _repository(tmp_path)
