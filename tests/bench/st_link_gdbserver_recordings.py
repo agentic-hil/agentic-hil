@@ -134,7 +134,20 @@ END_CANDIDATES: dict[str, tuple[tuple[str, ...], str, object]] = {
     "shared_sigkill": (("-t",), "signal", signal.SIGKILL),
     "shared_gdb_kill_sigkill": (("-t",), "gdb_then_signal", (GDB_KILL, signal.SIGKILL)),
     "shared_sigterm": (("-t",), "signal", signal.SIGTERM),
+    "reset_sigkill": ((), "signal", signal.SIGKILL),
+    "reset_gdb_kill_sigkill": ((), "gdb_then_signal", (GDB_KILL, signal.SIGKILL)),
+    "reset_sigterm": ((), "signal", signal.SIGTERM),
+    "reset_shared_sigkill": (("-t",), "signal", signal.SIGKILL),
 }
+# The ends whose cycle is the product's reset-halt session rather than an
+# attach: `monitor reset` right after the connect, then a resume nothing stops
+# for as long as the tier lets one run before it interrupts it. The product's
+# own cycles of that shape had a start refused with "USB communication error"
+# after one kill in about twenty, where attach cycles killed the same way had
+# none.
+RESET_FIRST = frozenset({"reset_sigkill", "reset_gdb_kill_sigkill", "reset_sigterm", "reset_shared_sigkill"})
+RESET_COMMAND = '-interpreter-exec console "monitor reset"'
+RESET_RUN_S = 3.0
 # `-t` is the server's shared mode: it reaches the probe through stlink-server
 # instead of opening its USB itself. ST's USB driver library connects to it on
 # this port (its own strings carry the number), so each shared cycle starts the
@@ -571,8 +584,11 @@ class StLinkRecorder(Recorder):
             record["connect"] = connect
         at_connect = self.core_state(client)
         record["at_connect"] = at_connect if whole else {key: at_connect[key] for key in ("s_halt", COUNTER, "pc")}
+        if how in RESET_FIRST:
+            reset = self.command(client, RESET_COMMAND)
+            record["reset"] = reset if whole else {key: reset[key] for key in ("result_class", "timed_out", "error")}
         run = [self.command(client, "-exec-continue")]
-        time.sleep(END_RUN_S)
+        time.sleep(RESET_RUN_S if how in RESET_FIRST else END_RUN_S)
         run.append(self.command(client, "-exec-interrupt --all"))
         stop = self.stop(client)
         record["run"] = {"steps": run, "stop": stop} if whole else {"stop_reason": stop["reason"], "timed_out": stop["timed_out"]}
