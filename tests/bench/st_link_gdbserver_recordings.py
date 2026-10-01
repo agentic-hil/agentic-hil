@@ -18,9 +18,11 @@ directory holding `STLink-gdb-server` and `STM32CubeProgrammer`). With
 as `st-link-gdbserver-recording.json`, the second round, the teardown one, as
 `st-link-gdbserver-teardown-recording.json`, the third, the restart one, as
 `st-link-gdbserver-restart-recording.json`, the fourth, the ends one, as
-`st-link-gdbserver-ends-recording.json`, and the fifth, the stops one, as
-`st-link-session-stops-recording.json`; each is always attached to the test
-report as a property as well. The fourth also makes calls through the product's
+`st-link-gdbserver-ends-recording.json`, the fifth, the stops one, as
+`st-link-session-stops-recording.json`, and the sixth, the stlink-server one,
+as `st-link-server-race-recording.json`; each is always attached to the test
+report as a property as well, which is how a run in the bench image, whose
+environment this module cannot set, hands its recording out. The fourth also makes calls through the product's
 own MCP server, on a copy of the tier's configuration with the probe on `type:
 stlink` and on the tier's own configuration, because what it asks is whether
 the product's next call still reaches the probe. The fifth runs the product's
@@ -29,8 +31,10 @@ own sessions through that server and drives no server or GDB itself.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -42,6 +46,7 @@ from pathlib import Path
 import pytest
 from support import scaled_time_bound
 
+from agentic_hil.backends.stlink import STLINK_SERVER_LISTEN_TIMEOUT_S, stlink_server_listening
 from agentic_hil.gdbmi import GdbMiClient, mi_field
 from agentic_hil.process import terminate_process_tree
 
@@ -162,6 +167,30 @@ STLINK_SERVER_EXIT_WAIT_S = 5.0
 STOPS_OUTPUT_NAME = "st-link-session-stops-recording.json"
 STOP_CYCLES_ENV = "AGENTIC_HIL_RECORDING_STOP_CYCLES"
 DEFAULT_STOP_CYCLES = 100
+# The sixth round: a session start through stlink-server made the way the
+# product makes one, over and over, in a few variants taken in turn. In the
+# bench image the product's starts were refused now and then with "Failed to
+# connect to device." while the stlink-server they reached printed `TCPCMD
+# OPEN_DEV FAIL, internal assoc not key created`, and the GDB server's stderr
+# carried a second stlink-server's "stlinkserver already running, exit": the
+# USB driver library ST-LINK_gdbserver loads names `LaunchServer`, `fork` and
+# `execvp` among its symbols. Each variant changes one thing about the start.
+RACE_OUTPUT_NAME = "st-link-server-race-recording.json"
+RACE_CYCLES_ENV = "AGENTIC_HIL_RECORDING_RACE_CYCLES"
+DEFAULT_RACE_CYCLES = 80
+RACE_VARIANTS: dict[str, dict] = {
+    # The product's start: its own stlink-server, the port listening, then the
+    # GDB server with `-t` in the product's own environment.
+    "on_path": {"stlink_server_on_path": True, "wait_after_listening_s": 0.0},
+    # The same with every PATH entry that holds an stlink-server left out of the
+    # GDB server's environment, so its driver finds none to start.
+    "off_path": {"stlink_server_on_path": False, "wait_after_listening_s": 0.0},
+    # The product's start with a pause between the port listening and the GDB
+    # server's start, for a server that listens before it can open the probe.
+    "on_path_after_a_wait": {"stlink_server_on_path": True, "wait_after_listening_s": 1.0},
+}
+# Refused starts in a row after which the round stops starting servers at a probe that answers none.
+RACE_REFUSALS_IN_A_ROW_LIMIT = 5
 
 
 def cubeclt_root() -> Path:
@@ -611,6 +640,64 @@ class StLinkRecorder(Recorder):
             record["cli"] = cli()
         return record
 
+    def race_cycle(self, variant: str, cycle: int, stlink_server: str, *, whole: bool) -> dict:
+        """One session start through stlink-server in `variant`, and the product's stop after it.
+
+        stlink-server is started as the product starts it, with no options from
+        its own directory, and asked whether it listens the way the product asks,
+        with a connect every 50 ms. The GDB server is then started with `-t`; if
+        it comes up, GDB attaches, the core's state is read, and the session is
+        ended as the product ends one: the GDB server killed, GDB closed, then
+        stlink-server terminated. `whole` keeps every line either server
+        printed; the other cycles keep stlink-server's lines and the GDB
+        server's stderr, where the second stlink-server prints."""
+        settings = RACE_VARIANTS[variant]
+        record: dict = {"variant": variant, "cycle": cycle}
+        probe_server = GdbServer([stlink_server], self.environment, str(Path(stlink_server).parent))
+        self.live.append(probe_server)
+        deadline = probe_server.started + STLINK_SERVER_LISTEN_TIMEOUT_S
+        listening = False
+        while time.monotonic() < deadline and probe_server.process.poll() is None:
+            if stlink_server_listening(STLINK_SERVER_PORT):
+                listening = True
+                break
+            time.sleep(0.05)
+        record["probe_server_listening_after_ms"] = int((time.monotonic() - probe_server.started) * 1000) if listening else None
+        if listening:
+            if settings["wait_after_listening_s"]:
+                time.sleep(settings["wait_after_listening_s"])
+            environment = dict(self.environment)
+            if not settings["stlink_server_on_path"]:
+                environment["PATH"] = path_without_stlink_server(environment.get("PATH", ""))
+            port = free_port()
+            server = GdbServer(self.server_argv(port, extra=["-g", "-t"]), environment, self.cwd)
+            self.live.append(server)
+            record["gdb_server_started_after_ms"] = int((server.started - probe_server.started) * 1000)
+            if whole:
+                record["argv_tail"] = server.argv[1:]
+            ready = self.wait_until_listening(server, port, STARTUP_TIMEOUT_S)
+            record["ready_at_s"] = ready["at_s"] if ready is not None else None
+            if ready is None:
+                record["refused"] = self.finish(server)
+            else:
+                record["processes_at_ready"] = processes_beside(probe_server.process.pid, server.process.pid)
+                client, connect = self.connect(port)
+                if whole:
+                    record["connect"] = connect
+                at_connect = self.core_state(client)
+                record["at_connect"] = at_connect if whole else {key: at_connect[key] for key in ("s_halt", COUNTER, "pc")}
+                record["end"] = self.kill(server)
+                closed = self.close_client(client)
+                record["gdb_exit"] = closed if whole else {"closed": closed["closed"], "error": closed.get("error")}
+                output = server.output()
+                record["gdb_server_output"] = output if whole else [line for line in output if line["stream"] == "stderr"]
+        record["probe_server_end"] = probe_server.terminate()
+        if probe_server in self.live:
+            self.live.remove(probe_server)
+        record["probe_server_output"] = probe_server.output()
+        record["left_running"] = [process["name"] for process in all_processes() if process["name"] in ("stlink-server", "ST-LINK_gdbserver")]
+        return record
+
     def verbose_idle(self, log_file: Path) -> dict:
         """What the server prints, at full logging, while the core sits halted with GDB idle, then runs, then is halted again.
 
@@ -744,6 +831,39 @@ class StLinkRecorder(Recorder):
         return record
 
 
+def path_without_stlink_server(value: str) -> str:
+    """PATH with every entry that holds an stlink-server left out."""
+    return os.pathsep.join(entry for entry in value.split(os.pathsep) if entry and not (Path(entry) / "stlink-server").is_file())
+
+
+def all_processes() -> list[dict]:
+    """Every process this PID namespace shows: its pid, its parent and the name of what it runs."""
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+            stat = (entry / "stat").read_text(encoding="ascii", errors="replace")
+        except OSError:
+            continue
+        name = Path(argv[0].decode(errors="replace")).name if argv and argv[0] else ""
+        found.append({"pid": int(entry.name), "ppid": int(stat.rsplit(")", 1)[1].split()[1]), "name": name})
+    return found
+
+
+def processes_beside(probe_server_pid: int, gdb_server_pid: int) -> list[dict]:
+    """The stlink-server and ST-LINK_gdbserver processes running, and the GDB server's children, by how they relate to the two this cycle started."""
+    related = []
+    for process in all_processes():
+        if process["pid"] in (probe_server_pid, gdb_server_pid):
+            continue
+        if process["ppid"] == gdb_server_pid or process["name"] in ("stlink-server", "ST-LINK_gdbserver"):
+            relation = "child of the GDB server" if process["ppid"] == gdb_server_pid else "started by neither"
+            related.append({"name": process["name"], "relation": relation})
+    return related
+
+
 def run_text(argv: list[str], environment: dict[str, str], cwd: str) -> dict:
     answered = subprocess.run(argv, capture_output=True, text=True, env=environment, cwd=cwd, timeout=scaled_time_bound(60), check=False)
     return {"argv_tail": argv[1:], "returncode": answered.returncode, "stdout": answered.stdout.splitlines(), "stderr": answered.stderr.splitlines()}
@@ -779,7 +899,11 @@ def recording_for(bench: Bench, firmware: Path, tmp_path: Path) -> tuple[Path, S
     # prints its path under the account's home.
     import pwd
 
-    account_home = pwd.getpwuid(os.getuid()).pw_dir
+    try:
+        account_home = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError:
+        # The bench image runs as an account its passwd file need not name.
+        account_home = str(Path.home())
     private_values = (serial, str(bench.project), str(bench.config_root), str(bench.state_root), str(tmp_path), str(Path.home()), account_home, str(firmware.parent))
     recording: dict = {
         "schema": RECORDING_SCHEMA,
@@ -1141,6 +1265,77 @@ def test_record_st_link_session_stops(
         recording["scenarios"]["session_stops"] = entries
         recording["summary"] = summarize_stops(entries)
         write_recording(recording, root, private_values, record_property, STOPS_OUTPUT_NAME)
+        restored = put_on_board(bench, firmware)
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+
+
+def summarize_race(entries: list[dict]) -> dict:
+    """Per variant: the starts, the refused ones with the decisive lines, and how often a second stlink-server spoke."""
+    summary: dict = {}
+    for variant in RACE_VARIANTS:
+        cycles = [entry for entry in entries if entry["variant"] == variant]
+        refused = [entry for entry in cycles if entry.get("ready_at_s") is None]
+
+        def lines(entry: dict, key: str) -> list[str]:
+            return [line["line"] for line in entry.get(key) or [] if isinstance(line, dict)]
+
+        def gdb_server_lines(entry: dict) -> list[str]:
+            return lines(entry, "gdb_server_output") + lines(entry.get("refused") or {}, "output")
+
+        summary[variant] = {
+            "cycles": len(cycles),
+            "refused_in_cycles": [entry["cycle"] for entry in refused],
+            "refused_reasons": sorted({line for entry in refused for line in gdb_server_lines(entry) if line.startswith("Reason:")}),
+            "probe_server_open_dev_fail_in_cycles": [entry["cycle"] for entry in cycles if any("OPEN_DEV FAIL" in line for line in lines(entry, "probe_server_output"))],
+            "second_stlink_server_said_already_running_in": len([entry for entry in cycles if any("already running" in line for line in gdb_server_lines(entry))]),
+            "left_running_after_a_cycle": sorted({name for entry in cycles for name in entry.get("left_running") or []}),
+            "processes_at_ready": sorted({json.dumps(process, sort_keys=True) for entry in cycles for process in entry.get("processes_at_ready") or []}),
+            "not_halted_at_connect_in_cycles": [entry["cycle"] for entry in cycles if "at_connect" in entry and entry["at_connect"].get("s_halt") is not True],
+        }
+    return summary
+
+
+def test_record_st_link_server_race(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
+    """The sixth round: session starts through stlink-server, variant after variant, and which of them the probe refused.
+
+    The variants are taken in turn, one cycle each, so whatever drifts over the
+    round drifts under all of them alike; a pause of the tier's own length
+    follows every cycle, as it follows a stop in the tier. stlink-server is the
+    one this run's PATH names (the bench image puts the one it extracted from
+    STM32CubeCLT there), or the one `AGENTIC_HIL_RECORDING_STLINK_SERVER`
+    names. A start refused that many times in a row ends the round early."""
+    root, recorder, private_values, recording = recording_for(bench, firmware, tmp_path)
+    stlink_server = os.environ.get(STLINK_SERVER_ENV) or shutil.which("stlink-server")
+    if not stlink_server or not Path(stlink_server).is_file():
+        pytest.fail(f"no stlink-server on PATH and none named by {STLINK_SERVER_ENV}", pytrace=False)
+    cycles = int(os.environ.get(RACE_CYCLES_ENV) or DEFAULT_RACE_CYCLES)
+    recording["race"] = {
+        "variants": RACE_VARIANTS,
+        "cycles_per_variant": cycles,
+        "pause_after_each_cycle_s": stlink_sessions.SETTLE_S,
+        "stlink_server_sha256": hashlib.sha256(Path(stlink_server).read_bytes()).hexdigest(),
+        "stlink_server_on_path": shutil.which("stlink-server") == stlink_server,
+        "in_a_container": {"dockerenv": Path("/.dockerenv").exists(), "containerenv": Path("/run/.containerenv").exists()},
+    }
+    entries: list[dict] = []
+    refusals_in_a_row = 0
+    try:
+        for cycle in range(1, cycles + 1):
+            for variant in RACE_VARIANTS:
+                entry = recorder.race_cycle(variant, cycle, stlink_server, whole=cycle == 1)
+                entries.append(entry)
+                refusals_in_a_row = refusals_in_a_row + 1 if entry.get("ready_at_s") is None else 0
+                time.sleep(stlink_sessions.SETTLE_S)
+                if refusals_in_a_row >= RACE_REFUSALS_IN_A_ROW_LIMIT:
+                    break
+            if refusals_in_a_row >= RACE_REFUSALS_IN_A_ROW_LIMIT:
+                recording["race"]["ended_early"] = f"{refusals_in_a_row} starts in a row were refused"
+                break
+    finally:
+        recorder.cleanup()
+        recording["scenarios"]["race"] = entries
+        recording["summary"] = summarize_race(entries)
+        write_recording(recording, root, private_values, record_property, RACE_OUTPUT_NAME)
         restored = put_on_board(bench, firmware)
         assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
 
