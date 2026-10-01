@@ -801,8 +801,8 @@ def test_stlink_usb_comm_error_is_its_own_bucket_with_the_measured_way_out(tmp_p
 
     The catalogue entry names what gave the probe back in the recorded cycles,
     an OpenOCD `reset_target` through the same probe, and the call keeps the
-    contact it had as an unknown error: a probe whose USB link failed mid-way
-    is not proof that nothing was carried."""
+    contact it had as an unknown error, the same output with another code: a
+    probe whose USB link failed mid-way is not proof that nothing was carried."""
     log = recorded_usb_comm_refusal()
     assert log["stdout"].rstrip().endswith("ST-LINK error (DEV_USB_COMM_ERR)"), log
     config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
@@ -811,13 +811,19 @@ def test_stlink_usb_comm_error_is_its_own_bucket_with_the_measured_way_out(tmp_p
 
     result = call(config, "probe_target")
 
+    play_transcript(monkeypatch, stdout=log["stdout"].replace("DEV_USB_COMM_ERR", "DEV_NO_SUCH_CODE"), stderr=log["stderr"], returncode=log["returncode"])
+    unknown = call(config_for(tmp_path / "unknown", "stlink", FAKE_TRANSCRIPT), "probe_target")
+    assert unknown["error_type"] == "debugger_error", unknown
     assert result["ok"] is False, result
     assert result["backend_error_type"] == "adapter_usb_error", result
     assert result["error_type"] == "adapter_usb_error", result
     assert result["remediation"], result
     assert result["remediation"] == remediation_fields("adapter_usb_error", "stlink")["remediation"], result
     assert "reset_target" in json.dumps(result["remediation"]), result["remediation"]
-    assert_effect_unconfirmed(result)
+    contact = ("safe_state_confirmed", "side_effect_status", "side_effect_committed", "retry_safe", "target_contacted", "hardware_state", "cleanup_required", "cleanup_reasons", "quarantined")
+    assert {key: result.get(key) for key in contact} == {key: unknown.get(key) for key in contact}, result
+    assert result["safe_state_confirmed"] is False, result
+    assert result["cleanup_required"] is True, result
 
 
 def test_a_missing_input_file_on_stlink_is_not_answered_with_the_missing_configuration_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
