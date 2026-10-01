@@ -420,7 +420,7 @@ def job_payload(
     }
 
 
-def docker_security_options() -> list[str]:
+def docker_security_options(*, memory: str = "2g", cpus: str = "2") -> list[str]:
     return [
         "--read-only",
         "--cap-drop",
@@ -434,9 +434,9 @@ def docker_security_options() -> list[str]:
         # what any run used, and a cap that large stops being a guard against a
         # runaway container once a dozen of them share one host.
         "--memory",
-        "2g",
+        memory,
         "--cpus",
-        "2",
+        cpus,
         "--tmpfs",
         "/tmp:rw,exec,nosuid,nodev,size=1g",
     ]

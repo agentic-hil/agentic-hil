@@ -36,6 +36,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - `evals/tls_proxy/container/Dockerfile` fetches the uv installer at the version and digest `install.sh` pins, as its comment says, and the static test and the release chore now hold all three sites together.
 
+- `tools/loop_in_container.py` gives the loop container 6g and four CPUs instead of the installation evaluation's 2g and two. An implementer round reached the 2g cap and was killed with exit -9 after 22 minutes, leaving its work uncommitted; the same work under 6g finished three rounds at a peak of 2224 MiB. Every other isolation option is still the evaluation's.
+
+- The review loop commits a stopped round's work in a repository that ignores its paperwork directory, as this one ignores `.agentic-loop/`. The salvage commit named the loop's review and log directories as exclusions, and under an ignored directory that makes `git add` exit 1 with "The following paths are ignored", so the commit was reported as refused and the work left in the tree to be committed by hand. A directory git already ignores is no longer named.
+
 ## [0.22.0] - 2026-09-30
 
 ### Added

@@ -185,6 +185,9 @@ IMAGE_NAME = "agentic-hil-loop"
 MOUNTED_REPOSITORY = "/repo"
 CONTAINER_HOME = "/home/loop"
 MOUNTED_FILES = "/run/loop-agent-files"
+# The loop container's limits; see `container_command` for the measurements.
+LOOP_MEMORY = "6g"
+LOOP_CPUS = "4"
 
 # Everything below 20 is the inner loop's own code, passed through exactly as
 # `agent_review_loop.py` produced it. 20 and up belong to this wrapper, and it
@@ -1025,20 +1028,18 @@ def container_command(
         # what makes the POSIX process-group tests pass here and fail under
         # tools/ci_linux.py, which has no reaper.
         "--init",
-        # Taken unchanged, because the numbers say they can be. Measured in this
-        # image with the container reporting its own cgroup peak (report_peaks
-        # in the entrypoint): the suite alone 287 MiB and 37 processes, a full
-        # implement-and-review round 405 MiB and 71, and 1019 MiB with 77
-        # processes for the heaviest round measured while the virtualenv was
-        # still a clone of the project on the tmpfs. Since each agent builds its
-        # own environment on the home volume instead, an implementer round that
-        # built one and ran ruff and pytest in it peaked at 755 MiB and 35
-        # processes. That last figure covers one agent: the reviewer's own
-        # environment has not been measured yet, because the run that would have
-        # built it was refused for quota. The two are built one after the other,
-        # so it is a peak rather than a sum -- but it is the number to watch.
-        # Half of 2g, and 77 of 512: still the evaluation's limits, with room.
-        *docker_security_options(),
+        # The evaluation's isolation, with memory and CPUs sized for a round
+        # rather than an install. Measured in this image with the container
+        # reporting its own cgroup peak (report_peaks in the entrypoint): the
+        # suite alone 287 MiB and 37 processes, a full implement-and-review round
+        # 405 MiB and 71, and an implementer round that built its environment
+        # and ran ruff and pytest in it 755 MiB and 35. Those fitted the
+        # evaluation's 2g. A longer implementer round did not: it reached the
+        # 2g cap with 178 processes and was killed with exit -9 after 22
+        # minutes, and the same work under 6g and four CPUs finished three
+        # rounds at a peak of 2224 MiB and 49 processes. 6g is that peak with
+        # room, and 178 is still well inside 512.
+        *docker_security_options(memory=LOOP_MEMORY, cpus=LOOP_CPUS),
         "--mount",
         docker_mount("volume", home_volume, CONTAINER_HOME),
         # Read-write, and the one deviation that matters: the loop's product is

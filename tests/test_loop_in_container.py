@@ -181,12 +181,22 @@ def _mounts(command: list[str]) -> list[str]:
 
 
 def test_the_container_keeps_every_isolation_option_the_evaluation_sets(tmp_path: Path) -> None:
-    """Measured peaks fit inside the evaluation's limits, so none of them is relaxed."""
+    """Every isolation option the evaluation sets, sized for an implementer round rather than an install.
+
+    An implementer round under the evaluation's 2g reached the cap and was killed
+    with exit -9 after 22 minutes; the same work under 6g and four CPUs finished
+    at a peak of 2224 MiB.
+    """
     command = _command(tmp_path)
     baseline = docker_security_options()
 
     start = command.index(baseline[0])
-    assert command[start : start + len(baseline)] == baseline
+    options = command[start : start + len(baseline)]
+    sizes = {baseline.index("--memory") + 1, baseline.index("--cpus") + 1}
+    assert [options[index] for index in sorted(sizes)] == ["6g", "4"]
+    assert [value for index, value in enumerate(options) if index not in sizes] == [
+        value for index, value in enumerate(baseline) if index not in sizes
+    ]
     for expected in ("--read-only", "no-new-privileges", "--memory"):
         assert expected in command
     for never in ("--privileged", "--cap-add", "--user"):
@@ -2870,6 +2880,30 @@ def test_the_salvage_commit_leaves_the_runs_own_paperwork_out_of_it(
     assert ".agentic-loop" not in _in(repository, "show", "--name-only", "--format=", "HEAD")
     # The transcripts are still there to read; they are just not part of the commit.
     assert list((repository / ".agentic-loop" / "logs").rglob("round-01-claude.log"))
+
+
+def test_a_round_cut_short_is_committed_where_the_repository_ignores_the_loops_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """This repository ignores `.agentic-loop/`, and there the salvage commit was refused.
+
+    An exclusion naming a path under an ignored directory makes `git add` exit 1
+    with "The following paths are ignored", after staging everything else, and
+    the salvage took that for git refusing the commit: a killed round's work was
+    left in the tree to be committed by hand.
+    """
+    repository = _repository(tmp_path)
+    (repository / ".gitignore").write_text(".agentic-loop/\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-q", "-m", "ignore the loop"], check=True)
+
+    exit_code = _cut_short(repository, _slow_agent(tmp_path), monkeypatch)
+
+    assert exit_code == agent_review_loop.EXIT_FAILED
+    assert "could not commit what round 1 left behind" not in capsys.readouterr().err
+    assert _in(repository, "log", "-1", "--format=%s").startswith("wip(review-loop): round 1")
+    assert _in(repository, "show", "--name-only", "--format=", "HEAD").split() == ["half-done.py"]
+    assert _in(repository, "status", "--porcelain").strip() == ""
 
 
 def test_the_loops_own_directory_ignores_itself_where_the_repository_ignores_nothing(tmp_path: Path) -> None:
