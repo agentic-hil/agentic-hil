@@ -15,24 +15,28 @@ Selected explicitly, like the other recorders: the file is not named `test_*`.
 `AGENTIC_HIL_BENCH_CUBECLT` names the root of an STM32CubeCLT tree (the
 directory holding `STLink-gdb-server` and `STM32CubeProgrammer`). With
 `AGENTIC_HIL_RECORDING_OUT` set to a directory, the recording is written there
-as `st-link-gdbserver-recording.json`; it is always attached to the test report
-as a property as well.
+as `st-link-gdbserver-recording.json`, and the second round, the teardown one,
+as `st-link-gdbserver-teardown-recording.json`; each is always attached to the
+test report as a property as well.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import subprocess
 import tempfile
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
 from support import scaled_time_bound
 
-from agentic_hil.gdbmi import GdbMiClient
+from agentic_hil.gdbmi import GdbMiClient, mi_field
+from agentic_hil.process import terminate_process_tree
 
 from .conftest import BENCH_ONLY, Bench, put_on_board
 from .pyocd_gdbserver_recordings import (
@@ -59,6 +63,7 @@ pytestmark = [pytest.mark.bench, BENCH_ONLY]
 CUBECLT_ENV = "AGENTIC_HIL_BENCH_CUBECLT"
 RECORDING_SCHEMA = "agentic-hil.st-link-gdbserver-recording/v1"
 OUTPUT_NAME = "st-link-gdbserver-recording.json"
+TEARDOWN_OUTPUT_NAME = "st-link-gdbserver-teardown-recording.json"
 STARTUP_TIMEOUT_S = 30.0
 # A serial no probe carries, for the refusal a wrong probe_id gets.
 UNKNOWN_SERIAL = "AGENTICHILNOSUCHPROBE0"
@@ -69,6 +74,16 @@ STARTS_AFTER_TERMINATE_RUNNING = 3
 NEXT_CONNECTS = 3
 # What the CubeCLT tree is called in the committed recording.
 CUBECLT_PLACEHOLDER = "<cubeclt>"
+# How many times a session is ended by killing the server with the core
+# halted, each read back by servers that are killed the same way.
+KILL_HALTED_CYCLES = 3
+# The Cortex-M debug halting control and status register: bit 17 (S_HALT)
+# reads 1 while the core is halted, whatever GDB has cached.
+DHCSR = "0xE000EDF0"
+# The arguments `monitor reset` is asked with: plain `reset` printed "System
+# reset", `reset halt` and `reset init` were refused as an unknown reset option,
+# so the numbered forms are asked for what they print and do.
+RESET_VARIANTS = ("reset", "reset 0", "reset 1", "reset 2")
 
 
 def cubeclt_root() -> Path:
@@ -124,6 +139,47 @@ class StLinkRecorder(Recorder):
     @staticmethod
     def port_of(server: GdbServer) -> int:
         return int(server.argv[server.argv.index("-p") + 1])
+
+    def kill(self, server: GdbServer) -> dict:
+        """SIGKILL to the server's process group and nothing before it, so the server runs none of its own shutdown."""
+        running = server.process.poll() is None
+        group = getattr(server.process, "_agentic_hil_pgid", None) or server.process.pid
+        if running:
+            with suppress(ProcessLookupError):
+                os.killpg(group, signal.SIGKILL)
+        returncode = server.wait_for_exit(5.0)
+        # The product's teardown on a group that is gone: it only forgets the process.
+        terminate_process_tree(server.process, 5.0)
+        for reader in server.readers:
+            reader.join(timeout=5.0)
+        if server in self.live:
+            self.live.remove(server)
+        return {"was_running": running, "returncode": returncode}
+
+    def core_state(self, client: GdbMiClient) -> dict:
+        """The core as it is rather than as GDB cached it: the register cache dropped, then DHCSR, the PC and the counter."""
+        flush = self.command(client, '-interpreter-exec console "maintenance flush register-cache"')
+        dhcsr = self.command(client, f"-data-read-memory-bytes {DHCSR} 4")
+        contents = mi_field(dhcsr["line"], "contents") if dhcsr["result_class"] == "done" else None
+        halted = None
+        if contents is not None and len(contents) == 8:
+            halted = bool(int.from_bytes(bytes.fromhex(contents), "little") & (1 << 17))
+        return {"flush": flush, "dhcsr": dhcsr, "dhcsr_contents": contents, "s_halt": halted, **self.where(client)}
+
+    def counter_after_a_killed_connect(self) -> dict:
+        """The core as a new attaching server and GDB find it, ended by killing the server so it resumes nothing."""
+        server, ready = self.started(["-g"])
+        record: dict = {"argv_tail": server.argv[1:], "ready": ready}
+        if ready is None:
+            record.update(self.finish(server))
+            return record
+        client, connect = self.connect(self.port_of(server))
+        record["connect"] = connect
+        record.update(self.core_state(client))
+        record["server_killed"] = self.kill(server)
+        record["gdb_closed"] = self.close_client(client)
+        record["output"] = server.output()
+        return record
 
     def monitor(self, client: GdbMiClient, words: str) -> dict:
         return self.command(client, f'-interpreter-exec console "monitor {words}"')
@@ -302,6 +358,114 @@ class StLinkRecorder(Recorder):
             record["next_connects"].append(self.counter_after_a_fresh_connect())
         return record
 
+    def session_ended_by_killing_the_server(self, cycle: int) -> dict:
+        """With the core halted at the handler, the server is killed while GDB is still connected."""
+        server, ready = self.started(["-g"])
+        record: dict = {"scenario": "session_ended_by_killing_the_server", "cycle": cycle, "argv_tail": server.argv[1:], "ready": ready}
+        if ready is None:
+            record.update(self.finish(server))
+            return record
+        client, connect = self.connect(self.port_of(server))
+        record["connect"] = connect
+        record["at_handler"] = self.halted_at_handler(client)
+        record["before_kill"] = self.core_state(client)
+        record["server_killed"] = self.kill(server)
+        record["server_output"] = server.output()
+        record["gdb_exit"] = self.close_client(client)
+        time.sleep(SETTLE_S)
+        record["settle_s"] = SETTLE_S
+        record["killed_connect"] = self.counter_after_a_killed_connect()
+        time.sleep(SETTLE_S)
+        record["killed_connect_again"] = self.counter_after_a_killed_connect()
+        return record
+
+    def monitor_resets(self) -> dict:
+        """Each reset form from a core halted at the handler, read back past GDB's cache, then run and interrupted."""
+        server, ready = self.started(["-g"])
+        record: dict = {"scenario": "monitor_resets", "argv_tail": server.argv[1:], "ready": ready, "resets": []}
+        if ready is None:
+            record.update(self.finish(server))
+            return record
+        client, connect = self.connect(self.port_of(server))
+        record["connect"] = connect
+        record["after_connect"] = self.core_state(client)
+        for words in RESET_VARIANTS:
+            entry: dict = {"words": words, "at_handler": self.halted_at_handler(client)}
+            entry["monitor"] = self.monitor(client, words)
+            entry["stop_poll"] = self.stop(client, 1.0)
+            entry["after"] = self.core_state(client)
+            time.sleep(0.5)
+            entry["half_a_second_later"] = self.core_state(client)
+            entry["run_and_interrupt"] = self.halted_by_interrupt(client)
+            record["resets"].append(entry)
+        record["server_killed"] = self.kill(server)
+        record["server_output"] = server.output()
+        record["gdb_exit"] = self.close_client(client)
+        return record
+
+    def persistent_session_detach(self) -> dict:
+        """`-e` keeps the server up after its client leaves: whether the core is resumed when GDB detaches from it."""
+        server, ready = self.started(["-g", "-e"])
+        record: dict = {"scenario": "persistent_session_detach", "argv_tail": server.argv[1:], "ready": ready}
+        if ready is None:
+            record.update(self.finish(server))
+            return record
+        client, connect = self.connect(self.port_of(server))
+        record["connect"] = connect
+        record["at_handler"] = self.halted_at_handler(client)
+        record["detach"] = self.command(client, "-target-detach")
+        record["gdb_exit"] = self.close_client(client)
+        time.sleep(SETTLE_S)
+        record["settle_s"] = SETTLE_S
+        record["server_running_after_detach"] = server.process.poll() is None
+        if record["server_running_after_detach"]:
+            record["listening_ports_after_detach"] = listening_ports(server.process.pid)
+            again, again_connect = self.connect(self.port_of(server))
+            record["second_client_connect"] = again_connect
+            record["second_client_reads"] = self.core_state(again)
+            record["server_killed"] = self.kill(server)
+            record["second_client_exit"] = self.close_client(again)
+        else:
+            record.update(self.finish(server))
+        record["server_output"] = server.output()
+        time.sleep(SETTLE_S)
+        record["killed_connect"] = self.counter_after_a_killed_connect()
+        return record
+
+    def ports(self) -> dict:
+        """What the second listening port is, and what the server does when either port is taken."""
+        record: dict = {}
+        port, console = free_port(), free_port()
+        server = self.start(self.server_argv(port, extra=["-g", "--semihost-console-port", str(console)]))
+        ready = self.wait_until_listening(server, port, STARTUP_TIMEOUT_S)
+        moved: dict = {"argv_tail": server.argv[1:], "ready": ready, "gdb_port": port, "semihost_console_port": console}
+        if ready is not None and server.process.poll() is None:
+            moved["listening_ports"] = listening_ports(server.process.pid)
+            moved["listening_addresses"] = listening_addresses(server.process.pid)
+        moved["server_killed"] = self.kill(server)
+        moved["output"] = server.output()
+        record["semihost_console_port_named"] = moved
+        for label, offset in (("gdb_port_taken", 0), ("port_after_the_gdb_port_taken", 1)):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
+                holder.bind(("0.0.0.0", 0))
+                taken = holder.getsockname()[1]
+                holder.listen(1)
+                gdb_port = taken - offset
+                server = self.start(self.server_argv(gdb_port, extra=["-g"]))
+                exited = server.wait_for_exit(EXIT_WAIT_S)
+                entry: dict = {"argv_tail": server.argv[1:], "gdb_port": gdb_port, "taken_port": taken, "exited_on_its_own": exited is not None, "returncode": exited}
+                if exited is None:
+                    entry["listening_ports"] = listening_ports(server.process.pid)
+                    entry["server_killed"] = self.kill(server)
+                else:
+                    for reader in server.readers:
+                        reader.join(timeout=5.0)
+                    if server in self.live:
+                        self.live.remove(server)
+                entry["output"] = server.output()
+                record[label] = entry
+        return record
+
     def failure(self, label: str, argv: list[str]) -> dict:  # type: ignore[override]
         server = self.start(argv)
         record: dict = {"scenario": label, "argv_tail": argv[1:]}
@@ -324,7 +488,7 @@ def run_text(argv: list[str], environment: dict[str, str], cwd: str) -> dict:
     return {"argv_tail": argv[1:], "returncode": answered.returncode, "stdout": answered.stdout.splitlines(), "stderr": answered.stderr.splitlines()}
 
 
-def write_recording(recording: dict, root: Path, private_values: tuple[str, ...], record_property) -> None:
+def write_recording(recording: dict, root: Path, private_values: tuple[str, ...], record_property, name: str = OUTPUT_NAME) -> None:
     text = json.dumps(recording, indent=2, sort_keys=True)
     # The tree first, so its paths read as the placeholder rather than as a
     # redacted home with the rest of the path after it.
@@ -334,11 +498,12 @@ def write_recording(recording: dict, root: Path, private_values: tuple[str, ...]
     directory = os.environ.get(OUTPUT_DIRECTORY_ENV)
     if directory:
         Path(directory).mkdir(parents=True, exist_ok=True)
-        (Path(directory) / OUTPUT_NAME).write_bytes(rendered.encode("utf-8"))
-    record_property("st_link_gdbserver_recording_v1", json.dumps(redacted, sort_keys=True, separators=(",", ":")))
+        (Path(directory) / name).write_bytes(rendered.encode("utf-8"))
+    record_property(name, json.dumps(redacted, sort_keys=True, separators=(",", ":")))
 
 
-def test_record_st_link_gdbserver(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
+def recording_for(bench: Bench, firmware: Path, tmp_path: Path) -> tuple[Path, StLinkRecorder, tuple[str, ...], dict]:
+    """The recorder for this bench's probe, the values a committed recording must not carry, and the recording's header."""
     root = cubeclt_root()
     executable = str(root / "STLink-gdb-server" / "bin" / "ST-LINK_gdbserver")
     programmer_bin = str(root / "STM32CubeProgrammer" / "bin")
@@ -349,7 +514,6 @@ def test_record_st_link_gdbserver(bench: Bench, firmware: Path, gdb: None, tmp_p
     assert serial, "the bench configuration names no probe"
     recorder = StLinkRecorder(bench, executable, programmer_bin, gdb_path, firmware, serial, environment)
     private_values = (serial, str(bench.project), str(bench.config_root), str(bench.state_root), str(tmp_path), str(Path.home()), str(firmware.parent))
-    version = run_text([executable, "--version"], environment, recorder.cwd)
     recording: dict = {
         "schema": RECORDING_SCHEMA,
         "recorded_on": time.strftime("%Y-%m-%d", time.gmtime()),
@@ -362,11 +526,16 @@ def test_record_st_link_gdbserver(bench: Bench, firmware: Path, gdb: None, tmp_p
         "timings": {"settle_s": SETTLE_S, "run_before_interrupt_s": RUN_BEFORE_INTERRUPT_S, "stop_timeout_s": STOP_TIMEOUT_S, "command_timeout_s": COMMAND_TIMEOUT_S, "exit_wait_s": EXIT_WAIT_S},
         "handler": HANDLER,
         "counter": COUNTER,
-        "version": version,
-        "help": run_text([executable, "-h"], environment, recorder.cwd),
-        "cwd_entries": directory_entries(Path(recorder.cwd)),
+        "version": run_text([executable, "--version"], environment, recorder.cwd),
         "scenarios": {},
     }
+    return root, recorder, private_values, recording
+
+
+def test_record_st_link_gdbserver(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
+    root, recorder, private_values, recording = recording_for(bench, firmware, tmp_path)
+    recording["help"] = run_text([recorder.executable, "-h"], recorder.environment, recorder.cwd)
+    recording["cwd_entries"] = directory_entries(Path(recorder.cwd))
     scenarios = recording["scenarios"]
     try:
         scenarios["startup_default"] = recorder.startup([], "startup_default")
@@ -386,5 +555,27 @@ def test_record_st_link_gdbserver(bench: Bench, firmware: Path, gdb: None, tmp_p
     finally:
         recorder.cleanup()
         write_recording(recording, root, private_values, record_property)
+        restored = put_on_board(bench, firmware)
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+
+
+def test_record_st_link_gdbserver_teardown(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
+    """The second round: a server killed rather than terminated, the reset forms read past GDB's cache, `-e`, and the ports.
+
+    The first round found every ending it tried resuming the core: GDB exiting,
+    GDB detaching, and the server terminated under GDB, which prints "Shutting
+    down..." first. This one asks whether a server that runs none of its own
+    shutdown leaves the core where it was, and whether the probe opens again
+    after it."""
+    root, recorder, private_values, recording = recording_for(bench, firmware, tmp_path)
+    scenarios = recording["scenarios"]
+    try:
+        scenarios["session_ended_by_killing_the_server"] = [recorder.session_ended_by_killing_the_server(cycle) for cycle in range(1, KILL_HALTED_CYCLES + 1)]
+        scenarios["monitor_resets"] = recorder.monitor_resets()
+        scenarios["persistent_session_detach"] = recorder.persistent_session_detach()
+        scenarios["ports"] = recorder.ports()
+    finally:
+        recorder.cleanup()
+        write_recording(recording, root, private_values, record_property, TEARDOWN_OUTPUT_NAME)
         restored = put_on_board(bench, firmware)
         assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
