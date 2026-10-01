@@ -1039,7 +1039,7 @@ def test_record_st_link_gdbserver(bench: Bench, firmware: Path, gdb: None, tmp_p
         recorder.cleanup()
         write_recording(recording, root, private_values, record_property)
         restored = put_on_board(bench, firmware)
-        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}{chr(10)}{json.dumps(restored, indent=1, default=str)}"
 
 
 def test_record_st_link_gdbserver_teardown(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
@@ -1061,7 +1061,7 @@ def test_record_st_link_gdbserver_teardown(bench: Bench, firmware: Path, gdb: No
         recorder.cleanup()
         write_recording(recording, root, private_values, record_property, TEARDOWN_OUTPUT_NAME)
         restored = put_on_board(bench, firmware)
-        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}{chr(10)}{json.dumps(restored, indent=1, default=str)}"
 
 
 def product_log(bench: Bench, log_path: object) -> list[str] | None:
@@ -1185,7 +1185,7 @@ def test_record_st_link_gdbserver_ends(
         recorder.cleanup()
         write_recording(recording, root, private_values, record_property, ENDS_OUTPUT_NAME)
         restored = put_on_board(bench, firmware)
-        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}{chr(10)}{json.dumps(restored, indent=1, default=str)}"
 
 
 def product_answer(answer: dict) -> dict:
@@ -1358,7 +1358,7 @@ def test_record_st_link_session_stops(
         recording["summary"] = summarize_stops(entries)
         write_recording(recording, root, private_values, record_property, STOPS_OUTPUT_NAME)
         restored = put_on_board(bench, firmware)
-        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}{chr(10)}{json.dumps(restored, indent=1, default=str)}"
 
 
 def summarize_race(entries: list[dict]) -> dict:
@@ -1429,7 +1429,7 @@ def test_record_st_link_server_race(bench: Bench, firmware: Path, gdb: None, tmp
         recording["summary"] = summarize_race(entries)
         write_recording(recording, root, private_values, record_property, RACE_OUTPUT_NAME)
         restored = put_on_board(bench, firmware)
-        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}{chr(10)}{json.dumps(restored, indent=1, default=str)}"
 
 
 def summarize_restarts(entries: list[dict]) -> dict:
@@ -1510,7 +1510,7 @@ def test_record_st_link_server_restarts(bench: Bench, firmware: Path, gdb: None,
         recording["summary"] = summarize_restarts(entries)
         write_recording(recording, root, private_values, record_property, RESTART_OUTPUT_NAME)
         restored = put_on_board(bench, firmware)
-        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}{chr(10)}{json.dumps(restored, indent=1, default=str)}"
 
 
 def usb_handles(pid: int) -> int | None:
@@ -1660,7 +1660,7 @@ def test_record_st_link_server_sharing(
         recording["stlink_servers_ended_at_the_end"] = left
         write_recording(recording, root, private_values, record_property, SHARING_OUTPUT_NAME)
         restored = put_on_board(bench, firmware)
-        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}{chr(10)}{json.dumps(restored, indent=1, default=str)}"
 
 
 def test_record_st_link_gdbserver_restart(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
@@ -1688,4 +1688,4 @@ def test_record_st_link_gdbserver_restart(bench: Bench, firmware: Path, gdb: Non
         recorder.cleanup()
         write_recording(recording, root, private_values, record_property, RESTART_OUTPUT_NAME)
         restored = put_on_board(bench, firmware)
-        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}{chr(10)}{json.dumps(restored, indent=1, default=str)}"
