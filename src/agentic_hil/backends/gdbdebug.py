@@ -189,6 +189,7 @@ class GdbDebugSessions:
         build_server_args: Callable[[str, int, bool], list[str]],
         classify_server_output: Callable[[str], str],
         server_ready_line: str | None = None,
+        read_start_failure: Callable[[str, list[str]], JsonObject | None] | None = None,
     ):
         self.config = config
         self.backend_name = backend_name
@@ -196,6 +197,16 @@ class GdbDebugSessions:
         self._build_server_args = build_server_args
         self._classify_server_output = classify_server_output
         self._server_ready_line = server_ready_line
+        # What a backend can read out of a dead server's output that classifying
+        # its words alone cannot. The one case there is: the server's command line
+        # carries the same probe-selection `-c` values the backend's tool path puts
+        # on its own, and a release that does not register one refuses it inside the
+        # interpreter, before `init`. The tool path reads that and names the
+        # command; without this the start classified from words and answered
+        # `debugger_error` / `unknown_debugger_error` for a server that provably
+        # stopped at its first `-c`. Given the output and the server's argv, and
+        # answering None where it has nothing to add.
+        self._read_start_failure = read_start_failure
         self.session: GdbDebugSession | None = None
         # Permanent audit latch: once evidence persistence breaks, it stays
         # broken for this service instance; it is never consumed by reporting.
@@ -1378,7 +1389,18 @@ class GdbDebugSessions:
             backend_error_type = self._classify_server_output(output)
             error_type = backend_error_type if backend_error_type != "unknown_debugger_error" else "debugger_error"
             summary = "Debug server exited before the GDB port became ready."
-        return {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": utc_now_iso(), "elapsed_ms": int((time.perf_counter() - start) * 1000), "error_type": error_type, "backend_error_type": backend_error_type, "summary": summary, "log_path": display_path(self.config, session.log_path)}
+        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": utc_now_iso(), "elapsed_ms": int((time.perf_counter() - start) * 1000), "error_type": error_type, "backend_error_type": backend_error_type, "summary": summary, "log_path": display_path(self.config, session.log_path)}
+        if not timed_out and self._read_start_failure is not None:
+            # A backend's own reading of the same output, which can name where the
+            # server stopped where classifying its words cannot. Merged over the
+            # classification rather than beside it: the two answer the same
+            # question and this one is the specific answer. A timeout is left
+            # alone, because a server still running proves nothing about where it
+            # got to.
+            read = self._read_start_failure(output, list(session.server_args))
+            if read:
+                result.update(read)
+        return result
 
     def _start_output_readers(self, session: GdbDebugSession) -> None:
         def read(stream, attribute: str) -> None:

@@ -218,10 +218,21 @@ OPENOCD_ADAPTER_DRIVER_QUERY = f'echo "{OPENOCD_ADAPTER_DRIVER_MARKER}[adapter n
 # OpenOCD 0.11 took the recorded serial with each (the `selector_*` recordings):
 # `hla_serial` for the hla driver `interface/stlink.cfg` loads, `st-link serial`
 # for the st-link driver of `interface/stlink-dap.cfg`, `cmsis_dap_serial` for
-# cmsis-dap. Each is a filter and not a preference: given a serial no attached
-# probe carries, OpenOCD 0.11 answered "No device matches the serial string" and
-# opened nothing. `jlink serial` is not here, because it refused the recorded
-# serial as not a number, and the other drivers have no selector at all.
+# cmsis-dap. `jlink serial` is not here, because it refused the recorded serial as
+# not a number, and the other drivers have no selector at all.
+#
+# Each is a filter and not a preference: given a serial no attached probe carries,
+# the selector makes 0.11 open nothing rather than fall back to the first probe it
+# finds. Measured for `hla_serial` alone, by the one recording that reaches `init`
+# with a serial nothing matches (`probe_target_hla_serial_no_such_probe`, where
+# 0.11 answered "No device matches the serial string"). The three `selector_*`
+# recordings stop at the configuration stage by construction, so they show the
+# form of each selector being accepted and can say nothing about what a non-match
+# does. For `st-link serial` and `cmsis_dap_serial` the filter behaviour is read
+# off the 0.11 driver sources (stlink_dap_usb_open and cmsis_dap_usb_open both
+# compare the serial and return ERROR_FAIL on no match) and not measured here.
+# Closing that gap means one `init`-stage no-match run per driver on a bench that
+# has those probes, in the shape of the hla recording.
 OPENOCD_0_11_SERIAL_SELECTORS = {"hla": "hla_serial", "st-link": "st-link serial", "cmsis-dap": "cmsis_dap_serial"}
 # How long a configuration-stage read may take: it loads one or two scripts and
 # exits, and the debugger's own timeout is sized for flashing a board.
@@ -261,15 +272,54 @@ def parse_openocd_version(output: str) -> OpenOCDRelease | None:
     return match.group(1), (int(match.group(2)), int(match.group(3)), int(match.group(4) or 0))
 
 
-def openocd_version(executable_path: str, timeout_s: float) -> OpenOCDRelease | None:
-    """The release the OpenOCD at this path says it is, from its own `--version`.
+def _last_written_line(output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
 
-    None when it did not say: it could not be started, did not answer in time,
-    failed, or printed no banner."""
+
+def read_failure_reason(completed: CompletedCommand, what: str, timeout_s: float, expected: str) -> str:
+    """Why one configuration-stage read of an OpenOCD answered nothing, in its own words where it wrote any.
+
+    Five unlike outcomes collapsed to a bare `None` before this: not found, not
+    executable, timed out, a non-zero exit, and an exit 0 that printed nothing the
+    read was looking for. Only the last of those is anything like "this OpenOCD is
+    simply older", and none of them was recorded anywhere, so the refusal a failed
+    read causes could not be traced back to it. The repo's rule is that a failure
+    surface shows the decisive line, redacted if it has to be, and here there is
+    nothing to redact: OpenOCD's own words about its own binary.
+
+    The path is not in the sentence. Every result that carries this also carries
+    `executable`, so naming it twice adds nothing, and this line travels into
+    `likely_causes`, which an agent reads back.
+    """
+    if completed.not_found:
+        return f"the {what} could not be started: the file is not there"
+    if completed.not_executable:
+        return f"the {what} could not be started: the file is not executable"
+    if completed.timed_out:
+        return f"the {what} did not answer within {timeout_s:g}s"
+    line = _last_written_line(f"{completed.stdout}{completed.stderr}")
+    if completed.returncode != 0:
+        return f"the {what} exited {completed.returncode}" + (f": {line}" if line else " and wrote nothing")
+    return f"the {what} exited 0 without {expected}" + (f"; its last line was: {line}" if line else " and wrote nothing at all")
+
+
+def openocd_version(executable_path: str, timeout_s: float) -> tuple[OpenOCDRelease | None, str | None]:
+    """The release the OpenOCD at this path says it is, from its own `--version`, or why it did not say.
+
+    Exactly one of the two is set. The second is the whole reason this returns a
+    pair: the release read is the one that decides which selector a call gets, and
+    a read that failed sends the call to `adapter serial` for a reason that has
+    nothing to do with the release, which is a wrapper the repo explicitly
+    supports (`debuggers.<name>.executable` may be one) swallowing `--version`."""
     completed = spawn_command([*invocation(executable_path), "--version"], str(Path(executable_path).parent), timeout_s)
+    reason = "OpenOCD release read (`--version`)"
     if completed.not_found or completed.not_executable or completed.timed_out or completed.returncode != 0:
-        return None
-    return parse_openocd_version(f"{completed.stdout}{completed.stderr}")
+        return None, read_failure_reason(completed, reason, timeout_s, "naming a release")
+    release = parse_openocd_version(f"{completed.stdout}{completed.stderr}")
+    if release is None:
+        return None, read_failure_reason(completed, reason, timeout_s, "printing a version banner")
+    return release, None
 
 
 def parse_openocd_adapter_driver(output: str) -> str | None:
@@ -284,19 +334,26 @@ def parse_openocd_adapter_driver(output: str) -> str | None:
     return answers.pop() or None
 
 
-def openocd_adapter_driver(executable_path: str, interface_cfg: str, timeout_s: float) -> str | None:
-    """The adapter driver this interface script loads on the OpenOCD at this path, or None.
+def openocd_adapter_driver(executable_path: str, interface_cfg: str, timeout_s: float) -> tuple[str | None, str | None]:
+    """The adapter driver this interface script loads on the OpenOCD at this path, or why it could not be read.
 
     OpenOCD loads the script, echoes `adapter name` and shuts down, all at its
-    configuration stage: `init`, which opens the adapter, is never reached."""
+    configuration stage: `init`, which opens the adapter, is never reached. The
+    second half of the pair is why nothing was read, for the reason
+    `openocd_version` returns one: a failed read here sends the call to `adapter
+    serial` too, and on 0.11 that is refused."""
     completed = spawn_command(
         [*invocation(executable_path), "-f", interface_cfg, "-c", OPENOCD_ADAPTER_DRIVER_QUERY, "-c", "shutdown"],
         str(Path(executable_path).parent),
         timeout_s,
     )
+    reason = f"adapter driver read of `{interface_cfg}`"
     if completed.not_found or completed.not_executable or completed.timed_out or completed.returncode != 0:
-        return None
-    return parse_openocd_adapter_driver(f"{completed.stdout}{completed.stderr}")
+        return None, read_failure_reason(completed, reason, timeout_s, "naming an adapter driver")
+    driver = parse_openocd_adapter_driver(f"{completed.stdout}{completed.stderr}")
+    if driver is None:
+        return None, read_failure_reason(completed, reason, timeout_s, f"echoing `{OPENOCD_ADAPTER_DRIVER_MARKER}` once")
+    return driver, None
 
 
 @dataclass(frozen=True)
@@ -305,12 +362,21 @@ class OpenOCDProbeSelection:
 
     `supported` is False when this OpenOCD has no selector for the probe's
     adapter driver, and then `commands` is empty: such a call is refused, never
-    sent without a selector."""
+    sent without a selector.
+
+    `read_failure` is set only where one of the two configuration-stage reads
+    answered nothing, and is then the decisive line it answered nothing with. It
+    is what tells the two `adapter serial` fallbacks apart: the release really is
+    0.12.0 or newer, or nothing here could find out. Every result the selection
+    feeds carries it, because a refusal caused by a failed read used to name only
+    `adapter serial` and the three generic causes, with nothing pointing at the
+    repair."""
 
     commands: tuple[str, ...]
     version: str | None
     adapter_driver: str | None
     supported: bool
+    read_failure: str | None = None
 
 
 def openocd_probe_selection(
@@ -319,7 +385,7 @@ def openocd_probe_selection(
     probe_id: str | None,
     timeout_s: float,
     *,
-    read_release: Callable[[str, float], OpenOCDRelease | None] = openocd_version,
+    read_release: Callable[[str, float], tuple[OpenOCDRelease | None, str | None]] = openocd_version,
 ) -> OpenOCDProbeSelection:
     """How the OpenOCD at this path is told which probe to open.
 
@@ -336,19 +402,24 @@ def openocd_probe_selection(
     The one thing never returned for a `probe_id` is an empty selection that is
     supported: OpenOCD would open whichever probe it found first.
 
+    Either fallback to `adapter serial` taken because a read failed carries that
+    read's decisive line on `read_failure`, so a call refused afterwards can be
+    traced to it. Nothing about the choice changes: a release without the command
+    refuses it before `init`, and that is still the safe answer.
+
     `read_release` reads the release; the backend passes one that remembers it."""
     if probe_id is None:
         return OpenOCDProbeSelection((), None, None, True)
     generic = ("-c", f"adapter serial {probe_id}")
-    release = read_release(executable_path, timeout_s)
+    release, release_failure = read_release(executable_path, timeout_s)
     if release is None:
-        return OpenOCDProbeSelection(generic, None, None, True)
+        return OpenOCDProbeSelection(generic, None, None, True, release_failure)
     version, numbers = release
     if numbers >= OPENOCD_ADAPTER_SERIAL_SINCE:
         return OpenOCDProbeSelection(generic, version, None, True)
-    driver = openocd_adapter_driver(executable_path, interface_cfg, timeout_s)
+    driver, driver_failure = openocd_adapter_driver(executable_path, interface_cfg, timeout_s)
     if driver is None:
-        return OpenOCDProbeSelection(generic, version, None, True)
+        return OpenOCDProbeSelection(generic, version, None, True, driver_failure)
     selector = OPENOCD_0_11_SERIAL_SELECTORS.get(driver)
     if selector is None:
         return OpenOCDProbeSelection((), version, driver, False)
@@ -376,6 +447,10 @@ class OpenOCDBackend:
         # The selection a session start's resolve chose, for the server it then
         # starts, with the executable, script and serial it was chosen for.
         self._debug_probe_selection: tuple[tuple[str, str, str | None], OpenOCDProbeSelection] | None = None
+        # The configuration-stage read that answered nothing for the call being
+        # run, so its decisive line reaches that call's own result. Set at the top
+        # of every `_run_openocd` and read by it alone.
+        self._selection_read_failure: str | None = None
         self._debug = GdbDebugSessions(
             config,
             backend_name=self.backend_name,
@@ -383,6 +458,7 @@ class OpenOCDBackend:
             build_server_args=self._debug_server_args,
             classify_server_output=self._classify_output,
             server_ready_line=OPENOCD_GDB_LISTENING_LINE,
+            read_start_failure=self._debug_start_failure,
         )
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
@@ -727,6 +803,41 @@ class OpenOCDBackend:
             startup,
         ]
 
+    def _debug_start_failure(self, output: str, server_args: list[str]) -> JsonObject | None:
+        """What a dead debug server's own output says about where it stopped, or None.
+
+        The server's command line carries the same probe-selection `-c` values the
+        tool path puts on its own, including the documented `adapter serial`
+        fallback taken when the release could not be read, and OpenOCD 0.11
+        refuses a selector its loaded adapter driver does not register from inside
+        the interpreter, before `init`. `rejected_openocd_commands` is what the
+        tool path reads that with; the start classified from the output's words
+        alone and answered `debugger_error` with "Debug server exited before the
+        GDB port became ready." for a server that provably stopped at its first
+        `-c`. The decisive line was in `server_stderr_tail` throughout and the
+        markers were already right, so this is the classification catching up with
+        what the transcript says.
+
+        The server's last `-c` is its startup script (`init; halt`), the same
+        place the tool path's own command sits, and every `-c` ahead of it is a
+        configuration command. Split that way so this asks exactly the question
+        the tool path asks.
+        """
+        values = [server_args[index + 1] for index, item in enumerate(server_args) if item == "-c" and index + 1 < len(server_args)]
+        if not values:
+            return None
+        rejected = rejected_openocd_commands(values[-1], output, tuple(values[:-1]))
+        if not rejected:
+            return None
+        backend_error_type = "command_rejected_before_init"
+        error_type = self._public_error_type(backend_error_type)
+        return {
+            "error_type": error_type,
+            "backend_error_type": backend_error_type,
+            "summary": f"Debug server exited before the GDB port became ready: {self._failure_summary(backend_error_type, error_type)}",
+            "rejected_commands": rejected,
+        }
+
     def _resolve_executable(self) -> JsonObject:
         configured = self.config.debugger.executable
         if configured:
@@ -763,6 +874,26 @@ class OpenOCDBackend:
         return resolved
 
     def _run_openocd(self, tool: str, openocd_command: str, success_marker: str | None = None) -> JsonObject:
+        """One OpenOCD call, carrying a configuration-stage read that failed on the way to it.
+
+        The two reads that decide which selector this call gets run before it and
+        answer nothing on a host whose OpenOCD is behind a wrapper that swallows
+        `--version`, which this repo explicitly supports as an `executable`. The
+        call is then made with `adapter serial`, which a 0.11 refuses before
+        `init`, and the refusal named that command and three generic causes with no
+        `openocd_version` field and nothing at all pointing at the wrapper. So the
+        line the read failed with rides out on every failure of the call it shaped:
+        it is not this call's error, and it is why this call has one.
+        """
+        self._selection_read_failure = None
+        result = self._run_openocd_call(tool, openocd_command, success_marker)
+        failure = self._selection_read_failure
+        if failure and result.get("ok") is not True:
+            result["probe_selection_read_failure"] = failure
+            result["likely_causes"] = [failure, *(result.get("likely_causes") or [])]
+        return result
+
+    def _run_openocd_call(self, tool: str, openocd_command: str, success_marker: str | None = None) -> JsonObject:
         started_at = utc_now_iso()
         start = time.perf_counter()
         resolved = self._resolve_executable()
@@ -770,6 +901,9 @@ class OpenOCDBackend:
             return {"tool": tool, "backend": self.backend_name, "started_at": started_at, **resolved, "finished_at": utc_now_iso(), "elapsed_ms": int((time.perf_counter() - start) * 1000)}
 
         selection = self._probe_selection(str(resolved["executable_path"]))
+        # Kept for the wrapper above, which puts it on whatever this returns. The
+        # refusal branch below publishes it itself, from the selection.
+        self._selection_read_failure = selection.read_failure
         if not selection.supported:
             # Before the call's own run and before its log: OpenOCD was started
             # only for the two configuration-stage reads, which open no adapter.
@@ -1031,19 +1165,28 @@ class OpenOCDBackend:
             read_release=self._release,
         )
 
-    def _release(self, executable_path: str, timeout_s: float) -> OpenOCDRelease | None:
-        """The release the OpenOCD at this path says it is, asked once per file."""
+    def _release(self, executable_path: str, timeout_s: float) -> tuple[OpenOCDRelease | None, str | None]:
+        """The release the OpenOCD at this path says it is, asked once per file, or why it did not say.
+
+        Only answers are remembered, deliberately: an OpenOCD that did not answer
+        is asked again, so a wrapper repaired between two calls is believed at
+        once and a read that failed once cannot pin a host to `adapter serial` for
+        the life of the process. The cost is one extra spawn per call on a host
+        whose read keeps failing, and the reason it keeps failing now travels with
+        every result, which is what turns that into something an operator can fix
+        rather than a silence."""
         try:
             status = os.stat(executable_path)
         except OSError:
             return openocd_version(executable_path, timeout_s)
         key = (executable_path, status.st_mtime_ns, status.st_size)
         release = self._releases.get(key)
-        if release is None:
-            release = openocd_version(executable_path, timeout_s)
-            if release is not None:
-                self._releases[key] = release
-        return release
+        if release is not None:
+            return release, None
+        release, failure = openocd_version(executable_path, timeout_s)
+        if release is not None:
+            self._releases[key] = release
+        return release, failure
 
     def _adapter_serial_selection(self) -> list[str]:
         return [] if self.config.debugger.probe_id is None else ["-c", f"adapter serial {self.config.debugger.probe_id}"]
@@ -1067,7 +1210,12 @@ class OpenOCDBackend:
             "openocd_version": selection.version,
             "adapter_driver": selection.adapter_driver,
             "interface_cfg": interface_cfg,
+            **({"probe_selection_read_failure": selection.read_failure} if selection.read_failure else {}),
             "likely_causes": [
+                # The read that failed first, where one did, because then it is
+                # the repair: the release and the driver below are what could not
+                # be read, so the three generic causes point at nothing.
+                *([selection.read_failure] if selection.read_failure else []),
                 f"the installed OpenOCD is {selection.version}, older than 0.12.0, which added `adapter serial` for every adapter driver",
                 "the interface script loads an adapter driver with no serial selector of its own on this release, or one whose selector takes serials in another form (`jlink serial` takes numbers only), or loads no adapter driver at all",
             ],

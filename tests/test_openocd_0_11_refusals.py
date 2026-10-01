@@ -126,3 +126,81 @@ def test_the_same_refusal_of_a_serial_this_backend_did_not_send_stays_an_unconfi
     assert result.get("hardware_state") != "unchanged", result
     assert result["cleanup_required"] is True, result
     assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"], result
+
+
+def session_log(config, started: dict) -> dict:
+    """The session log the start's result names, where the server's own output is kept."""
+    return json.loads((Path(config.work_dir) / started["log_path"]).read_text(encoding="utf-8"))
+
+
+def test_a_debug_session_the_same_refusal_stops_is_read_as_the_rejected_command_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The debug server puts the same `-c` on its command line, so the same reading has to apply.
+
+    A session start builds the server's argv with the probe selection the tool
+    path uses, including the documented `adapter serial` fallback taken when the
+    release could not be read, and 0.11 refuses it inside the interpreter at the
+    first argument. The tool path answers `debugger_command_rejected` naming
+    `adapter serial`; the start classified from the output's words alone and
+    answered `error_type: debugger_error`, `backend_error_type:
+    unknown_debugger_error` and "Debug server exited before the GDB port became
+    ready." with no `rejected_commands`, for a server that provably stopped before
+    `init`.
+
+    The markers were already right and the decisive line was already in
+    `server_stderr_tail`, so nothing about what this does to the bench changes:
+    this is the classification catching up with the transcript. The bench stays in
+    service either way, and that is asserted here so it cannot regress the other
+    way.
+    """
+    from test_debug_sessions import debug_service, start_debug_session
+
+    play(monkeypatch, RESET)
+    service = debug_service(tmp_path, debugger_executable=FAKE_TRANSCRIPT, probe_id=SERIAL)
+    try:
+        # `attach`, because a `load` start that spawned a server cannot rule the
+        # firmware load out on the coordination layer's own evidence and keeps the
+        # unconfirmed reading it had: that reading is not what this is about, and
+        # changing it would be a product decision rather than a classification.
+        started = start_debug_session(service, "attach")
+        status = service.call("debug_get_session_status")
+    finally:
+        service.close()
+
+    assert started["ok"] is False, started
+    assert started["error_type"] == "debugger_command_rejected", started
+    assert started["backend_error_type"] == "command_rejected_before_init", started
+    assert started["rejected_commands"] == ["adapter serial"], started
+    # The decisive line, still where it always was: the session log the result names.
+    assert f'invalid subcommand "serial {SERIAL}"' in session_log(service.config, started)["server_stderr_tail"], started
+    # And still not an incident: nothing opened the probe, so nothing has to be
+    # inspected before the next call.
+    assert started["side_effect_status"] == "not_started", started
+    assert started["retry_safe"] is True, started
+    assert started.get("quarantined") is not True, started
+    assert not blocking_record_states(service.config), blocking_record_states(service.config)
+    assert status.get("active") is not True, status
+
+
+def test_a_server_that_died_for_another_reason_keeps_the_reading_it_had(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction: only a command this backend sent may be read this way.
+
+    A server whose output names no command of ours stopped somewhere this layer
+    cannot place, and the generic classification is the honest answer for it.
+    """
+    from test_debug_sessions import debug_service, start_debug_session
+
+    play(monkeypatch, {"stdout": "", "stderr": "Open On-Chip Debugger 0.11.0\nError: libusb_open() failed with LIBUSB_ERROR_ACCESS\n", "returncode": 1})
+    service = debug_service(tmp_path, debugger_executable=FAKE_TRANSCRIPT, probe_id=SERIAL)
+    try:
+        started = start_debug_session(service, "attach")
+    finally:
+        service.close()
+
+    assert started["ok"] is False, started
+    assert "rejected_commands" not in started, started
+    assert started["error_type"] != "debugger_command_rejected", started
+    assert "LIBUSB_ERROR_ACCESS" in session_log(service.config, started)["server_stderr_tail"], started
