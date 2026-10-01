@@ -12,6 +12,12 @@ Every hardware action is validated against one authoritative configuration file 
 - [STM32 starter](https://github.com/agentic-hil/stm32-starter): a Nucleo-F446RE project with firmware, three test plans and one planted defect, so the whole loop runs in three steps.
 - [README.md](https://github.com/agentic-hil/agentic-hil/blob/master/README.md): what the product is, the install line, and the short tour of what it drives.
 
+## Use cases
+
+- [docs/use-cases/flash-and-reset.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/use-cases/flash-and-reset.md): letting a coding agent flash and reset a board behind a debug probe without handing it a debugger shell, with what the operator grants, two recorded runs and their limits.
+- [docs/use-cases/uart-and-can.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/use-cases/uart-and-can.md): sending a board commands over its serial line or CAN bus and judging its answer against a stated claim, with a failing run and its fix, and how a CAN bus is held to listen-only.
+- [docs/use-cases/check-plan.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/use-cases/check-plan.md): checking hardware test plans in CI without a board, what a green run of that check proves, and what only the board shows.
+
 ## Reference
 
 - [docs/installation.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/installation.md): every install path, the optional extras, upgrading, and the platform and debugger backends.

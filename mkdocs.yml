@@ -8,6 +8,10 @@ edit_uri: edit/master/docs/
 nav:
   - Home: index.md
   - Installation: installation.md
+  - Use cases:
+      - Flash and reset: use-cases/flash-and-reset.md
+      - UART and CAN feedback: use-cases/uart-and-can.md
+      - Plans without a board: use-cases/check-plan.md
   - Configuration: configuration.md
   - MCP hosts: mcp-hosts.md
   - MCP tools: mcp-tools.md

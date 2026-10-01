@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- Three use-case pages under `docs/use-cases/`, each built from runs on real releases with their output, the release and date they came from, and where they stop: letting a coding agent flash and reset the board through narrow tools instead of a debugger shell (`flash-and-reset.md`), driving UART and CAN and judging the board's answer against a stated claim (`uart-and-can.md`), and checking hardware test plans in CI without a board (`check-plan.md`). Each names what it cannot show: pyOCD has no recorded run there, no published record shows the CAN tools driving a board yet, and a green `check-plan` says nothing about the firmware, the wiring or the board. They are in the site navigation, on the docs index and in `llms.txt`.
+
 ## [0.22.0] - 2026-09-30
 
 ### Added
