@@ -4,17 +4,20 @@
 Quality Score from falling: a change passes when the overall score after it is
 at least the overall score before it, compared on the number, not the letter
 tier. Everything in this file runs without a model and without the network.
-The scorer is a fake that hands back canned answers, and the prompt texts are
+The scorer is a fake that hands back canned answers, the command-line backend
+runs a stand-in program in place of the real one, and the prompt texts are
 stand-ins, because the upstream specification carries no license and its
 prompts are fetched at run time and never committed.
 
 The section names in the comments are those of the specification README at the
 pinned upstream commit b9881b0cfec8: Stage 1 (context signals, invocation
 cost), Stage 2 (hard gates), the LLM output contract, Stage 4 (post-processing),
-Computing the score, Tiers, Server-level scores, Shadowed tools, Overall, Output
-format, and Running TDQS at scale (the four referential checks on shadowing
-risks). The export tests start the real server over stdio from this checkout,
-the way a host does.
+Computing the score, Tiers, Flags and smells, Server-level scores, Shadowed
+tools, Overall, Output format, Running TDQS at scale (the four referential
+checks on shadowing risks), and the two appendices. The export tests start the
+real server over stdio from this checkout, the way a host does.
+
+The test that calls the real model lives in test_tool_definition_score_model.py.
 """
 
 from __future__ import annotations
@@ -28,11 +31,14 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
+from collections import Counter
 from collections.abc import Callable
 from fractions import Fraction
 from pathlib import Path
 
 import pytest
+import yaml
 from conftest import write_authoritative_config, write_config
 from support import scaled_time_bound
 
@@ -44,6 +50,9 @@ from agentic_hil.tools import AgenticHILToolService
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+TDQS_DIRECTORY = ROOT / "tools" / "tdqs"
+CALIBRATION_DOCUMENT = ROOT / "docs" / "tool-definition-score.md"
 
 sys.path.insert(0, str(ROOT / "tools"))
 
@@ -70,7 +79,13 @@ PUBLISHED_WEIGHTS = {
 # Appendix B output contract: the four coherence dimensions, as the model names them.
 COHERENCE_DIMENSIONS = ("disambiguation", "naming_consistency", "tool_count_appropriateness", "completeness")
 PROMPT_KEYS = {"tool_system", "tool_user", "coherence_system", "coherence_user"}
+# The confirmation procedure of the brief, as the version record states it.
+CONFIRMATION_PROCEDURE = {"version": 1, "initial_pairs": 1, "confirmation_pairs_on_drop": 2, "statistic": "median_per_side"}
+PINNED_MODEL = "claude-haiku-4-5-20251001"
+TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
+MISSING_TOKEN_LINE = f"INVALID: The tool definitions changed and {TOKEN_VARIABLE} is not set, so they cannot be scored."
 GIT_CALL_S = 60
+CLI_CALL_S = 60
 
 
 # --- builders ----------------------------------------------------------------
@@ -127,12 +142,14 @@ def coherence_answer(values: tuple[int, int, int, int], *, risks: list[dict] | t
 class FakeScorer:
     """The scorer interface the gate calls, answering from a table instead of a model.
 
-    `table` maps a tool's description to the answer for it. `coherence` is the
+    `table` maps a tool's description to the answer for it, and `default`
+    answers every description the table does not name. `coherence` is the
     answer for every set, or a callable that receives the tool list. Calls are
     recorded under a lock because the gate may score concurrently."""
 
-    def __init__(self, table: dict | None = None, coherence: object = None) -> None:
+    def __init__(self, table: dict | None = None, coherence: object = None, default: str | None = None) -> None:
         self.table = table or {}
+        self.default = default
         self.coherence = coherence if coherence is not None else coherence_answer((4, 4, 4, 4))
         self.lock = threading.Lock()
         self.tool_calls: list[tuple[str, tuple[str, ...]]] = []
@@ -141,7 +158,12 @@ class FakeScorer:
     def tool_answer(self, definition: dict, sibling_names: object) -> str:
         with self.lock:
             self.tool_calls.append((definition["name"], tuple(sibling_names)))  # type: ignore[arg-type]
-        return self.table[definition.get("description")]
+        description = definition.get("description")
+        if description in self.table:
+            return self.table[description]
+        if self.default is not None:
+            return self.default
+        raise KeyError(description)
 
     def coherence_answer(self, server_name: str, tools: list, candidates: object) -> str:
         with self.lock:
@@ -174,6 +196,25 @@ class SequenceScorer:
         return self._next(self.coherence_answers)
 
 
+class QueueScorer:
+    """Scores each tool from a queue of values kept per description, one value per call.
+
+    A value v answers v on all six dimensions, so a one-tool set scores TDQS v.
+    What is left in a queue afterwards is what the gate never asked for."""
+
+    def __init__(self, queues: dict[str, list[int]]) -> None:
+        self.queues = {description: list(values) for description, values in queues.items()}
+        self.lock = threading.Lock()
+
+    def tool_answer(self, definition: dict, sibling_names: object) -> str:
+        with self.lock:
+            value = self.queues[definition["description"]].pop(0)
+        return tool_answer((value,) * 6)
+
+    def coherence_answer(self, server_name: str, tools: list, candidates: object) -> str:
+        return coherence_answer((4, 4, 4, 4))
+
+
 def standin_record(**changes: object) -> dict:
     """A version record with every field the committed one carries, and stand-in values."""
     record = {
@@ -187,7 +228,7 @@ def standin_record(**changes: object) -> dict:
         "overall_weights": {"description_quality": 70, "coherence": 30},
         "tier_thresholds": {"A": 3.5, "B": 3.0, "C": 2.0, "D": 1.0},
         "retries": 2,
-        "confirmation": {"version": 1, "pairs": 3},
+        "confirmation": dict(CONFIRMATION_PROCEDURE),
     }
     record.update(changes)
     return record
@@ -195,6 +236,10 @@ def standin_record(**changes: object) -> dict:
 
 def export(tools: list[dict], version: str = "1.0") -> dict:
     return tds.export_from_tools(copy.deepcopy(tools), server_name="agentic-hil", server_version=version)
+
+
+def overall_pairs(report: dict) -> list[tuple[Fraction, Fraction]]:
+    return [(pair["base"]["rollups"]["overallScore"], pair["head"]["rollups"]["overallScore"]) for pair in report["pairs"]]
 
 
 # --- round1 and the tiers (Computing the score, Tiers) ------------------------
@@ -321,12 +366,14 @@ def test_overall_of_the_published_server_example() -> None:
 
 
 def test_rollups_report_counts_the_minimum_tool_and_every_score() -> None:
+    """TDQS 2.6, 2.9, 2.9, 5.0: the published mean is round1(13.4, 4), so 3.4."""
     results = {"a": {"tdqs": Fraction("2.6")}, "b": {"tdqs": Fraction("2.9")}, "c": {"tdqs": Fraction("2.9")}, "d": {"tdqs": Fraction("5.0")}}
 
     rollups = tds.rollups(results, ["a", "b", "c", "d"], {"coherenceScore": Fraction("3.3")})
 
     assert rollups["toolCount"] == 4
     assert rollups["scoredToolCount"] == 4
+    assert rollups["meanTdqs"] == Fraction("3.4")
     assert rollups["minTdqs"] == Fraction("2.6")
     assert rollups["minTool"] == "a"
     assert rollups["descriptionQualityScore"] == Fraction("3.1")
@@ -337,13 +384,16 @@ def test_rollups_report_counts_the_minimum_tool_and_every_score() -> None:
     assert rollups["overallTier"] == "B"
 
 
-def test_rollups_refuse_an_unscored_tool() -> None:
-    """The registry rolls up at 80 % coverage; the gate needs every tool scored."""
+@pytest.mark.parametrize(("scored", "total"), [(2, 3), (4, 5), (43, 44)], ids=["2-of-3", "4-of-5", "43-of-44"])
+def test_rollups_refuse_an_unscored_tool(scored: int, total: int) -> None:
+    """The registry rolls up at 80 % coverage; the gate needs every tool scored.
+    4 of 5 is exactly the registry's threshold and 43 of 44 is above it."""
     assert issubclass(tds.IncompleteResult, tds.InvalidComparison)
-    results = {"a": {"tdqs": Fraction("3.0")}, "b": {"tdqs": Fraction("4.0")}}
+    names = [f"tool_{index:02d}" for index in range(total)]
+    results = {name: {"tdqs": Fraction("4.0")} for name in names[:scored]}
 
-    with pytest.raises(tds.IncompleteResult):
-        tds.rollups(results, ["a", "b", "c"], {"coherenceScore": Fraction("4.0")})
+    with pytest.raises(tds.IncompleteResult, match=names[-1]):
+        tds.rollups(results, names, {"coherenceScore": Fraction("4.0")})
 
 
 # --- context signals (Stage 1) ------------------------------------------------
@@ -416,11 +466,26 @@ def test_enums_and_nested_objects_are_counted() -> None:
     assert tds.context_signals(tool("t", schema=scalars("a", "b")))["hasNestedObjects"] is False
 
 
-def test_annotation_values_come_from_the_hints() -> None:
-    signals = tds.context_signals(tool("read_thing", annotations={"title": "Read a thing", "readOnlyHint": True, "openWorldHint": False}))
+ANNOTATION_HINTS = {"readOnlyHint": "readOnly", "destructiveHint": "destructive", "idempotentHint": "idempotent", "openWorldHint": "openWorld"}
 
+
+@pytest.mark.parametrize("hint", sorted(ANNOTATION_HINTS))
+@pytest.mark.parametrize("value", [True, False, "absent", "yes"], ids=["true", "false", "absent", "not-a-boolean"])
+def test_each_annotation_hint_is_read_on_its_own(hint: str, value: object) -> None:
+    """Each hint reads as declared true, declared false, or undeclared (None); a value
+    that is not a boolean declares nothing. The other three stay undeclared."""
+    annotations = {"title": "A title"} if value == "absent" else {"title": "A title", hint: value}
+
+    signals = tds.context_signals(tool("t", annotations=annotations))
+
+    expected = dict.fromkeys(ANNOTATION_HINTS.values())
+    if isinstance(value, bool):
+        expected[ANNOTATION_HINTS[hint]] = value
+    assert signals["annotationValues"] == expected
     assert signals["hasAnnotations"] is True
-    assert signals["annotationValues"] == {"readOnly": True, "destructive": None, "idempotent": None, "openWorld": False}
+
+
+def test_empty_or_absent_annotations_are_no_annotations() -> None:
     assert tds.context_signals(tool("t", annotations={}))["hasAnnotations"] is False
     assert tds.context_signals(tool("t"))["hasAnnotations"] is False
 
@@ -443,6 +508,14 @@ def test_title_is_meaningful_when_it_exists_differs_and_is_longer(title: str | N
     definition = tool("run_tests") if title is None else tool("run_tests", title=title)
 
     assert tds.context_signals(definition)["titleIsMeaningful"] is meaningful
+
+
+def test_the_title_is_the_top_level_one_not_the_annotation_title() -> None:
+    """What gets scored names `title` as the optional MCP display title, a field of the
+    definition; the annotation title is part of the annotations block."""
+    definition = tool("run_tests", annotations={"title": "Run the test suite"})
+
+    assert tds.context_signals(definition)["titleIsMeaningful"] is False
 
 
 def test_definition_bytes_and_input_hash_follow_the_canonical_serialization() -> None:
@@ -538,6 +611,61 @@ REF_DEFS = {"type": "object", "properties": {"cfg": {"$ref": "#/$defs/Cfg"}}, "r
 REF_DEFINITIONS = {"type": "object", "properties": {"cfg": {"$ref": "#/definitions/Cfg"}}, "required": ["cfg"], "definitions": {"Cfg": scalars("a", "b")}}
 ONLY_OPTIONAL = {"type": "object", "properties": {"verbose": {"type": "boolean"}}}
 
+# allOf: every branch must hold, so their required fields add up; depth is the deepest.
+# cfg (1) + a, b (2) + c (1) = 4 over depth 2: 4 + 2 = 6.
+ALL_OF = {"type": "object", "properties": {"cfg": {"allOf": [scalars("a", "b"), scalars("c")]}}, "required": ["cfg"]}
+# `not` is traversed for depth and nothing else: x (1) over depth 3: 1 + 2 x 2 = 5.
+NOT_DEPTH = {
+    "type": "object",
+    "properties": {
+        "x": {
+            "type": "object",
+            "properties": {"y": {"type": "string"}},
+            "not": {"type": "object", "properties": {"z": scalars("w")}, "required": ["z"]},
+        }
+    },
+    "required": ["x"],
+}
+# The widest branch (three fields at depth 1) is not the deepest (two fields at depth 2):
+# the count comes from the widest and the depth from the deepest, 1 + 3 = 4 over depth 3
+# with one union choice: 4 + 2 x 2 + 2 x 1 = 10.
+UNEQUAL_UNION = {
+    "type": "object",
+    "properties": {
+        "target": {
+            "oneOf": [
+                scalars("a", "b", "c"),
+                {"type": "object", "properties": {"inner": scalars("x")}, "required": ["inner"]},
+            ]
+        }
+    },
+    "required": ["target"],
+}
+# One definition required twice is constructed twice: a and b (2) + x, y twice (4) = 6
+# over depth 2: 6 + 2 = 8. Only a pointer already on the path from the root is a repeat.
+SHARED_DEFINITION = {
+    "type": "object",
+    "properties": {"a": {"$ref": "#/$defs/Pair"}, "b": {"$ref": "#/$defs/Pair"}},
+    "required": ["a", "b"],
+    "$defs": {"Pair": scalars("x", "y")},
+}
+# Branches that only name what they require take the properties of the object they sit
+# on: port (1) + the widest branch (1) = 2 at depth 1, one union choice: 2 + 2 = 4.
+REQUIRED_ONLY_BRANCHES = {
+    "type": "object",
+    "properties": {"port": {"type": "string"}, "text": {"type": "string"}, "hex": {"type": "string"}},
+    "required": ["port"],
+    "oneOf": [{"required": ["text"]}, {"required": ["hex"]}],
+}
+# node (1) + value (1) + next (1, a repeat of the pointer on the path, so a leaf) = 3
+# over depth 2: 3 + 2 = 5.
+RECURSIVE = {
+    "type": "object",
+    "properties": {"node": {"$ref": "#/$defs/Node"}},
+    "required": ["node"],
+    "$defs": {"Node": {"type": "object", "properties": {"value": {"type": "string"}, "next": {"$ref": "#/$defs/Node"}}, "required": ["value", "next"]}},
+}
+
 
 def cost_signals(schema: dict) -> tuple[int, int, int, int]:
     signals = tds.context_signals(tool("t", schema=schema))
@@ -561,6 +689,12 @@ def cost_signals(schema: dict) -> tuple[int, int, int, int]:
         pytest.param(REF_DEFS, (3, 2, 0, 5), id="ref-into-defs"),
         pytest.param(REF_DEFINITIONS, (3, 2, 0, 5), id="ref-into-definitions"),
         pytest.param(ONLY_OPTIONAL, (0, 1, 0, 0), id="no-required-parameter"),
+        pytest.param(ALL_OF, (4, 2, 0, 6), id="allof-branches-add-up"),
+        pytest.param(NOT_DEPTH, (1, 3, 0, 5), id="not-adds-depth-only"),
+        pytest.param(UNEQUAL_UNION, (4, 3, 1, 10), id="widest-branch-for-count-deepest-for-depth"),
+        pytest.param(SHARED_DEFINITION, (6, 2, 0, 8), id="a-definition-required-twice-counts-twice"),
+        pytest.param(REQUIRED_ONLY_BRANCHES, (2, 1, 1, 4), id="required-only-branches-use-the-parents-properties"),
+        pytest.param(RECURSIVE, (3, 2, 0, 5), id="a-recursive-reference-stops-at-the-repeat"),
     ],
 )
 def test_invocation_cost(schema: dict, expected: tuple[int, int, int, int]) -> None:
@@ -584,29 +718,14 @@ def test_an_absent_empty_or_property_less_schema_costs_nothing(schema: object) -
     assert signals["schemaDescriptionCoverage"] == 100
 
 
-def test_a_recursive_schema_terminates() -> None:
-    recursive = {
-        "type": "object",
-        "properties": {"node": {"$ref": "#/$defs/Node"}},
-        "required": ["node"],
-        "$defs": {"Node": {"type": "object", "properties": {"value": {"type": "string"}, "next": {"$ref": "#/$defs/Node"}}, "required": ["value", "next"]}},
-    }
-
-    count, depth, unions, cost = cost_signals(recursive)
-
-    assert 1 <= depth <= 10
-    assert cost == count + 2 * max(0, depth - 1) + 2 * unions
-
-
 def test_depth_is_capped_at_ten() -> None:
+    """Fifteen nested required objects: the traversal stops below the tenth level, so the
+    tenth counts its own required child and nothing under it: 10 fields at depth 10."""
     schema: dict = scalars("leaf")
     for _ in range(14):
         schema = {"type": "object", "properties": {"child": schema}, "required": ["child"]}
 
-    count, depth, unions, cost = cost_signals(schema)
-
-    assert depth == 10
-    assert cost == count + 2 * 9 + 2 * unions
+    assert cost_signals(schema) == (10, 10, 0, 10 + 2 * 9)
 
 
 # --- hashing and change detection ---------------------------------------------
@@ -637,6 +756,33 @@ def test_definition_hash_is_a_full_sha256_stable_under_key_order() -> None:
     assert tds.definition_hash(reversed_keys(HASHED)) == digest
     assert tds.canonical_definition(reversed_keys(HASHED)) == tds.canonical_definition(HASHED)
     assert tds.context_signals(HASHED)["inputHash"] == digest[:16]
+
+
+def test_the_canonical_bytes_are_the_six_fields_as_sorted_compact_utf8_json() -> None:
+    """Decoded on their own, the bytes hold exactly the six fields, an absent one as null,
+    with every object's keys sorted, no whitespace between tokens and non-ASCII text
+    as UTF-8 rather than escapes."""
+    schema = {"type": "object", "required": ["wait"], "properties": {"wait": {"type": "integer", "description": "Wartezeit in µs."}}}
+    definition = {"name": "greet", "description": "Grüße senden.", "inputSchema": schema, "annotations": {"readOnlyHint": False}, "_meta": {"x": 1}}
+
+    canonical = tds.canonical_definition(definition)
+    text = canonical.decode("utf-8")
+    decoded = json.loads(text)
+
+    assert decoded == {
+        "annotations": {"readOnlyHint": False},
+        "description": "Grüße senden.",
+        "inputSchema": schema,
+        "name": "greet",
+        "outputSchema": None,
+        "title": None,
+    }
+    assert list(decoded) == sorted(decoded)
+    assert list(decoded["inputSchema"]) == sorted(decoded["inputSchema"])
+    assert "Grüße".encode() in canonical
+    assert "µs".encode() in canonical
+    assert "\\u" not in text
+    assert not re.search(r'[,:]\s', text.replace("Grüße senden.", "").replace("Wartezeit in µs.", ""))
 
 
 @pytest.mark.parametrize(
@@ -680,6 +826,30 @@ def test_set_hash_and_diff_see_every_kind_of_change() -> None:
     assert list(diff.unchanged) == ["a"]
 
 
+def test_the_set_hash_does_not_depend_on_listing_order() -> None:
+    tools = [tool("a", "A."), tool("b", "B.", FOUR_FLAT), tool("c", "C.")]
+
+    assert tds.set_hash(list(reversed(tools))) == tds.set_hash(tools)
+    assert tds.set_hash([tools[1], tools[0], tools[2]]) == tds.set_hash(tools)
+
+
+def test_a_reordered_listing_passes_without_any_model_call() -> None:
+    tools = [tool("alpha_tool", "Alpha."), tool("beta_tool", "Beta.", FOUR_FLAT), tool("gamma_tool", "Gamma.")]
+    scorer = FakeScorer()
+
+    report = tds.compare(export(tools), export(list(reversed(tools))), scorer, standin_record())
+
+    assert report["decision"] == "pass"
+    assert report["pairs"] == []
+    assert scorer.tool_calls == []
+    assert scorer.coherence_calls == []
+
+
+def test_a_listing_with_a_duplicate_name_is_refused() -> None:
+    with pytest.raises(tds.InvalidComparison, match="alpha_tool"):
+        export([tool("alpha_tool", "Alpha."), tool("alpha_tool", "Alpha again.")])
+
+
 def test_export_from_tools_carries_the_definitions_and_their_hashes() -> None:
     tools = [tool("a", "A."), HASHED]
 
@@ -690,6 +860,78 @@ def test_export_from_tools_carries_the_definitions_and_their_hashes() -> None:
     assert exported["tools"] == tools
     assert exported["hashes"] == {item["name"]: tds.definition_hash(item) for item in tools}
     assert exported["setHash"] == tds.set_hash(tools)
+
+
+# --- what the definitions cost (the size report, informational) ---------------
+
+GREETING = "Grüße, µs."  # 10 characters, 13 bytes in UTF-8
+
+
+def compact_utf8_bytes(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def test_the_export_measures_characters_bytes_and_each_definition() -> None:
+    """Description characters count characters; the tools/list result and each
+    definition count UTF-8 bytes, so non-ASCII text tells them apart."""
+    tools = [tool("read_greeting", GREETING), tool("ping", "Ping.")]
+
+    size = export(tools)["size"]
+
+    assert size["descriptionCharacters"] == len(GREETING) + len("Ping.") == 15
+    assert size["toolsListBytes"] == compact_utf8_bytes({"tools": tools})
+    assert size["toolsListBytes"] > len(json.dumps({"tools": tools}, ensure_ascii=False, separators=(",", ":")))
+    ping_canonical = {"annotations": None, "description": "Ping.", "inputSchema": {"properties": {}, "type": "object"}, "name": "ping", "outputSchema": None, "title": None}
+    assert size["definitionBytes"]["ping"] == len(json.dumps(ping_canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    assert size["definitionBytes"] == {item["name"]: len(tds.canonical_definition(item)) for item in tools}
+
+
+def size_row(summary: str, label: str, base: int, head: int, delta: int) -> re.Match | None:
+    signed = f"+{delta}" if delta > 0 else str(delta)
+    return re.search(rf"^\|\s*{re.escape(label)}\s*\|\s*{base}\s*\|\s*{head}\s*\|\s*{re.escape(signed)}\s*\|", summary, re.MULTILINE)
+
+
+def test_a_bigger_head_with_equal_scores_passes_and_the_report_shows_the_cost() -> None:
+    """The size report is information: a longer description, a tool removed and a
+    larger one added change the numbers, never the decision."""
+    base_tools = [tool("read_greeting", "Grüße."), tool("ping", "Ping."), tool("old_tool", "Old.")]
+    head_tools = [tool("read_greeting", "Grüße, µs, and a good deal more text."), tool("ping", "Ping."), tool("new_tool", "New, and larger.", FOUR_FLAT)]
+    scorer = FakeScorer(default=tool_answer((4,) * 6))
+    base_export, head_export = export(base_tools), export(head_tools)
+
+    report = tds.compare(base_export, head_export, scorer, standin_record())
+
+    assert report["decision"] == "pass"
+    assert len(report["pairs"]) == 1
+    base_size, head_size = base_export["size"], head_export["size"]
+    assert head_size["toolsListBytes"] > base_size["toolsListBytes"]
+    assert report["size"]["base"] == base_size
+    assert report["size"]["head"] == head_size
+    delta = report["size"]["delta"]
+    assert delta["descriptionCharacters"] == head_size["descriptionCharacters"] - base_size["descriptionCharacters"]
+    assert delta["toolsListBytes"] == head_size["toolsListBytes"] - base_size["toolsListBytes"]
+    assert delta["definitionBytes"] == {
+        "read_greeting": head_size["definitionBytes"]["read_greeting"] - base_size["definitionBytes"]["read_greeting"],
+        "ping": 0,
+        "old_tool": -base_size["definitionBytes"]["old_tool"],
+        "new_tool": head_size["definitionBytes"]["new_tool"],
+    }
+    summary = tds.summary_markdown(report)
+    assert size_row(summary, "Description characters", base_size["descriptionCharacters"], head_size["descriptionCharacters"], delta["descriptionCharacters"])
+    assert size_row(summary, "tools/list bytes", base_size["toolsListBytes"], head_size["toolsListBytes"], delta["toolsListBytes"])
+    assert size_row(summary, "`new_tool`", 0, head_size["definitionBytes"]["new_tool"], delta["definitionBytes"]["new_tool"])
+    assert size_row(summary, "`old_tool`", base_size["definitionBytes"]["old_tool"], 0, delta["definitionBytes"]["old_tool"])
+    assert size_row(summary, "`read_greeting`", base_size["definitionBytes"]["read_greeting"], head_size["definitionBytes"]["read_greeting"], delta["definitionBytes"]["read_greeting"])
+    assert json.loads(tds.report_json(report))["size"]["delta"]["toolsListBytes"] == delta["toolsListBytes"]
+
+
+def test_the_size_report_is_there_when_nothing_changed() -> None:
+    tools = [tool("read_greeting", GREETING)]
+
+    report = tds.compare(export(tools), export(tools), None, standin_record())
+
+    assert report["size"]["delta"] == {"descriptionCharacters": 0, "toolsListBytes": 0, "definitionBytes": {"read_greeting": 0}}
+    assert size_row(tds.summary_markdown(report), "Description characters", len(GREETING), len(GREETING), 0)
 
 
 # --- hard gates and post-processing (Stage 2, Stage 4) ------------------------
@@ -706,6 +948,12 @@ def test_a_missing_description_is_scored_without_the_model(description: object) 
 
     assert scorer.tool_calls == []
     assert result["scores"] == dict.fromkeys(DIMENSIONS, 1)
+    assert set(result["justifications"]) == set(DIMENSIONS)
+    for dimension in DIMENSIONS:
+        assert result["justifications"][dimension]["score"] == 1
+        assert isinstance(result["justifications"][dimension]["justification"], str)
+        assert result["justifications"][dimension]["justification"].strip()
+    assert result["smells"] == list(DIMENSIONS)
     assert result["tdqs"] == Fraction("1.0")
     assert result["tier"] == "D"
     assert result["flags"] == ["No Description"]
@@ -719,6 +967,7 @@ def test_a_tautological_description_caps_purpose_clarity_at_two() -> None:
 
     assert len(scorer.tool_calls) == 1
     assert result["scores"]["purpose_clarity"] == 2
+    assert result["justifications"]["purpose_clarity"]["score"] == 2
     assert result["tdqs"] == Fraction("4.3")
     assert result["flags"] == ["Tautological Description"]
     assert result["smells"] == ["purpose_clarity"]
@@ -753,15 +1002,16 @@ def test_a_description_that_only_starts_with_the_name_is_not_tautological() -> N
 
 
 def test_post_processing_flags_a_contradiction_and_lists_smells_in_dimension_order() -> None:
+    """The published contradiction example: transparency 1, so 265 hundredths, 2.7, tier C."""
     definition = tool("create_record", "Creates a new record.", annotations={"readOnlyHint": True})
-    scorer = FakeScorer({"Creates a new record.": tool_answer((4, 2, 2, 3, 4, 2), contradiction=True)})
+    scorer = FakeScorer({"Creates a new record.": tool_answer((4, 2, 1, 3, 4, 2), contradiction=True)})
 
     result = tds.evaluate_tool(definition, ["get_record"], scorer)
 
     assert result["flags"] == ["Annotation Contradiction"]
     assert result["smells"] == ["usage_guidelines", "behavioral_transparency", "contextual_completeness"]
-    assert result["scores"] == scores(4, 2, 2, 3, 4, 2)
-    assert result["tdqs"] == Fraction("2.9")
+    assert result["scores"] == scores(4, 2, 1, 3, 4, 2)
+    assert result["tdqs"] == Fraction("2.7")
     assert result["tier"] == "C"
     assert result["justifications"]["usage_guidelines"] == {"score": 2, "justification": "usage_guidelines justification"}
     assert set(result["justifications"]) == set(DIMENSIONS)
@@ -769,6 +1019,14 @@ def test_post_processing_flags_a_contradiction_and_lists_smells_in_dimension_ord
     assert result["serverFlags"] == []
     assert result["definitionHash"] == tds.definition_hash(definition)
     assert result["contextSignals"] == tds.context_signals(definition)
+
+
+def test_the_flags_keep_their_published_order() -> None:
+    scorer = FakeScorer({"process": tool_answer((5, 5, 5, 5, 5, 5), contradiction=True)})
+
+    result = tds.evaluate_tool(tool("process", "process", annotations={"readOnlyHint": True}), [], scorer)
+
+    assert result["flags"] == ["Tautological Description", "Annotation Contradiction"]
 
 
 # --- the output contract and the retry limit (LLM output contract) ------------
@@ -783,27 +1041,47 @@ def changed_answer(answer: dict, change: Callable[[dict], object]) -> str:
     return json.dumps(edited)
 
 
-def set_score(value: object) -> Callable[[dict], object]:
-    return lambda answer: answer["scores"]["purpose_clarity"].__setitem__("score", value)
+def set_score(value: object, dimension: str = "purpose_clarity") -> Callable[[dict], object]:
+    return lambda answer: answer["scores"][dimension].__setitem__("score", value)
+
+
+def drop_justification(dimension: str) -> Callable[[dict], object]:
+    return lambda answer: answer["scores"][dimension].pop("justification")
+
+
+def set_justification(dimension: str, value: object) -> Callable[[dict], object]:
+    return lambda answer: answer["scores"][dimension].__setitem__("justification", value)
+
+
+def drop_dimension(dimension: str) -> Callable[[dict], object]:
+    return lambda answer: answer["scores"].pop(dimension)
+
+
+def set_field(field: str, value: object) -> Callable[[dict], object]:
+    return lambda answer: answer.__setitem__(field, value)
+
+
+def drop_field(field: str) -> Callable[[dict], object]:
+    return lambda answer: answer.pop(field)
 
 
 BAD_TOOL_ANSWERS = [
     pytest.param("this is not json", id="not-json"),
     pytest.param("[]", id="a-list"),
-    pytest.param(changed_answer(GOOD_TOOL_ANSWER, lambda a: a.__setitem__("scores", [])), id="scores-not-an-object"),
-    pytest.param(changed_answer(GOOD_TOOL_ANSWER, lambda a: a["scores"].pop("parameter_semantics")), id="a-dimension-missing"),
+    pytest.param(changed_answer(GOOD_TOOL_ANSWER, set_field("scores", [])), id="scores-not-an-object"),
+    pytest.param(changed_answer(GOOD_TOOL_ANSWER, drop_dimension("parameter_semantics")), id="a-dimension-missing"),
     pytest.param(changed_answer(GOOD_TOOL_ANSWER, lambda a: a["scores"].__setitem__("purpose_clarity", 4)), id="a-dimension-not-an-object"),
     pytest.param(changed_answer(GOOD_TOOL_ANSWER, set_score(0)), id="score-0"),
     pytest.param(changed_answer(GOOD_TOOL_ANSWER, set_score(6)), id="score-6"),
     pytest.param(changed_answer(GOOD_TOOL_ANSWER, set_score(3.5)), id="score-3.5"),
     pytest.param(changed_answer(GOOD_TOOL_ANSWER, set_score("4")), id="score-a-string"),
     pytest.param(changed_answer(GOOD_TOOL_ANSWER, set_score(True)), id="score-a-boolean"),
-    pytest.param(changed_answer(GOOD_TOOL_ANSWER, lambda a: a["scores"]["usage_guidelines"].pop("justification")), id="justification-missing"),
-    pytest.param(changed_answer(GOOD_TOOL_ANSWER, lambda a: a["scores"]["usage_guidelines"].__setitem__("justification", 5)), id="justification-not-a-string"),
-    pytest.param(changed_answer(GOOD_TOOL_ANSWER, lambda a: a.pop("annotation_contradiction")), id="contradiction-missing"),
-    pytest.param(changed_answer(GOOD_TOOL_ANSWER, lambda a: a.__setitem__("annotation_contradiction", "false")), id="contradiction-a-string"),
-    pytest.param(changed_answer(GOOD_TOOL_ANSWER, lambda a: a.pop("summary")), id="summary-missing"),
-    pytest.param(changed_answer(GOOD_TOOL_ANSWER, lambda a: a.__setitem__("summary", 3)), id="summary-not-a-string"),
+    pytest.param(changed_answer(GOOD_TOOL_ANSWER, drop_justification("usage_guidelines")), id="justification-missing"),
+    pytest.param(changed_answer(GOOD_TOOL_ANSWER, set_justification("usage_guidelines", 5)), id="justification-not-a-string"),
+    pytest.param(changed_answer(GOOD_TOOL_ANSWER, drop_field("annotation_contradiction")), id="contradiction-missing"),
+    pytest.param(changed_answer(GOOD_TOOL_ANSWER, set_field("annotation_contradiction", "false")), id="contradiction-a-string"),
+    pytest.param(changed_answer(GOOD_TOOL_ANSWER, drop_field("summary")), id="summary-missing"),
+    pytest.param(changed_answer(GOOD_TOOL_ANSWER, set_field("summary", 3)), id="summary-not-a-string"),
 ]
 
 
@@ -814,22 +1092,46 @@ def test_a_good_tool_answer_parses() -> None:
     assert parsed["annotation_contradiction"] is False
 
 
+def test_an_answer_in_a_json_fence_parses() -> None:
+    parsed = tds.parse_tool_answer("```json\n" + json.dumps(GOOD_TOOL_ANSWER) + "\n```")
+
+    assert parsed["scores"]["purpose_clarity"]["score"] == 4
+    assert tds.parse_coherence_answer("```json\n" + json.dumps(GOOD_COHERENCE_ANSWER) + "\n```")["scores"]["disambiguation"]["score"] == 4
+
+
 @pytest.mark.parametrize("text", BAD_TOOL_ANSWERS)
 def test_a_bad_tool_answer_is_refused(text: str) -> None:
     with pytest.raises(tds.InvalidAnswer):
         tds.parse_tool_answer(text)
 
 
+def risk(**fields: object) -> dict:
+    return {"tool": "a", "cheaper_sibling": "b", "justification": "j", **fields}
+
+
+def without(entry: dict, field: str) -> dict:
+    return {key: value for key, value in entry.items() if key != field}
+
+
 BAD_COHERENCE_ANSWERS = [
+    *[
+        pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, set_score(value, dimension)), id=f"{dimension}-score-{label}")
+        for dimension in COHERENCE_DIMENSIONS
+        for value, label in ((0, "0"), (6, "6"), (2.5, "2.5"), (True, "a-boolean"), ("4", "a-string"))
+    ],
+    *[pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, drop_justification(dimension)), id=f"{dimension}-justification-missing") for dimension in COHERENCE_DIMENSIONS],
+    *[pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, set_justification(dimension, 5)), id=f"{dimension}-justification-not-a-string") for dimension in COHERENCE_DIMENSIONS],
+    *[pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, drop_dimension(dimension)), id=f"{dimension}-missing") for dimension in COHERENCE_DIMENSIONS],
     pytest.param("not json either", id="not-json"),
-    pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, lambda a: a["scores"].pop("completeness")), id="a-dimension-missing"),
-    pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, lambda a: a["scores"]["completeness"].__setitem__("score", 6)), id="score-out-of-range"),
-    pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, lambda a: a["scores"]["completeness"].__setitem__("score", 2.5)), id="score-not-an-integer"),
-    pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, lambda a: a["scores"]["disambiguation"].pop("justification")), id="justification-missing"),
-    pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, lambda a: a.__setitem__("shadowing_risks", {})), id="risks-not-a-list"),
-    pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, lambda a: a.__setitem__("shadowing_risks", [{"tool": "a", "cheaper_sibling": "b"}])), id="a-risk-without-justification"),
-    pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, lambda a: a.__setitem__("shadowing_risks", [{"tool": 1, "cheaper_sibling": "b", "justification": "j"}])), id="a-risk-with-a-non-string-name"),
-    pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, lambda a: a.pop("summary")), id="summary-missing"),
+    pytest.param("[]", id="a-list"),
+    pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, set_field("scores", [])), id="scores-not-an-object"),
+    pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, drop_field("summary")), id="summary-missing"),
+    pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, set_field("summary", 3)), id="summary-not-a-string"),
+    pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, drop_field("shadowing_risks")), id="risks-missing"),
+    pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, set_field("shadowing_risks", {})), id="risks-not-a-list"),
+    pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, set_field("shadowing_risks", ["a"])), id="a-risk-not-an-object"),
+    *[pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, set_field("shadowing_risks", [without(risk(), field)])), id=f"a-risk-without-{field}") for field in ("tool", "cheaper_sibling", "justification")],
+    *[pytest.param(changed_answer(GOOD_COHERENCE_ANSWER, set_field("shadowing_risks", [risk(**{field: 1})])), id=f"a-risk-with-a-non-string-{field}") for field in ("tool", "cheaper_sibling", "justification")],
 ]
 
 
@@ -862,8 +1164,8 @@ def test_an_invalid_tool_answer_is_retried() -> None:
 def test_a_tool_answer_still_invalid_after_the_retries_makes_the_comparison_invalid() -> None:
     scorer = SequenceScorer(tool_answers=["this is not json"])
 
-    with pytest.raises(tds.InvalidComparison):
-        tds.evaluate_tool(tool("t", "Does t."), [], scorer)
+    with pytest.raises(tds.InvalidComparison, match="t_tool"):
+        tds.evaluate_tool(tool("t_tool", "Does t."), [], scorer)
 
     assert scorer.tool_calls == 1 + tds.RETRIES
 
@@ -877,8 +1179,35 @@ def test_a_backend_failure_is_retried_like_an_invalid_answer() -> None:
     assert result["tdqs"] == Fraction("4.0")
 
 
+def test_a_backend_that_keeps_failing_makes_a_tool_invalid() -> None:
+    scorer = SequenceScorer(tool_answers=[tds.BackendError("the model call failed")])
+
+    with pytest.raises(tds.InvalidComparison):
+        tds.evaluate_tool(tool("t", "Does t."), [], scorer)
+
+    assert scorer.tool_calls == 1 + tds.RETRIES
+
+
+def test_an_invalid_coherence_answer_is_retried() -> None:
+    scorer = SequenceScorer(coherence_answers=["this is not json", coherence_answer((4, 4, 4, 4))])
+
+    result = tds.evaluate_coherence("agentic-hil", [tool("a", "A."), tool("b", "B.")], scorer)
+
+    assert scorer.coherence_calls == 2
+    assert result["coherenceScore"] == Fraction("4.0")
+
+
 def test_a_coherence_answer_still_invalid_after_the_retries_makes_the_comparison_invalid() -> None:
     scorer = SequenceScorer(coherence_answers=["this is not json"])
+
+    with pytest.raises(tds.InvalidComparison):
+        tds.evaluate_coherence("agentic-hil", [tool("a", "A."), tool("b", "B.")], scorer)
+
+    assert scorer.coherence_calls == 1 + tds.RETRIES
+
+
+def test_a_backend_that_keeps_failing_makes_coherence_invalid() -> None:
+    scorer = SequenceScorer(coherence_answers=[tds.BackendError("the model call failed")])
 
     with pytest.raises(tds.InvalidComparison):
         tds.evaluate_coherence("agentic-hil", [tool("a", "A."), tool("b", "B.")], scorer)
@@ -919,17 +1248,13 @@ def test_the_prefilter_proposes_the_dearest_qualifying_sibling_once_per_tool() -
     get_stat, the dearer; lookup (7 < 2 x 4) and get_stat fall back to the zero-argument ping."""
     candidates = tds.shadow_candidates(STATS_TOOLS)
 
-    assert {item["tool"]: item["cheaperSibling"] for item in candidates} == {"query_panel": "get_stat", "lookup": "ping", "get_stat": "ping"}
-    assert len(candidates) == 3
+    assert [(item["tool"], item["cheaperSibling"]) for item in candidates] == [("get_stat", "ping"), ("lookup", "ping"), ("query_panel", "get_stat")]
     query_panel = next(item for item in candidates if item["tool"] == "query_panel")
     assert (query_panel["invocationCost"], query_panel["cheaperSiblingInvocationCost"]) == (13, 4)
 
 
 def test_the_prefilter_does_not_depend_on_tool_order() -> None:
-    forward = {item["tool"]: item["cheaperSibling"] for item in tds.shadow_candidates(STATS_TOOLS)}
-    backward = {item["tool"]: item["cheaperSibling"] for item in tds.shadow_candidates(list(reversed(STATS_TOOLS)))}
-
-    assert backward == forward
+    assert tds.shadow_candidates(list(reversed(STATS_TOOLS))) == tds.shadow_candidates(STATS_TOOLS)
 
 
 def test_equal_costs_give_no_candidate() -> None:
@@ -955,7 +1280,7 @@ def test_no_tool_is_confirmed_twice() -> None:
 
     confirmed = tds.confirmed_shadowing_risks([CONFIRMED, dict(CONFIRMED)], candidates)
 
-    assert [item["tool"] for item in confirmed].count("query_panel") <= 1
+    assert [item["tool"] for item in confirmed] == ["query_panel"]
 
 
 def test_coherence_evaluation_scores_the_set_and_confirms_against_the_prefilter() -> None:
@@ -981,10 +1306,13 @@ def test_score_side_scores_every_tool_and_flags_the_shadowed_one() -> None:
     table["Run a qualified query over the panel."] = tool_answer((5, 5, 5, 5, 5, 5))
     scorer = FakeScorer(table, coherence_answer((4, 3, 3, 3), risks=[CONFIRMED]))
     names = [item["name"] for item in STATS_TOOLS]
+    exported = tds.export_from_tools(copy.deepcopy(STATS_TOOLS), server_name="stats-api", server_version="1")
 
-    side = tds.score_side(tds.export_from_tools(copy.deepcopy(STATS_TOOLS), server_name="stats-api", server_version="1"), scorer)
+    side = tds.score_side(exported, scorer, version_digest="d" * 64)
 
     assert sorted(side["tools"]) == sorted(names)
+    assert side["setHash"] == exported["setHash"]
+    assert side["versionDigest"] == "d" * 64
     assert len(scorer.tool_calls) == 4
     assert len(scorer.coherence_calls) == 1
     for name, siblings in scorer.tool_calls:
@@ -1017,6 +1345,10 @@ class PairRunner:
         base, head = self.pairs[self.calls]
         self.calls += 1
         return side(base), side(head)
+
+
+def test_the_confirmation_procedure_is_the_versioned_one() -> None:
+    assert tds.CONFIRMATION == CONFIRMATION_PROCEDURE
 
 
 @pytest.mark.parametrize(
@@ -1056,6 +1388,37 @@ def test_an_invalid_pair_during_confirmation_never_passes() -> None:
         tds.confirm(run_pair)
 
 
+ONE_BEFORE = [tool("alpha_tool", "Before.")]
+ONE_AFTER = [tool("alpha_tool", "After.")]
+
+
+@pytest.mark.parametrize(
+    ("base_values", "head_values", "decision", "recorded", "unused"),
+    [
+        pytest.param(
+            [4, 4, 4, 4], [3, 5, 3, 5], "block",
+            [("4.0", "3.3"), ("4.0", "4.7"), ("4.0", "3.3")], [5],
+            id="a-favourable-second-pair-then-a-blocking-median-and-an-unused-fourth",
+        ),
+        pytest.param([4, 4, 4], [3, 5, 4], "pass", [("4.0", "3.3"), ("4.0", "4.7"), ("4.0", "4.0")], [], id="the-median-clears-the-first-drop"),
+        pytest.param([5, 3, 4], [3, 4, 4], "pass", [("4.7", "3.3"), ("3.3", "4.0"), ("4.0", "4.0")], [], id="per-side-medians-not-per-pair-differences"),
+    ],
+)
+def test_noisy_scores_run_through_the_comparison(
+    base_values: list[int], head_values: list[int], decision: str, recorded: list[tuple[str, str]], unused: list[int]
+) -> None:
+    """One tool per side, a coherence of 4.0 throughout: a tool scoring v gives the
+    overall 0.7 v + 1.2, so 3 gives 3.3, 4 gives 4.0 and 5 gives 4.7."""
+    scorer = QueueScorer({"Before.": base_values, "After.": head_values})
+
+    report = tds.compare(export(ONE_BEFORE), export(ONE_AFTER), scorer, standin_record())
+
+    assert report["decision"] == decision
+    assert overall_pairs(report) == [(Fraction(base), Fraction(head)) for base, head in recorded]
+    assert scorer.queues["After."] == unused
+    assert scorer.queues["Before."] == base_values[3:]
+
+
 # --- the comparison and its report --------------------------------------------
 
 
@@ -1073,7 +1436,7 @@ def test_unchanged_definitions_pass_without_any_model_call() -> None:
     assert report["exitCode"] == 0
     assert scorer.tool_calls == []
     assert scorer.coherence_calls == []
-    assert "unchanged" in report["reason"].lower() or "identical" in report["reason"].lower()
+    assert "unchanged" in report["reason"].lower()
 
 
 def test_unchanged_definitions_pass_without_a_scorer_at_all() -> None:
@@ -1084,6 +1447,40 @@ def test_unchanged_definitions_pass_without_a_scorer_at_all() -> None:
 
     assert report["decision"] == "pass"
     assert report["exitCode"] == 0
+
+
+def expected_tool_calls(tools: list[dict]) -> Counter:
+    """One call per tool, carrying every other tool of the same side as its siblings."""
+    names = [item["name"] for item in tools]
+    return Counter((name, tuple(sorted(other for other in names if other != name))) for name in names)
+
+
+COMPLETE_BASE = [tool("alpha_tool", "Alpha."), tool("beta_tool", "Beta.", FOUR_FLAT), tool("gamma_tool", "Gamma.")]
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        pytest.param([*COMPLETE_BASE, tool("delta_tool", "Delta.")], id="a-tool-added"),
+        pytest.param(COMPLETE_BASE[:2], id="a-tool-removed"),
+        pytest.param([COMPLETE_BASE[0], tool("beta_tool", "Beta.", FOUR_FLAT, annotations={"readOnlyHint": True}), COMPLETE_BASE[2]], id="one-field-of-one-tool-changed"),
+    ],
+)
+def test_any_change_scores_both_complete_sets(head: list[dict]) -> None:
+    """Whatever changed, every tool of both sides is scored with that side's complete
+    sibling list, and both sets get their coherence evaluation, never only the change."""
+    scorer = FakeScorer(default=tool_answer((4,) * 6))
+
+    report = tds.compare(export(COMPLETE_BASE), export(head), scorer, standin_record())
+
+    assert report["decision"] == "pass"
+    assert len(report["pairs"]) == 1
+    observed = Counter((name, tuple(sorted(siblings))) for name, siblings in scorer.tool_calls)
+    assert observed == expected_tool_calls(COMPLETE_BASE) + expected_tool_calls(head)
+    assert Counter(call[1] for call in scorer.coherence_calls) == Counter([tuple(item["name"] for item in COMPLETE_BASE), tuple(item["name"] for item in head)])
+    pair = report["pairs"][0]
+    assert sorted(pair["base"]["tools"]) == sorted(item["name"] for item in COMPLETE_BASE)
+    assert sorted(pair["head"]["tools"]) == sorted(item["name"] for item in head)
 
 
 def exact_mean(scored_side: dict) -> Fraction:
@@ -1187,22 +1584,53 @@ def test_the_tools_that_fell_are_sorted_by_their_effect_on_the_overall() -> None
     assert report["causes"]["minimumTerm"]["head"]["tool"] == "zeta_tool"
 
 
-def test_an_answer_that_stays_invalid_makes_the_comparison_invalid() -> None:
-    base_tools = [tool("broken_tool", "Broken, before."), tool("fine_tool", "Fine.")]
-    head_tools = [tool("broken_tool", "Broken, after."), tool("fine_tool", "Fine.")]
+def test_a_small_drop_of_the_minimum_tool_outranks_a_bigger_drop_elsewhere() -> None:
+    """Five tools. zulu_tool, the minimum on both sides, falls 3.0 to 2.8; alpha_tool falls
+    4.5 to 3.9. Overall 3.8 to 3.7. Taken alone, zulu's fall lowers the unrounded
+    overall by 0.7 x (0.6 x 0.2 / 5 + 0.4 x 0.2) = 0.0728 and alpha's by
+    0.7 x 0.6 x 0.6 / 5 = 0.0504, so zulu comes first although alpha fell further."""
+    others = ("bravo_tool", "charlie_tool", "delta_tool")
+    base_tools = [tool("zulu_tool", "Zulu, before."), tool("alpha_tool", "Alpha, before."), *[tool(name, "Steady.") for name in others]]
+    head_tools = [tool("zulu_tool", "Zulu, after."), tool("alpha_tool", "Alpha, after."), *[tool(name, "Steady.") for name in others]]
     scorer = FakeScorer(
         {
-            "Broken, before.": tool_answer((4, 4, 4, 4, 4, 4)),
-            "Broken, after.": "this is not json",
-            "Fine.": tool_answer((4, 4, 4, 4, 4, 4)),
+            "Zulu, before.": tool_answer((3, 3, 3, 3, 3, 3)),
+            "Zulu, after.": tool_answer((3, 3, 3, 3, 2, 2)),
+            "Alpha, before.": tool_answer((4, 5, 5, 4, 5, 4)),
+            "Alpha, after.": tool_answer((4, 4, 4, 4, 4, 3)),
+            "Steady.": tool_answer((4, 5, 5, 4, 5, 4)),
         }
     )
+
+    report = tds.compare(export(base_tools), export(head_tools), scorer, standin_record())
+
+    assert report["decision"] == "block"
+    assert overall_pairs(report)[0] == (Fraction("3.8"), Fraction("3.7"))
+    causes = report["causes"]["tools"]
+    assert [item["tool"] for item in causes] == ["zulu_tool", "alpha_tool"]
+    assert [item["effect"] for item in causes] == [Fraction("0.0728"), Fraction("0.0504")]
+    assert [(item["base"], item["head"]) for item in causes] == [(Fraction("3.0"), Fraction("2.8")), (Fraction("4.5"), Fraction("3.9"))]
+    assert report["causes"]["minimumTerm"]["base"]["tool"] == "zulu_tool"
+    assert report["causes"]["minimumTerm"]["head"]["tool"] == "zulu_tool"
+
+
+@pytest.mark.parametrize("total", [5, 44])
+def test_an_answer_that_stays_invalid_makes_the_comparison_invalid(total: int) -> None:
+    """One tool of many whose answer never validates is enough: no partial result passes."""
+    fine = [tool(f"fine_{index:02d}", f"Fine {index}.") for index in range(total - 1)]
+    base_tools = [tool("broken_tool", "Broken, before."), *fine]
+    head_tools = [tool("broken_tool", "Broken, after."), *fine]
+    scorer = FakeScorer({"Broken, after.": "this is not json"}, default=tool_answer((4, 4, 4, 4, 4, 4)))
 
     report = tds.compare(export(base_tools), export(head_tools), scorer, standin_record())
 
     assert report["decision"] == "invalid"
     assert report["exitCode"] == 2
     assert "broken_tool" in report["reason"]
+
+
+def markdown_row(summary: str, label: str, base: str, head: str) -> re.Match | None:
+    return re.search(rf"^\|\s*{re.escape(label)}\s*\|\s*{re.escape(base)}\b[^|]*\|\s*{re.escape(head)}\b[^|]*\|", summary, re.MULTILINE)
 
 
 def test_the_report_carries_exports_versions_and_commits_and_serializes() -> None:
@@ -1216,13 +1644,24 @@ def test_the_report_carries_exports_versions_and_commits_and_serializes() -> Non
 
     assert report["decision"] == "pass"
     assert len(report["pairs"]) == 1
-    assert report["base"]["export"]["setHash"] == base_export["setHash"]
-    assert report["head"]["export"]["hashes"] == head_export["hashes"]
+    assert report["base"]["export"] == base_export
+    assert report["head"]["export"] == head_export
+    assert report["versions"] == record
+    assert report["versionDigest"] == tds.version_digest(record)
     assert (report["baseCommit"], report["headCommit"]) == ("1" * 40, "2" * 40)
-    assert report["versions"]["model"] == record["model"]
     parsed = json.loads(tds.report_json(report))
     assert parsed["pairs"][0]["head"]["rollups"]["overallScore"] == 4.7
     assert parsed["pairs"][0]["base"]["tools"]["alpha_tool"]["tdqs"] == 4.0
+    assert parsed["base"]["export"]["tools"] == base_tools
+    summary = tds.summary_markdown(report)
+    assert markdown_row(summary, "Overall", "4.0", "4.7")
+    assert markdown_row(summary, "Description quality", "4.0", "5.0")
+    assert markdown_row(summary, "Coherence", "4.0", "4.0")
+    assert markdown_row(summary, "Mean TDQS", "4.0", "5.0")
+    minimum = re.search(r"^\|\s*Minimum TDQS\s*\|([^|]*)\|([^|]*)\|", summary, re.MULTILINE)
+    assert minimum
+    assert "4.0" in minimum.group(1) and "alpha_tool" in minimum.group(1)
+    assert "5.0" in minimum.group(2) and "alpha_tool" in minimum.group(2)
 
 
 def test_a_stale_report_is_rejected() -> None:
@@ -1241,13 +1680,72 @@ def test_a_stale_report_is_rejected() -> None:
     assert issubclass(tds.StaleReport, tds.InvalidComparison)
 
 
+def scored_report() -> tuple[dict, dict, dict, dict]:
+    """A complete, scored, passing report over two changed tools, with its exports and record."""
+    base_tools = [tool("alpha_tool", "Alpha, before."), tool("beta_tool", "Beta, before.")]
+    head_tools = [tool("alpha_tool", "Alpha, after."), tool("beta_tool", "Beta, after.")]
+    table = {
+        "Alpha, before.": tool_answer((4,) * 6),
+        "Beta, before.": tool_answer((4,) * 6),
+        "Alpha, after.": tool_answer((5,) * 6),
+        "Beta, after.": tool_answer((5,) * 6),
+    }
+    base_export, head_export, record = export(base_tools), export(head_tools), standin_record()
+    report = tds.compare(base_export, head_export, FakeScorer(table), record)
+    assert report["decision"] == "pass"
+    return report, base_export, head_export, record
+
+
+def first_head_tool(report: dict) -> dict:
+    return report["pairs"][0]["head"]["tools"]["alpha_tool"]
+
+
+REPORT_MUTATIONS = [
+    pytest.param(lambda r: r["pairs"][0]["head"]["tools"].pop("beta_tool"), tds.IncompleteResult, id="a-scored-tool-missing"),
+    pytest.param(lambda r: r["pairs"][0]["base"].pop("coherence"), tds.IncompleteResult, id="coherence-missing"),
+    pytest.param(lambda r: r["pairs"].clear(), tds.IncompleteResult, id="the-pairs-missing"),
+    pytest.param(lambda r: first_head_tool(r).__setitem__("definitionHash", "0" * 64), tds.StaleReport, id="a-stale-tool-hash"),
+    pytest.param(lambda r: r["pairs"][0]["base"].__setitem__("versionDigest", "0" * 64), tds.StaleReport, id="a-side-scored-under-other-versions"),
+    pytest.param(lambda r: r["pairs"][0]["head"].__setitem__("setHash", "0" * 64), tds.StaleReport, id="a-side-scored-from-another-set"),
+    pytest.param(lambda r: r["versions"].__setitem__("retries", 3), tds.StaleReport, id="the-versions-changed"),
+    pytest.param(lambda r: r.__setitem__("decision", "block"), tds.InvalidComparison, id="the-decision-flipped"),
+    pytest.param(lambda r: r.__setitem__("exitCode", 1), tds.InvalidComparison, id="the-exit-code-changed"),
+    pytest.param(lambda r: first_head_tool(r).__setitem__("tdqs", Fraction("4.9")), tds.InvalidComparison, id="a-tdqs-changed"),
+    pytest.param(lambda r: first_head_tool(r)["scores"].__setitem__("purpose_clarity", 4), tds.InvalidComparison, id="a-dimension-score-changed"),
+    pytest.param(lambda r: r["pairs"][0]["head"]["rollups"].__setitem__("overallScore", Fraction("4.9")), tds.InvalidComparison, id="an-overall-changed"),
+    pytest.param(lambda r: r["pairs"][0]["head"]["coherence"].__setitem__("coherenceScore", Fraction("4.9")), tds.InvalidComparison, id="a-coherence-score-changed"),
+    pytest.param(lambda r: r["pairs"].append(copy.deepcopy(r["pairs"][0])), tds.InvalidComparison, id="two-pairs"),
+]
+
+
+@pytest.mark.parametrize(("mutate", "error"), REPORT_MUTATIONS)
+def test_a_scored_report_that_does_not_hold_together_is_rejected(mutate: Callable[[dict], object], error: type[Exception]) -> None:
+    """Each mutation leaves the report's outer exports untouched, so only the scored
+    content itself can give it away."""
+    report, base_export, head_export, record = scored_report()
+    tds.check_report(report, base_export, head_export, record)
+    mutated = copy.deepcopy(report)
+    mutate(mutated)
+    assert mutated["base"]["export"] == base_export
+    assert mutated["head"]["export"] == head_export
+
+    with pytest.raises(error):
+        tds.check_report(mutated, base_export, head_export, record)
+
+
+def test_a_scored_report_survives_its_own_json() -> None:
+    report, base_export, head_export, record = scored_report()
+
+    tds.check_report(json.loads(tds.report_json(report)), base_export, head_export, record)
+
+
 # --- the version record and the calibration record ----------------------------
 
 
 def test_the_committed_version_record_pins_model_spec_prompts_and_rubric() -> None:
     record = tds.load_version_record()
 
-    assert record["model"] == "claude-haiku-4-5-20251001"
+    assert record["model"] == PINNED_MODEL
     assert re.fullmatch(r"\d+\.\d+\.\d+", record["cli_version"])
     assert re.fullmatch(r"[0-9a-f]{40}", record["spec_commit"])
     assert record["spec_commit"].startswith("b9881b0cfec8")
@@ -1264,12 +1762,7 @@ def test_the_committed_version_record_pins_model_spec_prompts_and_rubric() -> No
         "D": Fraction("1.0"),
     }
     assert record["retries"] == tds.RETRIES
-    assert isinstance(record["confirmation"]["version"], int)
-
-
-def test_the_calibration_record_belongs_to_this_version_record() -> None:
-    """A change to anything in the version record needs a new calibration."""
-    assert tds.load_calibration_record()["version_digest"] == tds.version_digest(tds.load_version_record())
+    assert record["confirmation"] == CONFIRMATION_PROCEDURE == tds.CONFIRMATION
 
 
 @pytest.mark.parametrize(
@@ -1281,10 +1774,12 @@ def test_the_calibration_record_belongs_to_this_version_record() -> None:
         pytest.param(lambda r: r.__setitem__("spec_version", "1.4"), id="spec-version"),
         pytest.param(lambda r: r["prompt_sha256"].__setitem__("coherence_user", "0" * 64), id="a-prompt-hash"),
         pytest.param(lambda r: r["dimension_weights"].__setitem__("purpose_clarity", 30), id="a-weight"),
+        pytest.param(lambda r: r["description_quality_weights"].__setitem__("mean", 61), id="a-description-quality-weight"),
         pytest.param(lambda r: r["overall_weights"].__setitem__("coherence", 31), id="a-rollup-weight"),
         pytest.param(lambda r: r["tier_thresholds"].__setitem__("A", 3.6), id="a-tier-threshold"),
         pytest.param(lambda r: r.__setitem__("retries", 3), id="the-retry-count"),
         pytest.param(lambda r: r["confirmation"].__setitem__("version", 2), id="the-confirmation-version"),
+        pytest.param(lambda r: r["confirmation"].__setitem__("confirmation_pairs_on_drop", 3), id="the-confirmation-pair-count"),
     ],
 )
 def test_the_version_digest_moves_with_every_field(change: Callable[[dict], object]) -> None:
@@ -1297,7 +1792,116 @@ def test_the_version_digest_moves_with_every_field(change: Callable[[dict], obje
     assert tds.version_digest(changed) != tds.version_digest(record)
 
 
+def per_dimension(values: tuple[int, ...]) -> dict:
+    return {"scores": scores(*values), "tdqs": float(tds.compute_tdqs(scores(*values)))}
+
+
+def test_the_calibration_summary_compares_per_tool_and_per_dimension() -> None:
+    """alpha_tool: the registry 4.0, three runs 4.3, 4.0 and 4.5, so the median 4.3 and
+    +0.3; purpose clarity 4 against 5, 4, 5, so +1. beta_tool: the registry 3.0, runs
+    3.0, 2.8 and 2.6, so 2.8 and -0.2; purpose clarity 3 against 3, 2, 2, so -1.
+    The mean absolute difference is 0.25 on the TDQS, 1 on purpose clarity, 0 elsewhere."""
+    registry = {"alpha_tool": per_dimension((4,) * 6), "beta_tool": per_dimension((3,) * 6)}
+    runs = [
+        {"alpha_tool": per_dimension((5, 4, 4, 4, 4, 4)), "beta_tool": per_dimension((3,) * 6)},
+        {"alpha_tool": per_dimension((4,) * 6), "beta_tool": per_dimension((2, 3, 3, 3, 3, 3))},
+        {"alpha_tool": per_dimension((5, 5, 4, 4, 4, 4)), "beta_tool": per_dimension((2, 2, 3, 3, 3, 3))},
+    ]
+
+    summary = tds.calibration_summary(registry, runs)
+
+    alpha, beta = summary["tools"]["alpha_tool"], summary["tools"]["beta_tool"]
+    assert alpha["gate"]["tdqs"] == Fraction("4.3")
+    assert alpha["difference"]["tdqs"] == Fraction("0.3")
+    assert alpha["gate"]["purpose_clarity"] == 5
+    assert alpha["difference"]["purpose_clarity"] == 1
+    assert alpha["difference"]["usage_guidelines"] == 0
+    assert beta["gate"]["tdqs"] == Fraction("2.8")
+    assert beta["difference"]["tdqs"] == Fraction("-0.2")
+    assert beta["difference"]["purpose_clarity"] == -1
+    assert beta["difference"]["usage_guidelines"] == 0
+    assert summary["meanAbsoluteDifference"] == {"tdqs": Fraction("0.25"), "purpose_clarity": 1, **dict.fromkeys(DIMENSIONS[1:], 0)}
+    assert [item["tool"] for item in summary["largestDifferences"]] == ["alpha_tool", "beta_tool"]
+
+
+def test_the_calibration_record_belongs_to_this_version_record() -> None:
+    """A change to anything in the version record needs a new calibration."""
+    assert tds.load_calibration_record()["version_digest"] == tds.version_digest(tds.load_version_record())
+
+
+def test_the_committed_calibration_record_holds_together() -> None:
+    """The registry's published scores, captured with their source and release; the
+    definitions the registry scored are the ones the evaluator scored; three runs over
+    the same tools, each internally consistent; and the summary recomputes from them."""
+    calibration = tds.load_calibration_record()
+    registry = calibration["registry"]
+
+    assert registry["source"].startswith("https://glama.ai/mcp/servers/agentic-hil/agentic-hil")
+    assert registry["release"] == "0.22.1-dev.0"
+    assert registry["setHash"] == calibration["evaluated"]["setHash"]
+    assert re.fullmatch(r"[0-9a-f]{40}", calibration["evaluated"]["commit"])
+    assert len(registry["tools"]) == calibration["evaluated"]["toolCount"] == 44
+    assert len(calibration["runs"]) == 3
+    for run in calibration["runs"]:
+        assert set(run["tools"]) == set(registry["tools"])
+        for result in run["tools"].values():
+            assert Fraction(str(result["tdqs"])) == tds.compute_tdqs(result["scores"])
+        coherence = {"coherenceScore": tds.coherence_score({dimension: run["coherence"][dimension] for dimension in COHERENCE_DIMENSIONS})}
+        tdqs_by_tool = {name: {"tdqs": Fraction(str(result["tdqs"]))} for name, result in run["tools"].items()}
+        recomputed = tds.rollups(tdqs_by_tool, list(run["tools"]), coherence)
+        for key in ("meanTdqs", "minTdqs", "descriptionQualityScore", "coherenceScore", "overallScore"):
+            assert Fraction(str(run["rollups"][key])) == recomputed[key], key
+    expected = tds.calibration_summary(registry["tools"], [run["tools"] for run in calibration["runs"]])
+    assert calibration["summary"] == json.loads(tds.report_json(expected))
+    document = CALIBRATION_DOCUMENT.read_text(encoding="utf-8")
+    assert "mean absolute difference" in document.lower()
+    assert f"{calibration['summary']['meanAbsoluteDifference']['tdqs']:.2f}" in document
+
+
 # --- the prompts: fetched, extracted, verified, never committed ---------------
+
+STANDIN_TOOL_SYSTEM = "STAND-IN TOOL SYSTEM PROMPT\n\n## A heading inside the fence\nScore {name} on six dimensions."
+# The stand-in user templates use the published placeholder grammar with other wording.
+STANDIN_TOOL_USER = "\n".join(
+    [
+        "Tool {name}",
+        'Display title {title | "null"}',
+        'Text: "{description}"',
+        "[schema]",
+        '{inputSchema JSON | "{}"}',
+        "[output]",
+        '{outputSchema JSON | "None provided"}',
+        "[annotations]",
+        '{annotations JSON | "None provided"}',
+        "Counts: {paramCount} params, {requiredParamCount} required, {schemaDescriptionCoverage}% described, {paramsWithEnums} with enums, nested {hasNestedObjects}",
+        "[siblings]",
+        '{sibling tool names, one per line | "None"}',
+        "JSON only.",
+    ]
+)
+STANDIN_COHERENCE_SYSTEM = "STAND-IN COHERENCE SYSTEM PROMPT\n## Another heading inside the fence"
+STANDIN_COHERENCE_USER = "\n".join(
+    [
+        "Server {serverName} with {toolCount} tools",
+        "[tools]",
+        '- {name} (cost {invocationCost}; {requiredFieldCount} req, depth {schemaDepth}, {unionChoiceCount} unions): {description | "(no description)"}',
+        "- ...",
+        "[candidates]",
+        '{"{dearer} costs {n}, {cheaper} costs {m}", one per line | "None"}',
+        "JSON only.",
+    ]
+)
+STANDIN_PROMPTS = {
+    "tool_system": STANDIN_TOOL_SYSTEM,
+    "tool_user": STANDIN_TOOL_USER,
+    "coherence_system": STANDIN_COHERENCE_SYSTEM,
+    "coherence_user": STANDIN_COHERENCE_USER,
+}
+
+
+def fenced(text: str) -> str:
+    return f"```text\n{text}\n```"
+
 
 STANDIN_README = "\n".join(
     [
@@ -1305,50 +1909,34 @@ STANDIN_README = "\n".join(
         "",
         "Prose before the appendices, with a block that is not a prompt:",
         "",
-        "```text",
-        "DECOY BLOCK, NOT A PROMPT",
-        "```",
+        fenced("DECOY BLOCK, NOT A PROMPT"),
         "",
         "## Appendix A: Tool scoring prompt",
         "",
         "The system prompt, verbatim:",
         "",
-        "```text",
-        "STAND-IN TOOL SYSTEM PROMPT",
-        "",
-        "## A heading inside the fence",
-        "Score {name} on six dimensions.",
-        "```",
+        fenced(STANDIN_TOOL_SYSTEM),
         "",
         "The user message template:",
         "",
-        "```text",
-        "STAND-IN TOOL USER TEMPLATE for {name}",
-        "```",
+        fenced(STANDIN_TOOL_USER),
         "",
         "## Appendix B: Server coherence prompt",
         "",
-        "```text",
-        "STAND-IN COHERENCE SYSTEM PROMPT",
-        "## Another heading inside the fence",
-        "```",
+        fenced(STANDIN_COHERENCE_SYSTEM),
         "",
-        "```text",
-        "STAND-IN COHERENCE USER TEMPLATE for {serverName}",
-        "```",
+        fenced(STANDIN_COHERENCE_USER),
         "",
         "## References",
         "",
     ]
 )
-STANDIN_PROMPTS = {
-    "tool_system": "STAND-IN TOOL SYSTEM PROMPT\n\n## A heading inside the fence\nScore {name} on six dimensions.",
-    "tool_user": "STAND-IN TOOL USER TEMPLATE for {name}",
-    "coherence_system": "STAND-IN COHERENCE SYSTEM PROMPT\n## Another heading inside the fence",
-    "coherence_user": "STAND-IN COHERENCE USER TEMPLATE for {serverName}",
-}
 STANDIN_HASHES = {key: hashlib.sha256(text.encode("utf-8")).hexdigest() for key, text in STANDIN_PROMPTS.items()}
 STANDIN_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def standin_prompt_record(**hashes: str) -> dict:
+    return standin_record(spec_commit=STANDIN_COMMIT, prompt_sha256={**STANDIN_HASHES, **hashes})
 
 
 def test_the_readme_is_fetched_at_the_full_commit() -> None:
@@ -1366,16 +1954,28 @@ def test_a_readme_without_an_appendix_is_refused() -> None:
         tds.extract_prompts(truncated)
 
 
-def test_prompts_that_match_their_hashes_are_accepted_and_a_changed_one_is_named() -> None:
+def test_prompts_that_match_their_hashes_are_accepted() -> None:
     tds.verify_prompts(STANDIN_PROMPTS, STANDIN_HASHES)
-    changed = {**STANDIN_PROMPTS, "coherence_user": STANDIN_PROMPTS["coherence_user"] + " "}
 
-    with pytest.raises(tds.PromptMismatch, match="coherence_user"):
+
+@pytest.mark.parametrize("key", sorted(PROMPT_KEYS))
+def test_each_changed_prompt_is_refused_and_named(key: str) -> None:
+    changed = {**STANDIN_PROMPTS, key: STANDIN_PROMPTS[key] + " "}
+
+    with pytest.raises(tds.PromptMismatch, match=key):
         tds.verify_prompts(changed, STANDIN_HASHES)
 
 
+@pytest.mark.parametrize("key", sorted(PROMPT_KEYS))
+def test_a_missing_prompt_or_a_missing_hash_is_refused_and_named(key: str) -> None:
+    with pytest.raises(tds.PromptMismatch, match=key):
+        tds.verify_prompts({name: text for name, text in STANDIN_PROMPTS.items() if name != key}, STANDIN_HASHES)
+    with pytest.raises(tds.PromptMismatch, match=key):
+        tds.verify_prompts(STANDIN_PROMPTS, {name: digest for name, digest in STANDIN_HASHES.items() if name != key})
+
+
 def test_load_prompts_fetches_once_and_then_reads_the_cache(tmp_path: Path) -> None:
-    record = {"spec_commit": STANDIN_COMMIT, "prompt_sha256": STANDIN_HASHES}
+    record = standin_prompt_record()
     fetched: list[str] = []
 
     def fetch(url: str) -> str:
@@ -1390,20 +1990,624 @@ def test_load_prompts_fetches_once_and_then_reads_the_cache(tmp_path: Path) -> N
     assert tds.load_prompts(record, tmp_path / "cache", no_network) == STANDIN_PROMPTS
 
 
-def test_load_prompts_refuses_a_mismatch_and_does_not_keep_it(tmp_path: Path) -> None:
-    record = {"spec_commit": STANDIN_COMMIT, "prompt_sha256": STANDIN_HASHES}
-    altered = STANDIN_README.replace("STAND-IN TOOL SYSTEM PROMPT", "A DIFFERENT SYSTEM PROMPT")
+@pytest.mark.parametrize("key", sorted(PROMPT_KEYS))
+def test_load_prompts_refuses_any_changed_prompt_and_does_not_keep_it(tmp_path: Path, key: str) -> None:
+    altered = STANDIN_README.replace(STANDIN_PROMPTS[key], STANDIN_PROMPTS[key] + "\nAN ADDED LINE")
+    assert altered != STANDIN_README
     fetched: list[str] = []
 
-    with pytest.raises(tds.PromptMismatch):
-        tds.load_prompts(record, tmp_path / "cache", lambda url: altered)
+    with pytest.raises(tds.PromptMismatch, match=key):
+        tds.load_prompts(standin_prompt_record(), tmp_path / "cache", lambda url: altered)
 
-    assert tds.load_prompts(record, tmp_path / "cache", lambda url: fetched.append(url) or STANDIN_README) == STANDIN_PROMPTS
+    assert tds.load_prompts(standin_prompt_record(), tmp_path / "cache", lambda url: fetched.append(url) or STANDIN_README) == STANDIN_PROMPTS
     assert len(fetched) == 1
+
+
+def cache_contents(cache: Path) -> dict[str, bytes]:
+    return {path.relative_to(cache).as_posix(): path.read_bytes() for path in sorted(cache.rglob("*")) if path.is_file()}
+
+
+def test_a_corrupted_cache_is_fetched_again(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    tds.load_prompts(standin_prompt_record(), cache, lambda url: STANDIN_README)
+    for path in cache.rglob("*"):
+        if path.is_file():
+            path.write_text("CORRUPTED", encoding="utf-8")
+    fetched: list[str] = []
+
+    prompts = tds.load_prompts(standin_prompt_record(), cache, lambda url: fetched.append(url) or STANDIN_README)
+
+    assert prompts == STANDIN_PROMPTS
+    assert len(fetched) == 1
+    assert tds.load_prompts(standin_prompt_record(), cache, lambda url: (_ for _ in ()).throw(AssertionError(url))) == STANDIN_PROMPTS
+
+
+def test_changed_hashes_in_the_record_refuse_a_cache_that_matched_the_old_ones(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    tds.load_prompts(standin_prompt_record(), cache, lambda url: STANDIN_README)
+    before = cache_contents(cache)
+
+    with pytest.raises(tds.PromptMismatch, match="tool_user"):
+        tds.load_prompts(standin_prompt_record(tool_user="0" * 64), cache, lambda url: STANDIN_README)
+
+    assert cache_contents(cache) == before
 
 
 def test_the_default_cache_is_outside_the_repository() -> None:
     assert not tds.default_cache_dir().resolve().is_relative_to(ROOT)
+    assert not tds.default_cache_dir(dict(os.environ)).resolve().is_relative_to(ROOT)
+
+
+# --- the prompts as the model receives them (Appendix A, Appendix B) ----------
+
+READ_THING = tool(
+    "read_thing",
+    "Read one thing by its id; waits up to 5 µs.",
+    {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "Thing id."},
+            "mode": {"type": "string", "enum": ["fast", "slow"]},
+            "filter": {"type": "object", "properties": {"tag": {"type": "string"}}},
+        },
+        "required": ["id"],
+    },
+    title="Read a thing",
+    annotations={"readOnlyHint": True},
+)
+READ_THING_PROMPT = """Tool read_thing
+Display title Read a thing
+Text: "Read one thing by its id; waits up to 5 µs."
+[schema]
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Thing id."
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "fast",
+        "slow"
+      ]
+    },
+    "filter": {
+      "type": "object",
+      "properties": {
+        "tag": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "required": [
+    "id"
+  ]
+}
+[output]
+None provided
+[annotations]
+{
+  "readOnlyHint": true
+}
+Counts: 3 params, 1 required, 33% described, 1 with enums, nested true
+[siblings]
+list_things
+ping
+JSON only."""
+BARE_PROMPT = """Tool ping
+Display title null
+Text: "Ping."
+[schema]
+{}
+[output]
+None provided
+[annotations]
+None provided
+Counts: 0 params, 0 required, 100% described, 0 with enums, nested false
+[siblings]
+None
+JSON only."""
+STATS_PROMPT = """Server stats-api with 4 tools
+[tools]
+- ping (cost 0; 0 req, depth 0, 0 unions): Check the service answers.
+- get_stat (cost 4; 4 req, depth 1, 0 unions): Return one stat for a player and season.
+- lookup (cost 7; 7 req, depth 1, 0 unions): Look a record up by seven keys.
+- query_panel (cost 13; 5 req, depth 3, 2 unions): Run a qualified query over the panel.
+[candidates]
+get_stat costs 4, ping costs 0
+lookup costs 7, ping costs 0
+query_panel costs 13, get_stat costs 4
+JSON only."""
+
+
+def test_the_tool_prompt_carries_the_full_definition_and_the_siblings() -> None:
+    """The schema and the annotations go in whole, pretty-printed, non-ASCII kept; the
+    signals are the five the template names; the siblings are one per line."""
+    assert tds.render_tool_prompt(STANDIN_TOOL_USER, READ_THING, ["list_things", "ping"]) == READ_THING_PROMPT
+
+
+@pytest.mark.parametrize("title", ["absent", None, "   "])
+def test_the_tool_prompt_falls_back_where_a_field_is_missing(title: object) -> None:
+    definition: dict = {"name": "ping", "description": "Ping."}
+    if title != "absent":
+        definition["title"] = title
+
+    assert tds.render_tool_prompt(STANDIN_TOOL_USER, definition, []) == BARE_PROMPT
+
+
+def test_the_output_schema_is_rendered_when_there_is_one() -> None:
+    definition = tool("ping", "Ping.", outputSchema={"type": "object"})
+
+    rendered = tds.render_tool_prompt(STANDIN_TOOL_USER, definition, [])
+
+    assert '[output]\n{\n  "type": "object"\n}\n[annotations]' in rendered
+
+
+@pytest.mark.parametrize("token", ["invocationCost", "requiredFieldCount", "schemaDepth", "unionChoiceCount", "definitionBytes", "hasOutputSchema", "favouriteColour"])
+def test_a_tool_template_asking_for_a_withheld_or_unknown_signal_is_refused(token: str) -> None:
+    """The invocation-cost signals, definitionBytes and hasOutputSchema are withheld
+    from the tool prompt; a template that asks for them is not the published one."""
+    with pytest.raises(tds.PromptMismatch, match=token):
+        tds.render_tool_prompt(STANDIN_TOOL_USER + f"\n{{{token}}}", READ_THING, [])
+
+
+def test_the_coherence_prompt_lists_every_tool_with_its_cost_and_the_candidates() -> None:
+    candidates = tds.shadow_candidates(STATS_TOOLS)
+
+    assert tds.render_coherence_prompt(STANDIN_COHERENCE_USER, "stats-api", STATS_TOOLS, candidates) == STATS_PROMPT
+
+
+def test_the_coherence_prompt_falls_back_where_there_is_nothing() -> None:
+    tools = [tool("ping", "Ping."), {"name": "ghost", "inputSchema": {"type": "object", "properties": {}}}]
+
+    rendered = tds.render_coherence_prompt(STANDIN_COHERENCE_USER, "agentic-hil", tools, [])
+
+    assert rendered == "\n".join(
+        [
+            "Server agentic-hil with 2 tools",
+            "[tools]",
+            "- ping (cost 0; 0 req, depth 0, 0 unions): Ping.",
+            "- ghost (cost 0; 0 req, depth 0, 0 unions): (no description)",
+            "[candidates]",
+            "None",
+            "JSON only.",
+        ]
+    )
+
+
+def test_a_coherence_template_with_an_unknown_placeholder_is_refused() -> None:
+    with pytest.raises(tds.PromptMismatch, match="favouriteColour"):
+        tds.render_coherence_prompt(STANDIN_COHERENCE_USER + "\n{favouriteColour}", "stats-api", STATS_TOOLS, [])
+
+
+# --- the model backend: the Claude Code command line ----------------------------
+
+FAKE_CLAUDE = '''
+import json, os, sys, time, uuid
+
+arguments = sys.argv[1:]
+if arguments == ["--version"]:
+    print(os.environ.get("FAKE_CLAUDE_VERSION", "0.0.0") + " (Claude Code)")
+    sys.exit(0)
+started = time.time()
+stdin = sys.stdin.buffer.read().decode("utf-8")
+mode = os.environ.get("FAKE_CLAUDE_MODE", "ok")
+if mode == "slow":
+    time.sleep(0.5)
+if mode == "hang":
+    time.sleep(120)
+cwd = os.getcwd()
+entry = {"argv": arguments, "cwd": cwd, "listing": sorted(os.listdir(cwd)), "stdin": stdin, "env": dict(os.environ), "started": started, "ended": time.time()}
+config = os.environ.get("CLAUDE_CONFIG_DIR")
+if config:
+    entry["configListing"] = sorted(os.listdir(config)) if os.path.isdir(config) else None
+log = os.path.join(os.environ["FAKE_CLAUDE_LOG"], uuid.uuid4().hex + ".json")
+with open(log, "w", encoding="utf-8") as handle:
+    json.dump(entry, handle)
+model = arguments[arguments.index("--model") + 1] if "--model" in arguments else "a-default-model"
+answer = os.environ.get("FAKE_CLAUDE_ANSWER", "")
+if mode == "garbage":
+    print("this is not an envelope")
+elif mode == "nonzero":
+    sys.stderr.write("something went wrong\\n")
+    sys.exit(3)
+elif mode == "leak":
+    sys.stderr.write("refused the token " + os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "") + "\\n")
+    sys.exit(1)
+else:
+    usage = {"another-model" if mode == "wrong-model" else model: {"inputTokens": 1, "outputTokens": 1}}
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": mode == "error", "result": answer, "modelUsage": usage}))
+'''
+DUMMY_TOKEN = "dummy-token-value-0123456789"
+
+
+@pytest.fixture
+def fake_cli(tmp_path: Path) -> dict:
+    """A stand-in for `claude`: it logs what it was given, one file per call, and answers
+    in the CLI's JSON envelope."""
+    script = tmp_path / "fake_claude.py"
+    script.write_text(FAKE_CLAUDE, encoding="utf-8")
+    log = tmp_path / "log"
+    log.mkdir()
+    environ = {**os.environ, "FAKE_CLAUDE_LOG": str(log), "FAKE_CLAUDE_MODE": "ok", "FAKE_CLAUDE_ANSWER": tool_answer((4,) * 6), "FAKE_CLAUDE_VERSION": "0.0.0"}
+    return {"command": [sys.executable, str(script)], "log": log, "environ": environ}
+
+
+def cli_calls(log: Path) -> list[dict]:
+    return sorted((json.loads(path.read_text(encoding="utf-8")) for path in log.glob("*.json")), key=lambda entry: entry["started"])
+
+
+def option(argv: list[str], name: str) -> str:
+    assert name in argv, (name, argv)
+    return argv[argv.index(name) + 1]
+
+
+def cli_scorer(fake_cli: dict, **options: object) -> object:
+    environ = options.pop("environ", fake_cli["environ"])
+    return tds.ClaudeCliScorer(STANDIN_PROMPTS, standin_record(), command=fake_cli["command"], environ=environ, timeout=options.pop("timeout", scaled_time_bound(CLI_CALL_S)), **options)
+
+
+def test_the_cli_gets_the_pinned_model_the_system_prompt_the_rendered_prompt_and_nothing_else(fake_cli: dict) -> None:
+    scorer = cli_scorer(fake_cli)
+
+    tool_text = scorer.tool_answer(READ_THING, ["list_things", "ping"])
+    coherence_text = scorer.coherence_answer("stats-api", STATS_TOOLS, tds.shadow_candidates(STATS_TOOLS))
+
+    assert tool_text == coherence_text == fake_cli["environ"]["FAKE_CLAUDE_ANSWER"]
+    assert scorer.calls == 2
+    first, second = cli_calls(fake_cli["log"])
+    for entry, system in ((first, STANDIN_TOOL_SYSTEM), (second, STANDIN_COHERENCE_SYSTEM)):
+        argv = entry["argv"]
+        assert "-p" in argv
+        assert option(argv, "--model") == "stand-in-model"
+        assert option(argv, "--system-prompt") == system
+        assert option(argv, "--tools") == ""
+        assert option(argv, "--setting-sources") == ""
+        assert option(argv, "--output-format") == "json"
+        for flag in ("--strict-mcp-config", "--safe-mode", "--disable-slash-commands", "--no-session-persistence"):
+            assert flag in argv
+        assert entry["listing"] == []
+        assert not Path(entry["cwd"]).exists()
+        assert not Path(entry["cwd"]).resolve().is_relative_to(ROOT)
+        assert entry["env"]["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] == "1"
+        assert entry["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    assert first["cwd"] != second["cwd"]
+    assert first["stdin"] == tds.render_tool_prompt(STANDIN_TOOL_USER, READ_THING, ["list_things", "ping"]) == READ_THING_PROMPT
+    assert second["stdin"] == STATS_PROMPT
+
+
+def test_the_cli_runs_no_more_calls_at_once_than_its_bound(fake_cli: dict) -> None:
+    environ = {**fake_cli["environ"], "FAKE_CLAUDE_MODE": "slow"}
+    scorer = cli_scorer(fake_cli, environ=environ, concurrency=2)
+    threads = [threading.Thread(target=scorer.tool_answer, args=(tool(f"t{index}", "T."), [])) for index in range(5)]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(scaled_time_bound(CLI_CALL_S))
+
+    calls = cli_calls(fake_cli["log"])
+    assert len(calls) == 5
+    for entry in calls:
+        overlapping = [other for other in calls if other["started"] < entry["ended"] and entry["started"] < other["ended"]]
+        assert len(overlapping) <= 2
+
+
+@pytest.mark.parametrize("mode", ["error", "wrong-model", "garbage", "nonzero"])
+def test_a_failed_cli_call_is_a_backend_error(fake_cli: dict, mode: str) -> None:
+    scorer = cli_scorer(fake_cli, environ={**fake_cli["environ"], "FAKE_CLAUDE_MODE": mode})
+
+    with pytest.raises(tds.BackendError):
+        scorer.tool_answer(READ_THING, [])
+
+
+def test_a_cli_call_that_hangs_is_cut_off(fake_cli: dict) -> None:
+    scorer = cli_scorer(fake_cli, environ={**fake_cli["environ"], "FAKE_CLAUDE_MODE": "hang"}, timeout=2.0)
+    started = time.monotonic()
+
+    with pytest.raises(tds.BackendError):
+        scorer.tool_answer(READ_THING, [])
+
+    assert time.monotonic() - started < scaled_time_bound(60)
+
+
+def test_the_token_reaches_the_cli_through_its_environment_alone(fake_cli: dict) -> None:
+    environ = {**fake_cli["environ"], TOKEN_VARIABLE: DUMMY_TOKEN, "ANTHROPIC_API_KEY": "an-api-key", "ANTHROPIC_AUTH_TOKEN": "an-auth-token"}
+    scorer = cli_scorer(fake_cli, environ=environ, token_env=TOKEN_VARIABLE)
+
+    scorer.tool_answer(READ_THING, [])
+    scorer.tool_answer(READ_THING, [])
+
+    calls = cli_calls(fake_cli["log"])
+    for entry in calls:
+        assert DUMMY_TOKEN not in json.dumps(entry["argv"])
+        assert DUMMY_TOKEN not in entry["stdin"]
+        assert entry["env"][TOKEN_VARIABLE] == DUMMY_TOKEN
+        assert "ANTHROPIC_API_KEY" not in entry["env"]
+        assert "ANTHROPIC_AUTH_TOKEN" not in entry["env"]
+        assert entry["configListing"] == []
+    assert calls[0]["env"]["CLAUDE_CONFIG_DIR"] != calls[1]["env"]["CLAUDE_CONFIG_DIR"]
+
+
+def test_the_token_never_appears_in_an_error(fake_cli: dict) -> None:
+    environ = {**fake_cli["environ"], TOKEN_VARIABLE: DUMMY_TOKEN, "FAKE_CLAUDE_MODE": "leak"}
+    scorer = cli_scorer(fake_cli, environ=environ, token_env=TOKEN_VARIABLE)
+
+    with pytest.raises(tds.BackendError) as raised:
+        scorer.tool_answer(READ_THING, [])
+
+    assert DUMMY_TOKEN not in str(raised.value)
+    assert "refused the token" in str(raised.value)
+
+
+def test_without_a_token_the_cli_keeps_the_developers_own_login(fake_cli: dict) -> None:
+    environ = {name: value for name, value in fake_cli["environ"].items() if name not in (TOKEN_VARIABLE, "CLAUDE_CONFIG_DIR")}
+    scorer = cli_scorer(fake_cli, environ=environ)
+
+    scorer.tool_answer(READ_THING, [])
+
+    (entry,) = cli_calls(fake_cli["log"])
+    assert "CLAUDE_CONFIG_DIR" not in entry["env"]
+    assert TOKEN_VARIABLE not in entry["env"]
+
+
+@pytest.mark.parametrize(("installed", "warned"), [("0.0.0", False), ("9.9.9", True)])
+def test_a_cli_version_other_than_the_recorded_one_is_reported(fake_cli: dict, installed: str, warned: bool) -> None:
+    scorer = cli_scorer(fake_cli, environ={**fake_cli["environ"], "FAKE_CLAUDE_VERSION": installed})
+
+    warnings = scorer.warnings()
+
+    if warned:
+        assert len(warnings) == 1
+        assert "9.9.9" in warnings[0] and "0.0.0" in warnings[0]
+    else:
+        assert warnings == []
+    assert scorer.calls == 0
+
+
+# --- the entry point --------------------------------------------------------------
+
+
+class MainRun:
+    """main() with its seams replaced: the exports, the record, the prompts and the scorer."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, base_tools: list[dict], head_tools: list[dict], scorer: object = None) -> None:
+        self.tmp_path = tmp_path
+        self.base_export, self.head_export = export(base_tools), export(head_tools)
+        self.scorer = scorer if scorer is not None else FakeScorer(default=tool_answer((4,) * 6))
+        self.prompt_loads: list[object] = []
+        self.scorers_built: list[object] = []
+        self.prompt_error: Exception | None = None
+        self.summary = tmp_path / "step-summary.md"
+        self.summary.write_text("EARLIER SUMMARY\n", encoding="utf-8")
+        self.output = tmp_path / "github-output"
+        self.output.write_text("", encoding="utf-8")
+        self.reports = tmp_path / "reports"
+        monkeypatch.setattr(tds, "rev_parse", lambda repo, ref: "1" * 40 if ref != "HEAD" else "2" * 40)
+        monkeypatch.setattr(tds, "export_revision", lambda repo, ref: copy.deepcopy(self.base_export))
+        monkeypatch.setattr(tds, "export_tools", lambda src: copy.deepcopy(self.head_export))
+        monkeypatch.setattr(tds, "load_version_record", standin_record)
+        monkeypatch.setattr(tds, "load_prompts", self._load_prompts)
+        monkeypatch.setattr(tds, "make_scorer", self._make_scorer)
+
+    def _load_prompts(self, record: dict, cache_dir: object, fetch: object) -> dict:
+        self.prompt_loads.append(cache_dir)
+        if self.prompt_error is not None:
+            raise self.prompt_error
+        return dict(STANDIN_PROMPTS)
+
+    def _make_scorer(self, prompts: dict, record: dict, args: object, environ: dict) -> object:
+        self.scorers_built.append(prompts)
+        return self.scorer
+
+    def environ(self, token: bool = True) -> dict:
+        environ = {"GITHUB_STEP_SUMMARY": str(self.summary), "GITHUB_OUTPUT": str(self.output)}
+        if token:
+            environ[TOKEN_VARIABLE] = DUMMY_TOKEN
+        return environ
+
+    def argv(self, *extra: str) -> list[str]:
+        return ["--base", "origin/master", "--repo", str(self.tmp_path / "repo"), "--report-dir", str(self.reports), "--token-env", TOKEN_VARIABLE, *extra]
+
+    def __call__(self, *extra: str, token: bool = True) -> int:
+        return tds.main(self.argv(*extra), self.environ(token))
+
+
+def lines(capsys: pytest.CaptureFixture[str]) -> list[str]:
+    return capsys.readouterr().out.splitlines()
+
+
+def test_main_passes_unchanged_definitions_without_a_token_prompts_or_scorer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    tools = [tool("alpha_tool", "Alpha.")]
+    run = MainRun(monkeypatch, tmp_path, tools, tools)
+
+    assert run(token=False) == 0
+
+    assert any(line.startswith("PASS:") for line in lines(capsys))
+    assert run.prompt_loads == []
+    assert run.scorers_built == []
+    assert "scored=false" in run.output.read_text(encoding="utf-8")
+
+
+def test_main_refuses_changed_definitions_without_the_token_with_one_exact_line(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    run = MainRun(monkeypatch, tmp_path, [tool("alpha_tool", "Alpha.")], [tool("alpha_tool", "Alpha, reworded.")])
+
+    assert run(token=False) == 2
+
+    assert MISSING_TOKEN_LINE in lines(capsys)
+    assert run.prompt_loads == []
+    assert run.scorers_built == []
+    assert "scored=false" in run.output.read_text(encoding="utf-8")
+    assert json.loads((run.reports / "tool-definition-score.json").read_text(encoding="utf-8"))["decision"] == "invalid"
+
+
+def test_main_passes_an_improvement_and_writes_the_reports(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    scorer = FakeScorer({"Alpha, before.": tool_answer((4,) * 6), "Alpha, after.": tool_answer((5,) * 6)})
+    run = MainRun(monkeypatch, tmp_path, [tool("alpha_tool", "Alpha, before.")], [tool("alpha_tool", "Alpha, after.")], scorer)
+
+    assert run() == 0
+
+    assert any(line.startswith("PASS:") for line in lines(capsys))
+    assert run.scorers_built == [STANDIN_PROMPTS]
+    report = json.loads((run.reports / "tool-definition-score.json").read_text(encoding="utf-8"))
+    assert report["decision"] == "pass"
+    assert (report["baseCommit"], report["headCommit"]) == ("1" * 40, "2" * 40)
+    markdown = (run.reports / "tool-definition-score.md").read_text(encoding="utf-8")
+    assert markdown_row(markdown, "Overall", "4.0", "4.7")
+    summary = run.summary.read_text(encoding="utf-8")
+    assert summary.startswith("EARLIER SUMMARY\n")
+    assert markdown.strip() in summary
+    assert "scored=true" in run.output.read_text(encoding="utf-8")
+
+
+def test_main_blocks_a_drop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    scorer = FakeScorer({"Alpha, before.": tool_answer((5,) * 6), "Alpha, after.": tool_answer((4,) * 6)})
+    run = MainRun(monkeypatch, tmp_path, [tool("alpha_tool", "Alpha, before.")], [tool("alpha_tool", "Alpha, after.")], scorer)
+
+    assert run() == 1
+
+    assert any(line.startswith("BLOCK:") for line in lines(capsys))
+
+
+def test_main_calls_an_answer_that_stays_invalid_invalid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    scorer = FakeScorer({"Alpha, before.": tool_answer((4,) * 6), "Alpha, after.": "this is not json"})
+    run = MainRun(monkeypatch, tmp_path, [tool("alpha_tool", "Alpha, before.")], [tool("alpha_tool", "Alpha, after.")], scorer)
+
+    assert run() == 2
+
+    assert any(line.startswith("INVALID:") and "alpha_tool" in line for line in lines(capsys))
+
+
+def test_main_refuses_mismatched_prompts_before_any_scoring(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    run = MainRun(monkeypatch, tmp_path, [tool("alpha_tool", "Alpha.")], [tool("alpha_tool", "Alpha, reworded.")])
+    run.prompt_error = tds.PromptMismatch("the fetched tool_user prompt does not match its recorded sha256")
+
+    assert run() == 2
+
+    assert any(line.startswith("INVALID:") and "tool_user" in line for line in lines(capsys))
+    assert run.scorers_built == []
+    assert run.scorer.tool_calls == []  # type: ignore[attr-defined]
+
+
+def test_main_turns_an_unexpected_failure_into_an_invalid_line(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    run = MainRun(monkeypatch, tmp_path, [tool("alpha_tool", "Alpha.")], [tool("alpha_tool", "Alpha.")])
+
+    def broken(repo: object, ref: object) -> dict:
+        raise RuntimeError("the base worktree could not be created")
+
+    monkeypatch.setattr(tds, "export_revision", broken)
+
+    assert run() == 2
+
+    assert any(line.startswith("INVALID:") and "the base worktree could not be created" in line for line in lines(capsys))
+
+
+def test_main_check_accepts_a_current_report_and_rejects_a_stale_one(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    scorer = FakeScorer({"Alpha, before.": tool_answer((4,) * 6), "Alpha, after.": tool_answer((5,) * 6)})
+    run = MainRun(monkeypatch, tmp_path, [tool("alpha_tool", "Alpha, before.")], [tool("alpha_tool", "Alpha, after.")], scorer)
+    assert run() == 0
+    saved = tmp_path / "saved.json"
+    shutil.copyfile(run.reports / "tool-definition-score.json", saved)
+    capsys.readouterr()
+
+    assert run("--check", str(saved)) == 0
+    run.head_export = export([tool("alpha_tool", "Alpha, changed again.")])
+    assert run("--check", str(saved)) == 2
+
+    assert any(line.startswith("INVALID:") and "stale" in line.lower() for line in lines(capsys))
+
+
+def test_the_report_directory_is_ignored_by_git() -> None:
+    ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+    assert ".tool-definition-score/" in ignored
+
+
+# --- the CI job -----------------------------------------------------------------
+
+
+def workflow() -> dict:
+    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+
+
+def score_job() -> dict:
+    return workflow()["jobs"]["tool_definition_score"]
+
+
+def step_by_id(job: dict, step_id: str) -> dict:
+    return next(step for step in job["steps"] if step.get("id") == step_id)
+
+
+def test_the_score_job_runs_on_pull_requests_against_their_base() -> None:
+    job = score_job()
+
+    assert "github.event_name == 'pull_request'" in job["if"]
+    checkout = next(step for step in job["steps"] if str(step.get("uses", "")).startswith("actions/checkout@"))
+    assert checkout["with"]["fetch-depth"] == 0
+    assert checkout["with"]["persist-credentials"] is False
+    score = step_by_id(job, "score")
+    assert 'python tools/tool_definition_score.py --base "origin/${{ github.base_ref }}" --token-env CLAUDE_CODE_OAUTH_TOKEN' in score["run"]
+    assert score["env"][TOKEN_VARIABLE] == "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"
+
+
+def test_the_score_job_pins_its_actions_and_its_cli() -> None:
+    job = score_job()
+
+    for step in job["steps"]:
+        if "uses" in step:
+            assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", step["uses"].split(" ")[0]), step["uses"]
+    install = next(step for step in job["steps"] if step.get("run", "").strip().startswith("npm ci"))
+    assert install["working-directory"] == "tools/tdqs"
+    record = json.loads((TDQS_DIRECTORY / "version.json").read_text(encoding="utf-8"))
+    package = json.loads((TDQS_DIRECTORY / "package.json").read_text(encoding="utf-8"))
+    assert package["dependencies"] == {"@anthropic-ai/claude-code": record["cli_version"]}
+    locked = json.loads((TDQS_DIRECTORY / "package-lock.json").read_text(encoding="utf-8"))["packages"]["node_modules/@anthropic-ai/claude-code"]
+    assert locked["version"] == record["cli_version"]
+    assert locked["integrity"].startswith("sha512-")
+
+
+def test_the_score_job_keeps_the_secret_to_the_steps_that_call_the_model() -> None:
+    job = score_job()
+
+    assert "secrets." not in json.dumps({key: value for key, value in job.items() if key != "steps"})
+    for step in job["steps"]:
+        if step.get("id") in ("score", "model"):
+            continue
+        assert "secrets." not in json.dumps(step), step
+
+
+def test_the_score_job_uploads_its_report_whatever_happened() -> None:
+    upload = next(step for step in score_job()["steps"] if str(step.get("uses", "")).startswith("actions/upload-artifact@"))
+
+    assert upload["if"] in ("always()", "${{ always() }}")
+    assert ".tool-definition-score" in upload["with"]["path"]
+
+
+def test_the_score_job_runs_the_model_test_when_it_scored() -> None:
+    model = step_by_id(score_job(), "model")
+
+    assert "steps.score.outputs.scored == 'true'" in model["if"]
+    assert model["env"]["AGENTIC_HIL_TDQS_MODEL"] == "1"
+    assert model["env"][TOKEN_VARIABLE] == "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"
+    assert "tests/test_tool_definition_score_model.py" in model["run"]
+
+
+def test_required_ci_needs_the_score_job_and_lets_it_skip_only_off_pull_requests() -> None:
+    required = workflow()["jobs"]["required-ci"]
+
+    assert "tool_definition_score" in required["needs"]
+    checks = "\n".join(step.get("run", "") for step in required["steps"])
+    guard = (
+        r'if \[\[ "\$\{\{ needs\.tool_definition_score\.result \}\}" != "success" \]\] && '
+        r'! \[\[ "\$\{\{ needs\.tool_definition_score\.result \}\}" == "skipped" && "\$\{\{ github\.event_name \}\}" != "pull_request" \]\]; then\n'
+        r'\s*echo "[^"\n]*\$\{\{ needs\.tool_definition_score\.result \}\}"\n'
+        r"\s*exit 1\n"
+        r"\s*fi"
+    )
+    assert re.search(guard, checks), checks
 
 
 # --- the export: what a host sees over stdio ----------------------------------
@@ -1417,11 +2621,55 @@ def provisioned_listing(workspace: Path) -> list[dict]:
     return json.loads(json.dumps(response["result"]["tools"]))
 
 
-def test_the_export_lists_what_a_provisioned_server_lists(tmp_path: Path) -> None:
-    """The export starts the server with no configuration, as the registry does,
-    and gets the same tools a provisioned server lists."""
+class LaunchRecorder:
+    """Stands in front of the real server launch, records what each launch was given and
+    answered, and lets `observe` look around while the child is about to run."""
+
+    def __init__(self, real: Callable, observe: Callable[[dict], object] | None = None) -> None:
+        self.real = real
+        self.observe = observe
+        self.launches: list[dict] = []
+
+    def __call__(self, argv: list[str], cwd: object, env: dict, stdin_text: str, timeout: float) -> tuple[int, str, str]:
+        launch: dict = {"argv": list(argv), "cwd": Path(cwd), "listing": sorted(os.listdir(cwd)), "env": dict(env), "stdin": stdin_text}  # type: ignore[arg-type]
+        if self.observe is not None:
+            launch["observed"] = self.observe(launch)
+        returncode, stdout, stderr = self.real(argv, cwd, env, stdin_text, timeout)
+        launch["stdout"] = stdout
+        self.launches.append(launch)
+        return returncode, stdout, stderr
+
+
+def assert_a_host_handshake(launch: dict) -> None:
+    """Three messages, as a host sends them, from an empty directory outside this checkout,
+    with no Agentic HIL configuration in the environment and no user site."""
+    messages = [json.loads(line) for line in launch["stdin"].splitlines() if line.strip()]
+    assert [message["method"] for message in messages] == ["initialize", "notifications/initialized", "tools/list"]
+    assert "id" not in messages[1]
+    assert launch["listing"] == []
+    assert not launch["cwd"].resolve().is_relative_to(ROOT)
+    assert not [name for name in launch["env"] if name.upper().startswith("AGENTIC_HIL_")]
+    assert launch["env"]["PYTHONNOUSERSITE"] == "1"
+
+
+def listed_tools(launch: dict) -> list[dict]:
+    responses = [json.loads(line) for line in launch["stdout"].splitlines() if line.strip()]
+    (listing,) = [response for response in responses if response.get("id") == 2]
+    return listing["result"]["tools"]
+
+
+def test_the_export_lists_what_a_provisioned_server_lists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The export starts the server with no configuration, as the registry does, over
+    stdio, and gets the same tools a provisioned server lists."""
+    recorder = LaunchRecorder(tds.run_server)
+    monkeypatch.setattr(tds, "run_server", recorder)
+
     exported = tds.export_tools(SRC)
 
+    (launch,) = recorder.launches
+    assert_a_host_handshake(launch)
+    assert Path(launch["argv"][-1]).resolve() == SRC.resolve()
+    assert exported["tools"] == listed_tools(launch)
     assert exported["serverName"] == "agentic-hil"
     assert exported["serverVersion"] == __version__
     assert [item["name"] for item in exported["tools"]] == MCP_TOOL_NAMES
@@ -1434,10 +2682,14 @@ def test_the_export_ignores_a_configuration_bound_to_another_workspace(tmp_path:
     """AGENTIC_HIL_CONFIG pointing at another project would end the server with config_invalid."""
     write_authoritative_config(tmp_path / "elsewhere", monkeypatch)
     assert os.environ.get("AGENTIC_HIL_CONFIG")
+    recorder = LaunchRecorder(tds.run_server)
+    monkeypatch.setattr(tds, "run_server", recorder)
 
     exported = tds.export_tools(SRC)
 
     assert [item["name"] for item in exported["tools"]] == MCP_TOOL_NAMES
+    (launch,) = recorder.launches
+    assert "AGENTIC_HIL_CONFIG" not in launch["env"]
 
 
 def git(where: Path, *args: str) -> str:
@@ -1456,9 +2708,14 @@ def git(where: Path, *args: str) -> str:
     return done.stdout
 
 
-def test_a_revision_and_a_changed_working_tree_are_told_apart(tmp_path: Path) -> None:
-    """The base comes from a git worktree of the ref; the head is the working tree.
-    In the working tree of a test copy a tool is added, one is changed and one removed."""
+def worktrees(repo: Path) -> list[Path]:
+    return [Path(line.split(" ", 1)[1]).resolve() for line in git(repo, "worktree", "list", "--porcelain").splitlines() if line.startswith("worktree ")]
+
+
+def test_a_revision_and_a_changed_working_tree_are_told_apart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The base comes from a git worktree of the ref, exported with that tree's own src;
+    the head is the working tree. In the working tree of a test copy a tool is added,
+    one is changed and one removed."""
     repo = tmp_path / "repo"
     shutil.copytree(SRC / "agentic_hil", repo / "src" / "agentic_hil", ignore=shutil.ignore_patterns("__pycache__"))
     (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
@@ -1478,15 +2735,31 @@ def test_a_revision_and_a_changed_working_tree_are_told_apart(tmp_path: Path) ->
     with contracts.open("a", encoding="utf-8") as handle:
         handle.write("\n".join(appended))
 
+    def observe(launch: dict) -> dict:
+        src = Path(launch["argv"][-1]).resolve()
+        return {"src": src, "worktrees": worktrees(repo), "contracts": (src / "agentic_hil" / "contracts.py").read_text(encoding="utf-8")}
+
+    recorder = LaunchRecorder(tds.run_server, observe)
+    monkeypatch.setattr(tds, "run_server", recorder)
+
     base = tds.export_revision(repo, "HEAD")
     head = tds.export_tools(repo / "src")
 
+    base_launch, head_launch = recorder.launches
+    for launch in (base_launch, head_launch):
+        assert_a_host_handshake(launch)
+    seen = base_launch["observed"]
+    assert seen["src"].parent in seen["worktrees"]
+    assert seen["src"].parent != repo.resolve()
+    assert "tdqs_added_tool" not in seen["contracts"]
+    assert head_launch["observed"]["src"] == (repo / "src").resolve()
+    assert "tdqs_added_tool" in head_launch["observed"]["contracts"]
+    assert base["tools"] == listed_tools(base_launch)
     assert base["tools"] == provisioned_listing(tmp_path / "workspace")
     diff = tds.diff_definitions(base["tools"], head["tools"])
     assert list(diff.added) == ["tdqs_added_tool"]
     assert list(diff.removed) == [last]
     assert list(diff.changed) == [first]
     assert base["setHash"] != head["setHash"]
-    worktrees = [line for line in git(repo, "worktree", "list", "--porcelain").splitlines() if line.startswith("worktree ")]
-    assert len(worktrees) == 1
+    assert worktrees(repo) == [repo.resolve()]
     assert git(repo, "status", "--porcelain").split() == ["M", "src/agentic_hil/contracts.py"]

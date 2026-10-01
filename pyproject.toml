@@ -126,7 +126,8 @@ markers = [
   "container: needs the real uv, OpenOCD and /proc, and no hardware; runs in tools/container/Dockerfile with AGENTIC_HIL_CONTAINER_TESTS=1",
   "bench: needs a debug probe and the board behind it; runs on a bench with AGENTIC_HIL_BENCH=1",
   "without_device_group: the bench stage with the probe's groups withheld; runs alone in tools/bench_in_container.py --without-device-group",
-  "wheelhouse: installs the product from the package index tools/bench/Dockerfile builds into the bench image; runs only where that index is"
+  "wheelhouse: installs the product from the package index tools/bench/Dockerfile builds into the bench image; runs only where that index is",
+  "tdqs_model: scores the real tools/list with the real model through the Claude Code command line; deselected unless AGENTIC_HIL_TDQS_MODEL=1"
 ]
 
 [tool.ruff]
