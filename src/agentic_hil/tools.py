@@ -8,6 +8,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import yaml
 
@@ -3967,6 +3968,37 @@ def unprovisioned_tool_error(tool: str, workspace: Path) -> JsonObject:
     }
 
 
+def root_folder(uri: str) -> Path | None:
+    """The local folder an MCP root names, or None for any root that is not one.
+
+    Decoded once and by hand rather than through `url2pathname`, which on
+    Windows leaves `file:///c%3A/...`, the spelling VS Code sends, as a path
+    with no drive. A root on another machine, or one that is not an existing
+    directory, names nothing this server could bind."""
+    parts = urlsplit(uri)
+    if parts.scheme.lower() != "file" or parts.query or parts.fragment:
+        return None
+    path = unquote(parts.path)
+    if parts.netloc not in ("", "localhost"):
+        if os.name != "nt":
+            return None
+        path = f"//{parts.netloc}{path}"
+    elif os.name == "nt" and len(path) > 2 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    folder = Path(path)
+    if not folder.is_absolute() or not folder.is_dir():
+        return None
+    return folder.resolve()
+
+
+def _loads_configuration(folder: Path) -> bool:
+    try:
+        load_authoritative_config(folder)
+    except ConfigError:
+        return False
+    return True
+
+
 class UnprovisionedToolService:
     """The MCP server for a workspace whose configuration does not exist yet.
 
@@ -3983,6 +4015,35 @@ class UnprovisionedToolService:
         self._frontend = frontend
         self._service: AgenticHILToolService | None = None
         self._lock = threading.RLock()
+        # Whether the host declared at initialize that it answers `roots/list`.
+        # Only then is it asked which folder it has open.
+        self.host_names_folders = False
+
+    @property
+    def movable(self) -> bool:
+        """Whether a folder the host names may still become the workspace.
+
+        Only until a configuration is bound: after that the session has a
+        policy, a state directory and possibly a run, and none of them moves."""
+        with self._lock:
+            return self._service is None
+
+    def serve_host_roots(self, uris: list[str]) -> None:
+        """Serve the folder the host has open, when its roots name exactly one.
+
+        One local folder is that folder, configured or not, so a configuration
+        generated from here is generated for it. Several are narrowed to the ones
+        with a configuration that loads, and serve only if that leaves one. Any
+        other answer leaves the workspace where the server started: guessing
+        between projects would bind the wrong bench's policy."""
+        folders = list(dict.fromkeys(folder for uri in uris if (folder := root_folder(uri)) is not None))
+        if len(folders) > 1:
+            folders = [folder for folder in folders if _loads_configuration(folder)]
+        if len(folders) != 1:
+            return
+        with self._lock:
+            if self._service is None:
+                self.workspace = folders[0]
 
     @property
     def config(self) -> AgenticHILConfig | None:

@@ -15,7 +15,7 @@ Every MCP host starts the same local stdio server from the firmware project root
 
 Host configuration schemas are not portable: VS Code uses `servers`, Claude Code uses `mcpServers`, Codex uses TOML, and OpenCode uses a command array. `agentic-hil agent-install --agent <agent>`, which `agentic-hil setup --agent <agent>` runs first, performs secure user-level registration for Claude Code, Codex, and OpenCode. See [MCP host configuration](mcp-hosts.md) for the remaining hosts. `agentic-hil mcp-config --output .mcp.json` generates only a machine-local Claude-compatible form with an absolute executable path; keep it uncommitted.
 
-`mcp-stdio` discovers the authoritative file from its project working directory. [The authoritative configuration](configuration.md) describes where it is found and how an absolute-path override is selected.
+`mcp-stdio` discovers the authoritative file from its project working directory or, started outside any project, from the folder the host names in its MCP roots. [The authoritative configuration](configuration.md) describes where it is found and how an absolute-path override is selected.
 
 ## The tool surface
 
