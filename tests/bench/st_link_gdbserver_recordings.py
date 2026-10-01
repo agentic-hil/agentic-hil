@@ -131,7 +131,18 @@ END_CANDIDATES: dict[str, tuple[tuple[str, ...], str, object]] = {
     "sigterm": ((), "signal", signal.SIGTERM),
     "sigkill": ((), "signal", signal.SIGKILL),
     "sigkill_slow_refresh": (("-r", "3600"), "signal", signal.SIGKILL),
+    "shared_sigkill": (("-t",), "signal", signal.SIGKILL),
+    "shared_gdb_kill_sigkill": (("-t",), "gdb_then_signal", (GDB_KILL, signal.SIGKILL)),
+    "shared_sigterm": (("-t",), "signal", signal.SIGTERM),
 }
+# `-t` is the server's shared mode: it reaches the probe through stlink-server
+# instead of opening its USB itself. ST's USB driver library connects to it on
+# this port (its own strings carry the number), so each shared cycle starts the
+# stlink-server this variable names with `--auto-exit`, which exits once its last
+# client has gone, and waits for it to listen before the GDB server is started.
+STLINK_SERVER_ENV = "AGENTIC_HIL_RECORDING_STLINK_SERVER"
+STLINK_SERVER_PORT = 7184
+STLINK_SERVER_EXIT_WAIT_S = 5.0
 
 
 def cubeclt_root() -> Path:
@@ -501,6 +512,38 @@ class StLinkRecorder(Recorder):
         record["gdb_exit"] = closed if whole else {"closed": closed["closed"], "error": closed.get("error")}
         return record
 
+    def shared_server_started(self) -> tuple[GdbServer, dict]:
+        """stlink-server for one shared cycle, listening on the port the driver connects to, or the record of why not."""
+        path = os.environ.get(STLINK_SERVER_ENV)
+        if not path or not Path(path).is_file():
+            pytest.fail(f"{STLINK_SERVER_ENV} does not name an stlink-server executable on this bench", pytrace=False)
+        server = self.start([path, "--auto-exit", "--debug", "1"])
+        deadline = time.monotonic() + 10.0
+        record: dict = {"listening_at_s": None}
+        while time.monotonic() < deadline and server.process.poll() is None:
+            with suppress(OSError):
+                if STLINK_SERVER_PORT in listening_ports(server.process.pid):
+                    record["listening_at_s"] = round(time.monotonic() - server.started, 2)
+                    break
+            time.sleep(0.05)
+        return server, record
+
+    def shared_server_end(self, server: GdbServer, *, whole: bool) -> dict:
+        """How long stlink-server took to exit on its own after its client went, and what it printed."""
+        began = time.monotonic()
+        returncode = server.wait_for_exit(STLINK_SERVER_EXIT_WAIT_S)
+        record: dict = {"returncode": returncode, "exited_after_s": round(time.monotonic() - began, 3) if returncode is not None else None}
+        if returncode is None:
+            record["terminated_after_waiting"] = server.terminate()
+        else:
+            for reader in server.readers:
+                reader.join(timeout=5.0)
+        if server in self.live:
+            self.live.remove(server)
+        output = server.output()
+        record["output"] = output if whole else [entry["line"] for entry in output][-6:]
+        return record
+
     def end_cycle(self, how: str, cycle: int, cli_first: bool, cli) -> dict:
         """A session halted, then ended by `how`; the counter before the end and, at the next cycle's connect, after it.
 
@@ -511,11 +554,17 @@ class StLinkRecorder(Recorder):
         other end is followed first by the CLI and every other by the server."""
         extra, _, _ = END_CANDIDATES[how]
         whole = cycle == 1
+        shared = None
+        record: dict = {"cycle": cycle, "first_opener_after_the_end": "cli" if cli_first else "server"}
+        if "-t" in extra:
+            shared, record["shared_server"] = self.shared_server_started()
         server, ready = self.started(["-g", *extra])
-        record: dict = {"cycle": cycle, "first_opener_after_the_end": "cli" if cli_first else "server", "argv_tail": server.argv[1:] if whole else None}
+        record["argv_tail"] = server.argv[1:] if whole else None
         record["ready_at_s"] = ready["at_s"] if ready is not None else None
         if ready is None:
             record["refused"] = self.finish(server)
+            if shared is not None:
+                record["shared_server_end"] = self.shared_server_end(shared, whole=True)
             return record
         client, connect = self.connect(self.port_of(server))
         if whole:
@@ -533,6 +582,8 @@ class StLinkRecorder(Recorder):
         record["end"] = self.end_session(server, client, how, whole=whole)
         output = server.output()
         record["output"] = output if whole else [entry["line"] for entry in output[lines_before_end:]]
+        if shared is not None:
+            record["shared_server_end"] = self.shared_server_end(shared, whole=whole)
         time.sleep(SETTLE_S)
         if cli_first:
             record["cli"] = cli()
