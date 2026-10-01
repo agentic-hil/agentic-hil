@@ -208,6 +208,26 @@ CUBEPROGRAMMER_BUILD_TARGET = "bench-tier-cubeprogrammer"
 DISTRIBUTIONS = ("ubuntu-22.04", "ubuntu-24.04", "debian-12", "fedora-44")
 DISTRIBUTION_HEADS = "tools/bench/distributions"
 SHARED_PART_STARTS = "WORKDIR "
+# Why the optional CubeProgrammer layer cannot be asked for on each head, one
+# reason per head, because they are not the same reason and a sentence that names
+# a package a head does carry sends the operator after the wrong thing. The layer
+# is part of the shared half `compose_dockerfile` carries onto every head, and
+# `--cubeprogrammer-archive` asks for it by `--target`, so the combination is
+# refused up front rather than paid for: left to run it builds the whole shared
+# part first, several minutes, and fails at the last stage. A new head needs an
+# entry of its own here, which a test holds this list to.
+CUBEPROGRAMMER_HEAD_REFUSALS = {
+    # Fedora has no apt at all, so the install line cannot even start.
+    "fedora-44": "Fedora packages no `apt-get`, which is what that layer installs its packages with",
+    # Neither release went through the 64-bit `time_t` transition, so the package
+    # is `libglib2.0-0` there and the name the layer asks for does not exist.
+    "ubuntu-22.04": "Ubuntu 22.04 has no `libglib2.0-0t64`, the name that layer installs, because it predates the 64-bit `time_t` transition that renamed it",
+    "debian-12": "Debian 12 has no `libglib2.0-0t64`, the name that layer installs, because it predates the 64-bit `time_t` transition that renamed it",
+    # Noble completed that transition and does carry the package, so the honest
+    # reason for this head is the one the whole layer rests on rather than a
+    # missing library: it is built, installed and smoke-tested against one base.
+    "ubuntu-24.04": "that layer is only built and recorded against the default image's own base (python:3.12-slim), and no build of it on another base has been measured",
+}
 # The label tools/bench/Dockerfile puts on the image. Earlier builds lose the
 # tag to the newest and are pruned by it; nothing else carries it.
 IMAGE_LABEL = "agentic-hil.image=bench-tier"
@@ -1399,21 +1419,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
         if options.cubeprogrammer_archive is not None and options.distribution is not None:
             # Refused here, before the lock and before any build, the way
-            # --live-device-tree is refused below. The optional CubeProgrammer
-            # stage is part of the shared half of the default Dockerfile, so
-            # `compose_dockerfile` carries it onto every distribution's head and
-            # --cubeprogrammer-archive asks for it by `--target`. Its package
-            # install is Debian's: `apt-get` is not on Fedora at all, and
-            # `libglib2.0-0t64` is not in Ubuntu 22.04 or Debian 12 either, so
-            # three of the four distributions cannot satisfy this combination and
-            # the fourth is the default image's own base anyway. Left to run, it
-            # builds the whole shared part first, several minutes, and fails at
-            # the last stage: loud, but paid for.
+            # --live-device-tree is refused below, with this head's own reason out
+            # of CUBEPROGRAMMER_HEAD_REFUSALS: the four are refused for three
+            # different reasons, and one of them carries the library the other
+            # three are missing.
             raise Refused(
                 EXIT_CANNOT_RUN_HERE,
-                f"--cubeprogrammer-archive cannot be combined with --distribution {options.distribution}: the optional "
-                "CubeProgrammer layer installs its packages with the default image's own package manager and names a "
-                "Debian trixie library, which no distribution head here carries; nothing was built",
+                f"--cubeprogrammer-archive cannot be combined with --distribution {options.distribution}: "
+                f"{CUBEPROGRAMMER_HEAD_REFUSALS[options.distribution]}; nothing was built",
             )
         runtime = pick_runtime(options.runtime)
         if options.live_device_tree and runtime != "podman":

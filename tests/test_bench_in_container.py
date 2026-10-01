@@ -647,12 +647,14 @@ def test_a_cubeprogrammer_archive_on_another_distribution_is_refused_before_anyt
     `compose_dockerfile` takes the default file from its first `WORKDIR` on, which
     includes the optional CubeProgrammer stage, so that stage really is built on
     whatever base the head brought, and `--cubeprogrammer-archive` asks for it by
-    `--target`. Its package install is Debian trixie's: `apt-get` does not exist
-    on Fedora, and `libglib2.0-0t64` is in neither Ubuntu 22.04 nor Debian 12, so
-    three of the four cannot satisfy it and the fourth is the default image's own
-    base. It failed loudly, so nothing green came out of it, but only after the
-    whole shared part had been built. This is the same up-front refusal
-    `--live-device-tree` gets when the runtime is not podman.
+    `--target`. Its package install is the default base's: `apt-get` does not
+    exist on Fedora, and `libglib2.0-0t64` is in neither Ubuntu 22.04 nor Debian
+    12. Ubuntu 24.04 does carry that package, and is refused for the other
+    reason: the layer is only built and recorded against the default image's own
+    base, and nothing here has measured it anywhere else. Left to run, it failed
+    loudly, so nothing green came out of it, but only after the whole shared part
+    had been built. This is the same up-front refusal `--live-device-tree` gets
+    when the runtime is not podman.
     """
     archive = tmp_path / "SetupSTM32CubeProgrammer_linux_64.zip"
     archive.write_bytes(b"test installer archive")
@@ -666,9 +668,43 @@ def test_a_cubeprogrammer_archive_on_another_distribution_is_refused_before_anyt
     assert "--cubeprogrammer-archive cannot be combined with --distribution" in said, said
     assert distribution in said, said
     assert "nothing was built" in said, said
+    # The reason this head is refused for, and not another head's: a sentence that
+    # says a head lacks a package it has sends the operator after the wrong thing.
+    assert bench_in_container.CUBEPROGRAMMER_HEAD_REFUSALS[distribution] in said, said
     # And the lock was never taken, so a refused combination cannot make the next
     # run queue behind it.
     assert not run_lock.lock_path().exists()
+
+
+def test_each_distribution_head_is_refused_the_optional_layer_for_a_reason_that_is_true_of_it() -> None:
+    """One reason per head, and no reason that is not that head's.
+
+    The refusal said the optional layer "names a Debian trixie library, which no
+    distribution head here carries", and Ubuntu 24.04 carries `libglib2.0-0t64`:
+    noble completed the 64-bit `time_t` transition and that is the package name
+    there. That head was being told it lacks a library it has, which is a sentence
+    an operator cannot act on, and the comment beside it called the same head the
+    default image's own base, which it is not: the default image is built on
+    `docker.io/library/python`, a Debian, and that head is Ubuntu.
+
+    The library is named only where it is really missing. For the head that has
+    it, the honest reason is the one the whole optional layer rests on: it is built
+    and recorded against the default base alone, and no build of it anywhere else
+    has been measured.
+    """
+    reasons = bench_in_container.CUBEPROGRAMMER_HEAD_REFUSALS
+
+    assert set(reasons) == set(bench_in_container.DISTRIBUTIONS), reasons
+    assert "apt-get" in reasons["fedora-44"], reasons["fedora-44"]
+    for head in ("ubuntu-22.04", "debian-12"):
+        assert "libglib2.0-0t64" in reasons[head], reasons[head]
+    # The head that carries the package is not told it is missing, and the layer's
+    # one measured base is named instead.
+    noble = reasons["ubuntu-24.04"]
+    assert "libglib2.0-0t64" not in noble, noble
+    assert "python:3.12-slim" in noble, noble
+    # And no head is told that none of them carries it.
+    assert not any("no distribution head" in reason for reason in reasons.values()), reasons
 
 
 def test_earlier_images_of_the_tier_are_pruned_after_the_build(machine: SimpleNamespace) -> None:
