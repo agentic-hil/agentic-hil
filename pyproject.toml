@@ -77,7 +77,7 @@ dev = [
 
 [project.urls]
 Homepage = "https://github.com/agentic-hil/agentic-hil"
-Documentation = "https://agentic-hil.readthedocs.io/"
+Documentation = "https://agentic-hil.github.io/docs/"
 Repository = "https://github.com/agentic-hil/agentic-hil.git"
 Changelog = "https://github.com/agentic-hil/agentic-hil/blob/master/CHANGELOG.md"
 Issues = "https://github.com/agentic-hil/agentic-hil/issues"
