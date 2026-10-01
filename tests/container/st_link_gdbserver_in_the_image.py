@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -42,10 +43,17 @@ def test_only_the_parts_the_bench_drives_were_extracted() -> None:
 
 
 def test_the_product_finds_the_extracted_stlink_server_on_path() -> None:
-    from agentic_hil.backends import stlink
-
+    """Asked in a child, as the product runs: this suite hides any stlink-server from the test process itself."""
     assert shutil.which("stlink-server") == str(STLINK_SERVER)
-    assert stlink.find_stlink_server() == str(STLINK_SERVER)
+    found = subprocess.run(
+        [sys.executable, "-c", "from agentic_hil.backends.stlink import find_stlink_server; print(find_stlink_server())"],
+        capture_output=True,
+        text=True,
+        timeout=scaled_time_bound(60),
+        check=False,
+    )
+    assert found.returncode == 0, found
+    assert found.stdout.strip() == str(STLINK_SERVER), found
 
 
 def answer_to(record: dict) -> dict:
