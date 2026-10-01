@@ -19,8 +19,9 @@ as `st-link-gdbserver-recording.json`, the second round, the teardown one, as
 `st-link-gdbserver-teardown-recording.json`, the third, the restart one, as
 `st-link-gdbserver-restart-recording.json`, the fourth, the ends one, as
 `st-link-gdbserver-ends-recording.json`, the fifth, the stops one, as
-`st-link-session-stops-recording.json`, and the sixth, the stlink-server one,
-as `st-link-server-race-recording.json`; each is always attached to the test
+`st-link-session-stops-recording.json`, the sixth, the stlink-server one,
+as `st-link-server-race-recording.json`, and the seventh, the restart one
+through stlink-server, as `st-link-server-restart-recording.json`; each is always attached to the test
 report as a property as well, which is how a run in the bench image, whose
 environment this module cannot set, hands its recording out. The fourth also makes calls through the product's
 own MCP server, on a copy of the tier's configuration with the probe on `type:
@@ -191,6 +192,22 @@ RACE_VARIANTS: dict[str, dict] = {
 }
 # Refused starts in a row after which the round stops starting servers at a probe that answers none.
 RACE_REFUSALS_IN_A_ROW_LIMIT = 5
+# The seventh round: the same starts with no pause before them. In the sixth
+# round every start came up, with the tier's pause after each cycle; in the
+# tier, the starts that were refused were the ones made with no pause after the
+# session before them had ended. Each block takes one way for stlink-server to
+# live: started for every session and ended with it in the product's order (the
+# GDB server killed, stlink-server ended at once, then GDB closed), or started
+# once and kept running across the block's sessions.
+RESTART_OUTPUT_NAME = "st-link-server-restart-recording.json"
+RESTART_CYCLES_ENV = "AGENTIC_HIL_RECORDING_RESTART_CYCLES"
+DEFAULT_RESTART_CYCLES = 40
+RESTART_BLOCKS: tuple[tuple[str, dict], ...] = (
+    ("restarted_at_once", {"stlink_server": "per_session", "pause_before_start_s": 0.0}),
+    ("kept_running", {"stlink_server": "kept_running", "pause_before_start_s": 0.0}),
+    ("restarted_after_a_pause", {"stlink_server": "per_session", "pause_before_start_s": 2.0}),
+    ("restarted_at_once_again", {"stlink_server": "per_session", "pause_before_start_s": 0.0}),
+)
 
 
 def cubeclt_root() -> Path:
@@ -697,6 +714,70 @@ class StLinkRecorder(Recorder):
         record["probe_server_output"] = probe_server.output()
         record["left_running"] = [process["name"] for process in all_processes() if process["name"] in ("stlink-server", "ST-LINK_gdbserver")]
         return record
+
+    def probe_server_started(self, stlink_server: str) -> tuple[GdbServer, int | None]:
+        """stlink-server started as the product starts it, and how long it took to listen, or None if it never did."""
+        probe_server = GdbServer([stlink_server], self.environment, str(Path(stlink_server).parent))
+        self.live.append(probe_server)
+        deadline = probe_server.started + STLINK_SERVER_LISTEN_TIMEOUT_S
+        while time.monotonic() < deadline and probe_server.process.poll() is None:
+            if stlink_server_listening(STLINK_SERVER_PORT):
+                return probe_server, int((time.monotonic() - probe_server.started) * 1000)
+            time.sleep(0.05)
+        return probe_server, None
+
+    def probe_server_ended(self, probe_server: GdbServer) -> dict:
+        ended = probe_server.terminate()
+        if probe_server in self.live:
+            self.live.remove(probe_server)
+        return ended
+
+    def restart_cycle(self, block: str, cycle: int, stlink_server: str, kept: GdbServer | None, ended_at: float | None, *, whole: bool) -> tuple[dict, float]:
+        """One session start in `block` and the product's stop after it; returns the record and when the cycle's last end was.
+
+        With `kept` the start reaches that stlink-server, which stays running;
+        without, one is started for this session and ended with it, in the
+        product's order. `ended_at` is when the cycle before ended, so the record
+        says how long after it this start was made."""
+        record: dict = {"block": block, "cycle": cycle}
+        began = time.monotonic()
+        if ended_at is not None:
+            record["started_after_the_last_end_ms"] = int((began - ended_at) * 1000)
+        if kept is None:
+            probe_server, listening_after_ms = self.probe_server_started(stlink_server)
+            record["probe_server_listening_after_ms"] = listening_after_ms
+            lines_before = 0
+        else:
+            probe_server, listening_after_ms = kept, 0
+            lines_before = len(kept.output())
+        if listening_after_ms is not None:
+            port = free_port()
+            server = GdbServer(self.server_argv(port, extra=["-g", "-t"]), self.environment, self.cwd)
+            self.live.append(server)
+            if whole:
+                record["argv_tail"] = server.argv[1:]
+            ready = self.wait_until_listening(server, port, STARTUP_TIMEOUT_S)
+            record["ready_at_s"] = ready["at_s"] if ready is not None else None
+            if ready is None:
+                record["refused"] = self.finish(server)
+            else:
+                client, connect = self.connect(port)
+                if whole:
+                    record["connect"] = connect
+                at_connect = self.core_state(client)
+                record["at_connect"] = at_connect if whole else {key: at_connect[key] for key in ("s_halt", COUNTER, "pc")}
+                record["end"] = self.kill(server)
+                if kept is None:
+                    record["probe_server_end"] = self.probe_server_ended(probe_server)
+                closed = self.close_client(client)
+                record["gdb_exit"] = closed if whole else {"closed": closed["closed"], "error": closed.get("error")}
+                output = server.output()
+                record["gdb_server_output"] = output if whole else [line for line in output if line["stream"] == "stderr"]
+        if kept is None and "probe_server_end" not in record:
+            record["probe_server_end"] = self.probe_server_ended(probe_server)
+        record["probe_server_output"] = probe_server.output()[lines_before:]
+        record["left_running"] = sorted(process["name"] for process in all_processes() if process["name"] in ("stlink-server", "ST-LINK_gdbserver"))
+        return record, time.monotonic()
 
     def verbose_idle(self, log_file: Path) -> dict:
         """What the server prints, at full logging, while the core sits halted with GDB idle, then runs, then is halted again.
@@ -1336,6 +1417,87 @@ def test_record_st_link_server_race(bench: Bench, firmware: Path, gdb: None, tmp
         recording["scenarios"]["race"] = entries
         recording["summary"] = summarize_race(entries)
         write_recording(recording, root, private_values, record_property, RACE_OUTPUT_NAME)
+        restored = put_on_board(bench, firmware)
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+
+
+def summarize_restarts(entries: list[dict]) -> dict:
+    """Per block: the starts, the refused ones with the decisive lines of both servers, and whether the next start came up."""
+    summary: dict = {}
+    for block, _ in RESTART_BLOCKS:
+        cycles = [entry for entry in entries if entry["block"] == block]
+        refused = [entry for entry in cycles if entry.get("ready_at_s") is None]
+
+        def lines(entry: dict, key: str) -> list[str]:
+            return [line["line"] for line in entry.get(key) or [] if isinstance(line, dict)]
+
+        following = []
+        for entry in refused:
+            index = entries.index(entry)
+            if index + 1 < len(entries):
+                following.append({"cycle": entry["cycle"], "next_block": entries[index + 1]["block"], "next_came_up": entries[index + 1].get("ready_at_s") is not None})
+        summary[block] = {
+            "cycles": len(cycles),
+            "refused_in_cycles": [entry["cycle"] for entry in refused],
+            "refused_reasons": sorted({line for entry in refused for line in lines(entry.get("refused") or {}, "output") if line.startswith("Reason:")}),
+            "probe_server_lines_at_refusals": sorted({line for entry in refused for line in lines(entry, "probe_server_output") if line.startswith("Error:") and "recv returned 0" not in line}),
+            "probe_server_open_dev_fail_in_cycles": [entry["cycle"] for entry in cycles if any("OPEN_DEV FAIL" in line for line in lines(entry, "probe_server_output"))],
+            "after_each_refusal": following,
+            "started_after_the_last_end_ms": sorted(entry["started_after_the_last_end_ms"] for entry in cycles if "started_after_the_last_end_ms" in entry),
+            "left_running_after_a_cycle": sorted({name for entry in cycles for name in entry.get("left_running") or []}),
+            "not_halted_at_connect_in_cycles": [entry["cycle"] for entry in cycles if "at_connect" in entry and entry["at_connect"].get("s_halt") is not True],
+        }
+    return summary
+
+
+def test_record_st_link_server_restarts(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
+    """The seventh round: session starts through stlink-server with no pause before them, block after block.
+
+    The blocks run in the order `RESTART_BLOCKS` lists them, the same number of
+    cycles each; the one that keeps stlink-server running starts it once,
+    before its first cycle, and ends it after its last. A start refused that
+    many times in a row ends the block early, not the round."""
+    root, recorder, private_values, recording = recording_for(bench, firmware, tmp_path)
+    stlink_server = os.environ.get(STLINK_SERVER_ENV) or shutil.which("stlink-server")
+    if not stlink_server or not Path(stlink_server).is_file():
+        pytest.fail(f"no stlink-server on PATH and none named by {STLINK_SERVER_ENV}", pytrace=False)
+    cycles = int(os.environ.get(RESTART_CYCLES_ENV) or DEFAULT_RESTART_CYCLES)
+    recording["restarts"] = {
+        "blocks": [{"block": block, **settings} for block, settings in RESTART_BLOCKS],
+        "cycles_per_block": cycles,
+        "stlink_server_sha256": hashlib.sha256(Path(stlink_server).read_bytes()).hexdigest(),
+        "stlink_server_on_path": shutil.which("stlink-server") == stlink_server,
+        "in_a_container": {"dockerenv": Path("/.dockerenv").exists(), "containerenv": Path("/run/.containerenv").exists()},
+    }
+    entries: list[dict] = []
+    ended_at: float | None = None
+    try:
+        for block, settings in RESTART_BLOCKS:
+            kept: GdbServer | None = None
+            if settings["stlink_server"] == "kept_running":
+                kept, listening_after_ms = recorder.probe_server_started(stlink_server)
+                recording["restarts"][f"{block}_listening_after_ms"] = listening_after_ms
+                if listening_after_ms is None:
+                    recording["restarts"][f"{block}_not_listening"] = recorder.probe_server_ended(kept)
+                    continue
+            refusals_in_a_row = 0
+            for cycle in range(1, cycles + 1):
+                if settings["pause_before_start_s"]:
+                    time.sleep(settings["pause_before_start_s"])
+                entry, ended_at = recorder.restart_cycle(block, cycle, stlink_server, kept, ended_at, whole=cycle == 1)
+                entries.append(entry)
+                refusals_in_a_row = refusals_in_a_row + 1 if entry.get("ready_at_s") is None else 0
+                if refusals_in_a_row >= RACE_REFUSALS_IN_A_ROW_LIMIT:
+                    recording["restarts"][f"{block}_ended_early"] = f"{refusals_in_a_row} starts in a row were refused"
+                    break
+            if kept is not None:
+                recording["restarts"][f"{block}_probe_server_end"] = recorder.probe_server_ended(kept)
+                ended_at = time.monotonic()
+    finally:
+        recorder.cleanup()
+        recording["scenarios"]["restarts"] = entries
+        recording["summary"] = summarize_restarts(entries)
+        write_recording(recording, root, private_values, record_property, RESTART_OUTPUT_NAME)
         restored = put_on_board(bench, firmware)
         assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
 
