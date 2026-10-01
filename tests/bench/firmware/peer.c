@@ -170,8 +170,12 @@
  * failed for a controller that would not start; `queued` the frames waiting
  * to be sent, the ones in the mailboxes included; `sent` the frames the
  * controller confirmed; `received` the frames heard; `answered` the frames a
- * rule answered; `lost` the frames heard and not kept (a receive FIFO
- * overrun, or the receive ring full); `unsent` the frames that will never be
+ * rule answered; `lost` the frames heard and not kept (the receive ring full,
+ * a receive FIFO overrun, or a mode switch that found the ring not empty), and
+ * a lower bound rather than a count whenever the FIFO overran: the controller
+ * reports an overrun as one flag however many frames it dropped while FIFO 0
+ * was full, and this counts that flag once, where the ring-full case counts
+ * every frame; `unsent` the frames that will never be
  * sent (an answer that found 16 waiting, or what a mode switch dropped);
  * `tec` and `rec` the controller's error counters; `state` active, warning,
  * passive or busoff. `digest` covers every frame heard, in whatever order:
@@ -1303,6 +1307,12 @@ void CAN1_RX0_IRQHandler(void)
         }
     }
     if ((CAN1_RF0R & CAN_RF0R_FOVR0) != 0U) {
+        /* One flag, however many frames the controller dropped while FIFO 0 was
+         * full: the hardware gives a bit and no count. Counted as one, which
+         * makes `can_lost` a lower bound whenever an overrun happened, and the
+         * header comment says so rather than claiming a number the controller
+         * never reported. The ring-full branch above does count per frame, so
+         * the two halves of this statistic are not the same kind of number. */
         CAN1_RF0R = CAN_RF0R_FOVR0;
         can_lost++;
     }
@@ -1563,7 +1573,18 @@ static int can_start(uint32_t mode)
 {
     RCC_APB1RSTR |= CAN1RST;
     RCC_APB1RSTR &= ~CAN1RST;
+    /* Whatever is still in the receive ring is counted as it is dropped, and
+     * both happen with interrupts off so no frame can arrive between the count
+     * and the flush. `can_reset` zeroes the statistics after this, so there the
+     * count is discarded with everything else; `can_switch` does not, and that
+     * is the path this exists for. It takes `can_take_received()` once and then
+     * waits for the controller, and a frame still in FIFO 0 when the mailboxes
+     * went empty reaches the ring through CAN1_RX0_IRQHandler a few
+     * microseconds later, after that call. Flushed without counting, such a
+     * frame was heard by the controller and appeared in neither `received` nor
+     * `lost` nor the digest, against what `lost` is documented to cover. */
     interrupts_off();
+    can_lost += can_rx_head - can_rx_tail;
     can_rx_tail = can_rx_head;
     interrupts_on();
 
