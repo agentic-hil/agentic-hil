@@ -57,6 +57,7 @@ CALIBRATION_RECORD = TDQS_DIRECTORY / "calibration.json"
 REPORT_JSON = "tool-definition-score.json"
 REPORT_MARKDOWN = "tool-definition-score.md"
 UPSTREAM_README = "https://raw.githubusercontent.com/glama-ai/tool-definition-quality-score/{commit}/README.md"
+REGISTRY_SOURCE = "https://glama.ai/mcp/servers/agentic-hil/agentic-hil"
 
 # Computing the score: the six dimensions in their published order, with their
 # integer weights in hundredths.
@@ -1300,7 +1301,11 @@ def _camel_to_snake(name: str) -> str:
 
 
 def registry_capture(path: Path) -> tuple[dict, list[dict]]:
-    """A capture of the registry's published scores: {"server": {...}, "tools": [{name, definition, qualityScore}]}."""
+    """A capture of the registry's published scores.
+
+    The file holds {"release", "server": {...}, "tools": [{name, definition,
+    qualityScore}]}. Only the numbers, tiers and the scoring time are kept;
+    the registry's own justification texts are not."""
     capture = json.loads(Path(path).read_text(encoding="utf-8"))
     published: dict[str, dict] = {}
     definitions = []
@@ -1308,7 +1313,57 @@ def registry_capture(path: Path) -> tuple[dict, list[dict]]:
         quality = item["qualityScore"]
         published[item["name"]] = {"scores": {_camel_to_snake(key): quality[key] for key in quality if _camel_to_snake(key) in DIMENSIONS}, "tdqs": quality["tdqs"], "tier": quality.get("tier")}
         definitions.append(item["definition"])
-    return {"server": capture.get("server", {}), "tools": published}, definitions
+    server = {key: value for key, value in capture.get("server", {}).items() if isinstance(value, (int, float)) or key.endswith("Tier") or key == "scoredAt"}
+    return {"release": capture["release"], "server": server, "tools": published}, definitions
+
+
+def definition_differences(published: Sequence[dict], tools: Sequence[dict]) -> dict[str, list[str]]:
+    """Per tool, the fields (for an object field, its keys) where a published definition differs from an export."""
+    exported = {item["name"]: item for item in tools}
+    differences = {}
+    for item in published:
+        other = exported.get(item["name"], {})
+        paths: list[str] = []
+        for field in DEFINITION_FIELDS:
+            mine, theirs = item.get(field), other.get(field)
+            if mine == theirs:
+                continue
+            if isinstance(mine, dict) and isinstance(theirs, dict):
+                paths.extend(f"{field}.{key}" for key in sorted(set(mine) | set(theirs)) if mine.get(key) != theirs.get(key))
+            else:
+                paths.append(field)
+        if paths:
+            differences[item["name"]] = paths
+    return differences
+
+
+def calibration_export(definitions: Sequence[dict], exported: dict) -> dict:
+    """The registry's definitions, in the export's listing order: the same definitions the registry scored."""
+    published = {item["name"]: item for item in definitions}
+    if sorted(published) != sorted(item["name"] for item in exported["tools"]):
+        raise InvalidComparison("The registry lists other tools than the export, so their scores cannot be compared.")
+    return export_from_tools([published[item["name"]] for item in exported["tools"]], exported["serverName"], exported["serverVersion"])
+
+
+def calibration_record(record: dict, registry: dict, definitions: Sequence[dict], commit: str, exported: dict, sides: Sequence[dict]) -> dict:
+    """The calibration record: the registry's scores, the scored runs, and where the definitions differ from the commit."""
+    scored = calibration_export(definitions, exported)
+    if any(side["setHash"] != scored["setHash"] for side in sides):
+        raise InvalidComparison("A calibration run scored other definitions than the registry's.")
+    runs = [_run_record(side) for side in sides]
+    return {
+        "version_digest": version_digest(record),
+        "registry": {"source": REGISTRY_SOURCE, "release": registry["release"], "server": registry["server"], "setHash": set_hash(definitions), "tools": registry["tools"]},
+        "evaluated": {
+            "commit": commit,
+            "setHash": scored["setHash"],
+            "toolCount": len(scored["tools"]),
+            "commitSetHash": exported["setHash"],
+            "definitionDifferences": definition_differences(definitions, exported["tools"]),
+        },
+        "runs": runs,
+        "summary": json.loads(report_json(calibration_summary(registry["tools"], [run["tools"] for run in runs]))),
+    }
 
 
 def _run_record(side: dict) -> dict:
@@ -1632,20 +1687,12 @@ def _calibrate(args: argparse.Namespace, record: dict, environ: dict[str, str], 
     registry, definitions = registry_capture(Path(args.calibrate))
     commit = rev_parse(repo, args.head or "HEAD")
     exported = export_revision(repo, commit) if args.head else export_tools(repo / "src")
-    if set_hash(definitions) != exported["setHash"]:
-        diff = diff_definitions(definitions, exported["tools"])
-        raise InvalidComparison(f"The registry scored other definitions than {commit}: added {diff.added}, removed {diff.removed}, changed {diff.changed}.")
+    scored = calibration_export(definitions, exported)
     prompts = load_prompts(record, Path(args.cache_dir) if args.cache_dir else default_cache_dir(environ), fetch_url)
     scorer = make_scorer(prompts, record, args, environ)
     digest = version_digest(record)
-    runs = [_run_record(score_side(exported, scorer, digest)) for _ in range(args.runs)]
-    calibration = {
-        "version_digest": digest,
-        "registry": {"source": "https://glama.ai/mcp/servers/agentic-hil/agentic-hil", **registry, "setHash": set_hash(definitions)},
-        "evaluated": {"commit": commit, "setHash": exported["setHash"], "toolCount": len(exported["tools"])},
-        "runs": runs,
-        "summary": json.loads(report_json(calibration_summary(registry["tools"], [run["tools"] for run in runs]))),
-    }
+    sides = [score_side(scored, scorer, digest) for _ in range(args.runs)]
+    calibration = calibration_record(record, registry, definitions, commit, exported, sides)
     target = Path(args.report_dir)
     target.mkdir(parents=True, exist_ok=True)
     (target / "calibration.json").write_text(json.dumps(calibration, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

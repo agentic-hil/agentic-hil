@@ -235,6 +235,12 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     "src/agentic_hil/knowledge.py": "prose reference to the release a behaviour changed in",
     "src/agentic_hil/schemas/config.schema.json": "prose reference to the release a key was removed in",
     "tests/test_hardening.py": "prose reference to the release a behaviour changed in",
+    # The tool-definition score's calibration compares the gate with the scores
+    # a registry published for one release, and names that release. It is a
+    # measurement of that release and must not follow this one.
+    "docs/tool-definition-score.md": "names the release a registry scored for the calibration",
+    "tests/test_tool_definition_score.py": "names the release a registry scored for the calibration",
+    "tools/tdqs/calibration.json": "names the release a registry scored for the calibration",
 }
 
 

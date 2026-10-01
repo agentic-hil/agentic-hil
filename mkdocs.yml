@@ -16,6 +16,7 @@ nav:
   - Configuration: configuration.md
   - MCP hosts: mcp-hosts.md
   - MCP tools: mcp-tools.md
+  - Tool definition score: tool-definition-score.md
   - Testing: testing.md
   - Bench battery: bench-battery.md
   - Test plan contract: test-plan-contract.md

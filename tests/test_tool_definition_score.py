@@ -1824,6 +1824,55 @@ def test_the_calibration_summary_compares_per_tool_and_per_dimension() -> None:
     assert [item["tool"] for item in summary["largestDifferences"]] == ["alpha_tool", "beta_tool"]
 
 
+def test_a_published_definition_is_compared_field_by_field_and_key_by_key() -> None:
+    """The registry may publish a definition with less than the server sends: each
+    difference is named down to the key of an object field."""
+    sent = [
+        tool("alpha_tool", annotations={"title": "Alpha", "readOnlyHint": True}),
+        tool("beta_tool", "Beta text."),
+        tool("gamma_tool"),
+    ]
+    published = [
+        tool("alpha_tool", annotations={"readOnlyHint": True}),
+        tool("beta_tool", "Other text.", title=None),
+        tool("gamma_tool"),
+    ]
+
+    assert tds.definition_differences(published, sent) == {"alpha_tool": ["annotations.title"], "beta_tool": ["description"]}
+
+
+def test_the_calibration_scores_the_published_definitions_in_listing_order() -> None:
+    sent = export([tool("beta_tool", annotations={"title": "Beta"}), tool("alpha_tool")])
+    published = [tool("alpha_tool"), tool("beta_tool", annotations={})]
+
+    scored = tds.calibration_export(published, sent)
+
+    assert [item["name"] for item in scored["tools"]] == ["beta_tool", "alpha_tool"]
+    assert scored["setHash"] == tds.set_hash(published) != sent["setHash"]
+
+
+def test_a_registry_with_other_tools_cannot_be_calibrated_against() -> None:
+    with pytest.raises(tds.InvalidComparison):
+        tds.calibration_export([tool("alpha_tool")], export([tool("alpha_tool"), tool("beta_tool")]))
+
+
+def test_the_calibration_record_refuses_a_run_over_other_definitions() -> None:
+    published = [tool("alpha_tool", annotations={"readOnlyHint": True})]
+    sent = export([tool("alpha_tool", annotations={"title": "Alpha", "readOnlyHint": True})])
+    registry = {"release": "1.0", "server": {}, "tools": {"alpha_tool": per_dimension((4,) * 6)}}
+    scorer = FakeScorer(default=tool_answer((4,) * 6))
+    record = standin_record()
+    right = tds.score_side(tds.calibration_export(published, sent), scorer, tds.version_digest(record))
+    wrong = tds.score_side(sent, scorer, tds.version_digest(record))
+
+    calibration = tds.calibration_record(record, registry, published, "0" * 40, sent, [right] * 3)
+
+    assert calibration["evaluated"]["setHash"] == calibration["registry"]["setHash"] != calibration["evaluated"]["commitSetHash"]
+    assert calibration["evaluated"]["definitionDifferences"] == {"alpha_tool": ["annotations.title"]}
+    with pytest.raises(tds.InvalidComparison):
+        tds.calibration_record(record, registry, published, "0" * 40, sent, [right, right, wrong])
+
+
 def test_the_calibration_record_belongs_to_this_version_record() -> None:
     """A change to anything in the version record needs a new calibration."""
     assert tds.load_calibration_record()["version_digest"] == tds.version_digest(tds.load_version_record())
@@ -1839,6 +1888,7 @@ def test_the_committed_calibration_record_holds_together() -> None:
     assert registry["source"].startswith("https://glama.ai/mcp/servers/agentic-hil/agentic-hil")
     assert registry["release"] == "0.22.1-dev.0"
     assert registry["setHash"] == calibration["evaluated"]["setHash"]
+    assert (calibration["evaluated"]["commitSetHash"] == registry["setHash"]) == (not calibration["evaluated"]["definitionDifferences"])
     assert re.fullmatch(r"[0-9a-f]{40}", calibration["evaluated"]["commit"])
     assert len(registry["tools"]) == calibration["evaluated"]["toolCount"] == 44
     assert len(calibration["runs"]) == 3
