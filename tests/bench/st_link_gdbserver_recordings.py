@@ -21,13 +21,16 @@ as `st-link-gdbserver-recording.json`, the second round, the teardown one, as
 `st-link-gdbserver-ends-recording.json`, the fifth, the stops one, as
 `st-link-session-stops-recording.json`, the sixth, the stlink-server one,
 as `st-link-server-race-recording.json`, and the seventh, the restart one
-through stlink-server, as `st-link-server-restart-recording.json`; each is always attached to the test
+through stlink-server, as `st-link-server-restart-recording.json`, and the
+eighth, the sharing one, as `st-link-server-sharing-recording.json`; each is always attached to the test
 report as a property as well, which is how a run in the bench image, whose
 environment this module cannot set, hands its recording out. The fourth also makes calls through the product's
 own MCP server, on a copy of the tier's configuration with the probe on `type:
 stlink` and on the tier's own configuration, because what it asks is whether
 the product's next call still reaches the probe. The fifth runs the product's
-own sessions through that server and drives no server or GDB itself.
+own sessions through that server and drives no server or GDB itself. The
+eighth does both: the product's calls and sessions, and a server and GDB of
+its own beside them.
 """
 
 from __future__ import annotations
@@ -208,6 +211,14 @@ RESTART_BLOCKS: tuple[tuple[str, dict], ...] = (
     ("restarted_after_a_pause", {"stlink_server": "per_session", "pause_before_start_s": 2.0}),
     ("restarted_at_once_again", {"stlink_server": "per_session", "pause_before_start_s": 0.0}),
 )
+# The eighth round: stlink-server shared. Whether one left running with no
+# client keeps the probe from the product's other openers (STM32_Programmer_CLI
+# and OpenOCD), and what a second GDB server on the same probe, through the same
+# stlink-server, can still do once the product's session that started that
+# stlink-server has stopped.
+SHARING_OUTPUT_NAME = "st-link-server-sharing-recording.json"
+SHARING_CYCLES_ENV = "AGENTIC_HIL_RECORDING_SHARING_CYCLES"
+DEFAULT_SHARING_CYCLES = 3
 
 
 def cubeclt_root() -> Path:
@@ -1498,6 +1509,156 @@ def test_record_st_link_server_restarts(bench: Bench, firmware: Path, gdb: None,
         recording["scenarios"]["restarts"] = entries
         recording["summary"] = summarize_restarts(entries)
         write_recording(recording, root, private_values, record_property, RESTART_OUTPUT_NAME)
+        restored = put_on_board(bench, firmware)
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+
+
+def usb_handles(pid: int) -> int | None:
+    """How many USB device nodes a process holds open, read from its /proc fd links; None where they cannot be read."""
+    try:
+        return len([fd for fd in Path(f"/proc/{pid}/fd").iterdir() if os.readlink(fd).startswith("/dev/bus/usb/")])
+    except OSError:
+        return None
+
+
+def stlink_servers_running() -> list[int]:
+    return sorted(process["pid"] for process in all_processes() if process["name"] == "stlink-server")
+
+
+def end_stlink_servers_left_running() -> list[dict]:
+    """End every stlink-server still running in this PID namespace, whoever started it, and say how each ended."""
+    ended = []
+    for pid in stlink_servers_running():
+        with suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and pid in stlink_servers_running():
+            time.sleep(0.05)
+        gone = pid not in stlink_servers_running()
+        if not gone:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+        ended.append({"ended_by_sigterm": gone})
+    return ended
+
+
+def test_record_st_link_server_sharing(
+    bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property, stlink_bench: Bench, stlink_servers, mcp_servers
+) -> None:
+    """The eighth round: stlink-server left running with no client, and a second GDB server sharing it.
+
+    The idle cycles run a session through an stlink-server started here, kill
+    its GDB server, and then, with that stlink-server still running and no
+    client on it, call the product's `probe_target` on the stlink
+    configuration (STM32_Programmer_CLI) and on the tier's own (OpenOCD); then
+    the same two once it has ended. The overlap cycles start the product's own
+    attach session, which starts its stlink-server, attach a second GDB server
+    with `-t` and GDB to the same probe, stop the product's session, and then
+    have the second halt the core, run it, halt it again and end. Whatever
+    stlink-server is left running at the end of a cycle is ended here."""
+    root, recorder, private_values, recording = recording_for(bench, firmware, tmp_path)
+    stlink_server = os.environ.get(STLINK_SERVER_ENV) or shutil.which("stlink-server")
+    if not stlink_server or not Path(stlink_server).is_file():
+        pytest.fail(f"no stlink-server on PATH and none named by {STLINK_SERVER_ENV}", pytrace=False)
+    cycles = int(os.environ.get(SHARING_CYCLES_ENV) or DEFAULT_SHARING_CYCLES)
+    recording["sharing"] = {"cycles": cycles, "settle_s": SETTLE_S, "run_before_interrupt_s": RUN_BEFORE_INTERRUPT_S}
+    product = stlink_servers()
+    image = debug_sessions.workspace_image(stlink_bench, firmware)
+    idle: list[dict] = []
+    overlap: list[dict] = []
+
+    def openocd_probe_target() -> dict:
+        openocd = mcp_servers()
+        try:
+            return product_answer(openocd.tool("probe_target"))
+        finally:
+            openocd.shut_down()
+
+    def cli_probe_target() -> dict:
+        answer = product.tool("probe_target")
+        entry = product_answer(answer)
+        if answer.get("ok") is not True:
+            entry["log"] = product_log(bench, answer.get("log_path"))
+        return entry
+
+    try:
+        for cycle in range(1, cycles + 1):
+            whole = cycle == 1
+            entry: dict = {"cycle": cycle}
+            idle.append(entry)
+            probe_server, entry["probe_server_listening_after_ms"] = recorder.probe_server_started(stlink_server)
+            port = free_port()
+            server = GdbServer(recorder.server_argv(port, extra=["-g", "-t"]), recorder.environment, recorder.cwd)
+            recorder.live.append(server)
+            ready = recorder.wait_until_listening(server, port, STARTUP_TIMEOUT_S)
+            entry["ready_at_s"] = ready["at_s"] if ready is not None else None
+            if ready is None:
+                entry["refused"] = recorder.finish(server)
+            else:
+                client, _ = recorder.connect(port)
+                entry["at_connect"] = {key: value for key, value in recorder.core_state(client).items() if key in ("s_halt", COUNTER, "pc")}
+                entry["usb_handles_with_a_client"] = usb_handles(probe_server.process.pid)
+                entry["end"] = recorder.kill(server)
+                entry["gdb_exit"] = {key: value for key, value in recorder.close_client(client).items() if key in ("closed", "error")}
+            time.sleep(SETTLE_S)
+            entry["usb_handles_while_idle"] = usb_handles(probe_server.process.pid)
+            entry["probe_server_running_while_idle"] = probe_server.process.poll() is None
+            entry["cli_probe_target_while_idle"] = cli_probe_target()
+            entry["openocd_probe_target_while_idle"] = openocd_probe_target()
+            entry["usb_handles_after_the_other_openers"] = usb_handles(probe_server.process.pid)
+            entry["probe_server_end"] = recorder.probe_server_ended(probe_server)
+            entry["probe_server_output"] = probe_server.output()
+            time.sleep(SETTLE_S)
+            entry["cli_probe_target_after_its_end"] = cli_probe_target()
+            entry["openocd_probe_target_after_its_end"] = openocd_probe_target()
+            if whole:
+                entry["gdb_server_output"] = server.output()
+        for cycle in range(1, cycles + 1):
+            whole = cycle == 1
+            entry = {"cycle": cycle}
+            overlap.append(entry)
+            started = product.tool("debug_start_session", {"image_path": image, "mode": "attach"})
+            entry["first_started"] = {**product_answer(started), "probe_server": (started.get("session") or {}).get("probe_server")}
+            if started.get("ok") is not True:
+                entry["first_refused"] = refused_session_start(bench, started)
+                continue
+            port = free_port()
+            second = GdbServer(recorder.server_argv(port, extra=["-g", "-t"]), recorder.environment, recorder.cwd)
+            recorder.live.append(second)
+            ready = recorder.wait_until_listening(second, port, STARTUP_TIMEOUT_S)
+            entry["second_ready_at_s"] = ready["at_s"] if ready is not None else None
+            client = None
+            if ready is None:
+                entry["second_refused"] = recorder.finish(second)
+            else:
+                client, _ = recorder.connect(port)
+                entry["second_at_connect"] = {key: value for key, value in recorder.core_state(client).items() if key in ("s_halt", COUNTER, "pc", "dhcsr_contents")}
+            stopped = product.tool("debug_stop_session")
+            entry["first_stopped"] = {**product_answer(stopped), "probe_server": (stopped.get("session") or {}).get("probe_server")}
+            entry["stlink_servers_running_after_the_first_stop"] = len(stlink_servers_running())
+            if client is not None:
+                time.sleep(SETTLE_S)
+                entry["second_interrupt"] = recorder.command(client, "-exec-interrupt --all")
+                entry["second_interrupt_stop"] = recorder.stop(client, 2.0)
+                entry["second_halted"] = {key: value for key, value in recorder.core_state(client).items() if key in ("s_halt", COUNTER, "pc", "dhcsr_contents")}
+                entry["second_continue"] = recorder.command(client, "-exec-continue")
+                time.sleep(RUN_BEFORE_INTERRUPT_S)
+                entry["second_interrupt_after_the_run"] = recorder.command(client, "-exec-interrupt --all")
+                entry["second_stop_after_the_run"] = recorder.stop(client)
+                entry["second_after_the_run"] = {key: value for key, value in recorder.core_state(client).items() if key in ("s_halt", COUNTER, "pc", "dhcsr_contents")}
+                entry["second_end"] = recorder.kill(second)
+                entry["second_gdb_exit"] = {key: value for key, value in recorder.close_client(client).items() if key in ("closed", "error")}
+            output = second.output()
+            entry["second_server_output"] = output if whole else [line for line in output if line["stream"] == "stderr" or "rror" in line["line"]]
+            entry["stlink_servers_ended_here"] = end_stlink_servers_left_running()
+            time.sleep(SETTLE_S)
+    finally:
+        recorder.cleanup()
+        left = end_stlink_servers_left_running()
+        recording["scenarios"]["idle_server_and_other_openers"] = idle
+        recording["scenarios"]["overlapping_sessions"] = overlap
+        recording["stlink_servers_ended_at_the_end"] = left
+        write_recording(recording, root, private_values, record_property, SHARING_OUTPUT_NAME)
         restored = put_on_board(bench, firmware)
         assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
 
