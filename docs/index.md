@@ -8,11 +8,13 @@ board is what decides whether the work is done, and the report it writes is
 what a reviewer reads. The supported unit is the probe with its backend rather
 than a board, so any board behind such a probe runs the same software.
 
-Start with [Installation](installation.md) (two commands and a first real run
+Start with [Develop on your board](use-cases/develop-on-your-board.md) to connect
+your existing coding agent to a build, flash, UART feedback and firmware fix loop.
+Then follow [Installation](installation.md) (two commands and a first real run
 on a Nucleo-F446RE, the reference this path is proved on), then bind your bench
 in [Configuration](configuration.md).
 
-Three use-case pages walk through the loop with real output, the release it
+The walkthroughs below cover individual parts with real output, the release it
 came from and where it stops:
 
 - [Flash and reset](use-cases/flash-and-reset.md): a coding agent flashes and resets the board through narrow tools instead of a debugger shell.

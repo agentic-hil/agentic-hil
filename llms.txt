@@ -8,12 +8,14 @@ Every hardware action is validated against one authoritative configuration file 
 
 ## Start here
 
+- [Documentation](https://agentic-hil.github.io/docs/): the rendered documentation, including the development loop, installation, supported probes and recorded use cases.
 - [AI_AGENT_QUICKSTART.md](https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md): the install and first-run path written for an agent, with the complete fallback chain.
 - [STM32 starter](https://github.com/agentic-hil/stm32-starter): a Nucleo-F446RE project with firmware, three test plans and one planted defect, so the whole loop runs in three steps.
 - [README.md](https://github.com/agentic-hil/agentic-hil/blob/master/README.md): what the product is, the install line, and the short tour of what it drives.
 
 ## Use cases
 
+- [docs/use-cases/develop-on-your-board.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/use-cases/develop-on-your-board.md): connect an existing coding agent and firmware project to a local build, flash, UART feedback and fix loop, with installation, probe/backend prerequisites and recorded starter evidence.
 - [docs/use-cases/flash-and-reset.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/use-cases/flash-and-reset.md): letting a coding agent flash and reset a board behind a debug probe without handing it a debugger shell, with what the operator grants, two recorded runs and their limits.
 - [docs/use-cases/uart-and-can.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/use-cases/uart-and-can.md): sending a board commands over its serial line or CAN bus and judging its answer against a stated claim, with a failing run and its fix, and how a CAN bus is held to listen-only.
 - [docs/use-cases/check-plan.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/use-cases/check-plan.md): checking hardware test plans in CI without a board, what a green run of that check proves, and what only the board shows.

@@ -1,6 +1,6 @@
 site_name: Agentic HIL
 site_description: "Develop firmware on the real board behind a debug probe: flash, reset, UART and CAN, from an AI agent over MCP, gated by one operator-owned policy file."
-site_url: https://agentic-hil.readthedocs.io/
+site_url: https://agentic-hil.github.io/docs/
 repo_url: https://github.com/agentic-hil/agentic-hil
 repo_name: agentic-hil/agentic-hil
 edit_uri: edit/master/docs/
@@ -9,6 +9,7 @@ nav:
   - Home: index.md
   - Installation: installation.md
   - Use cases:
+      - Develop on your board: use-cases/develop-on-your-board.md
       - Flash and reset: use-cases/flash-and-reset.md
       - UART and CAN feedback: use-cases/uart-and-can.md
       - Plans without a board: use-cases/check-plan.md
