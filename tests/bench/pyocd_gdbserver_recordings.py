@@ -53,7 +53,18 @@ UNKNOWN_UID = "AGENTICHILNOSUCHPROBE0"
 UNKNOWN_TARGET = "agentic_hil_no_such_target"
 COUNTER = "uptime_ms"
 HANDLER = "SysTick_Handler"
-STDIO_OFF = ["-O", "stdio_mode=off"]
+# pyOCD 0.45.1 starts a STDIO (semihosting console) server on the fixed port
+# 4444 unless told otherwise. `stdio_mode=off` reads as YAML, where `off` is a
+# boolean, so pyOCD warns and ignores it; the plain string option it falls back
+# to is what turns the console server off. Both are recorded.
+STDIO_MODE_OFF = ["-O", "stdio_mode=off"]
+CONSOLE_OFF = ["-O", "semihost_console_type=off"]
+# How many times a session is ended by terminating the server with the core
+# halted, each followed by a fresh server that has to open the probe again.
+TERMINATE_HALTED_CYCLES = 3
+# How many fresh starts are tried after the server was terminated while the
+# core ran, to see whether and when the probe answers again.
+STARTS_AFTER_TERMINATE_RUNNING = 3
 
 
 class GdbServer:
@@ -204,11 +215,13 @@ class Recorder:
         return server, ready
 
     def connect(self, port: int) -> tuple[GdbMiClient, list[dict]]:
+        """The product's MI prologue, then the stop GDB reports for the connect itself, so a later stop poll waits for a new one."""
         client = GdbMiClient(self.gdb, str(self.bench.project))
         self.clients.append(client)
         transcript = []
         for command in ("-gdb-set pagination off", "-gdb-set confirm off", "-gdb-set mi-async on", f"-file-exec-and-symbols {mi_string(str(self.image))}", f"-target-select extended-remote localhost:{port}"):
             transcript.append(self.command(client, command))
+        transcript.append({"stop_after_connect": self.stop(client, 1.0)})
         return client, transcript
 
     def command(self, client: GdbMiClient, command: str, timeout_s: float = COMMAND_TIMEOUT_S) -> dict:
@@ -272,7 +285,7 @@ class Recorder:
 
     def tcp_probe(self) -> dict:
         """What the server does when something connects to its GDB port and closes without speaking GDB's protocol."""
-        server, ready = self.started(STDIO_OFF)
+        server, ready = self.started(CONSOLE_OFF)
         port = int(server.argv[server.argv.index("--port") + 1])
         record: dict = {"scenario": "connect_and_close_without_gdb", "argv_tail": server.argv[1:], "ready_line": ready}
         with socket.create_connection(("127.0.0.1", port), timeout=5.0):
@@ -282,7 +295,7 @@ class Recorder:
 
     def counter_after_a_fresh_connect(self) -> dict:
         """The demo's counter and PC as a new server and GDB find them, ended so the core stays where it is."""
-        server, ready = self.started(STDIO_OFF)
+        server, ready = self.started(CONSOLE_OFF)
         port = int(server.argv[server.argv.index("--port") + 1])
         client, connect = self.connect(port)
         counter_answer, counter = self.value(client, COUNTER)
@@ -304,7 +317,7 @@ class Recorder:
 
     def session_ended_by_gdb_exit(self) -> dict:
         """A session through the commands the product sends, ended the way OpenOCD sessions are: GDB exits first."""
-        server, ready = self.started(STDIO_OFF)
+        server, ready = self.started(CONSOLE_OFF)
         port = int(server.argv[server.argv.index("--port") + 1])
         client, connect = self.connect(port)
         record: dict = {"scenario": "session_ended_by_gdb_exit", "argv_tail": server.argv[1:], "ready_line": ready, "connect": connect}
@@ -327,12 +340,12 @@ class Recorder:
         record["fresh_connect"] = self.counter_after_a_fresh_connect()
         return record
 
-    def session_ended_by_terminating_the_server(self) -> dict:
-        """The same session ended the other way round: the server is terminated while GDB is still connected."""
-        server, ready = self.started(STDIO_OFF)
+    def session_ended_by_terminating_the_server(self, cycle: int) -> dict:
+        """The same session ended the other way round: with the core halted, the server is terminated while GDB is still connected."""
+        server, ready = self.started(CONSOLE_OFF)
         port = int(server.argv[server.argv.index("--port") + 1])
         client, connect = self.connect(port)
-        record: dict = {"scenario": "session_ended_by_terminating_the_server", "argv_tail": server.argv[1:], "ready_line": ready, "connect": connect}
+        record: dict = {"scenario": "session_ended_by_terminating_the_server", "cycle": cycle, "argv_tail": server.argv[1:], "ready_line": ready, "connect": connect}
         record["at_handler"] = self.halted_at_handler(client)
         record["server_terminated"] = server.terminate()
         self.live.remove(server)
@@ -343,6 +356,29 @@ class Recorder:
         record["fresh_connect"] = self.counter_after_a_fresh_connect()
         return record
 
+    def server_terminated_while_the_core_runs(self) -> dict:
+        """The server terminated while GDB has the core running, then fresh servers started until one answers or the tries run out."""
+        server, ready = self.started(CONSOLE_OFF)
+        port = int(server.argv[server.argv.index("--port") + 1])
+        client, connect = self.connect(port)
+        record: dict = {"scenario": "server_terminated_while_the_core_runs", "argv_tail": server.argv[1:], "ready_line": ready, "connect": connect}
+        record["continue"] = self.command(client, "-exec-continue")
+        time.sleep(0.5)
+        record["server_terminated"] = server.terminate()
+        self.live.remove(server)
+        record["server_output"] = server.output()
+        record["gdb_exit"] = self.close_client(client)
+        time.sleep(SETTLE_S)
+        record["settle_s"] = SETTLE_S
+        record["starts_after"] = []
+        for _ in range(STARTS_AFTER_TERMINATE_RUNNING):
+            attempt = self.counter_after_a_fresh_connect()
+            record["starts_after"].append(attempt)
+            if attempt["ready_line"] is not None:
+                break
+            time.sleep(SETTLE_S)
+        return record
+
     def failure(self, label: str, argv: list[str]) -> dict:
         server = self.start(argv)
         record: dict = {"scenario": label, "argv_tail": argv[1:]}
@@ -350,9 +386,9 @@ class Recorder:
         return record
 
     def busy_probe(self) -> dict:
-        holder, ready = self.started(STDIO_OFF)
+        holder, ready = self.started(CONSOLE_OFF)
         port = free_port()
-        record = self.failure("probe_already_held_by_another_server", self.server_argv(port, extra=STDIO_OFF))
+        record = self.failure("probe_already_held_by_another_server", self.server_argv(port, extra=CONSOLE_OFF))
         record["holder_ready_line"] = ready
         record["holder_terminated"] = holder.terminate()
         self.live.remove(holder)
@@ -398,12 +434,14 @@ def test_record_pyocd_gdbserver(bench: Bench, firmware: Path, gdb: None, tmp_pat
     scenarios = recording["scenarios"]
     try:
         scenarios["startup_default_options"] = recorder.startup([], "startup_default_options")
-        scenarios["startup_stdio_off"] = recorder.startup(STDIO_OFF, "startup_stdio_off")
+        scenarios["startup_stdio_mode_off"] = recorder.startup(STDIO_MODE_OFF, "startup_stdio_mode_off")
+        scenarios["startup_console_off"] = recorder.startup(CONSOLE_OFF, "startup_console_off")
         scenarios["connect_and_close_without_gdb"] = recorder.tcp_probe()
         scenarios["session_ended_by_gdb_exit"] = recorder.session_ended_by_gdb_exit()
-        scenarios["session_ended_by_terminating_the_server"] = recorder.session_ended_by_terminating_the_server()
-        scenarios["unknown_probe_uid"] = recorder.failure("unknown_probe_uid", recorder.server_argv(free_port(), uid=UNKNOWN_UID, extra=STDIO_OFF))
-        scenarios["unknown_target_type"] = recorder.failure("unknown_target_type", recorder.server_argv(free_port(), target=UNKNOWN_TARGET, extra=STDIO_OFF))
+        scenarios["session_ended_by_terminating_the_server"] = [recorder.session_ended_by_terminating_the_server(cycle) for cycle in range(1, TERMINATE_HALTED_CYCLES + 1)]
+        scenarios["server_terminated_while_the_core_runs"] = recorder.server_terminated_while_the_core_runs()
+        scenarios["unknown_probe_uid"] = recorder.failure("unknown_probe_uid", recorder.server_argv(free_port(), uid=UNKNOWN_UID, extra=CONSOLE_OFF))
+        scenarios["unknown_target_type"] = recorder.failure("unknown_target_type", recorder.server_argv(free_port(), target=UNKNOWN_TARGET, extra=CONSOLE_OFF))
         scenarios["probe_already_held_by_another_server"] = recorder.busy_probe()
     finally:
         recorder.cleanup()
