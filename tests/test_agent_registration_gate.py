@@ -188,7 +188,7 @@ def test_a_final_release_the_index_serves_is_a_floor_whatever_its_spelling(
     assert published_release() == release
 
 
-@pytest.mark.parametrize("served", ["", "not-a-version", "latest", "0.22.0rc1", "0.22.0.dev3", "0.22.0a1", "0.22.0-beta2"])
+@pytest.mark.parametrize("served", ["", "not-a-version", "latest", "0.22.0rc1", "0.22.0.dev3", "0.22.0a1", "1.4.0-beta2"])
 def test_an_index_answer_that_is_no_floor_at_all_is_still_refused(monkeypatch: pytest.MonkeyPatch, served: str) -> None:
     """The two answers that really are not a floor: not a version, and a release
     `install.sh` would not install. `uv tool install` takes the newest final
