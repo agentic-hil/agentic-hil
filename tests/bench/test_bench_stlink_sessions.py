@@ -87,6 +87,11 @@ NEXT_CONNECT_RUN_BOUND_MS = 500
 SERVER_KILLED_BEFORE_DETACH = "server_killed_before_gdb_detach"
 
 
+def said(answer: object) -> str:
+    """The whole answer, for an assertion message: pytest shortens anything that is not a string, and the decisive line is deep in it."""
+    return json.dumps(answer, indent=1, sort_keys=True, default=str)
+
+
 def cubeclt_root() -> Path:
     """The STM32CubeCLT tree this run was given; the `cubeclt` mark deselects the module without one."""
     return Path(os.environ[CUBECLT_ENV])
@@ -172,15 +177,15 @@ def session_log(bench: Bench, log_path: str) -> dict:
 
 def assert_ended_with_the_core_held(stopped: dict, bench: Bench) -> None:
     """A stop that says the core was confirmed halted and the server was gone before GDB left."""
-    assert stopped["ok"] is True, stopped
-    assert stopped["backend"] == "stlink", stopped
-    assert stopped["safe_state_confirmed"] is True, stopped
-    assert stopped["halt_not_confirmed"] is False, stopped
-    assert stopped["detach_resume_guard_confirmed"] is True, stopped
-    assert stopped["summary"] == "Debug session stopped with the target confirmed halted.", stopped["summary"]
+    assert stopped["ok"] is True, said(stopped)
+    assert stopped["backend"] == "stlink", said(stopped)
+    assert stopped["safe_state_confirmed"] is True, said(stopped)
+    assert stopped["halt_not_confirmed"] is False, said(stopped)
+    assert stopped["detach_resume_guard_confirmed"] is True, said(stopped)
+    assert stopped["summary"] == "Debug session stopped with the target confirmed halted.", said(stopped["summary"])
     guard = session_log(bench, stopped["log_path"])["detach_guard"]
-    assert guard["kind"] == SERVER_KILLED_BEFORE_DETACH, guard
-    assert guard["server_exited"] is True, guard
+    assert guard["kind"] == SERVER_KILLED_BEFORE_DETACH, said(guard)
+    assert guard["server_exited"] is True, said(guard)
 
 
 def test_a_reset_halt_session_runs_to_a_breakpoint_halts_and_stops(stlink_servers, stlink_bench: Bench, gdb: None, firmware: Path) -> None:
@@ -197,46 +202,46 @@ def test_a_reset_halt_session_runs_to_a_breakpoint_halts_and_stops(stlink_server
 
     started = server.tool("debug_start_session", {"image_path": workspace_image(stlink_bench, firmware), "mode": "reset_halt"})
 
-    assert started["ok"] is True, started
-    assert started["backend"] == "stlink", started
-    assert started["mode"] == "reset_halt", started
+    assert started["ok"] is True, said(started)
+    assert started["backend"] == "stlink", said(started)
+    assert started["mode"] == "reset_halt", said(started)
     session = started["session"]
-    assert session["status"] == "halted", session
-    assert session["load_phase"] == "pre_load_reset_confirmed", session
-    assert session["firmware_load_status"] == "not_started", session
-    assert isinstance(session["gdb_port"], int) and session["gdb_port"] > 0, session
+    assert session["status"] == "halted", said(session)
+    assert session["load_phase"] == "pre_load_reset_confirmed", said(session)
+    assert session["firmware_load_status"] == "not_started", said(session)
+    assert isinstance(session["gdb_port"], int) and session["gdb_port"] > 0, said(session)
 
     placed = server.tool("debug_set_breakpoint", {"location": HANDLER})
-    assert placed["ok"] is True, placed
+    assert placed["ok"] is True, said(placed)
     tracked = placed["breakpoint"]
 
     stopped_at = server.tool("debug_continue", {"timeout_s": REACHABLE_STOP_TIMEOUT_S})
-    assert stopped_at["ok"] is True, stopped_at
-    assert stopped_at["stop_reason"] == "breakpoint_hit", stopped_at
-    assert stopped_at["target_ok"] is True, stopped_at
+    assert stopped_at["ok"] is True, said(stopped_at)
+    assert stopped_at["stop_reason"] == "breakpoint_hit", said(stopped_at)
+    assert stopped_at["target_ok"] is True, said(stopped_at)
     stop = stopped_at["stop"]
-    assert stop["breakpoint_expected"] is True, stop
-    assert stop["breakpoint_id"] == tracked["id"], (stop, tracked)
-    assert stop["frame"]["function"] == HANDLER, stop
+    assert stop["breakpoint_expected"] is True, said(stop)
+    assert stop["breakpoint_id"] == tracked["id"], said([stop, tracked])
+    assert stop["frame"]["function"] == HANDLER, said(stop)
 
     reason = server.tool("debug_get_stop_reason")
-    assert reason["ok"] is True, reason
-    assert reason["stop_reason"] == "breakpoint_hit", reason
-    assert reason["stop"]["breakpoint_id"] == tracked["id"], reason
+    assert reason["ok"] is True, said(reason)
+    assert reason["stop_reason"] == "breakpoint_hit", said(reason)
+    assert reason["stop"]["breakpoint_id"] == tracked["id"], said(reason)
 
     halted = server.tool("debug_halt")
-    assert halted["ok"] is True, halted
-    assert halted["stop_reason"] == "breakpoint_hit", halted
-    assert halted["summary"].startswith("Target was already stopped"), halted
-    assert halted.get("quarantined") is not True, halted
+    assert halted["ok"] is True, said(halted)
+    assert halted["stop_reason"] == "breakpoint_hit", said(halted)
+    assert halted["summary"].startswith("Target was already stopped"), said(halted)
+    assert halted.get("quarantined") is not True, said(halted)
 
     stopped = server.tool("debug_stop_session")
     assert_ended_with_the_core_held(stopped, stlink_bench)
     command = session_log(stlink_bench, stopped["log_path"])["server_command"]
     root = cubeclt_root()
-    assert Path(command[0]).resolve() == (root / GDB_SERVER).resolve(), command
-    assert Path(command[command.index("-cp") + 1]).resolve() == (root / PROGRAMMER_CLI).resolve().parent, command
-    assert "-g" in command and "-d" in command, command
+    assert Path(command[0]).resolve() == (root / GDB_SERVER).resolve(), said(command)
+    assert Path(command[command.index("-cp") + 1]).resolve() == (root / PROGRAMMER_CLI).resolve().parent, said(command)
+    assert "-g" in command and "-d" in command, said(command)
 
 
 def test_a_resume_nothing_stops_is_interrupted_and_the_core_does_not_run_once_the_session_ends(
@@ -254,30 +259,30 @@ def test_a_resume_nothing_stops_is_interrupted_and_the_core_does_not_run_once_th
     server = stlink_servers()
     image = workspace_image(stlink_bench, firmware)
     started = server.tool("debug_start_session", {"image_path": image, "mode": "reset_halt"})
-    assert started["ok"] is True, started
+    assert started["ok"] is True, said(started)
 
     timed_out = server.tool("debug_continue", {"timeout_s": UNREACHABLE_STOP_TIMEOUT_S})
-    assert timed_out["ok"] is False, timed_out
-    assert timed_out["error_type"] == "timeout", timed_out
-    assert timed_out["halt_confirmed"] is True, timed_out
-    assert timed_out["target_state"] == "halted", timed_out
-    assert timed_out.get("quarantined") is not True, timed_out
+    assert timed_out["ok"] is False, said(timed_out)
+    assert timed_out["error_type"] == "timeout", said(timed_out)
+    assert timed_out["halt_confirmed"] is True, said(timed_out)
+    assert timed_out["target_state"] == "halted", said(timed_out)
+    assert timed_out.get("quarantined") is not True, said(timed_out)
 
     before = server.tool("debug_symbol_value", {"symbol": COUNTER})
-    assert before["ok"] is True, before
-    assert before["session"]["session_id"] == started["session"]["session_id"], before
+    assert before["ok"] is True, said(before)
+    assert before["session"]["session_id"] == started["session"]["session_id"], said(before)
     # The core ran for the length of the resume, so the counter has moved off
     # the zero the reset left it at; a reading of zero would prove nothing below.
-    assert before["value_unsigned"] > 0, before
+    assert before["value_unsigned"] > 0, said(before)
 
     assert_ended_with_the_core_held(server.tool("debug_stop_session"), stlink_bench)
     time.sleep(SETTLE_S)
 
     attached = server.tool("debug_start_session", {"image_path": image, "mode": "attach"})
-    assert attached["ok"] is True, attached
-    assert attached["session"]["load_phase"] == "target_connected", attached["session"]
+    assert attached["ok"] is True, said(attached)
+    assert attached["session"]["load_phase"] == "target_connected", said(attached["session"])
     after = server.tool("debug_symbol_value", {"symbol": COUNTER})
-    assert after["ok"] is True, after
+    assert after["ok"] is True, said(after)
     ran_ms = after["value_unsigned"] - before["value_unsigned"]
     assert 0 <= ran_ms < NEXT_CONNECT_RUN_BOUND_MS, (before["value_unsigned"], after["value_unsigned"], SETTLE_S)
 
@@ -296,11 +301,11 @@ def test_a_load_session_writes_the_demo_through_st_link_gdbserver_and_says_the_l
 
     started = server.tool("debug_start_session", {"image_path": workspace_image(stlink_bench, firmware), "mode": "load"})
 
-    assert started["ok"] is True, started
+    assert started["ok"] is True, said(started)
     session = started["session"]
-    assert session["status"] == "halted", session
-    assert session["firmware_load_status"] == "committed", session
-    assert session["load_phase"] == "post_load_reset_confirmed", session
+    assert session["status"] == "halted", said(session)
+    assert session["firmware_load_status"] == "committed", said(session)
+    assert session["load_phase"] == "post_load_reset_confirmed", said(session)
 
     assert_ended_with_the_core_held(server.tool("debug_stop_session"), stlink_bench)
 
@@ -317,21 +322,21 @@ def test_a_server_that_ends_with_an_stlink_session_open_hands_the_board_to_the_n
     the same probe."""
     abandoned = stlink_servers()
     started = abandoned.tool("debug_start_session", {"image_path": workspace_image(stlink_bench, firmware), "mode": "attach"})
-    assert started["ok"] is True, started
+    assert started["ok"] is True, said(started)
     first_session_id = started["session"]["session_id"]
 
     assert abandoned.shut_down(stop_session=False) == 0, abandoned.diagnosis()
 
     handed_back = stlink_bench.document("lease-status")[1]
-    assert handed_back["blocked"] is False, handed_back
-    assert handed_back["bench_held"] is False, handed_back
-    assert handed_back["owner_active"] is False, handed_back
+    assert handed_back["blocked"] is False, said(handed_back)
+    assert handed_back["bench_held"] is False, said(handed_back)
+    assert handed_back["owner_active"] is False, said(handed_back)
 
     successor = stlink_servers()
     reopened = successor.tool("debug_start_session", {"image_path": workspace_image(stlink_bench, firmware), "mode": "attach"})
-    assert reopened["ok"] is True, reopened
-    assert reopened["session"]["status"] == "halted", reopened["session"]
-    assert reopened["session"]["session_id"] != first_session_id, reopened["session"]
+    assert reopened["ok"] is True, said(reopened) + chr(10) + successor.diagnosis()
+    assert reopened["session"]["status"] == "halted", said(reopened["session"])
+    assert reopened["session"]["session_id"] != first_session_id, said(reopened["session"])
 
     assert_ended_with_the_core_held(successor.tool("debug_stop_session"), stlink_bench)
 
