@@ -16,9 +16,13 @@ Selected explicitly, like the other recorders: the file is not named `test_*`.
 directory holding `STLink-gdb-server` and `STM32CubeProgrammer`). With
 `AGENTIC_HIL_RECORDING_OUT` set to a directory, the recording is written there
 as `st-link-gdbserver-recording.json`, the second round, the teardown one, as
-`st-link-gdbserver-teardown-recording.json`, and the third, the restart one,
-as `st-link-gdbserver-restart-recording.json`; each is always attached to the
-test report as a property as well.
+`st-link-gdbserver-teardown-recording.json`, the third, the restart one, as
+`st-link-gdbserver-restart-recording.json`, and the fourth, the ends one, as
+`st-link-gdbserver-ends-recording.json`; each is always attached to the test
+report as a property as well. The fourth also makes calls through the product's
+own MCP server, on a copy of the tier's configuration with the probe on `type:
+stlink` and on the tier's own configuration, because what it asks is whether
+the product's next call still reaches the probe.
 """
 
 from __future__ import annotations
@@ -39,6 +43,8 @@ from support import scaled_time_bound
 from agentic_hil.gdbmi import GdbMiClient, mi_field
 from agentic_hil.process import terminate_process_tree
 
+from . import test_bench_debug_sessions as debug_sessions
+from . import test_bench_stlink_sessions as stlink_sessions
 from .conftest import BENCH_ONLY, Bench, put_on_board
 from .pyocd_gdbserver_recordings import (
     COMMAND_TIMEOUT_S,
@@ -94,6 +100,30 @@ RESET_VARIANTS = ("reset", "reset 0", "reset 1", "reset 2")
 RESTART_CYCLES = 8
 RESTART_DELAYS_S = (0.25, 0.5, 1.0, 2.0)
 RESTART_CYCLES_PER_DELAY = 4
+# The fourth round: each way a session's server could be ended, many times in a
+# row, with the core halted before the end. Which ways and how many times are
+# chosen when the round is run, and written into the recording.
+ENDS_OUTPUT_NAME = "st-link-gdbserver-ends-recording.json"
+ENDS_ENV = "AGENTIC_HIL_RECORDING_ENDS"
+END_CYCLES_ENV = "AGENTIC_HIL_RECORDING_END_CYCLES"
+DEFAULT_END_CYCLES = 10
+# How long each cycle lets the core run before it is interrupted, so the counter
+# moves between the connect and the end.
+END_RUN_S = 0.3
+# Each way of ending: the server options it is started with, and the end itself,
+# either a GDB command sent while the server runs or a signal to its group.
+# `kill` is GDB's own end of the inferior (the `k` or `vKill` packet),
+# `-target-disconnect` closes the connection without detaching, and the signals
+# are the server's own shutdown (SIGINT, SIGTERM) or none of it (SIGKILL).
+# `-r` is the server's "Minimum delay in seconds for hardware status refresh".
+END_CANDIDATES: dict[str, tuple[tuple[str, ...], str, object]] = {
+    "gdb_kill": ((), "gdb", '-interpreter-exec console "kill"'),
+    "gdb_disconnect": ((), "gdb", "-target-disconnect"),
+    "sigint": ((), "signal", signal.SIGINT),
+    "sigterm": ((), "signal", signal.SIGTERM),
+    "sigkill": ((), "signal", signal.SIGKILL),
+    "sigkill_slow_refresh": (("-r", "3600"), "signal", signal.SIGKILL),
+}
 
 
 def cubeclt_root() -> Path:
@@ -422,6 +452,107 @@ class StLinkRecorder(Recorder):
             record["start_again_at_once"] = self.start_once()
         return record
 
+    def signal_group(self, server: GdbServer, number: int) -> None:
+        group = getattr(server.process, "_agentic_hil_pgid", None) or server.process.pid
+        with suppress(ProcessLookupError):
+            os.killpg(group, number)
+
+    def end_session(self, server: GdbServer, client: GdbMiClient, how: str, *, whole: bool) -> dict:
+        """One candidate end, with how long the server took to exit after it and what it exited with.
+
+        A server still running `EXIT_WAIT_S` after the end is killed, and the
+        record says so. `whole` keeps every GDB record, with GDB's remote packet
+        log turned on for a GDB command; the other cycles keep the result only."""
+        _, kind, what = END_CANDIDATES[how]
+        record: dict = {"how": how}
+        if kind == "gdb" and whole:
+            record["debug_remote"] = self.command(client, "-gdb-set debug remote 1")
+        began = time.monotonic()
+        if kind == "gdb":
+            answer = self.command(client, str(what))
+            record["answer"] = answer if whole else {key: answer[key] for key in ("result_class", "line", "timed_out", "error")}
+        else:
+            self.signal_group(server, int(what))  # type: ignore[call-overload]
+        returncode = server.wait_for_exit(EXIT_WAIT_S)
+        record["returncode"] = returncode
+        record["exited_after_s"] = round(time.monotonic() - began, 3) if returncode is not None else None
+        if returncode is None:
+            record["killed_after_waiting"] = self.kill(server)
+        else:
+            for reader in server.readers:
+                reader.join(timeout=5.0)
+            if server in self.live:
+                self.live.remove(server)
+        closed = self.close_client(client)
+        record["gdb_exit"] = closed if whole else {"closed": closed["closed"], "error": closed.get("error")}
+        return record
+
+    def end_cycle(self, how: str, cycle: int, cli_first: bool, cli) -> dict:
+        """A session halted, then ended by `how`; the counter before the end and, at the next cycle's connect, after it.
+
+        With `-g` the connect halts the core where it runs, so the counter read
+        at a connect minus the one read before the previous end is what the core
+        ran in between. `cli_first` puts a call of the product's own (the CLI,
+        through `probe_target`) between this end and the next start, so every
+        other end is followed first by the CLI and every other by the server."""
+        extra, _, _ = END_CANDIDATES[how]
+        whole = cycle == 1
+        server, ready = self.started(["-g", *extra])
+        record: dict = {"cycle": cycle, "first_opener_after_the_end": "cli" if cli_first else "server", "argv_tail": server.argv[1:] if whole else None}
+        record["ready_at_s"] = ready["at_s"] if ready is not None else None
+        if ready is None:
+            record["refused"] = self.finish(server)
+            return record
+        client, connect = self.connect(self.port_of(server))
+        if whole:
+            record["connect"] = connect
+        at_connect = self.core_state(client)
+        record["at_connect"] = at_connect if whole else {key: at_connect[key] for key in ("s_halt", COUNTER, "pc")}
+        run = [self.command(client, "-exec-continue")]
+        time.sleep(END_RUN_S)
+        run.append(self.command(client, "-exec-interrupt --all"))
+        stop = self.stop(client)
+        record["run"] = {"steps": run, "stop": stop} if whole else {"stop_reason": stop["reason"], "timed_out": stop["timed_out"]}
+        before = self.core_state(client)
+        record["before_end"] = before if whole else {key: before[key] for key in ("s_halt", COUNTER, "pc")}
+        lines_before_end = len(server.output())
+        record["end"] = self.end_session(server, client, how, whole=whole)
+        output = server.output()
+        record["output"] = output if whole else [entry["line"] for entry in output[lines_before_end:]]
+        time.sleep(SETTLE_S)
+        if cli_first:
+            record["cli"] = cli()
+        return record
+
+    def verbose_idle(self, log_file: Path) -> dict:
+        """What the server prints, at full logging, while the core sits halted with GDB idle, then runs, then is halted again.
+
+        Ended by SIGTERM, which is the server's own shutdown."""
+        server, ready = self.started(["-g", "-v", "-l", "31", "-f", str(log_file)])
+        record: dict = {"scenario": "verbose_idle", "argv_tail": server.argv[1:], "ready_at_s": ready["at_s"] if ready else None}
+        if ready is None:
+            record.update(self.finish(server))
+            return record
+        client, connect = self.connect(self.port_of(server))
+        record["connect"] = connect
+        marks = {"connected": round(time.monotonic() - server.started, 2)}
+        time.sleep(3.0)
+        marks["idle_halted_until"] = round(time.monotonic() - server.started, 2)
+        record["continue"] = self.command(client, "-exec-continue")
+        time.sleep(1.0)
+        marks["running_until"] = round(time.monotonic() - server.started, 2)
+        record["interrupt"] = self.command(client, "-exec-interrupt --all")
+        record["interrupt_stop"] = self.stop(client)
+        marks["halted_again"] = round(time.monotonic() - server.started, 2)
+        time.sleep(2.0)
+        marks["idle_halted_again_until"] = round(time.monotonic() - server.started, 2)
+        record["marks"] = marks
+        record["server_terminated"] = server.terminate()
+        self.live.remove(server)
+        record["gdb_exit"] = self.close_client(client)
+        record["output"] = server.output()
+        return record
+
     def monitor_resets(self) -> dict:
         """Each reset form from a core halted at the handler, read back past GDB's cache, then run and interrupted."""
         server, ready = self.started(["-g"])
@@ -620,6 +751,130 @@ def test_record_st_link_gdbserver_teardown(bench: Bench, firmware: Path, gdb: No
     finally:
         recorder.cleanup()
         write_recording(recording, root, private_values, record_property, TEARDOWN_OUTPUT_NAME)
+        restored = put_on_board(bench, firmware)
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+
+
+def product_log(bench: Bench, log_path: object) -> list[str] | None:
+    """The lines of a log the product named in an answer, for a call that failed."""
+    if not isinstance(log_path, str) or not log_path:
+        return None
+    path = bench.project / log_path
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as error:
+        return [f"<unreadable: {type(error).__name__}>"]
+
+
+def summarize_ends(entries: list[dict]) -> dict:
+    """Per candidate: the starts and CLI calls refused, how each end exited, and the counter run over each end.
+
+    The run over an end is only taken between two cycles with nothing in between
+    but the pause and, every other cycle, the CLI call; a cycle that needed a
+    heal is left out, because what heals the probe may move the core too."""
+    refused_starts = [entry["cycle"] for entry in entries if entry.get("refused") is not None]
+    cli_calls = [entry for entry in entries if "cli" in entry]
+    refused_cli = [entry["cycle"] for entry in cli_calls if entry["cli"].get("ok") is not True]
+    ran: dict[str, list[int]] = {"server": [], "cli": []}
+    for previous, following in zip(entries, entries[1:], strict=False):
+        if "heal" in previous or "before_end" not in previous or "at_connect" not in following:
+            continue
+        before, after = previous["before_end"].get(COUNTER), following["at_connect"].get(COUNTER)
+        if before is None or after is None:
+            continue
+        ran[previous["first_opener_after_the_end"]].append(int(after) - int(before))
+    returncodes: dict[str, int] = {}
+    exited_after = []
+    for entry in entries:
+        if "end" not in entry:
+            continue
+        key = str(entry["end"]["returncode"])
+        returncodes[key] = returncodes.get(key, 0) + 1
+        if entry["end"]["exited_after_s"] is not None:
+            exited_after.append(entry["end"]["exited_after_s"])
+    return {
+        "cycles": len(entries),
+        "starts_refused_in_cycles": refused_starts,
+        "cli_calls": len(cli_calls),
+        "cli_refused_in_cycles": refused_cli,
+        "ran_ms_over_the_end_next_opener_server": ran["server"],
+        "ran_ms_over_the_end_next_opener_cli": ran["cli"],
+        "end_returncodes": returncodes,
+        "exited_after_s_max": max(exited_after) if exited_after else None,
+        "not_halted_before_the_end_in_cycles": [entry["cycle"] for entry in entries if "before_end" in entry and entry["before_end"].get("s_halt") is not True],
+    }
+
+
+# The product's own MCP servers for the fourth round: on the stlink copy of the
+# tier's configuration for the CLI call, and on the tier's own OpenOCD one for
+# the open that was measured to give a refusing probe back.
+stlink_bench = stlink_sessions.stlink_bench
+stlink_servers = stlink_sessions.stlink_servers
+mcp_servers = debug_sessions.mcp_servers
+
+
+def test_record_st_link_gdbserver_ends(
+    bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property, stlink_servers, mcp_servers
+) -> None:
+    """The fourth round: each way of ending a session's server, cycle after cycle, and what the probe and the core do after it.
+
+    The product ends a session's server with SIGKILL because every end the
+    server runs itself resumed the core, and its bench tier then had one start
+    in four refused with "USB communication error" until an OpenOCD open. So
+    each candidate end is run many times in a row with the core halted before
+    it: what the core ran over it, read from the counter at the next connect;
+    whether the next start comes up; and, every other cycle, whether the CLI
+    answers first. A refused start or CLI call is recorded whole, then tried
+    again, and then the probe is opened once through OpenOCD by the product and
+    tried once more, so the recording says what gave it back."""
+    root, recorder, private_values, recording = recording_for(bench, firmware, tmp_path)
+    asked = [name.strip() for name in os.environ.get(ENDS_ENV, ",".join(END_CANDIDATES)).split(",") if name.strip()]
+    unknown = [name for name in asked if name not in END_CANDIDATES and name != "verbose_idle"]
+    assert not unknown, f"{ENDS_ENV} names ends this round does not know: {unknown}"
+    cycles = int(os.environ.get(END_CYCLES_ENV) or DEFAULT_END_CYCLES)
+    recording["ends_asked"] = asked
+    recording["cycles_per_end"] = cycles
+    recording["end_run_s"] = END_RUN_S
+    recording["summary"] = {}
+    scenarios = recording["scenarios"]
+    product = stlink_servers()
+
+    def cli(*, whole: bool = False) -> dict:
+        answer = product.tool("probe_target")
+        entry = {key: answer.get(key) for key in ("ok", "error_type", "backend_error_type", "summary")}
+        if whole or answer.get("ok") is not True:
+            entry["answer"] = answer
+            entry["log"] = product_log(bench, answer.get("log_path"))
+        return entry
+
+    def heal() -> dict:
+        record: dict = {"start_again": recorder.startup(["-g"], "start_again"), "cli_again": cli(whole=True)}
+        if record["start_again"]["ready"] is not None and record["cli_again"]["ok"] is True:
+            return record
+        openocd = mcp_servers()
+        opened = openocd.tool("probe_target")
+        record["openocd_probe_target"] = {key: opened.get(key) for key in ("ok", "error_type", "summary", "log_path")}
+        openocd.shut_down()
+        record["start_after_openocd"] = recorder.startup(["-g"], "start_after_openocd")
+        record["cli_after_openocd"] = cli(whole=True)
+        return record
+
+    try:
+        for how in asked:
+            if how == "verbose_idle":
+                scenarios["verbose_idle"] = recorder.verbose_idle(tmp_path / "st-link-gdbserver-verbose.log")
+                continue
+            entries: list[dict] = []
+            for cycle in range(1, cycles + 1):
+                entry = recorder.end_cycle(how, cycle, cycle % 2 == 0, cli)
+                if entry.get("refused") is not None or ("cli" in entry and entry["cli"].get("ok") is not True):
+                    entry["heal"] = heal()
+                entries.append(entry)
+            scenarios[f"ends_{how}"] = entries
+            recording["summary"][how] = summarize_ends(entries)
+    finally:
+        recorder.cleanup()
+        write_recording(recording, root, private_values, record_property, ENDS_OUTPUT_NAME)
         restored = put_on_board(bench, firmware)
         assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
 
