@@ -15,8 +15,9 @@ Selected explicitly, like the other recorders: the file is not named `test_*`.
 `AGENTIC_HIL_BENCH_CUBECLT` names the root of an STM32CubeCLT tree (the
 directory holding `STLink-gdb-server` and `STM32CubeProgrammer`). With
 `AGENTIC_HIL_RECORDING_OUT` set to a directory, the recording is written there
-as `st-link-gdbserver-recording.json`, and the second round, the teardown one,
-as `st-link-gdbserver-teardown-recording.json`; each is always attached to the
+as `st-link-gdbserver-recording.json`, the second round, the teardown one, as
+`st-link-gdbserver-teardown-recording.json`, and the third, the restart one,
+as `st-link-gdbserver-restart-recording.json`; each is always attached to the
 test report as a property as well.
 """
 
@@ -64,6 +65,7 @@ CUBECLT_ENV = "AGENTIC_HIL_BENCH_CUBECLT"
 RECORDING_SCHEMA = "agentic-hil.st-link-gdbserver-recording/v1"
 OUTPUT_NAME = "st-link-gdbserver-recording.json"
 TEARDOWN_OUTPUT_NAME = "st-link-gdbserver-teardown-recording.json"
+RESTART_OUTPUT_NAME = "st-link-gdbserver-restart-recording.json"
 STARTUP_TIMEOUT_S = 30.0
 # A serial no probe carries, for the refusal a wrong probe_id gets.
 UNKNOWN_SERIAL = "AGENTICHILNOSUCHPROBE0"
@@ -84,6 +86,14 @@ DHCSR = "0xE000EDF0"
 # reset", `reset halt` and `reset init` were refused as an unknown reset option,
 # so the numbered forms are asked for what they print and do.
 RESET_VARIANTS = ("reset", "reset 0", "reset 1", "reset 2")
+# The third round. A session ended by killing its server, the next server
+# started at once, the way a stop followed by a start reaches the probe: the
+# bench tier found such a start refused with "USB communication error". How
+# many times that is tried, and the waits between the kill and the next start
+# it is tried with as well, each that many times.
+RESTART_CYCLES = 8
+RESTART_DELAYS_S = (0.25, 0.5, 1.0, 2.0)
+RESTART_CYCLES_PER_DELAY = 4
 
 
 def cubeclt_root() -> Path:
@@ -379,6 +389,39 @@ class StLinkRecorder(Recorder):
         record["killed_connect_again"] = self.counter_after_a_killed_connect()
         return record
 
+    def start_once(self) -> dict:
+        """One attaching server started: whether it came up, and what it printed if it did not."""
+        server, ready = self.started(["-g"])
+        record: dict = {"argv_tail": server.argv[1:], "ready": ready}
+        if ready is None:
+            record.update(self.finish(server))
+        else:
+            record["server_killed"] = self.kill(server)
+            record["output"] = server.output()
+        return record
+
+    def restart_after_a_kill(self, cycle: int, delay_s: float) -> dict:
+        """A session ended by killing its server, then the next server started after `delay_s`; once more at once if that one did not come up."""
+        server, ready = self.started(["-g"])
+        record: dict = {"scenario": "restart_after_a_kill", "cycle": cycle, "delay_s": delay_s, "argv_tail": server.argv[1:], "ready": ready}
+        if ready is None:
+            record.update(self.finish(server))
+            return record
+        client, connect = self.connect(self.port_of(server))
+        record["connect"] = connect
+        record["before_kill"] = self.where(client)
+        record["server_killed"] = self.kill(server)
+        killed_at = time.monotonic()
+        record["server_output"] = server.output()
+        record["gdb_exit"] = self.close_client(client)
+        if delay_s:
+            time.sleep(delay_s)
+        record["gap_s"] = round(time.monotonic() - killed_at, 3)
+        record["next_start"] = self.start_once()
+        if record["next_start"]["ready"] is None:
+            record["start_again_at_once"] = self.start_once()
+        return record
+
     def monitor_resets(self) -> dict:
         """Each reset form from a core halted at the handler, read back past GDB's cache, then run and interrupted."""
         server, ready = self.started(["-g"])
@@ -577,5 +620,33 @@ def test_record_st_link_gdbserver_teardown(bench: Bench, firmware: Path, gdb: No
     finally:
         recorder.cleanup()
         write_recording(recording, root, private_values, record_property, TEARDOWN_OUTPUT_NAME)
+        restored = put_on_board(bench, firmware)
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+
+
+def test_record_st_link_gdbserver_restart(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
+    """The third round: the next server started right after a session's server was killed, and after waits.
+
+    The product ends a session's server with SIGKILL, and its bench tier had a
+    session start, right after another session ended that way, refused before
+    the GDB port opened: "Target USB comms error", then "USB communication
+    error. Please reconnect the ST-LINK USB cable and try again." This round
+    asks how often that happens at once, whether a wait after the kill avoids
+    it, and whether a start tried again at once after it comes up."""
+    root, recorder, private_values, recording = recording_for(bench, firmware, tmp_path)
+    scenarios = recording["scenarios"]
+    try:
+        scenarios["restart_at_once"] = []
+        for cycle in range(1, RESTART_CYCLES + 1):
+            scenarios["restart_at_once"].append(recorder.restart_after_a_kill(cycle, 0.0))
+            time.sleep(SETTLE_S)
+        scenarios["restart_after_a_wait"] = []
+        for delay_s in RESTART_DELAYS_S:
+            for cycle in range(1, RESTART_CYCLES_PER_DELAY + 1):
+                scenarios["restart_after_a_wait"].append(recorder.restart_after_a_kill(cycle, delay_s))
+                time.sleep(SETTLE_S)
+    finally:
+        recorder.cleanup()
+        write_recording(recording, root, private_values, record_property, RESTART_OUTPUT_NAME)
         restored = put_on_board(bench, firmware)
         assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
