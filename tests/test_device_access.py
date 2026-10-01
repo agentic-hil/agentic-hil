@@ -410,6 +410,40 @@ def test_what_the_namespace_reports_as_an_unmapped_owning_group(gid: int, gid_ma
     assert device_access.gid_is_mapped_by(gid, gid_map, overflow_gid) is mapped
 
 
+def test_this_machine_binds_the_two_proc_files_the_mapping_question_rests_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one `gid_is_mapped` a bench actually runs, over the two files it reads.
+
+    Every case above hands `gid_is_mapped_by` its text directly, the parametrized
+    one and `RecordedHost` alike, so `LocalHost.gid_is_mapped` is the single place
+    the two `/proc` paths are bound to that reader's two parameters and the only
+    one a bench goes through. Bound the other way round it still answers, and
+    answers True: the overflow file's single field trips the `len(fields) != 3`
+    tolerance, and this reader answers True wherever nothing says otherwise. That
+    is every group mapped on every host, the cause this module grew for disabled,
+    and nothing red anywhere. So the binding is asserted here, on the recorded
+    container's own pair, where the two files disagree about 65534.
+    """
+    container = RECORDING[WITHHOLDING_THE_GROUPS]
+    overflow_gid = int(container["overflowgid"])
+    gid_map_file = tmp_path / "gid_map"
+    overflow_gid_file = tmp_path / "overflowgid"
+    gid_map_file.write_text(f"{container['gid_map']}\n", encoding="utf-8")
+    overflow_gid_file.write_text(f"{overflow_gid}\n", encoding="utf-8")
+    monkeypatch.setattr(device_access, "PROC_GID_MAP", gid_map_file)
+    monkeypatch.setattr(device_access, "PROC_OVERFLOW_GID", overflow_gid_file)
+
+    # The owner the recorded container reports for a node it has no group for.
+    assert AskedLocalHost().gid_is_mapped(overflow_gid) is False
+    # And a group the same namespace does map, so this is not the map refusing
+    # every number put to it.
+    assert AskedLocalHost().gid_is_mapped(PROBE_GROUP_GID) is True
+
+    # The host's map in the same two files: the number is the one the container
+    # answered False for, and the map is what moved.
+    gid_map_file.write_text(f"{RECORDING[ON_THE_HOST]['gid_map']}\n", encoding="utf-8")
+    assert AskedLocalHost().gid_is_mapped(overflow_gid) is True
+
+
 def test_an_account_database_that_cannot_be_read_is_not_a_claim_about_the_account(tmp_path: Path) -> None:
     """A uid with no passwd entry is the case this check exists for, and the one it guessed at.
 
