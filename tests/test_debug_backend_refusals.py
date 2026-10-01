@@ -1943,15 +1943,20 @@ def test_a_read_that_timed_out_carries_the_timeout_entry_and_not_the_reads(tmp_p
     assert "do_not" not in value, value
 
 
-def test_a_read_that_timed_out_stays_silent_while_the_catalogue_names_no_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The timeout's own silence, unchanged: nothing has written that bucket either."""
-    assert "timeout" not in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
-    assert "timeout:openocd" not in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
+def test_a_read_that_timed_out_carries_the_openocd_timeout_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The timeout's own entry, written by #644: the read GDB never answered carries OpenOCD's timeout steps.
+
+    The neighbouring read bucket stays silent (above); what changed is that the
+    timeout has an entry of its own now, and it is that entry, under the
+    backend that ran the session, that arrives on the result.
+    """
+    advice = remediation_fields("timeout", "openocd")
+    assert advice, "no catalogue entry answers timeout under openocd"
 
     value = gdb_read_failure(tmp_path, monkeypatch, "memory_read_hangs")
 
     assert value["ok"] is False, value
     assert value["error_type"] == "timeout", value
     assert value["summary"] == "GDB/MI command timed out.", value
-    assert "remediation" not in value, value
-    assert "do_not" not in value, value
+    assert value.get("remediation") == advice["remediation"], value
+    assert value.get("do_not") == advice.get("do_not"), value

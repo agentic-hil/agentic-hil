@@ -157,7 +157,10 @@ def test_every_key_a_template_can_produce_is_readable(service: AgenticHILToolSer
 
 def test_a_uri_this_server_does_not_serve_is_refused_as_a_missing_resource(service: AgenticHILToolService) -> None:
     unknown = mcp(service, "resources/read", {"uri": f"{RESOURCE_SCHEME}://reference/does-not-exist"})
-    unwritten_scope = mcp(service, "resources/read", {"uri": ERROR_URI_PREFIX + "timeout:openocd"})
+    # A pair #516 keeps silent, with no bare entry under it either; both are
+    # pinned in test_debug_backend_refusals.py. `timeout:openocd` stood here
+    # until #644 wrote it.
+    unwritten_scope = mcp(service, "resources/read", {"uri": ERROR_URI_PREFIX + "verify_failed:openocd"})
 
     # -32002, not a method error: a client has to be able to tell "no such
     # resource" from "this server cannot serve resources at all".
