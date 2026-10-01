@@ -237,6 +237,7 @@ FAKE_STLINK_NO_TARGET = ROOT / "tests" / "fixtures" / "fake_stlink_no_target.py"
 FAKE_STLINK_NO_PROBE = ROOT / "tests" / "fixtures" / "fake_stlink_no_probe.py"
 FAKE_STLINK_ERASE_REFUSED = ROOT / "tests" / "fixtures" / "fake_stlink_erase_refused.py"
 FAKE_STLINK_ERASE_MID_FLASH = ROOT / "tests" / "fixtures" / "fake_stlink_erase_mid_flash.py"
+FAKE_ST_LINK_GDBSERVER = ROOT / "tests" / "fixtures" / "fake_st_link_gdbserver.py"
 FAKE_PYOCD = ROOT / "tests" / "fixtures" / "fake_pyocd.py"
 FAKE_PYOCD_NO_TARGET = ROOT / "tests" / "fixtures" / "fake_pyocd_no_target.py"
 FAKE_PYOCD_SILENT_READ = ROOT / "tests" / "fixtures" / "fake_pyocd_silent_read.py"
@@ -483,6 +484,20 @@ def _no_host_stm32_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_host_st_link_gdb_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `type: stlink` entry finds no ST-LINK_gdbserver on the machine running the suite.
+
+    Loading such an entry looks for the GDB server its typed debug sessions run
+    on, and the places it looks past the configured CLI's own bundle are this
+    host's PATH and its STM32CubeCLT installations. A developer with STM32CubeCLT
+    installed would otherwise have every ST-Link test in the suite open sessions
+    the same tests refuse on CI. The search beside the configured CLI is left
+    alone: it reads only the path the test configured. A test about the host
+    search patches this name itself, after this one."""
+    monkeypatch.setattr("agentic_hil.backends.common.host_st_link_gdb_server", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_host_device_access(monkeypatch: pytest.MonkeyPatch) -> None:
     """`doctor` asks nothing of the device nodes on the machine running the suite.
 
@@ -589,6 +604,9 @@ def write_config(
     # exercising the file that never named a connect mode and is read at the
     # default. A test that wants the key writes it.
     connect_mode: str | None = None,
+    # Omitted by default like connect_mode: every file written before typed
+    # debug sessions reached STM32CubeProgrammer never named it.
+    gdb_server_executable: Path | str | None = None,
     config_path: Path | None = None,
     auto_recover: str | None = None,
     recovery_max_attempts: int | None = None,
@@ -616,6 +634,7 @@ def write_config(
         "flash_address": flash_address,
         "timeout_s": timeout_s,
         **({"connect_mode": connect_mode} if connect_mode is not None else {}),
+        **({"gdb_server_executable": Path(gdb_server_executable).as_posix() if isinstance(gdb_server_executable, Path) else gdb_server_executable} if gdb_server_executable is not None else {}),
     }
     # Omitted entirely by default, so the common test config exercises the same
     # "policy was never named" path a config written before recovery existed has.

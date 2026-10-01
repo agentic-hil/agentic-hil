@@ -101,6 +101,15 @@ WITHOUT_DEVICE_GROUP = "without_device_group"
 # run directly or in any other image, those tests are deselected.
 WHEELHOUSE = Path("/wheelhouse")
 NEEDS_THE_WHEELHOUSE = "wheelhouse"
+# The STM32CubeCLT tree a run was given, and the mark of the tests that drive the
+# board through it: typed debug sessions on `type: stlink`, which run the
+# ST-LINK_gdbserver that tree carries beside its STM32_Programmer_CLI. The bench
+# image built with `tools/bench_in_container.py --cubeclt-archive` names its own;
+# a bench run directly names one by hand. Where none is named, or what is named
+# is no directory, those tests are deselected, and the run says why in one line.
+CUBECLT_ENV = "AGENTIC_HIL_BENCH_CUBECLT"
+CUBECLT = "cubeclt"
+CUBECLT_LEFT_OUT = pytest.StashKey[str]()
 # What says a run is in the bench image, written by `tools/bench/Dockerfile`, and
 # what an image built on another distribution says it is: the distribution's
 # name, written by its head under `tools/bench/distributions`. The default image
@@ -861,6 +870,16 @@ def why_the_index_tests_are_left_out() -> str | None:
     return f"deselected on {distribution}, where a clean account cannot do the quick start's `python -m pip install --user`: {lacking}"
 
 
+def why_the_cubeclt_tests_are_left_out() -> str | None:
+    """Why the tests with the STM32CubeCLT mark are deselected from this run, or None where they run."""
+    named = os.environ.get(CUBECLT_ENV)
+    if not named:
+        return f"deselected, {CUBECLT_ENV} names no STM32CubeCLT tree for this run"
+    if not Path(named).is_dir():
+        return f"deselected, {CUBECLT_ENV} names {named}, which is no directory here"
+    return None
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """The stage that withholds the probe's group runs alone, and never beside the tier.
 
@@ -873,7 +892,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     installs the product from the bench image's package index is deselected the
     same way where `why_the_index_tests_are_left_out` gives a reason, and the
     reason is reported after collection. So is a test with the USB-UART
-    adapter's mark on a run that was handed no adapter.
+    adapter's mark on a run that was handed no adapter, and a test that drives
+    the board through an STM32CubeCLT tree, where
+    `why_the_cubeclt_tests_are_left_out` gives a reason.
     """
     if os.environ.get(BENCH_ENV) != "1":
         return
@@ -881,6 +902,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     wired = bool(os.environ.get(USB_UART_ENV))
     indexing = not withheld and any(item.get_closest_marker(NEEDS_THE_WHEELHOUSE) is not None for item in items)
     left_out = why_the_index_tests_are_left_out() if indexing else None
+    on_cubeclt = not withheld and any(item.get_closest_marker(CUBECLT) is not None for item in items)
+    cubeclt_left_out = why_the_cubeclt_tests_are_left_out() if on_cubeclt else None
     kept: list[pytest.Item] = []
     deselected: list[pytest.Item] = []
     unwired = 0
@@ -888,23 +911,30 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         in_the_stage = item.get_closest_marker(WITHOUT_DEVICE_GROUP) is not None
         installable = left_out is None or item.get_closest_marker(NEEDS_THE_WHEELHOUSE) is None
         reachable = wired or item.get_closest_marker(USB_UART) is None
-        if in_the_stage == withheld and installable and not reachable:
+        has_its_tree = cubeclt_left_out is None or item.get_closest_marker(CUBECLT) is None
+        if in_the_stage == withheld and installable and has_its_tree and not reachable:
             unwired += 1
-        (kept if in_the_stage == withheld and installable and reachable else deselected).append(item)
+        (kept if in_the_stage == withheld and installable and has_its_tree and reachable else deselected).append(item)
     if left_out is not None:
         config.stash[INDEX_LEFT_OUT] = f"tests marked {NEEDS_THE_WHEELHOUSE}: {left_out}"
     if unwired:
         config.stash[USB_UART_LEFT_OUT] = (
             f"tests marked {USB_UART}: deselected, this run was handed no USB-UART adapter ({USB_UART_ENV} is not set)"
         )
+    if cubeclt_left_out is not None:
+        config.stash[CUBECLT_LEFT_OUT] = f"tests marked {CUBECLT}: {cubeclt_left_out}"
     if deselected:
         config.hook.pytest_deselected(items=deselected)
         items[:] = kept
 
 
 def pytest_report_collectionfinish(config: pytest.Config) -> str | list[str] | None:
-    """One line for each kind of test deselected for what this run lacks: the package index, the USB-UART adapter."""
-    lines = [line for key in (INDEX_LEFT_OUT, USB_UART_LEFT_OUT) if (line := config.stash.get(key, None)) is not None]
+    """One line for each kind of test deselected for what this run lacks: the package index, the USB-UART adapter, the STM32CubeCLT tree."""
+    lines = [
+        line
+        for key in (INDEX_LEFT_OUT, USB_UART_LEFT_OUT, CUBECLT_LEFT_OUT)
+        if (line := config.stash.get(key, None)) is not None
+    ]
     if not lines:
         return None
     return lines[0] if len(lines) == 1 else lines

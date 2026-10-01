@@ -2228,7 +2228,7 @@ def test_stlink_dump_does_not_open_the_typed_debug_session_family(tmp_path: Path
     for tool, result in results.items():
         assert result["ok"] is False, (tool, result)
         assert result["error_type"] == "not_supported", (tool, result)
-        assert "Typed debug sessions require the OpenOCD backend" in result["summary"], (tool, result)
+        assert "Typed debug sessions on the stlink backend run on a GDB server" in result["summary"], (tool, result)
         # The way out, in the summary itself, because a caller that reads only
         # the summary is the caller this refusal failed before.
         assert "`type: openocd`" in result["summary"], (tool, result)
@@ -3411,7 +3411,7 @@ def test_stlink_symbol_value_still_refuses_the_rest_of_the_typed_family(tmp_path
 
     assert refused["ok"] is False, refused
     assert refused["error_type"] == "not_supported"
-    assert "Typed debug sessions require the OpenOCD backend" in refused["summary"]
+    assert "Typed debug sessions on the stlink backend run on a GDB server" in refused["summary"]
     assert "`type: openocd`" in refused["summary"]
 
 

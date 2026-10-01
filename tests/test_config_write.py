@@ -1110,6 +1110,48 @@ def test_a_connect_mode_the_backend_cannot_carry_out_rolls_the_file_back(tmp_pat
     assert path.read_bytes() == before, "nothing changed"
 
 
+def test_the_gdb_server_is_opened_by_the_description_grant_and_reaches_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The key a refused debug session on an stlink entry names (#624).
+
+    It sits beside `executable`: which program runs for this probe is a fact
+    about the bench, and the description grant that may name the CLI may name
+    the GDB server installed with it."""
+    workspace, path = bench(tmp_path, monkeypatch, debugger_type="stlink", **{CONFIG_DESCRIPTION_RIGHT: True})
+    server = tmp_path / "clt" / "STLink-gdb-server" / "bin" / "ST-LINK_gdbserver"
+    server.parent.mkdir(parents=True)
+    server.write_bytes(b"")
+    tools = service(workspace)
+    try:
+        described = tools.call(PROJECT_CONFIG_DESCRIBE, {})
+        writable = {entry["key"]: entry for entry in described["writable_keys"]}
+        written = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.gdb_server_executable", server.as_posix())))
+    finally:
+        tools.close()
+
+    assert "debuggers.dut.gdb_server_executable" in writable
+    assert writable["debuggers.dut.gdb_server_executable"]["right"] == CONFIG_DESCRIPTION_RIGHT
+    assert written["ok"] is True, written
+    assert written["permissions_changed"] == []
+    assert document_of(path)["debuggers"]["dut"]["gdb_server_executable"] == server.as_posix()
+
+
+def test_a_gdb_server_that_does_not_exist_rolls_the_file_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace, path = bench(tmp_path, monkeypatch, debugger_type="stlink", **{CONFIG_DESCRIPTION_RIGHT: True})
+    before = path.read_bytes()
+    missing = (tmp_path / "clt" / "STLink-gdb-server" / "bin" / "ST-LINK_gdbserver").resolve()
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.gdb_server_executable", missing.as_posix())))
+    finally:
+        tools.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "config_invalid"
+    assert refused["field"] == "debuggers.dut.gdb_server_executable"
+    assert refused["summary"].startswith("Configured executable must be an existing single-link regular file."), refused["summary"]
+    assert path.read_bytes() == before, "nothing changed"
+
+
 # ---------------------------------------------------------------------------
 # `debuggers.<name>.type`, the one description key checked as a whole.
 

@@ -28,6 +28,8 @@ from agentic_hil.backends.common import (
     which,
 )
 from agentic_hil.backends.gdbdebug import (
+    GdbDebugSessions,
+    GdbServerSteps,
     decode_symbol_value,
     offline_symbol_info,
     resolve_symbol_offline,
@@ -92,6 +94,11 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
     # backend's own `unknown_debugger_error` travels beside it in
     # `backend_error_type` for a reader at that layer (#506).
     "unknown_debugger_error": "debugger_error",
+    # The GDB server a debug session runs on, named by
+    # `debuggers.<name>.gdb_server_executable` or found beside the CLI, is not
+    # there any more. A program this backend starts that is missing, which is
+    # what `debugger_not_found` says for the CLI itself.
+    "gdb_server_not_found": "debugger_not_found",
 }
 
 # One entry per tool, and every entry is a line the operation itself prints.
@@ -258,15 +265,115 @@ ERASE_REFUSED_EFFECT_UNCONFIRMED = "erase_refused_effect_unconfirmed"
 FLASH_CHANGE_UNDERWAY = "flash_change_underway"
 ERASE_ABORT_POINT_UNREADABLE = "abort_point_unreadable"
 
+# Typed debug sessions on this backend run ST-LINK_gdbserver, the GDB server
+# STM32CubeCLT installs beside STM32_Programmer_CLI (#624). What the session
+# layer has to know of it, each from version 7.14.0 recorded on the reference
+# board (tests/fixtures/st_link_gdbserver_7_14_0_linux_recordings.json and
+# st_link_gdbserver_7_14_0_linux_teardown_recordings.json):
+#
+# * Ready: `Waiting for debugger connection...`, a line of its own that names no
+#   port; the server prints it again after each client it accepts.
+# * It serves one client and exits when that client leaves, and a bare TCP
+#   connect and close is a client. So readiness is the line, never a look at the
+#   port, which would end the server it looked at.
+# * Started with `-g`, GDB's connect halts the core where it runs and GDB
+#   reports that stop. Without `-g` the connect resets the core first.
+# * Reset: `monitor reset` answers `^done` after `STM32 Successfully completed
+#   reset operation (System reset)` and leaves the core halted at the reset
+#   vector with no stop record of its own. `monitor reset halt`, `reset 0` to
+#   `reset 2` and `reset init` are each refused as an unknown reset option.
+# * Detach: GDB exiting, GDB detaching and the server's own shutdown on SIGTERM
+#   each resumed the core, and the server has no command that stops that. A
+#   killed server left the core halted where it was, three times out of three,
+#   read back by servers killed the same way. So the server is killed, with no
+#   SIGTERM first, before GDB detaches.
+ST_LINK_GDB_SERVER_STEPS = GdbServerSteps(
+    ready_line="Waiting for debugger connection...",
+    ready_line_ends_the_line=True,
+    reset_halt_command='-interpreter-exec console "monitor reset"',
+    reset_halt_confirmation="Successfully completed reset operation",
+    detach_guard_command=None,
+    server_resets_at_start=False,
+    graceful_server_shutdown=False,
+)
+# How ST-LINK_gdbserver says it could not start, in the `Reason:` line it ends
+# with, recorded on Linux with the reference board and on Windows with nothing
+# on USB (st_link_gdbserver_7_14_0_windows_recordings.json). Its words are not
+# STM32_Programmer_CLI's, and the CLI's reading does not fit them: an unknown
+# serial is `ST-LINK: <serial> not found`, which that reading takes for a
+# missing input file. First match wins, in this order.
+ST_LINK_GDB_SERVER_REFUSALS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # `No ST-LINK found. Please check ST-LINK USB cable.` with nothing on USB,
+    # and `ST-LINK: <serial> not found.` for a serial no connected probe has.
+    ("probe_not_found", re.compile(r"no st-link found|st-link: \S+ not found", re.IGNORECASE)),
+    # `Failed to connect to device. Please check power and cabling to target.`
+    # for a probe another server holds, and `Unknown MCU found on target.` for a
+    # JTAG connect to the reference board's SWD-only wiring. A target that is
+    # off is the other cause the server's words name, so neither line is read as
+    # proof that nothing behind the probe was reached.
+    ("target_not_detected", re.compile(r"failed to connect to device|unknown mcu found on target", re.IGNORECASE)),
+    # `Couldn't locate STM32CubeProgrammer in '<-cp>', use -cp <path>`.
+    ("stm32_programmer_cli_not_found", re.compile(r"couldn't locate stm32cubeprogrammer", re.IGNORECASE)),
+)
+# The refusals that end the server before any probe carried anything.
+ST_LINK_GDB_SERVER_PRE_CONTACT = frozenset({"probe_not_found", "stm32_programmer_cli_not_found"})
+
+
+def classify_gdb_server_output(output: str) -> str:
+    """The backend error ST-LINK_gdbserver's output names, or `unknown_debugger_error`."""
+    for backend_error_type, pattern in ST_LINK_GDB_SERVER_REFUSALS:
+        if pattern.search(output):
+            return backend_error_type
+    return "unknown_debugger_error"
+
+
+def gdb_server_decisive_line(output: str, classified: str) -> str | None:
+    """The line a start failure is reported by.
+
+    The first line that alone classifies as the whole output did. For output
+    nothing classifies, the last line that reports a failure, because the server
+    ends a failed start with `Shutting down...` and `Exit.` (a taken GDB port,
+    recorded), and only then the last line."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return None
+    if classified != "unknown_debugger_error":
+        for line in lines:
+            if classify_gdb_server_output(line) == classified:
+                return line
+    failures = [line for line in lines if contains_any(line.lower(), ["fail", "error"])]
+    return failures[-1] if failures else lines[-1]
+
 
 class STLinkBackend:
     backend_name = "stlink"
 
     def __init__(self, config: AgenticHILConfig):
         self.config = config
+        # The directory of the STM32_Programmer_CLI the session being started
+        # resolved, which its server is given as `-cp`.
+        self._programmer_directory: str | None = None
+        self._debug = GdbDebugSessions(
+            config,
+            backend_name=self.backend_name,
+            resolve_server=self._resolve_debug_server,
+            build_server_args=self._debug_server_args,
+            classify_server_output=classify_gdb_server_output,
+            server_steps=ST_LINK_GDB_SERVER_STEPS,
+            read_start_failure=self._debug_start_failure,
+        )
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
+        # An open session may not outlive a change to the probe it runs on, to
+        # the server it runs (the entry's `gdb_server_executable` is part of
+        # it), or a grant that refuses sessions, read exactly as the OpenOCD
+        # and pyOCD backends read them.
+        debugger_changed = config.debugger != self.config.debugger or config.target != self.config.target
+        debug_permission_revoked = not config.probe_allowed() or config.debugger is None or config.debugger.permissions.allow_raw_debugger_commands
+        if debugger_changed or debug_permission_revoked:
+            self._debug.close()
         self.config = config
+        self._debug.config = config
 
     def info(self) -> JsonObject:
         resolved = self._resolve_executable()
@@ -371,32 +478,65 @@ class STLinkBackend:
             result["summary"] = f"Target reset with mode '{mode}'."
         return self._write_action_report(result)
 
-    def debug_start_session(self, artifact: JsonObject | None = None, mode: str = "attach", timeout_s: float | None = None) -> JsonObject:
-        return self._unsupported_debug_tool("debug_start_session")
+    # The session tools run on ST-LINK_gdbserver when the entry has one, and
+    # refuse naming the ways to get one when it has none. A session already on
+    # file is answered by the session layer whatever the entry says now.
+    def debug_start_session(self, artifact: JsonObject, mode: str = "attach", timeout_s: float | None = None) -> JsonObject:
+        if not self.opens_debug_sessions():
+            return self._unsupported_debug_tool("debug_start_session")
+        return self._debug.start_session(artifact, mode, timeout_s)
 
     def debug_stop_session(self, timeout_s: float | None = None) -> JsonObject:
-        return self._unsupported_debug_tool("debug_stop_session")
+        if not self._serves_session_tools():
+            return self._unsupported_debug_tool("debug_stop_session")
+        return self._debug.stop_session(timeout_s)
 
     def debug_get_session_status(self) -> JsonObject:
-        return self._unsupported_debug_tool("debug_get_session_status")
+        if not self._serves_session_tools():
+            return self._unsupported_debug_tool("debug_get_session_status")
+        return self._debug.get_session_status()
 
-    def debug_set_breakpoint(self, location: JsonObject | None = None) -> JsonObject:
-        return self._unsupported_debug_tool("debug_set_breakpoint")
+    def debug_set_breakpoint(self, location: JsonObject) -> JsonObject:
+        if not self._serves_session_tools():
+            return self._unsupported_debug_tool("debug_set_breakpoint")
+        return self._debug.set_breakpoint(location.get("location", ""))
 
     def debug_list_breakpoints(self) -> JsonObject:
-        return self._unsupported_debug_tool("debug_list_breakpoints")
+        if not self._serves_session_tools():
+            return self._unsupported_debug_tool("debug_list_breakpoints")
+        return self._debug.list_breakpoints()
 
     def debug_clear_breakpoints(self) -> JsonObject:
-        return self._unsupported_debug_tool("debug_clear_breakpoints")
+        if not self._serves_session_tools():
+            return self._unsupported_debug_tool("debug_clear_breakpoints")
+        return self._debug.clear_breakpoints()
 
     def debug_continue(self, timeout_s: float | None = None) -> JsonObject:
-        return self._unsupported_debug_tool("debug_continue")
+        if not self._serves_session_tools():
+            return self._unsupported_debug_tool("debug_continue")
+        return self._debug.continue_execution(timeout_s)
 
     def debug_halt(self, timeout_s: float | None = None) -> JsonObject:
-        return self._unsupported_debug_tool("debug_halt")
+        if not self._serves_session_tools():
+            return self._unsupported_debug_tool("debug_halt")
+        return self._debug.halt(timeout_s)
 
     def debug_get_stop_reason(self) -> JsonObject:
-        return self._unsupported_debug_tool("debug_get_stop_reason")
+        if not self._serves_session_tools():
+            return self._unsupported_debug_tool("debug_get_stop_reason")
+        return self._debug.get_stop_reason()
+
+    def _serves_session_tools(self) -> bool:
+        return self.opens_debug_sessions() or self._session_open()
+
+    def _session_open(self) -> bool:
+        """Whether a debug session is on file, settled or not.
+
+        While one is, its server holds the probe, and STM32_Programmer_CLI
+        opening the same probe is the busy-probe refusal recorded for a second
+        server, so every read goes to the session, which also answers for one
+        left unsettled."""
+        return self._debug.session is not None
 
     def debug_symbol_info(self, symbol: str = "", symbol_elf: JsonObject | None = None) -> JsonObject:
         """The shared offline resolution, and nothing of this backend's own.
@@ -410,7 +550,12 @@ class STLinkBackend:
         Delegated whole because there is nothing here for STM32CubeProgrammer to
         do: `offline_symbol_info` runs a GDB against the flashed ELF, and the
         pyOCD backend answers the same question through the same call (#344).
+
+        Inside a debug session the session's GDB answers instead, against the
+        image the session started with, as on OpenOCD and pyOCD (#624).
         """
+        if self._session_open():
+            return self._debug.symbol_info(symbol)
         return offline_symbol_info(self.config, self.backend_name, symbol, symbol_elf)
 
     def debug_symbol_value(self, symbol: str = "", symbol_elf: JsonObject | None = None) -> JsonObject:
@@ -437,7 +582,12 @@ class STLinkBackend:
         the address of every record it holds, so the bytes are taken by address
         rather than by position, and a file that does not cover the whole window
         is a failed read rather than a short answer.
+
+        Inside a debug session the read goes through the session (#624): the
+        session's server holds the probe, so the CLI could not open it.
         """
+        if self._session_open():
+            return self._debug.symbol_value(symbol)
         tool = "debug_symbol_value"
         if not self.config.probe_allowed():
             return self._permission_denied(tool, "Symbol reads require allow_probe in the authoritative config.", self._permission_key("allow_probe"))
@@ -509,7 +659,12 @@ class STLinkBackend:
         rather than hidden: with no session there is no loaded image to ask, so
         the answer is resolved offline from the ELF this service flashed, whose
         sha256 travels in the result.
+
+        Inside a debug session the dump goes through the session (#624), for
+        the reason the value read does.
         """
+        if self._session_open() and output is not None:
+            return self._debug.dump_symbol_ihex(symbol, output)
         tool = "debug_dump_symbol_ihex"
         if not self.config.probe_allowed():
             return self._permission_denied(tool, "Symbol dumps require allow_probe in the authoritative config.", self._permission_key("allow_probe"))
@@ -564,7 +719,7 @@ class STLinkBackend:
         return self._write_action_report(result)
 
     def close(self) -> None:
-        return None
+        self._debug.close()
 
     def sessionless_debug_tools(self) -> frozenset[str]:
         """The two reads this backend serves with no debug session behind them.
@@ -574,12 +729,21 @@ class STLinkBackend:
         that already holds the lease. The coordination layer takes a one-shot
         debugger lease for exactly these (machine-wide ownership, run
         declaration and the incident path for an unconfirmed read), where a
-        session backend's own lease would carry them instead."""
+        session backend's own lease would carry them instead.
+
+        None while a session is open: the reads then run through it, on the
+        lease it holds."""
+        if self._session_open():
+            return frozenset()
         return SESSIONLESS_DEBUG_READS
 
     def opens_debug_sessions(self) -> bool:
-        """Not yet: the session tools refuse here and name their way out."""
-        return False
+        """When the entry has ST-LINK_gdbserver to run them on (#624).
+
+        `debuggers.<name>.gdb_server_executable`, as configured or as found
+        beside the configured CLI when the configuration loaded. Without one
+        the session tools refuse and name both ways to get one."""
+        return self.config.debugger is not None and self.config.debugger.gdb_server_executable is not None
 
     def target_support(self) -> JsonObject:
         """STM32CubeProgrammer identifies the part itself.
@@ -866,6 +1030,91 @@ class STLinkBackend:
 
     def _unsupported_debug_tool(self, tool: str) -> JsonObject:
         return debug_session_unsupported(self.backend_name, tool)
+
+    def _gdb_server_field(self) -> str:
+        return f"debuggers.{self.config.debugger_id or '<name>'}.gdb_server_executable"
+
+    def _resolve_debug_server(self) -> JsonObject:
+        """The ST-LINK_gdbserver a debug session starts, or the refusal that starts none.
+
+        The CLI is resolved first, exactly as every other call resolves it,
+        because the server is told its directory as `-cp` and refuses to start
+        without an STM32CubeProgrammer there (recorded). The directory is the
+        resolved file's, so a CLI reached through a link names the installation
+        it is part of."""
+        resolved = self._resolve_executable()
+        if not resolved["ok"]:
+            return resolved
+        server = self.config.debugger.gdb_server_executable
+        if server is None:
+            return self._unsupported_debug_tool("debug_start_session")
+        if not Path(server).is_file():
+            field = self._gdb_server_field()
+            return {
+                "ok": False,
+                "backend": self.backend_name,
+                "error_type": "debugger_not_found",
+                "backend_error_type": "gdb_server_not_found",
+                "summary": f"ST-LINK_gdbserver could not be found at {server}, the path {field} resolved to when the configuration loaded.",
+                "field": field,
+                "likely_causes": ["STM32CubeCLT was removed or moved after the configuration was loaded", f"{field} names a file that has since been deleted"],
+                **NOT_CONTACTED,
+            }
+        self._programmer_directory = str(Path(str(resolved["executable_path"])).resolve().parent)
+        return {"ok": True, "executable": server, "executable_path": server}
+
+    def _debug_server_args(self, executable_path: str, gdb_port: int, reset: bool) -> list[str]:
+        """ST-LINK_gdbserver on the reserved port, the entry's probe, attached.
+
+        The same for every mode: the reset into halt is a GDB command here
+        (`ST_LINK_GDB_SERVER_STEPS`), so `-g` connects without one, as an
+        attach must. `-d` for an SWD entry: without it the server connects over
+        JTAG, which the reference board's SWD-only wiring refused as an unknown
+        MCU. Never `-e`, which keeps the server up after its client leaves."""
+        args = [*invocation(executable_path), "-p", str(gdb_port)]
+        if self.config.debugger.interface.upper() == "SWD":
+            args.append("-d")
+        args.extend(["-cp", str(self._programmer_directory)])
+        if self.config.debugger.probe_id is not None:
+            args.extend(["-i", self.config.debugger.probe_id])
+        args.append("-g")
+        return args
+
+    def _debug_start_failure(self, output: str, server_args: list[str]) -> JsonObject | None:
+        """What a server that exited at start said, in its own words.
+
+        The line that decided it travels as `backend_error`: the server prints a
+        banner and its options ahead of the reason. A missing probe and a
+        missing STM32CubeProgrammer end it before any probe carried anything,
+        which is what NOT_CONTACTED says; the others make no such claim."""
+        backend_error_type = classify_gdb_server_output(output)
+        error_type = self._public_error_type(backend_error_type)
+        result: JsonObject = {
+            "error_type": error_type,
+            "backend_error_type": backend_error_type,
+            "summary": f"Debug server exited before the GDB port became ready: {self._gdb_server_summary(backend_error_type, error_type)}",
+            "likely_causes": self._gdb_server_likely_causes(backend_error_type, error_type),
+            **remediation_fields(error_type, self.backend_name),
+        }
+        decisive = gdb_server_decisive_line(output, backend_error_type)
+        if decisive is not None:
+            result["backend_error"] = decisive
+        if backend_error_type in ST_LINK_GDB_SERVER_PRE_CONTACT:
+            result.update(NOT_CONTACTED)
+        return result
+
+    def _gdb_server_summary(self, backend_error_type: str, error_type: str) -> str:
+        if backend_error_type == "stm32_programmer_cli_not_found":
+            return "ST-LINK_gdbserver found no STM32CubeProgrammer in the directory of the configured STM32_Programmer_CLI."
+        return self._summary_for_error(error_type)
+
+    def _gdb_server_likely_causes(self, backend_error_type: str, error_type: str) -> list[str]:
+        if backend_error_type == "stm32_programmer_cli_not_found":
+            return [
+                "debuggers.<name>.executable is a wrapper or a copy rather than the STM32_Programmer_CLI inside an STM32CubeProgrammer bin directory",
+                "the STM32CubeProgrammer installation the CLI belongs to is incomplete",
+            ]
+        return self._likely_causes(error_type)
 
     def _classify_output(self, output: str, tool: str | None = None) -> str:
         lower = output.lower()

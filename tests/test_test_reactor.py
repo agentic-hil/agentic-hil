@@ -5597,7 +5597,9 @@ def test_a_read_step_on_a_backend_that_serves_it_neither_way_is_refused_by_name(
     assert refusal["sessionless_debug_reads"] == []
     assert refusal["summary"] == (
         "Step 1's 'read_symbol' reads target memory, and the 'stlink' backend on debugger 'dut' serves that read "
-        "neither without a debug session nor inside one. To run it on this bench, the same ST-Link runs under "
+        "neither without a debug session nor inside one. To run it on this bench, name the ST-LINK_gdbserver that "
+        "STM32CubeCLT installs as `debuggers.<name>.gdb_server_executable` (it is found by itself beside the "
+        "configured STM32_Programmer_CLI of the same STM32CubeCLT), or run the same in-circuit debugger under "
         "`type: openocd` with `interface_cfg: interface/stlink.cfg` and the `target_cfg` for this part."
     )
     assert service.calls == []

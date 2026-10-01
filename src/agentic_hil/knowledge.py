@@ -4439,11 +4439,15 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "not_supported:stlink": ErrorRemedy(
         meaning=(
             "This bench runs `type: stlink`, which drives STM32CubeProgrammer's CLI. That CLI programs, resets and "
-            "reads memory; it is not a debug server, so there is no session on this backend to hold a breakpoint, "
-            "resume a core, or report why one stopped. `debug_start_session`, `debug_stop_session`, "
-            "`debug_get_session_status`, `debug_set_breakpoint`, `debug_list_breakpoints`, `debug_clear_breakpoints`, "
-            "`debug_continue`, `debug_halt` and `debug_get_stop_reason` are refused here for that reason, and so is "
-            "`reset_target` with mode `init`, whose reset-init event script is an OpenOCD thing.\n\n"
+            "reads memory; it is not a debug server. Typed debug sessions on this backend run on ST-LINK_gdbserver, "
+            "the GDB server STM32CubeCLT installs beside the CLI (#624), and this debugger has none: "
+            "`debuggers.<name>.gdb_server_executable` is not set, and none was found beside the configured "
+            "STM32_Programmer_CLI or elsewhere on the host when the configuration loaded. Without it there is no "
+            "session on this backend to hold a breakpoint, resume a core, or report why one stopped, so "
+            "`debug_start_session`, `debug_stop_session`, `debug_get_session_status`, `debug_set_breakpoint`, "
+            "`debug_list_breakpoints`, `debug_clear_breakpoints`, `debug_continue`, `debug_halt` and "
+            "`debug_get_stop_reason` are refused. `reset_target` with mode `init` is refused here whatever is "
+            "configured, because its reset-init event script is an OpenOCD thing.\n\n"
             "What is *not* refused any more is the read half of the typed-debug family. `debug_symbol_info`, "
             "`debug_symbol_value` and `debug_dump_symbol_ihex` are served on this backend with no session behind them: "
             "the first resolves an address and a size out of the ELF `flash_firmware` put on the board and opens no "
@@ -4461,15 +4465,20 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "lives without touching the board. They resolve against the ELF this service flashed, so flash the ELF "
             "with `flash_firmware` first and keep the symbol in `debug.allowed_symbols`.",
             "If the step genuinely needs a session (a breakpoint, a resume, a stop reason, stepping), the way out is "
-            "a configuration change and not a different probe: the same ST-Link is a probe OpenOCD drives. Set "
+            "a configuration change and not a different probe. The smaller one keeps this backend: install "
+            "STM32CubeCLT, whose ST-LINK_gdbserver is found by itself beside its own STM32_Programmer_CLI, or name the "
+            "server as `debuggers.<name>.gdb_server_executable`. Sessions then run through it with the GDB "
+            "`debug.gdb_executable` names, and flashing, probing and reading are unchanged.",
+            "The other keeps the probe and changes the stack: the same in-circuit debugger is one OpenOCD drives. Set "
             "`debuggers.<name>.type` to `openocd`, with `interface_cfg: interface/stlink.cfg` and the `target_cfg` for "
             "this part, `target/stm32f4x.cfg` for an STM32F4.",
-            "The switch is one `project_config_set` call behind `allow_config_description_write`: send "
-            "`debuggers.<name>.type` together with the fields the new backend requires, and it lands whole or is "
-            "refused naming what is missing. Which debug stack a bench runs is the operator's decision, so report "
-            "the change and get their word before making it. Afterwards the server adopts it through "
-            "`project_config_reload_description` or a restart.",
-            "Say what the move costs before it is made, because parts of this bench change hands with it. OpenOCD has "
+            "Either is one `project_config_set` call behind `allow_config_description_write`: send "
+            "`debuggers.<name>.gdb_server_executable`, or `debuggers.<name>.type` together with the fields the new "
+            "backend requires, and it lands whole or is refused naming what is missing. Which debug stack a bench "
+            "runs is the operator's decision, so report the change and get their word before making it. Afterwards "
+            "the server adopts it through `project_config_reload_description` or a restart.",
+            "Say what the move to OpenOCD costs before it is made, because parts of this bench change hands with it. "
+            "OpenOCD has "
             "to be installed and reachable, by PATH or `debuggers.<name>.executable`. A typed debug session is GDB, so "
             "`debug.gdb_executable` has to name a GDB that speaks this target, such as `arm-none-eabi-gdb`. A "
             "`connect_mode: under_reset` on that debugger has to go: OpenOCD refuses the value at load with "
@@ -4484,11 +4493,11 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not read this as no debug on this bench. Three of the twelve typed-debug tools work here, and they are "
             "the three that answer what is in memory.",
-            "Do not reach for `openocd`, `gdb`, `st-util` or a raw debugger command to get a breakpoint anyway. That "
-            "bypasses the policy this refusal comes from, takes the probe out from under the bench's own coordination, "
-            "and leaves the operator with no record of what ran.",
-            "Do not swap the probe. The ST-Link is not what refused; the backend the configuration names for it is, "
-            "and the same probe serves both.",
+            "Do not reach for `openocd`, `gdb`, `ST-LINK_gdbserver`, `st-util` or a raw debugger command to get a "
+            "breakpoint anyway. That bypasses the policy this refusal comes from, takes the probe out from under the "
+            "bench's own coordination, and leaves the operator with no record of what ran.",
+            "Do not swap the probe. The in-circuit debugger is not what refused; the configuration around it is, and "
+            "the same probe serves both ways out.",
         ),
     ),
     "not_supported:pyocd": ErrorRemedy(
@@ -6901,6 +6910,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "tool": "openocd",
         "type": {"status": "optional", "value": "openocd", "note": "Default. Omit only if no other backend is meant. Settable over MCP behind allow_config_description_write, and switching an entry to this backend has to carry interface_cfg and target_cfg in the same call, because OpenOCD reaches the board through no other route; an entry that does not name them is refused rather than left half switched. Send executable in that call too, or `null` to have OpenOCD discovered on PATH: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to `openocd` on PATH, except on the untouched starter entry, which stays inert until somebody names a toolchain in it. An absolute path or a value containing a separator is resolved against workspace_root and must exist."},
+        "gdb_server_executable": {"status": "ignored", "note": "OpenOCD is its own GDB server: a typed debug session runs `executable` with a `gdb_port` on a port this server reserves."},
         "probe_id": {"status": "optional", "note": "Adapter serial number. OpenOCD 0.12.0 and newer are passed `adapter serial <probe_id>`; an older release is passed the adapter driver's own serial command (`hla_serial`, `st-link serial` or `cmsis_dap_serial`), and a call whose driver has none is refused `not_supported` before OpenOCD is started for it. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "OpenOCD selects the target through target_cfg."},
         "interface": {"status": "ignored", "note": "OpenOCD selects the transport through interface_cfg."},
@@ -6913,6 +6923,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "tool": "STM32_Programmer_CLI (STM32CubeProgrammer)",
         "type": {"status": "required", "value": "stlink", "note": "Settable over MCP behind allow_config_description_write. Switching an entry to this backend needs no other key of this surface: interface defaults to SWD, and interface_cfg and target_cfg are ignored here, so they may stay in the entry. Send executable in the same call, or `null` to have STM32_Programmer_CLI discovered: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to STM32_Programmer_CLI on PATH, then the standard STM32CubeProgrammer and STM32CubeIDE install locations."},
+        "gdb_server_executable": {"status": "discovered", "note": "The GDB server typed debug sessions run: ST-LINK_gdbserver, which STM32CubeCLT installs beside STM32_Programmer_CLI because the CLI has none. Falls back to the one in the same STM32CubeCLT tree as `executable` (`STLink-gdb-server/bin` beside `STM32CubeProgrammer/bin`), then ST-LINK_gdbserver on PATH, then the STM32CubeCLT installations under C:/ST. Held to the rules `executable` is. Started with `-cp` naming the CLI's directory, `-i <probe_id>`, `-d` for SWD and `-g`, so the connect neither resets nor moves the core. Unset and not found, flashing, probing and reading are unchanged and the debug session tools are refused naming this key."},
         "probe_id": {"status": "optional", "note": "ST-Link serial number, passed as `sn=<probe_id>`. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "STM32CubeProgrammer identifies the part itself."},
         "interface": {"status": "required", "default": "SWD", "enum": ["SWD", "JTAG"], "note": "Passed as `port=<interface>`."},
@@ -6925,6 +6936,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "tool": "pyocd",
         "type": {"status": "required", "value": "pyocd", "note": "Settable over MCP behind allow_config_description_write. Switching an entry to this backend needs no other key of this surface, because target_type is not one it writes and pyOCD guesses from the probe's board ID when it is unset; a bench that needs a specific part still has to have target_type in the file. Send executable in the same call, or `null` to have pyocd discovered: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to `pyocd` on PATH. Install with `pip install agentic-hil[pyocd]` or `pip install pyocd`. Typed debug sessions run `pyocd gdbserver` from the same executable, on a port this server reserves for the session, with the same `--uid`, `--target` and `-W` every other call carries and pyOCD's semihosting console switched off, so the server opens no port of its own beside the one GDB connects to."},
+        "gdb_server_executable": {"status": "ignored", "note": "Typed debug sessions run `pyocd gdbserver` from `executable`."},
         "probe_id": {"status": "optional", "note": "Probe unique ID, passed as `--uid`. pyOCD matches it as a case-insensitive substring and strips a leading `<type>:`, so give the full ID. Required once more than one debugger is configured."},
         "target_type": {"status": "required", "note": "Passed as `--target`. Omitted entirely when unset, leaving pyOCD to guess from the probe's board ID. Most vendor parts resolve only after a CMSIS pack is installed."},
         "interface": {"status": "ignored"},
@@ -7297,6 +7309,10 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # refused naming exactly what is missing, and the call lands a whole entry
     # or changes nothing.
     #
+    # `gdb_server_executable` is `executable` again for the one backend whose
+    # CLI has no GDB server: which program runs for a debug session on this
+    # probe, a fact about the bench like the CLI beside it (#624).
+    #
     # `connect_mode` joins them under the same right. It is not a
     # permission and it widens nothing: the two values it takes are both a flash
     # this configuration already allows, and the difference between them is
@@ -7307,7 +7323,7 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # the permissions grant it would sit with the keys that decide authority,
     # where nobody could set it without also being able to grant themselves
     # flashing.
-    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("type", "probe_id", "executable", "interface_cfg", "target_cfg", "connect_mode")),
+    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("type", "probe_id", "executable", "gdb_server_executable", "interface_cfg", "target_cfg", "connect_mode")),
     # `serial_number` is in the description half for the same reason `probe_id`
     # is: it is what an attached board hands you, and it says which unit this
     # entry is rather than what may be done to it. `vid`/`pid` come off the same
@@ -8616,7 +8632,7 @@ MCP_RESOURCES: list[JsonObject] = [
         DEBUGGER_BACKENDS_URI,
         "debugger-backends",
         "Required fields per debugger backend",
-        "Which of type, executable, probe_id, target_type, interface, interface_cfg, target_cfg, connect_mode and flash_address each of openocd, stlink and pyocd requires, discovers, ignores, or refuses; when probe_id becomes mandatory; when flash_address is needed; which backend can connect under reset; and which of bootstrap discovery's two enumerations answers on a given host, which decides the type and executable a generated entry gets.",
+        "Which of type, executable, gdb_server_executable, probe_id, target_type, interface, interface_cfg, target_cfg, connect_mode and flash_address each of openocd, stlink and pyocd requires, discovers, ignores, or refuses; when probe_id becomes mandatory; when flash_address is needed; which backend can connect under reset; and which of bootstrap discovery's two enumerations answers on a given host, which decides the type and executable a generated entry gets.",
         JSON_MIME,
     ),
     _resource_descriptor(

@@ -278,6 +278,11 @@ class DebuggerConfig:
     # `under_reset` at load rather than accepting a value they would ignore.
     connect_mode: Literal["hotplug", "under_reset"] = "hotplug"
     permissions: DebuggerPermissions = field(default_factory=DebuggerPermissions)
+    # The GDB server typed debug sessions run on under `type: stlink`:
+    # ST-LINK_gdbserver, which STM32_Programmer_CLI does not contain. Pinning
+    # finds it beside the CLI when unset; None means no session on this entry.
+    # OpenOCD and pyOCD run their sessions on `executable` and never read it.
+    gdb_server_executable: str | None = None
     # Unset means the project target; a named probe on a second board overrides it.
     target: TargetConfig | None = None
 

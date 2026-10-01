@@ -204,6 +204,27 @@ PYOCD_RESET_UNCONFIRMED = "pyocd_reset_unconfirmed"
 PYOCD_RESET_FAILED_RECORD = '@"Failed to halt device on reset (state is RUNNING)\\n"'
 PYOCD_RECORDING = Path(__file__).with_name("pyocd_0_45_1_gdbserver_recordings.json")
 MONITOR_RESET_HALT = '-interpreter-exec console "monitor reset halt"'
+# ST-LINK_gdbserver as the GDB on the reference board saw it, replayed from the
+# recording beside this file (ST-LINK_gdbserver 7.14.0 from STM32CubeCLT 1.22.0,
+# xPack arm-none-eabi-gdb 14.2.90, 2026-10-01). Opted into by name, and it
+# implies `connects_to_server`. Every answer is the recorded one:
+# `-target-select` answers `^connected` after a `*stopped` record with no
+# reason for the core the server halted on connect (scenario
+# `session_attach_connect`, started with `-g`); `monitor reset` answers `^done`
+# after the target record that says the reset completed, and leaves the core
+# halted at the reset vector with no stop record (the same scenario, whose stop
+# poll after `monitor reset` timed out);
+# `monitor reset halt` and every monitor command the server does not know are
+# refused with `Protocol error with Rcmd`.
+ST_LINK_GDBSERVER = "st_link_gdbserver"
+# The same reset with its target record taken out: the recorded answer, minus
+# the one line that says the reset completed. No reset that failed to complete
+# has been recorded, so what the server prints then is not known; this is the
+# absence of the line the product waits for, not a line of its own.
+ST_LINK_RESET_UNCONFIRMED = "st_link_reset_unconfirmed"
+ST_LINK_RECORDING = Path(__file__).with_name("st_link_gdbserver_7_14_0_linux_recordings.json")
+ST_LINK_MONITOR_RESET = '-interpreter-exec console "monitor reset"'
+st_link_scenarios: dict | None = None
 
 
 def pyocd_recorded_records(command_prefix: str) -> list[str]:
@@ -212,6 +233,24 @@ def pyocd_recorded_records(command_prefix: str) -> list[str]:
     steps = [step for step in session["connect"] if "command" in step] + [session["reset_halt"]]
     step = next(step for step in steps if step["command"].startswith(command_prefix))
     return [record for record in step["records"] if RESULT_LINE_PATTERN.match(record) is None]
+
+
+def st_link_recorded_answer(step: str) -> list[str]:
+    """Every record GDB printed for one step of the recorded `-g` session, its result line last."""
+    global st_link_scenarios
+    if st_link_scenarios is None:
+        st_link_scenarios = json.loads(ST_LINK_RECORDING.read_text(encoding="utf-8"))["scenarios"]
+    recorded = st_link_scenarios["session_attach_connect"][step]
+    if isinstance(recorded, list):
+        recorded = next(entry for entry in recorded if str(entry.get("command", "")).startswith("-target-select"))
+    return list(recorded["records"])
+
+
+def emit_recorded_answer(token: str, records: list[str]) -> None:
+    """The recorded records, with this command's token on the result line."""
+    for record in records:
+        result = RESULT_LINE_PATTERN.match(record)
+        emit(token + record[result.end() - 1 :] if result is not None else record)
 
 
 def emit(line: str) -> None:
@@ -418,7 +457,7 @@ def main() -> int:
         if command.startswith("-target-select"):
             if behavior() == "target_select_timeout":
                 continue
-            if has_behavior(CONNECTS_TO_SERVER) or has_behavior(PYOCD_GDBSERVER):
+            if has_behavior(CONNECTS_TO_SERVER) or has_behavior(PYOCD_GDBSERVER) or has_behavior(ST_LINK_GDBSERVER):
                 refused = connect_to_server(command)
                 if refused is not None:
                     emit(f'{token}^error,msg="{refused}"')
@@ -431,6 +470,9 @@ def main() -> int:
                 for record in pyocd_recorded_records("-target-select"):
                     emit(record)
                 emit(f"{token}^connected")
+                continue
+            if has_behavior(ST_LINK_GDBSERVER):
+                emit_recorded_answer(token, st_link_recorded_answer("connect"))
                 continue
             emit(f"{token}^done")
             if behavior() == "stopped_on_attach_hardfault":
@@ -466,6 +508,17 @@ def main() -> int:
             for record in records:
                 emit(record)
             emit(f"{token}^done")
+        elif command.startswith("-interpreter-exec") and has_behavior(ST_LINK_GDBSERVER):
+            if command == ST_LINK_MONITOR_RESET:
+                reset_count += 1
+                records = st_link_recorded_answer("monitor_reset")
+                if has_behavior(ST_LINK_RESET_UNCONFIRMED):
+                    records = [record for record in records if not record.startswith('@"')]
+                emit_recorded_answer(token, records)
+            elif command == MONITOR_RESET_HALT:
+                emit_recorded_answer(token, st_link_recorded_answer("monitor_reset_halt"))
+            else:
+                emit_recorded_answer(token, st_link_recorded_answer("unknown_monitor_command"))
         elif command.startswith("-interpreter-exec"):
             reset_count += 1
             if reset_count == 2 and behavior() == "post_load_reset_timeout":

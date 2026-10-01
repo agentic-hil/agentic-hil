@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""ST-LINK_gdbserver, replayed from what version 7.14.0 printed on the reference board.
+
+The recording beside this file holds the version, the date, the STM32CubeCLT it
+came from and the GDB that drove it. Nothing here is remembered output: every
+line this server prints is a line of that recording, with the port the start
+reserved, the serial it was given and the programmer directory it was pointed
+at where the recording has its own. Where it refuses something the recording
+does not cover, it says so in its own words, starting `fake ST-LINK_gdbserver:`.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import signal
+import socket
+import sys
+import threading
+import time
+from pathlib import Path
+
+RECORDING = Path(__file__).with_name("st_link_gdbserver_7_14_0_linux_recordings.json")
+# A file this fake appends one JSON line to for every event: the start with its
+# arguments, the port listening, every client it accepted and lost, and a
+# SIGTERM it ran its own shutdown for.
+EVENTS_VARIABLE = "FAKE_ST_LINK_GDBSERVER_EVENTS"
+# The name of a recorded failure to replay instead of serving.
+SCENARIO_VARIABLE = "FAKE_ST_LINK_GDBSERVER"
+FAILURE_SCENARIOS = ("unknown_serial", "probe_already_held_by_another_server", "programmer_path_missing")
+# The recorded run that served one session with `-g`, and the line in it that
+# says the GDB port listens. The server prints the same line again after every
+# client it accepts.
+STARTUP_SCENARIO = "startup_attach"
+READY_LINE = "Waiting for debugger connection..."
+CONNECTED_LINE = "Debugger connected"
+# What the recorded server printed when it ended on its own: when its client
+# left (scenario `session_ended_by_detach`) and when it was sent SIGTERM
+# (scenario `session_ended_by_terminating_the_server`). Both resumed the core.
+SHUTDOWN_LINES = ("Shutting down...", "Exit.")
+PORT_WORDS = "Listen Port Number         : "
+# The serial and the programmer directory the recorded refusals were given.
+RECORDED_UNKNOWN_SERIAL = "AGENTICHILNOSUCHPROBE0"
+RECORDED_MISSING_PROGRAMMER = "[redacted]/no-such-programmer"
+# Options this fake refuses, because a session must not use them. `-e` and
+# `--persistent` keep the server alive after its client leaves (the recorded
+# help); a session ends the server itself.
+PERSISTENT_OPTIONS = ("-e", "--persistent")
+output_lock = threading.Lock()
+
+
+def recording() -> dict:
+    return json.loads(RECORDING.read_text(encoding="utf-8"))
+
+
+def event(name: str, **fields: object) -> None:
+    path = os.environ.get(EVENTS_VARIABLE)
+    if not path:
+        return
+    with output_lock, open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"event": name, "pid": os.getpid(), **fields}) + "\n")
+
+
+def say(line: str, stream: str = "stdout") -> None:
+    with output_lock, contextlib.suppress(OSError):
+        target = sys.stdout if stream == "stdout" else sys.stderr
+        target.write(line + "\n")
+        target.flush()
+
+
+def option_value(args: list[str], option: str) -> str | None:
+    if option not in args:
+        return None
+    index = args.index(option)
+    return args[index + 1] if index + 1 < len(args) else None
+
+
+def replay(lines: list[dict], port: str, recorded_port: str, substitutions: dict[str, str] | None = None) -> None:
+    for entry in lines:
+        line = str(entry["line"])
+        if PORT_WORDS in line:
+            line = line.replace(f"{PORT_WORDS}{recorded_port}", f"{PORT_WORDS}{port}")
+        for recorded, given in (substitutions or {}).items():
+            line = line.replace(recorded, given)
+        say(line, str(entry["stream"]))
+
+
+def recorded_port(scenario: dict) -> str:
+    return str(scenario["argv_tail"][scenario["argv_tail"].index("-p") + 1])
+
+
+def shut_down(reason: str, **fields: object) -> None:
+    event(reason, **fields)
+    for line in SHUTDOWN_LINES:
+        say(line)
+    os._exit(0)
+
+
+def serve_one_client(listener: socket.socket, port: int) -> None:
+    """One client, then exit: what the recorded server did without `-e`.
+
+    A client that leaves ends the server, whether it was GDB or a bare TCP
+    connect (scenario `connect_and_close_without_gdb`, exit status 0), and the
+    recorded GDB that detached left the core running (scenario
+    `session_ended_by_detach`), which is what the event says."""
+    try:
+        connection, _ = listener.accept()
+    except OSError:
+        os._exit(0)
+    event("client_connected", port=port)
+    say(CONNECTED_LINE)
+    say(READY_LINE)
+    with contextlib.suppress(OSError):
+        while True:
+            received = connection.recv(4096)
+            if not received:
+                break
+            if received.startswith(b"+"):
+                connection.sendall(b"+")
+    shut_down("client_disconnected", port=port, resumes_core=True)
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    scenarios = recording()["scenarios"]
+    event("started", argv=args)
+    port_text = option_value(args, "-p")
+    programmer = option_value(args, "-cp")
+    if port_text is None or programmer is None:
+        print(f"fake ST-LINK_gdbserver: a session server needs -p and -cp: {args!r}", file=sys.stderr)
+        return 2
+    if any(option in args for option in PERSISTENT_OPTIONS) or "-g" not in args:
+        # Without `-g` the recorded server reset the core when GDB connected
+        # (scenario `session_default_connect` stops at Reset_Handler), which an
+        # attach must never do.
+        print(f"fake ST-LINK_gdbserver: a session server needs -g and no -e: {args!r}", file=sys.stderr)
+        return 2
+    scenario_name = os.environ.get(SCENARIO_VARIABLE, "")
+    if scenario_name in FAILURE_SCENARIOS:
+        failure = scenarios[scenario_name]
+        substitutions = {RECORDED_UNKNOWN_SERIAL: option_value(args, "-i") or "", RECORDED_MISSING_PROGRAMMER: programmer}
+        replay(failure["output"], port_text, recorded_port(failure), substitutions)
+        return int(failure["returncode"])
+    if "-d" not in args:
+        # The recorded server started without `-d` found no MCU it knew on the
+        # reference board's SWD-only wiring.
+        failure = scenarios["startup_without_swd"]
+        replay(failure["output"], port_text, recorded_port(failure))
+        return int(failure["returncode"])
+    port = int(port_text)
+
+    def terminated(signum: int, frame: object) -> None:
+        # The recorded server's own shutdown on SIGTERM, which resumed the core.
+        shut_down("terminated", port=port, resumes_core=True)
+
+    signal.signal(signal.SIGTERM, terminated)
+    startup = scenarios[STARTUP_SCENARIO]
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    for entry in startup["output"]:
+        line = str(entry["line"])
+        if line in SHUTDOWN_LINES:
+            break
+        if line == READY_LINE:
+            # Listening before the line says so. The real server listens on
+            # every address and on the port after this one as well (its SWV
+            # port); this fake listens on loopback and the GDB port only.
+            listener.bind(("127.0.0.1", port))
+            listener.listen(1)
+            event("listening", port=port)
+        if PORT_WORDS in line:
+            line = line.replace(f"{PORT_WORDS}{recorded_port(startup)}", f"{PORT_WORDS}{port}")
+        say(line, str(entry["stream"]))
+    threading.Thread(target=serve_one_client, args=(listener, port), daemon=True).start()
+    while True:
+        time.sleep(3600)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
