@@ -107,13 +107,15 @@ class RecordedHost:
         self.group_names = {int(gid): name for gid, name in credentials["group_names"].items()}
         self.owner_names = {node["st_uid"]: node["owner"] for node in place["nodes"]}
         self.group_names.update({node["st_gid"]: node["group"] for node in place["nodes"]})
-        # A plain host's own map, which is the whole range in one line and the
-        # answer `LocalHost` gives wherever there is no namespace to read. The
-        # recording carries what the kernel said about each node and about this
-        # account's groups, and not the namespace's gid map, which is a fact about
-        # the container rather than about a device, so a place that runs in one
-        # states its map (see `in_a_rootless_namespace`).
-        self.mapped_gids = [(0, 2**32 - 1)]
+        # The user namespace each place ran in, as the recording captured it:
+        # `/proc/self/gid_map` and `/proc/sys/kernel/overflowgid`, word for word.
+        # The host's map is the whole range in one line; both container places map
+        # the invoking account's gid and a 65536-wide block beside it, which is
+        # what rootless Podman's /etc/subgid gives it. Replayed rather than stated
+        # so a case is about the container that was recorded: a stated pair said
+        # the overflow group was outside the map, and the recorded map covers it.
+        self.gid_map: str | None = place["gid_map"]
+        self.overflow_gid: str | None = str(place["overflowgid"])
 
     def asks(self) -> bool:
         return True
@@ -132,7 +134,9 @@ class RecordedHost:
         return self.nodes[path]["access_rw"]
 
     def gid_is_mapped(self, gid: int) -> bool:
-        return any(first <= gid < first + count for first, count in self.mapped_gids)
+        # The product's own reading of the two files, handed the recorded text:
+        # reimplementing it here would make the assertion about this class.
+        return device_access.gid_is_mapped_by(gid, self.gid_map, self.overflow_gid)
 
     def login_groups(self) -> frozenset[int]:
         return self.login
@@ -179,20 +183,17 @@ def with_no_udev_rule(tmp_path: Path) -> RecordedHost:
     return host
 
 
-def in_a_rootless_namespace(tmp_path: Path, place: str) -> RecordedHost:
-    """One recorded container place, with the user namespace it ran in stated.
+def with_the_owning_group_mapped(tmp_path: Path, place: str) -> RecordedHost:
+    """One recorded place with a user namespace that maps every group id.
 
-    The recording holds what the kernel answered inside that container and not
-    the namespace's own gid map, so the map is stated here the way
-    `added_after_this_login` and `with_no_udev_rule` state what they compose. A
-    rootless container maps one group id and no more, the one the invoking account
-    runs as, which is why every host group outside that map appears as the
-    overflow group the recording did capture: the node's group is 65534 `nogroup`
-    in the place that withholds the device groups, and `nogroup` is not a group
-    anything in the namespace can be joined to.
+    Composed from a recorded place, and says so the way `added_after_this_login`
+    and `with_no_udev_rule` do: the nodes, the modes and the account are the
+    recorded ones, and the map is a plain host's, the whole range in one line. A
+    namespace that maps everything can have no unmapped owner, so the group the
+    node names is a group here, whatever its number is.
     """
     host = recorded_host(tmp_path, place)
-    host.mapped_gids = [(0, 1)]
+    host.gid_map = RECORDING[ON_THE_HOST]["gid_map"]
     return host
 
 
@@ -316,15 +317,22 @@ def test_the_container_that_keeps_the_groups_may_open_both(tmp_path: Path) -> No
 def test_the_container_that_withholds_the_groups_may_open_neither_and_says_the_group_is_not_mapped(tmp_path: Path) -> None:
     """The remedy has to be the one that works, and adding an account to `nogroup` is not it.
 
-    In a rootless container every host group outside the namespace's map appears
-    as the overflow group, which is what the recording captured: the nodes are
-    owned by 65534 `nogroup` there. Naming that as the group an administrator adds
-    this account to is advice that changes nothing, because there is no such group
-    in the namespace to be in. What the bench runner itself does is map the groups
-    in (`--group-add keep-groups`, tools/bench_in_container.py), and that is what
-    the sentence has to say.
+    In a rootless container every host group with no mapping inside the namespace
+    is reported as the overflow group, which is what the recording captured: the
+    nodes are owned by 65534 `nogroup` there, and the map the same recording
+    carries is rootless Podman's own (`0 1001 1` and `1 165536 65536`). Naming
+    that group as the one an administrator adds this account to is advice that
+    changes nothing, because there is no such group in the namespace to be in.
+    What the bench runner itself does is map the groups in (`--group-add
+    keep-groups`, tools/bench_in_container.py), and that is what the sentence has
+    to say.
+
+    The whole of this place is replayed, the map included: 65534 falls inside that
+    second range, so a reading that only asks whether some line covers the number
+    answers that the group is mapped and hands back the remedy that cannot work,
+    in exactly the container this case is about.
     """
-    host = in_a_rootless_namespace(tmp_path, WITHHOLDING_THE_GROUPS)
+    host = recorded_host(tmp_path, WITHHOLDING_THE_GROUPS)
 
     probe = device_access.probe_access(PROBE_SERIAL, host=host)
     port = device_access.port_access(BY_ID_PATH, host=host)
@@ -353,16 +361,53 @@ def test_the_container_that_withholds_the_groups_may_open_neither_and_says_the_g
 def test_a_group_the_namespace_does_map_is_still_a_group_to_be_added_to(tmp_path: Path) -> None:
     """The other side of the same fork, so the new cause cannot swallow the old one.
 
-    On a host, and in a container whose map covers the owning group, an account
-    outside that group is exactly what it looks like: a group that exists here and
-    that an administrator adds the account to once.
+    On a host, and in a namespace that maps every group id, an account outside the
+    owning group is exactly what it looks like: a group that exists here and that
+    an administrator adds the account to once. The number is the same 65534 the
+    container reports, so it is the map and not the number that decides this.
     """
-    host = recorded_host(tmp_path, WITHHOLDING_THE_GROUPS)
+    host = with_the_owning_group_mapped(tmp_path, WITHHOLDING_THE_GROUPS)
 
     port = device_access.port_access(BY_ID_PATH, host=host)
 
     assert port is not None and port["cause"] == "not_in_group", port
     assert "an administrator adds it to nogroup once" in port["summary"], port["summary"]
+
+
+@pytest.mark.parametrize(
+    ("gid", "gid_map", "overflow_gid", "mapped"),
+    [
+        # A plain host: one line, the whole range, and the overflow number is an
+        # ordinary group there because no owner can be unmapped at all.
+        (65534, "0          0 4294967295", "65534", True),
+        (46, "0          0 4294967295", "65534", True),
+        # The recorded rootless container: 65534 falls inside the second range,
+        # and is still what the kernel reports for an owner it cannot name.
+        (65534, "0       1001          1\n         1     165536      65536", "65534", False),
+        # A gid no line covers, which is the other unmapped shape.
+        (70000, "0       1001          1\n         1     165536      65536", "65534", False),
+        # A group the same namespace does map, and is not the overflow number.
+        (46, "0       1001          1\n         1     165536      65536", "65534", True),
+        # An overflow id this kernel was configured differently for.
+        (60000, "0       1001          1\n         1     165536      65536", "60000", False),
+        # True wherever nothing says otherwise: no map to read, a map this reader
+        # cannot parse, and an overflow file that says nothing a gid could be.
+        (65534, None, "65534", True),
+        (65534, "not a map at all", "65534", True),
+        (65534, "0       1001          1\n         1     165536      65536", None, True),
+        (65534, "0       1001          1\n         1     165536      65536", "", True),
+    ],
+)
+def test_what_the_namespace_reports_as_an_unmapped_owning_group(gid: int, gid_map: str | None, overflow_gid: str | None, mapped: bool) -> None:
+    """The two shapes of an owner this namespace has no group for, and the tolerance around them.
+
+    The kernel reports an owner it has no mapping for as the overflow id, whether
+    or not that id is itself inside some range of the map, so the number alone is
+    not the question and neither is the range alone. A namespace that maps the
+    whole space is the one place the overflow id means nothing of the sort,
+    because nothing there can be unmapped.
+    """
+    assert device_access.gid_is_mapped_by(gid, gid_map, overflow_gid) is mapped
 
 
 def test_an_account_database_that_cannot_be_read_is_not_a_claim_about_the_account(tmp_path: Path) -> None:
@@ -785,7 +830,7 @@ def test_doctor_does_not_attach_a_neighbouring_st_links_verdict_to_a_pyocd_debug
         com_ports_yaml=f'com_ports:\n  dut_uart:\n    device: "{BY_ID_PATH}"\n    baudrate: 115200\n',
     )
     monkeypatch.chdir(workspace)
-    monkeypatch.setattr(device_access, "HOST", in_a_rootless_namespace(tmp_path, WITHHOLDING_THE_GROUPS))
+    monkeypatch.setattr(device_access, "HOST", recorded_host(tmp_path, WITHHOLDING_THE_GROUPS))
 
     report = doctor()
 

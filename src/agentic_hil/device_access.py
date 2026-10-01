@@ -63,6 +63,15 @@ GROUP_READ_WRITE = stat.S_IRGRP | stat.S_IWGRP
 # covers the whole range, so the one place it says anything is a rootless
 # container: see `_cause`'s `group_not_mapped`.
 PROC_GID_MAP = Path("/proc/self/gid_map")
+# The group id the kernel reports in place of an owner this namespace has no
+# mapping for. Read rather than assumed to be 65534, which is only the usual
+# build-time default, and read beside the map because the substitute number can
+# itself be inside a mapped range: see `gid_is_mapped_by`.
+PROC_OVERFLOW_GID = Path("/proc/sys/kernel/overflowgid")
+# How many group ids there are, 0 to 4294967294: 4294967295 is `(gid_t) -1`,
+# which is no group. A map that covers all of them is a namespace in which no
+# owner can be unmapped.
+GID_SPACE = 2**32 - 1
 # The errnos that are a refusal of the node rather than a question that could not
 # be asked. A directory on the way to the node this account may not search, or a
 # security module that denies the node, refuses `os.stat` before any mode can be
@@ -101,6 +110,83 @@ def _failure(error: OSError) -> NodeFailure:
     number = error.errno if isinstance(error.errno, int) else None
     name = errno.errorcode.get(number, "") if number is not None else ""
     return NodeFailure(name=name or type(error).__name__, number=number, message=str(error))
+
+
+def _proc_text(path: Path) -> str | None:
+    """What a `/proc` file says, or None where this platform has no such file to say it."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def gid_is_mapped_by(gid: int, gid_map: str | None, overflow_gid: str | None) -> bool:
+    """Whether a user namespace with this map has a group of its own for this group id.
+
+    True wherever nothing says otherwise, which is every platform with no
+    `/proc/self/gid_map` and every map this reader cannot parse: claiming a group
+    is outside a namespace is a claim, and an unread file is not evidence for it.
+
+    Each map line is `inside outside count`, and `inside` is the spelling every
+    other reader here sees, because `os.stat` reports a node's group in this
+    namespace's own numbering. Two shapes are an owner the namespace cannot name:
+
+    * a gid no line of the map covers, and
+    * the overflow gid, which is what the kernel reports *instead of* a mapping
+      for an owner it has none for. It is reported whether or not that number is
+      itself inside some mapped range, and in rootless Podman's map it is: the
+      bench's recorded container maps inside-gids 1 to 65536, so the 65534 the
+      kernel shows for a host-root-owned node falls inside the map while naming
+      no group that can be joined. Asking only whether a line covers the number
+      answered that container with "an administrator adds this account to
+      nogroup", the one remedy that cannot work there.
+
+    The exception is a namespace that maps the whole id space: nothing in it can
+    be unmapped, so the overflow number there is an ordinary group (`nogroup` on
+    a plain host) and is read as one. That is also every host outside a namespace,
+    whose map is the whole range in one line.
+    """
+    if gid_map is None:
+        return True
+    ranges: list[tuple[int, int]] = []
+    for line in gid_map.splitlines():
+        fields = line.split()
+        if len(fields) != 3:
+            return True
+        try:
+            ranges.append((int(fields[0]), int(fields[2])))
+        except ValueError:
+            return True
+    if not ranges:
+        return True
+    if not any(inside <= gid < inside + count for inside, count in ranges):
+        return False
+    overflow = _as_gid(overflow_gid)
+    if overflow is None or gid != overflow:
+        return True
+    # The number is the overflow id: a group of its own only where nothing in
+    # this namespace can be unmapped, which is a map with no gap in it.
+    return _covers_every_gid(ranges)
+
+
+def _as_gid(text: str | None) -> int | None:
+    """One group id a `/proc` file holds, or None where it holds anything else."""
+    if text is None:
+        return None
+    try:
+        return int(text.strip())
+    except ValueError:
+        return None
+
+
+def _covers_every_gid(ranges: list[tuple[int, int]]) -> bool:
+    """Whether these `(inside, count)` ranges together leave no group id unmapped."""
+    reach = 0
+    for inside, count in sorted(ranges):
+        if inside > reach:
+            return False
+        reach = max(reach, inside + count)
+    return reach >= GID_SPACE
 
 
 class Host(Protocol):
@@ -173,33 +259,12 @@ class LocalHost:
             return False
 
     def gid_is_mapped(self, gid: int) -> bool:
-        """Whether this process's user namespace has a group id for this group.
+        """Whether this process's user namespace has a group of its own for this group.
 
-        True wherever nothing says otherwise, which is every platform without
-        `/proc/self/gid_map` and every map this reader cannot parse: claiming a
-        group is outside a namespace is a claim, and an unread file is not
-        evidence for it. A plain Linux host maps the whole range in one line, so
-        the only place this answers False is a namespace whose map leaves the
-        node's owning group out, which is the rootless container case.
-
-        Each line is `inside outside count`, and `inside` is the spelling every
-        other reader here sees, because `os.stat` reports the node's group in
-        this namespace's own numbering."""
-        try:
-            lines = PROC_GID_MAP.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            return True
-        mapped = False
-        for line in lines:
-            fields = line.split()
-            if len(fields) != 3:
-                return True
-            try:
-                inside, count = int(fields[0]), int(fields[2])
-            except ValueError:
-                return True
-            mapped = mapped or inside <= gid < inside + count
-        return mapped or not lines
+        The two files this rests on, each read with the same tolerance: a file
+        that cannot be read says nothing, and `gid_is_mapped_by` answers True
+        wherever nothing says otherwise."""
+        return gid_is_mapped_by(gid, _proc_text(PROC_GID_MAP), _proc_text(PROC_OVERFLOW_GID))
 
     def login_groups(self) -> frozenset[int]:
         """The groups this process holds: the ones this login began with."""
@@ -445,10 +510,13 @@ def _cause(status: NodeStatus, account_in_group: bool | None, login_in_group: bo
     if login_in_group:
         return "denied_otherwise"
     if not gid_is_mapped:
-        # A group id this process's user namespace has no mapping for, which is
-        # what every host group outside the map shows up as in a rootless
-        # container. Adding the account to it changes nothing, because there is no
-        # such group here to be added to; the fix is mapping the gid in.
+        # A group this process's user namespace has no group of its own for, in
+        # either of the two shapes `gid_is_mapped_by` reads: a gid no line of the
+        # map covers, or the overflow gid the kernel reports in place of an owner
+        # it cannot name, which is what a host group outside the map shows up as
+        # in a rootless container. Adding the account to it changes nothing,
+        # because there is no such group here to be added to; the fix is mapping
+        # the gid in.
         return "group_not_mapped"
     if account_in_group is None:
         # The account database could not be read at all (a uid with no passwd
