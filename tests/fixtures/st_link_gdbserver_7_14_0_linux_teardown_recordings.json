@@ -1,0 +1,5464 @@
+{
+  "bundle": "STM32CubeCLT 1.22.0 for Linux, extracted from its installer without running it",
+  "counter": "uptime_ms",
+  "gdb_version": "GNU gdb (xPack GNU Arm Embedded GCC x86_64) 14.2.90.20240526-git",
+  "handler": "SysTick_Handler",
+  "image": "the demo firmware the tier builds",
+  "probe": "the bench's in-circuit debugger, its serial number redacted",
+  "recorded_on": "2026-10-01",
+  "scenarios": {
+    "monitor_resets": {
+      "after_connect": {
+        "answers": [
+          {
+            "command": "-data-evaluate-expression uptime_ms",
+            "error": null,
+            "line": "8^done,value=\"790\"",
+            "records": [
+              "8^done,value=\"790\""
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-data-evaluate-expression $pc",
+            "error": null,
+            "line": "9^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+            "records": [
+              "9^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+            ],
+            "result_class": "done",
+            "timed_out": false
+          }
+        ],
+        "dhcsr": {
+          "command": "-data-read-memory-bytes 0xE000EDF0 4",
+          "error": null,
+          "line": "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+          "records": [
+            "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        "dhcsr_contents": "03000300",
+        "flush": {
+          "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+          "error": null,
+          "line": "6^done",
+          "records": [
+            "~\"Register cache flushed.\\n\"",
+            "6^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        "pc": "0x8001f60 <SysTick_Handler+4>",
+        "s_halt": true,
+        "uptime_ms": "790"
+      },
+      "argv_tail": [
+        "-p",
+        "53875",
+        "-d",
+        "-cp",
+        "<cubeclt>/STM32CubeProgrammer/bin",
+        "-i",
+        "[redacted]",
+        "-g"
+      ],
+      "connect": [
+        {
+          "command": "-gdb-set pagination off",
+          "error": null,
+          "line": "1^done",
+          "records": [
+            "=thread-group-added,id=\"i1\"",
+            "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+            "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+            "(gdb) ",
+            "1^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-gdb-set confirm off",
+          "error": null,
+          "line": "2^done",
+          "records": [
+            "2^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-gdb-set mi-async on",
+          "error": null,
+          "line": "3^done",
+          "records": [
+            "3^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+          "error": null,
+          "line": "4^done",
+          "records": [
+            "4^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-target-select extended-remote localhost:53875",
+          "error": null,
+          "line": "5^connected",
+          "records": [
+            "=thread-group-started,id=\"i1\",pid=\"42000\"",
+            "=thread-created,id=\"1\",group-id=\"i1\"",
+            "~\"SysTick_Handler () at [redacted]/Src/main.c:66\\n\"",
+            "~\"66\\t    uptime_ms++;\\n\"",
+            "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+            "5^connected"
+          ],
+          "result_class": "connected",
+          "timed_out": false
+        },
+        {
+          "stop_after_connect": {
+            "error": null,
+            "line": "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+            "reason": "unknown",
+            "timed_out": false
+          }
+        }
+      ],
+      "gdb_exit": {
+        "closed": true,
+        "commands": [
+          {
+            "command": "-gdb-exit",
+            "result_class": "exit",
+            "timed_out": false
+          }
+        ]
+      },
+      "ready": {
+        "at_s": 0.35,
+        "lines_by_then": [
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Starting server with the following options:",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Persistent Mode            : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Logging Level              : 1",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Listen Port Number         : 53875",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Status Refresh Delay       : 15s",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Verbose Mode               : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        SWD Debug                  : Enabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.02,
+            "line": "Waiting for debugger connection...",
+            "stream": "stdout"
+          }
+        ]
+      },
+      "resets": [
+        {
+          "after": {
+            "answers": [
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "18^done,value=\"791\"",
+                "records": [
+                  "18^done,value=\"791\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "19^done,value=\"0x8002240 <Reset_Handler>\"",
+                "records": [
+                  "19^done,value=\"0x8002240 <Reset_Handler>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "dhcsr": {
+              "command": "-data-read-memory-bytes 0xE000EDF0 4",
+              "error": null,
+              "line": "17^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+              "records": [
+                "17^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "dhcsr_contents": "03000300",
+            "flush": {
+              "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+              "error": null,
+              "line": "16^done",
+              "records": [
+                "~\"Register cache flushed.\\n\"",
+                "16^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "pc": "0x8002240 <Reset_Handler>",
+            "s_halt": true,
+            "uptime_ms": "791"
+          },
+          "at_handler": {
+            "pc": "0x8001f60 <SysTick_Handler+4>",
+            "steps": [
+              {
+                "command": "-break-insert SysTick_Handler",
+                "error": null,
+                "line": "10^done,bkpt={number=\"1\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}",
+                "records": [
+                  "~\"Note: automatically using hardware breakpoints for read-only addresses.\\n\"",
+                  "10^done,bkpt={number=\"1\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}"
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-exec-continue",
+                "error": null,
+                "line": "11^running",
+                "records": [
+                  "11^running"
+                ],
+                "result_class": "running",
+                "timed_out": false
+              },
+              {
+                "command": "-break-delete",
+                "error": null,
+                "line": "12^done",
+                "records": [
+                  "12^done"
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "13^done,value=\"791\"",
+                "records": [
+                  "13^done,value=\"791\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "14^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+                "records": [
+                  "14^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "stop": {
+              "error": null,
+              "line": "*stopped,reason=\"breakpoint-hit\",disp=\"keep\",bkptno=\"1\",frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "reason": "breakpoint-hit",
+              "timed_out": false
+            },
+            "uptime_ms": "791"
+          },
+          "half_a_second_later": {
+            "answers": [
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "22^done,value=\"791\"",
+                "records": [
+                  "22^done,value=\"791\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "23^done,value=\"0x8002240 <Reset_Handler>\"",
+                "records": [
+                  "23^done,value=\"0x8002240 <Reset_Handler>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "dhcsr": {
+              "command": "-data-read-memory-bytes 0xE000EDF0 4",
+              "error": null,
+              "line": "21^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+              "records": [
+                "21^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "dhcsr_contents": "03000300",
+            "flush": {
+              "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+              "error": null,
+              "line": "20^done",
+              "records": [
+                "~\"Register cache flushed.\\n\"",
+                "20^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "pc": "0x8002240 <Reset_Handler>",
+            "s_halt": true,
+            "uptime_ms": "791"
+          },
+          "monitor": {
+            "command": "-interpreter-exec console \"monitor reset\"",
+            "error": null,
+            "line": "15^done",
+            "records": [
+              "@\"STM32 Successfully completed reset operation (System reset)\\n\"",
+              "15^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "run_and_interrupt": {
+            "pc": "0x800208c <delay+24>",
+            "steps": [
+              {
+                "command": "-exec-continue",
+                "error": null,
+                "line": "24^running",
+                "records": [
+                  "24^running"
+                ],
+                "result_class": "running",
+                "timed_out": false
+              },
+              {
+                "command": "-exec-interrupt --all",
+                "error": null,
+                "line": "25^done",
+                "records": [
+                  "25^done"
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "26^done,value=\"1005\"",
+                "records": [
+                  "26^done,value=\"1005\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "27^done,value=\"0x800208c <delay+24>\"",
+                "records": [
+                  "27^done,value=\"0x800208c <delay+24>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "stop": {
+              "error": null,
+              "line": "*stopped,reason=\"signal-received\",signal-name=\"SIGINT\",signal-meaning=\"Interrupt\",frame={addr=\"0x0800208c\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "reason": "signal-received",
+              "timed_out": false
+            },
+            "uptime_ms": "1005"
+          },
+          "stop_poll": {
+            "error": null,
+            "line": "",
+            "reason": "timeout",
+            "timed_out": true
+          },
+          "words": "reset"
+        },
+        {
+          "after": {
+            "answers": [
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "36^done,value=\"1005\"",
+                "records": [
+                  "36^done,value=\"1005\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "37^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+                "records": [
+                  "37^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "dhcsr": {
+              "command": "-data-read-memory-bytes 0xE000EDF0 4",
+              "error": null,
+              "line": "35^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+              "records": [
+                "35^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "dhcsr_contents": "03000300",
+            "flush": {
+              "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+              "error": null,
+              "line": "34^done",
+              "records": [
+                "~\"Register cache flushed.\\n\"",
+                "34^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "pc": "0x8001f60 <SysTick_Handler+4>",
+            "s_halt": true,
+            "uptime_ms": "1005"
+          },
+          "at_handler": {
+            "pc": "0x8001f60 <SysTick_Handler+4>",
+            "steps": [
+              {
+                "command": "-break-insert SysTick_Handler",
+                "error": null,
+                "line": "28^done,bkpt={number=\"2\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}",
+                "records": [
+                  "28^done,bkpt={number=\"2\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}"
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-exec-continue",
+                "error": null,
+                "line": "29^running",
+                "records": [
+                  "29^running"
+                ],
+                "result_class": "running",
+                "timed_out": false
+              },
+              {
+                "command": "-break-delete",
+                "error": null,
+                "line": "30^done",
+                "records": [
+                  "30^done"
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "31^done,value=\"1005\"",
+                "records": [
+                  "31^done,value=\"1005\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "32^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+                "records": [
+                  "32^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "stop": {
+              "error": null,
+              "line": "*stopped,reason=\"breakpoint-hit\",disp=\"keep\",bkptno=\"2\",frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "reason": "breakpoint-hit",
+              "timed_out": false
+            },
+            "uptime_ms": "1005"
+          },
+          "half_a_second_later": {
+            "answers": [
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "40^done,value=\"1005\"",
+                "records": [
+                  "40^done,value=\"1005\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "41^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+                "records": [
+                  "41^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "dhcsr": {
+              "command": "-data-read-memory-bytes 0xE000EDF0 4",
+              "error": null,
+              "line": "39^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+              "records": [
+                "39^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "dhcsr_contents": "03000300",
+            "flush": {
+              "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+              "error": null,
+              "line": "38^done",
+              "records": [
+                "~\"Register cache flushed.\\n\"",
+                "38^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "pc": "0x8001f60 <SysTick_Handler+4>",
+            "s_halt": true,
+            "uptime_ms": "1005"
+          },
+          "monitor": {
+            "command": "-interpreter-exec console \"monitor reset 0\"",
+            "error": "Protocol error with Rcmd",
+            "line": "33^error,msg=\"Protocol error with Rcmd\"",
+            "records": [
+              "@\"Unknown reset option\\n\"",
+              "&\"Protocol error with Rcmd\\n\"",
+              "33^error,msg=\"Protocol error with Rcmd\""
+            ],
+            "result_class": "error",
+            "timed_out": false
+          },
+          "run_and_interrupt": {
+            "pc": "0x8002084 <delay+16>",
+            "steps": [
+              {
+                "command": "-exec-continue",
+                "error": null,
+                "line": "42^running",
+                "records": [
+                  "42^running"
+                ],
+                "result_class": "running",
+                "timed_out": false
+              },
+              {
+                "command": "-exec-interrupt --all",
+                "error": null,
+                "line": "43^done",
+                "records": [
+                  "43^done"
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "44^done,value=\"2011\"",
+                "records": [
+                  "44^done,value=\"2011\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "45^done,value=\"0x8002084 <delay+16>\"",
+                "records": [
+                  "45^done,value=\"0x8002084 <delay+16>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "stop": {
+              "error": null,
+              "line": "*stopped,reason=\"signal-received\",signal-name=\"SIGINT\",signal-meaning=\"Interrupt\",frame={addr=\"0x08002084\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "reason": "signal-received",
+              "timed_out": false
+            },
+            "uptime_ms": "2011"
+          },
+          "stop_poll": {
+            "error": null,
+            "line": "",
+            "reason": "timeout",
+            "timed_out": true
+          },
+          "words": "reset 0"
+        },
+        {
+          "after": {
+            "answers": [
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "54^done,value=\"2011\"",
+                "records": [
+                  "54^done,value=\"2011\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "55^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+                "records": [
+                  "55^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "dhcsr": {
+              "command": "-data-read-memory-bytes 0xE000EDF0 4",
+              "error": null,
+              "line": "53^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+              "records": [
+                "53^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "dhcsr_contents": "03000300",
+            "flush": {
+              "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+              "error": null,
+              "line": "52^done",
+              "records": [
+                "~\"Register cache flushed.\\n\"",
+                "52^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "pc": "0x8001f60 <SysTick_Handler+4>",
+            "s_halt": true,
+            "uptime_ms": "2011"
+          },
+          "at_handler": {
+            "pc": "0x8001f60 <SysTick_Handler+4>",
+            "steps": [
+              {
+                "command": "-break-insert SysTick_Handler",
+                "error": null,
+                "line": "46^done,bkpt={number=\"3\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}",
+                "records": [
+                  "46^done,bkpt={number=\"3\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}"
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-exec-continue",
+                "error": null,
+                "line": "47^running",
+                "records": [
+                  "47^running"
+                ],
+                "result_class": "running",
+                "timed_out": false
+              },
+              {
+                "command": "-break-delete",
+                "error": null,
+                "line": "48^done",
+                "records": [
+                  "48^done"
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "49^done,value=\"2011\"",
+                "records": [
+                  "49^done,value=\"2011\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "50^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+                "records": [
+                  "50^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "stop": {
+              "error": null,
+              "line": "*stopped,reason=\"breakpoint-hit\",disp=\"keep\",bkptno=\"3\",frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "reason": "breakpoint-hit",
+              "timed_out": false
+            },
+            "uptime_ms": "2011"
+          },
+          "half_a_second_later": {
+            "answers": [
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "58^done,value=\"2011\"",
+                "records": [
+                  "58^done,value=\"2011\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "59^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+                "records": [
+                  "59^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "dhcsr": {
+              "command": "-data-read-memory-bytes 0xE000EDF0 4",
+              "error": null,
+              "line": "57^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+              "records": [
+                "57^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "dhcsr_contents": "03000300",
+            "flush": {
+              "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+              "error": null,
+              "line": "56^done",
+              "records": [
+                "~\"Register cache flushed.\\n\"",
+                "56^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "pc": "0x8001f60 <SysTick_Handler+4>",
+            "s_halt": true,
+            "uptime_ms": "2011"
+          },
+          "monitor": {
+            "command": "-interpreter-exec console \"monitor reset 1\"",
+            "error": "Protocol error with Rcmd",
+            "line": "51^error,msg=\"Protocol error with Rcmd\"",
+            "records": [
+              "@\"Unknown reset option\\n\"",
+              "&\"Protocol error with Rcmd\\n\"",
+              "51^error,msg=\"Protocol error with Rcmd\""
+            ],
+            "result_class": "error",
+            "timed_out": false
+          },
+          "run_and_interrupt": {
+            "pc": "0x800208e <delay+26>",
+            "steps": [
+              {
+                "command": "-exec-continue",
+                "error": null,
+                "line": "60^running",
+                "records": [
+                  "60^running"
+                ],
+                "result_class": "running",
+                "timed_out": false
+              },
+              {
+                "command": "-exec-interrupt --all",
+                "error": null,
+                "line": "61^done",
+                "records": [
+                  "61^done"
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "62^done,value=\"3016\"",
+                "records": [
+                  "62^done,value=\"3016\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "63^done,value=\"0x800208e <delay+26>\"",
+                "records": [
+                  "63^done,value=\"0x800208e <delay+26>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "stop": {
+              "error": null,
+              "line": "*stopped,reason=\"signal-received\",signal-name=\"SIGINT\",signal-meaning=\"Interrupt\",frame={addr=\"0x0800208e\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "reason": "signal-received",
+              "timed_out": false
+            },
+            "uptime_ms": "3016"
+          },
+          "stop_poll": {
+            "error": null,
+            "line": "",
+            "reason": "timeout",
+            "timed_out": true
+          },
+          "words": "reset 1"
+        },
+        {
+          "after": {
+            "answers": [
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "72^done,value=\"3016\"",
+                "records": [
+                  "72^done,value=\"3016\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "73^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+                "records": [
+                  "73^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "dhcsr": {
+              "command": "-data-read-memory-bytes 0xE000EDF0 4",
+              "error": null,
+              "line": "71^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+              "records": [
+                "71^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "dhcsr_contents": "03000300",
+            "flush": {
+              "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+              "error": null,
+              "line": "70^done",
+              "records": [
+                "~\"Register cache flushed.\\n\"",
+                "70^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "pc": "0x8001f60 <SysTick_Handler+4>",
+            "s_halt": true,
+            "uptime_ms": "3016"
+          },
+          "at_handler": {
+            "pc": "0x8001f60 <SysTick_Handler+4>",
+            "steps": [
+              {
+                "command": "-break-insert SysTick_Handler",
+                "error": null,
+                "line": "64^done,bkpt={number=\"4\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}",
+                "records": [
+                  "64^done,bkpt={number=\"4\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}"
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-exec-continue",
+                "error": null,
+                "line": "65^running",
+                "records": [
+                  "65^running"
+                ],
+                "result_class": "running",
+                "timed_out": false
+              },
+              {
+                "command": "-break-delete",
+                "error": null,
+                "line": "66^done",
+                "records": [
+                  "66^done"
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "67^done,value=\"3016\"",
+                "records": [
+                  "67^done,value=\"3016\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "68^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+                "records": [
+                  "68^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "stop": {
+              "error": null,
+              "line": "*stopped,reason=\"breakpoint-hit\",disp=\"keep\",bkptno=\"4\",frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "reason": "breakpoint-hit",
+              "timed_out": false
+            },
+            "uptime_ms": "3016"
+          },
+          "half_a_second_later": {
+            "answers": [
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "76^done,value=\"3016\"",
+                "records": [
+                  "76^done,value=\"3016\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "77^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+                "records": [
+                  "77^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "dhcsr": {
+              "command": "-data-read-memory-bytes 0xE000EDF0 4",
+              "error": null,
+              "line": "75^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+              "records": [
+                "75^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "dhcsr_contents": "03000300",
+            "flush": {
+              "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+              "error": null,
+              "line": "74^done",
+              "records": [
+                "~\"Register cache flushed.\\n\"",
+                "74^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            "pc": "0x8001f60 <SysTick_Handler+4>",
+            "s_halt": true,
+            "uptime_ms": "3016"
+          },
+          "monitor": {
+            "command": "-interpreter-exec console \"monitor reset 2\"",
+            "error": "Protocol error with Rcmd",
+            "line": "69^error,msg=\"Protocol error with Rcmd\"",
+            "records": [
+              "@\"Unknown reset option\\n\"",
+              "&\"Protocol error with Rcmd\\n\"",
+              "69^error,msg=\"Protocol error with Rcmd\""
+            ],
+            "result_class": "error",
+            "timed_out": false
+          },
+          "run_and_interrupt": {
+            "pc": "0x8002088 <delay+20>",
+            "steps": [
+              {
+                "command": "-exec-continue",
+                "error": null,
+                "line": "78^running",
+                "records": [
+                  "78^running"
+                ],
+                "result_class": "running",
+                "timed_out": false
+              },
+              {
+                "command": "-exec-interrupt --all",
+                "error": null,
+                "line": "79^done",
+                "records": [
+                  "79^done"
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression uptime_ms",
+                "error": null,
+                "line": "80^done,value=\"4021\"",
+                "records": [
+                  "80^done,value=\"4021\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              },
+              {
+                "command": "-data-evaluate-expression $pc",
+                "error": null,
+                "line": "81^done,value=\"0x8002088 <delay+20>\"",
+                "records": [
+                  "81^done,value=\"0x8002088 <delay+20>\""
+                ],
+                "result_class": "done",
+                "timed_out": false
+              }
+            ],
+            "stop": {
+              "error": null,
+              "line": "*stopped,reason=\"signal-received\",signal-name=\"SIGINT\",signal-meaning=\"Interrupt\",frame={addr=\"0x08002088\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "reason": "signal-received",
+              "timed_out": false
+            },
+            "uptime_ms": "4021"
+          },
+          "stop_poll": {
+            "error": null,
+            "line": "",
+            "reason": "timeout",
+            "timed_out": true
+          },
+          "words": "reset 2"
+        }
+      ],
+      "scenario": "monitor_resets",
+      "server_killed": {
+        "returncode": -9,
+        "was_running": true
+      },
+      "server_output": [
+        {
+          "at_s": 0.0,
+          "line": "",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "Starting server with the following options:",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "        Persistent Mode            : Disabled",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "        Logging Level              : 1",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "        Listen Port Number         : 53875",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "        Status Refresh Delay       : 15s",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "        Verbose Mode               : Disabled",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "        SWD Debug                  : Enabled",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.01,
+          "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.02,
+          "line": "Waiting for debugger connection...",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.38,
+          "line": "Debugger connected",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.38,
+          "line": "Waiting for debugger connection...",
+          "stream": "stdout"
+        }
+      ]
+    },
+    "persistent_session_detach": {
+      "argv_tail": [
+        "-p",
+        "42213",
+        "-d",
+        "-cp",
+        "<cubeclt>/STM32CubeProgrammer/bin",
+        "-i",
+        "[redacted]",
+        "-g",
+        "-e"
+      ],
+      "at_handler": {
+        "pc": "0x8001f60 <SysTick_Handler+4>",
+        "steps": [
+          {
+            "command": "-break-insert SysTick_Handler",
+            "error": null,
+            "line": "6^done,bkpt={number=\"1\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}",
+            "records": [
+              "~\"Note: automatically using hardware breakpoints for read-only addresses.\\n\"",
+              "6^done,bkpt={number=\"1\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-exec-continue",
+            "error": null,
+            "line": "7^running",
+            "records": [
+              "7^running"
+            ],
+            "result_class": "running",
+            "timed_out": false
+          },
+          {
+            "command": "-break-delete",
+            "error": null,
+            "line": "8^done",
+            "records": [
+              "8^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-data-evaluate-expression uptime_ms",
+            "error": null,
+            "line": "9^done,value=\"4021\"",
+            "records": [
+              "9^done,value=\"4021\""
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-data-evaluate-expression $pc",
+            "error": null,
+            "line": "10^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+            "records": [
+              "10^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+            ],
+            "result_class": "done",
+            "timed_out": false
+          }
+        ],
+        "stop": {
+          "error": null,
+          "line": "*stopped,reason=\"breakpoint-hit\",disp=\"keep\",bkptno=\"1\",frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+          "reason": "breakpoint-hit",
+          "timed_out": false
+        },
+        "uptime_ms": "4021"
+      },
+      "connect": [
+        {
+          "command": "-gdb-set pagination off",
+          "error": null,
+          "line": "1^done",
+          "records": [
+            "=thread-group-added,id=\"i1\"",
+            "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+            "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+            "(gdb) ",
+            "1^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-gdb-set confirm off",
+          "error": null,
+          "line": "2^done",
+          "records": [
+            "2^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-gdb-set mi-async on",
+          "error": null,
+          "line": "3^done",
+          "records": [
+            "3^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+          "error": null,
+          "line": "4^done",
+          "records": [
+            "4^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-target-select extended-remote localhost:42213",
+          "error": null,
+          "line": "5^connected",
+          "records": [
+            "=thread-group-started,id=\"i1\",pid=\"42000\"",
+            "=thread-created,id=\"1\",group-id=\"i1\"",
+            "~\"0x08002088 in delay () at [redacted]/Src/main.c:113\\n\"",
+            "~\"113\\t    for (volatile uint32_t i = 0; i < 1000000U; ++i) {\\n\"",
+            "*stopped,frame={addr=\"0x08002088\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+            "5^connected"
+          ],
+          "result_class": "connected",
+          "timed_out": false
+        },
+        {
+          "stop_after_connect": {
+            "error": null,
+            "line": "*stopped,frame={addr=\"0x08002088\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+            "reason": "unknown",
+            "timed_out": false
+          }
+        }
+      ],
+      "detach": {
+        "command": "-target-detach",
+        "error": null,
+        "line": "11^done",
+        "records": [
+          "=thread-exited,id=\"1\",group-id=\"i1\"",
+          "=thread-group-exited,id=\"i1\"",
+          "~\"[Inferior 1 (Remote target) detached]\\n\"",
+          "11^done"
+        ],
+        "result_class": "done",
+        "timed_out": false
+      },
+      "gdb_exit": {
+        "closed": true,
+        "commands": [
+          {
+            "command": "-gdb-exit",
+            "result_class": "exit",
+            "timed_out": false
+          }
+        ]
+      },
+      "killed_connect": {
+        "answers": [
+          {
+            "command": "-data-evaluate-expression uptime_ms",
+            "error": null,
+            "line": "8^done,value=\"6069\"",
+            "records": [
+              "8^done,value=\"6069\""
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-data-evaluate-expression $pc",
+            "error": null,
+            "line": "9^done,value=\"0x8002084 <delay+16>\"",
+            "records": [
+              "9^done,value=\"0x8002084 <delay+16>\""
+            ],
+            "result_class": "done",
+            "timed_out": false
+          }
+        ],
+        "argv_tail": [
+          "-p",
+          "39309",
+          "-d",
+          "-cp",
+          "<cubeclt>/STM32CubeProgrammer/bin",
+          "-i",
+          "[redacted]",
+          "-g"
+        ],
+        "connect": [
+          {
+            "command": "-gdb-set pagination off",
+            "error": null,
+            "line": "1^done",
+            "records": [
+              "=thread-group-added,id=\"i1\"",
+              "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+              "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+              "(gdb) ",
+              "1^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-gdb-set confirm off",
+            "error": null,
+            "line": "2^done",
+            "records": [
+              "2^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-gdb-set mi-async on",
+            "error": null,
+            "line": "3^done",
+            "records": [
+              "3^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+            "error": null,
+            "line": "4^done",
+            "records": [
+              "4^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-target-select extended-remote localhost:39309",
+            "error": null,
+            "line": "5^connected",
+            "records": [
+              "=thread-group-started,id=\"i1\",pid=\"42000\"",
+              "=thread-created,id=\"1\",group-id=\"i1\"",
+              "~\"0x08002084 in delay () at [redacted]/Src/main.c:113\\n\"",
+              "~\"113\\t    for (volatile uint32_t i = 0; i < 1000000U; ++i) {\\n\"",
+              "*stopped,frame={addr=\"0x08002084\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "5^connected"
+            ],
+            "result_class": "connected",
+            "timed_out": false
+          },
+          {
+            "stop_after_connect": {
+              "error": null,
+              "line": "*stopped,frame={addr=\"0x08002084\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "reason": "unknown",
+              "timed_out": false
+            }
+          }
+        ],
+        "dhcsr": {
+          "command": "-data-read-memory-bytes 0xE000EDF0 4",
+          "error": null,
+          "line": "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+          "records": [
+            "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        "dhcsr_contents": "03000300",
+        "flush": {
+          "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+          "error": null,
+          "line": "6^done",
+          "records": [
+            "~\"Register cache flushed.\\n\"",
+            "6^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        "gdb_closed": {
+          "closed": true,
+          "commands": [
+            {
+              "command": "-gdb-exit",
+              "result_class": "exit",
+              "timed_out": false
+            }
+          ]
+        },
+        "output": [
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Starting server with the following options:",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Persistent Mode            : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Logging Level              : 1",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Listen Port Number         : 39309",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Status Refresh Delay       : 15s",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Verbose Mode               : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        SWD Debug                  : Enabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.03,
+            "line": "Waiting for debugger connection...",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.38,
+            "line": "Debugger connected",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.38,
+            "line": "Waiting for debugger connection...",
+            "stream": "stdout"
+          }
+        ],
+        "pc": "0x8002084 <delay+16>",
+        "ready": {
+          "at_s": 0.36,
+          "lines_by_then": [
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "Starting server with the following options:",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Persistent Mode            : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Logging Level              : 1",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Listen Port Number         : 39309",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Status Refresh Delay       : 15s",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Verbose Mode               : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        SWD Debug                  : Enabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.03,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            }
+          ]
+        },
+        "s_halt": true,
+        "server_killed": {
+          "returncode": -9,
+          "was_running": true
+        },
+        "uptime_ms": "6069"
+      },
+      "listening_ports_after_detach": [
+        42213,
+        42214
+      ],
+      "ready": {
+        "at_s": 0.35,
+        "lines_by_then": [
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Starting server with the following options:",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Persistent Mode            : Enabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Logging Level              : 1",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Listen Port Number         : 42213",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Status Refresh Delay       : 15s",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Verbose Mode               : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        SWD Debug                  : Enabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.03,
+            "line": "Waiting for debugger connection...",
+            "stream": "stdout"
+          }
+        ]
+      },
+      "scenario": "persistent_session_detach",
+      "second_client_connect": [
+        {
+          "command": "-gdb-set pagination off",
+          "error": null,
+          "line": "1^done",
+          "records": [
+            "=thread-group-added,id=\"i1\"",
+            "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+            "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+            "(gdb) ",
+            "1^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-gdb-set confirm off",
+          "error": null,
+          "line": "2^done",
+          "records": [
+            "2^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-gdb-set mi-async on",
+          "error": null,
+          "line": "3^done",
+          "records": [
+            "3^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+          "error": null,
+          "line": "4^done",
+          "records": [
+            "4^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-target-select extended-remote localhost:42213",
+          "error": null,
+          "line": "5^connected",
+          "records": [
+            "=thread-group-started,id=\"i1\",pid=\"42000\"",
+            "=thread-created,id=\"1\",group-id=\"i1\"",
+            "~\"0x08002084 in delay () at [redacted]/Src/main.c:113\\n\"",
+            "~\"113\\t    for (volatile uint32_t i = 0; i < 1000000U; ++i) {\\n\"",
+            "*stopped,frame={addr=\"0x08002084\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+            "5^connected"
+          ],
+          "result_class": "connected",
+          "timed_out": false
+        },
+        {
+          "stop_after_connect": {
+            "error": null,
+            "line": "*stopped,frame={addr=\"0x08002084\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+            "reason": "unknown",
+            "timed_out": false
+          }
+        }
+      ],
+      "second_client_exit": {
+        "closed": true,
+        "commands": [
+          {
+            "command": "-gdb-exit",
+            "result_class": "exit",
+            "timed_out": false
+          }
+        ]
+      },
+      "second_client_reads": {
+        "answers": [
+          {
+            "command": "-data-evaluate-expression uptime_ms",
+            "error": null,
+            "line": "8^done,value=\"6069\"",
+            "records": [
+              "8^done,value=\"6069\""
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-data-evaluate-expression $pc",
+            "error": null,
+            "line": "9^done,value=\"0x8002084 <delay+16>\"",
+            "records": [
+              "9^done,value=\"0x8002084 <delay+16>\""
+            ],
+            "result_class": "done",
+            "timed_out": false
+          }
+        ],
+        "dhcsr": {
+          "command": "-data-read-memory-bytes 0xE000EDF0 4",
+          "error": null,
+          "line": "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+          "records": [
+            "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        "dhcsr_contents": "03000300",
+        "flush": {
+          "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+          "error": null,
+          "line": "6^done",
+          "records": [
+            "~\"Register cache flushed.\\n\"",
+            "6^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        "pc": "0x8002084 <delay+16>",
+        "s_halt": true,
+        "uptime_ms": "6069"
+      },
+      "server_killed": {
+        "returncode": -9,
+        "was_running": true
+      },
+      "server_output": [
+        {
+          "at_s": 0.0,
+          "line": "",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "Starting server with the following options:",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "        Persistent Mode            : Enabled",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "        Logging Level              : 1",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "        Listen Port Number         : 42213",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "        Status Refresh Delay       : 15s",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "        Verbose Mode               : Disabled",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "        SWD Debug                  : Enabled",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.0,
+          "line": "",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.01,
+          "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.03,
+          "line": "Waiting for debugger connection...",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.39,
+          "line": "Debugger connected",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 0.39,
+          "line": "Waiting for debugger connection...",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 2.66,
+          "line": "Debugger connected",
+          "stream": "stdout"
+        },
+        {
+          "at_s": 2.66,
+          "line": "Waiting for debugger connection...",
+          "stream": "stdout"
+        }
+      ],
+      "server_running_after_detach": true,
+      "settle_s": 2.0
+    },
+    "ports": {
+      "gdb_port_taken": {
+        "argv_tail": [
+          "-p",
+          "58185",
+          "-d",
+          "-cp",
+          "<cubeclt>/STM32CubeProgrammer/bin",
+          "-i",
+          "[redacted]",
+          "-g"
+        ],
+        "exited_on_its_own": true,
+        "gdb_port": 58185,
+        "output": [
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Starting server with the following options:",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Persistent Mode            : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Logging Level              : 1",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Listen Port Number         : 58185",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Status Refresh Delay       : 15s",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Verbose Mode               : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        SWD Debug                  : Enabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.03,
+            "line": "Failed to bind to port 58185, error code -1: Address already in use",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.03,
+            "line": "Failure starting GDB server: TCP port 58185 not available.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.03,
+            "line": "Shutting down...",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.14,
+            "line": "Exit.",
+            "stream": "stdout"
+          }
+        ],
+        "returncode": 0,
+        "taken_port": 58185
+      },
+      "port_after_the_gdb_port_taken": {
+        "argv_tail": [
+          "-p",
+          "42020",
+          "-d",
+          "-cp",
+          "<cubeclt>/STM32CubeProgrammer/bin",
+          "-i",
+          "[redacted]",
+          "-g"
+        ],
+        "exited_on_its_own": false,
+        "gdb_port": 42020,
+        "listening_ports": [
+          42020
+        ],
+        "output": [
+          {
+            "at_s": 0.01,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "Starting server with the following options:",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "        Persistent Mode            : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "        Logging Level              : 1",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "        Listen Port Number         : 42020",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "        Status Refresh Delay       : 15s",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "        Verbose Mode               : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "        SWD Debug                  : Enabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.03,
+            "line": "Failed to bind to port 42021, error code -1: Address already in use",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.03,
+            "line": "Failure starting SWV server on TCP port: 42021",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.03,
+            "line": "Waiting for debugger connection...",
+            "stream": "stdout"
+          }
+        ],
+        "returncode": null,
+        "server_killed": {
+          "returncode": -9,
+          "was_running": true
+        },
+        "taken_port": 42021
+      },
+      "semihost_console_port_named": {
+        "argv_tail": [
+          "-p",
+          "55803",
+          "-d",
+          "-cp",
+          "<cubeclt>/STM32CubeProgrammer/bin",
+          "-i",
+          "[redacted]",
+          "-g",
+          "--semihost-console-port",
+          "55573"
+        ],
+        "gdb_port": 55803,
+        "listening_addresses": [
+          "0.0.0.0:55803",
+          "0.0.0.0:55804"
+        ],
+        "listening_ports": [
+          55803,
+          55804
+        ],
+        "output": [
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Starting server with the following options:",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Persistent Mode            : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Logging Level              : 1",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Listen Port Number         : 55803",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Status Refresh Delay       : 15s",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Verbose Mode               : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        SWD Debug                  : Enabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.03,
+            "line": "Waiting for debugger connection...",
+            "stream": "stdout"
+          }
+        ],
+        "ready": {
+          "at_s": 0.36,
+          "lines_by_then": [
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "Starting server with the following options:",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Persistent Mode            : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Logging Level              : 1",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Listen Port Number         : 55803",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Status Refresh Delay       : 15s",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Verbose Mode               : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        SWD Debug                  : Enabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.03,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            }
+          ]
+        },
+        "semihost_console_port": 55573,
+        "server_killed": {
+          "returncode": -9,
+          "was_running": true
+        }
+      }
+    },
+    "session_ended_by_killing_the_server": [
+      {
+        "argv_tail": [
+          "-p",
+          "51765",
+          "-d",
+          "-cp",
+          "<cubeclt>/STM32CubeProgrammer/bin",
+          "-i",
+          "[redacted]",
+          "-g"
+        ],
+        "at_handler": {
+          "pc": "0x8001f60 <SysTick_Handler+4>",
+          "steps": [
+            {
+              "command": "-break-insert SysTick_Handler",
+              "error": null,
+              "line": "6^done,bkpt={number=\"1\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}",
+              "records": [
+                "~\"Note: automatically using hardware breakpoints for read-only addresses.\\n\"",
+                "6^done,bkpt={number=\"1\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-exec-continue",
+              "error": null,
+              "line": "7^running",
+              "records": [
+                "7^running"
+              ],
+              "result_class": "running",
+              "timed_out": false
+            },
+            {
+              "command": "-break-delete",
+              "error": null,
+              "line": "8^done",
+              "records": [
+                "8^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "9^done,value=\"788\"",
+              "records": [
+                "9^done,value=\"788\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "10^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+              "records": [
+                "10^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "stop": {
+            "error": null,
+            "line": "*stopped,reason=\"breakpoint-hit\",disp=\"keep\",bkptno=\"1\",frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+            "reason": "breakpoint-hit",
+            "timed_out": false
+          },
+          "uptime_ms": "788"
+        },
+        "before_kill": {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "13^done,value=\"788\"",
+              "records": [
+                "13^done,value=\"788\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "14^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+              "records": [
+                "14^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "dhcsr": {
+            "command": "-data-read-memory-bytes 0xE000EDF0 4",
+            "error": null,
+            "line": "12^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+            "records": [
+              "12^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "dhcsr_contents": "03000300",
+          "flush": {
+            "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+            "error": null,
+            "line": "11^done",
+            "records": [
+              "~\"Register cache flushed.\\n\"",
+              "11^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "pc": "0x8001f60 <SysTick_Handler+4>",
+          "s_halt": true,
+          "uptime_ms": "788"
+        },
+        "connect": [
+          {
+            "command": "-gdb-set pagination off",
+            "error": null,
+            "line": "1^done",
+            "records": [
+              "=thread-group-added,id=\"i1\"",
+              "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+              "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+              "(gdb) ",
+              "1^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-gdb-set confirm off",
+            "error": null,
+            "line": "2^done",
+            "records": [
+              "2^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-gdb-set mi-async on",
+            "error": null,
+            "line": "3^done",
+            "records": [
+              "3^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+            "error": null,
+            "line": "4^done",
+            "records": [
+              "4^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-target-select extended-remote localhost:51765",
+            "error": null,
+            "line": "5^connected",
+            "records": [
+              "=thread-group-started,id=\"i1\",pid=\"42000\"",
+              "=thread-created,id=\"1\",group-id=\"i1\"",
+              "~\"0x0800208c in delay () at [redacted]/Src/main.c:113\\n\"",
+              "~\"113\\t    for (volatile uint32_t i = 0; i < 1000000U; ++i) {\\n\"",
+              "*stopped,frame={addr=\"0x0800208c\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "5^connected"
+            ],
+            "result_class": "connected",
+            "timed_out": false
+          },
+          {
+            "stop_after_connect": {
+              "error": null,
+              "line": "*stopped,frame={addr=\"0x0800208c\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "reason": "unknown",
+              "timed_out": false
+            }
+          }
+        ],
+        "cycle": 1,
+        "gdb_exit": {
+          "closed": true,
+          "commands": [
+            {
+              "command": "-gdb-exit",
+              "result_class": "exit",
+              "timed_out": false
+            }
+          ]
+        },
+        "killed_connect": {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "8^done,value=\"788\"",
+              "records": [
+                "8^done,value=\"788\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "9^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+              "records": [
+                "9^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "argv_tail": [
+            "-p",
+            "35371",
+            "-d",
+            "-cp",
+            "<cubeclt>/STM32CubeProgrammer/bin",
+            "-i",
+            "[redacted]",
+            "-g"
+          ],
+          "connect": [
+            {
+              "command": "-gdb-set pagination off",
+              "error": null,
+              "line": "1^done",
+              "records": [
+                "=thread-group-added,id=\"i1\"",
+                "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+                "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+                "(gdb) ",
+                "1^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set confirm off",
+              "error": null,
+              "line": "2^done",
+              "records": [
+                "2^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set mi-async on",
+              "error": null,
+              "line": "3^done",
+              "records": [
+                "3^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+              "error": null,
+              "line": "4^done",
+              "records": [
+                "4^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-target-select extended-remote localhost:35371",
+              "error": null,
+              "line": "5^connected",
+              "records": [
+                "=thread-group-started,id=\"i1\",pid=\"42000\"",
+                "=thread-created,id=\"1\",group-id=\"i1\"",
+                "~\"SysTick_Handler () at [redacted]/Src/main.c:66\\n\"",
+                "~\"66\\t    uptime_ms++;\\n\"",
+                "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+                "5^connected"
+              ],
+              "result_class": "connected",
+              "timed_out": false
+            },
+            {
+              "stop_after_connect": {
+                "error": null,
+                "line": "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+                "reason": "unknown",
+                "timed_out": false
+              }
+            }
+          ],
+          "dhcsr": {
+            "command": "-data-read-memory-bytes 0xE000EDF0 4",
+            "error": null,
+            "line": "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+            "records": [
+              "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "dhcsr_contents": "03000300",
+          "flush": {
+            "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+            "error": null,
+            "line": "6^done",
+            "records": [
+              "~\"Register cache flushed.\\n\"",
+              "6^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "gdb_closed": {
+            "closed": true,
+            "commands": [
+              {
+                "command": "-gdb-exit",
+                "result_class": "exit",
+                "timed_out": false
+              }
+            ]
+          },
+          "output": [
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "Starting server with the following options:",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Persistent Mode            : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Logging Level              : 1",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Listen Port Number         : 35371",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Status Refresh Delay       : 15s",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Verbose Mode               : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        SWD Debug                  : Enabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.03,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.38,
+              "line": "Debugger connected",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.38,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            }
+          ],
+          "pc": "0x8001f60 <SysTick_Handler+4>",
+          "ready": {
+            "at_s": 0.35,
+            "lines_by_then": [
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "Starting server with the following options:",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Persistent Mode            : Disabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Logging Level              : 1",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Listen Port Number         : 35371",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Status Refresh Delay       : 15s",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Verbose Mode               : Disabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        SWD Debug                  : Enabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.03,
+                "line": "Waiting for debugger connection...",
+                "stream": "stdout"
+              }
+            ]
+          },
+          "s_halt": true,
+          "server_killed": {
+            "returncode": -9,
+            "was_running": true
+          },
+          "uptime_ms": "788"
+        },
+        "killed_connect_again": {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "8^done,value=\"788\"",
+              "records": [
+                "8^done,value=\"788\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "9^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+              "records": [
+                "9^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "argv_tail": [
+            "-p",
+            "55107",
+            "-d",
+            "-cp",
+            "<cubeclt>/STM32CubeProgrammer/bin",
+            "-i",
+            "[redacted]",
+            "-g"
+          ],
+          "connect": [
+            {
+              "command": "-gdb-set pagination off",
+              "error": null,
+              "line": "1^done",
+              "records": [
+                "=thread-group-added,id=\"i1\"",
+                "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+                "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+                "(gdb) ",
+                "1^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set confirm off",
+              "error": null,
+              "line": "2^done",
+              "records": [
+                "2^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set mi-async on",
+              "error": null,
+              "line": "3^done",
+              "records": [
+                "3^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+              "error": null,
+              "line": "4^done",
+              "records": [
+                "4^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-target-select extended-remote localhost:55107",
+              "error": null,
+              "line": "5^connected",
+              "records": [
+                "=thread-group-started,id=\"i1\",pid=\"42000\"",
+                "=thread-created,id=\"1\",group-id=\"i1\"",
+                "~\"SysTick_Handler () at [redacted]/Src/main.c:66\\n\"",
+                "~\"66\\t    uptime_ms++;\\n\"",
+                "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+                "5^connected"
+              ],
+              "result_class": "connected",
+              "timed_out": false
+            },
+            {
+              "stop_after_connect": {
+                "error": null,
+                "line": "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+                "reason": "unknown",
+                "timed_out": false
+              }
+            }
+          ],
+          "dhcsr": {
+            "command": "-data-read-memory-bytes 0xE000EDF0 4",
+            "error": null,
+            "line": "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+            "records": [
+              "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "dhcsr_contents": "03000300",
+          "flush": {
+            "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+            "error": null,
+            "line": "6^done",
+            "records": [
+              "~\"Register cache flushed.\\n\"",
+              "6^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "gdb_closed": {
+            "closed": true,
+            "commands": [
+              {
+                "command": "-gdb-exit",
+                "result_class": "exit",
+                "timed_out": false
+              }
+            ]
+          },
+          "output": [
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "Starting server with the following options:",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Persistent Mode            : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Logging Level              : 1",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Listen Port Number         : 55107",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Status Refresh Delay       : 15s",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Verbose Mode               : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        SWD Debug                  : Enabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.03,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.38,
+              "line": "Debugger connected",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.38,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            }
+          ],
+          "pc": "0x8001f60 <SysTick_Handler+4>",
+          "ready": {
+            "at_s": 0.35,
+            "lines_by_then": [
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "Starting server with the following options:",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Persistent Mode            : Disabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Logging Level              : 1",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Listen Port Number         : 55107",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Status Refresh Delay       : 15s",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Verbose Mode               : Disabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        SWD Debug                  : Enabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.03,
+                "line": "Waiting for debugger connection...",
+                "stream": "stdout"
+              }
+            ]
+          },
+          "s_halt": true,
+          "server_killed": {
+            "returncode": -9,
+            "was_running": true
+          },
+          "uptime_ms": "788"
+        },
+        "ready": {
+          "at_s": 0.35,
+          "lines_by_then": [
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "Starting server with the following options:",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Persistent Mode            : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Logging Level              : 1",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Listen Port Number         : 51765",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Status Refresh Delay       : 15s",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Verbose Mode               : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        SWD Debug                  : Enabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.03,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            }
+          ]
+        },
+        "scenario": "session_ended_by_killing_the_server",
+        "server_killed": {
+          "returncode": -9,
+          "was_running": true
+        },
+        "server_output": [
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Starting server with the following options:",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Persistent Mode            : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Logging Level              : 1",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Listen Port Number         : 51765",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Status Refresh Delay       : 15s",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Verbose Mode               : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        SWD Debug                  : Enabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.03,
+            "line": "Waiting for debugger connection...",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.38,
+            "line": "Debugger connected",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.38,
+            "line": "Waiting for debugger connection...",
+            "stream": "stdout"
+          }
+        ],
+        "settle_s": 2.0
+      },
+      {
+        "argv_tail": [
+          "-p",
+          "47651",
+          "-d",
+          "-cp",
+          "<cubeclt>/STM32CubeProgrammer/bin",
+          "-i",
+          "[redacted]",
+          "-g"
+        ],
+        "at_handler": {
+          "pc": "0x8001f60 <SysTick_Handler+4>",
+          "steps": [
+            {
+              "command": "-break-insert SysTick_Handler",
+              "error": null,
+              "line": "6^done,bkpt={number=\"1\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}",
+              "records": [
+                "~\"Note: automatically using hardware breakpoints for read-only addresses.\\n\"",
+                "6^done,bkpt={number=\"1\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-exec-continue",
+              "error": null,
+              "line": "7^running",
+              "records": [
+                "7^running"
+              ],
+              "result_class": "running",
+              "timed_out": false
+            },
+            {
+              "command": "-break-delete",
+              "error": null,
+              "line": "8^done",
+              "records": [
+                "8^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "9^done,value=\"789\"",
+              "records": [
+                "9^done,value=\"789\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "10^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+              "records": [
+                "10^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "stop": {
+            "error": null,
+            "line": "*stopped,reason=\"breakpoint-hit\",disp=\"keep\",bkptno=\"1\",frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+            "reason": "breakpoint-hit",
+            "timed_out": false
+          },
+          "uptime_ms": "789"
+        },
+        "before_kill": {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "13^done,value=\"789\"",
+              "records": [
+                "13^done,value=\"789\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "14^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+              "records": [
+                "14^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "dhcsr": {
+            "command": "-data-read-memory-bytes 0xE000EDF0 4",
+            "error": null,
+            "line": "12^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+            "records": [
+              "12^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "dhcsr_contents": "03000300",
+          "flush": {
+            "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+            "error": null,
+            "line": "11^done",
+            "records": [
+              "~\"Register cache flushed.\\n\"",
+              "11^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "pc": "0x8001f60 <SysTick_Handler+4>",
+          "s_halt": true,
+          "uptime_ms": "789"
+        },
+        "connect": [
+          {
+            "command": "-gdb-set pagination off",
+            "error": null,
+            "line": "1^done",
+            "records": [
+              "=thread-group-added,id=\"i1\"",
+              "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+              "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+              "(gdb) ",
+              "1^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-gdb-set confirm off",
+            "error": null,
+            "line": "2^done",
+            "records": [
+              "2^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-gdb-set mi-async on",
+            "error": null,
+            "line": "3^done",
+            "records": [
+              "3^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+            "error": null,
+            "line": "4^done",
+            "records": [
+              "4^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-target-select extended-remote localhost:47651",
+            "error": null,
+            "line": "5^connected",
+            "records": [
+              "=thread-group-started,id=\"i1\",pid=\"42000\"",
+              "=thread-created,id=\"1\",group-id=\"i1\"",
+              "~\"SysTick_Handler () at [redacted]/Src/main.c:66\\n\"",
+              "~\"66\\t    uptime_ms++;\\n\"",
+              "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "5^connected"
+            ],
+            "result_class": "connected",
+            "timed_out": false
+          },
+          {
+            "stop_after_connect": {
+              "error": null,
+              "line": "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "reason": "unknown",
+              "timed_out": false
+            }
+          }
+        ],
+        "cycle": 2,
+        "gdb_exit": {
+          "closed": true,
+          "commands": [
+            {
+              "command": "-gdb-exit",
+              "result_class": "exit",
+              "timed_out": false
+            }
+          ]
+        },
+        "killed_connect": {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "8^done,value=\"789\"",
+              "records": [
+                "8^done,value=\"789\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "9^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+              "records": [
+                "9^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "argv_tail": [
+            "-p",
+            "36493",
+            "-d",
+            "-cp",
+            "<cubeclt>/STM32CubeProgrammer/bin",
+            "-i",
+            "[redacted]",
+            "-g"
+          ],
+          "connect": [
+            {
+              "command": "-gdb-set pagination off",
+              "error": null,
+              "line": "1^done",
+              "records": [
+                "=thread-group-added,id=\"i1\"",
+                "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+                "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+                "(gdb) ",
+                "1^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set confirm off",
+              "error": null,
+              "line": "2^done",
+              "records": [
+                "2^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set mi-async on",
+              "error": null,
+              "line": "3^done",
+              "records": [
+                "3^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+              "error": null,
+              "line": "4^done",
+              "records": [
+                "4^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-target-select extended-remote localhost:36493",
+              "error": null,
+              "line": "5^connected",
+              "records": [
+                "=thread-group-started,id=\"i1\",pid=\"42000\"",
+                "=thread-created,id=\"1\",group-id=\"i1\"",
+                "~\"SysTick_Handler () at [redacted]/Src/main.c:66\\n\"",
+                "~\"66\\t    uptime_ms++;\\n\"",
+                "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+                "5^connected"
+              ],
+              "result_class": "connected",
+              "timed_out": false
+            },
+            {
+              "stop_after_connect": {
+                "error": null,
+                "line": "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+                "reason": "unknown",
+                "timed_out": false
+              }
+            }
+          ],
+          "dhcsr": {
+            "command": "-data-read-memory-bytes 0xE000EDF0 4",
+            "error": null,
+            "line": "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+            "records": [
+              "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "dhcsr_contents": "03000300",
+          "flush": {
+            "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+            "error": null,
+            "line": "6^done",
+            "records": [
+              "~\"Register cache flushed.\\n\"",
+              "6^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "gdb_closed": {
+            "closed": true,
+            "commands": [
+              {
+                "command": "-gdb-exit",
+                "result_class": "exit",
+                "timed_out": false
+              }
+            ]
+          },
+          "output": [
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "Starting server with the following options:",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Persistent Mode            : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Logging Level              : 1",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Listen Port Number         : 36493",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Status Refresh Delay       : 15s",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Verbose Mode               : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        SWD Debug                  : Enabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.03,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.38,
+              "line": "Debugger connected",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.38,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            }
+          ],
+          "pc": "0x8001f60 <SysTick_Handler+4>",
+          "ready": {
+            "at_s": 0.35,
+            "lines_by_then": [
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "Starting server with the following options:",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Persistent Mode            : Disabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Logging Level              : 1",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Listen Port Number         : 36493",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Status Refresh Delay       : 15s",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Verbose Mode               : Disabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        SWD Debug                  : Enabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.03,
+                "line": "Waiting for debugger connection...",
+                "stream": "stdout"
+              }
+            ]
+          },
+          "s_halt": true,
+          "server_killed": {
+            "returncode": -9,
+            "was_running": true
+          },
+          "uptime_ms": "789"
+        },
+        "killed_connect_again": {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "8^done,value=\"789\"",
+              "records": [
+                "8^done,value=\"789\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "9^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+              "records": [
+                "9^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "argv_tail": [
+            "-p",
+            "53589",
+            "-d",
+            "-cp",
+            "<cubeclt>/STM32CubeProgrammer/bin",
+            "-i",
+            "[redacted]",
+            "-g"
+          ],
+          "connect": [
+            {
+              "command": "-gdb-set pagination off",
+              "error": null,
+              "line": "1^done",
+              "records": [
+                "=thread-group-added,id=\"i1\"",
+                "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+                "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+                "(gdb) ",
+                "1^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set confirm off",
+              "error": null,
+              "line": "2^done",
+              "records": [
+                "2^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set mi-async on",
+              "error": null,
+              "line": "3^done",
+              "records": [
+                "3^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+              "error": null,
+              "line": "4^done",
+              "records": [
+                "4^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-target-select extended-remote localhost:53589",
+              "error": null,
+              "line": "5^connected",
+              "records": [
+                "=thread-group-started,id=\"i1\",pid=\"42000\"",
+                "=thread-created,id=\"1\",group-id=\"i1\"",
+                "~\"SysTick_Handler () at [redacted]/Src/main.c:66\\n\"",
+                "~\"66\\t    uptime_ms++;\\n\"",
+                "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+                "5^connected"
+              ],
+              "result_class": "connected",
+              "timed_out": false
+            },
+            {
+              "stop_after_connect": {
+                "error": null,
+                "line": "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+                "reason": "unknown",
+                "timed_out": false
+              }
+            }
+          ],
+          "dhcsr": {
+            "command": "-data-read-memory-bytes 0xE000EDF0 4",
+            "error": null,
+            "line": "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+            "records": [
+              "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "dhcsr_contents": "03000300",
+          "flush": {
+            "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+            "error": null,
+            "line": "6^done",
+            "records": [
+              "~\"Register cache flushed.\\n\"",
+              "6^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "gdb_closed": {
+            "closed": true,
+            "commands": [
+              {
+                "command": "-gdb-exit",
+                "result_class": "exit",
+                "timed_out": false
+              }
+            ]
+          },
+          "output": [
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "Starting server with the following options:",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Persistent Mode            : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Logging Level              : 1",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Listen Port Number         : 53589",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Status Refresh Delay       : 15s",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Verbose Mode               : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        SWD Debug                  : Enabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.03,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.38,
+              "line": "Debugger connected",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.38,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            }
+          ],
+          "pc": "0x8001f60 <SysTick_Handler+4>",
+          "ready": {
+            "at_s": 0.35,
+            "lines_by_then": [
+              {
+                "at_s": 0.0,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "Starting server with the following options:",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "        Persistent Mode            : Disabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "        Logging Level              : 1",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "        Listen Port Number         : 53589",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "        Status Refresh Delay       : 15s",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "        Verbose Mode               : Disabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "        SWD Debug                  : Enabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.03,
+                "line": "Waiting for debugger connection...",
+                "stream": "stdout"
+              }
+            ]
+          },
+          "s_halt": true,
+          "server_killed": {
+            "returncode": -9,
+            "was_running": true
+          },
+          "uptime_ms": "789"
+        },
+        "ready": {
+          "at_s": 0.35,
+          "lines_by_then": [
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "Starting server with the following options:",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Persistent Mode            : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Logging Level              : 1",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Listen Port Number         : 47651",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Status Refresh Delay       : 15s",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Verbose Mode               : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        SWD Debug                  : Enabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.03,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            }
+          ]
+        },
+        "scenario": "session_ended_by_killing_the_server",
+        "server_killed": {
+          "returncode": -9,
+          "was_running": true
+        },
+        "server_output": [
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Starting server with the following options:",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Persistent Mode            : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Logging Level              : 1",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Listen Port Number         : 47651",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Status Refresh Delay       : 15s",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Verbose Mode               : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        SWD Debug                  : Enabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.03,
+            "line": "Waiting for debugger connection...",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.38,
+            "line": "Debugger connected",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.38,
+            "line": "Waiting for debugger connection...",
+            "stream": "stdout"
+          }
+        ],
+        "settle_s": 2.0
+      },
+      {
+        "argv_tail": [
+          "-p",
+          "47859",
+          "-d",
+          "-cp",
+          "<cubeclt>/STM32CubeProgrammer/bin",
+          "-i",
+          "[redacted]",
+          "-g"
+        ],
+        "at_handler": {
+          "pc": "0x8001f60 <SysTick_Handler+4>",
+          "steps": [
+            {
+              "command": "-break-insert SysTick_Handler",
+              "error": null,
+              "line": "6^done,bkpt={number=\"1\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}",
+              "records": [
+                "~\"Note: automatically using hardware breakpoints for read-only addresses.\\n\"",
+                "6^done,bkpt={number=\"1\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-exec-continue",
+              "error": null,
+              "line": "7^running",
+              "records": [
+                "7^running"
+              ],
+              "result_class": "running",
+              "timed_out": false
+            },
+            {
+              "command": "-break-delete",
+              "error": null,
+              "line": "8^done",
+              "records": [
+                "8^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "9^done,value=\"790\"",
+              "records": [
+                "9^done,value=\"790\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "10^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+              "records": [
+                "10^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "stop": {
+            "error": null,
+            "line": "*stopped,reason=\"breakpoint-hit\",disp=\"keep\",bkptno=\"1\",frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+            "reason": "breakpoint-hit",
+            "timed_out": false
+          },
+          "uptime_ms": "790"
+        },
+        "before_kill": {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "13^done,value=\"790\"",
+              "records": [
+                "13^done,value=\"790\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "14^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+              "records": [
+                "14^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "dhcsr": {
+            "command": "-data-read-memory-bytes 0xE000EDF0 4",
+            "error": null,
+            "line": "12^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+            "records": [
+              "12^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "dhcsr_contents": "03000300",
+          "flush": {
+            "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+            "error": null,
+            "line": "11^done",
+            "records": [
+              "~\"Register cache flushed.\\n\"",
+              "11^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "pc": "0x8001f60 <SysTick_Handler+4>",
+          "s_halt": true,
+          "uptime_ms": "790"
+        },
+        "connect": [
+          {
+            "command": "-gdb-set pagination off",
+            "error": null,
+            "line": "1^done",
+            "records": [
+              "=thread-group-added,id=\"i1\"",
+              "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+              "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+              "(gdb) ",
+              "1^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-gdb-set confirm off",
+            "error": null,
+            "line": "2^done",
+            "records": [
+              "2^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-gdb-set mi-async on",
+            "error": null,
+            "line": "3^done",
+            "records": [
+              "3^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+            "error": null,
+            "line": "4^done",
+            "records": [
+              "4^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-target-select extended-remote localhost:47859",
+            "error": null,
+            "line": "5^connected",
+            "records": [
+              "=thread-group-started,id=\"i1\",pid=\"42000\"",
+              "=thread-created,id=\"1\",group-id=\"i1\"",
+              "~\"SysTick_Handler () at [redacted]/Src/main.c:66\\n\"",
+              "~\"66\\t    uptime_ms++;\\n\"",
+              "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "5^connected"
+            ],
+            "result_class": "connected",
+            "timed_out": false
+          },
+          {
+            "stop_after_connect": {
+              "error": null,
+              "line": "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+              "reason": "unknown",
+              "timed_out": false
+            }
+          }
+        ],
+        "cycle": 3,
+        "gdb_exit": {
+          "closed": true,
+          "commands": [
+            {
+              "command": "-gdb-exit",
+              "result_class": "exit",
+              "timed_out": false
+            }
+          ]
+        },
+        "killed_connect": {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "8^done,value=\"790\"",
+              "records": [
+                "8^done,value=\"790\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "9^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+              "records": [
+                "9^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "argv_tail": [
+            "-p",
+            "55103",
+            "-d",
+            "-cp",
+            "<cubeclt>/STM32CubeProgrammer/bin",
+            "-i",
+            "[redacted]",
+            "-g"
+          ],
+          "connect": [
+            {
+              "command": "-gdb-set pagination off",
+              "error": null,
+              "line": "1^done",
+              "records": [
+                "=thread-group-added,id=\"i1\"",
+                "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+                "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+                "(gdb) ",
+                "1^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set confirm off",
+              "error": null,
+              "line": "2^done",
+              "records": [
+                "2^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set mi-async on",
+              "error": null,
+              "line": "3^done",
+              "records": [
+                "3^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+              "error": null,
+              "line": "4^done",
+              "records": [
+                "4^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-target-select extended-remote localhost:55103",
+              "error": null,
+              "line": "5^connected",
+              "records": [
+                "=thread-group-started,id=\"i1\",pid=\"42000\"",
+                "=thread-created,id=\"1\",group-id=\"i1\"",
+                "~\"SysTick_Handler () at [redacted]/Src/main.c:66\\n\"",
+                "~\"66\\t    uptime_ms++;\\n\"",
+                "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+                "5^connected"
+              ],
+              "result_class": "connected",
+              "timed_out": false
+            },
+            {
+              "stop_after_connect": {
+                "error": null,
+                "line": "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+                "reason": "unknown",
+                "timed_out": false
+              }
+            }
+          ],
+          "dhcsr": {
+            "command": "-data-read-memory-bytes 0xE000EDF0 4",
+            "error": null,
+            "line": "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+            "records": [
+              "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "dhcsr_contents": "03000300",
+          "flush": {
+            "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+            "error": null,
+            "line": "6^done",
+            "records": [
+              "~\"Register cache flushed.\\n\"",
+              "6^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "gdb_closed": {
+            "closed": true,
+            "commands": [
+              {
+                "command": "-gdb-exit",
+                "result_class": "exit",
+                "timed_out": false
+              }
+            ]
+          },
+          "output": [
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "Starting server with the following options:",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Persistent Mode            : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Logging Level              : 1",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Listen Port Number         : 55103",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Status Refresh Delay       : 15s",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        Verbose Mode               : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "        SWD Debug                  : Enabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.03,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.38,
+              "line": "Debugger connected",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.38,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            }
+          ],
+          "pc": "0x8001f60 <SysTick_Handler+4>",
+          "ready": {
+            "at_s": 0.35,
+            "lines_by_then": [
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "Starting server with the following options:",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Persistent Mode            : Disabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Logging Level              : 1",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Listen Port Number         : 55103",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Status Refresh Delay       : 15s",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        Verbose Mode               : Disabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "        SWD Debug                  : Enabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.03,
+                "line": "Waiting for debugger connection...",
+                "stream": "stdout"
+              }
+            ]
+          },
+          "s_halt": true,
+          "server_killed": {
+            "returncode": -9,
+            "was_running": true
+          },
+          "uptime_ms": "790"
+        },
+        "killed_connect_again": {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "8^done,value=\"790\"",
+              "records": [
+                "8^done,value=\"790\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "9^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+              "records": [
+                "9^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "argv_tail": [
+            "-p",
+            "50527",
+            "-d",
+            "-cp",
+            "<cubeclt>/STM32CubeProgrammer/bin",
+            "-i",
+            "[redacted]",
+            "-g"
+          ],
+          "connect": [
+            {
+              "command": "-gdb-set pagination off",
+              "error": null,
+              "line": "1^done",
+              "records": [
+                "=thread-group-added,id=\"i1\"",
+                "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+                "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+                "(gdb) ",
+                "1^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set confirm off",
+              "error": null,
+              "line": "2^done",
+              "records": [
+                "2^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set mi-async on",
+              "error": null,
+              "line": "3^done",
+              "records": [
+                "3^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+              "error": null,
+              "line": "4^done",
+              "records": [
+                "4^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-target-select extended-remote localhost:50527",
+              "error": null,
+              "line": "5^connected",
+              "records": [
+                "=thread-group-started,id=\"i1\",pid=\"42000\"",
+                "=thread-created,id=\"1\",group-id=\"i1\"",
+                "~\"SysTick_Handler () at [redacted]/Src/main.c:66\\n\"",
+                "~\"66\\t    uptime_ms++;\\n\"",
+                "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+                "5^connected"
+              ],
+              "result_class": "connected",
+              "timed_out": false
+            },
+            {
+              "stop_after_connect": {
+                "error": null,
+                "line": "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"",
+                "reason": "unknown",
+                "timed_out": false
+              }
+            }
+          ],
+          "dhcsr": {
+            "command": "-data-read-memory-bytes 0xE000EDF0 4",
+            "error": null,
+            "line": "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]",
+            "records": [
+              "7^done,memory=[{begin=\"0xe000edf0\",offset=\"0x00000000\",end=\"0xe000edf4\",contents=\"03000300\"}]"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "dhcsr_contents": "03000300",
+          "flush": {
+            "command": "-interpreter-exec console \"maintenance flush register-cache\"",
+            "error": null,
+            "line": "6^done",
+            "records": [
+              "~\"Register cache flushed.\\n\"",
+              "6^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          "gdb_closed": {
+            "closed": true,
+            "commands": [
+              {
+                "command": "-gdb-exit",
+                "result_class": "exit",
+                "timed_out": false
+              }
+            ]
+          },
+          "output": [
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "Starting server with the following options:",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Persistent Mode            : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Logging Level              : 1",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Listen Port Number         : 50527",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Status Refresh Delay       : 15s",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Verbose Mode               : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        SWD Debug                  : Enabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.03,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.39,
+              "line": "Debugger connected",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.39,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            }
+          ],
+          "pc": "0x8001f60 <SysTick_Handler+4>",
+          "ready": {
+            "at_s": 0.35,
+            "lines_by_then": [
+              {
+                "at_s": 0.0,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "Starting server with the following options:",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "        Persistent Mode            : Disabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "        Logging Level              : 1",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "        Listen Port Number         : 50527",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "        Status Refresh Delay       : 15s",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "        Verbose Mode               : Disabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "        SWD Debug                  : Enabled",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.0,
+                "line": "",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.01,
+                "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+                "stream": "stdout"
+              },
+              {
+                "at_s": 0.03,
+                "line": "Waiting for debugger connection...",
+                "stream": "stdout"
+              }
+            ]
+          },
+          "s_halt": true,
+          "server_killed": {
+            "returncode": -9,
+            "was_running": true
+          },
+          "uptime_ms": "790"
+        },
+        "ready": {
+          "at_s": 0.35,
+          "lines_by_then": [
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "Starting server with the following options:",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Persistent Mode            : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Logging Level              : 1",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Listen Port Number         : 47859",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Status Refresh Delay       : 15s",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        Verbose Mode               : Disabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "        SWD Debug                  : Enabled",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.0,
+              "line": "",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.01,
+              "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+              "stream": "stdout"
+            },
+            {
+              "at_s": 0.03,
+              "line": "Waiting for debugger connection...",
+              "stream": "stdout"
+            }
+          ]
+        },
+        "scenario": "session_ended_by_killing_the_server",
+        "server_killed": {
+          "returncode": -9,
+          "was_running": true
+        },
+        "server_output": [
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "STMicroelectronics ST-LINK GDB server. Version 7.14.0",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Copyright (c) 2026, STMicroelectronics. All rights reserved.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "Starting server with the following options:",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Persistent Mode            : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Logging Level              : 1",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Listen Port Number         : 47859",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Status Refresh Delay       : 15s",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        Verbose Mode               : Disabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "        SWD Debug                  : Enabled",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.0,
+            "line": "",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.01,
+            "line": "ST-LINK firmware update available. Upgrade the ST-LINK firmware using the upgrade tool.",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.03,
+            "line": "Waiting for debugger connection...",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.38,
+            "line": "Debugger connected",
+            "stream": "stdout"
+          },
+          {
+            "at_s": 0.38,
+            "line": "Waiting for debugger connection...",
+            "stream": "stdout"
+          }
+        ],
+        "settle_s": 2.0
+      }
+    ]
+  },
+  "schema": "agentic-hil.st-link-gdbserver-recording/v1",
+  "source_commit": "ee22b3b",
+  "stm32cubeprogrammer_version": "2.23.0",
+  "timings": {
+    "command_timeout_s": 10.0,
+    "exit_wait_s": 10.0,
+    "run_before_interrupt_s": 1.0,
+    "settle_s": 2.0,
+    "stop_timeout_s": 10.0
+  },
+  "version": {
+    "argv_tail": [
+      "--version"
+    ],
+    "returncode": 0,
+    "stderr": [],
+    "stdout": [
+      "",
+      "<cubeclt>/STLink-gdb-server/bin/ST-LINK_gdbserver  version: 7.14.0",
+      ""
+    ]
+  }
+}
