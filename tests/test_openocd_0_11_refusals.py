@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 from conftest import write_config
 
+import agentic_hil.backends.openocd as openocd_backend
 from agentic_hil.backends.common import NOT_CONTACTED
 from agentic_hil.config import load_config
 from agentic_hil.tools import AgenticHILToolService
@@ -45,6 +46,13 @@ RECORDINGS = json.loads((FIXTURES / "openocd_0_11_bench_recordings.json").read_t
 # runner withholds: the backend has to be bound to the serial OpenOCD names.
 SERIAL = RECORDINGS["probe_serial"]
 RESET = RECORDINGS["recordings"]["reset_target_run"]
+# A server that stopped somewhere this layer cannot place from a command of
+# ours: the release line of the OpenOCD this module is about, and then the line
+# #604 recorded from the real binary with the probe's group withheld. The
+# transcript fake answers the release read with it too, which is the whole of the
+# scenario: the read really did fail, and `adapter serial` really was the
+# fallback the server was started with.
+ACCESS_REFUSED = {"stdout": "", "stderr": "Open On-Chip Debugger 0.11.0\nError: libusb_open() failed with LIBUSB_ERROR_ACCESS\n", "returncode": 1}
 
 
 def play(monkeypatch: pytest.MonkeyPatch, recorded: dict) -> None:
@@ -231,7 +239,7 @@ def test_a_server_that_died_for_another_reason_keeps_the_reading_it_had(
     """
     from test_debug_sessions import debug_service, start_debug_session
 
-    play(monkeypatch, {"stdout": "", "stderr": "Open On-Chip Debugger 0.11.0\nError: libusb_open() failed with LIBUSB_ERROR_ACCESS\n", "returncode": 1})
+    play(monkeypatch, ACCESS_REFUSED)
     service = debug_service(tmp_path, debugger_executable=FAKE_TRANSCRIPT, probe_id=SERIAL)
     try:
         started = start_debug_session(service, "attach")
@@ -246,3 +254,49 @@ def test_a_server_that_died_for_another_reason_keeps_the_reading_it_had(
     # was started with `adapter serial` at all. What it may not do is say where
     # the server stopped: that is what the output alone decides.
     assert "OpenOCD release read" in started["probe_selection_read_failure"], started
+
+
+@pytest.mark.parametrize(
+    ("recorded", "backend_error_type", "a_cause_the_backend_holds", "causes"),
+    [
+        (RESET, "command_rejected_before_init", "a configuration script used a run-stage command before 'init'", 4),
+        (ACCESS_REFUSED, "adapter_access_denied", "add the user to the group the probe's udev rule gives it to", 3),
+    ],
+    ids=["a-rejected-selector", "a-probe-this-user-may-not-open"],
+)
+def test_the_start_offers_the_causes_the_backend_holds_for_the_stop_it_classified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: dict, backend_error_type: str, a_cause_the_backend_holds: str, causes: int
+) -> None:
+    """The read line leads the causes; it does not replace them.
+
+    The tool path publishes both sets for the same two errors, with the read line
+    in front (`_run_openocd` prepends it to
+    `OPENOCD_CAUSES_BY_BACKEND_ERROR.get(backend_error_type) or
+    self._likely_causes(error_type)`). The start assigned instead, so whatever it
+    classified, `likely_causes` was exactly one line: the failed read. For a
+    server that stopped on `LIBUSB_ERROR_ACCESS` that sends an agent after the
+    wrapper that swallowed `--version` while the repair is the group the probe's
+    udev rule names, which this backend holds the words for and did not offer.
+    """
+    from test_debug_sessions import debug_service, start_debug_session
+    from test_openocd_access_denied import HostOs
+
+    # The libusb line is read as a refusal only off Windows, where the same error
+    # also means a device another program holds, so the host the backend sees is
+    # fixed for both cases rather than for one of them.
+    monkeypatch.setattr(openocd_backend, "os", HostOs("posix"), raising=False)
+    play(monkeypatch, recorded)
+    service = debug_service(tmp_path, debugger_executable=FAKE_TRANSCRIPT, probe_id=SERIAL)
+    try:
+        started = start_debug_session(service, "attach")
+    finally:
+        service.close()
+
+    assert started["ok"] is False, started
+    assert started["backend_error_type"] == backend_error_type, started
+    read_failure = started["probe_selection_read_failure"]
+    assert "OpenOCD release read" in read_failure, read_failure
+    assert started["likely_causes"][0] == read_failure, started["likely_causes"]
+    assert a_cause_the_backend_holds in " ".join(started["likely_causes"][1:]), started["likely_causes"]
+    # The read line and the table's own entries, and nothing else.
+    assert len(started["likely_causes"]) == causes, started["likely_causes"]

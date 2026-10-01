@@ -42,6 +42,7 @@ from fixtures.fake_openocd import (
     RECORDED_ACCEPTING_LINE,
     RECORDED_LISTENING_LINE,
     RECORDED_REJECTED_LINE,
+    VERSION_SWALLOWED_VARIABLE,
 )
 from support import scaled_time_bound
 
@@ -69,6 +70,11 @@ LINELESS_START_TIMEOUT_S = 2.0
 # wait could still catch the line in passing.
 NARROW_TAIL_CHARS = 1024
 FLOOD_LINES = 64
+# A `probe_id` for the one case that needs the probe selection to run at all:
+# without one nothing is selected and no release is read. The value only has to
+# reach the server's command line, which is why it is a plausible ST-Link serial
+# and nothing more.
+A_PROBE_SERIAL = "066BFF505050505050505050"
 
 PORT_LISTENING = "port listening"
 LINE_PRINTED = "listening line printed"
@@ -112,8 +118,8 @@ def write_image(tmp_path: Path, fake_gdb_behavior: str) -> Path:
     return image
 
 
-def debug_service(tmp_path: Path, fake_gdb_behavior: str = CONNECTS_TO_SERVER) -> AgenticHILToolService:
-    config_path = write_config(tmp_path, gdb_executable=FAKE_GDB, timeout_s=scaled_time_bound(START_TIMEOUT_S))
+def debug_service(tmp_path: Path, fake_gdb_behavior: str = CONNECTS_TO_SERVER, probe_id: str | None = None) -> AgenticHILToolService:
+    config_path = write_config(tmp_path, gdb_executable=FAKE_GDB, timeout_s=scaled_time_bound(START_TIMEOUT_S), probe_id=probe_id)
     write_image(tmp_path, fake_gdb_behavior)
     return AgenticHILToolService(load_config(str(config_path)))
 
@@ -267,6 +273,46 @@ def test_a_start_that_never_sees_the_line_times_out_naming_it(tmp_path: Path, mo
     assert {key: started.get(key) for key in TIMEOUT_FAILURE} == TIMEOUT_FAILURE
     assert started["summary"] == f'Debug server did not print "{AWAITED_LINE.format(port=served_port(record))}" before the timeout.', started
     assert timelines(record) == [expected]
+
+
+def test_a_start_that_timed_out_still_names_the_read_that_sent_it_to_adapter_serial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The timeout is the surface that failure is met on, and the read was named nowhere on it.
+
+    With `probe_id` set and an `executable` that swallows `--version`, which this
+    repo supports and which the fake answers the way such a wrapper does, the
+    probe selection falls back to `adapter serial` and keeps the line the read
+    failed with. A server that then hangs instead of exiting is the failure an
+    operator meets most often, and the read was published only where the server
+    had stopped: `probe_selection_read_failure` appeared on no timed-out start,
+    and neither the result nor the session log named the read that chose the
+    selector.
+
+    The line is a fact about the command line the server was started with, known
+    before it ran, so it is not a reclassification and the guard against those
+    does not apply to it. What the timeout keeps is everything it says about where
+    the server got to: the same `timeout` / `gdb_server_not_ready` and the same
+    summary naming the line it never printed.
+    """
+    monkeypatch.setenv(VERSION_SWALLOWED_VARIABLE, "1")
+    record = drive_fake_openocd(monkeypatch, tmp_path, line_after=NEVER)
+    service = debug_service(tmp_path, probe_id=A_PROBE_SERIAL)
+    try:
+        started = start_attach(service, LINELESS_START_TIMEOUT_S)
+    finally:
+        close(service)
+
+    assert {key: started.get(key) for key in TIMEOUT_FAILURE} == TIMEOUT_FAILURE
+    assert started["summary"] == f'Debug server did not print "{AWAITED_LINE.format(port=served_port(record))}" before the timeout.', started
+    # Nothing about the output was read: the server is still running, and no
+    # command of ours was reported rejected.
+    assert "rejected_commands" not in started, started
+    read_failure = started["probe_selection_read_failure"]
+    assert "OpenOCD release read" in read_failure, read_failure
+    # First, because the release that could not be read is why the selector on
+    # that command line is `adapter serial` at all, and ahead of the causes a
+    # timeout carries rather than instead of them.
+    assert started["likely_causes"][0] == read_failure, started["likely_causes"]
+    assert "timeout_s is too low for this operation" in started["likely_causes"], started["likely_causes"]
 
 
 def test_the_line_counts_even_when_later_output_pushes_it_out_of_the_tail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -190,6 +190,7 @@ class GdbDebugSessions:
         classify_server_output: Callable[[str], str],
         server_ready_line: str | None = None,
         read_start_failure: Callable[[str, list[str]], JsonObject | None] | None = None,
+        read_start_context: Callable[[JsonObject], JsonObject | None] | None = None,
     ):
         self.config = config
         self.backend_name = backend_name
@@ -207,6 +208,12 @@ class GdbDebugSessions:
         # stopped at its first `-c`. Given the output and the server's argv, and
         # answering None where it has nothing to add.
         self._read_start_failure = read_start_failure
+        # What a backend knows about a start whatever its server then did with
+        # it: facts about the command line it was built with, known before it
+        # ran. Given the finished classification and answering None where it has
+        # nothing to add, so it rides out on the start that timed out as well,
+        # which is the one surface the reading above cannot reach.
+        self._read_start_context = read_start_context
         self.session: GdbDebugSession | None = None
         # Permanent audit latch: once evidence persistence breaks, it stays
         # broken for this service instance; it is never consumed by reporting.
@@ -1400,6 +1407,16 @@ class GdbDebugSessions:
             read = self._read_start_failure(output, list(session.server_args))
             if read:
                 result.update(read)
+        if self._read_start_context is not None:
+            # What the backend knows about this start from before its server ran,
+            # which a timeout has as much as a stop does: it is not a reading of
+            # the output and so not the reclassification the guard above exists
+            # against. Last, so it is handed the error this result carries,
+            # including a reclassification the reading above just made, and can
+            # offer the causes for that one.
+            context = self._read_start_context(dict(result))
+            if context:
+                result.update(context)
         return result
 
     def _start_output_readers(self, session: GdbDebugSession) -> None:

@@ -367,10 +367,14 @@ class OpenOCDProbeSelection:
     `read_failure` is set only where one of the two configuration-stage reads
     answered nothing, and is then the decisive line it answered nothing with. It
     is what tells the two `adapter serial` fallbacks apart: the release really is
-    0.12.0 or newer, or nothing here could find out. Every result the selection
-    feeds carries it, because a refusal caused by a failed read used to name only
-    `adapter serial` and the three generic causes, with nothing pointing at the
-    repair."""
+    0.12.0 or newer, or nothing here could find out. Three surfaces carry it, and
+    they are every refusal this selection shapes: the refusal of a selection this
+    OpenOCD has no selector for, every failure of a tool call the selection was
+    sent with, and every start that never reached its GDB port, whether its
+    server stopped or hung. A call that succeeded carries nothing, having nothing
+    to explain. All of them, because a refusal caused by a failed read used to
+    name only `adapter serial` and the three generic causes, with nothing
+    pointing at the repair."""
 
     commands: tuple[str, ...]
     version: str | None
@@ -459,6 +463,7 @@ class OpenOCDBackend:
             classify_server_output=self._classify_output,
             server_ready_line=OPENOCD_GDB_LISTENING_LINE,
             read_start_failure=self._debug_start_failure,
+            read_start_context=self._debug_start_context,
         )
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
@@ -823,27 +828,17 @@ class OpenOCDBackend:
         configuration command. Split that way so this asks exactly the question
         the tool path asks.
 
-        It also carries the configuration-stage read that answered nothing, where
-        one did, which is why the selection was `adapter serial` in the first
-        place. That line is about this start whatever the output says, so it is
-        published on its own where nothing was rejected. A start that timed out
-        does not reach here at all: the server is still running, and `gdbdebug`
-        asks this only of one that stopped.
+        A start that timed out does not reach here at all: the server is still
+        running, and `gdbdebug` asks this only of one that stopped. The read that
+        shaped the command line travels on either, from `_debug_start_context`,
+        because it is not a reading of the output.
         """
-        # The read that shaped this server's own `-c` values, where one failed:
-        # the same two lines the tool path puts on every failure of the call it
-        # shaped, so the wrapper that swallowed `--version` is named on this path
-        # too. The line is about the start whether or not a command was rejected,
-        # and `likely_causes` it leads is what an agent reads back.
-        stored = self._debug_probe_selection
-        read_failure = stored[1].read_failure if stored is not None else None
-        carried: JsonObject = {} if not read_failure else {"probe_selection_read_failure": read_failure, "likely_causes": [read_failure]}
         values = [server_args[index + 1] for index, item in enumerate(server_args) if item == "-c" and index + 1 < len(server_args)]
         if not values:
-            return carried or None
+            return None
         rejected = rejected_openocd_commands(values[-1], output, tuple(values[:-1]))
         if not rejected:
-            return carried or None
+            return None
         backend_error_type = "command_rejected_before_init"
         error_type = self._public_error_type(backend_error_type)
         return {
@@ -851,8 +846,35 @@ class OpenOCDBackend:
             "backend_error_type": backend_error_type,
             "summary": f"Debug server exited before the GDB port became ready: {self._failure_summary(backend_error_type, error_type)}",
             "rejected_commands": rejected,
-            **carried,
         }
+
+    def _debug_start_context(self, classified: JsonObject) -> JsonObject | None:
+        """The configuration-stage read that shaped this start's command line, or None.
+
+        Where one of the two reads answered nothing, the server was started with
+        `adapter serial` for that reason, and the decisive line it answered
+        nothing with is the repair: an `executable` that is a wrapper swallowing
+        `--version` is an explicitly supported configuration, and nothing else on
+        a start's surface names it. The line is about the command line the server
+        was built with, known before it ran, so it rides out on a start that hung
+        as well as on one that stopped, and says nothing about where either got
+        to.
+
+        It leads `likely_causes` rather than replacing it, exactly as
+        `_run_openocd` leads the tool path's: the backend's own causes for the
+        error this start was classified as follow, from the same two tables that
+        path reads. Assigned instead, the list was this one line whatever the
+        start stopped on, so a server refused by `LIBUSB_ERROR_ACCESS` offered
+        the wrapper and not the group its udev rule names.
+        """
+        stored = self._debug_probe_selection
+        read_failure = stored[1].read_failure if stored is not None else None
+        if not read_failure:
+            return None
+        backend_error_type = str(classified.get("backend_error_type") or "")
+        error_type = str(classified.get("error_type") or "")
+        causes = OPENOCD_CAUSES_BY_BACKEND_ERROR.get(backend_error_type) or self._likely_causes(error_type)
+        return {"probe_selection_read_failure": read_failure, "likely_causes": [read_failure, *causes]}
 
     def _resolve_executable(self) -> JsonObject:
         configured = self.config.debugger.executable
