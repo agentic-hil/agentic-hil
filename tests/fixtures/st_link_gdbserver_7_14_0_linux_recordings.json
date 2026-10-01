@@ -9231,7 +9231,7 @@
     }
   },
   "schema": "agentic-hil.st-link-gdbserver-recording/v1",
-  "source_commit": null,
+  "source_commit": "0b519bbb2871d4f2099e91e8d350751e2e15ee0f",
   "stm32cubeprogrammer_version": "2.23.0",
   "timings": {
     "command_timeout_s": 10.0,
