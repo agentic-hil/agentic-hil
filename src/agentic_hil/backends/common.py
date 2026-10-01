@@ -34,6 +34,22 @@ NOT_CONTACTED: JsonObject = {
     "retry_safe": True,
 }
 
+# The markers a failure carries when it cannot place where it stopped: nothing
+# about the bench is settled, nothing may be retried on its word, and what it
+# held stays held until something settles it. Not the opposite claim to
+# NOT_CONTACTED but the absence of one, said out loud: a reading that can prove
+# neither reaches for these, so that a layer above, which knows less about the
+# server than the reading did, cannot fill the silence with the safe answer.
+# Carries no `target_contacted` and no `side_effect_committed`, because an
+# unproven contact is not a denied one.
+CONTACT_UNPROVEN: JsonObject = {
+    "side_effect_status": "unknown",
+    "retry_safe": False,
+    "target_state": "unknown",
+    "hardware_state": "unknown",
+    "cleanup_required": True,
+}
+
 # The tools whose command drives nothing of its own: whatever addressed the
 # target did so while the backend was still opening its session. A backend may
 # therefore read "no target answered" as a proven abort point for these, and may

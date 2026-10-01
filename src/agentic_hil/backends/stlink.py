@@ -12,6 +12,7 @@ from typing import Literal
 
 from agentic_hil.artifacts import looks_like_intel_hex
 from agentic_hil.backends.common import (
+    CONTACT_UNPROVEN,
     FAILURE_WORDS,
     NOT_CONTACTED,
     READ_ONLY_TOOLS,
@@ -1214,7 +1215,18 @@ class STLinkBackend:
         The line that decided it travels as `backend_error`: the server prints a
         banner and its options ahead of the reason. A missing probe and a
         missing STM32CubeProgrammer end it before any probe carried anything,
-        which is what NOT_CONTACTED says; the others make no such claim."""
+        which is what NOT_CONTACTED says.
+
+        Every other recorded refusal comes after the server opened the probe and
+        went at the target, and says so itself: `Device connect error` for a
+        probe another server holds, `Target unknown MCU target` for a JTAG
+        connect to the reference board's SWD-only wiring, `Target USB comms
+        error` for a probe a killed server left behind. So those carry
+        CONTACT_UNPROVEN, which is the claim this reading can support, rather
+        than no claim for the session layer to fill in with the safe one. A
+        retry is refused with them because the recorded USB refusal was refused
+        again in every cycle that retried it, and only an OpenOCD `reset_target`
+        through the same probe gave it back."""
         backend_error_type = classify_gdb_server_output(output)
         error_type = self._public_error_type(backend_error_type)
         result: JsonObject = {
@@ -1227,8 +1239,7 @@ class STLinkBackend:
         decisive = gdb_server_decisive_line(output, backend_error_type)
         if decisive is not None:
             result["backend_error"] = decisive
-        if backend_error_type in ST_LINK_GDB_SERVER_PRE_CONTACT:
-            result.update(NOT_CONTACTED)
+        result.update(NOT_CONTACTED if backend_error_type in ST_LINK_GDB_SERVER_PRE_CONTACT else CONTACT_UNPROVEN)
         return result
 
     def _gdb_server_summary(self, backend_error_type: str, error_type: str) -> str:

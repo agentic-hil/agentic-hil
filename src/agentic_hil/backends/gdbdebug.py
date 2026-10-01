@@ -14,6 +14,7 @@ from pathlib import Path
 
 from agentic_hil.artifacts import sha256_file
 from agentic_hil.backends.common import (
+    CONTACT_UNPROVEN,
     NOT_CONTACTED,
     contains_any,
     invocation,
@@ -510,7 +511,10 @@ class GdbDebugSessions:
         else:
             ready = wait_for_tcp_port(gdb_port, timeout, server)
         if not ready:
-            failure = self._start_failure(session, tool, started_at, start, timeout, timed_out=server.poll() is None)
+            # Read once, before the cleanup that ends a server still running:
+            # afterwards an exit of its own and an end of ours look alike.
+            timed_out = server.poll() is None
+            failure = self._start_failure(session, tool, started_at, start, timeout, timed_out=timed_out)
             cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
             if cleanup_error is not None:
                 failure["cleanup_error"] = cleanup_error
@@ -518,7 +522,11 @@ class GdbDebugSessions:
                 failure.update(self._probe_server_fields(session))
                 session.status = "cleanup_required"
             else:
-                failure.update({"cleanup_confirmed": True, **self._startup_effect_fields(session, timed_out=True)})
+                # The classified failure goes back in as this start's evidence
+                # about its server: where the server ended by itself, the
+                # backend's reading of its last words is what says whether
+                # anything was reached before it did.
+                failure.update({"cleanup_confirmed": True, **self._startup_effect_fields(session, timed_out=timed_out, server_exit=failure)})
                 if failure.get("cleanup_required") is True:
                     session.status = "cleanup_required"
                 else:
@@ -551,6 +559,10 @@ class GdbDebugSessions:
         if not initialized["ok"]:
             cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
             result = {"tool": tool, "backend": self.backend_name, "started_at": started_at, **initialized, "log_path": display_path(self.config, log_path)}
+            # The companion record again, now that the cleanup has been through
+            # it: the failure was written while the companion was still running,
+            # and what became of it is part of what this start left behind.
+            result.update(self._probe_server_fields(session))
             if cleanup_error is not None:
                 result["cleanup_error"] = cleanup_error
                 result["cleanup_required"] = True
@@ -1129,6 +1141,12 @@ class GdbDebugSessions:
                         "side_effect_committed": False,
                         "side_effect_status": "not_started",
                         "retry_safe": True,
+                        # Which way this start reached the probe, on this answer
+                        # as on every other one given after the companion was
+                        # chosen: a refusal that names no session block is read
+                        # for it here, whether or not ending the server also put
+                        # the probe in doubt.
+                        **self._probe_server_fields(session),
                     }
                     if self._server_end_leaves_probe_unconfirmed(session):
                         # GDB refused before it was pointed at the target, but
@@ -1230,14 +1248,17 @@ class GdbDebugSessions:
             return None
         return {"backend_error": result["summary"], "log_path": result["log_path"]}
 
-    def _startup_effect_fields(self, session: GdbDebugSession, timed_out: bool = False) -> JsonObject:
+    def _startup_effect_fields(self, session: GdbDebugSession, timed_out: bool = False, *, server_exit: JsonObject | None = None) -> JsonObject:
         """What a failed start says it left behind.
 
         A start that never got through to the target can refuse instead of
         quarantining a board, but only on evidence: the phase says what GDB had
-        reached, and the backend says what ending this start's own server can
-        leave on the in-circuit debugger or programmer
-        (`_server_end_leaves_probe_unconfirmed`). Where either is unaccounted
+        reached, the backend says what ending this start's own server can leave
+        on the in-circuit debugger or programmer
+        (`_server_end_leaves_probe_unconfirmed`), and `server_exit`, the
+        classified failure of a server that ended by itself, carries the
+        backend's reading of the words it ended on
+        (`_pre_gdb_contact_is_accounted_for`). Where any of them is unaccounted
         for, the start reports unknown state, refuses a retry of its own accord
         and keeps the session for cleanup."""
         # Every answer a start gives once its companion was chosen names it,
@@ -1248,7 +1269,7 @@ class GdbDebugSessions:
         # Before GDB connects, an attach has done nothing to the target, and
         # neither has a reset mode on a server whose reset is GDB's command.
         resets_before_connect = session.mode != "attach" and self._server_steps.server_resets_at_start
-        if not resets_before_connect and session.load_phase in _BEFORE_GDB_CONNECT_PHASES and not self._server_end_leaves_probe_unconfirmed(session):
+        if not resets_before_connect and session.load_phase in _BEFORE_GDB_CONNECT_PHASES and self._pre_gdb_contact_is_accounted_for(session, server_exit):
             return {**fields, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
         if session.load_phase in {"download_started", "download_confirmed", "post_load_reset_started", "post_load_reset_confirmed"}:
             status = "unknown" if timed_out else "partial"
@@ -1261,7 +1282,30 @@ class GdbDebugSessions:
 
     def _unknown_after_server_end_fields(self, session: GdbDebugSession) -> JsonObject:
         """What a failed start says about state it cannot account for: nothing is settled and nothing may be retried on its word."""
-        return {"side_effect_status": "unknown", "retry_safe": False, "target_state": "unknown", "hardware_state": "unknown", "cleanup_required": True, **self._probe_server_fields(session)}
+        return {**CONTACT_UNPROVEN, **self._probe_server_fields(session)}
+
+    def _pre_gdb_contact_is_accounted_for(self, session: GdbDebugSession, server_exit: JsonObject | None) -> bool:
+        """Whether a start that failed before GDB connected can say the hardware is as it was.
+
+        Two things can leave it unable to. Ending this start's own GDB server,
+        where the backend says that end leaves the in-circuit debugger or
+        programmer unaccounted for (`_server_end_leaves_probe_unconfirmed`). And
+        the exit of a server that ended by itself: a GDB server opens the probe,
+        and on the STM32CubeProgrammer backend goes at the target, before it
+        listens for GDB, so what it reached is in the words it ended on and
+        nowhere else. The backend's reading of those words is the answer, and
+        where that reading could place the exit before any contact it says so
+        (NOT_CONTACTED); where it could not it says that instead
+        (CONTACT_UNPROVEN), and this start may not improve on it merely because
+        the reset of a reset mode is a GDB command it never got to send.
+
+        A reading that proved no contact, a reading that answers something else
+        than contact, and a start with no server exit to read, each leave the
+        phase to answer as it did before typed sessions ran on a second
+        server."""
+        if self._server_end_leaves_probe_unconfirmed(session):
+            return False
+        return (server_exit or {}).get("side_effect_status") != CONTACT_UNPROVEN["side_effect_status"]
 
     def _server_end_leaves_probe_unconfirmed(self, session: GdbDebugSession) -> bool:
         """Whether ending this session's own GDB server leaves the in-circuit debugger or programmer unaccounted for.

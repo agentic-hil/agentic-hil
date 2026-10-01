@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from agentic_hil.backends.common import (
+    CONTACT_UNPROVEN,
     FAILURE_WORDS,
     NOT_CONTACTED,
     READ_ONLY_TOOLS,
@@ -753,7 +754,13 @@ class PyOCDBackend:
         line that decided it travels as `backend_error`: pyOCD prints a banner and
         a target line ahead of the error, and the recorded refusals each name
         their cause in one line of their own. Every recorded one is a refusal
-        before the probe carried anything, which is what NOT_CONTACTED says."""
+        before the probe carried anything, which is what NOT_CONTACTED says.
+
+        An exit that is none of them carries CONTACT_UNPROVEN, the claim this
+        reading can support for it: `pyocd gdbserver` opens the probe and the
+        target before it listens for GDB, so an exit its words do not place
+        before that is one this reading cannot place at all, and the session
+        layer may not read the silence as the safe answer."""
         tool = "debug_start_session"
         classified = self._classify_output(output, tool)
         backend_error_type = self._confirm_target_support(classified)
@@ -770,8 +777,7 @@ class PyOCDBackend:
             result["backend_error"] = decisive
         if backend_error_type == "target_type_invalid" and self.config.debugger.target_type:
             result["install_commands"] = pack_install_commands(self.config.debugger.target_type)
-        if self._proves_no_contact(tool, backend_error_type):
-            result.update(NOT_CONTACTED)
+        result.update(NOT_CONTACTED if self._proves_no_contact(tool, backend_error_type) else CONTACT_UNPROVEN)
         return result
 
     def _decisive_line(self, output: str, classified: str, tool: str) -> str | None:

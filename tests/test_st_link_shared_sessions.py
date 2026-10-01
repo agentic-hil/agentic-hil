@@ -367,3 +367,36 @@ def test_a_gdb_refusal_before_the_connect_still_reports_a_direct_probe_unaccount
     assert "target_contacted" not in started, started
     assert started["probe_server"]["mode"] == "direct", started["probe_server"]
     assert "Target USB comms error" in started["probe_server"]["stop_risk"], started["probe_server"]
+
+
+def test_a_gdb_refusal_before_the_connect_through_stlink_server_still_says_which_way_it_reached_the_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same refusal in shared mode: the bench is as it was, and the answer still names the companion.
+
+    Here the refusal keeps what it claims: ST-LINK_gdbserver with `-t` holds no
+    probe of its own, so ending it leaves nothing unaccounted for, and GDB was
+    refused before `-target-select`. What a caller reads a start by is still
+    which way it reached the probe, and `probe_server` is where that is said, on
+    this answer as on every other one a start gives once the companion was
+    chosen."""
+    use_stlink_server(tmp_path, monkeypatch, str(FAKE_STLINK_SERVER))
+    monkeypatch.setenv("FAKE_GDB_BEHAVIOR", MI_ASYNC_UNSUPPORTED)
+    service, _ = st_link_session_service(tmp_path, monkeypatch, behavior=f"{ST_LINK_GDBSERVER}+{MI_ASYNC_UNSUPPORTED}")
+    try:
+        started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": NEVER_READY_TIMEOUT_S})
+        status = service.call("debug_get_session_status")
+    finally:
+        with contextlib.suppress(RuntimeError):
+            service.close()
+        service.coordinator.close()
+
+    assert started["ok"] is False, started
+    assert started["error_type"] == "gdb_async_unsupported", started
+    assert "mi-async" in started["summary"], started
+    assert started["target_contacted"] is False, started
+    assert started["side_effect_committed"] is False, started
+    assert started["side_effect_status"] == "not_started", started
+    assert started["retry_safe"] is True, started
+    assert started.get("cleanup_required") is not True, started
+    assert started["probe_server"]["mode"] == "shared", started["probe_server"]
+    assert started["probe_server"]["ended"] is True, started["probe_server"]
+    assert status["active"] is False, status

@@ -793,15 +793,20 @@ def st_link_recorded_line(scenario: str, starts_with: str) -> str:
 def test_st_link_server_that_exits_at_startup_is_classified_from_its_recorded_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, scenario: str, interface: str, error_type: str, decisive_line: str | None, contact_disproved: bool
 ) -> None:
-    """Each recorded way the server refused to start, read from its own line.
+    """Each recorded way the server refused to start, read from its own line, and what that line proves.
 
     No probe by that serial and a missing STM32CubeProgrammer each end before a
-    probe carried anything, which the result says. A probe another server holds
-    and a JTAG connect to the SWD-only board both print the server's
-    `Failed to connect` family of reason, which a target that is off prints too,
-    so the result does not claim nothing was reached; it does say nothing was
-    changed, because with `-g` the server resets nothing and the reset of a reset
-    mode is a GDB command the start never got to send."""
+    probe carried anything, which the result says and which lets the start refuse
+    rather than quarantine a bench it never reached.
+
+    The other three say the opposite in their own lines: `Device connect error`
+    for a probe another server holds, `Target unknown MCU target` for a JTAG
+    connect to the SWD-only board, `Target USB comms error` for a probe a killed
+    server left behind. Each of them opened the probe and went at the target
+    before it exited, so the start reports side effect, target and hardware as
+    unknown and keeps the bench until something settles it. The reset of a reset
+    mode being a GDB command this start never sent says nothing about any of
+    that, which is why the mode makes no difference here."""
     service, events_path = st_link_session_service(tmp_path, monkeypatch, interface=interface)
     if scenario != "startup_without_swd":
         monkeypatch.setenv(ST_LINK_SCENARIO_VARIABLE, scenario)
@@ -811,21 +816,32 @@ def test_st_link_server_that_exits_at_startup_is_classified_from_its_recorded_ou
         started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": mode, "timeout_s": START_TIMEOUT_S})
         status = service.call("debug_get_session_status")
     finally:
-        service.close()
+        close_unsettled(service)
 
     assert started["ok"] is False, started
     assert started["error_type"] == error_type, started
     assert started["backend_error"] == decisive_line, started
     assert started["summary"].startswith("Debug server exited before the GDB port became ready"), started
     assert started["elapsed_ms"] < scaled_time_bound(START_TIMEOUT_S * 1000 / 2), started
+    assert started.get("command_timed_out", False) is False, started
     if contact_disproved:
         assert started["target_contacted"] is False, started
+        assert started["side_effect_committed"] is False, started
+        assert started["side_effect_status"] == "not_started", started
+        assert started["hardware_state"] == "unchanged", started
+        assert started["retry_safe"] is True, started
+        assert started.get("cleanup_required") is not True, started
+        assert status["active"] is False, status
     else:
-        assert started.get("target_contacted") is not False, started
-    assert started["side_effect_status"] == "not_started", started
-    assert started["retry_safe"] is True, started
-    assert started.get("cleanup_required") is not True, started
-    assert status["active"] is False, status
+        assert "target_contacted" not in started, started
+        assert "side_effect_committed" not in started, started
+        assert started["side_effect_status"] == "unknown", started
+        assert started["target_state"] == "unknown", started
+        assert started["hardware_state"] == "unknown", started
+        assert started["retry_safe"] is False, started
+        assert started["cleanup_required"] is True, started
+        assert status["active"] is True, status
+        assert status["quarantined"] is True, status
     assert [event["event"] for event in server_events(events_path)] == ["started"]
 
 
@@ -842,7 +858,7 @@ def test_st_link_start_refused_over_usb_names_what_gave_the_probe_back(tmp_path:
     try:
         started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": START_TIMEOUT_S})
     finally:
-        service.close()
+        close_unsettled(service)
 
     assert started["ok"] is False, started
     assert started["error_type"] == "adapter_usb_error", started
@@ -850,6 +866,10 @@ def test_st_link_start_refused_over_usb_names_what_gave_the_probe_back(tmp_path:
     assert started["remediation"], started
     assert started["remediation"] == remediation_fields("adapter_usb_error", "stlink")["remediation"], started
     assert "reset_target" in json.dumps(started["remediation"]), started["remediation"]
+    # The probe that refused this start is not a probe a retry may have: it
+    # refused the next start in every recorded cycle, and the way out is the
+    # remediation above, not another start.
+    assert started["retry_safe"] is False, started
 
 
 def windows_recorded_lines(name: str) -> str:
