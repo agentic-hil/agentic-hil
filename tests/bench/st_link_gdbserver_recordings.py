@@ -17,12 +17,14 @@ directory holding `STLink-gdb-server` and `STM32CubeProgrammer`). With
 `AGENTIC_HIL_RECORDING_OUT` set to a directory, the recording is written there
 as `st-link-gdbserver-recording.json`, the second round, the teardown one, as
 `st-link-gdbserver-teardown-recording.json`, the third, the restart one, as
-`st-link-gdbserver-restart-recording.json`, and the fourth, the ends one, as
-`st-link-gdbserver-ends-recording.json`; each is always attached to the test
+`st-link-gdbserver-restart-recording.json`, the fourth, the ends one, as
+`st-link-gdbserver-ends-recording.json`, and the fifth, the stops one, as
+`st-link-session-stops-recording.json`; each is always attached to the test
 report as a property as well. The fourth also makes calls through the product's
 own MCP server, on a copy of the tier's configuration with the probe on `type:
 stlink` and on the tier's own configuration, because what it asks is whether
-the product's next call still reaches the probe.
+the product's next call still reaches the probe. The fifth runs the product's
+own sessions through that server and drives no server or GDB itself.
 """
 
 from __future__ import annotations
@@ -156,6 +158,10 @@ RESET_RUN_S = 3.0
 STLINK_SERVER_ENV = "AGENTIC_HIL_RECORDING_STLINK_SERVER"
 STLINK_SERVER_PORT = 7184
 STLINK_SERVER_EXIT_WAIT_S = 5.0
+# The fifth round: the product's own session stops, through its MCP server.
+STOPS_OUTPUT_NAME = "st-link-session-stops-recording.json"
+STOP_CYCLES_ENV = "AGENTIC_HIL_RECORDING_STOP_CYCLES"
+DEFAULT_STOP_CYCLES = 100
 
 
 def cubeclt_root() -> Path:
@@ -956,6 +962,148 @@ def test_record_st_link_gdbserver_ends(
     finally:
         recorder.cleanup()
         write_recording(recording, root, private_values, record_property, ENDS_OUTPUT_NAME)
+        restored = put_on_board(bench, firmware)
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+
+
+def product_answer(answer: dict) -> dict:
+    """The fields of a product answer a stop round keeps for every call."""
+    return {key: answer.get(key) for key in ("ok", "error_type", "backend_error_type", "backend_error", "summary", "safe_state_confirmed", "halt_not_confirmed", "elapsed_ms") if key in answer}
+
+
+def refused_session_start(bench: Bench, answer: dict) -> dict:
+    """A session start the product refused, with what the server printed before it exited, from the session's own log."""
+    record = {"answer": answer}
+    lines = product_log(bench, answer.get("log_path"))
+    if lines is not None:
+        with suppress(ValueError):
+            logged = json.loads(chr(10).join(lines))
+            record["server_command"] = logged.get("server_command")
+            record["server_stdout"] = str(logged.get("server_stdout_tail") or "").splitlines()
+            record["server_stderr"] = str(logged.get("server_stderr_tail") or "").splitlines()
+    return record
+
+
+def summarize_stops(entries: list[dict]) -> dict:
+    """The stop round's counts: every stop, every opener after one, and what the core ran over the stops a start followed."""
+    stops = [stop for entry in entries for stop in (entry.get("reset_halt_stop"), entry.get("attach_stop")) if stop is not None]
+    starts = [entry[key] for entry in entries for key in ("reset_halt_start", "attach_start") if key in entry]
+    clis = [entry["cli"] for entry in entries if "cli" in entry]
+    return {
+        "cycles": len(entries),
+        "stops": len(stops),
+        "stops_not_confirmed": len([stop for stop in stops if stop.get("ok") is not True or stop.get("safe_state_confirmed") is not True]),
+        "starts": len(starts),
+        "starts_refused_in_cycles": [entry["cycle"] for entry in entries for key in ("reset_halt_start", "attach_start") if key in entry and entry[key].get("ok") is not True],
+        "cli_calls": len(clis),
+        "cli_refused_in_cycles": [entry["cycle"] for entry in entries if "cli" in entry and entry["cli"].get("ok") is not True],
+        "ran_ms_over_the_stop": [entry["ran_ms_over_the_stop"] for entry in entries if "ran_ms_over_the_stop" in entry],
+        "detach_guards": sorted({json.dumps({key: value for key, value in (stop.get("detach_guard") or {}).items() if key != "server_returncode"}, sort_keys=True) for stop in stops}),
+    }
+
+
+def test_record_st_link_session_stops(
+    bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property, stlink_bench: Bench, stlink_servers, mcp_servers
+) -> None:
+    """The fifth round: the product's own session stops, cycle after cycle, and whether the probe answers the next opener.
+
+    The direct ends of the fourth round never had a start refused, where the
+    product's own reset-halt sessions had one in about twenty refused right
+    after a stop. So this round goes through the product's MCP server as an
+    agent does. Each cycle is a reset-halt session that a resume nothing stops
+    runs out on, a stop, the pause, an attach session (the next server start,
+    which reads what the core ran over the stop), a stop, the pause and a
+    `probe_target` (the next CLI call). A refused start or CLI call is recorded
+    with the server's or the CLI's own lines, and then what gives the probe
+    back is tried in turn and recorded: the same call again, an OpenOCD open,
+    an OpenOCD reset, and the demo put back on the board."""
+    root, _, private_values, recording = recording_for(bench, firmware, tmp_path)
+    cycles = int(os.environ.get(STOP_CYCLES_ENV) or DEFAULT_STOP_CYCLES)
+    recording["cycles_asked"] = cycles
+    recording["stop_round"] = {"continue_timeout_s": stlink_sessions.UNREACHABLE_STOP_TIMEOUT_S, "settle_s": stlink_sessions.SETTLE_S}
+    product = stlink_servers()
+    image = debug_sessions.workspace_image(stlink_bench, firmware)
+    entries: list[dict] = []
+
+    def cli() -> dict:
+        answer = product.tool("probe_target")
+        entry = product_answer(answer)
+        if answer.get("ok") is not True:
+            entry["log"] = product_log(bench, answer.get("log_path"))
+        return entry
+
+    def start(mode: str) -> tuple[dict, bool]:
+        answer = product.tool("debug_start_session", {"image_path": image, "mode": mode})
+        if answer.get("ok") is True:
+            return product_answer(answer), True
+        return {**product_answer(answer), "refused": refused_session_start(bench, answer)}, False
+
+    def stop() -> dict:
+        answer = product.tool("debug_stop_session")
+        entry = product_answer(answer)
+        lines = product_log(bench, answer.get("log_path"))
+        if lines is not None:
+            with suppress(ValueError):
+                entry["detach_guard"] = json.loads(chr(10).join(lines)).get("detach_guard")
+        return entry
+
+    def give_back() -> dict:
+        """What gives a refusing probe back, tried in turn until a start comes up."""
+        record: dict = {"cli": cli()}
+        again, ready = start("attach")
+        record["start_again"] = again
+        if ready:
+            record["stop_again"] = stop()
+            return record
+        openocd = mcp_servers()
+        record["openocd_probe_target"] = product_answer(openocd.tool("probe_target"))
+        record["start_after_openocd_open"], ready = start("attach")
+        if ready:
+            record["stop_after_openocd_open"] = stop()
+            openocd.shut_down()
+            return record
+        record["cli_after_openocd_open"] = cli()
+        record["openocd_reset_target"] = product_answer(openocd.tool("reset_target", {"mode": "run"}))
+        openocd.shut_down()
+        record["cli_after_openocd_reset"] = cli()
+        record["start_after_openocd_reset"], ready = start("attach")
+        if ready:
+            record["stop_after_openocd_reset"] = stop()
+            return record
+        record["put_on_board"] = product_answer(put_on_board(bench, firmware))
+        record["start_after_put_on_board"], ready = start("attach")
+        if ready:
+            record["stop_after_put_on_board"] = stop()
+        return record
+
+    try:
+        for cycle in range(1, cycles + 1):
+            entry: dict = {"cycle": cycle}
+            entries.append(entry)
+            entry["reset_halt_start"], ready = start("reset_halt")
+            if not ready:
+                entry["given_back"] = give_back()
+                continue
+            entry["continue"] = product_answer(product.tool("debug_continue", {"timeout_s": stlink_sessions.UNREACHABLE_STOP_TIMEOUT_S}))
+            before = product.tool("debug_symbol_value", {"symbol": COUNTER})
+            entry["reset_halt_stop"] = stop()
+            time.sleep(stlink_sessions.SETTLE_S)
+            entry["attach_start"], ready = start("attach")
+            if not ready:
+                entry["given_back"] = give_back()
+                continue
+            after = product.tool("debug_symbol_value", {"symbol": COUNTER})
+            if isinstance(before.get("value_unsigned"), int) and isinstance(after.get("value_unsigned"), int):
+                entry["ran_ms_over_the_stop"] = after["value_unsigned"] - before["value_unsigned"]
+            entry["attach_stop"] = stop()
+            time.sleep(stlink_sessions.SETTLE_S)
+            entry["cli"] = cli()
+            if entry["cli"].get("ok") is not True:
+                entry["given_back"] = give_back()
+    finally:
+        recording["scenarios"]["session_stops"] = entries
+        recording["summary"] = summarize_stops(entries)
+        write_recording(recording, root, private_values, record_property, STOPS_OUTPUT_NAME)
         restored = put_on_board(bench, firmware)
         assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
 
