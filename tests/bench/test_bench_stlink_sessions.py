@@ -30,6 +30,10 @@ What only the board can say about a session on this backend:
   connect itself moves it.
 * whether a server that ends with a session open gives the probe back, so the
   next server can open one.
+* whether a session reaches the probe through the stlink-server it starts and
+  ends that one after the GDB server, which is what lets the next start and the
+  next CLI call open the probe after a stop. This tier needs stlink-server on
+  PATH, as its installer puts it, and fails without one.
 
 The module ends with the demo put back on the board and running, through the
 tier's own plan runner, because a session ends with the core held halted and the
@@ -186,6 +190,13 @@ def assert_ended_with_the_core_held(stopped: dict, bench: Bench) -> None:
     guard = session_log(bench, stopped["log_path"])["detach_guard"]
     assert guard["kind"] == SERVER_KILLED_BEFORE_DETACH, said(guard)
     assert guard["server_exited"] is True, said(guard)
+    # Through the stlink-server the session started, and ended after the GDB
+    # server: killed while it held the probe's USB itself, the GDB server left
+    # the probe refusing the next opener in the recorded stop cycles.
+    reached = stopped["session"].get("probe_server")
+    assert reached is not None and reached["mode"] == "shared", f"the session did not reach the probe through stlink-server, which this tier needs on PATH: {said(reached)}"
+    assert reached["started_by_session"] is True, said(reached)
+    assert reached["ended"] is True, said(reached)
 
 
 def test_a_reset_halt_session_runs_to_a_breakpoint_halts_and_stops(stlink_servers, stlink_bench: Bench, gdb: None, firmware: Path) -> None:

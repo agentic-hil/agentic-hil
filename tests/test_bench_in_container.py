@@ -2057,6 +2057,8 @@ def test_cubeclt_is_an_optional_offline_image_layer_that_names_its_tree_to_the_t
     from tests.bench.conftest import CUBECLT_ENV
 
     assert f"ENV {CUBECLT_ENV}=/opt/st/stm32cubeclt_1.22.0" in layer
+    # stlink-server on PATH, where a session on the stlink backend looks for it.
+    assert "ENV PATH=/opt/st/stm32cubeclt_1.22.0/stlink-server:$PATH" in layer
     assert "tests/container/st_link_gdbserver_in_the_image.py" in layer
     for installer in ("setup.sh", "install_clt_as_root.sh", "st-stlink-server", "st-stlink-udev-rules"):
         assert installer not in layer, installer
@@ -2083,8 +2085,27 @@ MAKESELF_HEADER_LINES = (
 )
 
 
-def a_cubeclt_installer(tmp_path: Path, *, packed_with: str = "cat") -> tuple[Path, Path]:
-    """A zip holding a makeself installer shaped like STM32CubeCLT's, whose setup.sh would leave a mark if anything ran it."""
+def a_makeself_installer(body: bytes, *, packed_with: str = "cat") -> bytes:
+    """MAKESELF_HEADER_LINES in front of `body`, saying where it starts and how it is packed."""
+    header_lines = [line.replace("eval \"cat\"", f'eval "{packed_with}"') for line in MAKESELF_HEADER_LINES]
+    count = len(header_lines) + 1
+    header = "\n".join(line.format(size=len(body), lines=count) for line in header_lines) + "\nexit 0\n"
+    return header.encode() + body
+
+
+def a_cubeclt_installer(
+    tmp_path: Path,
+    *,
+    packed_with: str = "cat",
+    stlink_server_installer: str | None = "after the tree",
+    stlink_server_packed_with: str = "cat",
+) -> tuple[Path, Path]:
+    """A zip holding a makeself installer shaped like STM32CubeCLT's, whose setup.sh would leave a mark if anything ran it.
+
+    Its payload carries stlink-server's own makeself installer beside the tree,
+    after it as in 1.22.0 (`st-stlink-server.2.1.1-1-linux-amd64.install.sh`,
+    whose header has the same lines and whose plain tar holds `./stlink-server`
+    beside a setup.sh of its own), before it, or not at all."""
     import io
     import tarfile
     import zipfile
@@ -2097,6 +2118,14 @@ def a_cubeclt_installer(tmp_path: Path, *, packed_with: str = "cat") -> tuple[Pa
         info.mode = mode
         archive.addfile(info, io.BytesIO(data))
 
+    package = io.BytesIO()
+    with tarfile.open(fileobj=package, mode="w") as stlink_server:
+        add(stlink_server, "./stlink-server", b"stlink-server", 0o755)
+        add(stlink_server, "./cleanup.sh", b"#!/bin/sh\n", 0o755)
+        add(stlink_server, "./setup.sh", f"#!/bin/sh\ntouch {marker.as_posix()}-by-stlink-server\n".encode(), 0o755)
+    stlink_server_installer_bytes = a_makeself_installer(package.getvalue(), packed_with=stlink_server_packed_with)
+    stlink_server_installer_name = "./st-stlink-server.2.1.1-1-linux-amd64.install.sh"
+
     inner = io.BytesIO()
     with tarfile.open(fileobj=inner, mode="w:gz") as tree:
         add(tree, "./GNU-tools-for-STM32/bin/arm-none-eabi-gcc", b"gcc", 0o755)
@@ -2107,21 +2136,29 @@ def a_cubeclt_installer(tmp_path: Path, *, packed_with: str = "cat") -> tuple[Pa
     payload = io.BytesIO()
     with tarfile.open(fileobj=payload, mode="w") as outer:
         add(outer, "./setup.sh", f"#!/bin/sh\ntouch {marker.as_posix()}\n".encode(), 0o755)
+        if stlink_server_installer == "before the tree":
+            add(outer, stlink_server_installer_name, stlink_server_installer_bytes)
         add(outer, "./stm32cubeclt_1.22.0_29188_20260626_1359-Lin.tar.gz", inner.getvalue())
-    body = payload.getvalue()
-    header_lines = [line.replace("eval \"cat\"", f'eval "{packed_with}"') for line in MAKESELF_HEADER_LINES]
-    count = len(header_lines) + 1
-    header = "\n".join(line.format(size=len(body), lines=count) for line in header_lines) + "\nexit 0\n"
+        if stlink_server_installer == "after the tree":
+            add(outer, stlink_server_installer_name, stlink_server_installer_bytes)
+        add(outer, "./cleanup.sh", b"#!/bin/sh\n", 0o755)
     archive = tmp_path / "stm32cubeclt_1.22.0-Lin-x86_64.sh.zip"
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
-        zipped.writestr("stm32cubeclt_1.22.0_29188_20260626_1359-Lin-x86_64.sh", header.encode() + body)
+        zipped.writestr("stm32cubeclt_1.22.0_29188_20260626_1359-Lin-x86_64.sh", a_makeself_installer(payload.getvalue(), packed_with=packed_with))
     return archive, marker
 
 
-def test_cubeclt_extraction_takes_the_two_parts_out_of_the_installer_without_running_it(tmp_path: Path) -> None:
+@pytest.mark.parametrize("stlink_server_installer", ["after the tree", "before the tree"])
+def test_cubeclt_extraction_takes_the_two_parts_and_stlink_server_out_of_the_installer_without_running_it(tmp_path: Path, stlink_server_installer: str) -> None:
+    """The two directories out of the tree, and stlink-server out of its own installer wherever the payload carries it.
+
+    A session on the stlink backend reaches the probe through stlink-server.
+    On a host, setup.sh would put it on PATH by running that installer as root;
+    here neither runs, and the program is taken out of the installer's plain tar
+    payload the way the two directories are taken out of the outer one."""
     from tools.bench import extract_cubeclt
 
-    archive, marker = a_cubeclt_installer(tmp_path)
+    archive, marker = a_cubeclt_installer(tmp_path, stlink_server_installer=stlink_server_installer)
     destination = tmp_path / "opt" / "stm32cubeclt_1.22.0"
 
     extract_cubeclt.extract(archive, destination, hashlib.sha256(archive.read_bytes()).hexdigest())
@@ -2132,11 +2169,41 @@ def test_cubeclt_extraction_takes_the_two_parts_out_of_the_installer_without_run
         "STLink-gdb-server/bin/native/linux_x64/libSTLinkUSBDriver.so",
         "STM32CubeProgrammer/bin/STM32_Programmer_CLI",
         "STM32CubeProgrammer/lib/libPreparation.so",
+        "stlink-server/stlink-server",
     ]
+    assert (destination / "stlink-server" / "stlink-server").read_bytes() == b"stlink-server"
+    assert sorted(path.name for path in tmp_path.glob("setup-ran*")) == []
     assert not marker.exists()
     if os.name != "nt":
         assert os.access(destination / "STLink-gdb-server" / "bin" / "ST-LINK_gdbserver", os.X_OK)
         assert os.access(destination / "STM32CubeProgrammer" / "bin" / "STM32_Programmer_CLI", os.X_OK)
+        assert os.access(destination / "stlink-server" / "stlink-server", os.X_OK)
+
+
+def test_cubeclt_extraction_refuses_a_payload_without_stlink_servers_installer(tmp_path: Path) -> None:
+    from tools.bench import extract_cubeclt
+
+    archive, _ = a_cubeclt_installer(tmp_path, stlink_server_installer=None)
+    destination = tmp_path / "opt" / "stm32cubeclt_1.22.0"
+
+    with pytest.raises(extract_cubeclt.ExtractionRefused, match="stlink-server"):
+        extract_cubeclt.extract(archive, destination, hashlib.sha256(archive.read_bytes()).hexdigest())
+
+    assert not destination.exists()
+    assert not destination.with_name(destination.name + ".partial").exists()
+
+
+def test_cubeclt_extraction_refuses_an_stlink_server_installer_it_would_have_to_run_something_to_unpack(tmp_path: Path) -> None:
+    from tools.bench import extract_cubeclt
+
+    archive, _ = a_cubeclt_installer(tmp_path, stlink_server_packed_with="gzip -cd")
+    destination = tmp_path / "opt" / "stm32cubeclt_1.22.0"
+
+    with pytest.raises(extract_cubeclt.ExtractionRefused, match="plain tar"):
+        extract_cubeclt.extract(archive, destination, hashlib.sha256(archive.read_bytes()).hexdigest())
+
+    assert not destination.exists()
+    assert not destination.with_name(destination.name + ".partial").exists()
 
 
 def test_cubeclt_extraction_refuses_an_archive_with_another_digest(tmp_path: Path) -> None:

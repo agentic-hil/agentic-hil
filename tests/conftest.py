@@ -498,6 +498,26 @@ def _no_host_st_link_gdb_server(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_host_stlink_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session on the stlink backend finds no stlink-server on the machine running the suite.
+
+    A session starts the stlink-server it finds on PATH, or shares the one
+    already listening on its port, and then runs ST-LINK_gdbserver in shared
+    mode. A developer with STM32CubeCLT installed has both, and every ST-LINK
+    session in the suite would otherwise start that server or reach through the
+    one already running to whatever probe is plugged in. So nothing is found,
+    and the port is one nothing listens on. A test about shared mode patches
+    both names itself, after this one."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as unused:
+        unused.bind(("127.0.0.1", 0))
+        port = unused.getsockname()[1]
+    monkeypatch.setattr("agentic_hil.backends.stlink.find_stlink_server", lambda: None)
+    monkeypatch.setattr("agentic_hil.backends.stlink.STLINK_SERVER_PORT", port)
+
+
+@pytest.fixture(autouse=True)
 def _no_host_device_access(monkeypatch: pytest.MonkeyPatch) -> None:
     """`doctor` asks nothing of the device nodes on the machine running the suite.
 

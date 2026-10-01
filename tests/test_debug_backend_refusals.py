@@ -782,6 +782,44 @@ def test_each_bucket_drives_the_tool_result_its_quarantine_and_its_remediation(t
         assert_effect_unconfirmed(result)
 
 
+def recorded_usb_comm_refusal() -> dict:
+    """STM32_Programmer_CLI's log of the first `probe_target` the direct stop round had refused.
+
+    Recorded on the reference board after a killed ST-LINK_gdbserver had held
+    the probe's USB itself, before anything gave the probe back
+    (st_link_gdbserver_7_14_0_linux_session_stops_recordings.json)."""
+    stops = json.loads((FIXTURES / "st_link_gdbserver_7_14_0_linux_session_stops_recordings.json").read_text(encoding="utf-8"))
+    for cycle in stops["rounds"]["direct"]["scenarios"]["session_stops"]:
+        refused = (cycle.get("given_back") or {}).get("cli")
+        if refused:
+            return json.loads("\n".join(refused["log"]))
+    raise AssertionError("the direct stop round holds no refused CLI call")
+
+
+def test_stlink_usb_comm_error_is_its_own_bucket_with_the_measured_way_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`ST-LINK error (DEV_USB_COMM_ERR)`: a probe that enumerates and refuses its opener, not an unknown error.
+
+    The catalogue entry names what gave the probe back in the recorded cycles,
+    an OpenOCD `reset_target` through the same probe, and the call keeps the
+    contact it had as an unknown error: a probe whose USB link failed mid-way
+    is not proof that nothing was carried."""
+    log = recorded_usb_comm_refusal()
+    assert log["stdout"].rstrip().endswith("ST-LINK error (DEV_USB_COMM_ERR)"), log
+    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+    assert STLinkBackend(config)._classify_output(f"{log['stdout']}{log['stderr']}", "probe_target") == "adapter_usb_error"
+    play_transcript(monkeypatch, stdout=log["stdout"], stderr=log["stderr"], returncode=log["returncode"])
+
+    result = call(config, "probe_target")
+
+    assert result["ok"] is False, result
+    assert result["backend_error_type"] == "adapter_usb_error", result
+    assert result["error_type"] == "adapter_usb_error", result
+    assert result["remediation"], result
+    assert result["remediation"] == remediation_fields("adapter_usb_error", "stlink")["remediation"], result
+    assert "reset_target" in json.dumps(result["remediation"]), result["remediation"]
+    assert_effect_unconfirmed(result)
+
+
 def test_a_missing_input_file_on_stlink_is_not_answered_with_the_missing_configuration_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The one bucket whose public name collides with a catalogue entry about something else.
 

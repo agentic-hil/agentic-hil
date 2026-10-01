@@ -1,17 +1,19 @@
 """Build-time check of the optional STM32CubeCLT image layer.
 
 Selected explicitly by the `bench-tier-cubeclt` target, after the layer has
-taken STM32_Programmer_CLI and ST-LINK_gdbserver out of the STM32CubeCLT
-installer. It is not named like the container tier's tests, so no other image
+taken STM32_Programmer_CLI, ST-LINK_gdbserver and stlink-server out of the
+STM32CubeCLT installer. It is not named like the container tier's tests, so no other image
 collects it. A build has no USB device, so nothing here reaches a probe: it
-proves the extracted programs load and answer as they did on the bench, and that
-the product finds the GDB server beside the CLI without being told where it is.
+proves the extracted programs load and answer as they did on the bench, that
+the product finds the GDB server beside the CLI without being told where it is,
+and that it finds stlink-server on PATH, where a session looks for it.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -25,16 +27,25 @@ from agentic_hil.tools import AgenticHILToolService
 ROOT = Path(os.environ["AGENTIC_HIL_BENCH_CUBECLT"])
 CUBE_CLI = ROOT / "STM32CubeProgrammer" / "bin" / "STM32_Programmer_CLI"
 GDB_SERVER = ROOT / "STLink-gdb-server" / "bin" / "ST-LINK_gdbserver"
+STLINK_SERVER = ROOT / "stlink-server" / "stlink-server"
 # Recorded on the bench from the same STM32CubeCLT 1.22.0 tree, its location
 # written as this placeholder.
 RECORDING = Path(__file__).resolve().parents[1] / "fixtures" / "st_link_gdbserver_7_14_0_linux_recordings.json"
 PLACEHOLDER = "<cubeclt>"
 
 
-def test_only_the_two_parts_the_bench_drives_were_extracted() -> None:
-    assert sorted(entry.name for entry in ROOT.iterdir()) == ["STLink-gdb-server", "STM32CubeProgrammer"]
+def test_only_the_parts_the_bench_drives_were_extracted() -> None:
+    assert sorted(entry.name for entry in ROOT.iterdir()) == ["STLink-gdb-server", "STM32CubeProgrammer", "stlink-server"]
     assert os.access(CUBE_CLI, os.X_OK), CUBE_CLI
     assert os.access(GDB_SERVER, os.X_OK), GDB_SERVER
+    assert os.access(STLINK_SERVER, os.X_OK), STLINK_SERVER
+
+
+def test_the_product_finds_the_extracted_stlink_server_on_path() -> None:
+    from agentic_hil.backends import stlink
+
+    assert shutil.which("stlink-server") == str(STLINK_SERVER)
+    assert stlink.find_stlink_server() == str(STLINK_SERVER)
 
 
 def answer_to(record: dict) -> dict:

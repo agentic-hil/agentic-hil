@@ -30,6 +30,7 @@ from fixtures.fake_st_link_gdbserver import EVENTS_VARIABLE as ST_LINK_EVENTS_VA
 from fixtures.fake_st_link_gdbserver import READY_LINE as ST_LINK_READY_LINE
 from fixtures.fake_st_link_gdbserver import RECORDING as ST_LINK_RECORDING
 from fixtures.fake_st_link_gdbserver import SCENARIO_VARIABLE as ST_LINK_SCENARIO_VARIABLE
+from fixtures.fake_st_link_gdbserver import USB_REFUSAL_SCENARIO, recorded_usb_refusal
 from support import scaled_time_bound
 from test_debug_sessions import BOOT_COUNTER_SYMBOL_TABLE, START_TIMEOUT_S, debug_service, start_debug_session
 
@@ -769,6 +770,7 @@ def st_link_recorded_line(scenario: str, starts_with: str) -> str:
         ("probe_already_held_by_another_server", "SWD", "target_not_detected", "Reason: Failed to connect to device. Please check power and cabling to target.", False),
         ("programmer_path_missing", "SWD", "debugger_not_found", None, True),
         ("startup_without_swd", "JTAG", "target_not_detected", "Reason: Unknown MCU found on target.", False),
+        ("start_refused_over_usb_after_a_killed_server", "SWD", "adapter_usb_error", "Target USB comms error", False),
     ],
 )
 def test_st_link_server_that_exits_at_startup_is_classified_from_its_recorded_output(
@@ -810,6 +812,29 @@ def test_st_link_server_that_exits_at_startup_is_classified_from_its_recorded_ou
     assert [event["event"] for event in server_events(events_path)] == ["started"]
 
 
+def test_st_link_start_refused_over_usb_names_what_gave_the_probe_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal a killed server left behind, with the catalogue's measured way out rather than a guess.
+
+    Retrying the start was refused again in every recorded cycle that had one;
+    an OpenOCD `reset_target` through the same probe gave it back (direct stop
+    round)."""
+    from agentic_hil.knowledge import remediation_fields
+
+    service, _ = st_link_session_service(tmp_path, monkeypatch)
+    monkeypatch.setenv(ST_LINK_SCENARIO_VARIABLE, USB_REFUSAL_SCENARIO)
+    try:
+        started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": START_TIMEOUT_S})
+    finally:
+        service.close()
+
+    assert started["ok"] is False, started
+    assert started["error_type"] == "adapter_usb_error", started
+    assert started["backend_error_type"] == "adapter_usb_error", started
+    assert started["remediation"], started
+    assert started["remediation"] == remediation_fields("adapter_usb_error", "stlink")["remediation"], started
+    assert "reset_target" in json.dumps(started["remediation"]), started["remediation"]
+
+
 def windows_recorded_lines(name: str) -> str:
     return json.loads(ST_LINK_WINDOWS_RECORDING.read_text(encoding="utf-8"))["recordings"][name]["stdout"]
 
@@ -849,6 +874,12 @@ def windows_recorded_lines(name: str) -> str:
             "target_not_detected",
             "Reason: Unknown MCU found on target.",
             id="linux-jtag-on-swd",
+        ),
+        pytest.param(
+            "\n".join(recorded_usb_refusal()),
+            "adapter_usb_error",
+            "Target USB comms error",
+            id="linux-usb-refused-after-a-killed-server",
         ),
     ],
 )

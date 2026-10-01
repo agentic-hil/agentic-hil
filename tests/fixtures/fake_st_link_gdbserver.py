@@ -47,7 +47,25 @@ RECORDED_MISSING_PROGRAMMER = "[redacted]/no-such-programmer"
 # `--persistent` keep the server alive after its client leaves (the recorded
 # help); a session ends the server itself.
 PERSISTENT_OPTIONS = ("-e", "--persistent")
+# `-t` is the shared mode: the server reaches the probe through stlink-server
+# on its port (7184) instead of opening the probe's USB itself. The recorded
+# shared cycles printed the same startup lines as a server that opened the USB
+# itself (st_link_gdbserver_7_14_0_linux_ends_recordings.json). This fake
+# connects to the port this variable names, standing in for 7184, and holds the
+# connection for as long as it runs. A shared start with nothing listening was
+# not recorded, so this fake refuses one in its own words.
+SHARED_OPTION = "-t"
+SHARED_PORT_VARIABLE = "FAKE_ST_LINK_SHARED_PORT"
+# The probe's USB refusing the server, after a killed server had held it
+# itself: the lines of the first start the direct stop round had refused
+# (st_link_gdbserver_7_14_0_linux_session_stops_recordings.json). That round
+# kept the server's lines and not its exit status, so this fake exits 1, the
+# status of the recorded refusal by a probe another server held; the product
+# reads a refusal from its lines.
+STOPS_RECORDING = Path(__file__).with_name("st_link_gdbserver_7_14_0_linux_session_stops_recordings.json")
+USB_REFUSAL_SCENARIO = "start_refused_over_usb_after_a_killed_server"
 output_lock = threading.Lock()
+shared_connections: list[socket.socket] = []
 
 
 def recording() -> dict:
@@ -88,6 +106,16 @@ def replay(lines: list[dict], port: str, recorded_port: str, substitutions: dict
 
 def recorded_port(scenario: dict) -> str:
     return str(scenario["argv_tail"][scenario["argv_tail"].index("-p") + 1])
+
+
+def recorded_usb_refusal() -> list[str]:
+    """The server's lines for the first refused start of the direct stop round."""
+    stops = json.loads(STOPS_RECORDING.read_text(encoding="utf-8"))["rounds"]["direct"]["scenarios"]["session_stops"]
+    for cycle in stops:
+        for step in cycle.values():
+            if isinstance(step, dict) and isinstance(step.get("refused"), dict):
+                return [str(line) for line in step["refused"]["server_stdout"]]
+    raise SystemExit("fake ST-LINK_gdbserver: the direct stop round holds no refused start")
 
 
 def shut_down(reason: str, **fields: object) -> None:
@@ -142,6 +170,10 @@ def main() -> int:
         substitutions = {RECORDED_UNKNOWN_SERIAL: option_value(args, "-i") or "", RECORDED_MISSING_PROGRAMMER: programmer}
         replay(failure["output"], port_text, recorded_port(failure), substitutions)
         return int(failure["returncode"])
+    if scenario_name == USB_REFUSAL_SCENARIO:
+        for line in recorded_usb_refusal():
+            say(line.split(PORT_WORDS)[0] + PORT_WORDS + port_text if PORT_WORDS in line else line)
+        return 1
     if "-d" not in args:
         # The recorded server started without `-d` found no MCU it knew on the
         # reference board's SWD-only wiring.
@@ -149,6 +181,15 @@ def main() -> int:
         replay(failure["output"], port_text, recorded_port(failure))
         return int(failure["returncode"])
     port = int(port_text)
+
+    if SHARED_OPTION in args:
+        shared_port = int(os.environ.get(SHARED_PORT_VARIABLE) or "7184")
+        try:
+            shared_connections.append(socket.create_connection(("127.0.0.1", shared_port), timeout=5.0))
+        except OSError as error:
+            print(f"fake ST-LINK_gdbserver: shared mode found no stlink-server on port {shared_port}: {error}", file=sys.stderr)
+            return 2
+        event("shared_server_connected", port=shared_port)
 
     def terminated(signum: int, frame: object) -> None:
         # The recorded server's own shutdown on SIGTERM, which resumed the core.

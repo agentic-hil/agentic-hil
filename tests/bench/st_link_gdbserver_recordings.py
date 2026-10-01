@@ -774,7 +774,13 @@ def recording_for(bench: Bench, firmware: Path, tmp_path: Path) -> tuple[Path, S
     serial = str(debugger.get("probe_id") or "")
     assert serial, "the bench configuration names no probe"
     recorder = StLinkRecorder(bench, executable, programmer_bin, gdb_path, firmware, serial, environment)
-    private_values = (serial, str(bench.project), str(bench.config_root), str(bench.state_root), str(tmp_path), str(Path.home()), str(firmware.parent))
+    # The account's own home as well as the one the tier gives its runs: an
+    # executable this round was pointed at from outside the tier (stlink-server)
+    # prints its path under the account's home.
+    import pwd
+
+    account_home = pwd.getpwuid(os.getuid()).pw_dir
+    private_values = (serial, str(bench.project), str(bench.config_root), str(bench.state_root), str(tmp_path), str(Path.home()), account_home, str(firmware.parent))
     recording: dict = {
         "schema": RECORDING_SCHEMA,
         "recorded_on": time.strftime("%Y-%m-%d", time.gmtime()),
@@ -1003,6 +1009,8 @@ def summarize_stops(entries: list[dict]) -> dict:
         "ran_ms_over_the_stop": [entry["ran_ms_over_the_stop"] for entry in entries if "ran_ms_over_the_stop" in entry],
         "ran_ms_over_the_attach_stop": [entry["ran_ms_over_the_attach_stop"] for entry in entries if "ran_ms_over_the_attach_stop" in entry],
         "detach_guards": sorted({json.dumps({key: value for key, value in (stop.get("detach_guard") or {}).items() if key != "server_returncode"}, sort_keys=True) for stop in stops}),
+        # How each stopped session reached the probe: through stlink-server or itself.
+        "probe_servers": sorted({str((stop.get("probe_server") or {}).get("mode")) for stop in stops}),
     }
 
 
@@ -1013,8 +1021,8 @@ def test_record_st_link_session_stops(
 
     The direct ends of the fourth round never had a start refused, where the
     product's own reset-halt sessions had one in about twenty refused right
-    after a stop. So this round goes through the product's MCP server as an
-    agent does. Each cycle is a reset-halt session that a resume nothing stops
+    after a stop. So this round goes through the product's MCP server as a
+    client does. Each cycle is a reset-halt session that a resume nothing stops
     runs out on, a stop, the pause, an attach session (the next server start,
     which reads what the core ran over the stop), a stop, the pause, a second
     attach session (which reads what the core ran over an attach session's
@@ -1051,7 +1059,9 @@ def test_record_st_link_session_stops(
         lines = product_log(bench, answer.get("log_path"))
         if lines is not None:
             with suppress(ValueError):
-                entry["detach_guard"] = json.loads(chr(10).join(lines)).get("detach_guard")
+                logged = json.loads(chr(10).join(lines))
+                entry["detach_guard"] = logged.get("detach_guard")
+                entry["probe_server"] = logged.get("probe_server")
         return entry
 
     def give_back() -> dict:
