@@ -577,6 +577,10 @@ class STLinkBackend:
         session backend's own lease would carry them instead."""
         return SESSIONLESS_DEBUG_READS
 
+    def opens_debug_sessions(self) -> bool:
+        """Not yet: the session tools refuse here and name their way out."""
+        return False
+
     def target_support(self) -> JsonObject:
         """STM32CubeProgrammer identifies the part itself.
 

@@ -25,6 +25,7 @@ from agentic_hil import comports
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends.common import spawn_command
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
+from agentic_hil.backends.openocd import OPENOCD_GDB_SERVER_STEPS
 from agentic_hil.bridge import BridgeCleanupError, ProcessBridgeSession
 from agentic_hil.can import CAN_DRAIN_TIMEOUT_S, CanBusService, CanBusSession, parse_can_id, payload_frame
 from agentic_hil.cli import debugger_probes, doctor, init_config
@@ -4150,6 +4151,7 @@ def test_debug_server_cleanup_runs_after_leader_exit(monkeypatch: pytest.MonkeyP
     child = SimpleNamespace(poll=lambda: 0)
     sessions = object.__new__(GdbDebugSessions)
     sessions._audit_broken = None
+    sessions._server_steps = OPENOCD_GDB_SERVER_STEPS
     sessions._write_session_log = lambda session: None
     session = SimpleNamespace(gdb=None, server=child)
     calls: list[object] = []

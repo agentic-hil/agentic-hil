@@ -206,9 +206,12 @@ def close_unsettled(service) -> None:
     """Close a service whose session was left unsettled on purpose.
 
     Closing one is refused with a RuntimeError naming what is unconfirmed; that
-    refusal is the product's and is asserted elsewhere."""
+    refusal is the product's and is asserted elsewhere. The coordinator the
+    refusal leaves holding the bench is closed after it, as the other unsettled
+    sessions in this suite close theirs."""
     with contextlib.suppress(RuntimeError):
         service.close()
+    service.coordinator.close()
 
 
 @pytest.mark.parametrize("mode", ["attach", "reset_halt", "load"])
@@ -468,6 +471,7 @@ def test_pyocd_symbol_reads_run_inside_an_open_session_and_standalone_without_on
         assert started["ok"] is True, started
         during = service.backend.sessionless_debug_tools()
         value = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+        info = service.call("debug_symbol_info", {"symbol": "boot_counter"})
         assert service.call("debug_stop_session")["ok"] is True
         after = service.backend.sessionless_debug_tools()
     finally:
@@ -479,6 +483,10 @@ def test_pyocd_symbol_reads_run_inside_an_open_session_and_standalone_without_on
     assert value["ok"] is True, value
     assert value["session"]["session_id"] == started["session"]["session_id"], value
     assert "symbol_source" not in value, value
+    # Where the symbol is comes from the same image as its bytes.
+    assert info["ok"] is True, info
+    assert info["session"]["session_id"] == started["session"]["session_id"], info
+    assert info["address"] == value["address"], (info, value)
 
 
 @pytest.mark.parametrize(("debugger_type", "opens"), [("openocd", True), ("pyocd", True), ("stlink", False)])
@@ -496,7 +504,7 @@ def test_pyocd_ready_line_is_the_recorded_line_for_the_reserved_port_only() -> N
     `GDB server listening on port 51409 (core 0) [gdbserver]` is the recorded
     line. A port that is a prefix of the recorded one must not match, or a start
     could take another server's line for its own."""
-    from agentic_hil.backends.gdbdebug import PYOCD_GDB_SERVER_STEPS
+    from agentic_hil.backends.pyocd import PYOCD_GDB_SERVER_STEPS
 
     startup = pyocd_recording()["scenarios"][GDBSERVER_STARTUP_SCENARIO]
     port = int(startup["gdb_port"])

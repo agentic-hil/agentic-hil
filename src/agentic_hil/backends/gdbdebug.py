@@ -9,6 +9,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from agentic_hil.artifacts import sha256_file
@@ -35,6 +36,7 @@ from agentic_hil.gdbmi import (
     mi_field,
     mi_string,
     parse_gdb_integer,
+    unescape_mi_string,
     write_intel_hex_file,
 )
 from agentic_hil.knowledge import (
@@ -118,6 +120,81 @@ _UNCONFIRMED_TEARDOWN_CLOSE_REASONS = {
     (False, True): "the backend's auto-resume-on-detach override was installed",
     (True, True): "the target was halted or the backend's auto-resume-on-detach override was installed",
 }
+MONITOR_RESET_HALT_COMMAND = '-interpreter-exec console "monitor reset halt"'
+# The phases a start is in before GDB has connected: the debug server may be
+# running, but nothing has reached the target through GDB yet.
+_BEFORE_GDB_CONNECT_PHASES = frozenset({"not_started", "server_spawned", "server_ready"})
+# The console records GDB/MI carries a monitor command's own output in: `@` for
+# the target's (what a remote server sends back), `~` for GDB's console.
+_CONSOLE_RECORD_PREFIXES = ('@"', '~"')
+
+
+@dataclass(frozen=True)
+class GdbServerSteps:
+    """The steps of a debug session that each backend's GDB server answers in its own words (#624).
+
+    Everything else a session does is GDB's and the same on every server. These
+    are not, and each was written against OpenOCD until a second server needed
+    sessions:
+
+    `ready_line` is the line the server prints once its GDB port listens, as a
+    format with `{port}`. A start that has one waits for it for the port the
+    start reserved and leaves the port to GDB; without one, a start finds the
+    port ready by connecting to it (#586). `ready_line_ends_the_line` says
+    whether the server ends the line there (OpenOCD) or carries on after the
+    port (pyOCD names the core and its logger), in which case the port has to
+    end where the number ends, so a start never takes a longer port's line for
+    its own.
+
+    `reset_halt_command` is the GDB/MI command that resets the core into halt,
+    and `reset_halt_confirmation` the words the server prints when it did. A
+    server that answers `^done` whether or not the core halted (pyOCD) names
+    them, and its reset is believed only on them; without them the `^done` is
+    the server's statement that the reset halted.
+
+    `detach_guard_command` is what keeps the core halted once GDB lets go. A
+    server that resumes the core when its last GDB client leaves and has a
+    command that stops it (OpenOCD's `gdb-detach` and `gdb-end` events) names
+    that command, and it is sent before GDB detaches. A server without one
+    (None) is ended before GDB detaches instead, so it never sees its client
+    leave, and the guard is confirmed by the server having exited.
+
+    `server_resets_at_start` says whether, in a reset mode, starting the server
+    already reset the core (OpenOCD's `init; reset halt`). A server that does
+    not leaves the reset to the GDB command, so a start that fails before GDB
+    connects reached the target no more than an attach does. It also means the
+    stop GDB reports for its connect comes before the reset, and is not the
+    session's.
+    """
+
+    ready_line: str | None
+    ready_line_ends_the_line: bool = True
+    reset_halt_command: str = MONITOR_RESET_HALT_COMMAND
+    reset_halt_confirmation: str | None = None
+    detach_guard_command: str | None = None
+    server_resets_at_start: bool = True
+
+    def ready_line_for(self, port: int) -> str | None:
+        return None if self.ready_line is None else self.ready_line.format(port=port)
+
+    def is_ready_line(self, line: str, port: int) -> bool:
+        expected = self.ready_line_for(port)
+        if expected is None:
+            return False
+        text = line.rstrip("\r\n")
+        if self.ready_line_ends_the_line:
+            return text.endswith(expected)
+        return re.search(re.escape(expected) + r"(?!\d)", text) is not None
+
+
+def console_output(records: list[str]) -> list[str]:
+    """The lines a GDB/MI command's console records printed, unescaped, in order."""
+    lines: list[str] = []
+    for record in records:
+        if record.startswith(_CONSOLE_RECORD_PREFIXES) and record.endswith('"'):
+            text = unescape_mi_string(record[2:-1])
+            lines.extend(line.strip() for line in text.splitlines() if line.strip())
+    return lines
 
 
 class GdbDebugSession:
@@ -154,6 +231,10 @@ class GdbDebugSession:
         # (where the target state proof already succeeded) -- see
         # `stop_session` and `close`.
         self.hardware_state_unconfirmed = False
+        # What a server without a detach command did as its guard: ended before
+        # GDB detached, and whether it was gone. Logged with the session, so the
+        # evidence for a guard confirmed this way is the server's own exit.
+        self.detach_guard: JsonObject | None = None
 
 
 class _AuditRefusedResponse:
@@ -173,12 +254,11 @@ class _AuditRefusedResponse:
 
 
 class GdbDebugSessions:
-    """Typed GDB/MI debug sessions against a gdbserver-providing debugger process (e.g. OpenOCD).
+    """Typed GDB/MI debug sessions against a debugger's own GDB server (OpenOCD, pyOCD).
 
-    `server_ready_line` is the line the debug server prints once its GDB port
-    listens, as a format with `{port}`. A backend that names one has each start
-    wait for that line for the port the start reserved, and leave the port to
-    GDB; without one, a start finds the port ready by connecting to it (#586).
+    `server_steps` is what that server answers in its own words: the line it
+    prints once its GDB port listens, its reset into halt and how it confirms
+    one, and how the core is kept halted once GDB lets go. See `GdbServerSteps`.
     """
 
     def __init__(
@@ -188,7 +268,7 @@ class GdbDebugSessions:
         resolve_server: Callable[[], JsonObject],
         build_server_args: Callable[[str, int, bool], list[str]],
         classify_server_output: Callable[[str], str],
-        server_ready_line: str | None = None,
+        server_steps: GdbServerSteps,
         read_start_failure: Callable[[str, list[str]], JsonObject | None] | None = None,
         read_start_context: Callable[[JsonObject], JsonObject | None] | None = None,
     ):
@@ -197,7 +277,7 @@ class GdbDebugSessions:
         self._resolve_server = resolve_server
         self._build_server_args = build_server_args
         self._classify_server_output = classify_server_output
-        self._server_ready_line = server_ready_line
+        self._server_steps = server_steps
         # What a backend can read out of a dead server's output that classifying
         # its words alone cannot. The one case there is: the server's command line
         # carries the same probe-selection `-c` values the backend's tool path puts
@@ -307,8 +387,7 @@ class GdbDebugSessions:
 
         session = GdbDebugSession(f"debug-{timestamp_for_filename()}", artifact, mode, gdb_port, server, server_args, log_path)
         session.load_phase = "server_spawned"
-        if self._server_ready_line is not None:
-            session.server_ready_line = self._server_ready_line.format(port=gdb_port)
+        session.server_ready_line = self._server_steps.ready_line_for(gdb_port)
         self.session = session
         try:
             self._start_output_readers(session)
@@ -934,10 +1013,12 @@ class GdbDebugSessions:
             return {**self._gdb_failure("debug_start_session", session, target.error_message, target.timed_out, response=target), **self._startup_effect_fields(session, target.timed_out)}
         session.load_phase = "target_connected"
         if session.mode != "attach":
+            if not self._server_steps.server_resets_at_start:
+                self._drain_connect_stop(session)
             session.load_phase = "pre_load_reset_started"
-            reset = self._gdb_command(session, '-interpreter-exec console "monitor reset halt"', min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
-            if not reset.ok:
-                return {**self._gdb_failure("debug_start_session", session, reset.error_message, reset.timed_out, response=reset), **self._startup_effect_fields(session, reset.timed_out)}
+            reset = self._reset_into_halt(session, timeout)
+            if reset is not None:
+                return reset
             session.load_phase = "pre_load_reset_confirmed"
         if session.mode == "load":
             session.load_phase = "download_started"
@@ -948,11 +1029,50 @@ class GdbDebugSessions:
             session.load_phase = "download_confirmed"
             session.firmware_load_status = "committed"
             session.load_phase = "post_load_reset_started"
-            reset = self._gdb_command(session, '-interpreter-exec console "monitor reset halt"', min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
-            if not reset.ok:
-                return {**self._gdb_failure("debug_start_session", session, reset.error_message, reset.timed_out, response=reset), **self._startup_effect_fields(session, reset.timed_out)}
+            reset = self._reset_into_halt(session, timeout)
+            if reset is not None:
+                return reset
             session.load_phase = "post_load_reset_confirmed"
         return {"ok": True, "load_phase": session.load_phase, "firmware_load_status": session.firmware_load_status}
+
+    def _reset_into_halt(self, session: GdbDebugSession, timeout: float) -> JsonObject | None:
+        """Reset the core into halt the way this server does it, and None once that is confirmed.
+
+        The failure otherwise. A server that names its confirmation is believed
+        only on it: its `^done` says the command ran, not that the core halted,
+        so a reset without the words is a target in an unknown state, and the
+        lines the server did print are the result's evidence."""
+        steps = self._server_steps
+        reset = self._gdb_command(session, steps.reset_halt_command, min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
+        if not reset.ok:
+            return {**self._gdb_failure("debug_start_session", session, reset.error_message, reset.timed_out, response=reset), **self._startup_effect_fields(session, reset.timed_out)}
+        if steps.reset_halt_confirmation is None:
+            return None
+        printed = console_output(list(getattr(reset, "records", [])))
+        if any(steps.reset_halt_confirmation in line for line in printed):
+            return None
+        quoted = ", ".join(f'"{line}"' for line in printed) if printed else "nothing"
+        return {
+            **self._gdb_failure("debug_start_session", session, None, False, response=reset),
+            "error_type": "debugger_error",
+            "backend_error_type": "reset_halt_not_confirmed",
+            "summary": f'The reset into halt was not confirmed: the debug server printed {quoted}, and not "{steps.reset_halt_confirmation}".',
+            "backend_error": "; ".join(printed),
+            **self._startup_effect_fields(session, False),
+        }
+
+    def _drain_connect_stop(self, session: GdbDebugSession) -> None:
+        """Keep the stop GDB reported for its connect out of a session that resets next.
+
+        A server that halts the core when GDB connects has GDB report that stop,
+        where the core happened to be. The reset that follows moves the core
+        without a stop record of its own, so the connect's stop, taken later as
+        the session's, would name a place the core no longer is. It is kept in
+        the session's stop records, where the log shows it, and nowhere else."""
+        assert session.gdb is not None
+        stop = session.gdb.poll_stop()
+        if stop is not None and stop.line.startswith(STOP_RECORD_PREFIX):
+            session.gdb_stop_records.append(stop.line)
 
     def _dropped_connect(self, mode: str, result: JsonObject) -> JsonObject | None:
         """What a start attempt left to name, when it lost its connect to the debug server and may connect again (#575).
@@ -978,7 +1098,10 @@ class GdbDebugSessions:
 
     def _startup_effect_fields(self, session: GdbDebugSession, timed_out: bool = False) -> JsonObject:
         fields: JsonObject = {"load_phase": session.load_phase, "firmware_load_status": session.firmware_load_status}
-        if session.mode == "attach" and session.load_phase in {"not_started", "server_spawned", "server_ready"}:
+        # Before GDB connects, an attach has done nothing to the target, and
+        # neither has a reset mode on a server whose reset is GDB's command.
+        resets_before_connect = session.mode != "attach" and self._server_steps.server_resets_at_start
+        if not resets_before_connect and session.load_phase in _BEFORE_GDB_CONNECT_PHASES:
             return {**fields, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
         if session.load_phase in {"download_started", "download_confirmed", "post_load_reset_started", "post_load_reset_confirmed"}:
             status = "unknown" if timed_out else "partial"
@@ -1291,8 +1414,13 @@ class GdbDebugSessions:
         return confirmed
 
     def _pin_no_resume_on_detach(self, session: GdbDebugSession, timeout_s: float) -> bool:
-        """Tell OpenOCD not to resume the target on its own once this GDB
-        connection goes away, and report whether that was confirmed accepted.
+        """Keep the debug server from resuming the target once this GDB
+        connection goes away, and report whether that was confirmed.
+
+        A server with a command for it (`GdbServerSteps.detach_guard_command`)
+        is sent the command, and the rest of this describes that guard on
+        OpenOCD. A server without one is ended before GDB detaches instead
+        (`_end_server_before_detach`).
 
         OpenOCD's ``gdb-detach`` and ``gdb-end`` target events resume the core
         by default the moment the last GDB connection ends, which is exactly
@@ -1318,48 +1446,84 @@ class GdbDebugSessions:
         overall result; this method only reports whether the override itself
         was confirmed.
         """
-        if session.load_phase in {"not_started", "server_spawned", "server_ready"}:
+        if session.load_phase in _BEFORE_GDB_CONNECT_PHASES:
             return True
         if session.gdb is None or not session.gdb.is_running():
             return False
+        guard = self._server_steps.detach_guard_command
+        if guard is None:
+            return self._end_server_before_detach(session, timeout_s)
         prior_stop_reason = session.stop_reason
         prior_status = session.status
-        response = self._gdb_command(
-            session,
-            '-interpreter-exec console "monitor $_TARGETNAME configure -event gdb-detach {}; $_TARGETNAME configure -event gdb-end {}"',
-            timeout_s,
-            containment=True,
-        )
+        response = self._gdb_command(session, guard, timeout_s, containment=True)
         if not response.ok:
             session.stop_reason = prior_stop_reason
             session.status = prior_status
             return False
         return True
 
+    def _end_server_before_detach(self, session: GdbDebugSession, timeout_s: float) -> bool:
+        """The guard on a server with no command that keeps the core halted.
+
+        pyOCD resumes the core when its GDB client leaves (the recorded GDB that
+        exited left it running), and has no command that stops it doing so. A
+        server that is gone cannot resume anything, and the recordings show the
+        core kept halted where it was when pyOCD's server was ended under it. So
+        the server is ended while GDB is still connected, and the guard is
+        confirmed by the server having exited: asking it to is not the proof,
+        its exit is. What happened is logged with the session either way."""
+        terminate_error: str | None = None
+        try:
+            terminate_process_tree(session.server, timeout_s)
+        except Exception as error:
+            terminate_error = f"{type(error).__name__}: {error}"
+        returncode = session.server.poll()
+        session.detach_guard = {"kind": "server_terminated_before_gdb_detach", "server_exited": returncode is not None, "server_returncode": returncode}
+        if terminate_error is not None:
+            session.detach_guard["terminate_error"] = terminate_error
+        self._write_session_log(session)
+        return returncode is not None
+
     def _cleanup_session(self, session: GdbDebugSession, timeout_s: float) -> str | None:
         errors: list[tuple[str, BaseException]] = []
-        interrupt: BaseException | None = None
-        if session.gdb is not None:
+        interrupts: list[BaseException] = []
+
+        def close_gdb() -> None:
+            if session.gdb is None:
+                return
             try:
                 session.gdb.close(timeout_s)
             except BaseException as error:
                 errors.append(("gdb", error))
                 if isinstance(error, (KeyboardInterrupt, SystemExit)):
-                    interrupt = error
-        try:
-            terminate_process_tree(session.server, timeout_s)
-            if session.server.poll() is None:
-                raise RuntimeError("Debug server remained active after kill.")
-            readers = getattr(session, "server_readers", [])
-            for reader in readers:
-                if reader.ident is not None:
-                    reader.join(timeout=timeout_s)
-            if any(reader.is_alive() for reader in readers):
-                raise RuntimeError("Debug server output readers remained active after process cleanup.")
-        except BaseException as error:
-            errors.append(("debug_server", error))
-            if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
-                interrupt = error
+                    interrupts.append(error)
+
+        def end_server() -> None:
+            try:
+                terminate_process_tree(session.server, timeout_s)
+                if session.server.poll() is None:
+                    raise RuntimeError("Debug server remained active after kill.")
+                readers = getattr(session, "server_readers", [])
+                for reader in readers:
+                    if reader.ident is not None:
+                        reader.join(timeout=timeout_s)
+                if any(reader.is_alive() for reader in readers):
+                    raise RuntimeError("Debug server output readers remained active after process cleanup.")
+            except BaseException as error:
+                errors.append(("debug_server", error))
+                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    interrupts.append(error)
+
+        # A server with no command that keeps the core halted is ended before
+        # GDB, on every way a session ends, so it never sees its client leave
+        # and resume the core (see `_end_server_before_detach`).
+        if self._server_steps.detach_guard_command is None:
+            end_server()
+            close_gdb()
+        else:
+            close_gdb()
+            end_server()
+        interrupt = interrupts[0] if interrupts else None
         self._write_session_log(session)
         if self._audit_broken is not None:
             errors.append(("audit", self._audit_broken))
@@ -1426,7 +1590,7 @@ class GdbDebugSessions:
             for line in stream:
                 # Recognised as it arrives rather than searched for in the tail
                 # later, where the output after it could already have pushed it out.
-                if session.server_ready_line is not None and line.rstrip("\r\n").endswith(session.server_ready_line):
+                if session.server_ready_line is not None and self._server_steps.is_ready_line(line, session.gdb_port):
                     session.server_ready.set()
                 setattr(session, attribute, (getattr(session, attribute) + line)[-OUTPUT_TAIL_CHARS:])
 
@@ -1468,6 +1632,8 @@ class GdbDebugSessions:
             "load_phase": session.load_phase,
             "firmware_load_status": session.firmware_load_status,
         }
+        if session.detach_guard is not None:
+            payload["detach_guard"] = session.detach_guard
         error = write_audit_log(self.config, session.log_path, json.dumps(payload, indent=2) + "\n")
         if error is not None:
             self._audit_broken = error

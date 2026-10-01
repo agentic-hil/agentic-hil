@@ -16,7 +16,6 @@ from agentic_hil.backends.common import (
     command_for_log,
     contains_any,
     contains_failure_text,
-    debug_session_unsupported,
     invocation,
     not_executable_refusal,
     programmer_output_fields,
@@ -26,6 +25,8 @@ from agentic_hil.backends.common import (
     which,
 )
 from agentic_hil.backends.gdbdebug import (
+    GdbDebugSessions,
+    GdbServerSteps,
     decode_symbol_value,
     offline_symbol_info,
     resolve_symbol_offline,
@@ -198,6 +199,34 @@ PYOCD_READ_CONNECT_ARGS = ["--connect", PYOCD_READ_CONNECT_MODE]
 # session lease that does not exist here. `debug_symbol_info` is deliberately not
 # among them: it opens no probe at all.
 SESSIONLESS_DEBUG_READS = frozenset({"debug_dump_symbol_ihex", "debug_symbol_value"})
+# Typed debug sessions run through `pyocd gdbserver` (#624), and these are its
+# answers to the session steps each server gives in its own words. All of them
+# are read off pyOCD 0.45.1 driving the reference board through GDB
+# (tests/fixtures/pyocd_0_45_1_gdbserver_recordings.json):
+#
+# * Ready: `0000848 I GDB server listening on port 51409 (core 0) [gdbserver]`.
+#   The line goes on after the port, so the port is matched where its digits
+#   end.
+# * Reset: `monitor reset halt` answers `^done` whether or not the core halted,
+#   and prints `Successfully halted device on reset` when it did. The server
+#   itself resets nothing at start: the reset is the GDB command, so a start
+#   that fails before GDB connects never reached the target.
+# * Detach: GDB leaving resumes the core, and pyOCD has no command that stops
+#   that; it answers OpenOCD's event override, as any monitor command it does
+#   not know, with an `Error:` record and `^done`. Ended while GDB is still
+#   connected, the server left the core halted where it was, three times out of
+#   three. So the server is ended before GDB detaches.
+PYOCD_GDB_SERVER_STEPS = GdbServerSteps(
+    ready_line="GDB server listening on port {port}",
+    ready_line_ends_the_line=False,
+    reset_halt_confirmation="Successfully halted device on reset",
+    detach_guard_command=None,
+    server_resets_at_start=False,
+)
+# Without it the recorded server also listened on 4444, a fixed port for its
+# semihosting console that a second session or another tool may hold; nothing a
+# session does reads the console.
+PYOCD_GDBSERVER_CONSOLE_OFF = "semihost_console_type=off"
 
 
 class PyOCDBackend:
@@ -207,13 +236,30 @@ class PyOCDBackend:
         self.config = config
         self._resolved_probe_uid: str | None = None
         self._target_types: JsonObject | None = None
+        self._debug = GdbDebugSessions(
+            config,
+            backend_name=self.backend_name,
+            resolve_server=self._resolve_debug_server,
+            build_server_args=self._debug_server_args,
+            classify_server_output=lambda output: self._classify_output(output, "debug_start_session"),
+            server_steps=PYOCD_GDB_SERVER_STEPS,
+            read_start_failure=self._debug_start_failure,
+        )
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
+        # An open session may not outlive a change to the probe it runs on or a
+        # grant that refuses sessions, read exactly as the OpenOCD backend reads
+        # them.
+        debugger_changed = config.debugger != self.config.debugger or config.target != self.config.target
+        debug_permission_revoked = not config.probe_allowed() or config.debugger is None or config.debugger.permissions.allow_raw_debugger_commands
+        if debugger_changed or debug_permission_revoked:
+            self._debug.close()
         if self._probe_selector_map(config) != self._probe_selector_map(self.config):
             self._resolved_probe_uid = None
         if config.debugger is None or self.config.debugger is None or config.debugger.executable != self.config.debugger.executable:
             self._target_types = None
         self.config = config
+        self._debug.config = config
 
     @staticmethod
     def _probe_selector_map(config: AgenticHILConfig) -> dict[str, tuple[str, str | None]]:
@@ -437,35 +483,54 @@ class PyOCDBackend:
             result["summary"] = f"Target reset with mode '{mode}'."
         return self._write_action_report(result)
 
-    def debug_start_session(self, artifact: JsonObject | None = None, mode: str = "attach", timeout_s: float | None = None) -> JsonObject:
-        return self._unsupported_debug_tool("debug_start_session")
+    def debug_start_session(self, artifact: JsonObject, mode: str = "attach", timeout_s: float | None = None) -> JsonObject:
+        return self._debug.start_session(artifact, mode, timeout_s)
 
     def debug_stop_session(self, timeout_s: float | None = None) -> JsonObject:
-        return self._unsupported_debug_tool("debug_stop_session")
+        return self._debug.stop_session(timeout_s)
 
     def debug_get_session_status(self) -> JsonObject:
-        return self._unsupported_debug_tool("debug_get_session_status")
+        return self._debug.get_session_status()
 
-    def debug_set_breakpoint(self, location: JsonObject | None = None) -> JsonObject:
-        return self._unsupported_debug_tool("debug_set_breakpoint")
+    def debug_set_breakpoint(self, location: JsonObject) -> JsonObject:
+        return self._debug.set_breakpoint(location.get("location", ""))
 
     def debug_list_breakpoints(self) -> JsonObject:
-        return self._unsupported_debug_tool("debug_list_breakpoints")
+        return self._debug.list_breakpoints()
 
     def debug_clear_breakpoints(self) -> JsonObject:
-        return self._unsupported_debug_tool("debug_clear_breakpoints")
+        return self._debug.clear_breakpoints()
 
     def debug_continue(self, timeout_s: float | None = None) -> JsonObject:
-        return self._unsupported_debug_tool("debug_continue")
+        return self._debug.continue_execution(timeout_s)
 
     def debug_halt(self, timeout_s: float | None = None) -> JsonObject:
-        return self._unsupported_debug_tool("debug_halt")
+        return self._debug.halt(timeout_s)
 
     def debug_get_stop_reason(self) -> JsonObject:
-        return self._unsupported_debug_tool("debug_get_stop_reason")
+        return self._debug.get_stop_reason()
+
+    def opens_debug_sessions(self) -> bool:
+        """Yes: through `pyocd gdbserver` (#624)."""
+        return True
+
+    def _session_open(self) -> bool:
+        """Whether a debug session is on file, settled or not.
+
+        While one is, the session's server holds the probe, and a second pyOCD
+        opening it is refused (`[Errno 16] Resource busy`, recorded), so every
+        read goes to the session, which also answers for one left unsettled."""
+        return self._debug.session is not None
 
     def debug_symbol_info(self, symbol: str = "", symbol_elf: JsonObject | None = None) -> JsonObject:
-        """The shared offline resolution, and nothing of this backend's own.
+        """The session's answer while one is open, the shared offline resolution otherwise.
+
+        Inside a session the symbol is resolved by the session's GDB against the
+        image the session started with, exactly as on OpenOCD, so where a symbol
+        is and the bytes the value read returns for it come from one image.
+
+        With no session, the shared offline resolution, and nothing of this
+        backend's own.
 
         Where a symbol lives and how large it is are properties of the image, and
         the image is on disk, so this answer never needed pyOCD at all. It
@@ -479,6 +544,8 @@ class PyOCDBackend:
         written. `debug.gdb_executable` is what it needs, and `gdb_not_found`
         names that field when the bench has not set one.
         """
+        if self._session_open():
+            return self._debug.symbol_info(symbol)
         return offline_symbol_info(self.config, self.backend_name, symbol, symbol_elf)
 
     def debug_symbol_value(self, symbol: str = "", symbol_elf: JsonObject | None = None) -> JsonObject:
@@ -502,7 +569,12 @@ class PyOCDBackend:
         The bytes are held to exactly what was asked for: `savemem` writes the
         window it read and nothing else, so a file that is not `size_bytes` long
         is a failed read rather than a short answer.
+
+        While a session is open the read is the session's, for the reason
+        `_session_open` gives.
         """
+        if self._session_open():
+            return self._debug.symbol_value(symbol)
         tool = "debug_symbol_value"
         prepared = self._prepare_symbol_read(tool, symbol, symbol_elf)
         if not prepared["ok"]:
@@ -525,7 +597,12 @@ class PyOCDBackend:
         path uses on the bytes its session read. The caller's path is therefore
         never handed to pyOCD, and the file that appears at it is written through
         the workspace-guarded writer or not at all.
+
+        While a session is open the read is the session's, for the reason
+        `_session_open` gives.
         """
+        if self._session_open() and output is not None:
+            return self._debug.dump_symbol_ihex(symbol, output)
         tool = "debug_dump_symbol_ihex"
         prepared = self._prepare_symbol_read(tool, symbol, symbol_elf)
         if not prepared["ok"]:
@@ -566,7 +643,12 @@ class PyOCDBackend:
         a session that already holds the lease. The coordination layer takes a
         one-shot debugger lease for exactly these: machine-wide ownership, run
         declaration and the incident path for an unconfirmed read, which a
-        session backend's own lease would carry instead."""
+        session backend's own lease would carry instead.
+
+        None while a session is open: the reads then run through it, on the
+        lease it holds, as they do on OpenOCD."""
+        if self._session_open():
+            return frozenset()
         return SESSIONLESS_DEBUG_READS
 
     def target_support(self) -> JsonObject:
@@ -630,7 +712,69 @@ class PyOCDBackend:
         return classify_failure_report(self.config, self._likely_causes)
 
     def close(self) -> None:
-        return None
+        self._debug.close()
+
+    def _resolve_debug_server(self) -> JsonObject:
+        """The pyOCD a debug session starts, or the refusal that starts none.
+
+        The probe is resolved to its one full UID by enumeration first, as every
+        other call that connects resolves it, so the server is never started on
+        a probe the configured `probe_id` does not name alone."""
+        resolved = self._resolve_executable()
+        if not resolved["ok"]:
+            return resolved
+        selected = self._resolve_probe_selector("debug_start_session")
+        if not overall_success(selected):
+            return selected
+        return resolved
+
+    def _debug_server_args(self, executable_path: str, gdb_port: int, reset: bool) -> list[str]:
+        """`pyocd gdbserver` on the reserved port, the resolved probe and the configured target.
+
+        The same for every mode: the reset into halt is a GDB command here
+        (`PYOCD_GDB_SERVER_STEPS`), not a server option. `_connection_args`
+        carries `--uid`, `--target` and `-W` exactly as on every other call."""
+        return [*invocation(executable_path), "gdbserver", "--port", str(gdb_port), "-O", PYOCD_GDBSERVER_CONSOLE_OFF, *self._connection_args()]
+
+    def _debug_start_failure(self, output: str, server_args: list[str]) -> JsonObject | None:
+        """What a server that exited at start said, in this backend's own words.
+
+        Classified as every other pyOCD call is, with its causes, its remediation
+        and, for a target type no installed pack provides, the pack command. The
+        line that decided it travels as `backend_error`: pyOCD prints a banner and
+        a target line ahead of the error, and the recorded refusals each name
+        their cause in one line of their own. Every recorded one is a refusal
+        before the probe carried anything, which is what NOT_CONTACTED says."""
+        tool = "debug_start_session"
+        classified = self._classify_output(output, tool)
+        backend_error_type = self._confirm_target_support(classified)
+        error_type = self._public_error_type(backend_error_type)
+        result: JsonObject = {
+            "error_type": error_type,
+            "backend_error_type": backend_error_type,
+            "summary": f"Debug server exited before the GDB port became ready: {self._summary_for_error(error_type)}",
+            "likely_causes": self._likely_causes(error_type),
+            **remediation_fields(error_type, self.backend_name),
+        }
+        decisive = self._decisive_line(output, classified, tool)
+        if decisive is not None:
+            result["backend_error"] = decisive
+        if backend_error_type == "target_type_invalid" and self.config.debugger.target_type:
+            result["install_commands"] = pack_install_commands(self.config.debugger.target_type)
+        if self._proves_no_contact(tool, backend_error_type):
+            result.update(NOT_CONTACTED)
+        return result
+
+    def _decisive_line(self, output: str, classified: str, tool: str) -> str | None:
+        """The first line that alone classifies as the whole output did, else the last line."""
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if not lines:
+            return None
+        if classified != "unknown_debugger_error":
+            for line in lines:
+                if self._classify_output(line, tool) == classified:
+                    return line
+        return lines[-1]
 
     def _enumerate_target_types(self) -> JsonObject:
         """Every target type this pyOCD resolves, keyed by pyOCD's normalised name.
@@ -1138,9 +1282,6 @@ class PyOCDBackend:
             **exclusive_permission_fields(blocking, self.config.debugger_id),
         }
 
-    def _unsupported_debug_tool(self, tool: str) -> JsonObject:
-        return debug_session_unsupported(self.backend_name, tool)
-
     def _classify_output(self, output: str, tool: str | None = None) -> str:
         lower = output.lower()
         # The last two are what pyOCD 0.45.1 prints when spawned with `-W` and
@@ -1149,7 +1290,10 @@ class PyOCDBackend:
         # (pyocd/core/helpers.py). Ahead of every other rule, because the
         # commander exits 0 over the first and `flash` follows it with a `No
         # target device available` line the flash bucket would otherwise claim.
-        if contains_any(lower, ["no available debug probes", "no debug probes are connected", "unable to open probe", "probe not found", "no probe with uid", "no connected debug probes", "no connected debug probe matches unique id"]):
+        # And `Error: [Errno 16] Resource busy`, all pyOCD 0.45.1 said when
+        # another pyOCD already held the probe (recorded beside a running
+        # `pyocd gdbserver`): the probe could not be opened, before the target.
+        if contains_any(lower, ["no available debug probes", "no debug probes are connected", "unable to open probe", "probe not found", "no probe with uid", "no connected debug probes", "no connected debug probe matches unique id", "[errno 16] resource busy"]):
             return "probe_not_found"
         if contains_any(lower, ["unable to connect", "failed to connect", "target is not responding", "no ack", "error connecting"]):
             return "target_not_detected"

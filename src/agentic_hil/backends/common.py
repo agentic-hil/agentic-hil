@@ -42,19 +42,14 @@ NOT_CONTACTED: JsonObject = {
 READ_ONLY_TOOLS = frozenset({"probe_target", "debugger_probes_list"})
 
 # What each backend without typed debug sessions would have to become to serve
-# one, in the words its own configuration uses. Both entries end in the same
-# place, because both probes are probes OpenOCD drives: the way out of this
-# refusal is a `debuggers.<name>.type` change and the two scripts that come with
-# it, not a different probe and not a different bench.
+# one, in the words its own configuration uses. The probe is one OpenOCD drives,
+# so the way out of this refusal is a `debuggers.<name>.type` change and the two
+# scripts that come with it, not a different probe and not a different bench.
+# pyOCD has no entry: it opens sessions through `pyocd gdbserver` (#624).
 DEBUG_SESSION_WAY_OUT: dict[str, str] = {
     "stlink": (
         "the same ST-Link runs under `type: openocd` with `interface_cfg: interface/stlink.cfg` and the "
         "`target_cfg` for this part"
-    ),
-    "pyocd": (
-        "the same probe runs under `type: openocd` with the `interface_cfg` for it ("
-        "`interface/stlink.cfg` for an ST-Link, `interface/cmsis-dap.cfg` for a CMSIS-DAP probe) and the `target_cfg` "
-        "for this part"
     ),
 }
 
@@ -63,8 +58,8 @@ def debug_session_unsupported(backend_name: str, tool: str) -> JsonObject:
     """Refuse a typed-debug session tool, and say what to change to get one.
 
     Breakpoints, continue, halt-with-stop-reason and the session lifecycle are
-    GDB operations, and neither STM32CubeProgrammer's CLI nor pyOCD's commander
-    is a GDB server this project drives as one. That much was always true; what
+    GDB operations, and STM32CubeProgrammer's CLI is not a GDB server this
+    project drives as one. That much was always true; what
     was wrong with the refusal is that it named the backend the bench does not
     run and stopped there (#342). A caller reading it learned that the capability
     exists somewhere and nothing about how to reach it, so the reasonable next
@@ -115,9 +110,8 @@ def reset_init_unsupported(backend_name: str, missing: str) -> JsonObject:
     machine depending on which debugger the project happened to configure;
     nothing shipped said so.
 
-    Refusing is the answer these two backends already give for typed debug
-    sessions: the capability is OpenOCD's, and a caller that needs it needs an
-    OpenOCD debugger rather than a quieter approximation of one. The refusal is
+    The capability is OpenOCD's, and a caller that needs it needs an OpenOCD
+    debugger rather than a quieter approximation of one. The refusal is
     also cheaper than what it replaces - it returns before the CLI is spawned,
     so it carries NOT_CONTACTED and leaves the board where the last call that
     did reach it left it. `run` and `halt` are unaffected: those two do agree

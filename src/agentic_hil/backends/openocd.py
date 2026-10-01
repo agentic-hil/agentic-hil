@@ -24,7 +24,7 @@ from agentic_hil.backends.common import (
     spawn_command,
     which,
 )
-from agentic_hil.backends.gdbdebug import GdbDebugSessions
+from agentic_hil.backends.gdbdebug import GdbDebugSessions, GdbServerSteps
 from agentic_hil.comports import (
     DISCOVERED_BY_USB_INVENTORY,
     list_available_com_ports,
@@ -143,6 +143,18 @@ OPENOCD_DISABLE_TCP_SERVER_COMMANDS = ["gdb_port disabled", "tcl_port disabled",
 # connection it accepts, and logs one that never sends GDB's acknowledgement as
 # rejected (#586).
 OPENOCD_GDB_LISTENING_LINE = "Listening on port {port} for gdb connections"
+# OpenOCD's own answers to the session steps that are each server's (#624):
+# the line above, `monitor reset halt` believed on its `^done`, and the guard
+# that keeps the core halted once GDB lets go. OpenOCD's `gdb-detach` and
+# `gdb-end` target events resume the core by default when the last GDB
+# connection ends, so both are overridden to do nothing before GDB detaches
+# (see `GdbDebugSessions._pin_no_resume_on_detach`). In a reset mode the server
+# itself starts with `init; reset halt`.
+OPENOCD_GDB_SERVER_STEPS = GdbServerSteps(
+    ready_line=OPENOCD_GDB_LISTENING_LINE,
+    detach_guard_command='-interpreter-exec console "monitor $_TARGETNAME configure -event gdb-detach {}; $_TARGETNAME configure -event gdb-end {}"',
+    server_resets_at_start=True,
+)
 # Each of these is `echo`ed by the command string *after* the one command the
 # tool exists for, and OpenOCD's interpreter stops evaluating a `-c` script at
 # the first command that fails. So a marker in the output is OpenOCD's own
@@ -461,7 +473,7 @@ class OpenOCDBackend:
             resolve_server=self._resolve_debug_server,
             build_server_args=self._debug_server_args,
             classify_server_output=self._classify_output,
-            server_ready_line=OPENOCD_GDB_LISTENING_LINE,
+            server_steps=OPENOCD_GDB_SERVER_STEPS,
             read_start_failure=self._debug_start_failure,
             read_start_context=self._debug_start_context,
         )
@@ -754,6 +766,10 @@ class OpenOCDBackend:
         treating them as session-scoped and never take a one-shot lease for
         them."""
         return frozenset()
+
+    def opens_debug_sessions(self) -> bool:
+        """Yes: through OpenOCD's own GDB server."""
+        return True
 
     def target_support(self) -> JsonObject:
         """OpenOCD has no target type to check.
