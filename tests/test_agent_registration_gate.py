@@ -162,14 +162,14 @@ def test_published_release_is_read_from_the_index(monkeypatch: pytest.MonkeyPatc
         # Every spelling of a final release the index can name as its newest.
         # None of these is a reason to fail a gate about install.sh: it installs
         # whichever of them the index serves, and the floor is the three fields.
-        ("0.22.1.post1", (0, 22, 1)),
-        ("0.22.1-1", (0, 22, 1)),
-        ("0.22.1+local.1", (0, 22, 1)),
+        ("0.21.4.post1", (0, 21, 4)),
+        ("0.21.4-1", (0, 21, 4)),
+        ("0.21.4+local.1", (0, 21, 4)),
         ("1.0", (1, 0, 0)),
         ("2", (2, 0, 0)),
-        ("v0.22.1", (0, 22, 1)),
-        ("0.22.1.2", (0, 22, 1)),
-        (" 0.22.1 ", (0, 22, 1)),
+        ("v0.21.4", (0, 21, 4)),
+        ("0.21.4.2", (0, 21, 4)),
+        (" 0.21.4 ", (0, 21, 4)),
     ],
 )
 def test_a_final_release_the_index_serves_is_a_floor_whatever_its_spelling(
@@ -177,7 +177,7 @@ def test_a_final_release_the_index_serves_is_a_floor_whatever_its_spelling(
 ) -> None:
     """An X.Y.Z-only regex reintroduced the false red it was fixing.
 
-    `require` failed outright on anything with a fourth field, so a `0.22.1.post1`
+    `require` failed outright on anything with a fourth field, so a `0.21.4.post1`
     on the index would turn every script case red with nothing wrong under
     install.sh, and the message named the index answer rather than the installer,
     so it read like a gate bug. `release_floor` then caps the floor at RELEASE, so
