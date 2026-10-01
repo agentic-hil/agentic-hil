@@ -165,6 +165,11 @@ class GdbServerSteps:
     connects reached the target no more than an attach does. It also means the
     stop GDB reports for its connect comes before the reset, and is not the
     session's.
+
+    `graceful_server_shutdown` says whether the server may be asked to stop
+    (SIGTERM on POSIX) before it is killed. A server whose own shutdown resumes
+    the core (ST-LINK_gdbserver) says False and is killed outright, because a
+    kill is the only end the recordings show leaving a halted core halted.
     """
 
     ready_line: str | None
@@ -173,6 +178,7 @@ class GdbServerSteps:
     reset_halt_confirmation: str | None = None
     detach_guard_command: str | None = None
     server_resets_at_start: bool = True
+    graceful_server_shutdown: bool = True
 
     def ready_line_for(self, port: int) -> str | None:
         return None if self.ready_line is None else self.ready_line.format(port=port)
@@ -1475,18 +1481,31 @@ class GdbDebugSessions:
 
         Halted is what the core stays until another pyOCD opens the probe; what
         that one does to it at connect is pyOCD's, and recorded beside
-        `PYOCD_GDB_SERVER_STEPS`."""
+        `PYOCD_GDB_SERVER_STEPS`.
+
+        ST-LINK_gdbserver resumes the core on SIGTERM as well as when its client
+        leaves, so it is killed rather than asked to stop
+        (`GdbServerSteps.graceful_server_shutdown`), and the guard says so."""
         terminate_error: str | None = None
         try:
-            terminate_process_tree(session.server, timeout_s)
+            self._end_server_process(session, timeout_s)
         except Exception as error:
             terminate_error = f"{type(error).__name__}: {error}"
         returncode = session.server.poll()
-        session.detach_guard = {"kind": "server_terminated_before_gdb_detach", "server_exited": returncode is not None, "server_returncode": returncode}
+        kind = "server_terminated_before_gdb_detach" if self._server_steps.graceful_server_shutdown else "server_killed_before_gdb_detach"
+        session.detach_guard = {"kind": kind, "server_exited": returncode is not None, "server_returncode": returncode}
         if terminate_error is not None:
             session.detach_guard["terminate_error"] = terminate_error
         self._write_session_log(session)
         return returncode is not None
+
+    def _end_server_process(self, session: GdbDebugSession, timeout_s: float) -> None:
+        """End the debug server's process tree, killing it outright when its
+        backend's own shutdown would resume the core."""
+        if self._server_steps.graceful_server_shutdown:
+            terminate_process_tree(session.server, timeout_s)
+        else:
+            terminate_process_tree(session.server, timeout_s, graceful=False)
 
     def _cleanup_session(self, session: GdbDebugSession, timeout_s: float) -> str | None:
         errors: list[tuple[str, BaseException]] = []
@@ -1504,7 +1523,7 @@ class GdbDebugSessions:
 
         def end_server() -> None:
             try:
-                terminate_process_tree(session.server, timeout_s)
+                self._end_server_process(session, timeout_s)
                 if session.server.poll() is None:
                     raise RuntimeError("Debug server remained active after kill.")
                 readers = getattr(session, "server_readers", [])
