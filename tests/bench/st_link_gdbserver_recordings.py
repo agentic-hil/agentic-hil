@@ -984,20 +984,24 @@ def refused_session_start(bench: Bench, answer: dict) -> dict:
     return record
 
 
+START_KEYS = ("reset_halt_start", "attach_start", "second_attach_start")
+
+
 def summarize_stops(entries: list[dict]) -> dict:
     """The stop round's counts: every stop, every opener after one, and what the core ran over the stops a start followed."""
-    stops = [stop for entry in entries for stop in (entry.get("reset_halt_stop"), entry.get("attach_stop")) if stop is not None]
-    starts = [entry[key] for entry in entries for key in ("reset_halt_start", "attach_start") if key in entry]
+    stops = [stop for entry in entries for stop in (entry.get("reset_halt_stop"), entry.get("attach_stop"), entry.get("second_attach_stop")) if stop is not None]
+    starts = [entry[key] for entry in entries for key in START_KEYS if key in entry]
     clis = [entry["cli"] for entry in entries if "cli" in entry]
     return {
         "cycles": len(entries),
         "stops": len(stops),
         "stops_not_confirmed": len([stop for stop in stops if stop.get("ok") is not True or stop.get("safe_state_confirmed") is not True]),
         "starts": len(starts),
-        "starts_refused_in_cycles": [entry["cycle"] for entry in entries for key in ("reset_halt_start", "attach_start") if key in entry and entry[key].get("ok") is not True],
+        "starts_refused_in_cycles": [entry["cycle"] for entry in entries for key in START_KEYS if key in entry and entry[key].get("ok") is not True],
         "cli_calls": len(clis),
         "cli_refused_in_cycles": [entry["cycle"] for entry in entries if "cli" in entry and entry["cli"].get("ok") is not True],
         "ran_ms_over_the_stop": [entry["ran_ms_over_the_stop"] for entry in entries if "ran_ms_over_the_stop" in entry],
+        "ran_ms_over_the_attach_stop": [entry["ran_ms_over_the_attach_stop"] for entry in entries if "ran_ms_over_the_attach_stop" in entry],
         "detach_guards": sorted({json.dumps({key: value for key, value in (stop.get("detach_guard") or {}).items() if key != "server_returncode"}, sort_keys=True) for stop in stops}),
     }
 
@@ -1012,8 +1016,10 @@ def test_record_st_link_session_stops(
     after a stop. So this round goes through the product's MCP server as an
     agent does. Each cycle is a reset-halt session that a resume nothing stops
     runs out on, a stop, the pause, an attach session (the next server start,
-    which reads what the core ran over the stop), a stop, the pause and a
-    `probe_target` (the next CLI call). A refused start or CLI call is recorded
+    which reads what the core ran over the stop), a stop, the pause, a second
+    attach session (which reads what the core ran over an attach session's
+    stop), a stop, the pause and a `probe_target` (the next CLI call). A
+    refused start or CLI call is recorded
     with the server's or the CLI's own lines, and then what gives the probe
     back is tried in turn and recorded: the same call again, an OpenOCD open,
     a second OpenOCD open, an OpenOCD reset, and the demo put back on the
@@ -1108,6 +1114,15 @@ def test_record_st_link_session_stops(
             if isinstance(before.get("value_unsigned"), int) and isinstance(after.get("value_unsigned"), int):
                 entry["ran_ms_over_the_stop"] = after["value_unsigned"] - before["value_unsigned"]
             entry["attach_stop"] = stop()
+            time.sleep(stlink_sessions.SETTLE_S)
+            entry["second_attach_start"], ready = start("attach")
+            if not ready:
+                entry["given_back"] = give_back()
+                continue
+            again = product.tool("debug_symbol_value", {"symbol": COUNTER})
+            if isinstance(after.get("value_unsigned"), int) and isinstance(again.get("value_unsigned"), int):
+                entry["ran_ms_over_the_attach_stop"] = again["value_unsigned"] - after["value_unsigned"]
+            entry["second_attach_stop"] = stop()
             time.sleep(stlink_sessions.SETTLE_S)
             entry["cli"] = cli()
             if entry["cli"].get("ok") is not True:
