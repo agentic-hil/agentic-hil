@@ -1016,7 +1016,8 @@ def test_record_st_link_session_stops(
     `probe_target` (the next CLI call). A refused start or CLI call is recorded
     with the server's or the CLI's own lines, and then what gives the probe
     back is tried in turn and recorded: the same call again, an OpenOCD open,
-    an OpenOCD reset, and the demo put back on the board."""
+    a second OpenOCD open, an OpenOCD reset, and the demo put back on the
+    board."""
     root, _, private_values, recording = recording_for(bench, firmware, tmp_path)
     cycles = int(os.environ.get(STOP_CYCLES_ENV) or DEFAULT_STOP_CYCLES)
     recording["cycles_asked"] = cycles
@@ -1063,6 +1064,17 @@ def test_record_st_link_session_stops(
             openocd.shut_down()
             return record
         record["cli_after_openocd_open"] = cli()
+        # A second open apart from the reset: in the first product stop cycles
+        # on the bench, the first open never gave the probe back and a reset
+        # after it always did, with its own examination failing, so the second
+        # open alone is tried first.
+        record["openocd_probe_target_again"] = product_answer(openocd.tool("probe_target"))
+        record["cli_after_second_openocd_open"] = cli()
+        record["start_after_second_openocd_open"], ready = start("attach")
+        if ready:
+            record["stop_after_second_openocd_open"] = stop()
+            openocd.shut_down()
+            return record
         record["openocd_reset_target"] = product_answer(openocd.tool("reset_target", {"mode": "run"}))
         openocd.shut_down()
         record["cli_after_openocd_reset"] = cli()
