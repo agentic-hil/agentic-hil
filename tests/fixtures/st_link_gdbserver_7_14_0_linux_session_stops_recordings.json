@@ -5670,6 +5670,4065 @@
      ""
     ]
    }
+  },
+  "shared": {
+   "bundle": "STM32CubeCLT 1.22.0 for Linux, extracted from its installer without running it",
+   "counter": "uptime_ms",
+   "cycles_asked": 40,
+   "gdb_version": "GNU gdb (xPack GNU Arm Embedded GCC x86_64) 14.2.90.20240526-git",
+   "handler": "SysTick_Handler",
+   "image": "the demo firmware the tier builds",
+   "probe": "the bench's in-circuit debugger, its serial number redacted",
+   "recorded_on": "2026-10-01",
+   "scenarios": {
+    "session_stops": [
+     {
+      "attach_start": {
+       "elapsed_ms": 418,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165859850Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 56,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 1,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 530,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165853726Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 393,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165902687Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 388,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165911776Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 40,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 2,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 501,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165905706Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 445,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165914613Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 424,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165923611Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 64,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 3,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 461,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165917611Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 477,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 50,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165926485Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 432,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165935620Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 43,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 4,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 506,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165929543Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 451,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165938499Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 417,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165947562Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 49,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 5,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 476,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165941532Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 467,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165950345Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 398,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165959503Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 54,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 6,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 458,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T165953427Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 426,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170002264Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 446,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170011403Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 65,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 7,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 498,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170005316Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 428,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170014287Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 430,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170023436Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 60,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 8,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 523,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170017348Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 455,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170027874Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 446,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170037101Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 56,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 9,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 527,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170030975Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 466,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170039959Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 415,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170049132Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 54,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 10,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 560,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170043033Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 442,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170052003Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 442,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170101159Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 53,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 11,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 510,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170055097Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 432,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170104099Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 423,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170113280Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 57,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 12,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 511,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170107126Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 408,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170116119Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 418,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170125286Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 54,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 13,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 533,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170119150Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 565,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170128130Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 458,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170137246Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 49,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 14,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 515,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170131164Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 426,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170140148Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 466,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170149333Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 70,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 15,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 529,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170143217Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 419,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170152289Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 440,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170202141Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 57,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 16,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 650,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 52,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170155380Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 413,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170205004Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 451,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170214006Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 77,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 17,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 460,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 2,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170208004Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 448,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170216895Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 443,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170226059Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 53,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 18,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 483,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 2,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170219963Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 394,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170228965Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 401,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170237980Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 90,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 19,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 481,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170231907Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 434,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170240803Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 423,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170249983Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 56,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 20,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 521,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170243916Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 441,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170252917Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 466,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170302212Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 50,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 21,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 593,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170256035Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 450,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170305158Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 409,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170314349Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 51,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 22,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 524,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170308181Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 448,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170317201Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 442,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170326578Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 50,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 23,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 639,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170320302Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 460,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 52,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170329477Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 415,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170338667Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 69,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 24,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 516,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170332553Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 435,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170341507Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 460,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170350683Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 65,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 25,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 517,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170344552Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 459,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170353557Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 434,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170402875Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 56,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 26,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 540,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170356680Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 391,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170405799Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 447,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170414835Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 74,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 27,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 546,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170408754Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 400,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170417694Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 453,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170426829Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 46,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 28,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 528,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170420768Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 446,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170429703Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 436,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170438893Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 68,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 29,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 586,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170432730Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 436,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 52,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170441750Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 398,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170450948Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 44,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 30,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 528,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170444770Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 403,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 2,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170453736Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 412,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170502969Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 52,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 31,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 517,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170456839Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 416,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170505801Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 423,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170514866Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 41,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 32,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 466,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170508789Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 443,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170517680Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 446,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170526863Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 43,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 33,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 534,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170520720Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 438,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170529758Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 590,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 52,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170538956Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 59,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 34,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 504,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170532807Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 407,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170541927Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 359,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 2,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170551012Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 65,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 35,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 480,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170544913Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 394,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 3,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170553802Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 434,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170602823Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 48,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 36,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 502,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170556790Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 492,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170605691Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 448,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170614967Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 59,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 37,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 507,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170608915Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 412,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170617841Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 427,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170627131Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 37,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 38,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 605,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170620881Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 438,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170630092Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 451,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170639214Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 53,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 39,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 545,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170633068Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 418,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170642124Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     },
+     {
+      "attach_start": {
+       "elapsed_ms": 464,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170651594Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "cli": {
+       "elapsed_ms": 48,
+       "ok": true,
+       "safe_state_confirmed": true,
+       "summary": "Target detected through ST-Link."
+      },
+      "continue": {
+       "error_type": "timeout",
+       "ok": false,
+       "safe_state_confirmed": false,
+       "summary": "Target did not stop before the timeout."
+      },
+      "cycle": 40,
+      "ran_ms_over_the_attach_stop": 0,
+      "ran_ms_over_the_stop": 0,
+      "reset_halt_start": {
+       "elapsed_ms": 622,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "reset_halt_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170645385Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      },
+      "second_attach_start": {
+       "elapsed_ms": 462,
+       "ok": true,
+       "safe_state_confirmed": false,
+       "summary": "Debug session started and target is halted."
+      },
+      "second_attach_stop": {
+       "detach_guard": {
+        "kind": "server_killed_before_gdb_detach",
+        "server_exited": true,
+        "server_returncode": -9
+       },
+       "halt_not_confirmed": false,
+       "ok": true,
+       "probe_server": {
+        "ended": true,
+        "executable": "[redacted]/w624/stlink-server-2.1.1/stlink-server",
+        "listening_after_ms": 51,
+        "log_path": ".agentic-hil/logs/stlink-server-20261001T170654484Z.log",
+        "mode": "shared",
+        "port": 7184,
+        "returncode": -15,
+        "started_by_session": true
+       },
+       "safe_state_confirmed": true,
+       "summary": "Debug session stopped with the target confirmed halted."
+      }
+     }
+    ]
+   },
+   "schema": "agentic-hil.st-link-gdbserver-recording/v1",
+   "source_commit": "157049d4cf7b749d36681051a2f9a5889ee6e44a",
+   "stm32cubeprogrammer_version": "2.23.0",
+   "stop_round": {
+    "continue_timeout_s": 3.0,
+    "settle_s": 2.0
+   },
+   "summary": {
+    "cli_calls": 40,
+    "cli_refused_in_cycles": [],
+    "cycles": 40,
+    "detach_guards": [
+     "{\"kind\": \"server_killed_before_gdb_detach\", \"server_exited\": true}"
+    ],
+    "probe_servers": [
+     "shared"
+    ],
+    "ran_ms_over_the_attach_stop": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "ran_ms_over_the_stop": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "starts": 120,
+    "starts_refused_in_cycles": [],
+    "stops": 120,
+    "stops_not_confirmed": 0
+   },
+   "timings": {
+    "command_timeout_s": 10.0,
+    "exit_wait_s": 10.0,
+    "run_before_interrupt_s": 1.0,
+    "settle_s": 2.0,
+    "stop_timeout_s": 10.0
+   },
+   "version": {
+    "argv_tail": [
+     "--version"
+    ],
+    "returncode": 0,
+    "stderr": [],
+    "stdout": [
+     "",
+     "<cubeclt>/STLink-gdb-server/bin/ST-LINK_gdbserver  version: 7.14.0",
+     ""
+    ]
+   }
   }
  }
 }
