@@ -243,12 +243,17 @@ class ServerCompanion:
     refusing its next opener, which the record names in `stop_risk`
     (ST-LINK_gdbserver killed while it held the probe's USB itself, recorded).
     A start that failed and had to end such a server therefore cannot report
-    the hardware as untouched: see `_startup_effect_fields`."""
+    the hardware as untouched: see `_startup_effect_fields`.
+
+    `end`, where a backend gives one, is how the session is done with a server
+    other sessions may share, called in place of ending `process`: the backend
+    decides there whether the server ends and says so in `record`."""
 
     process: subprocess.Popen | None
     record: JsonObject
     ended: bool = False
     stop_leaves_probe_unconfirmed: bool = False
+    end: Callable[[float], None] | None = None
 
 
 def console_output(records: list[str]) -> list[str]:
@@ -1834,7 +1839,13 @@ class GdbDebugSessions:
 
     def _end_companion(self, companion: ServerCompanion | None, timeout_s: float) -> None:
         """End the probe server a session started, once; one it found running is left to its owner."""
-        if companion is None or companion.ended or companion.process is None:
+        if companion is None or companion.ended:
+            return
+        if companion.end is not None:
+            companion.end(timeout_s)
+            companion.ended = True
+            return
+        if companion.process is None:
             return
         terminate_process_tree(companion.process, timeout_s)
         companion.ended = True

@@ -108,6 +108,15 @@ def recorded_terminations(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     return calls
 
 
+def another_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A second service on this machine, with a probe and a state root of its own.
+
+    A session holds the probe discovery of its state root for as long as it is
+    open, so a second session overlaps the first only from another state root:
+    another account's, or one configured apart."""
+    return st_link_session_service(tmp_path / "second", monkeypatch, probe_id="STLINK456", state_root=tmp_path / "second-state")
+
+
 def wait_for_stlink_server_event(events: Path, name: str, count: int = 1) -> None:
     deadline_s = scaled_time_bound(10)
     began = time.monotonic()
@@ -659,7 +668,7 @@ def test_two_sessions_share_one_stlink_server_and_the_first_stop_leaves_it_to_th
     try:
         started_first = start_debug_session(first, mode="attach")
         assert started_first["ok"] is True, started_first
-        second, _ = st_link_session_service(tmp_path / "second", monkeypatch, probe_id="STLINK456")
+        second, _ = another_service(tmp_path, monkeypatch)
         started_second = start_debug_session(second, mode="attach")
         assert started_second["ok"] is True, started_second
         stopped_first = first.call("debug_stop_session")
@@ -693,7 +702,11 @@ def test_two_sessions_share_one_stlink_server_and_the_first_stop_leaves_it_to_th
     ends = [call for call in calls if call["which"] == "stlink_server"]
     gdb_server_ends = [call for call in calls if call["which"] == "gdb_server"]
     assert len(ends) == 1, calls
-    assert len(gdb_server_ends) >= 2 and calls.index(gdb_server_ends[-1]) < calls.index(ends[0]), calls
+    # Each GDB server is asked to end more than once over a stop (a server already gone is a no-op), so its first end is the one that counts.
+    gdb_servers = list({id(call["process"]): call["process"] for call in gdb_server_ends}.values())
+    first_end_of_each = [next(index for index, call in enumerate(calls) if call["process"] is server) for server in gdb_servers]
+    assert len(gdb_servers) == 2 and max(first_end_of_each) < calls.index(ends[0]), calls
+    assert ends[0]["gdb_server_gone"] is True, calls
     assert not stlink.stlink_server_listening(stlink.STLINK_SERVER_PORT)
 
 
@@ -781,7 +794,7 @@ def test_the_last_session_ends_an_stlink_server_another_service_process_started(
     try:
         started_first = start_debug_session(first, mode="attach")
         assert started_first["ok"] is True, started_first
-        second, _ = st_link_session_service(tmp_path / "second", monkeypatch, probe_id="STLINK456")
+        second, _ = another_service(tmp_path, monkeypatch)
         started_second = start_debug_session(second, mode="attach")
         assert started_second["ok"] is True, started_second
         assert first.call("debug_stop_session")["ok"] is True
@@ -860,7 +873,7 @@ def test_a_refusal_already_in_the_stlink_server_log_is_not_read_as_a_later_start
         wait_for_stlink_server_event(stlink_events, "open_refused")
         other.close()
         other = None
-        second, _ = st_link_session_service(tmp_path / "second", monkeypatch, probe_id="STLINK456")
+        second, _ = another_service(tmp_path, monkeypatch)
         monkeypatch.setenv(ST_LINK_SCENARIO_VARIABLE, "probe_already_held_by_another_server")
         started_second = second.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": START_TIMEOUT_S})
         assert first.call("debug_stop_session")["ok"] is True

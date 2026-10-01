@@ -3435,6 +3435,32 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "STM32_Programmer_CLI call were refused again until the reset.",
         ),
     ),
+    # stlink-server could not open the probe for a GDB server reaching it through
+    # stlink-server: recorded on the reference board when stlink-server had been
+    # ended or restarted right after the previous session's GDB server was
+    # killed, with what the next start met, in
+    # tests/fixtures/st_link_gdbserver_7_14_0_linux_restarts_recordings.json and
+    # tests/fixtures/st_link_gdbserver_7_14_0_linux_server_ends_recordings.json.
+    "probe_server_open_failed:stlink": ErrorRemedy(
+        meaning=(
+            "stlink-server could not open the in-circuit debugger or programmer for the session's GDB server: its log "
+            "says `TCPCMD OPEN_DEV FAIL`. ST-LINK_gdbserver words the same start as `Failed to connect to device`, "
+            "the line a target that is off gives too, so the session reads stlink-server's log to tell them apart."
+        ),
+        remediation=(
+            "Stop the session, which the refused start keeps for cleanup, and start it again. In the recorded rounds the "
+            "next start came up after every such refusal (44 of 44), "
+            "with nothing changed on the board.",
+            "If it keeps coming back, look for a program that ends or restarts stlink-server while sessions use it. "
+            "Ended at once after a session's GDB server was killed, stlink-server left the next start refused in "
+            "6 of 40 recorded cycles; ended half a second later, or once it had released the probe's USB, in "
+            "0 of 79. Sessions end it the second way.",
+        ),
+        do_not=(
+            "Check the target's power and wiring first: the GDB server's line is the one a target that is off gives, "
+            "and in the recorded refusals the next start came up with no change to either.",
+        ),
+    ),
     # `doctor`'s device-access check, which `init` repeats as a warning. It asks
     # the kernel with `os.access` and opens nothing, so these are the refusals the
     # first hardware call would meet, said before it is made.
