@@ -31,6 +31,17 @@ RELEASE_SIZE = 252_673_523
 RELEASE_ARCHIVE_NAME = "SetupSTM32CubeProgrammer_linux_64.zip"
 _DECIMAL_ID = re.compile(r"^[1-9][0-9]*$")
 
+# Which of this machine's names are worth taking out of a line of output, copied
+# from `bench_in_container.Redactor` because this helper is invoked straight from
+# a checkout and imports nothing of it; a test keeps the two copies one value.
+# A value shorter than this, or one of these words, names nothing a reader could
+# find a machine by, and rewriting it would garble ordinary output: the account
+# on a hosted runner really is `runner` and on the bench it really is `bench`.
+SHORTEST_WITHHELD = 4
+TOO_COMMON = frozenset(
+    {"root", "user", "admin", "runner", "bench", "test", "tests", "work", "localhost", "linux", "ubuntu", "debian"}
+)
+
 
 def validate_asset_id(asset_id: str) -> str:
     if not isinstance(asset_id, str) or not _DECIMAL_ID.fullmatch(asset_id):
@@ -116,8 +127,10 @@ def cache_cubeprogrammer_archive(
 def host_identities() -> list[str]:
     """What names this machine in a line of output: host, home and user.
 
-    The same three values `bench_in_container.py` withholds, for the same reason:
-    the only surface this helper has is a public workflow log."""
+    The same three values `bench_in_container.py` withholds, filtered the same two
+    ways its `Redactor` filters them, for the same reason: the only surface this
+    helper has is a public workflow log, and a value that names no machine in
+    particular is left alone so an ordinary sentence is not garbled."""
     names: list[str] = []
     with suppress(OSError):
         host = socket.gethostname()
@@ -126,7 +139,8 @@ def host_identities() -> list[str]:
     names += [home, Path(home).as_posix()]
     with suppress(Exception):
         names.append(getpass.getuser())
-    return [name for name in (value.strip() for value in names) if len(name) >= 4]
+    kept = (value.strip() for value in names)
+    return [name for name in kept if len(name) >= SHORTEST_WITHHELD and name.lower() not in TOO_COMMON]
 
 
 def withheld(text: object) -> str:

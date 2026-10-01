@@ -670,10 +670,15 @@ def test_the_reenumeration_stage_waits_for_the_configured_uart_before_it_opens_o
 
     assert hasattr(stage, "wait_for_the_configured_uart")
     # The wait comes first, and the single-shot calls read what it settled on.
-    waited = source.index("after_listing = wait_for_the_configured_uart(")
-    matched = source.index("after_port = matching_available_port(after_listing", waited)
-    opened = source.index('server.call("com_session_start"', waited)
-    assert waited < matched < opened, (waited, matched, opened)
+    # Offsets into the source, named `_at` rather than after the act: these are
+    # positions, not durations, and tests/test_scaled_time_bounds.py reads a
+    # comparison whose left side is named like a measured duration as a bare
+    # wall-clock ceiling. Keeping that vocabulary meaningful is worth more than
+    # the shorter name here.
+    wait_at = source.index("after_listing = wait_for_the_configured_uart(")
+    match_at = source.index("after_port = matching_available_port(after_listing", wait_at)
+    open_at = source.index('server.call("com_session_start"', wait_at)
+    assert wait_at < match_at < open_at, (wait_at, match_at, open_at)
 
 
 class FakeListingServer:

@@ -413,10 +413,59 @@ def test_an_error_message_never_carries_this_machines_home_or_user(monkeypatch):
     assert helper.withheld("benchrunnerless said no") == "benchrunnerless said no"
 
 
+def test_a_value_too_common_to_name_a_machine_is_left_in_the_error_line(monkeypatch):
+    """The other half of the rule: a word that identifies nothing is not taken out.
+
+    `Redactor` has kept this exclusion since it was written, because the account
+    on a hosted runner is `runner` and on this bench it is `bench`, and taking
+    either word out of an English sentence garbles the one line the operator
+    reads without withholding anything a reader could find a machine by. This
+    copy of the filter had the length test and not this one, so the product's own
+    sentence came out with a word missing.
+    """
+    helper = _load_helper()
+    monkeypatch.setattr(helper.os.path, "expanduser", lambda path: "/home/runner")
+    monkeypatch.setattr(helper.getpass, "getuser", lambda: "runner")
+    monkeypatch.setattr(helper.socket, "gethostname", lambda: "bench")
+
+    assert helper.withheld("bench runner discovery is unavailable") == "bench runner discovery is unavailable"
+    # The home directory is still a value worth withholding, word for word, even
+    # though the account name inside it is not.
+    line = helper.withheld(OSError(13, "Permission denied", "/home/runner/.cache/agentic-hil/x.zip"))
+    assert "/home/runner" not in line, line
+    assert "Permission denied" in line, line
+
+
+def test_what_is_too_common_to_withhold_is_one_list_with_the_bench_runners():
+    """The two copies of the filter, held to one value.
+
+    This helper runs from a checkout and imports nothing of the bench runner, so
+    the filter is copied rather than shared. Copying the length test and not the
+    word list is what put a hole in it, and a hole in exactly one direction: a
+    word too common to name a machine was taken out of the product's own
+    sentence.
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    try:
+        import bench_in_container
+    finally:
+        sys.path.pop(0)
+    helper = _load_helper()
+
+    assert helper.SHORTEST_WITHHELD == bench_in_container.SHORTEST_WITHHELD
+    assert helper.TOO_COMMON == bench_in_container.TOO_COMMON
+
+
 def test_the_read_only_half_carries_its_own_error_line_too(monkeypatch, capsys):
     """The sibling path at the top of `main`, for the same reason: a sysfs scan that
     failed says why, and the class alone said nothing an operator could act on."""
     helper = _load_helper()
+    # Stated rather than inherited, the way the redaction test beside this one
+    # states them: the assertion is about the whole sentence, and a machine whose
+    # host or account happens to be one of its words would otherwise decide it.
+    monkeypatch.setattr(helper.os.path, "expanduser", lambda path: "/home/bench")
+    monkeypatch.setattr(helper.getpass, "getuser", lambda: "benchrunner")
+    monkeypatch.setattr(helper.socket, "gethostname", lambda: "bench-1.example.invalid")
 
     def refuse():
         raise RuntimeError("bench runner discovery is unavailable")
