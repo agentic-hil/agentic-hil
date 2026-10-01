@@ -104,11 +104,17 @@ DECOY_LISTENING_LINES = (
 # DECOY_LINES: `1` prints the decoy lines above as soon as the port listens.
 # FLOOD_LINES: how many copies of the flood line follow the listening line in the
 #   same write.
+# VERSION_SWALLOWED: `1` answers `--version` the way a wrapper around OpenOCD
+#   that swallows it does: nothing on either stream and a non-zero status. An
+#   `executable` like that is explicitly supported, and it is what leaves a
+#   probe-selection read with nothing to answer. Everything else is unchanged, so
+#   the same process still serves the GDB port afterwards.
 RECORD_VARIABLE = "FAKE_OPENOCD_RECORD"
 LISTEN_AFTER_VARIABLE = "FAKE_OPENOCD_LISTEN_AFTER_S"
 LINE_AFTER_VARIABLE = "FAKE_OPENOCD_LINE_AFTER_S"
 DECOY_LINES_VARIABLE = "FAKE_OPENOCD_DECOY_LINES"
 FLOOD_LINES_VARIABLE = "FAKE_OPENOCD_FLOOD_LINES"
+VERSION_SWALLOWED_VARIABLE = "FAKE_OPENOCD_VERSION_SWALLOWED"
 NEVER = "never"
 
 output_lock = threading.Lock()
@@ -264,6 +270,8 @@ def evaluate(script: str, initialized: bool) -> tuple[list[str], bool, int | Non
 def main() -> int:
     args = sys.argv[1:]
     if "--version" in args:
+        if os.environ.get(VERSION_SWALLOWED_VARIABLE) == "1":
+            return 1
         print("Open On-Chip Debugger 0.12.0")
         return 0
     gdb_port_match = re.search(r"gdb_port (\d+)", " ".join(args))

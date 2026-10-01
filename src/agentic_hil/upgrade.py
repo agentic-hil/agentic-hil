@@ -1115,6 +1115,93 @@ def missing_configured_extras(config: AgenticHILConfig) -> JsonObject | None:
     }
 
 
+def _scheme_directory(name: str, scheme: str | None) -> Path | None:
+    """One `sysconfig` directory, or None where this interpreter does not answer for it.
+
+    The same tolerance every other reader in this module gets: a scheme an
+    interpreter does not carry is a candidate that is simply not offered, never a
+    failed upgrade.
+    """
+    try:
+        return Path(sysconfig.get_path(name) if scheme is None else sysconfig.get_path(name, scheme))
+    except (KeyError, OSError):
+        return None
+
+
+def _user_scheme_names() -> tuple[str, ...]:
+    """Every spelling of the per-user install scheme this interpreter may answer to.
+
+    `get_preferred_scheme("user")` is what pip asks and what
+    `_user_site_installation` reads, and on a macOS framework build it answers
+    `osx_framework_user` where Linux answers `posix_user`; the plain `<os>_user`
+    name is the one every interpreter since 3.10 has. Both are read, because the
+    two directories taken out of a scheme here are compared against one another:
+    the script directory decides which console script is claimed and the purelib
+    decides whether it is this installation's scheme at all, so they have to come
+    out of the same scheme or a user installation is measured against a system
+    directory.
+    """
+    return tuple(dict.fromkeys((_preferred_user_scheme(), f"{os.name}_user")))
+
+
+def _distribution_site_directory() -> str:
+    """The site directory this distribution's own installed metadata sits in, or "".
+
+    Its `.dist-info`'s parent, which is the directory the install wrote the
+    package into, read the way `_user_site_installation` reads it. Every
+    exception is the empty answer rather than a raise: this only narrows which
+    console script is claimed, and a source tree on `sys.path`, a legacy
+    `.egg-link` develop install and a metadata directory this account may not
+    read all arrive here. None of them is a reason to refuse the upgrade the
+    operator typed.
+    """
+    try:
+        from importlib.metadata import distribution
+
+        located = distribution("agentic-hil").locate_file("")
+    except Exception:
+        return ""
+    return "" if located is None else str(located)
+
+
+def _same_directory_or_inside(path: str, directory: Path | None) -> bool:
+    """Whether a path is that directory or sits under it, in the one spelling they compare in."""
+    if directory is None:
+        return False
+    here, there = _normalized_location(path), _normalized_location(directory)
+    return here == there or here.startswith(there.rstrip("/") + "/")
+
+
+def _installed_in_user_site() -> bool | None:
+    """Whether this distribution's files sit in this user's own site, or None where nothing can tell.
+
+    Three answers, and the third is what keeps an upgrade honest: the scheme
+    decides which console script belongs to the installation being replaced, so a
+    scheme guessed wrong is a claim about a *different* installation. Where the
+    metadata does not say, the caller goes on offering every candidate it used
+    to, which is a false claim at worst and never a crash.
+
+    `_user_site_installation` asks the same question for pip's command line and
+    answers it in two states, because a missing answer there must mean "do not
+    pass `--user`": adding the flag to a system installation would scatter the
+    package into a per-user directory nothing on PATH points at. Here a missing
+    answer has to stay missing, which is why the two are not one function.
+    """
+    located = _distribution_site_directory()
+    if located:
+        if any(_same_directory_or_inside(located, _scheme_directory("purelib", scheme)) for scheme in _user_scheme_names()):
+            return True
+        if _same_directory_or_inside(located, _scheme_directory("purelib", None)):
+            return False
+    if sys.prefix != sys.base_prefix:
+        # A virtual environment's installation is not the user one whatever else
+        # could not be read: pip refuses `--user` inside one and `site` leaves the
+        # per-user directory out of the path there, so nothing can have installed
+        # this distribution into it.
+        return False
+    return None
+
+
 def _installation_console_scripts() -> tuple[str, ...]:
     """Where this distribution's own console script can sit for this interpreter.
 
@@ -1123,12 +1210,37 @@ def _installation_console_scripts() -> tuple[str, ...]:
     exact files are attributable to this distribution, which is what a shared
     prefix needs: the interpreter there runs every other Python program on the
     machine too.
+
+    One scheme rather than all of them, and that is the narrowing. Offering the
+    interpreter's own script directory and the per-user one together named two
+    installations at once: the checkout venv `python -m pip install -e .` makes
+    and a registered `~/.local/bin/agentic-hil` are exactly that pair, and an
+    upgrade run out of the venv reported the user installation's MCP server as a
+    holder and answered `restart_required: true`, although it never writes into
+    `~/.local/bin` and restarting that server adopts nothing. The mirror image is
+    a `--user` installation claiming the server a root-installed
+    `/usr/local/bin/agentic-hil` started.
+
+    Which scheme is read off the installed distribution's own location by
+    `_installed_in_user_site`. Where that cannot be told, both groups are offered
+    as before, deliberately: naming a holder that is somebody else's is a claim
+    an operator can check against the pid beside it, and a scheme narrowed on a
+    guess would name nobody at all on the benches this whole check exists for.
     """
     name = "agentic-hil.exe" if os.name == "nt" else "agentic-hil"
-    directories = [Path(sys.executable).parent, Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")]
-    for scheme in (None, f"{os.name}_user"):
-        with suppress(KeyError, OSError):
-            directories.append(Path(sysconfig.get_path("scripts") if scheme is None else sysconfig.get_path("scripts", scheme)))
+    # Three spellings of the one scheme this interpreter installs into: beside the
+    # interpreter, under its prefix, and whatever sysconfig calls the default
+    # scheme's script directory. A virtual environment answers the same directory
+    # for all three; a framework or relocated build does not, and each spelling is
+    # still this installation's own.
+    own_scheme = [Path(sys.executable).parent, Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")]
+    own_scheme += [directory for directory in (_scheme_directory("scripts", None),) if directory is not None]
+    user_scheme = [directory for scheme in _user_scheme_names() if (directory := _scheme_directory("scripts", scheme)) is not None]
+    in_user_site = _installed_in_user_site()
+    # A user installation's script directory is the only one that is its own:
+    # `Path(sys.executable).parent` there is the shared `bin` the system
+    # installation's launcher sits in, which is the false claim above in reverse.
+    directories = user_scheme if in_user_site else own_scheme if in_user_site is False else [*own_scheme, *user_scheme]
     return tuple(dict.fromkeys(_normalized_location(directory / name) for directory in directories))
 
 
@@ -1203,23 +1315,85 @@ def _belongs_to_installation(entry: ProcessImage, owned_prefixes: tuple[str, ...
     starts the server it registered. Measured on a bench with a
     `pip install --user` installation: the server holding the board ran as
     `/usr/local/bin/python <home>/.local/bin/agentic-hil mcp-stdio` with no
-    `VIRTUAL_ENV`, and `agentic-hil upgrade` named nobody.
+    `VIRTUAL_ENV`, and `agentic-hil upgrade` named nobody. That route is
+    `_started_by_the_console_script`, which is where the shape of a running
+    script is required rather than merely the file's name appearing somewhere.
     """
     if _under_owned_prefix(entry.image, owned_prefixes):
         return True
-    # Absolute arguments only. A relative one is relative to *that* process's
-    # working directory, which nothing here has, and making it absolute uses this
-    # process's instead: run `agentic-hil upgrade` from inside the tool
-    # environment and every process started as `bash` or `python3` would be
-    # claimed as a holder of it.
-    invoked_by = [argument for argument in entry.launch_arguments if argument and os.path.isabs(argument)]
-    if any(spelling in scripts for path in (entry.image, *invoked_by) for spelling in _location_spellings(path)):
+    if _started_by_the_console_script(entry, scripts):
         return True
     if not owned_prefixes:
         return False
     if entry.virtual_env and any(spelling.rstrip("/") + "/" in owned_prefixes for spelling in _location_spellings(entry.virtual_env)):
         return True
-    return any(_under_owned_prefix(argument, owned_prefixes) for argument in invoked_by)
+    return any(_under_owned_prefix(argument, owned_prefixes) for argument in _absolute_launch_arguments(entry))
+
+
+def _absolute_launch_arguments(entry: ProcessImage) -> list[str]:
+    """The arguments that say where they came from, which is the absolute ones.
+
+    A relative argument is relative to *that* process's working directory, which
+    nothing here has, and making it absolute uses this process's instead: run
+    `agentic-hil upgrade` from inside the tool environment and every process
+    started as `bash` or `python3` would be claimed as a holder of it.
+    """
+    return [argument for argument in entry.launch_arguments if argument and os.path.isabs(argument)]
+
+
+def _started_by_the_console_script(entry: ProcessImage, scripts: tuple[str, ...]) -> bool:
+    """Whether this process *is* one of this installation's console scripts, running.
+
+    Two platform shapes, and each needs both of its halves, which is the
+    narrowing.
+
+    On Windows the console script is a real executable, so the kernel answers it
+    as the image and there is no command line to read at all: `ProcessImage`
+    carries no `launch_arguments` from that host, because the snapshot there is
+    built out of `QueryFullProcessImageNameW` alone. The image is the whole of the
+    evidence, and `agentic-hil.exe` in argv[0] is the shape that does not exist
+    on POSIX.
+
+    On POSIX the script is a text file with a `#!` line, so it can never be the
+    image: the kernel runs the interpreter that line names and hands it the
+    script as argv[1], with the interpreter itself in argv[0]. Claiming any
+    absolute argument that merely *equalled* the script claimed every process
+    whose command line named the file instead. An operator with
+    `vim ~/.local/bin/agentic-hil` open, or a backup running
+    `cp ~/.local/bin/agentic-hil /tmp/`, came back under `restart_required_by`,
+    so the upgrade asked for a text editor to be restarted to adopt the new
+    release. The file has to sit in the slot the kernel fills from the `#!` line,
+    and the slot beside it has to name a Python interpreter.
+
+    The interpreter is accepted from either side of that pair, because the two
+    are the same fact read twice: argv[0] is the `#!` line as written, which a
+    relocated or renamed interpreter spells its own way, and the image is what
+    the kernel resolved it to.
+    """
+    if any(spelling in scripts for spelling in _location_spellings(entry.image)):
+        return True
+    arguments = entry.launch_arguments
+    if len(arguments) < 2 or not os.path.isabs(arguments[1]):
+        return False
+    if not any(spelling in scripts for spelling in _location_spellings(arguments[1])):
+        return False
+    return _names_a_python_interpreter(arguments[0]) or _names_a_python_interpreter(entry.image)
+
+
+# What the slot a `#!` line fills looks like. Anchored on a name rather than a
+# path, because that slot carries whatever the line was written with: `python`,
+# `python3.12`, `python3.13t`, `pythonw.exe`, a distribution's
+# `platform-python3.9` or pypy. Deliberately generous, since it is only ever
+# asked once the argument beside it is already this installation's own console
+# script: what it has to exclude is `/usr/bin/vim` and `/usr/bin/cp`, not an
+# interpreter somebody's distribution renamed.
+_PYTHON_INTERPRETER_NAME = re.compile(r"(?:^|[^a-z])(?:python|pypy)w?(?![a-z])")
+
+
+def _names_a_python_interpreter(path: str) -> bool:
+    """Whether this path names a Python interpreter rather than some other program."""
+    name = os.path.basename(path.replace("\\", "/")).casefold()
+    return bool(name) and _PYTHON_INTERPRETER_NAME.search(name.removesuffix(".exe")) is not None
 
 
 def _upgrading_process_and_its_launchers(by_pid: dict[int, ProcessImage], owned_prefixes: tuple[str, ...], scripts: tuple[str, ...]) -> set[int]:

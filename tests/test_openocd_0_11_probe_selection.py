@@ -465,3 +465,95 @@ def test_bootstrap_on_openocd_0_11_says_nothing_to_a_board_whose_driver_has_no_s
     assert result["hardware_state"] == "unchanged", result
     summary = result["target_discovery"]["summary"]
     assert "0.11.0" in summary and "jlink" in summary, result["target_discovery"]
+
+
+def test_a_release_read_that_failed_says_why_and_the_refusal_it_causes_names_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The two reads collapsed five outcomes into a bare None, and nothing recorded any of them.
+
+    `openocd_version` and `adapter_driver` are published only on the
+    `not_supported` refusal, so no success path and no other failure path said
+    the reads had happened or failed, and `_write_log` keeps only the call's own
+    argv and streams. This repository explicitly supports
+    `debuggers.<name>.executable` being a wrapper, and names one as a
+    `likely_cause` elsewhere: put one that swallows `--version` in front of
+    OpenOCD 0.11 and the release read answers nothing, the backend falls back to
+    `adapter serial`, and 0.11 refuses it. The result named `adapter serial` and
+    three generic causes with no `openocd_version` field at all, so nothing
+    pointed at the repair, which is to make the wrapper pass `--version` through.
+    """
+    reads: list[tuple[str, float]] = []
+
+    def a_wrapper_that_swallows_the_banner(executable_path: str, timeout_s: float) -> tuple[object, str | None]:
+        reads.append((executable_path, timeout_s))
+        return None, openocd_backend.read_failure_reason(
+            CompletedCommand("", "", 0, False, False), "OpenOCD release read (`--version`)", timeout_s, "printing a version banner"
+        )
+
+    selection = openocd_backend.openocd_probe_selection(
+        str(FAKE_RECORDED), "interface/stlink.cfg", SERIAL, 5, read_release=a_wrapper_that_swallows_the_banner
+    )
+
+    assert reads, "the release read was never asked"
+    assert list(selection.commands) == ["-c", f"adapter serial {SERIAL}"], selection
+    assert selection.supported is True, selection
+    assert selection.version is None and selection.adapter_driver is None, selection
+    # The decisive line, which is the whole of what used to be dropped.
+    assert selection.read_failure is not None
+    assert "exited 0 without printing a version banner" in selection.read_failure, selection.read_failure
+
+
+@pytest.mark.parametrize(
+    ("completed", "expected"),
+    [
+        (CompletedCommand("", "", 1, False, True), "could not be started: the file is not there"),
+        (CompletedCommand("", "", 1, False, False, "not executable"), "could not be started: the file is not executable"),
+        (CompletedCommand("", "", 1, True, False), "did not answer within 5s"),
+        (CompletedCommand("", "wrapper: cannot exec openocd\n", 127, False, False), "exited 127: wrapper: cannot exec openocd"),
+        (CompletedCommand("", "", 2, False, False), "exited 2 and wrote nothing"),
+        (CompletedCommand("quiet wrapper\n", "", 0, False, False), "exited 0 without naming a release; its last line was: quiet wrapper"),
+    ],
+)
+def test_each_way_a_read_can_fail_says_which_one_it_was(completed: CompletedCommand, expected: str) -> None:
+    """Five outcomes, five sentences, and OpenOCD's own last line where it wrote one.
+
+    The path is deliberately not in any of them: every result that carries this
+    carries `executable` beside it, and these travel into `likely_causes`."""
+    reason = openocd_backend.read_failure_reason(completed, "OpenOCD release read (`--version`)", 5, "naming a release")
+
+    assert expected in reason, reason
+    assert "OpenOCD release read" in reason, reason
+
+
+def test_a_refusal_caused_by_a_failed_driver_read_carries_that_reads_own_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 0.11 whose interface script cannot be found: the driver read fails and the call is refused.
+
+    The release reads fine, so `openocd_version` is on the result; what is missing
+    without this is any statement that the driver could not be read, and that is
+    what sent the call to `adapter serial`. The refusal the call then gets names
+    the read first, because the release and the driver below it are what could not
+    be learned.
+    """
+    missing = RECORDED["adapter_driver_missing_script"]["argv"][2]
+    replay(monkeypatch, tmp_path, adapter_driver="adapter_driver_missing_script")
+
+    result, _ = call_service(tmp_path, "probe_target", interface_cfg=missing)
+
+    assert result["ok"] is False, result
+    read_failure = result["probe_selection_read_failure"]
+    assert "adapter driver read" in read_failure, read_failure
+    assert missing in read_failure, read_failure
+    assert result["likely_causes"][0] == read_failure, result["likely_causes"]
+
+
+def test_a_read_that_answered_keeps_the_result_free_of_a_read_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other direction: a 0.11 that named its release and its driver reports no failed read.
+
+    This is what tells the two `adapter serial` fallbacks apart, so the field must
+    be absent where nothing failed rather than carrying an empty string.
+    """
+    replay(monkeypatch, tmp_path, adapter_driver="adapter_driver_hla", call="probe_target_hla_serial_no_such_probe")
+
+    result, _ = call_service(tmp_path, "probe_target")
+
+    assert result["ok"] is False, result
+    assert "probe_selection_read_failure" not in result, result

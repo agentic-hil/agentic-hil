@@ -50,13 +50,45 @@ def require(condition: object, detail: str) -> None:
         raise AssertionError(detail)
 
 
+# PEP 440's shape, as much of it as this needs. The numeric release is what the
+# floor is compared on, and the segments behind it decide whether the index's
+# answer is a release `install.sh` would install at all: `uv tool install` takes
+# the newest final release, so a post-release (`0.22.1.post1`) is one and a
+# pre-release or a dev release is not. `packaging` would say this in one line and
+# is deliberately not imported: this module runs under the container's own
+# `/usr/bin/python3`, whose only third-party package is PyYAML, so a new import
+# here would be a gate that cannot start.
+_INDEX_VERSION = re.compile(
+    r"v?(?P<release>\d+(?:\.\d+)*)"
+    r"(?P<pre>[-_.]?(?:a|b|c|rc|alpha|beta|pre|preview)[-_.]?\d*)?"
+    r"(?:[-_.]?(?:post|rev|r)[-_.]?\d*|-\d+)?"
+    r"(?P<dev>[-_.]?dev[-_.]?\d*)?"
+    r"(?:\+[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*)?",
+    re.IGNORECASE,
+)
+
+
 def published_release() -> tuple[int, ...]:
-    """The newest release the index serves, read from the index install.sh downloads from."""
+    """The newest release the index serves, read from the index install.sh downloads from.
+
+    Three numeric fields and nothing else was refused outright, which turns a
+    perfectly ordinary index answer into a red gate: `0.22.1.post1` would fail
+    `require` and every script case would go red with nothing wrong under
+    install.sh, and the message names the index answer rather than the installer,
+    so it reads like a gate bug. That is the same false red 72ddcba exists to
+    remove, in a narrower form. So the release fields are read out of whatever
+    PEP 440 spelling the index used, padded to three, and the refusal is kept for
+    the two answers that really are not a floor: something that is not a version
+    at all, and a release `install.sh` would not install, since comparing what it
+    did install against a pre-release floor is the same false red again."""
     with urllib.request.urlopen(PYPI_PROJECT_JSON, timeout=30) as response:
         version = json.load(response)["info"]["version"]
-    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    match = _INDEX_VERSION.fullmatch(str(version).strip())
     require(match is not None, f"the index names no release as its newest: {version!r}")
-    return tuple(map(int, match.groups()))
+    assert match is not None  # for the type checker; `require` has raised otherwise
+    require(not match.group("pre") and not match.group("dev"), f"the index's newest release is not a final release: {version!r}")
+    fields = [int(field) for field in match.group("release").split(".")]
+    return tuple((*fields, 0, 0)[:3])
 
 
 def release_floor(stamped: tuple[int, ...], published: tuple[int, ...]) -> tuple[int, ...]:

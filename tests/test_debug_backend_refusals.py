@@ -459,6 +459,102 @@ def test_stlink_probe_target_does_not_generalize_a_neighboring_vendor_error_code
     assert backend._classify_output(output, "probe_target") == "config_file_not_found"
 
 
+# A flash that lost its probe part-way through the download. Assembled, not
+# recorded: the download-phase lines are STM32CubeProgrammer 2.23.0's own, in the
+# order the bench flash recording prints them
+# (fixtures/stm32cubeprogrammer_2_23_0_nucleo_f446re_flash_recordings.json), and
+# `ST-LINK error (DEV_NO_STLINK)` is the line the USB-free bench image recorded
+# for a handle with no device behind it. No checked-in transcript carries the two
+# together, which is the whole point: what the backend may not do is treat a
+# transcript that places a write phase as proof the probe was never there.
+STLINK_DEV_NO_STLINK_MID_DOWNLOAD = (
+    "Memory Programming ...\n"
+    "  File          : firmware.elf\n"
+    "  Size          : 9.99 KB \n"
+    "  Address       : 0x08000000\n"
+    "\n"
+    "Erasing memory corresponding to segment 0:\n"
+    "Erasing internal memory sector 0\n"
+    "Download in Progress:\n"
+    "ST-LINK error (DEV_NO_STLINK)\n"
+)
+
+
+def test_a_dev_no_stlink_after_the_download_started_leaves_the_flash_unconfirmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`DEV_NO_STLINK` is a driver error code, not a phase, so a flash that printed it must not claim no contact.
+
+    `probe_not_found` carries the CLI's discovery prose ("No ST-Link detected!"),
+    which is measured with nothing on USB, and the driver library's
+    `DEV_NO_STLINK`, which is measured in that same probe-free run and means no
+    device behind this handle. A probe that drops off USB mid-download can print
+    the second one with the write phase already started, and `Download in
+    Progress:` is the repo's own evidence that it was. Reading that transcript as
+    a pre-contact refusal publishes `hardware_state: unchanged`, `retry_safe:
+    true` and no incident for a board whose flash is half written.
+    """
+    play_transcript(monkeypatch, stdout=STLINK_DEV_NO_STLINK_MID_DOWNLOAD, returncode=1)
+    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+
+    result = call(config, "flash_firmware", {"image_path": "build/firmware.elf"})
+
+    assert result["ok"] is False, result
+    assert result["backend_error_type"] == "probe_not_found", result
+    # The decisive line is still on the result, whichever way it is read.
+    assert "ST-LINK error (DEV_NO_STLINK)" in result["programmer_output"]["stdout"], result["programmer_output"]
+    assert_effect_unconfirmed(result)
+    # An incident was opened for the half-written flash. A bare `flash_firmware`
+    # call stands its own incident down when it ends, so what proves the incident
+    # existed is this field, not a record left behind.
+    assert result["incident_stood_down"]["reasons"] == ["debugger_result_unconfirmed"], result
+
+
+def test_a_dev_no_stlink_with_no_flash_phase_behind_it_still_refuses_before_contact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other direction, on the real recording: a flash that never reached the board keeps its clean refusal.
+
+    The recorded transcript is the whole of what the CLI printed when there was
+    no probe to open, and it places no phase of any kind. Quarantining that would
+    send an operator to inspect a board the run never touched, and would deny the
+    retry the missing probe is the only fix for.
+    """
+    play_cube_bench_image_recording(monkeypatch, "connect_no_probe")
+    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+
+    result = call(config, "flash_firmware", {"image_path": "build/firmware.elf"})
+
+    assert result["ok"] is False, result
+    assert result["backend_error_type"] == "probe_not_found", result
+    assert result["error_type"] == "adapter_not_found", result
+    assert "ST-LINK error (DEV_NO_STLINK)" in result["programmer_output"]["stdout"], result["programmer_output"]
+    assert "incident_stood_down" not in result, result
+    assert_refused_before_contact(result, config)
+
+
+def test_the_no_contact_claim_is_declined_only_for_the_tools_whose_command_drives_the_target(tmp_path: Path) -> None:
+    """Which tool asked decides, because only a writing command can leave flash half changed.
+
+    A `-r` read and a probe listing cannot, so they keep the unconditional claim:
+    an upload progress bar in a read's own transcript must never be read as a
+    flash change and quarantine a call that provably altered nothing. The
+    discovery prose is unaffected in both directions, and a transcript with no
+    phase in it still proves no contact for every tool.
+    """
+    config = load_config(str(write_config(tmp_path, debugger_type="stlink")))
+    backend = STLinkBackend(config)
+    discovery = cube_bench_image_recording("connect_no_probe")["stdout"]
+
+    assert backend._proves_no_contact("flash_firmware", "probe_not_found", STLINK_DEV_NO_STLINK_MID_DOWNLOAD) is False
+    assert backend._proves_no_contact("flash_firmware", "probe_not_found", discovery) is True
+    assert backend._proves_no_contact("reset_target", "probe_not_found", discovery) is True
+    # The pre-existing discovery prose, in both directions: on its own it proves
+    # no contact, and behind a download line it no longer does either, because a
+    # probe that carried a write phase was there whatever the CLI says next.
+    assert backend._proves_no_contact("flash_firmware", "probe_not_found", "Error: No ST-LINK detected!\n") is True
+    assert backend._proves_no_contact("flash_firmware", "probe_not_found", "Download in Progress:\nError: No ST-LINK detected!\n") is False
+    for read_only in ["probe_target", "debugger_probes_list", "debug_symbol_value", "debug_dump_symbol_ihex"]:
+        assert backend._proves_no_contact(read_only, "probe_not_found", STLINK_DEV_NO_STLINK_MID_DOWNLOAD) is True, read_only
+        assert backend._proves_no_contact(read_only, "probe_not_found", "[=========                     ] 18%\nST-LINK error (DEV_NO_STLINK)\n") is True, read_only
+
+
 def test_doctor_reports_the_classified_version_failure_and_exits_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The operator's view of the same check: a document that carries the classification, and exit 1.
 

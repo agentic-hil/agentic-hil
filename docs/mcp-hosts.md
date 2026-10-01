@@ -109,7 +109,7 @@ These are hints. Agentic HIL decides nothing by them (what a call may do is deci
 
 ## VS Code and GitHub Copilot
 
-Use this server shape in the operator-controlled VS Code user-profile MCP configuration:
+Put this server in the operator-controlled VS Code user-profile MCP configuration. One registration serves every project, and none of it lives in a repository:
 
 ```json
 {
@@ -119,14 +119,13 @@ Use this server shape in the operator-controlled VS Code user-profile MCP config
       "command": "/absolute/path/to/persistent/agentic-hil",
       "args": [
         "mcp-stdio"
-      ],
-      "cwd": "${workspaceFolder}"
+      ]
     }
   }
 }
 ```
 
-Run **MCP: List Servers**, start `agentic-hil`, and approve the workspace server after reviewing it. VS Code's own `mcp.json` uses `servers`, not `mcpServers`; the `mcpServers` shape it also reads belongs to the portable `.mcp.json` and `~/.copilot/mcp-config.json`, a different file. Prefer its user-profile MCP configuration for the operator-controlled registration; the configured `cwd` enables automatic config discovery.
+Run **MCP: List Servers** and start `agentic-hil`. VS Code starts a user-profile server in the home directory, where there is no project, so the server asks VS Code which folder it has open (the MCP `roots/list` request) and serves that folder's configuration; with several folders open, it serves the one that has a configuration. Leave `cwd` out: VS Code resolves no `${workspaceFolder}` in the user profile and does not start the server with it. VS Code's own `mcp.json` uses `servers`, not `mcpServers`; the `mcpServers` shape it also reads belongs to the portable `.mcp.json` and `~/.copilot/mcp-config.json`, a different file.
 
 Sources: [VS Code MCP configuration reference](https://code.visualstudio.com/docs/agents/reference/mcp-configuration) and [GitHub Copilot MCP setup](https://docs.github.com/en/copilot/how-tos/copilot-in-your-ide/customize-copilot/extend-copilot-with-tools-and-context/extend-copilot-chat-with-mcp).
 

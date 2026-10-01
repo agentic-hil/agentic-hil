@@ -325,13 +325,39 @@ def test_successful_probe_enumeration_does_not_hide_log_audit_failure(
     assert overall_success(result) is False
 
 
-@pytest.mark.parametrize("operation", ["probe_target", "flash_firmware", "reset_target", "symbol_read_prepare"])
+@pytest.mark.parametrize(
+    ("operation", "tool"),
+    [
+        ("probe_target", "probe_target"),
+        ("flash_firmware", "flash_firmware"),
+        ("reset_target", "reset_target"),
+        ("symbol_read_prepare", "debug_symbol_value"),
+    ],
+)
 def test_probe_selector_audit_failure_blocks_every_target_command(
     backend: PyOCDBackend,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     operation: str,
+    tool: str,
 ) -> None:
+    """The listing that gates the command must not be returned as its result.
+
+    The probe listing runs first, on its own, and every command above it stops
+    when that listing is not an overall success. A listing whose action log could
+    not be written is exactly that case, and it is still `ok: True` with the
+    headline of a successful enumeration, so returning it unchanged handed the
+    caller a flash result saying `ok: true`, no `error_type`, and "1 connected
+    debugger probe(s) detected." for a flash that never ran. Two readers inside
+    the product test `ok` rather than the documented predicate, so that document
+    became a proven symbol source and made a capture wait for a boot banner.
+
+    So the gate has to name its own refusal: `ok: false` with `audit_unavailable`
+    beside the `target_contacted: false` / `retry_safe: true` markers the
+    refusal contract requires, the tool it refused, and the enumeration's own
+    evidence (the probes it did read, its log path, the decisive audit error
+    line) kept where a reader can still see what happened.
+    """
     from agentic_hil.backends.common import CompletedCommand
 
     executable = tmp_path / "pyocd.exe"
@@ -365,6 +391,26 @@ def test_probe_selector_audit_failure_blocks_every_target_command(
     assert commands[0][-3:] == ["json", "--probes", "--no-config"]
     assert failure["audit_ok"] is False
     assert overall_success(failure) is False
+    # A named refusal, not the listing wearing the command's name: the two
+    # readers inside the product that test `ok` have to see this one fail too.
+    assert failure["ok"] is False, failure
+    assert failure["error_type"] == "audit_unavailable", failure
+    assert failure["tool"] == tool, failure
+    assert tool in failure["summary"], failure["summary"]
+    assert "probe listing" in failure["summary"], failure["summary"]
+    # The enumeration's success headline must not stand as this command's.
+    assert "detected" not in failure["summary"], failure["summary"]
+    # The markers the refusal contract requires of a failure that proves no
+    # hardware contact, which the listing's own NOT_CONTACTED fields carry.
+    assert failure["target_contacted"] is False, failure
+    assert failure["side_effect_committed"] is False, failure
+    assert failure["side_effect_status"] == "not_started", failure
+    assert failure["hardware_state"] == "unchanged", failure
+    assert failure["retry_safe"] is True, failure
+    # The evidence the enumeration did collect, and the decisive error line.
+    assert failure["probes"] == [{"probe_id": "PYOCD123"}], failure
+    assert failure["log_path"], failure
+    assert failure["audit_error"]["backend_error"] == "could not persist pyOCD action log", failure
 
 
 def test_recorded_stlink_usb_timeout_replays_as_not_contacted_probe_discovery_failure(

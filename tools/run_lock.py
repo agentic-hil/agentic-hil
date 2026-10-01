@@ -37,8 +37,10 @@ board. `run` holds it for one command's life and exits with the command's
 status. Their lines withhold this machine's name, home directory and user the
 way `bench_in_container.py` withholds its own, because a workflow's log is
 public. Exit statuses: 0 done, 1 the lock was lost before `give-back`, 2
-refused, 5 `--no-wait` met a held machine, 127 the command could not start,
-130 interrupted while waiting, and otherwise the command's own.
+refused, 5 a held machine this run would not queue behind (`--no-wait` met a
+holder, or a record only an operator can clear, which nothing queues behind),
+127 the command could not start, 130 interrupted while waiting, and otherwise
+the command's own.
 
 Who reads the lock file: those three scripts and this module's own command,
 and nothing else. It is written by one of them on an operator's own machine,
@@ -129,7 +131,10 @@ LOCK_NOTICE_INTERVAL_S = 60.0
 # -- onto a daemon the leftover container never left, the starvation this whole
 # file exists to prevent. `stale_reason` never breaks a record carrying this,
 # and `holder_notice` explains it: it is cleared by an operator who has stopped
-# the container, never automatically.
+# the container, never automatically. It is also the one record `acquire` refuses
+# rather than queues on, however it was told to wait: nothing a waiting run can
+# wait for clears a record only an operator clears, so a queue here is a queue
+# with no end (see `acquire`).
 CLEANUP_REQUIRED_FIELD = "cleanup_required"
 # The version stamped onto a cleanup-required record, and the whole reason the
 # field above is not enough on its own. A reader on this checkout refuses a
@@ -332,8 +337,9 @@ def holder_notice(record: dict | None, path: Path | None = None) -> str:
         # only way out is an operator who has stopped that container.
         return (
             f"{text}. That run exited with a container it could not confirm removed, so the machine is still in "
-            f"use and this lock is not taken over from here: {cleanup} Once no container of these tools is "
-            "running, remove the lock file by hand"
+            f"use and this lock is not taken over from here: {cleanup} No wait clears a record like this one, so "
+            "a run that meets it is refused rather than queued behind it, whether or not it was told to wait. "
+            "Once no container of these tools is running, remove the lock file by hand"
         )
     if record.get("version") != LOCK_RECORD_VERSION:
         return f"{text}. That record was written by a different version of this tool, so its holder is not judged from here"
@@ -369,7 +375,11 @@ def stale_reason(record: dict | None, path: Path) -> str | None:
     and the machine is still in use anyway, because the run that left it could not
     confirm its container removed. Liveness is exactly the wrong question there,
     so it is not asked; an operator stops the container and clears the file (see
-    `RunLock.retain_for_cleanup`).
+    `RunLock.retain_for_cleanup`). Not breakable is not the same as worth waiting
+    for, and the two answers part company here: `acquire` refuses that record
+    instead of queueing on it, because nothing it could wait for would ever clear
+    it. This function's answer stays None, which is the whole of what it is asked:
+    whether the lock may be removed.
     """
     if record is None:
         return None
@@ -462,7 +472,14 @@ def _machine_wide_guard(path: Path):
 
 
 class RunLockBusy(RuntimeError):
-    """Somebody else holds the machine, and the refusal names them."""
+    """Somebody else holds the machine, and the refusal names them.
+
+    Two endings raise it, and `holder_notice` tells them apart in the one place
+    the message is built: a holder this run was not willing to queue behind, and a
+    record marked for cleanup, which no run queues behind at all. `record` is kept
+    so a caller that wants to say which of the two this was can read
+    `CLEANUP_REQUIRED_FIELD` off it rather than reading the sentence back.
+    """
 
     def __init__(self, record: dict | None, path: Path | None = None):
         super().__init__(holder_notice(record, path))
@@ -538,7 +555,10 @@ class RunLock:
     def acquire(self, *, wait: bool = True) -> None:
         """Hold the machine, queueing behind a live holder if asked to.
 
-        Raises RunLockBusy when a live holder is in the way and `wait` is false.
+        Raises RunLockBusy when a live holder is in the way and `wait` is false,
+        and whenever the record in the way is one marked for cleanup, `wait` or
+        no `wait`: waiting is how a run gets past a holder that finishes, and that
+        record's holder has already finished (see the branch below).
         """
         said: set[str] = set()
         announced_at: float | None = None
@@ -566,6 +586,23 @@ class RunLock:
                     # long as it waits.
                     self.held = True
                     return
+                if record and record.get(CLEANUP_REQUIRED_FIELD):
+                    # The one holder a run is refused by even when it asked to
+                    # queue. Every other wait ends because the holder finishes;
+                    # this holder finished already and left the mark precisely
+                    # because the machine outlived it, so the only thing that
+                    # clears the file is an operator who has stopped the leftover
+                    # container. A run that queued here would poll every two
+                    # seconds, with no age bound and no way through, until
+                    # whatever limit its caller has: the nightly's four hours at
+                    # the step that takes the lock, spent without anything
+                    # reaching the board, and the same again for every run behind
+                    # it until somebody removed the file by hand. Failing in
+                    # seconds carries the record's own line about what is still on
+                    # the machine to whoever reads the log instead (see
+                    # `holder_notice`). The record itself is untouched: still
+                    # never broken, only never queued on.
+                    raise RunLockBusy(record, self.path)
                 stale = stale_reason(record, self.path)
                 if stale is not None:
                     if stale not in said:
@@ -622,10 +659,13 @@ class RunLock:
         declining to delete is not enough -- this process is about to exit, and
         the next run judges a record whose pid is no longer running stale and
         breaks it (see `stale_reason`). So the record is rewritten in place to one
-        carrying `CLEANUP_REQUIRED_FIELD`, which neither `stale_reason` nor a
-        waiting acquirer will take over: the machine stays held until an operator
-        stops the leftover container and removes the file by hand. `detail` is
-        what that operator, and the next run's queue notice, are told about it.
+        carrying `CLEANUP_REQUIRED_FIELD`, which no acquirer will take over: the
+        machine stays held until an operator stops the leftover container and
+        removes the file by hand. A run that meets it is refused there and then
+        rather than queued behind it, because a queue behind this record could
+        only end when that operator arrived (see `acquire`). `detail` is what that
+        operator, and the refusal the next run leaves in its log, are told about
+        it, so it has to name what was left running and what clears it.
 
         The rewrite also restamps the record's `version` to
         `LOCK_CLEANUP_RECORD_VERSION`. The cleanup field holds this checkout's
@@ -804,7 +844,15 @@ def take(options: argparse.Namespace, say: Callable[[str], None]) -> int:
 
 
 def give_back(options: argparse.Namespace, say: Callable[[str], None]) -> int:
-    """Return what `take` took, and nothing that is not its own."""
+    """Return what `take` took, and nothing that is not its own.
+
+    The owner id is the whole of "its own": it is the one thing in a record that
+    tells this take's lock from the lock of a run that took the machine after it.
+    An absent id is therefore not something to compare, it is something to stop
+    on, and the refusal says so out loud. Two absent ids compare equal, which
+    would make this remove a lock it has no claim to and report a clean give back
+    while another run is mid-container on the board.
+    """
     state = Path(options.state)
     kept = read_lock_record(state)
     if kept is None:
@@ -813,7 +861,28 @@ def give_back(options: argparse.Namespace, say: Callable[[str], None]) -> int:
     try:
         path = lock_path()
         record = read_lock_record(path)
-        if record and record.get("owner_id") == kept.get("owner_id"):
+        mine = kept.get("owner_id")
+        if mine is None:
+            # Every take this command writes publishes an owner id before it
+            # acquires anything, so a state file without one was written by
+            # another version of this command or has been edited since. Either
+            # way nothing here can prove what is at `path` is the lock this take
+            # took, so it is left standing, and the reason is the decisive line:
+            # not "the lock was lost", which names the wrong side, but that this
+            # side carries no id to match it by.
+            held = kept.get("held") is True
+            say(
+                f"the take recorded in {state} carries no owner id, so nothing here can tell the lock at {path} "
+                "from one another run took since, and a lock this command cannot recognise is never removed. "
+                + (
+                    "This job recorded holding the machine, so it may have shared the board; once no run is using "
+                    "the machine, remove the lock file by hand"
+                    if held
+                    else "That take never recorded holding the machine, so there is nothing to give back"
+                )
+            )
+            return EXIT_LOST if held else 0
+        if record and record.get("owner_id") == mine:
             with suppress(FileNotFoundError):
                 os.unlink(path)
             say("gave the machine back")
@@ -836,12 +905,31 @@ def run_holding(command: list[str], say: Callable[[str], None]) -> int:
     """Run `command` to its end; its status, as a shell reports it.
 
     This process must not end before the command does, or the machine would be
-    handed on while the command still uses it. An interrupt from a terminal
-    reaches the command too, as part of the foreground process group, so it is
-    the command's to act on, and this keeps waiting while the command cleans
-    up. A termination sent to this process alone is passed on, and the wait
-    goes on the same way. Only a kill ends this first, and the record then
-    names a dead process, which the next run breaks as stale.
+    handed on while the command still uses it. So every signal it can catch that
+    means "stop" is passed on to the command and the wait goes on: the command is
+    the one that has to put the board back, and this holds the lock until it says
+    it is finished. Only a kill ends this first, and the record then names a dead
+    process, which the next run breaks as stale.
+
+    Both signals are passed on, not only the termination. A supervisor that stops
+    one process rather than a process group, which is how a workflow runner
+    cancels or times out a step, sends the interrupt to this pid alone: nothing of
+    it reaches the command by any other route, so a wrapper that swallowed it
+    would leave a board command running untouched for the whole grace window and
+    then be killed with the board part way through whatever it was doing. That
+    this process usually also sits in the terminal's foreground group, where the
+    interrupt reaches the command anyway, is exactly the assumption that made the
+    interrupt look handled and is true only at a terminal.
+
+    The command deliberately stays in this process' group: `start_new_session`
+    would buy one delivery instead of two for a terminal interrupt and would cost
+    the group's own reach, which is the last thing that stops the command when
+    this process is killed outright rather than signalled. Double delivery is the
+    cheaper side of that trade, and for these two signals it is nearly free: the
+    second one says what the first said, to a command that is already stopping,
+    and a command too rushed by it to finish cleaning up was going to be killed
+    seconds later anyway. That is the same bargain the termination has always been
+    passed on under, and this only stops making an exception of the interrupt.
     """
     child: subprocess.Popen[bytes] | None = None
     pending: list[int] = []
@@ -858,9 +946,22 @@ def run_holding(command: list[str], say: Callable[[str], None]) -> int:
 
     # Handlers rather than SIG_IGN, installed before the command starts: an
     # ignored signal would be inherited by the command, a handler is not.
-    previous = {signal.SIGINT: signal.signal(signal.SIGINT, keep_waiting)}
-    if os.name != "nt":
-        previous[signal.SIGTERM] = signal.signal(signal.SIGTERM, pass_on)
+    #
+    # Windows keeps the older treatment of the interrupt, because there it is
+    # true: a console interrupt is an event every process attached to the console
+    # receives, so the command already has it, and `send_signal` cannot pass one
+    # on there in any case (it accepts the console events, not SIGINT). The
+    # handler is still installed rather than left at its default, so this process
+    # keeps waiting for the command instead of dying first and handing the machine
+    # on mid-cleanup. A termination there is `TerminateProcess`, which no process
+    # can answer, so there is nothing to install for it.
+    if os.name == "nt":
+        previous = {signal.SIGINT: signal.signal(signal.SIGINT, keep_waiting)}
+    else:
+        previous = {
+            signal.SIGINT: signal.signal(signal.SIGINT, pass_on),
+            signal.SIGTERM: signal.signal(signal.SIGTERM, pass_on),
+        }
     try:
         try:
             child = subprocess.Popen(command)

@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -635,6 +636,75 @@ def test_a_cubeprogrammer_archive_selects_its_separate_image_target(
     assert machine.runtime.context_inputs == {
         bench_in_container.CUBEPROGRAMMER_CONTEXT_PATH.as_posix(): digest
     }
+
+
+@pytest.mark.parametrize("distribution", list(bench_in_container.DISTRIBUTIONS))
+def test_a_cubeprogrammer_archive_on_another_distribution_is_refused_before_anything_is_built(
+    machine: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, distribution: str
+) -> None:
+    """A combination the tool accepted and could not meet, after paying for a base build.
+
+    `compose_dockerfile` takes the default file from its first `WORKDIR` on, which
+    includes the optional CubeProgrammer stage, so that stage really is built on
+    whatever base the head brought, and `--cubeprogrammer-archive` asks for it by
+    `--target`. Its package install is the default base's: `apt-get` does not
+    exist on Fedora, and `libglib2.0-0t64` is in neither Ubuntu 22.04 nor Debian
+    12. Ubuntu 24.04 does carry that package, and is refused for the other
+    reason: the layer is only built and recorded against the default image's own
+    base, and nothing here has measured it anywhere else. Left to run, it failed
+    loudly, so nothing green came out of it, but only after the whole shared part
+    had been built. This is the same up-front refusal `--live-device-tree` gets
+    when the runtime is not podman.
+    """
+    archive = tmp_path / "SetupSTM32CubeProgrammer_linux_64.zip"
+    archive.write_bytes(b"test installer archive")
+    monkeypatch.setattr(bench_in_container, "CUBEPROGRAMMER_ARCHIVE_SHA256", hashlib.sha256(archive.read_bytes()).hexdigest())
+
+    status = run(machine, "--build-only", "--distribution", distribution, "--cubeprogrammer-archive", str(archive))
+
+    assert status == bench_in_container.EXIT_CANNOT_RUN_HERE
+    assert machine.runtime.commands == []
+    said = capsys.readouterr().err
+    assert "--cubeprogrammer-archive cannot be combined with --distribution" in said, said
+    assert distribution in said, said
+    assert "nothing was built" in said, said
+    # The reason this head is refused for, and not another head's: a sentence that
+    # says a head lacks a package it has sends the operator after the wrong thing.
+    assert bench_in_container.CUBEPROGRAMMER_HEAD_REFUSALS[distribution] in said, said
+    # And the lock was never taken, so a refused combination cannot make the next
+    # run queue behind it.
+    assert not run_lock.lock_path().exists()
+
+
+def test_each_distribution_head_is_refused_the_optional_layer_for_a_reason_that_is_true_of_it() -> None:
+    """One reason per head, and no reason that is not that head's.
+
+    The refusal said the optional layer "names a Debian trixie library, which no
+    distribution head here carries", and Ubuntu 24.04 carries `libglib2.0-0t64`:
+    noble completed the 64-bit `time_t` transition and that is the package name
+    there. That head was being told it lacks a library it has, which is a sentence
+    an operator cannot act on, and the comment beside it called the same head the
+    default image's own base, which it is not: the default image is built on
+    `docker.io/library/python`, a Debian, and that head is Ubuntu.
+
+    The library is named only where it is really missing. For the head that has
+    it, the honest reason is the one the whole optional layer rests on: it is built
+    and recorded against the default base alone, and no build of it anywhere else
+    has been measured.
+    """
+    reasons = bench_in_container.CUBEPROGRAMMER_HEAD_REFUSALS
+
+    assert set(reasons) == set(bench_in_container.DISTRIBUTIONS), reasons
+    assert "apt-get" in reasons["fedora-44"], reasons["fedora-44"]
+    for head in ("ubuntu-22.04", "debian-12"):
+        assert "libglib2.0-0t64" in reasons[head], reasons[head]
+    # The head that carries the package is not told it is missing, and the layer's
+    # one measured base is named instead.
+    noble = reasons["ubuntu-24.04"]
+    assert "libglib2.0-0t64" not in noble, noble
+    assert "python:3.12-slim" in noble, noble
+    # And no head is told that none of them carries it.
+    assert not any("no distribution head" in reason for reason in reasons.values()), reasons
 
 
 def test_earlier_images_of_the_tier_are_pruned_after_the_build(machine: SimpleNamespace) -> None:
@@ -1452,8 +1522,59 @@ def test_the_f446_pack_install_checks_its_own_result_and_starts_over_from_an_emp
     assert text.index(check) > end, "the offline check must follow the install step"
 
 
+def ignore_patterns() -> list[str]:
+    return [line.strip() for line in IGNORE_FILE.read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
+
+
+def _one_pattern(pattern: str) -> re.Pattern[str]:
+    """One ignore pattern as the build's own matcher reads it.
+
+    `*` and `?` stop at a path separator and `**` crosses them, which is the one
+    place this differs from `fnmatch`, whose `*` would cross and quietly make
+    every assertion below weaker than it looks. The trailing slash is dropped
+    before the comparison, which is exactly why a directory pattern also matches
+    the directory itself and therefore every path beneath it.
+    """
+    body, index = "", 0
+    text = pattern.rstrip("/")
+    while index < len(text):
+        if text.startswith("**", index):
+            body, index = body + ".*", index + 2
+        elif text[index] == "*":
+            body, index = body + "[^/]*", index + 1
+        elif text[index] == "?":
+            body, index = body + "[^/]", index + 1
+        else:
+            body, index = body + re.escape(text[index]), index + 1
+    return re.compile(f"^{body}$")
+
+
+def reaches_the_daemon(patterns: list[str], path: str) -> bool:
+    """Whether one context path is sent to the build, the way moby decides it.
+
+    Patterns are read in order and the last one that matches wins, and a pattern
+    matches a path when it matches that path *or any of its parents*, which holds
+    for a re-inclusion as much as for an exclusion. That parent rule is the whole
+    of the widening this file used to carry: a bare `!tools/` matched the parent of
+    everything under `tools`, so the tree came in whole and the leaves named after
+    it decided nothing.
+    """
+    ancestors = []
+    parts = path.split("/")
+    for index in range(1, len(parts)):
+        ancestors.append("/".join(parts[:index]))
+    ignored = False
+    for pattern in patterns:
+        admits = pattern.startswith("!")
+        if admits == ignored:
+            compiled = _one_pattern(pattern.removeprefix("!"))
+            if any(compiled.match(candidate) for candidate in (path, *ancestors)):
+                ignored = not admits
+    return not ignored
+
+
 def test_the_build_context_is_an_allowlist_of_what_the_tier_reads() -> None:
-    ignore = [line.strip() for line in IGNORE_FILE.read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
+    ignore = ignore_patterns()
 
     assert ignore[0] == "**", ignore
     admitted = {line.lstrip("!") for line in ignore if line.startswith("!")}
@@ -1467,6 +1588,66 @@ def test_the_build_context_is_an_allowlist_of_what_the_tier_reads() -> None:
         "tools/bench/install_cubeprogrammer.sh",
         "tools/bench/cubeprogrammer-auto-install.xml",
     } <= admitted, admitted
+
+
+def test_only_the_named_files_of_the_tools_tree_reach_the_context() -> None:
+    """The two trees whose leaves are named one by one really contribute only those leaves.
+
+    A directory let back in admits its whole subtree, so `!tools/` and
+    `!build-inputs/` re-admitted everything beneath them and the three leaf
+    patterns after them decided nothing: the whole `tools/` tree reached the
+    context and `COPY . /work` baked it into every bench image on every
+    distribution. Asserting that the leaf patterns are present could not see that,
+    because they were present and redundant; this asks what the matcher answers.
+    """
+    patterns = ignore_patterns()
+    needed = ("tools/bench/install_cubeprogrammer.sh", "tools/bench/cubeprogrammer-auto-install.xml", "build-inputs/cubeprogrammer.zip")
+    for path in needed:
+        assert reaches_the_daemon(patterns, path) is True, path
+    for path in (
+        "tools/bench_in_container.py",
+        "tools/run_lock.py",
+        "tools/ci_linux.py",
+        "tools/bench/README.md",
+        "tools/bench/Dockerfile",
+        "tools/bench/Dockerfile.dockerignore",
+        "tools/bench/distributions/fedora-44.Dockerfile",
+        "tools/bench/firmware/anything.c",
+        "tools/container/Dockerfile",
+        "build-inputs/anything-else.zip",
+    ):
+        assert reaches_the_daemon(patterns, path) is False, path
+    # And nothing under tools/ that the committed tree actually holds, beyond the
+    # two files the optional stage copies, comes in with it.
+    tools = REPOSITORY_ROOT / "tools"
+    reaching = sorted(
+        entry.relative_to(REPOSITORY_ROOT).as_posix()
+        for entry in tools.rglob("*")
+        if entry.is_file() and reaches_the_daemon(patterns, entry.relative_to(REPOSITORY_ROOT).as_posix())
+    )
+    assert reaching == sorted(name for name in needed if name.startswith("tools/")), reaching
+
+
+def test_the_trees_the_tier_runs_from_still_reach_the_context() -> None:
+    """The other direction, so emptying the two trees above cannot empty the rest.
+
+    `COPY . /work` is what puts the tier's own checkout in the image, so the
+    product, the suite and the demo have to arrive whole.
+    """
+    patterns = ignore_patterns()
+    for path in (
+        "pyproject.toml",
+        "src/agentic_hil/cli.py",
+        "src/agentic_hil/skills/agentic-hil/SKILL.md",
+        "tests/bench/test_bench_serial_peer.py",
+        "tests/bench/firmware/peer.c",
+        "tests/container/conftest.py",
+        "requirements/container.txt",
+        "examples/nucleo-f446re_demo/Makefile",
+    ):
+        assert reaches_the_daemon(patterns, path) is True, path
+    for path in ("src/agentic_hil/__pycache__/cli.cpython-312.pyc", "examples/nucleo-f446re_demo/build/firmware.elf", ".git/config"):
+        assert reaches_the_daemon(patterns, path) is False, path
 
 
 def test_cubeprogrammer_installer_is_an_optional_offline_image_layer() -> None:

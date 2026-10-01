@@ -106,8 +106,15 @@ def server_instructions(tools: AgenticHILToolService | UnprovisionedToolService)
     Asked of the service rather than of the file: an unprovisioned server binds
     the moment a configuration loads, so one whose file was written between its
     start and the host's first message answers every call as a configured server
-    and introduces itself as one."""
-    if isinstance(tools, UnprovisionedToolService) and tools.config is None:
+    and introduces itself as one.
+
+    A host that answers `roots/list` is asked for its folder only after this
+    answer, so the folder is not known yet. Such a server introduces itself as a
+    configured one: a registration that reaches every project is there for the
+    ones with a bench, where "start with project_config_create" regenerates what
+    the operator set up, and a folder without a configuration says so at the
+    first call, with the tool that generates one."""
+    if isinstance(tools, UnprovisionedToolService) and not tools.host_names_folders and tools.config is None:
         return UNPROVISIONED_SERVER_INSTRUCTIONS
     return SERVER_INSTRUCTIONS
 
@@ -332,6 +339,9 @@ def handle_method(request_id: Any, method: str, params: Any, tools: AgenticHILTo
         params_object = params_object_or_throw(params)
         requested_version = params_object.get("protocolVersion")
         negotiated_version = requested_version if requested_version in SUPPORTED_MCP_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSION
+        if isinstance(tools, UnprovisionedToolService):
+            capabilities = params_object.get("capabilities")
+            tools.host_names_folders = isinstance(capabilities, dict) and isinstance(capabilities.get("roots"), dict)
         return result_response(request_id, {"protocolVersion": negotiated_version, "capabilities": {"tools": {"listChanged": False}, "prompts": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}}, "serverInfo": {"name": "agentic-hil", "version": __version__}, "instructions": server_instructions(tools)})
     if method == "ping":
         return result_response(request_id, {})

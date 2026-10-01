@@ -3686,6 +3686,26 @@ def _proc_entry(
     (entry / "environ").write_bytes(b"".join(f"{item}\0".encode() for item in environment))
 
 
+def _scheme_paths(monkeypatch: pytest.MonkeyPatch, *, default: dict[str, Path], user: dict[str, Path]) -> None:
+    """`sysconfig` answering for the two install schemes a faked installation has.
+
+    Keyed by which scheme was asked for rather than by its name, because the name
+    differs per platform: a macOS framework build prefers `osx_framework_user`
+    where Linux answers `posix_user` and Windows `nt_user`. Any path this was not
+    given falls through to what this interpreter really answers, so a test states
+    only the directories its own installation is made of.
+    """
+    real_get_path = sysconfig.get_path
+
+    def get_path(name: str, scheme: str | None = None, *more: object, **named: object) -> str:
+        asked = user if scheme and scheme.endswith("_user") else default if scheme is None else {}
+        if name in asked:
+            return str(asked[name])
+        return real_get_path(name, *([scheme] if scheme else []), *more, **named)
+
+    monkeypatch.setattr("agentic_hil.upgrade.sysconfig.get_path", get_path)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="a POSIX venv's symlinked interpreter needs symlinks to reproduce")
 def test_a_linux_server_started_by_the_environments_own_python_is_found(
     monkeypatch: pytest.MonkeyPatch,
@@ -3817,6 +3837,13 @@ def test_a_linux_server_started_through_a_user_installations_console_script_is_f
     the script's `#!` line. The scripts pip installed beside it, run the same
     way, are the neighbours that stay unclaimed, and so is the upgrade, which
     runs through the very same console script.
+
+    The recorded installation's own scheme is faked too, because that is what
+    decides whose console script `<home>/.local/bin/agentic-hil` is: the package
+    sits in the recorded per-user `purelib`, which is what a
+    `pip install --user` install writes, and the per-user script directory is
+    therefore this installation's rather than the system `bin` beside the
+    interpreter.
     """
     from agentic_hil.upgrade import _processes_holding_installation
 
@@ -3849,23 +3876,162 @@ def test_a_linux_server_started_through_a_user_installations_console_script_is_f
     for pid, name in enumerate(neighbours, start=4300):
         _proc_entry(proc, pid, exe=image, cmdline=(str(python), str(user_scripts / name)))
     _proc_entry(proc, 4100, exe=image, cmdline=(str(python), str(user_scripts / "agentic-hil"), "upgrade", "--json"))
-    scripts_of = {None: here(interpreter["prefix"]) / "bin", "posix_user": user_scripts}
-    real_get_path = sysconfig.get_path
-
-    def get_path(name: str, scheme: str | None = None, *more: object, **named: object) -> str:
-        if name == "scripts" and scheme in scripts_of:
-            return str(scripts_of[scheme])
-        return real_get_path(name, *([scheme] if scheme else []), *more, **named)
-
+    user_purelib = here(interpreter["user_purelib"])
+    _scheme_paths(
+        monkeypatch,
+        default={"scripts": here(interpreter["prefix"]) / "bin", "purelib": here(interpreter["prefix"]) / "lib" / user_purelib.parent.name / "site-packages"},
+        user={"scripts": user_scripts, "purelib": user_purelib},
+    )
     monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
     monkeypatch.setattr("agentic_hil.upgrade.owning_manager", lambda: recording["upgrade"]["manager"])
-    monkeypatch.setattr("agentic_hil.upgrade.sysconfig.get_path", get_path)
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_site_directory", lambda: str(user_purelib))
     monkeypatch.setattr(sys, "prefix", str(here(interpreter["prefix"])))
     monkeypatch.setattr(sys, "executable", str(python))
     monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 4100)
     _proc_lists_the_reader(proc)
 
     assert _processes_holding_installation() == [{"pid": 4242, "image": str(image), "working_directory": str(project)}]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader needs the symlinks a POSIX host makes without privileges")
+def test_a_process_that_only_names_the_console_script_is_not_one_running_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An editor open on the launcher is not a server anybody has to restart.
+
+    A system or `--user` installation owns no prefix, so its console script is
+    the whole of what names its processes, and every absolute argument of every
+    process was read against it. An operator with `vim <prefix>/bin/agentic-hil`
+    open, or a backup running `cp <prefix>/bin/agentic-hil /tmp/`, therefore came
+    back under `restart_required_by`, and the upgrade asked for a text editor to
+    be restarted to adopt the new release, in exactly the field that exists to
+    name running servers.
+
+    What runs a console script is the kernel running its `#!` line: the script
+    lands in argv[1] and the interpreter that line names lands in argv[0]. Both
+    halves are required here, so the server is still found and the two processes
+    that merely hold the file open are not.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    proc = tmp_path / "proc"
+    prefix = tmp_path / "usr" / "local"
+    interpreter = prefix / "bin" / "python3.12"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("", encoding="utf-8")
+    python = prefix / "bin" / "python"
+    python.symlink_to(interpreter)
+    script = prefix / "bin" / "agentic-hil"
+    script.write_text(f"#!{python}\n", encoding="utf-8")
+    editor = tmp_path / "usr" / "bin" / "vim"
+    editor.parent.mkdir(parents=True)
+    editor.write_text("", encoding="utf-8")
+    copier = tmp_path / "usr" / "bin" / "cp"
+    copier.write_text("", encoding="utf-8")
+    # The recorded shape of a server started through the script, and the two
+    # shapes of a process that only has the file as an argument.
+    _proc_entry(proc, 4242, exe=interpreter, cmdline=(str(python), str(script), "mcp-stdio"))
+    _proc_entry(proc, 4300, exe=editor, cmdline=("vim", str(script)))
+    _proc_entry(proc, 4301, exe=copier, cmdline=(str(copier), str(script)))
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+    monkeypatch.setattr("agentic_hil.upgrade.owning_manager", lambda: "pip")
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+    monkeypatch.setattr(sys, "executable", str(python))
+    monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 1)
+    _proc_lists_the_reader(proc)
+
+    assert [holder["pid"] for holder in _processes_holding_installation() or []] == [4242]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader needs the symlinks a POSIX host makes without privileges")
+def test_a_checkout_venvs_upgrade_does_not_claim_a_user_installations_server(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two installations on one machine, and an upgrade that replaces one of them.
+
+    The setup this repository documents is `python -m pip install -e .` in a
+    checkout's virtual environment, beside the `~/.local/bin` installation an
+    agent host was registered against. The console script was looked for in every
+    install scheme at once, so the venv's upgrade named the user installation's
+    MCP server as a holder and answered `restart_required: true`, although it
+    never writes into `~/.local/bin` and restarting that server adopts nothing.
+    The same shape the other way round makes a `--user` installation claim the
+    server a root-installed `/usr/local/bin/agentic-hil` started.
+
+    Only the scheme this distribution is installed into is this installation's.
+    The venv's own server, which this upgrade does replace, is still named.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    proc = tmp_path / "proc"
+    system_python = tmp_path / "usr" / "bin" / "python3.12"
+    system_python.parent.mkdir(parents=True)
+    system_python.write_text("", encoding="utf-8")
+    checkout = tmp_path / "checkout" / ".venv"
+    (checkout / "bin").mkdir(parents=True)
+    checkout_python = checkout / "bin" / "python"
+    checkout_python.symlink_to(system_python)
+    checkout_script = checkout / "bin" / "agentic-hil"
+    checkout_script.write_text(f"#!{checkout_python}\n", encoding="utf-8")
+    user_scripts = tmp_path / "home" / "bench" / ".local" / "bin"
+    user_scripts.mkdir(parents=True)
+    user_script = user_scripts / "agentic-hil"
+    user_script.write_text(f"#!{system_python}\n", encoding="utf-8")
+    _proc_entry(proc, 4242, exe=system_python, cmdline=(str(checkout_python), str(checkout_script), "mcp-stdio"))
+    _proc_entry(proc, 4343, exe=system_python, cmdline=(str(system_python), str(user_script), "mcp-stdio"))
+    _scheme_paths(
+        monkeypatch,
+        default={"scripts": checkout / "bin", "purelib": checkout / "lib" / "python3.12" / "site-packages"},
+        user={"scripts": user_scripts, "purelib": tmp_path / "home" / "bench" / ".local" / "lib" / "python3.12" / "site-packages"},
+    )
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+    monkeypatch.setattr("agentic_hil.upgrade.owning_manager", lambda: "pip")
+    monkeypatch.setattr(sys, "prefix", str(checkout))
+    monkeypatch.setattr(sys, "executable", str(checkout_python))
+    monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 1)
+    _proc_lists_the_reader(proc)
+
+    assert [holder["pid"] for holder in _processes_holding_installation() or []] == [4242]
+
+
+def test_an_installation_whose_own_location_cannot_be_read_keeps_every_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The narrowing fails safe: an unreadable installation offers what it always did.
+
+    Which install scheme's console script belongs to this installation is read
+    off the distribution's own metadata, and that read can come back with
+    nothing: a source tree on `sys.path`, a legacy develop install, a metadata
+    directory this account may not enter. None of those is a reason to refuse the
+    upgrade the operator typed, and none of them is a reason to name nobody
+    either, so both schemes' candidates stay on offer, which is what this did
+    before any scheme was chosen at all.
+    """
+    from agentic_hil.upgrade import _installation_console_scripts, _normalized_location
+
+    name = "agentic-hil.exe" if os.name == "nt" else "agentic-hil"
+    prefix = tmp_path / "usr" / "local"
+    user_scripts = tmp_path / "home" / "bench" / ".local" / "bin"
+    _scheme_paths(
+        monkeypatch,
+        default={"scripts": prefix / "bin", "purelib": prefix / "lib" / "python3.12" / "site-packages"},
+        user={"scripts": user_scripts, "purelib": tmp_path / "home" / "bench" / ".local" / "lib" / "python3.12" / "site-packages"},
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_site_directory", lambda: "")
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+    # A system interpreter, where the scheme is the open question. Inside a
+    # virtual environment it is not: nothing can have installed this distribution
+    # into a per-user site that `site` leaves off the path there.
+    monkeypatch.setattr(sys, "base_prefix", str(prefix))
+    monkeypatch.setattr(sys, "executable", str(prefix / "bin" / "python"))
+
+    scripts = _installation_console_scripts()
+
+    assert _normalized_location(prefix / "bin" / name) in scripts, scripts
+    assert _normalized_location(user_scripts / name) in scripts, scripts
 
 
 def test_a_relative_command_line_is_never_read_against_this_process_own_directory(

@@ -141,7 +141,7 @@ GREEN_PLAN = [
     {"action": "uart_write", "text": "PING\r\n"},
     {"action": "uart_expect", "text": "PONG", "timeout_s": 5},
     {"action": "uart_write", "text": "VERSION\r\n"},
-    {"action": "uart_read", "comparator": {"pattern": "^v(\\d+)\\.2\\.3", "range": {"min": 1, "max": 9}}, "timeout_s": 5},
+    {"action": "uart_read", "comparator": {"pattern": "(?m)^v(\\d+)\\.2\\.3", "range": {"min": 1, "max": 9}}, "timeout_s": 5},
     {"action": "uart_read"},
     {"action": "uart_close"},
 ]
@@ -154,7 +154,7 @@ FAILING_PLAN = [
 SHAPES_PLAN = [
     {"action": "uart_open"},
     {"action": "uart_write", "text": "VERSION\r\n"},
-    {"action": "uart_read", "comparator": {"pattern": "^v\\d+\\.\\d+\\.\\d+"}, "timeout_s": 5},
+    {"action": "uart_read", "comparator": {"pattern": "(?m)^v\\d+\\.\\d+\\.\\d+"}, "timeout_s": 5},
     {"action": "uart_write", "text": "VERSION\r\n"},
     {"action": "uart_read", "comparator": {"equals": "v1.2.3"}, "timeout_s": 5},
     {"action": "uart_write", "text": "COUNT\r\n"},
@@ -1344,7 +1344,7 @@ def test_a_pattern_an_equals_and_a_range_claim_are_each_met_by_the_line_they_des
     assert all(step["result"]["ok"] is True for step in result["steps"]), result["steps"]
 
     by_pattern = result["steps"][2]["result"]
-    assert by_pattern["comparator"] == {"pattern": "^v\\d+\\.\\d+\\.\\d+"}, by_pattern
+    assert by_pattern["comparator"] == {"pattern": "(?m)^v\\d+\\.\\d+\\.\\d+"}, by_pattern
     assert by_pattern["matched_text"]["text"] == "v1.2.3", by_pattern
     assert by_pattern["summary"] == "Expected pattern matched the COM port output.", by_pattern
 

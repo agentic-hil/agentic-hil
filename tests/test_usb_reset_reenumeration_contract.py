@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import importlib
 import json
 import os
@@ -522,3 +523,225 @@ def test_boot_read_stops_immediately_when_a_read_fails_the_continue_predicate() 
     with pytest.raises(pytest.fail.Exception):
         helper.read_demo_boot(server, "uart", timeout_s=2.0)
     assert server.calls == 1
+
+
+def a_node_that_exists(tmp_path: Path) -> tuple[Path, Path]:
+    """A sysfs entry for the configured probe and the usbfs node it derives."""
+    sysfs = tmp_path / "sys"
+    sysfs.mkdir()
+    usb_entry(sysfs, "1-2")
+    node = tmp_path / "dev" / "bus" / "usb" / "001" / "007"
+    node.parent.mkdir(parents=True)
+    node.write_bytes(b"")
+    return sysfs, tmp_path / "dev" / "bus" / "usb"
+
+
+def a_character_node(path: Path) -> SimpleNamespace:
+    """What `os.stat` answers for the node, on any host.
+
+    The node `a_node_that_exists` writes is a plain file, and Windows' stat has no
+    `st_rdev`, so the wait is handed the device node's stat the way the discovery
+    cases above are. The file still has to exist: absence is the wait's own case.
+    """
+    path.stat()
+    return SimpleNamespace(st_mode=stat.S_IFCHR | 0o660, st_rdev=0)
+
+
+def test_the_visibility_wait_also_requires_the_node_to_be_openable(tmp_path: Path) -> None:
+    """A stat that answers is not a node this account may open yet.
+
+    The kernel creates `/dev/bus/usb/BBB/DDD` at device registration, which is when
+    `os.stat` starts answering, and udev applies `MODE`, `GROUP` and `uaccess`
+    afterwards. A wait that returned on the stat alone handed the single-shot
+    `debugger_probes_list` behind it a node this account could not open, and
+    re-enumeration recreating that node is exactly what the stage induces.
+    """
+    helper = importlib.import_module(MODULE)
+    sysfs, dev_root = a_node_that_exists(tmp_path)
+    refusals = [PermissionError(13, "Permission denied"), PermissionError(13, "Permission denied"), None]
+    opened: list[str] = []
+    closed: list[int] = []
+    slept: list[float] = []
+
+    def open_fn(path: str, flags: int) -> int:
+        assert flags & os.O_RDWR, flags
+        opened.append(path)
+        refusal = refusals.pop(0)
+        if refusal is not None:
+            raise refusal
+        return 11
+
+    identity = helper.wait_for_usb_device(
+        sysfs_root=sysfs,
+        device_root=dev_root,
+        expected_serial=SERIAL,
+        expected_vid=VID,
+        expected_pid=PID,
+        timeout_s=12.0,
+        poll_interval_s=0.25,
+        sleep=slept.append,
+        open_fn=open_fn,
+        close_fn=closed.append,
+        stat_fn=a_character_node,
+    )
+
+    # Polled over the two refusals and returned on the open that worked.
+    assert len(opened) == 3 and set(opened) == {str(Path(identity.node_path))}, opened
+    assert slept == [0.25, 0.25], slept
+    # The one fd it did get is closed again: the open is the question, not a hold.
+    assert closed == [11], closed
+
+
+def test_a_node_that_never_becomes_openable_raises_rather_than_returning(tmp_path: Path) -> None:
+    """The bound is the same deadline, and what the wait gave up on is what it raises."""
+    helper = importlib.import_module(MODULE)
+    sysfs, dev_root = a_node_that_exists(tmp_path)
+    ticks = iter([0.0, 0.0, 6.0, 12.0, 12.0, 12.0])
+
+    def refuse(path: str, flags: int) -> int:
+        raise PermissionError(13, "Permission denied")
+
+    with pytest.raises(helper.USBDeviceNotOpenable) as refused:
+        helper.wait_for_usb_device(
+            sysfs_root=sysfs,
+            device_root=dev_root,
+            expected_serial=SERIAL,
+            expected_vid=VID,
+            expected_pid=PID,
+            timeout_s=12.0,
+            poll_interval_s=0.25,
+            clock=lambda: next(ticks),
+            sleep=lambda _seconds: None,
+            open_fn=refuse,
+            close_fn=lambda _fd: None,
+            stat_fn=a_character_node,
+        )
+
+    assert "could not be opened within the wait" in str(refused.value)
+    assert "errno=13" in str(refused.value)
+
+
+def test_an_open_refused_for_another_reason_is_not_waited_out(tmp_path: Path) -> None:
+    """Only absence and a permission refusal are timing; anything else is a refusal
+    this wait must not sit on, and raises at once with its own errno."""
+    helper = importlib.import_module(MODULE)
+    sysfs, dev_root = a_node_that_exists(tmp_path)
+    slept: list[float] = []
+
+    def refuse(path: str, flags: int) -> int:
+        raise OSError(errno.ENODEV, "No such device")
+
+    with pytest.raises(OSError) as refused:
+        helper.wait_for_usb_device(
+            sysfs_root=sysfs,
+            device_root=dev_root,
+            expected_serial=SERIAL,
+            expected_vid=VID,
+            expected_pid=PID,
+            timeout_s=12.0,
+            poll_interval_s=0.25,
+            sleep=slept.append,
+            open_fn=refuse,
+            close_fn=lambda _fd: None,
+            stat_fn=a_character_node,
+        )
+
+    assert refused.value.errno == errno.ENODEV
+    assert slept == [], slept
+
+
+def test_an_absent_node_still_raises_the_not_found_it_always_did(tmp_path: Path) -> None:
+    helper = importlib.import_module(MODULE)
+    sysfs = tmp_path / "sys"
+    sysfs.mkdir()
+    ticks = iter([0.0, 0.0, 12.0])
+
+    with pytest.raises(helper.USBDeviceNotFound):
+        helper.wait_for_usb_device(
+            sysfs_root=sysfs,
+            device_root=tmp_path / "dev",
+            expected_serial=SERIAL,
+            expected_vid=VID,
+            expected_pid=PID,
+            timeout_s=12.0,
+            poll_interval_s=0.25,
+            clock=lambda: next(ticks),
+            sleep=lambda _seconds: None,
+        )
+
+
+def test_the_reenumeration_stage_waits_for_the_configured_uart_before_it_opens_one() -> None:
+    """The tty half of the same gap, pinned on the stage's own helper.
+
+    `cdc_acm` creates `/dev/ttyACM*` after the usbfs node exists and udev corrects
+    the new node after that again, so the two single-shot calls about the tty
+    (`matching_available_port`, which hard-fails, and `com_session_start`, which
+    fails outright on EACCES because comports.py keeps it out of
+    PORT_BUSY_ERRNOS) were being asked at the instant the usbfs wait returned.
+    """
+    stage = importlib.import_module("tests.bench.usb_reset_reenumeration")
+    source = Path(stage.__file__).read_text(encoding="utf-8")
+
+    assert hasattr(stage, "wait_for_the_configured_uart")
+    # The wait comes first, and the single-shot calls read what it settled on.
+    # Offsets into the source, named `_at` rather than after the act: these are
+    # positions, not durations, and tests/test_scaled_time_bounds.py reads a
+    # comparison whose left side is named like a measured duration as a bare
+    # wall-clock ceiling. Keeping that vocabulary meaningful is worth more than
+    # the shorter name here.
+    wait_at = source.index("after_listing = wait_for_the_configured_uart(")
+    match_at = source.index("after_port = matching_available_port(after_listing", wait_at)
+    open_at = source.index('server.call("com_session_start"', wait_at)
+    assert wait_at < match_at < open_at, (wait_at, match_at, open_at)
+
+
+class FakeListingServer:
+    """The product's COM port listing, answering a different way on each poll."""
+
+    def __init__(self, listings: list[dict]) -> None:
+        self.listings = listings
+        self.calls = 0
+
+    def call(self, name: str, arguments: dict | None = None) -> tuple[str, dict]:
+        assert name == "com_ports_list", name
+        self.calls += 1
+        return name, self.listings[min(self.calls - 1, len(self.listings) - 1)]
+
+
+def a_listing(device: str | None) -> dict:
+    ports = [] if device is None else [{"device": device, "serial_number": SERIAL, "vid": 0x0483, "pid": 0x374B}]
+    return {"ok": True, "available_com_ports": {"ports": ports}}
+
+
+def test_the_uart_wait_polls_the_products_listing_until_the_node_is_there_and_openable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Three answers: no UART yet, a node this account may not open, then one it may."""
+    stage = importlib.import_module("tests.bench.usb_reset_reenumeration")
+    node = tmp_path / "ttyACM0"
+    node.write_bytes(b"")
+    server = FakeListingServer([a_listing(None), a_listing(str(node)), a_listing(str(node))])
+    answers = iter([False, True])
+    monkeypatch.setattr(stage.os, "access", lambda path, mode: next(answers))
+    monkeypatch.setattr(stage.time, "sleep", lambda _seconds: None)
+
+    listing = stage.wait_for_the_configured_uart(server, SERIAL, VID.lower(), PID.lower(), ())
+
+    assert server.calls == 3
+    assert stage.matching_available_port(listing, SERIAL, VID.lower(), PID.lower())["device"] == str(node)
+
+
+def test_the_uart_wait_is_bounded_and_leaves_the_refusal_to_the_call_after_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deadline is the only bound, and a UART that never came back is reported
+    by the single-shot call that follows, exactly as before this wait existed."""
+    stage = importlib.import_module("tests.bench.usb_reset_reenumeration")
+    server = FakeListingServer([a_listing(None)])
+    ticks = iter([0.0, 2.0, 2.0])
+    monkeypatch.setattr(stage.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(stage.time, "sleep", lambda _seconds: None)
+
+    listing = stage.wait_for_the_configured_uart(server, SERIAL, VID.lower(), PID.lower(), (), timeout_s=1.0)
+
+    assert listing == a_listing(None)
+    # `pytest.fail` raises `Failed`, which is what the single-shot call does with
+    # a listing that still names no UART: the wait never swallows that.
+    with pytest.raises(pytest.fail.Exception):
+        stage.matching_available_port(listing, SERIAL, VID.lower(), PID.lower())

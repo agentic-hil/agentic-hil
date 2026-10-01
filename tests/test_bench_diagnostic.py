@@ -364,3 +364,119 @@ def test_incident_recovery_check_is_an_explicit_preflight_before_the_standard_ga
     assert "!inputs.run_recovery_check" in withheld["if"]
     assert "steps.recovery_check.outcome == 'success'" in withheld["if"]
     assert "success()" not in withheld["if"]
+
+
+def test_a_pinned_digest_mismatch_names_itself_in_the_step_the_operator_reads(tmp_path, monkeypatch, capsys):
+    """The one signal in this file worth acting on differently, in the only surface it has.
+
+    `main` reported `{"downloaded": false, "error": "ValueError"}` and exit 1 for
+    all four of the provisioning failures: a pinned-digest mismatch, a size
+    mismatch, a missing token and a URL that is not the GitHub API. The workflow
+    step's log is the whole of what an operator gets, so a supply-chain signal was
+    indistinguishable from a secret that was never set. The function level already
+    said "SHA-256"; `main` threw it away.
+    """
+    helper = _load_helper()
+    monkeypatch.setattr(helper.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(helper, "collect_read_only_diagnostic", lambda: {"ok": True, "writes_performed": False})
+    monkeypatch.setattr(helper, "_download_release_asset", lambda asset_id, token, destination: destination.write_bytes(b"not the asset"))
+
+    status = helper.main(["--asset-id", "595488871"])
+
+    assert status == 1
+    report = json.loads(capsys.readouterr().out)["cubeprogrammer_cache"]
+    assert report["downloaded"] is False
+    assert report["error"] == "ValueError"
+    assert "SHA-256" in report["error_detail"], report
+    assert "pinned digest" in report["error_detail"], report
+
+
+def test_an_error_message_never_carries_this_machines_home_or_user(monkeypatch):
+    """Redacted, never removed, which is the rule the dropped message was breaking.
+
+    The case the caution was written for is an `OSError` whose text embeds a path
+    under the home directory. The values are matched whole, so a longer word that
+    merely contains one is left alone.
+    """
+    helper = _load_helper()
+    monkeypatch.setattr(helper.os.path, "expanduser", lambda path: "/home/benchrunner")
+    monkeypatch.setattr(helper.getpass, "getuser", lambda: "benchrunner")
+    monkeypatch.setattr(helper.socket, "gethostname", lambda: "bench-1.example.invalid")
+
+    line = helper.withheld(OSError(13, "Permission denied", "/home/benchrunner/.cache/agentic-hil/x.zip"))
+
+    assert "benchrunner" not in line, line
+    assert "bench-1" not in line, line
+    assert "Permission denied" in line, line
+    assert "[withheld]" in line, line
+    # Whole values only: a longer name that contains one is not this machine.
+    assert helper.withheld("benchrunnerless said no") == "benchrunnerless said no"
+
+
+def test_a_value_too_common_to_name_a_machine_is_left_in_the_error_line(monkeypatch):
+    """The other half of the rule: a word that identifies nothing is not taken out.
+
+    `Redactor` has kept this exclusion since it was written, because the account
+    on a hosted runner is `runner` and on this bench it is `bench`, and taking
+    either word out of an English sentence garbles the one line the operator
+    reads without withholding anything a reader could find a machine by. This
+    copy of the filter had the length test and not this one, so the product's own
+    sentence came out with a word missing.
+    """
+    helper = _load_helper()
+    # Not /home/runner, although that is the hosted runner's home: the patch
+    # reaches every `expanduser` in the process, and the suite's own guard
+    # rightly reads a profile path equal to the real one as an escape.
+    monkeypatch.setattr(helper.os.path, "expanduser", lambda path: "/srv/runner")
+    monkeypatch.setattr(helper.getpass, "getuser", lambda: "runner")
+    monkeypatch.setattr(helper.socket, "gethostname", lambda: "bench")
+
+    assert helper.withheld("bench runner discovery is unavailable") == "bench runner discovery is unavailable"
+    # The home directory is still a value worth withholding, word for word, even
+    # though the account name inside it is not.
+    line = helper.withheld(OSError(13, "Permission denied", "/srv/runner/.cache/agentic-hil/x.zip"))
+    assert "/srv/runner" not in line, line
+    assert "Permission denied" in line, line
+
+
+def test_what_is_too_common_to_withhold_is_one_list_with_the_bench_runners():
+    """The two copies of the filter, held to one value.
+
+    This helper runs from a checkout and imports nothing of the bench runner, so
+    the filter is copied rather than shared. Copying the length test and not the
+    word list is what put a hole in it, and a hole in exactly one direction: a
+    word too common to name a machine was taken out of the product's own
+    sentence.
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    try:
+        import bench_in_container
+    finally:
+        sys.path.pop(0)
+    helper = _load_helper()
+
+    assert helper.SHORTEST_WITHHELD == bench_in_container.SHORTEST_WITHHELD
+    assert helper.TOO_COMMON == bench_in_container.TOO_COMMON
+
+
+def test_the_read_only_half_carries_its_own_error_line_too(monkeypatch, capsys):
+    """The sibling path at the top of `main`, for the same reason: a sysfs scan that
+    failed says why, and the class alone said nothing an operator could act on."""
+    helper = _load_helper()
+    # Stated rather than inherited, the way the redaction test beside this one
+    # states them: the assertion is about the whole sentence, and a machine whose
+    # host or account happens to be one of its words would otherwise decide it.
+    monkeypatch.setattr(helper.os.path, "expanduser", lambda path: "/home/bench")
+    monkeypatch.setattr(helper.getpass, "getuser", lambda: "benchrunner")
+    monkeypatch.setattr(helper.socket, "gethostname", lambda: "bench-1.example.invalid")
+
+    def refuse():
+        raise RuntimeError("bench runner discovery is unavailable")
+
+    monkeypatch.setattr(helper, "collect_read_only_diagnostic", refuse)
+
+    assert helper.main([]) == 1
+
+    report = json.loads(capsys.readouterr().out)["diagnostic"]
+    assert (report["ok"], report["error"]) == (False, "RuntimeError")
+    assert report["error_detail"] == "bench runner discovery is unavailable"

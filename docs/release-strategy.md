@@ -85,8 +85,13 @@ the second it is asked. Each script names one uv release in its URL, carries the
 SHA-256 of exactly those bytes as a constant, and refuses to execute a download
 that is not those bytes. `install.sh` holds `UV_INSTALLER_VERSION` and
 `UV_INSTALLER_SHA256`; `install.ps1` holds `$UvInstallerVersion` and
-`$UvInstallerSha256`. All four move together, and the two scripts pin the same
-uv release; a static test refuses a tree where they disagree.
+`$UvInstallerSha256`. A third fetch site carries the same pin for the same
+reason: `evals/tls_proxy/container/Dockerfile` bootstraps uv in the TLS-proxy
+eval image and fetches the very file `install.sh` does, so its `ARG
+UV_INSTALLER_VERSION` and `ARG UV_INSTALLER_SHA256` are a copy of that script's
+pair rather than a second measurement. All five constants move together, and the
+three sites pin the same uv release; a static test refuses a tree where any of
+them disagrees.
 
 Refreshing the pin is a release chore and not an install-time one. An installer
 that went looking for a newer uv on the operator's machine would be back to
@@ -103,8 +108,12 @@ is brought forward, by a person who can look at what changed:
 3. Put the version and the two digests into install.sh and install.ps1. Never one
    without the other: a version without its digest fails every install, which is
    the intended failure mode and not a thing to work around.
-4. Run pytest tests/test_install_scripts.py, which checks the URL shape, the
-   presence of the digest check in both scripts, and that both name the same uv.
+4. Copy install.sh's version and digest into the ARG pair in
+   evals/tls_proxy/container/Dockerfile. It fetches the same file, so there is
+   nothing extra to hash.
+5. Run pytest tests/test_install_scripts.py, which checks the URL shape, the
+   presence of the digest check in both scripts, and that all three sites name
+   the same uv.
 ```
 
 A stale pin is safe, not broken: it installs an older uv, which then upgrades

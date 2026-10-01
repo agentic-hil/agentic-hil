@@ -891,7 +891,7 @@ class PyOCDBackend:
 
         listed = self._enumerate_probes(tool)
         if not overall_success(listed):
-            return listed
+            return self._listing_refusal(tool, listed)
         available = [str(probe.get("probe_id", "")) for probe in listed["probes"]]
         needle = debugger.probe_id.split(":", 1)[1] if ":" in debugger.probe_id else debugger.probe_id
         matches = [uid for uid in available if needle.lower() in uid.lower()]
@@ -910,6 +910,47 @@ class PyOCDBackend:
             return self._probe_identity_collision_error(tool, debugger.probe_id, matches[0], *collision)
         self._resolved_probe_uid = matches[0]
         return {"ok": True, "uid": matches[0]}
+
+    def _listing_refusal(self, tool: str, listed: JsonObject) -> JsonObject:
+        """The probe listing that gated `tool`, as a refusal of `tool` itself.
+
+        Every command above this gate stops on `overall_success`, and returns
+        this document as its own result. A listing that failed outright is
+        already a refusal and is handed back unchanged. A listing that succeeded
+        and could not be *audited* is not: `mark_audit_failure` adds `audit_ok:
+        false` and leaves `ok: true` with the headline of a successful
+        enumeration, so returning it unchanged answered a flash that never ran
+        with `ok: true`, no `error_type` and "1 connected debugger probe(s)
+        detected.". The refusal contract wants a failure that proves no hardware
+        contact to carry a named error beside `target_contacted: false` and
+        `retry_safe: true`, and two readers inside the product test `ok` rather
+        than the documented predicate: the flash path remembers a confirmed
+        image as the bench's symbol source, and a capture waits the whole
+        timeout for a boot banner. Both of them have to see this fail.
+
+        `audit_unavailable` names it, the same error every other tool gives when
+        it will not touch hardware it cannot record touching, and it is the whole
+        of what can have failed here: the enumeration's success document states
+        nothing about the bench except NOT_CONTACTED, which is green in every
+        field, so the audit is the only check it can fail while still saying
+        `ok: true`. A marker added to that document later would need its own
+        error here, which is why this reads the listing rather than the flag.
+
+        The listing is kept whole underneath (the probes it did read, its log
+        path, pyOCD's own output, the decisive audit error line): the command did
+        not run, and the enumeration that stopped it is the evidence for why, so
+        none of it is dropped on the way out.
+        """
+        if listed.get("ok") is not True:
+            return listed
+        return {
+            **listed,
+            "ok": False,
+            "tool": tool,
+            "error_type": "audit_unavailable",
+            "summary": f"{tool} was not started: the probe listing it needs succeeded, but its action log could not be written.",
+            **remediation_fields("audit_unavailable", self.backend_name),
+        }
 
     def _cross_debugger_identity_collision(self, resolved_uid: str, available: list[str]) -> tuple[str, str] | None:
         """The other configured debugger, if any, whose own probe_id resolves to
