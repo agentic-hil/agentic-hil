@@ -215,9 +215,11 @@ Three notes on that call:
 
 A changed `type` is a device description like any other, so the running server keeps answering out of the configuration it loaded until `project_config_reload_description` or a restart.
 
+What the switch keeps: `openocd` and `pyocd` both open typed debug sessions, each through its own GDB server (OpenOCD's, and `pyocd gdbserver` on a port the server reserves for the session), so moving between those two keeps every session tool with the same payloads; only `reset_target` mode `init` stays with OpenOCD. Moving to `stlink` keeps flashing, resets, probing and the three symbol reads, and the session tools refuse there with `not_supported`, naming the way back.
+
 ### Naming the GDB this bench reads with
 
-`debug.gdb_executable` says which GDB reads this bench's images: the typed debug session's server, and the offline symbol resolution the stlink and pyocd memory reads run against the flashed ELF before they touch the target. It is in the description half beside `debuggers.<name>.executable`, for the same reason: it is a toolchain on this host, at a location only this host can state, and it grants nothing that the debug permissions beside it do not already decide.
+`debug.gdb_executable` says which GDB reads this bench's images: the one every typed debug session connects to the backend's GDB server with, on openocd and pyocd alike, and the offline symbol resolution the stlink and pyocd memory reads run against the flashed ELF before they touch the target. It is in the description half beside `debuggers.<name>.executable`, for the same reason: it is a toolchain on this host, at a location only this host can state, and it grants nothing that the debug permissions beside it do not already decide.
 
 Left `null` it is not a hole. Every caller that needs GDB then resolves one on the PATH the server was started with, trying `arm-none-eabi-gdb`, `gdb-multiarch` and `gdb` in that order, which is what a generated configuration relies on, because generation writes `null` whenever the generating shell had no GDB on its own PATH. Name it when that fallback cannot answer or answers with the wrong one:
 
