@@ -7370,7 +7370,7 @@ def test_a_deny_pattern_names_a_filesystem_path_on_either_platform() -> None:
     https://code.claude.com/docs/en/permissions.
     """
     assert _posix_filesystem_path(PureWindowsPath(r"C:\Users\alice\.agentic-hil")) == "/c/Users/alice/.agentic-hil"
-    assert _posix_filesystem_path(PurePosixPath("/home/hpauli/.config/agentic-hil")) == "/home/hpauli/.config/agentic-hil"
+    assert _posix_filesystem_path(PurePosixPath("/home/alice/.config/agentic-hil")) == "/home/alice/.config/agentic-hil"
     # A colon deeper in a POSIX path is not a drive letter.
     assert _posix_filesystem_path(PurePosixPath("/home/h/a:b/state")) == "/home/h/a:b/state"
 
@@ -8410,8 +8410,8 @@ def _opencode_permission_file(home: Path) -> Path:
     return path
 
 
-_OPENCODE_HOME = PurePosixPath("/home/hpauli")
-_OPENCODE_CONFIG_DIR = _OPENCODE_HOME / ".config" / "agentic-hil" / "projects" / "stepper_module_s_3"
+_OPENCODE_HOME = PurePosixPath("/home/alice")
+_OPENCODE_CONFIG_DIR = _OPENCODE_HOME / ".config" / "agentic-hil" / "projects" / "blinky"
 
 
 def test_setup_writes_no_opencode_restriction_and_says_so(
