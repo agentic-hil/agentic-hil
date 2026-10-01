@@ -674,14 +674,16 @@ def test_the_evidence_is_built_from_this_runs_own_report() -> None:
 
     A plan refused before its first step leaves the shared file holding an
     earlier run's report, so a job that read it would publish that report under
-    this run's name. `--json` is written on every path, a refusal included.
+    this run's name. `--json` is written on every path, a refusal included, and
+    it reaches the file as the plan wrote it, through the withholding wrapper's
+    `--stdout-file` (see the withholding tests below).
     """
     lines = run_lines(bench_job())
     plan = lines[line_index(lines, "agentic-hil test-reactor")]
     evidence = lines[line_index(lines, "agentic-hil run-evidence")]
 
     assert "--json" in plan
-    report = plan.split(">", 1)[1].strip()
+    report = option_value(shlex.split(plan), "--stdout-file")
     assert report, plan
     assert f"--report {report}" in evidence
     assert " --out " in evidence
@@ -738,11 +740,15 @@ def test_a_command_that_goes_through_the_tool_is_accepted(command: str) -> None:
 
 
 def test_the_bench_run_uploads_its_evidence_whatever_the_run_did() -> None:
-    """The red run is the one whose evidence matters most, and it is kept."""
+    """The red run is the one whose evidence matters most, and it is kept.
+
+    Whatever the run did, once what names the bench has been withheld from it:
+    the condition is the one the withholding tests below hold.
+    """
     upload = [step for step in bench_job()["steps"] if "upload-artifact" in str(step.get("uses", ""))]
 
     assert len(upload) == 1, upload
-    assert upload[0]["if"] == "always()"
+    assert upload[0]["if"] == UPLOAD_ONCE_WITHHELD
     assert upload[0]["with"]["retention-days"] == 14
     assert f"{DEMO_DIRECTORY}/artifacts/" in upload[0]["with"]["path"]
 
@@ -847,6 +853,80 @@ def test_the_wait_for_the_machine_never_eats_into_the_time_the_jobs_work_has() -
 
     assert isinstance(step["timeout-minutes"], int), step
     assert bench_job()["timeout-minutes"] == step["timeout-minutes"] + BENCH_WORK_MINUTES
+
+
+# What names the bench, kept out of what anybody can read. The job's log and its
+# uploaded evidence are public, and doctor, the plan's report, the OpenOCD logs
+# and the port logs name the probe by its serial number and the machine by its
+# paths. tools/withhold.py withholds both the way tools/bench_in_container.py
+# does in the gate's log and the distributions' reports, by the runner's own
+# withholding: every command this job runs on the board runs through it, and the
+# evidence is withheld in place before it is uploaded.
+WITHHOLD = "tools/withhold.py"
+# The id of the step that withholds the evidence, and the upload's condition:
+# whatever the run did, as before, and only once that step has succeeded.
+WITHHOLD_STEP_ID = "withhold"
+UPLOAD_ONCE_WITHHELD = "${{ always() && steps.withhold.outcome == 'success' }}"
+# What the bench job runs on its own that names nothing: the release's number.
+NAMES_NOTHING = (["agentic-hil", "--version"],)
+
+
+def withheld_commands(step: dict) -> list[list[str]]:
+    """Every command line a step runs, as words."""
+    return [shlex.split(line) for line in run_lines({"steps": [step]})]
+
+
+def test_every_command_the_bench_job_runs_on_the_board_prints_through_the_withholding() -> None:
+    """Doctor, the plan, the pytest variant and the evidence, each through `withhold.py run`.
+
+    Doctor names the probe by its serial number and the port by a link that
+    carries it, a red plan or a failing test says which probe it was, and the
+    evidence says where the reports were. Each is run by the wrapper, which
+    prints both its streams withheld and exits with the command's status, so a
+    red step stays red. Only the release's number is printed directly.
+    """
+    wrapped = []
+    for step in bench_job()["steps"]:
+        for command in withheld_commands(step):
+            if not ({"agentic-hil", "pytest"} & set(command)) or command in NAMES_NOTHING:
+                continue
+            assert command[0] == "python3", command
+            assert resolved_script(step, command[1]) == WITHHOLD, (step, command)
+            assert command[2] == "run", command
+            assert "--" in command, command
+            wrapped.append(shlex.join(command[command.index("--") + 1 :]))
+
+    for needed in ("agentic-hil doctor", "agentic-hil test-reactor", "pytest tests/", "agentic-hil run-evidence"):
+        assert any(command.startswith(needed) for command in wrapped), (needed, wrapped)
+
+
+def test_the_evidence_is_withheld_in_place_before_it_is_uploaded_and_uploaded_only_then() -> None:
+    """After the last step that writes it, before the upload, whatever the run did.
+
+    Every path the upload takes is a path the step withholds, resolved from the
+    workspace root, so a directory added to the upload and not to this step
+    fails here. The upload waits for the step to succeed: a step that could not
+    withhold, because no attached probe showed a serial number to withhold, is a
+    step after which nothing goes out.
+    """
+    steps = bench_job()["steps"]
+    found = [(index, step) for index, step in enumerate(steps) if step.get("id") == WITHHOLD_STEP_ID]
+    assert len(found) == 1, found
+    index, step = found[0]
+    commands = withheld_commands(step)
+    assert len(commands) == 1, commands
+    command = commands[0]
+    upload = [i for i, later in enumerate(steps) if "upload-artifact" in str(later.get("uses", ""))]
+
+    assert command[0] == "python3", command
+    assert resolved_script(step, command[1]) == WITHHOLD, (step, command)
+    assert command[2] == "files", command
+    assert step["if"] == "always()", step
+    assert step_index("agentic-hil run-evidence") < index < upload[0], (index, upload)
+    withheld = {resolved_script(step, path) for path in command[3:]}
+    uploaded = {posixpath.normpath(path.strip()) for path in steps[upload[0]]["with"]["path"].split("\n") if path.strip()}
+    assert withheld == uploaded, (withheld, uploaded)
+    assert steps[upload[0]]["if"] == UPLOAD_ONCE_WITHHELD, steps[upload[0]]
 
 
 # The bench tier on every other distribution tools/bench_in_container.py builds

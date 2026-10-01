@@ -131,8 +131,16 @@ jobs:
       # workspace. This job never creates it and never edits it: a configuration
       # bound to another directory is refused rather than reused, and one stored
       # inside the workspace is refused at load.
+      #
+      # This log is public, and doctor names the probe by its serial number, so
+      # this and every step below that reaches the board prints through
+      # tools/withhold.py: the withholding tools/bench_in_container.py gives the
+      # gate's log, every attached probe's serial number and this machine's
+      # names replaced by `[withheld]`, no line removed and the command's status
+      # kept. It refuses to run anything when no attached probe shows a serial
+      # number, since what it would have to withhold is then not known.
       - name: Report the bench this job is about to drive
-        run: agentic-hil doctor
+        run: python3 ../../tools/withhold.py run -- agentic-hil doctor
 
       - name: Build the demo firmware for the board
         id: build
@@ -152,14 +160,16 @@ jobs:
       # step writes nothing there, so the shared file would still hold an earlier
       # run's report and this job would publish it under this run's name.
       # `--json` is written on every path, a refusal included, and names the plan
-      # it is about.
+      # it is about. It reaches the file as the plan wrote it, because the
+      # evidence step reads the plan by the paths in it; the step that withholds
+      # the evidence covers the file before it is uploaded.
       - name: Run the demo's test plan on the board
         id: plan
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: |
           mkdir -p artifacts/reports
-          agentic-hil test-reactor --test-config testconfig.yaml --json > artifacts/reports/testconfig.json
+          python3 ../../tools/withhold.py run --stdout-file artifacts/reports/testconfig.json -- agentic-hil test-reactor --test-config testconfig.yaml --json
 
       # The other way this demo reaches the board, and a different claim from the
       # plan above: the same four tools driven by hand through the `agentic_hil`
@@ -169,7 +179,7 @@ jobs:
       # README runs it from here and why this job does too.
       - name: Run the same loop through the pytest plugin
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: pytest tests/
+        run: python3 ../../tools/withhold.py run -- pytest tests/
 
       # After the last step that reaches the board, and whatever happened: a red
       # plan and a cancelled run hold the machine as much as a green one. A take
@@ -191,10 +201,22 @@ jobs:
       # the job's own page and nothing here prints it a second time.
       - name: Collect the evidence for the run
         if: ${{ !cancelled() && steps.plan.outcome != 'skipped' }}
-        run: agentic-hil run-evidence --report artifacts/reports/testconfig.json --out artifacts/evidence
+        run: python3 ../../tools/withhold.py run -- agentic-hil run-evidence --report artifacts/reports/testconfig.json --out artifacts/evidence
 
-      # `if: always()` because a cancelled run still leaves what it got as far
-      # as, and `warn` rather than `error` because a job that never reached a
+      # What the upload below takes, withheld in place the same way: the plan's
+      # report, the OpenOCD and port logs and the report mirrors name the probe
+      # by its serial number and the machine by its paths. After the last step
+      # that writes them and whatever the run did, and every path the upload
+      # names; a file nothing names the bench in is left as it is.
+      - name: Withhold what names the bench from the evidence
+        id: withhold
+        if: always()
+        run: python3 ../../tools/withhold.py files artifacts .agentic-hil/reports .agentic-hil/logs
+
+      # Whatever the run did, because a cancelled run still leaves what it got
+      # as far as, and only once the step above has withheld what it uploads: a
+      # step that could not is a run whose evidence stays on the bench. `warn`
+      # rather than `error` because a job that never reached a
       # report has already failed for a reason worth reading, and a second
       # failure from the upload step would sit on top of it.
       #
@@ -204,7 +226,7 @@ jobs:
       # shipping them to an artifact store would publish the thing they exist to
       # verify.
       - name: Upload the run evidence
-        if: always()
+        if: ${{ always() && steps.withhold.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nucleo-f446re-bench-evidence
