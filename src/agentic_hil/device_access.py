@@ -132,7 +132,7 @@ def gid_is_mapped_by(gid: int, gid_map: str | None, overflow_gid: str | None) ->
     namespace's own numbering. Two shapes are an owner the namespace cannot name:
 
     * a gid no line of the map covers, and
-    * the overflow gid, which is what the kernel reports *instead of* a mapping
+    * the overflow gid, which is what the kernel reports in place of a mapping
       for an owner it has none for. It is reported whether or not that number is
       itself inside some mapped range, and in rootless Podman's map it is: the
       bench's recorded container maps inside-gids 1 to 65536, so the 65534 the

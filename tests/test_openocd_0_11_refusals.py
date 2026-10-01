@@ -242,3 +242,7 @@ def test_a_server_that_died_for_another_reason_keeps_the_reading_it_had(
     assert "rejected_commands" not in started, started
     assert started["error_type"] != "debugger_command_rejected", started
     assert "LIBUSB_ERROR_ACCESS" in session_log(service.config, started)["server_stderr_tail"], started
+    # The failed release read still travels, because it is still why this server
+    # was started with `adapter serial` at all. What it may not do is say where
+    # the server stopped: that is what the output alone decides.
+    assert "OpenOCD release read" in started["probe_selection_read_failure"], started
