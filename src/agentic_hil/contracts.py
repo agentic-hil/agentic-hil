@@ -456,10 +456,11 @@ TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     # an effect, so not read-only; nothing is lost by it, so not destructive.
     "debug_halt": {"title": "Halt the target", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
     "debug_get_stop_reason": {"title": "Last stop reason", "readOnlyHint": True, "openWorldHint": False},
-    # Two GDB expression evaluations, `(unsigned long)&symbol` and
-    # `sizeof(symbol)`, both answered out of the ELF's debug information. No
-    # target memory is read and nothing is written, so this is a read even
-    # though it needs a live session to ask through.
+    # Answered out of the ELF's debug information: on OpenOCD by two GDB
+    # expression evaluations, `(unsigned long)&symbol` and `sizeof(symbol)`,
+    # through the live session; on pyOCD and STM32CubeProgrammer from the ELF
+    # last flashed, without a session. No target memory is read and nothing
+    # is written, so this is a read.
     "debug_symbol_info": {"title": "Resolve a debug symbol", "readOnlyHint": True, "openWorldHint": False},
     # Reads target memory and returns it. A read changes nothing on the board,
     # and unlike the dump below it writes no file either, so nothing anywhere
