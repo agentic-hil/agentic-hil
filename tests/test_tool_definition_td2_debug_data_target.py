@@ -21,6 +21,8 @@ here as surely as one that leaves an outcome out.
 
 from __future__ import annotations
 
+import copy
+import inspect
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -48,7 +50,9 @@ from test_debug_sessions import (
 )
 from test_tool_definition_debug_sessions import (
     CEILING,
+    FLOOR,
     SECONDS,
+    WHOLE_CALL,
     definition_text,
     listed_tools,
     property_texts,
@@ -77,6 +81,7 @@ from agentic_hil.backends.common import CompletedCommand
 from agentic_hil.backends.gdbdebug import DEBUG_SYMBOL_PATTERN, INTEGER_VALUE_WIDTHS
 from agentic_hil.config import load_config
 from agentic_hil.contracts import validate_tool_arguments
+from agentic_hil.gdbmi import read_intel_hex_file
 from agentic_hil.tools import AgenticHILToolService
 
 VALUE = "debug_symbol_value"
@@ -115,7 +120,19 @@ NO_PROBE = r"\bprobes?\b|\badapters?\b|\bprogrammer\b|\bplugged\b|\bUSB\b"
 BOARD_SILENT = r"\bboard\b|\btarget\b|\banswer\w*|\brespond\w*|\bpower\w*|\bsilent\b|\bwir\w+"
 NOT_INSTALLED = r"\bmissing\b|\bnot\s+installed\b|\bnot\s+found\b|\babsent\b|\buninstalled\b|\bnot\s+on\s+PATH\b"
 ALLOW_RESET = r"\ballow_reset\b"
+ALLOW_PROBE = r"\ballow_probe\b"
 UNREADABLE_ADAPTER = r"\badapters?\b|\binterface_cfg\b"
+# reset_failed: the backend reported the reset itself failed or left it
+# unconfirmed (openocd.py:85 and 1292, stlink.py:892, pyocd.py:1172); its
+# likely causes are the reset line and a board that stopped answering.
+RESET_FAILED = r"\breset\b[^,;()]{0,25}\b(?:fail\w*|unconfirmed|confirm\w*|complet\w*)\b|\breset\s+line\b|\bwir(?:e|es|ed|ing)\b|\b(?:board|target)\b[^,;()]{0,15}\b(?:respond\w*|answer\w*)"
+# Words that state a circumstance as missing. A refusal caused by something
+# absent ("no probe", "without allow_reset") needs one beside its circumstance,
+# and one caused by something present ("while a session is open") must not have one.
+ABSENCE = r"\b(?:no|not|never|without|unless|missing|absent|unknown|silent|outside|off|false|unconfirmed|cannot)\b|n't\b"
+# A hedge keeps a claim about the core's state a possibility, not a promise.
+HEDGE = r"\b(?:may|might|can|could|depending|depends|possibly)\b"
+CORE_STATE = r"\bhalt(?:s|ed|ing)?\b|\bstops?\s+the\s+core\b|\b(?:core|firmware|program)\s+(?:keeps|stays|remains|continues)\s+running\b|\bleaves?\s+the\s+core\s+running\b|\bresum\w*"
 
 
 # --- reading the definitions ---------------------------------------------------
@@ -161,23 +178,49 @@ def first_sentence(text: str) -> str:
 # --- the meaning checks ----------------------------------------------------------
 
 
-def explains(text: str, error_type: str, circumstance: str) -> bool:
-    """The code is named beside what makes it happen.
+def _negated_nearby(context: str, match: re.Match[str]) -> bool:
+    """An absence word in the circumstance or within four words of it."""
+    before = re.findall(r"\S+", context[: match.start()])[-4:]
+    after = re.findall(r"\S+", context[match.end() :])[:4]
+    return re.search(ABSENCE, " ".join([*before, match.group(0), *after]), re.IGNORECASE) is not None
+
+
+def explains(text: str, error_type: str, circumstance: str, when: str = "absent") -> bool:
+    """The code is named beside what makes it happen, in the direction the code takes.
 
     Beside means in the same comma-separated part of one clause, or, for a part
     that opens with "else", in the part right before it ("allowed if listed,
     else permission_denied"). A sentence that lists several codes therefore
     cannot lend one code the circumstance of another.
+
+    Direction: most refusals come from something missing, so with
+    `when="absent"` the circumstance is either required before an "else" that
+    leads to the code ("needs allow_reset (else permission_denied)") or negated
+    within a few words of itself ("no probe", "without allow_probe"). A refusal
+    that comes from something present (`when="present"`, resource_busy while a
+    session is open) must be stated neither way. "permission_denied when
+    allow_reset is true" names the right key in the wrong direction and fails.
     """
+    code = rf"(?<![\w.]){re.escape(error_type)}(?![\w])"
     for clause in clauses(text):
         found = parts(clause)
         for index, part in enumerate(found):
-            if not names(part, error_type):
+            named = re.search(code, part)
+            if named is None:
                 continue
-            context = part
+            context, at = part, named.start()
             if index > 0 and re.match(r"(?:else|otherwise)\b", part, re.IGNORECASE):
                 context = found[index - 1] + ", " + part
-            if re.search(circumstance, context, re.IGNORECASE) and not re.search(SUCCESS, context, re.IGNORECASE):
+                at += len(found[index - 1]) + 2
+            matches = list(re.finditer(circumstance, context, re.IGNORECASE))
+            if not matches or re.search(SUCCESS, context, re.IGNORECASE):
+                continue
+            required = any(
+                otherwise.start() < at and any(match.end() <= otherwise.start() for match in matches)
+                for otherwise in re.finditer(r"\b(?:else|otherwise)\b", context, re.IGNORECASE)
+            )
+            negated = any(_negated_nearby(context, match) for match in matches)
+            if (required or negated) if when == "absent" else not (required or negated):
                 return True
     return False
 
@@ -201,13 +244,28 @@ def caps_the_read_size(text: str) -> bool:
 
 
 def names_the_value_readings(text: str) -> bool:
-    """`hex` always, the two integer readings only at the widths that have one."""
+    """`hex` always, the two integer readings only at the widths that have one.
+
+    The widths are read as a set, in any order, and must be exactly
+    INTEGER_VALUE_WIDTHS, counted in bytes, under a positive condition: "unless
+    1, 2, 4 or 8" and "1, 2, 4 or 8 bits" both invert gdbdebug.py:1908.
+    """
     if not (names(text, "hex") and names(text, "value_unsigned") and names(text, "value_signed")):
         return False
     readings = [clause for clause in clauses(text) if names(clause, "value_unsigned")]
-    widths = r"\b1\b[^;]*\b2\b[^;]*\b4\b[^;]*\b8\b"
     unconditional = r"\balways\b|\bany\s+size\b|\bevery\s+size\b|\ball\s+sizes\b|\bwhatever\s+(?:the\s+)?size\b"
-    return any(re.search(widths, clause) for clause in readings) and not any(re.search(unconditional, clause, re.IGNORECASE) for clause in readings)
+    inverted = r"\bunless\b|\bexcept\b|\bother\s+than\b|\bbut\s+not\b|\bnot\s+(?:at|for|if|when|of)\b"
+
+    def widths(clause: str) -> set[int]:
+        return {int(number) for number in re.findall(r"(?<![\w.])\d+(?![\w.])", clause)}
+
+    return any(
+        widths(clause) == set(INTEGER_VALUE_WIDTHS)
+        and re.search(r"\bbytes?\b|\bsize_bytes\b", clause, re.IGNORECASE)
+        and not re.search(r"\bbits?\b|\bwords?\b", clause, re.IGNORECASE)
+        and not re.search(inverted, clause, re.IGNORECASE)
+        for clause in readings
+    ) and not any(re.search(unconditional, clause, re.IGNORECASE) for clause in readings)
 
 
 def names_a_sibling(text: str, sibling: str, meaning: str) -> bool:
@@ -252,6 +310,51 @@ def output_examples_are_workspace_hex_paths(text: str) -> bool:
     )
 
 
+def refuses_a_dot_dot_segment(text: str) -> bool:
+    """A `..` segment is refused (artifacts.py:621), never offered."""
+    return any(
+        re.search(r"\.\.|\btraversal\b", part, re.IGNORECASE) and re.search(r"\b(?:no|not|never|without)\b|\brefused\b|\brejected\b|output_validation_failed", part, re.IGNORECASE)
+        for clause in clauses(text)
+        for part in parts(clause)
+    )
+
+
+def roots_bind_only_under_require_allowed_root(text: str) -> bool:
+    """`artifacts.allowed_roots` binds only while `validation.require_allowed_root`
+    is on (artifacts.py:412), which it is by default (config.py:3715)."""
+    rooted = [part for clause in clauses(text) for part in parts(clause) if mentions(part, "allowed_roots")]
+    conditional = r"\b(?:if|when|while|with)\s+(?:\S+\.)?require_allowed_root\b"
+    inverted = r"\bunless\s+(?:\S+\.)?require_allowed_root\b|require_allowed_root\W[^,;]{0,25}\bdefault\s+false\b"
+    return bool(rooted) and all(re.search(conditional, part) and not re.search(inverted, part, re.IGNORECASE) for part in rooted)
+
+
+def does_not_demand_a_relative_path(text: str) -> bool:
+    """An absolute path inside the workspace is accepted (config.py:3062)."""
+    demanded = r"\b(?:must\s+be|only)\s+relative\b|\brelative\s+(?:paths?\s+)?only\b|\bno\s+absolute\b|\babsolute\b[^,;]{0,30}\b(?:refused|rejected|forbidden|not\s+(?:allowed|accepted))\b"
+    return re.search(demanded, text, re.IGNORECASE) is None
+
+
+def says_an_existing_file_is_replaced(text: str) -> bool:
+    """A second dump to the same path replaces the file (gdbmi.py:341)."""
+    replaced = r"\b(?:replac\w*|overwrit\w*)\b"
+    denied = r"\b(?:no|not|never|without)\s+(?:\w+\s+){0,2}?(?:replac|overwrit)\w*"
+    return any(
+        re.search(replaced, part, re.IGNORECASE) and re.search(r"\bfiles?\b", part, re.IGNORECASE) and not re.search(denied, part, re.IGNORECASE)
+        for clause in clauses(text)
+        for part in parts(clause)
+    )
+
+
+# A negation that belongs to the contact itself: "never connects", "contacts no
+# probe or board", "connects to no board", "no board contact". A negation of
+# something else in the same part ("contacts the board with no reset") is not one.
+NEG_CONTACT = (
+    r"\b(?:no|not|never|without)\s+(?:\w+\s+){0,2}?" + CONTACT
+    + r"|" + CONTACT + r"\s+(?:to\s+|with\s+)?(?:no|nothing|neither)\b"
+    + r"|\bno\s+(?:\w+\s+){0,3}?contact\b"
+)
+
+
 def says_it_contacts_no_board(text: str) -> bool:
     """A denial of contact with the board, and no claim of it, for this tool.
 
@@ -264,7 +367,7 @@ def says_it_contacts_no_board(text: str) -> bool:
         for segment in _segments(text)
         if not any(names(segment, other) for other in others) and re.search(CONTACT, segment, re.IGNORECASE) and re.search(r"\b(?:board|target|core)\b", segment, re.IGNORECASE)
     ]
-    return any(re.search(NEGATION, segment, re.IGNORECASE) for segment in contact) and not any(not re.search(NEGATION, segment, re.IGNORECASE) for segment in contact)
+    return any(re.search(NEG_CONTACT, segment, re.IGNORECASE) for segment in contact) and not any(not re.search(NEG_CONTACT, segment, re.IGNORECASE) for segment in contact)
 
 
 def checks_the_backend_version(text: str) -> bool:
@@ -275,6 +378,22 @@ def checks_the_backend_version(text: str) -> bool:
 def bounded_at_ten_seconds(text: str) -> bool:
     ceiling = re.compile(CEILING.pattern + r"|\bwithin\b|\bup\s+to\b", re.IGNORECASE)
     return any(SECONDS.search(clause) and ceiling.search(clause) and re.search(rf"\b{VERSION_CHECK_CEILING_S}\b", clause) for clause in clauses(text))
+
+
+def bounds_each_command_by_the_timeout(text: str) -> bool:
+    """`timeout` comes from one backend command running past
+    `debugger.timeout_s` (openocd.py:962, stlink.py:624, pyocd.py:718).
+
+    The setting bounds each command, not the whole call, so the clause that
+    names the code says so and never states a whole-call deadline or a floor.
+    """
+    per_command = r"\b(?:each|every|any|one|a|per)\s+(?:backend\s+|debugger\s+)?(?:command|step|spawn|subprocess)\b"
+    bound = CEILING.pattern + r"|\bover\b|\bpast\b|\bexceed\w*|\blonger\s+than\b|\bbeyond\b|\bwithin\b"
+    return any(
+        re.search(per_command, clause, re.IGNORECASE) and re.search(bound, clause, re.IGNORECASE) and not WHOLE_CALL.search(clause) and not FLOOR.search(clause)
+        for clause in clauses(text)
+        if names(clause, "timeout") and mentions(clause, "debugger.timeout_s")
+    )
 
 
 def names_the_info_result(text: str) -> bool:
@@ -328,18 +447,22 @@ def names_target_detected_true(text: str) -> bool:
 
 
 RESET_WORD = r"\breset(?:s|ting)?\b"
+# A negation that belongs to the reset itself: "no reset", "never resets",
+# "without a reset", "does not reset".
+NEG_RESET = r"\b(?:no|not|never|without)\s+(?:\w+\s+){0,2}?reset(?:s|ting)?\b"
 
 
 def says_it_does_not_reset(text: str) -> bool:
     """A denial of a reset by this tool, and no reset claimed for it."""
     own = [segment for segment in _segments(text) if not names(segment, "reset_target") and re.search(RESET_WORD, segment, re.IGNORECASE)]
-    return any(re.search(NEGATION, segment, re.IGNORECASE) for segment in own) and not any(not re.search(NEGATION, segment, re.IGNORECASE) for segment in own)
+    return any(re.search(NEG_RESET, segment, re.IGNORECASE) for segment in own) and not any(not re.search(NEG_RESET, segment, re.IGNORECASE) for segment in own)
 
 
-def makes_no_halt_claim(text: str) -> bool:
-    """Whether a connect leaves the core halted depends on the probe and the part,
-    and nothing here can observe it, so the definition claims neither way."""
-    return re.search(r"\bhalt", text, re.IGNORECASE) is None
+def makes_no_core_state_guarantee(text: str) -> bool:
+    """Whether a connect leaves the core halted depends on the probe and the
+    part, and nothing here can observe it. A hedge ("an SWD attach may halt the
+    core", contracts.py:405) is fine; a promise either way is not."""
+    return not any(re.search(CORE_STATE, segment, re.IGNORECASE) and not re.search(HEDGE, segment, re.IGNORECASE) for segment in _segments(text))
 
 
 def resets_the_board(text: str) -> bool:
@@ -351,9 +474,13 @@ def keeps_flash(text: str) -> bool:
     """Flash is said to be kept, and never said to be erased or written."""
     flash = [segment for segment in _segments(text) if re.search(r"\bflash\b", segment, re.IGNORECASE)]
     kept = r"\b(?:keeps?|kept|untouched|unchanged|preserved|stays|remains|retained|intact)\b|\bnot\s+(?:erased|written|programmed|touched|changed)\b"
-    changed = r"\b(?:erases?|erased|erasing|programs?|programmed|writes?|written|wipes?|wiped|clears?|cleared)\b"
+    verbs = r"(?:erases?|erased|erasing|programs?|programmed|writes?|written|wipes?|wiped|clears?|cleared)"
+    changed = rf"\b{verbs}\b"
+    # The negation must belong to the change ("not erased", "no flash written"),
+    # not to something else in the part ("erases flash with no warning").
+    denied = rf"\b(?:no|not|never|without)\s+(?:\w+\s+){{0,2}}?{verbs}\b|\bno\s+flash\b"
     return any(re.search(kept, segment, re.IGNORECASE) for segment in flash) and not any(
-        re.search(changed, segment, re.IGNORECASE) and not re.search(NEGATION, segment, re.IGNORECASE) for segment in flash
+        re.search(changed, segment, re.IGNORECASE) and not re.search(denied, segment, re.IGNORECASE) for segment in flash
     )
 
 
@@ -371,6 +498,31 @@ def names_run_as_the_default(text: str) -> bool:
     run = r"\bdefaults?\b\W{0,3}(?:is\s+|to\s+)?'?run'?|'?\brun'?\s*\(\s*default\b|'?\brun'?\s+is\s+the\s+default\b|'?\brun'?\s+by\s+default\b"
     other = r"\bdefaults?\b\W{0,3}(?:is\s+|to\s+)?'?(?:halt|init)\b|'?\b(?:halt|init)'?\s*\(\s*default\b|'?\b(?:halt|init)'?\s+(?:is\s+the\s+default|by\s+default)\b"
     return re.search(run, text, re.IGNORECASE) is not None and re.search(other, text, re.IGNORECASE) is None
+
+
+def names_each_mode_effect(text: str) -> bool:
+    """Each mode's own words say what it does: 'run' lets the core execute,
+    'halt' stops it at reset, 'init' runs the reset-init script (pyocd.py:430,
+    `reset {mode}` at openocd.py:1393).
+
+    The text is cut at each quoted mode name, so "'run' (default) halts; 'halt'
+    executes" puts the halt in 'run's words and fails.
+    """
+    found = list(re.finditer(r"'(run|halt|init)'", text))
+    chunks: dict[str, str] = {}
+    for index, mode in enumerate(found):
+        end = found[index + 1].start() if index + 1 < len(found) else len(text)
+        chunks.setdefault(mode.group(1), text[mode.end() : end])
+    runs = r"\b(?:execut\w*|runs?|running|resum\w*|starts?)\b"
+    stops = r"\b(?:halt\w*|stops?|stopped|held|holds?|paused?)\b"
+    run, halt, init = chunks.get("run", ""), chunks.get("halt", ""), chunks.get("init", "")
+    return (
+        re.search(runs, run, re.IGNORECASE) is not None
+        and re.search(stops, run, re.IGNORECASE) is None
+        and re.search(stops, halt, re.IGNORECASE) is not None
+        and re.search(runs, halt, re.IGNORECASE) is None
+        and re.search(r"\breset-init\b|\breset_init\b|\binit\s+script\b", init, re.IGNORECASE) is not None
+    )
 
 
 def init_is_openocd_only(text: str) -> bool:
@@ -419,9 +571,15 @@ def not_tied_to_one_backend(text: str) -> bool:
         (caps_the_read_size, "debug.max_dump_size_bytes caps the read.", False),
         (names_the_value_readings, "Returns hex, plus value_unsigned and value_signed if size_bytes is 1, 2, 4 or 8.", True),
         (names_the_value_readings, "hex always; value_unsigned and value_signed for 1, 2, 4 or 8 bytes.", True),
+        (names_the_value_readings, "hex, plus value_unsigned and value_signed at 8, 4, 2 or 1 bytes.", True),
         (names_the_value_readings, "Returns hex, value_unsigned and value_signed for any size.", False),
         (names_the_value_readings, "Returns hex, value_unsigned and value_signed.", False),
         (names_the_value_readings, "Returns value_unsigned and value_signed if size_bytes is 1, 2, 4 or 8.", False),
+        (names_the_value_readings, "hex, plus value_unsigned and value_signed unless size_bytes is 1, 2, 4 or 8.", False),
+        (names_the_value_readings, "hex, plus value_unsigned and value_signed unless size_bytes is 1,2,4,8 bits.", False),
+        (names_the_value_readings, "hex, plus value_unsigned and value_signed at 1, 2, 4 or 8 bits.", False),
+        (names_the_value_readings, "hex, plus value_unsigned and value_signed at 1, 2 or 4 bytes.", False),
+        (names_the_value_readings, "hex, plus value_unsigned and value_signed at 1, 2, 4, 8 or 16 bytes.", False),
         (writes_intel_hex_to_output_path, "Read a symbol's bytes from target memory and write them as Intel HEX to output_path.", True),
         (writes_intel_hex_to_output_path, "Saves the bytes to output_path as Intel HEX.", True),
         (writes_intel_hex_to_output_path, "Read a symbol from target memory and write Intel HEX.", False),
@@ -438,11 +596,39 @@ def not_tied_to_one_backend(text: str) -> bool:
         (output_examples_are_workspace_hex_paths, "Workspace path, e.g. build/counter.bin.", False),
         (output_examples_are_workspace_hex_paths, "Workspace path, e.g. ../counter.hex.", False),
         (output_examples_are_workspace_hex_paths, "Workspace path, e.g. /tmp/counter.hex.", False),
+        (refuses_a_dot_dot_segment, "Workspace path, no '..' segment.", True),
+        (refuses_a_dot_dot_segment, "A '..' segment is refused.", True),
+        (refuses_a_dot_dot_segment, "A path that may contain '..' segments.", False),
+        (refuses_a_dot_dot_segment, "Workspace path ending .hex or .ihex.", False),
+        (roots_bind_only_under_require_allowed_root, "Under artifacts.allowed_roots if validation.require_allowed_root (default true).", True),
+        (roots_bind_only_under_require_allowed_root, "Inside artifacts.allowed_roots when require_allowed_root is on.", True),
+        (roots_bind_only_under_require_allowed_root, "Under artifacts.allowed_roots.", False),
+        (roots_bind_only_under_require_allowed_root, "Under artifacts.allowed_roots unless validation.require_allowed_root.", False),
+        (roots_bind_only_under_require_allowed_root, "Under artifacts.allowed_roots if validation.require_allowed_root (default false).", False),
+        (roots_bind_only_under_require_allowed_root, "Workspace path ending .hex.", False),
+        (does_not_demand_a_relative_path, "Workspace path ending .hex or .ihex.", True),
+        (does_not_demand_a_relative_path, "Relative path only, ending .hex.", False),
+        (does_not_demand_a_relative_path, "Must be relative to the workspace.", False),
+        (does_not_demand_a_relative_path, "Absolute paths are refused.", False),
+        (says_an_existing_file_is_replaced, "Folders created, a file replaced.", True),
+        (says_an_existing_file_is_replaced, "An existing file is overwritten.", True),
+        (says_an_existing_file_is_replaced, "An existing file is never overwritten.", False),
+        (says_an_existing_file_is_replaced, "An existing file is not replaced.", False),
+        (says_an_existing_file_is_replaced, "Folders created.", False),
         (says_it_contacts_no_board, "Runs its version command only; contacts no probe or board.", True),
         (says_it_contacts_no_board, "Never connects to the board.", True),
+        (says_it_contacts_no_board, "Lists probe ids; connects to no board.", True),
         (says_it_contacts_no_board, "Connects to the board to read the version.", False),
         (says_it_contacts_no_board, "Contacts the board; no probe is opened.", False),
         (says_it_contacts_no_board, "Reads the version; probe_target connects to the board.", False),
+        (says_it_contacts_no_board, "Contacts the board with no reset.", False),
+        (says_it_contacts_no_board, "Opens the board without a version check.", False),
+        (bounds_each_command_by_the_timeout, "Failures: reset_failed, timeout (one command over debugger.timeout_s).", True),
+        (bounds_each_command_by_the_timeout, "timeout (each command at most debugger.timeout_s).", True),
+        (bounds_each_command_by_the_timeout, "timeout (the whole call at most debugger.timeout_s).", False),
+        (bounds_each_command_by_the_timeout, "timeout (at most debugger.timeout_s).", False),
+        (bounds_each_command_by_the_timeout, "timeout (each command at least debugger.timeout_s).", False),
+        (bounds_each_command_by_the_timeout, "Each command at most debugger.timeout_s.", False),
         (checks_the_backend_version, "Check the configured debugger backend is installed by running its version command.", True),
         (checks_the_backend_version, "Check whether the configured debugger backend is available.", False),
         (bounded_at_ten_seconds, "Runs its version command only, at most 10 s.", True),
@@ -481,9 +667,12 @@ def not_tied_to_one_backend(text: str) -> bool:
         (says_it_does_not_reset, "Connects and resets the board.", False),
         (says_it_does_not_reset, "Connects without resetting, then resets the core.", False),
         (says_it_does_not_reset, "Connects; reset_target resets.", False),
-        (makes_no_halt_claim, "Connects with no reset.", True),
-        (makes_no_halt_claim, "Connects and halts the core.", False),
-        (makes_no_halt_claim, "Connects and never halts the core.", False),
+        (says_it_does_not_reset, "Resets the board with no flash write.", False),
+        (makes_no_core_state_guarantee, "Connects with no reset.", True),
+        (makes_no_core_state_guarantee, "Connects; an SWD attach may halt the core.", True),
+        (makes_no_core_state_guarantee, "Connects and halts the core.", False),
+        (makes_no_core_state_guarantee, "Connects and never halts the core.", False),
+        (makes_no_core_state_guarantee, "Connects; the core keeps running.", False),
         (resets_the_board, "Reset the board through the in-circuit debugger or programmer.", True),
         (resets_the_board, "Resets the embedded target.", True),
         (resets_the_board, "Check the board answers.", False),
@@ -491,6 +680,7 @@ def not_tied_to_one_backend(text: str) -> bool:
         (keeps_flash, "Flash is not erased.", True),
         (keeps_flash, "The firmware restarts and flash is erased.", False),
         (keeps_flash, "Flash is kept; the reset writes flash again.", False),
+        (keeps_flash, "Flash is kept until the reset erases flash with no warning.", False),
         (keeps_flash, "The firmware restarts.", False),
         (points_to_probe_target_for_a_check, "To check the board without a reset use probe_target.", True),
         (points_to_probe_target_for_a_check, "probe_target checks the board with no reset.", True),
@@ -501,6 +691,11 @@ def not_tied_to_one_backend(text: str) -> bool:
         (names_run_as_the_default, "'run' is the default.", True),
         (names_run_as_the_default, "Default 'halt'; 'run' executes.", False),
         (names_run_as_the_default, "'run' executes, 'halt' stops the core.", False),
+        (names_each_mode_effect, "Default 'run' (core executes); 'halt' stops the core at reset; 'init' also runs the reset-init script.", True),
+        (names_each_mode_effect, "How the target is left: 'run' executes, 'halt' stops the core, 'init' also runs the reset-init script.", True),
+        (names_each_mode_effect, "'run' (default) halts; 'halt' executes; 'init' runs the reset-init script.", False),
+        (names_each_mode_effect, "'run' (default), 'halt' or 'init'.", False),
+        (names_each_mode_effect, "'run' executes, 'halt' stops the core, 'init' is OpenOCD-only.", False),
         (init_is_openocd_only, "'init' also runs the reset-init script, OpenOCD-only, else not_supported.", True),
         (init_is_openocd_only, "'init' runs the reset-init script and is OpenOCD-only: other backends answer not_supported.", True),
         (init_is_openocd_only, "'init' runs the reset-init script; OpenOCD answers not_supported.", False),
@@ -523,31 +718,49 @@ def test_each_check_accepts_a_paraphrase_and_rejects_an_inversion(check: Callabl
 
 
 @pytest.mark.parametrize(
-    ("text", "error_type", "circumstance", "accepted"),
+    ("text", "error_type", "circumstance", "when", "accepted"),
     [
-        ("Allowed if in debug.allowed_symbols or debug.allow_all_symbols is true, else permission_denied.", "permission_denied", ALLOWLIST, True),
-        ("Over debug.max_dump_size_bytes: permission_denied.", "permission_denied", ALLOWLIST, False),
-        ("OpenOCD needs debug_start_session (else session_not_active).", "session_not_active", SESSION, True),
-        ("Failures: session_not_active, symbol_not_found.", "session_not_active", SESSION, False),
-        ("pyOCD and STM32CubeProgrammer, the ELF last flashed via flash_firmware (else symbol_source_not_available).", "symbol_source_not_available", FLASHED_ELF, True),
-        ("Not in the ELF: symbol_not_found.", "symbol_not_found", NOT_IN_ELF, True),
-        ("Failures: symbol_not_found, permission_denied.", "symbol_not_found", NOT_IN_ELF, False),
-        ("Under artifacts.allowed_roots (else output_validation_failed).", "output_validation_failed", OUTPUT_RULES, True),
-        ("Failures: output_validation_failed.", "output_validation_failed", OUTPUT_RULES, False),
-        ("Refused with resource_busy while a debug session is open.", "resource_busy", SESSION, True),
-        ("Failures: resource_busy, target_not_detected (no debug session).", "resource_busy", SESSION, False),
-        ("Failures: adapter_not_found (no probe), target_not_detected (board not answering).", "adapter_not_found", NO_PROBE, True),
-        ("Failures: adapter_not_found (no probe), target_not_detected (board not answering).", "target_not_detected", BOARD_SILENT, True),
-        ("Failures: adapter_not_found (board not answering), target_not_detected (no probe).", "adapter_not_found", NO_PROBE, False),
-        ("Failures: adapter_not_found (board not answering), target_not_detected (no probe).", "target_not_detected", BOARD_SILENT, False),
-        ("Failures: debugger_not_found (backend not installed), timeout.", "debugger_not_found", NOT_INSTALLED, True),
-        ("Failures: debugger_not_found, timeout.", "debugger_not_found", NOT_INSTALLED, False),
-        ("Needs allow_reset (else permission_denied).", "permission_denied", ALLOW_RESET, True),
-        ("A success even when allow_reset is off: permission_denied.", "permission_denied", ALLOW_RESET, False),
+        ("Allowed if in debug.allowed_symbols or debug.allow_all_symbols is true, else permission_denied.", "permission_denied", ALLOWLIST, "absent", True),
+        ("Not in debug.allowed_symbols: permission_denied.", "permission_denied", ALLOWLIST, "absent", True),
+        ("Over debug.max_dump_size_bytes: permission_denied.", "permission_denied", ALLOWLIST, "absent", False),
+        ("permission_denied if in debug.allowed_symbols.", "permission_denied", ALLOWLIST, "absent", False),
+        ("OpenOCD needs debug_start_session (else session_not_active).", "session_not_active", SESSION, "absent", True),
+        ("Without debug_start_session: session_not_active.", "session_not_active", SESSION, "absent", True),
+        ("Failures: session_not_active, symbol_not_found.", "session_not_active", SESSION, "absent", False),
+        ("session_not_active when the session is active.", "session_not_active", SESSION, "absent", False),
+        ("pyOCD and STM32CubeProgrammer, the ELF last flashed via flash_firmware (else symbol_source_not_available).", "symbol_source_not_available", FLASHED_ELF, "absent", True),
+        ("symbol_source_not_available once flash_firmware has flashed the ELF.", "symbol_source_not_available", FLASHED_ELF, "absent", False),
+        ("Not in the ELF: symbol_not_found.", "symbol_not_found", NOT_IN_ELF, "absent", True),
+        ("Failures: symbol_not_found, permission_denied.", "symbol_not_found", NOT_IN_ELF, "absent", False),
+        ("Under artifacts.allowed_roots (else output_validation_failed).", "output_validation_failed", OUTPUT_RULES, "absent", True),
+        ("Failures: output_validation_failed.", "output_validation_failed", OUTPUT_RULES, "absent", False),
+        ("output_validation_failed for a path under artifacts.allowed_roots.", "output_validation_failed", OUTPUT_RULES, "absent", False),
+        ("Refused with resource_busy while a debug session is open.", "resource_busy", SESSION, "present", True),
+        ("Failures: resource_busy, target_not_detected (no debug session).", "resource_busy", SESSION, "present", False),
+        ("Refused with resource_busy unless a debug session is open.", "resource_busy", SESSION, "present", False),
+        ("resource_busy when no debug session is open.", "resource_busy", SESSION, "present", False),
+        ("Failures: adapter_not_found (no probe), target_not_detected (board not answering).", "adapter_not_found", NO_PROBE, "absent", True),
+        ("Failures: adapter_not_found (no probe), target_not_detected (board not answering).", "target_not_detected", BOARD_SILENT, "absent", True),
+        ("Failures: adapter_not_found (no probe), target_not_detected (board silent).", "target_not_detected", BOARD_SILENT, "absent", True),
+        ("Failures: adapter_not_found (board not answering), target_not_detected (no probe).", "adapter_not_found", NO_PROBE, "absent", False),
+        ("Failures: adapter_not_found (board not answering), target_not_detected (no probe).", "target_not_detected", BOARD_SILENT, "absent", False),
+        ("Failures: adapter_not_found (probe attached).", "adapter_not_found", NO_PROBE, "absent", False),
+        ("Failures: debugger_not_found (backend not installed), timeout.", "debugger_not_found", NOT_INSTALLED, "absent", True),
+        ("Failures: debugger_not_found, timeout.", "debugger_not_found", NOT_INSTALLED, "absent", False),
+        ("Needs allow_reset (else permission_denied).", "permission_denied", ALLOW_RESET, "absent", True),
+        ("permission_denied unless allow_reset is true.", "permission_denied", ALLOW_RESET, "absent", True),
+        ("permission_denied when allow_reset is true.", "permission_denied", ALLOW_RESET, "absent", False),
+        ("A success even when allow_reset is off: permission_denied.", "permission_denied", ALLOW_RESET, "absent", False),
+        ("Failures: reset_failed (reset not confirmed), timeout.", "reset_failed", RESET_FAILED, "absent", True),
+        ("Failures: reset_failed (board not answering the reset).", "reset_failed", RESET_FAILED, "absent", True),
+        ("Failures: reset_failed, timeout.", "reset_failed", RESET_FAILED, "absent", False),
+        ("Failures: reset_failed (the reset was confirmed).", "reset_failed", RESET_FAILED, "absent", False),
+        ("permission_denied without allow_probe (config version 1).", "permission_denied", ALLOW_PROBE, "absent", True),
+        ("permission_denied with allow_probe (config version 1).", "permission_denied", ALLOW_PROBE, "absent", False),
     ],
 )
-def test_the_refusal_check_wants_the_circumstance_beside_the_code(text: str, error_type: str, circumstance: str, accepted: bool) -> None:
-    assert explains(text, error_type, circumstance) is accepted, (error_type, text)
+def test_the_refusal_check_wants_the_circumstance_beside_the_code_in_its_direction(text: str, error_type: str, circumstance: str, when: str, accepted: bool) -> None:
+    assert explains(text, error_type, circumstance, when) is accepted, (error_type, when, text)
 
 
 # --- all six definitions -----------------------------------------------------------
@@ -665,14 +878,19 @@ def test_the_dump_says_what_it_writes_where_and_what_it_returns(listed: dict[str
     assert writes_intel_hex_to_output_path(text), text
     assert names_the_dump_result(text), text
     assert names_a_sibling(text, VALUE, r"\bbytes?\b|\bvalues?\b|\binline\b|\bintegers?\b"), text
+    assert says_an_existing_file_is_replaced(whole(listed, DUMP)), whole(listed, DUMP)
 
 
 def test_the_output_path_description_names_every_rule_the_validator_applies(listed: dict[str, dict]) -> None:
-    """artifacts.py validate_output_path: inside the workspace, under the allowed
-    roots, ending .hex or .ihex, each refused with output_validation_failed."""
+    """artifacts.py validate_output_path: inside the workspace, no `..` segment,
+    under the allowed roots while validation.require_allowed_root is on, ending
+    .hex or .ihex, each refused with output_validation_failed. An absolute path
+    inside the workspace is accepted."""
     text = property_text(listed, DUMP, "output_path")
     assert keeps_the_output_in_the_workspace(text), text
-    assert mentions(text, "allowed_roots"), text
+    assert refuses_a_dot_dot_segment(text), text
+    assert roots_bind_only_under_require_allowed_root(text), text
+    assert does_not_demand_a_relative_path(text), text
     assert names_both_hex_extensions(text), text
     assert explains(text, "output_validation_failed", OUTPUT_RULES), text
     assert output_examples_are_workspace_hex_paths(text), text
@@ -687,14 +905,15 @@ def test_probe_says_it_connects_and_confirms_the_board_without_a_reset(listed: d
     assert names_target_detected_true(text), text
     assert says_it_does_not_reset(text), text
     assert names_a_sibling(text, RESET, RESET_WORD + r"|\brestart"), text
-    assert makes_no_halt_claim(whole(listed, PROBE)), whole(listed, PROBE)
+    assert makes_no_core_state_guarantee(whole(listed, PROBE)), whole(listed, PROBE)
 
 
 def test_probe_explains_each_failure_an_agent_acts_on(listed: dict[str, dict]) -> None:
     text = whole(listed, PROBE)
-    assert explains(text, "resource_busy", SESSION), text
+    assert explains(text, "resource_busy", SESSION, when="present"), text
     assert explains(text, "adapter_not_found", NO_PROBE), text
     assert explains(text, "target_not_detected", BOARD_SILENT), text
+    assert bounds_each_command_by_the_timeout(text), text
 
 
 # --- reset_target: definition ----------------------------------------------------
@@ -710,13 +929,20 @@ def test_reset_says_it_resets_the_board_and_keeps_flash(listed: dict[str, dict])
 def test_reset_explains_its_prerequisites(listed: dict[str, dict]) -> None:
     text = whole(listed, RESET)
     assert explains(text, "permission_denied", ALLOW_RESET), text
-    assert explains(text, "resource_busy", SESSION), text
+    assert explains(text, "resource_busy", SESSION, when="present"), text
 
 
-def test_reset_mode_names_its_default_and_where_init_runs(listed: dict[str, dict]) -> None:
+def test_reset_explains_how_the_reset_itself_fails(listed: dict[str, dict]) -> None:
+    text = whole(listed, RESET)
+    assert explains(text, "reset_failed", RESET_FAILED), text
+    assert bounds_each_command_by_the_timeout(text), text
+
+
+def test_reset_mode_names_its_default_each_effect_and_where_init_runs(listed: dict[str, dict]) -> None:
     text = property_text(listed, RESET, "mode")
     assert listed[RESET]["inputSchema"]["properties"]["mode"]["default"] == "run"
     assert names_run_as_the_default(text), text
+    assert names_each_mode_effect(text), text
     assert init_is_openocd_only(text), text
 
 
@@ -740,6 +966,15 @@ def test_info_names_its_result_its_failures_and_what_comes_next(listed: dict[str
     assert names_a_sibling(text, PROBE, r"\bboard\b|\btarget\b|\bconnects?\b|\breach(?:es)?\b"), text
 
 
+def test_info_says_a_version_1_config_needs_allow_probe(listed: dict[str, dict]) -> None:
+    """tools.py:266 refuses debugger_info unless probe_allowed(), which a
+    version 2 config always is and a version 1 config is with allow_probe
+    (types.py:601)."""
+    text = description(listed, INFO)
+    assert explains(text, "permission_denied", ALLOW_PROBE), text
+    assert allow_probe_is_qualified(text), text
+
+
 # --- debugger_probes_list: definition --------------------------------------------
 
 
@@ -756,6 +991,117 @@ def test_probes_says_how_openocd_lists_and_what_it_refuses(listed: dict[str, dic
     assert openocd_listing_reads_the_usb_inventory(text), text
     assert openocd_refuses_an_adapter_it_cannot_read(text), text
     assert names(text, "probe_discovery_failed"), text
+
+
+# --- the checks admit one set of definitions together ----------------------------
+#
+# A paraphrase of each definition, written apart from the served text, that
+# every metadata test above accepts within the 400 and 200 character limits. It
+# shows the checks can all be met at once, and that they hold meaning rather
+# than one wording.
+
+WITNESS_READ_SYMBOL = (
+    "C identifier, ::-qualified optionally, e.g. CTC_buf. Readable if in debug.allowed_symbols or "
+    "debug.allow_all_symbols is true (default false), else permission_denied. Unknown in ELF: symbol_not_found."
+)
+WITNESS_BACKENDS = (
+    "OpenOCD reads only in debug_start_session (else session_not_active); pyOCD and STM32CubeProgrammer read "
+    "the ELF flash_firmware last wrote (else symbol_source_not_available)."
+)
+WITNESS_CAP = "Above debug.max_dump_size_bytes: permission_denied."
+WITNESS = {
+    VALUE: (
+        "Reads a symbol's memory, like gdb print: hex, plus value_signed and value_unsigned if size_bytes is 8, 4, 2 or 1. "
+        "Where: debug_symbol_info; as a file: debug_dump_symbol_ihex. " + WITNESS_BACKENDS + " " + WITNESS_CAP,
+        {"symbol": WITNESS_READ_SYMBOL},
+    ),
+    DUMP: (
+        "Reads an allowed symbol's memory on the board and saves it to output_path as Intel HEX; returns output, address and "
+        "size_bytes. Its value inline: debug_symbol_value. " + WITNESS_BACKENDS + " " + WITNESS_CAP,
+        {
+            "symbol": WITNESS_READ_SYMBOL,
+            "output_path": (
+                "A .hex or .ihex workspace path, e.g. build/c.ihex; no '..'; in artifacts.allowed_roots when "
+                "validation.require_allowed_root is on, else output_validation_failed. Existing files are overwritten."
+            ),
+        },
+    ),
+    PROBE: (
+        "Checks the board answers through the in-circuit debugger or programmer (target_detected: true) and never resets it; "
+        "for a reset use reset_target. An SWD attach may halt the core. Refused with resource_busy while a debug session is "
+        "open. Failures: adapter_not_found (probe missing), target_not_detected (board not answering), timeout (each command "
+        "at most debugger.timeout_s).",
+        {},
+    ),
+    RESET: (
+        "Resets the board via the in-circuit debugger or programmer; flash stays untouched and the firmware starts over. "
+        "Needs allow_reset, else permission_denied. Refused with resource_busy while a debug session is open. probe_target "
+        "checks the board with no reset. Failures: reset_failed (board not answering the reset), timeout (one command over "
+        "debugger.timeout_s).",
+        {
+            "mode": (
+                "'run' (default) lets the core execute, 'halt' holds it stopped at reset, 'init' also runs the reset-init script "
+                "and is OpenOCD-only: other backends answer not_supported."
+            ),
+        },
+    ),
+    INFO: (
+        "Checks the debugger backend is installed via its version command, capped at 10 s; never connects to a probe or "
+        "board. Returns backend, executable, version, config_status. Then: debugger_probes_list for probe ids, probe_target "
+        "for the board. Failures: debugger_not_found (missing), timeout; not_supported unless exactly one debugger is set; "
+        "version 1 configs need allow_probe, else permission_denied.",
+        {},
+    ),
+    PROBES: (
+        "Lists the probes on this host as probe ids, for the in-circuit debugger or programmer; never connects to a board. "
+        "Returns probes; copy one's probe_id into the debugger entry. pyOCD and STM32CubeProgrammer ask their CLI; OpenOCD "
+        "answers from the USB serial inventory with complete: false, and not_supported for adapters that inventory cannot "
+        "read. Failure: probe_discovery_failed.",
+        {},
+    ),
+}
+WITNESS_TEST = "test_one_set_of_definitions_meets_every_check_within_the_limits"
+
+
+def with_texts(listed: dict[str, dict], texts: dict[str, tuple[str, dict[str, str]]]) -> dict[str, dict]:
+    """The served definitions with these tools' words replaced, schemas kept."""
+    witness = copy.deepcopy(listed)
+    for tool, (text, properties) in texts.items():
+        witness[tool]["description"] = text
+        for name, prop in properties.items():
+            witness[tool]["inputSchema"]["properties"][name]["description"] = prop
+    return witness
+
+
+def metadata_tests() -> list[tuple[Callable[..., None], list[str | None]]]:
+    """Every test in this module that reads only the served definitions, with
+    the tools it is parametrized over."""
+    found: list[tuple[Callable[..., None], list[str | None]]] = []
+    for name, function in list(globals().items()):
+        if not name.startswith("test_") or name == WITNESS_TEST or not callable(function):
+            continue
+        parameters = set(inspect.signature(function).parameters)
+        if "listed" not in parameters or not parameters <= {"listed", "known_literals", "tool"}:
+            continue
+        tools: list[str | None] = [None]
+        for mark in getattr(function, "pytestmark", []):
+            if mark.name == "parametrize" and mark.args[0] == "tool":
+                tools = list(mark.args[1])
+        found.append((function, tools))
+    return found
+
+
+def test_one_set_of_definitions_meets_every_check_within_the_limits(listed: dict[str, dict], known_literals: set[str]) -> None:
+    for tool, (_, properties) in WITNESS.items():
+        assert set(properties) == set(listed[tool]["inputSchema"].get("properties", {})), tool
+    witness = with_texts(listed, WITNESS)
+    checked = metadata_tests()
+    assert len(checked) >= 26, sorted(function.__name__ for function, _ in checked)
+    for function, tools in checked:
+        parameters = inspect.signature(function).parameters
+        for tool in tools:
+            supplied = {"listed": witness, "known_literals": known_literals, "tool": tool}
+            function(**{name: supplied[name] for name in parameters})
 
 
 # ---------------------------------------------------------------------------
@@ -827,6 +1173,16 @@ def test_info_runs_only_the_version_command_within_ten_seconds(tmp_path: Path, m
     command, timeout = spawns[0]
     assert command[-1] == "--version", command
     assert timeout <= VERSION_CHECK_CEILING_S, timeout
+
+
+@pytest.mark.parametrize(("config_version", "refused"), [(None, True), (2, False)], ids=["version-1", "version-2"])
+def test_info_needs_allow_probe_only_under_config_version_1(tmp_path: Path, config_version: int | None, refused: bool) -> None:
+    permissions = {**DEFAULT_TEST_PERMISSIONS, "allow_probe": False}
+    answer = call(bench(tmp_path, "openocd", permissions=permissions, config_version=config_version), INFO)
+
+    assert (answer.get("error_type") == "permission_denied") is refused, answer
+    if refused:
+        assert "allow_probe" in str(answer), answer
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -960,6 +1316,29 @@ def test_an_open_session_refuses_probe_and_reset_until_it_stops(tmp_path: Path) 
     assert reset_after["ok"] is True, reset_after
 
 
+@pytest.mark.parametrize("tool", [PROBE, RESET])
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_probe_and_reset_bound_each_command_by_debugger_timeout_s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, tool: str) -> None:
+    spawns = recorded_spawns(monkeypatch, backend)
+    answer = call(bench(tmp_path, backend, timeout_s=7), tool)
+
+    assert answer["ok"] is True, answer
+    assert spawns, spawns
+    assert all(timeout <= 7 for _, timeout in spawns), spawns
+    assert any(timeout == 7 for _, timeout in spawns), spawns
+
+
+@pytest.mark.parametrize("tool", [PROBE, RESET])
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_probe_and_reset_answer_timeout_when_a_command_does_not_return(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, tool: str) -> None:
+    hung = CompletedCommand(stdout="", stderr="", returncode=None, timed_out=True, not_found=False)
+    monkeypatch.setattr(BACKEND_MODULES[backend], "spawn_command", lambda command, cwd, timeout_seconds: hung)
+    answer = call(bench(tmp_path, backend), tool)
+
+    assert answer["ok"] is False, answer
+    assert answer["error_type"] == "timeout", answer
+
+
 # --- reset_target ---------------------------------------------------------------------
 
 
@@ -1021,6 +1400,16 @@ def test_reset_init_runs_on_openocd_alone(tmp_path: Path, backend: str, ok: bool
     if not ok:
         assert answer["error_type"] == "not_supported", answer
         assert answer["target_contacted"] is False, answer
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_reset_answers_reset_failed_when_the_backend_reports_the_reset_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    failed = CompletedCommand(stdout="", stderr="Error: reset failed\n", returncode=1, timed_out=False, not_found=False)
+    monkeypatch.setattr(BACKEND_MODULES[backend], "spawn_command", lambda command, cwd, timeout_seconds: failed)
+    answer = call(bench(tmp_path, backend), RESET)
+
+    assert answer["ok"] is False, answer
+    assert answer["error_type"] == "reset_failed", answer
 
 
 # --- the two symbol reads -----------------------------------------------------------------
@@ -1110,28 +1499,41 @@ def test_both_reads_refuse_a_symbol_not_allowed_or_not_in_the_elf(tmp_path: Path
     assert answer["error_type"] == error_type, answer
 
 
-def is_intel_hex(path: Path) -> bool:
-    lines = path.read_text(encoding="ascii").split()
-    return bool(lines) and all(re.fullmatch(r":[0-9A-Fa-f]{10,}", line) for line in lines) and lines[-1].upper() == ":00000001FF"
-
-
 @pytest.mark.parametrize("prepare", READY, ids=READY_IDS)
 def test_the_dump_writes_intel_hex_creating_folders_and_replacing_a_file(tmp_path: Path, prepare: Callable[..., AgenticHILToolService]) -> None:
+    """The file is read back with the shipped parser, which checks every record's
+    checksum and that the symbol's whole range is covered, and holds the bytes
+    the value read returns for the same symbol."""
     existing = tmp_path / "build" / "old.hex"
     service = prepare(tmp_path)
     existing.write_text("not a hex file\n", encoding="ascii")
     try:
         nested = service.call(DUMP, {"symbol": "CTC_array", "output_path": "build/new/nested/memory.hex"})
         replaced = service.call(DUMP, {"symbol": "boot_counter", "output_path": "build/old.hex"})
+        values = {symbol: service.call(VALUE, {"symbol": symbol}) for symbol in ("CTC_array", "boot_counter")}
     finally:
         service.close()
 
-    for answer, path in ((nested, tmp_path / "build" / "new" / "nested" / "memory.hex"), (replaced, existing)):
+    for symbol, answer, path in (("CTC_array", nested, tmp_path / "build" / "new" / "nested" / "memory.hex"), ("boot_counter", replaced, existing)):
         assert answer["ok"] is True, answer
         for field in ("address", "size_bytes", "output"):
             assert field in answer, (field, answer)
         assert Path(answer["output"]["resolved_path"]) == path.resolve(), answer
-        assert is_intel_hex(path), path.read_text(encoding="ascii")
+        value = values[symbol]
+        assert value["ok"] is True, value
+        assert (value["address"], value["size_bytes"]) == (answer["address"], answer["size_bytes"]), (value, answer)
+        recorded = read_intel_hex_file(path, int(answer["address"], 16), int(answer["size_bytes"]))
+        assert recorded is not None, path.read_text(encoding="ascii")
+        assert recorded == bytes.fromhex(value["hex"]), (recorded.hex(), value["hex"])
+
+
+def test_the_dump_accepts_an_absolute_path_inside_the_workspace(tmp_path: Path) -> None:
+    target = tmp_path / "build" / "absolute.hex"
+    answer = call(openocd_session(tmp_path), DUMP, {"symbol": "boot_counter", "output_path": str(target)})
+
+    assert answer["ok"] is True, answer
+    assert Path(answer["output"]["resolved_path"]) == target.resolve(), answer
+    assert target.is_file()
 
 
 @pytest.mark.parametrize(
