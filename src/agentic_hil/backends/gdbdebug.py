@@ -304,9 +304,12 @@ class GdbDebugSession:
         # Logged with the session: see `_remove_breakpoints_before_end`.
         self.breakpoint_removal: JsonObject | None = None
         # Whether this session itself ended a debug server that was still
-        # running, rather than finding one that had exited on its own. What such
-        # an end can leave behind is the backend's to say
-        # (`ServerCompanion.stop_leaves_probe_unconfirmed`).
+        # running, rather than finding one that had exited on its own. Set when
+        # the end finds it running (`_end_server_process`) and when the failure
+        # that leads to one does (`_note_server_running_at_failure`), because
+        # between those two moments the server can exit and make the end look
+        # like its own. What such an end can leave behind is the backend's to
+        # say (`ServerCompanion.stop_leaves_probe_unconfirmed`).
         self.server_ended_while_running = False
         # The server this session's GDB server reaches the probe through, where
         # its backend starts one (see ServerCompanion).
@@ -487,6 +490,7 @@ class GdbDebugSessions:
         try:
             self._start_output_readers(session)
         except BaseException as error:
+            self._note_server_running_at_failure(session)
             cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
             if cleanup_error is not None:
                 session.status = "cleanup_required"
@@ -512,8 +516,10 @@ class GdbDebugSessions:
             ready = wait_for_tcp_port(gdb_port, timeout, server)
         if not ready:
             # Read once, before the cleanup that ends a server still running:
-            # afterwards an exit of its own and an end of ours look alike.
-            timed_out = server.poll() is None
+            # afterwards an exit of its own and an end of ours look alike. Kept
+            # on the session by the read itself, so an exit in the window
+            # between it and the cleanup cannot take the answer with it.
+            timed_out = self._note_server_running_at_failure(session)
             failure = self._start_failure(session, tool, started_at, start, timeout, timed_out=timed_out)
             cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
             if cleanup_error is not None:
@@ -537,6 +543,7 @@ class GdbDebugSessions:
         try:
             session.gdb = GdbMiClient(str(resolved_gdb["executable"]), str(Path(str(resolved_gdb["executable"])).parent))
         except BaseException as error:
+            self._note_server_running_at_failure(session)
             cleanup_error = self._cleanup_session(session, STOP_SESSION_TIMEOUT_CAP_S)
             if cleanup_error is not None:
                 session.status = "cleanup_required"
@@ -1307,6 +1314,23 @@ class GdbDebugSessions:
             return False
         return (server_exit or {}).get("side_effect_status") != CONTACT_UNPROVEN["side_effect_status"]
 
+    def _note_server_running_at_failure(self, session: GdbDebugSession) -> bool:
+        """Read whether this start's own GDB server is still running, at the moment the start is given up, and keep the reading.
+
+        The cleanup that follows ends such a server, and once it has, an exit of
+        the server's own and an end of ours look alike: a server that exits in
+        the window between this reading and that end would otherwise leave the
+        cleanup finding an exited process and nothing saying who ended it. What
+        our end can leave on the in-circuit debugger or programmer is the
+        backend's to say (`_server_end_leaves_probe_unconfirmed`), and that
+        answer may not be lost to the moment the exit happened to fall in.
+
+        Returns the reading, which a timeout is also told from a self-exit by."""
+        running = session.server.poll() is None
+        if running:
+            session.server_ended_while_running = True
+        return running
+
     def _server_end_leaves_probe_unconfirmed(self, session: GdbDebugSession) -> bool:
         """Whether ending this session's own GDB server leaves the in-circuit debugger or programmer unaccounted for.
 
@@ -1321,7 +1345,9 @@ class GdbDebugSessions:
 
         A server that exited on its own is a different matter: nothing killed
         it, and what it said on the way out is what the backend's reading of its
-        output answers for."""
+        output answers for. Only an exit this session read before it gave up on
+        the server counts as one (`_note_server_running_at_failure`); an exit
+        after that falls in the window the kill was already on its way in."""
         companion = session.companion
         if companion is None or not companion.stop_leaves_probe_unconfirmed:
             return False

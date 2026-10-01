@@ -22,6 +22,7 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -269,15 +270,18 @@ def test_the_recorded_stop_cycles_back_the_shared_mode() -> None:
     assert shared["ran_ms_over_the_attach_stop"] and set(shared["ran_ms_over_the_attach_stop"]) == {0}, shared
 
 
-def never_ready_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+def never_ready_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prepare: Callable[[object], None] | None = None) -> dict:
     """A start whose GDB server never says its port listens, so the start runs out its time and ends a running server.
 
     The fake prints the recorded startup up to the ready line and then keeps
     running, which is the one way the end of a running server is reached at
-    start: what that end can leave on the probe is what the two tests below
-    differ in."""
+    start: what that end can leave on the probe is what the tests below differ
+    in. `prepare` is handed the service before the start, for a test that has
+    something to arrange inside it."""
     monkeypatch.setenv(ST_LINK_NEVER_READY_VARIABLE, "1")
     service, _ = st_link_session_service(tmp_path, monkeypatch)
+    if prepare is not None:
+        prepare(service)
     try:
         started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": NEVER_READY_TIMEOUT_S})
         return {"started": started, "status": service.call("debug_get_session_status")}
@@ -332,6 +336,52 @@ def test_a_start_that_times_out_on_the_probes_usb_itself_reports_the_hardware_un
     assert started["hardware_state"] == "unknown", started
     assert started["target_state"] == "unknown", started
     assert started["cleanup_required"] is True, started
+    assert started["probe_server"]["mode"] == "direct", started["probe_server"]
+    assert "Target USB comms error" in started["probe_server"]["stop_risk"], started["probe_server"]
+    assert status["active"] is True, status
+    assert status["quarantined"] is True, status
+
+
+def test_a_timed_out_server_that_exits_before_the_cleanup_still_reports_the_hardware_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Direct mode, with the server exiting between the read that gives up on it and the cleanup that would end it.
+
+    From that moment the kill is on its way, and the cleanup finds a process
+    already gone: nothing it can read afterwards says whether the server exited
+    on its own or was ended under it. So the answer stands on the read the start
+    took while the server was still running, and is the same answer as the test
+    above. What would have earned a refusal instead is a backend reading of the
+    server's last words that placed its exit before any contact, and a server
+    killed mid-wait leaves none."""
+    use_stlink_server(tmp_path, monkeypatch, None)
+    cleanup_found_the_server_gone: list[bool] = []
+
+    def exit_the_server_before_the_cleanup(service) -> None:
+        sessions = service.backend._debug
+        cleanup = sessions._cleanup_session
+
+        def ends_the_server_first(session, timeout_s: float):
+            gdbdebug.terminate_process_tree(session.server, scaled_time_bound(10), graceful=False)
+            cleanup_found_the_server_gone.append(session.server.poll() is not None)
+            return cleanup(session, timeout_s)
+
+        sessions._cleanup_session = ends_the_server_first
+
+    answers = never_ready_start(tmp_path, monkeypatch, prepare=exit_the_server_before_the_cleanup)
+    started, status = answers["started"], answers["status"]
+
+    # The window this is about: the cleanup really did run on an exited server.
+    assert cleanup_found_the_server_gone[:1] == [True], cleanup_found_the_server_gone
+    assert started["ok"] is False, started
+    assert started["error_type"] == "timeout", started
+    assert started["backend_error_type"] == "gdb_server_not_ready", started
+    assert started["cleanup_confirmed"] is True, started
+    assert started["side_effect_status"] == "unknown", started
+    assert started["retry_safe"] is False, started
+    assert started["hardware_state"] == "unknown", started
+    assert started["target_state"] == "unknown", started
+    assert started["cleanup_required"] is True, started
+    assert started["lease_state"] == "cleanup_required", started
+    assert "target_contacted" not in started, started
     assert started["probe_server"]["mode"] == "direct", started["probe_server"]
     assert "Target USB comms error" in started["probe_server"]["stop_risk"], started["probe_server"]
     assert status["active"] is True, status
