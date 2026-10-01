@@ -481,6 +481,62 @@ def test_a_gdb_refusal_before_the_connect_still_reports_a_direct_probe_unaccount
     assert "Target USB comms error" in started["probe_server"]["stop_risk"], started["probe_server"]
 
 
+@pytest.mark.parametrize(("failure", "error_type"), [("mi_async_refused", "gdb_async_unsupported"), ("gdb_exited", "debugger_error")])
+def test_a_server_gone_before_a_gdb_setup_command_fails_still_reports_the_hardware_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, error_type: str) -> None:
+    """Direct mode, with the server already gone when a GDB command of the start's setup fails, before `-target-select`.
+
+    The recorded refusal of asynchronous MI, and the first setup command
+    failing because GDB itself has exited. Either way the start gives up on a
+    server it did not end, but one that held the probe's USB itself and had
+    said its port listens, which it only does once it has the probe. Nothing
+    read what it said on the way out, so nothing places its exit before any
+    contact, and the answer is the one a start gives for a server it ended."""
+    use_stlink_server(tmp_path, monkeypatch, None)
+    behavior, failing_command = ST_LINK_GDBSERVER, "-gdb-set pagination off"
+    if failure == "mi_async_refused":
+        monkeypatch.setenv("FAKE_GDB_BEHAVIOR", MI_ASYNC_UNSUPPORTED)
+        behavior, failing_command = f"{ST_LINK_GDBSERVER}+{MI_ASYNC_UNSUPPORTED}", gdbdebug.MI_ASYNC_COMMAND
+    service, _ = st_link_session_service(tmp_path, monkeypatch, behavior=behavior)
+    sessions = service.backend._debug
+    send = sessions._gdb_command
+    server_gone_before_the_read: list[bool] = []
+
+    def ends_the_server_first(session, command: str, *args, **kwargs):
+        if command == failing_command:
+            gdbdebug.terminate_process_tree(session.server, scaled_time_bound(10), graceful=False)
+            server_gone_before_the_read.append(session.server.poll() is not None)
+            if failure == "gdb_exited":
+                gdbdebug.terminate_process_tree(session.gdb.child, scaled_time_bound(10), graceful=False)
+                assert session.gdb.exited.wait(scaled_time_bound(10))
+        return send(session, command, *args, **kwargs)
+
+    sessions._gdb_command = ends_the_server_first
+    try:
+        started = start_debug_session(service, mode="attach")
+        status = service.call("debug_get_session_status")
+    finally:
+        with contextlib.suppress(RuntimeError):
+            service.close()
+        service.coordinator.close()
+
+    # The window this is about: the server was gone before the start read it.
+    assert server_gone_before_the_read == [True], server_gone_before_the_read
+    assert started["ok"] is False, started
+    assert started["error_type"] == error_type, started
+    assert started["cleanup_confirmed"] is True, started
+    assert started["side_effect_status"] == "unknown", started
+    assert started["retry_safe"] is False, started
+    assert started["hardware_state"] == "unknown", started
+    assert started["target_state"] == "unknown", started
+    assert started["cleanup_required"] is True, started
+    assert started["lease_state"] == "cleanup_required", started
+    assert "target_contacted" not in started, started
+    assert started["probe_server"]["mode"] == "direct", started["probe_server"]
+    assert "Target USB comms error" in started["probe_server"]["stop_risk"], started["probe_server"]
+    assert status["active"] is True, status
+    assert status["quarantined"] is True, status
+
+
 def test_a_gdb_refusal_before_the_connect_through_stlink_server_still_says_which_way_it_reached_the_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The same refusal in shared mode: the bench is as it was, and the answer still names the companion.
 

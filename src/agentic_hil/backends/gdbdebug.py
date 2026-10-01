@@ -1136,6 +1136,11 @@ class GdbDebugSessions:
         for command in commands:
             response = self._gdb_command(session, command, min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
             if not response.ok:
+                # The start gives up on its server here, which its cleanup then
+                # ends: read once whether it still runs, so an exit of its own
+                # that nobody read stays apart from our end of it.
+                running = self._note_server_running_at_failure(session)
+                server_exit = self._unread_server_exit(session, running)
                 if command == MI_ASYNC_COMMAND and not response.timed_out and not getattr(response, "audit_failure", False):
                     refusal = {
                         **self._gdb_failure("debug_start_session", session, response.error_message, False, response=response),
@@ -1155,17 +1160,18 @@ class GdbDebugSessions:
                         # the probe in doubt.
                         **self._probe_server_fields(session),
                     }
-                    if self._server_end_leaves_probe_unconfirmed(session):
+                    if not self._pre_gdb_contact_is_accounted_for(session, server_exit):
                         # GDB refused before it was pointed at the target, but
                         # this start still has a running server of its own to
                         # end, and on this backend that end can leave the
                         # in-circuit debugger or programmer refusing its next
-                        # opener. A refusal would be claiming that away.
+                        # opener; or the server exited on its own and nothing
+                        # read where. A refusal would be claiming that away.
                         refusal.pop("target_contacted", None)
                         refusal.pop("side_effect_committed", None)
                         refusal.update(self._unknown_after_server_end_fields(session))
                     return refusal
-                return {**self._gdb_failure("debug_start_session", session, response.error_message or f"GDB startup command failed: {command}", response.timed_out, response=response), **self._startup_effect_fields(session, response.timed_out)}
+                return {**self._gdb_failure("debug_start_session", session, response.error_message or f"GDB startup command failed: {command}", response.timed_out, response=response), **self._startup_effect_fields(session, response.timed_out, server_exit=server_exit)}
         session.load_phase = "target_connect_started"
         target = self._gdb_command(session, f"-target-select extended-remote localhost:{session.gdb_port}", min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
         if not target.ok:
