@@ -2,6 +2,7 @@
 """Fake GDB/MI process for tests: token-numbered replies, delayed async *stopped records."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import socket
@@ -11,6 +12,7 @@ import time
 from pathlib import Path
 
 COMMAND_PATTERN = re.compile(r"^(\d+)(.*)$")
+RESULT_LINE_PATTERN = re.compile(r"^\d+\^")
 MEMORY_READ_PATTERN = re.compile(r"^-data-read-memory-bytes\s+(0x[0-9a-fA-F]+|\d+)\s+(\d+)$")
 ASYNC_STOP_DELAY_S = 0.02
 
@@ -183,6 +185,33 @@ CONNECT_DROPPED_MESSAGE = "Remote communication error.  Target disconnected: Con
 # GDB that connects to nothing.
 CONNECTS_TO_SERVER = "connects_to_server"
 server_connections: list[socket.socket] = []
+# pyOCD's GDB server as the GDB on the reference board saw it, replayed from the
+# recording beside this file (pyOCD 0.45.1, xPack arm-none-eabi-gdb 14.2.90,
+# 2026-10-01; scenario `session_ended_by_gdb_exit`). Opted into by name, and it
+# implies `connects_to_server`. What differs from the OpenOCD answers above is
+# all in the recording: `-target-select` answers `^connected` after a `*stopped`
+# record with no reason for the core pyOCD halted on connect, and
+# `monitor reset halt` answers `^done` after two console records, the second of
+# which is the only evidence the core is halted at the reset vector. pyOCD
+# answers `^done` to a monitor command it does not know as well, after an
+# `Error:` console record, so the status alone proves nothing.
+PYOCD_GDBSERVER = "pyocd_gdbserver"
+# The same reset with the confirmation missing: what pyOCD 0.45.1 prints when
+# the core is not halted after the reset. The line is pyOCD's own format string
+# (`ResetCommand.execute` in pyocd/commands/commands.py), not a recording; no
+# board that fails to halt on reset has been driven, and that recording is owed.
+PYOCD_RESET_UNCONFIRMED = "pyocd_reset_unconfirmed"
+PYOCD_RESET_FAILED_RECORD = '@"Failed to halt device on reset (state is RUNNING)\\n"'
+PYOCD_RECORDING = Path(__file__).with_name("pyocd_0_45_1_gdbserver_recordings.json")
+MONITOR_RESET_HALT = '-interpreter-exec console "monitor reset halt"'
+
+
+def pyocd_recorded_records(command_prefix: str) -> list[str]:
+    """The records GDB printed before the result line of one recorded command."""
+    session = json.loads(PYOCD_RECORDING.read_text(encoding="utf-8"))["scenarios"]["session_ended_by_gdb_exit"]
+    steps = [step for step in session["connect"] if "command" in step] + [session["reset_halt"]]
+    step = next(step for step in steps if step["command"].startswith(command_prefix))
+    return [record for record in step["records"] if RESULT_LINE_PATTERN.match(record) is None]
 
 
 def emit(line: str) -> None:
@@ -389,7 +418,7 @@ def main() -> int:
         if command.startswith("-target-select"):
             if behavior() == "target_select_timeout":
                 continue
-            if has_behavior(CONNECTS_TO_SERVER):
+            if has_behavior(CONNECTS_TO_SERVER) or has_behavior(PYOCD_GDBSERVER):
                 refused = connect_to_server(command)
                 if refused is not None:
                     emit(f'{token}^error,msg="{refused}"')
@@ -397,6 +426,11 @@ def main() -> int:
             if connect_dropped(image):
                 close_server_connections()
                 emit(f'{token}^error,msg="{CONNECT_DROPPED_MESSAGE}"')
+                continue
+            if has_behavior(PYOCD_GDBSERVER):
+                for record in pyocd_recorded_records("-target-select"):
+                    emit(record)
+                emit(f"{token}^connected")
                 continue
             emit(f"{token}^done")
             if behavior() == "stopped_on_attach_hardfault":
@@ -417,6 +451,20 @@ def main() -> int:
             if behavior() == "download_error":
                 emit(f'{token}^error,msg="Download failed"')
                 continue
+            emit(f"{token}^done")
+        elif command.startswith("-interpreter-exec") and has_behavior(PYOCD_GDBSERVER):
+            if command != MONITOR_RESET_HALT:
+                # The fake's own words: no other monitor command was recorded,
+                # and a session over pyOCD sends none.
+                unrecorded = command.replace('"', "'")
+                emit(f'{token}^error,msg="fake GDB over pyOCD: no recording answers {unrecorded}"')
+                continue
+            reset_count += 1
+            records = pyocd_recorded_records(MONITOR_RESET_HALT)
+            if has_behavior(PYOCD_RESET_UNCONFIRMED):
+                records = [records[0], PYOCD_RESET_FAILED_RECORD]
+            for record in records:
+                emit(record)
             emit(f"{token}^done")
         elif command.startswith("-interpreter-exec"):
             reset_count += 1
