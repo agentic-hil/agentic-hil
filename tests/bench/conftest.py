@@ -644,7 +644,7 @@ def firmware(configured_bench: Bench) -> Path:
     # two agree, which made every debug test depend on running after them.
     report = put_on_board(configured_bench, image)
     if report.get("ok") is not True:
-        pytest.fail(f"the demo firmware could not be put on the board before this session: {report.get('summary')}", pytrace=False)
+        pytest.fail(f"the demo firmware could not be put on the board before this session: {report.get('summary')}{chr(10)}{json.dumps(report, indent=1, default=str)}", pytrace=False)
     return image
 
 
@@ -697,7 +697,7 @@ class BoardImages:
             return
         report = put_on_board(self.bench, self.demo)
         if report.get("ok") is not True:
-            pytest.fail(f"the demo firmware could not be put back on the board, so every module after this one would run against the wrong image: {report.get('summary')}", pytrace=False)
+            pytest.fail(f"the demo firmware could not be put back on the board, so every module after this one would run against the wrong image: {report.get('summary')}{chr(10)}{json.dumps(report, indent=1, default=str)}", pytrace=False)
         self.displaced = False
 
 
