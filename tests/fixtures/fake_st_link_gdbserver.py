@@ -70,6 +70,13 @@ USB_REFUSAL_SCENARIO = "start_refused_over_usb_after_a_killed_server"
 # this prints no line the recording has not got: it stops where the product's
 # wait begins, which is the one case a running server's end has to be read in.
 NEVER_READY_VARIABLE = "FAKE_ST_LINK_GDBSERVER_NEVER_READY"
+# A shared start stlink-server could not open the probe for: the GDB server's
+# lines and exit status of the first such start in the restart round, where
+# stlink-server's own log said `TCPCMD OPEN_DEV FAIL`. In this scenario the
+# fake asks the fake stlink-server for the probe by sending it a line, waits
+# for that one to refuse and close, and then says what the recorded server said.
+RESTARTS_RECORDING = Path(__file__).with_name("st_link_gdbserver_7_14_0_linux_restarts_recordings.json")
+OPEN_REFUSAL_SCENARIO = "start_refused_by_stlink_server"
 output_lock = threading.Lock()
 shared_connections: list[socket.socket] = []
 
@@ -122,6 +129,14 @@ def recorded_usb_refusal() -> list[str]:
             if isinstance(step, dict) and isinstance(step.get("refused"), dict):
                 return [str(line) for line in step["refused"]["server_stdout"]]
     raise SystemExit("fake ST-LINK_gdbserver: the direct stop round holds no refused start")
+
+
+def recorded_open_refusal() -> dict:
+    """The first start of the restart round that stlink-server could not open the probe for."""
+    for cycle in json.loads(RESTARTS_RECORDING.read_text(encoding="utf-8"))["scenarios"]["restarts"]:
+        if cycle.get("ready_at_s") is None and any("OPEN_DEV FAIL" in str(line["line"]) for line in cycle.get("probe_server_output") or []):
+            return cycle["refused"]
+    raise SystemExit("fake ST-LINK_gdbserver: the restart round holds no start stlink-server could not open the probe for")
 
 
 def shut_down(reason: str, **fields: object) -> None:
@@ -196,6 +211,19 @@ def main() -> int:
             print(f"fake ST-LINK_gdbserver: shared mode found no stlink-server on port {shared_port}: {error}", file=sys.stderr)
             return 2
         event("shared_server_connected", port=shared_port)
+        if scenario_name == OPEN_REFUSAL_SCENARIO:
+            refusal = recorded_open_refusal()
+            connection = shared_connections[-1]
+            connection.sendall(b"open" + bytes([10]))
+            with contextlib.suppress(OSError):
+                while connection.recv(4096):
+                    pass
+            for entry in refusal["output"]:
+                line = str(entry["line"])
+                if PORT_WORDS in line:
+                    line = line.split(PORT_WORDS)[0] + PORT_WORDS + port_text
+                say(line, str(entry["stream"]))
+            return int(refusal["returncode"])
 
     def terminated(signum: int, frame: object) -> None:
         # The recorded server's own shutdown on SIGTERM, which resumed the core.

@@ -11,6 +11,14 @@ stlink-server first, ends it only after the GDB server is gone, and says which
 way it reached the probe. The recordings are
 st_link_gdbserver_7_14_0_linux_ends_recordings.json and
 st_link_gdbserver_7_14_0_linux_session_stops_recordings.json beside the fakes.
+
+There is one stlink-server per port on a machine, and every session that
+reaches a probe through it shares it, whichever service started it. So the
+product starts it once, records it beside the device locks with every session
+using it, and ends it only when the last of them is done and no other program
+still holds a connection to it. Ended at once after the GDB server was killed,
+it left the next start refused (`TCPCMD OPEN_DEV FAIL`); ended half a second
+later, never (st_link_gdbserver_7_14_0_linux_server_ends_recordings.json).
 """
 
 from __future__ import annotations
@@ -28,20 +36,31 @@ from pathlib import Path
 import pytest
 from fixtures.fake_gdb import MI_ASYNC_UNSUPPORTED, ST_LINK_GDBSERVER
 from fixtures.fake_st_link_gdbserver import NEVER_READY_VARIABLE as ST_LINK_NEVER_READY_VARIABLE
-from fixtures.fake_st_link_gdbserver import SHARED_PORT_VARIABLE
+from fixtures.fake_st_link_gdbserver import OPEN_REFUSAL_SCENARIO, SHARED_PORT_VARIABLE
 from fixtures.fake_stlink_server import EVENTS_VARIABLE as STLINK_SERVER_EVENTS_VARIABLE
+from fixtures.fake_stlink_server import OPEN_DEV_REFUSED
 from fixtures.fake_stlink_server import PORT_VARIABLE as STLINK_SERVER_PORT_VARIABLE
+from fixtures.fake_stlink_server import SCENARIO_VARIABLE as STLINK_SERVER_SCENARIO_VARIABLE
 from support import scaled_time_bound
-from test_debug_sessions import start_debug_session
-from test_gdbserver_sessions import server_events, session_log, st_link_session_service
+from test_debug_sessions import START_TIMEOUT_S, start_debug_session
+from test_gdbserver_sessions import ST_LINK_SCENARIO_VARIABLE, server_events, session_log, st_link_session_service
 
-from agentic_hil.backends import gdbdebug, stlink
+from agentic_hil.backends import gdbdebug, stlink, stlink_server
+from agentic_hil.knowledge import remediation_fields
+from agentic_hil.process import snapshot_process_images
 
-FAKE_STLINK_SERVER = Path(__file__).parent / "fixtures" / "fake_stlink_server.py"
+RECORDINGS = Path(__file__).parent / "fixtures"
+FAKE_STLINK_SERVER = RECORDINGS / "fake_stlink_server.py"
+SERVER_ENDS_RECORDING = RECORDINGS / "st_link_gdbserver_7_14_0_linux_server_ends_recordings.json"
+RESTARTS_RECORDING = RECORDINGS / "st_link_gdbserver_7_14_0_linux_restarts_recordings.json"
+OPEN_DEV_LINE = "Error: TCPCMD OPEN_DEV FAIL, internal assoc not key created"
 # The deadline of a start whose server never says its port listens. The fake has
 # printed every other recorded startup line long before it runs out, so a start
 # that took one of them for the ready line would have connected already.
 NEVER_READY_TIMEOUT_S = scaled_time_bound(2.0)
+# Hosts whose kernel answers which connections are open on a port: Linux in
+# /proc/net/tcp and tcp6, Windows through GetTcpTable and GetTcp6Table.
+CONNECTIONS_COUNTED = sys.platform == "win32" or sys.platform.startswith("linux")
 
 
 def free_port() -> int:
@@ -65,18 +84,36 @@ def use_stlink_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, executabl
 
 
 def recorded_terminations(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
-    """Every process tree the session layer ends, in order, with whether the GDB server was gone by then."""
-    terminate = gdbdebug.terminate_process_tree
+    """Every process tree the session layer and the stlink-server coordination end, in order.
+
+    Each with whether the GDB server was gone by then, and the monotonic time
+    the end was asked for and returned."""
     calls: list[dict] = []
 
-    def recorded(process, timeout_s, **kwargs):
-        gdb_servers = [call["process"] for call in calls if call["which"] == "gdb_server"]
-        which = "stlink_server" if "fake_stlink_server" in " ".join(map(str, process.args)) else "gdb_server"
-        calls.append({"which": which, "process": process, "graceful": kwargs.get("graceful", True), "gdb_server_gone": all(server.poll() is not None for server in gdb_servers) and bool(gdb_servers)})
-        return terminate(process, timeout_s, **kwargs)
+    def recording(terminate):
+        def recorded(process, timeout_s, **kwargs):
+            gdb_servers = [call["process"] for call in calls if call["which"] == "gdb_server"]
+            which = "stlink_server" if "fake_stlink_server" in " ".join(map(str, process.args)) else "gdb_server"
+            call = {"which": which, "process": process, "graceful": kwargs.get("graceful", True), "gdb_server_gone": all(server.poll() is not None for server in gdb_servers) and bool(gdb_servers), "called_at": time.monotonic()}
+            calls.append(call)
+            try:
+                return terminate(process, timeout_s, **kwargs)
+            finally:
+                call["returned_at"] = time.monotonic()
 
-    monkeypatch.setattr(gdbdebug, "terminate_process_tree", recorded)
+        return recorded
+
+    monkeypatch.setattr(gdbdebug, "terminate_process_tree", recording(gdbdebug.terminate_process_tree))
+    monkeypatch.setattr(stlink_server, "terminate_process_tree", recording(stlink_server.terminate_process_tree))
     return calls
+
+
+def wait_for_stlink_server_event(events: Path, name: str, count: int = 1) -> None:
+    deadline_s = scaled_time_bound(10)
+    began = time.monotonic()
+    while [event["event"] for event in server_events(events)].count(name) < count:
+        assert time.monotonic() - began < deadline_s, server_events(events)
+        time.sleep(0.05)
 
 
 def test_st_link_session_reaches_the_probe_through_the_stlink_server_it_starts_and_ends_it_after_the_gdb_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,6 +187,7 @@ def test_st_link_session_shares_an_stlink_server_already_listening_and_leaves_it
         shared = stopped["session"]["probe_server"]
         assert shared["mode"] == "shared", shared
         assert shared["started_by_session"] is False, shared
+        assert shared["started_by_agentic_hil"] is False, shared
         assert shared["ended"] is False, shared
     finally:
         already.kill()
@@ -209,40 +247,48 @@ def test_stlink_server_that_exits_without_listening_is_reported_and_the_session_
     assert (Path(service.config.work_dir) / direct["log_path"]).read_bytes() == b"", direct
 
 
-@pytest.mark.skipif(os.name != "nt", reason="the Windows end: each process ends with its Job Object")
-def test_windows_stop_ends_the_gdb_servers_job_before_the_stlink_servers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Windows has no SIGKILL and no SIGTERM: the end there is each tree's Job Object terminated, the GDB server's first.
+@pytest.mark.skipif(os.name != "nt", reason="the Windows end: the GDB server's Job Object, then stlink-server's process tree")
+def test_windows_stop_ends_the_gdb_servers_job_before_the_stlink_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows has no SIGKILL and no SIGTERM: the GDB server ends with its Job Object, and stlink-server's tree is ended after it.
 
-    That is a kill for both. stlink-server died of the signal on SIGTERM
-    without a shutdown of its own (exit status -15, recorded), so its Job ending
-    is the same end; the order is what keeps the GDB server from being cut off
+    stlink-server is in no Job of the service that started it, because another
+    service's session may still reach the probe through it when that service
+    exits. Both ends are kills. stlink-server died of the signal on SIGTERM
+    without a shutdown of its own (exit status -15, recorded), so a kill is the
+    same end; the order is what keeps the GDB server from being cut off
     mid-transfer by the server it reaches the probe through."""
     use_stlink_server(tmp_path, monkeypatch, str(FAKE_STLINK_SERVER))
     from agentic_hil import process as process_module
 
     terminate_job = process_module._terminate_windows_job
-    ended: list[int] = []
+    ended_jobs: list[tuple[int, float]] = []
 
     def recorded(handle: int) -> None:
-        ended.append(handle)
         terminate_job(handle)
+        ended_jobs.append((handle, time.monotonic()))
 
     monkeypatch.setattr(process_module, "_terminate_windows_job", recorded)
+    calls = recorded_terminations(monkeypatch)
     service, _ = st_link_session_service(tmp_path, monkeypatch)
     try:
         started = start_debug_session(service, mode="attach")
         assert started["ok"] is True, started
         session = service.backend._debug.session
         gdb_server_job = session.server._agentic_hil_job_handle
-        stlink_server_job = session.companion.process._agentic_hil_job_handle
-        assert isinstance(gdb_server_job, int) and isinstance(stlink_server_job, int)
+        assert isinstance(gdb_server_job, int)
+        assert getattr(session.companion.process, "_agentic_hil_job_handle", None) is None
         stopped = service.call("debug_stop_session")
     finally:
         with contextlib.suppress(RuntimeError):
             service.close()
 
     assert stopped["ok"] is True, stopped
-    assert ended[:2] == [gdb_server_job, stlink_server_job], ended
+    assert ended_jobs and ended_jobs[0][0] == gdb_server_job, ended_jobs
+    ends = [call for call in calls if call["which"] == "stlink_server"]
+    assert len(ends) == 1, calls
+    assert ends[0]["called_at"] > ended_jobs[0][1], (ends, ended_jobs)
+    assert ends[0]["gdb_server_gone"] is True, calls
+    assert ends[0]["process"].poll() is not None
     assert stopped["session"]["probe_server"]["ended"] is True
 
 
@@ -568,3 +614,314 @@ def test_a_gdb_refusal_before_the_connect_through_stlink_server_still_says_which
     assert started["probe_server"]["mode"] == "shared", started["probe_server"]
     assert started["probe_server"]["ended"] is True, started["probe_server"]
     assert status["active"] is False, status
+
+
+def test_st_link_session_ends_its_stlink_server_only_half_a_second_after_the_gdb_server_is_gone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wait that kept the next start from being refused.
+
+    Ended at once after the GDB server's kill, stlink-server left the next start
+    refused with `TCPCMD OPEN_DEV FAIL` in 6 of 40 recorded cycles. Ended after
+    it had released the probe's USB, which was at most 9 ms after the kill, or
+    half a second after the kill, it left none refused in 79. So the session
+    waits half a second once the GDB server is gone before it ends stlink-server."""
+    _, stlink_events = use_stlink_server(tmp_path, monkeypatch, str(FAKE_STLINK_SERVER))
+    calls = recorded_terminations(monkeypatch)
+    service, _ = st_link_session_service(tmp_path, monkeypatch)
+    try:
+        started = start_debug_session(service, mode="attach")
+        assert started["ok"] is True, started
+        stopped = service.call("debug_stop_session")
+    finally:
+        service.close()
+
+    assert stopped["ok"] is True, stopped
+    gdb_server_end = next(call for call in calls if call["which"] == "gdb_server")
+    ends = [call for call in calls if call["which"] == "stlink_server"]
+    assert len(ends) == 1, calls
+    assert ends[0]["called_at"] - gdb_server_end["returned_at"] >= stlink_server.STLINK_SERVER_RELEASE_WAIT_S, calls
+    disconnected = [event["at"] for event in server_events(stlink_events) if event["event"] == "client_disconnected"]
+    assert disconnected and max(disconnected) < ends[0]["called_at"], (server_events(stlink_events), calls)
+    assert stopped["session"]["probe_server"]["ended"] is True
+
+
+def test_two_sessions_share_one_stlink_server_and_the_first_stop_leaves_it_to_the_second(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two services, two probes, one stlink-server: the one that started it stops first, and the other carries on.
+
+    The first service starts stlink-server and records it; the second finds it
+    listening, recorded as this product's, and joins it. The first stop leaves
+    it running, because the second session still reaches its probe through it,
+    and that session halts, continues and stops as before. Its stop is the last
+    one, so it ends stlink-server."""
+    _, stlink_events = use_stlink_server(tmp_path, monkeypatch, str(FAKE_STLINK_SERVER))
+    calls = recorded_terminations(monkeypatch)
+    first, _ = st_link_session_service(tmp_path / "first", monkeypatch)
+    second = None
+    try:
+        started_first = start_debug_session(first, mode="attach")
+        assert started_first["ok"] is True, started_first
+        second, _ = st_link_session_service(tmp_path / "second", monkeypatch, probe_id="STLINK456")
+        started_second = start_debug_session(second, mode="attach")
+        assert started_second["ok"] is True, started_second
+        stopped_first = first.call("debug_stop_session")
+        assert stopped_first["ok"] is True, stopped_first
+        assert stlink.stlink_server_listening(stlink.STLINK_SERVER_PORT)
+        assert second.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}})["ok"] is True
+        continued = second.call("debug_continue", {"timeout_s": 5})
+        assert continued["stop_reason"] == "breakpoint_hit", continued
+        assert second.call("debug_halt", {"timeout_s": 5})["ok"] is True
+        stopped_second = second.call("debug_stop_session")
+    finally:
+        first.close()
+        if second is not None:
+            second.close()
+
+    assert stopped_second["ok"] is True, stopped_second
+    assert stopped_second["safe_state_confirmed"] is True, stopped_second
+    assert [event["event"] for event in server_events(stlink_events)].count("started") == 1
+    left = stopped_first["session"]["probe_server"]
+    assert left["started_by_session"] is True, left
+    assert left["ended"] is False, left
+    assert left["other_sessions"] == 1, left
+    assert left["left_running"], left
+    joined = started_second["session"]["probe_server"]
+    assert joined["mode"] == "shared", joined
+    assert joined["started_by_session"] is False, joined
+    assert joined["started_by_agentic_hil"] is True, joined
+    ended = stopped_second["session"]["probe_server"]
+    assert ended["ended"] is True, ended
+    assert ended["returncode"] is not None, ended
+    ends = [call for call in calls if call["which"] == "stlink_server"]
+    gdb_server_ends = [call for call in calls if call["which"] == "gdb_server"]
+    assert len(ends) == 1, calls
+    assert len(gdb_server_ends) >= 2 and calls.index(gdb_server_ends[-1]) < calls.index(ends[0]), calls
+    assert not stlink.stlink_server_listening(stlink.STLINK_SERVER_PORT)
+
+
+@pytest.mark.skipif(not CONNECTIONS_COUNTED, reason="this host's kernel publishes no table of open connections to read")
+def test_stlink_server_another_program_is_connected_to_is_left_running_and_a_later_last_session_ends_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A connection this product did not make is a user it cannot see in its own record.
+
+    stlink-server is there to be shared, so another tool may be reaching a probe
+    through the one a session started. The last session's stop counts the
+    connections still open to it and leaves it running while there are any,
+    recorded as this product's; the next session that is the last one ends it."""
+    port, stlink_events = use_stlink_server(tmp_path, monkeypatch, str(FAKE_STLINK_SERVER))
+    calls = recorded_terminations(monkeypatch)
+    service, _ = st_link_session_service(tmp_path, monkeypatch)
+    other = None
+    try:
+        started = start_debug_session(service, mode="attach")
+        assert started["ok"] is True, started
+        connected = [event["event"] for event in server_events(stlink_events)].count("client_connected")
+        other = socket.create_connection(("127.0.0.1", port), timeout=scaled_time_bound(5))
+        wait_for_stlink_server_event(stlink_events, "client_connected", connected + 1)
+        stopped = service.call("debug_stop_session")
+        assert stopped["ok"] is True, stopped
+        assert stlink.stlink_server_listening(port)
+        other.close()
+        other = None
+        again = start_debug_session(service, mode="attach")
+        assert again["ok"] is True, again
+        stopped_again = service.call("debug_stop_session")
+    finally:
+        if other is not None:
+            other.close()
+        service.close()
+
+    left = stopped["session"]["probe_server"]
+    assert left["ended"] is False, left
+    assert left["other_sessions"] == 0, left
+    assert left["open_connections"] >= 1, left
+    assert left["left_running"], left
+    joined = again["session"]["probe_server"]
+    assert joined["started_by_session"] is False, joined
+    assert joined["started_by_agentic_hil"] is True, joined
+    ended = stopped_again["session"]["probe_server"]
+    assert ended["ended"] is True, ended
+    assert ended["open_connections"] == 0, ended
+    assert [event["event"] for event in server_events(stlink_events)].count("started") == 1
+    assert len([call for call in calls if call["which"] == "stlink_server"]) == 1, calls
+    assert not stlink.stlink_server_listening(port)
+
+
+def test_where_open_connections_cannot_be_counted_the_record_of_this_products_sessions_decides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host whose kernel publishes no connection table: the record of this product's sessions decides alone.
+
+    Left running across sessions, stlink-server was measured refusing every
+    start from its tenth killed client on (`Target unknown error 33`, the
+    kept_running block of the restart round), so a server no session can be
+    shown to use is ended rather than kept. The record says the connections
+    were not counted."""
+    use_stlink_server(tmp_path, monkeypatch, str(FAKE_STLINK_SERVER))
+    monkeypatch.setattr(stlink_server, "established_connections", lambda port: None)
+    service, _ = st_link_session_service(tmp_path, monkeypatch)
+    try:
+        started = start_debug_session(service, mode="attach")
+        assert started["ok"] is True, started
+        stopped = service.call("debug_stop_session")
+    finally:
+        service.close()
+
+    ended = stopped["session"]["probe_server"]
+    assert ended["ended"] is True, ended
+    assert ended["open_connections"] is None, ended
+    assert not stlink.stlink_server_listening(stlink.STLINK_SERVER_PORT)
+
+
+@pytest.mark.skipif(snapshot_process_images() is None, reason="this host publishes no process table to confirm a process by")
+def test_the_last_session_ends_an_stlink_server_another_service_process_started(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The service that started stlink-server is gone by the time the last session using it stops.
+
+    That session ends it by the process recorded for it, once it has confirmed
+    that the running process with that number is the one that was started (its
+    creation time), so a reused number is never ended."""
+    _, stlink_events = use_stlink_server(tmp_path, monkeypatch, str(FAKE_STLINK_SERVER))
+    first, _ = st_link_session_service(tmp_path / "first", monkeypatch)
+    second = None
+    try:
+        started_first = start_debug_session(first, mode="attach")
+        assert started_first["ok"] is True, started_first
+        second, _ = st_link_session_service(tmp_path / "second", monkeypatch, probe_id="STLINK456")
+        started_second = start_debug_session(second, mode="attach")
+        assert started_second["ok"] is True, started_second
+        assert first.call("debug_stop_session")["ok"] is True
+        first.close()
+        # What a later process knows of the server: its record, not the handle of the process that started it.
+        monkeypatch.setattr(stlink_server, "_STARTED", {})
+        stopped_second = second.call("debug_stop_session")
+    finally:
+        first.close()
+        if second is not None:
+            second.close()
+
+    ended = stopped_second["session"]["probe_server"]
+    assert ended["ended"] is True, ended
+    assert not stlink.stlink_server_listening(stlink.STLINK_SERVER_PORT)
+    started_pid = next(event["pid"] for event in server_events(stlink_events) if event["event"] == "started")
+    assert all(image.pid != started_pid for image in snapshot_process_images() or ())
+
+
+def test_st_link_start_stlink_server_could_not_open_the_probe_for_is_its_own_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`TCPCMD OPEN_DEV FAIL` in stlink-server's log is not a target that did not answer.
+
+    ST-LINK_gdbserver words that start as `Failed to connect to device. Please
+    check power and cabling to target.`, the line a target that is off gives
+    too. stlink-server's own log names what happened: it could not open the
+    in-circuit debugger or programmer for the GDB server. The session reads that
+    log from where its start began, and the answer carries the catalogue's
+    measured way out."""
+    use_stlink_server(tmp_path, monkeypatch, str(FAKE_STLINK_SERVER))
+    monkeypatch.setenv(STLINK_SERVER_SCENARIO_VARIABLE, OPEN_DEV_REFUSED)
+    service, _ = st_link_session_service(tmp_path, monkeypatch)
+    monkeypatch.setenv(ST_LINK_SCENARIO_VARIABLE, OPEN_REFUSAL_SCENARIO)
+    try:
+        started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": START_TIMEOUT_S})
+    finally:
+        # The refused start keeps its session for cleanup (below), and a service closed
+        # over such a session says so by raising.
+        with contextlib.suppress(RuntimeError):
+            service.close()
+        service.coordinator.close()
+
+    assert started["ok"] is False, started
+    assert started["error_type"] == "probe_server_open_failed", started
+    assert started["backend_error_type"] == "probe_server_open_failed", started
+    assert started["backend_error"] == OPEN_DEV_LINE, started
+    assert started["remediation"], started
+    assert started["remediation"] == remediation_fields("probe_server_open_failed", "stlink")["remediation"], started
+    # The log says that an open failed, not that nothing this start sent before
+    # it got through, and the server's own last line is `Device connect error`:
+    # nothing places the end before any contact, so the start claims none.
+    assert started["side_effect_status"] == "unknown", started
+    assert started["retry_safe"] is False, started
+    assert started["cleanup_required"] is True, started
+    assert "target_contacted" not in started, started
+    assert not stlink.stlink_server_listening(stlink.STLINK_SERVER_PORT)
+
+
+def test_a_refusal_already_in_the_stlink_server_log_is_not_read_as_a_later_starts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only what stlink-server wrote since a session's start began counts for that start.
+
+    An `OPEN_DEV FAIL` line another client met earlier in the shared log says
+    nothing about a later start that failed for its own reason, which keeps the
+    GDB server's own classification: a probe another server holds, recorded as
+    `Failed to connect to device`, is `target_not_detected`."""
+    port, stlink_events = use_stlink_server(tmp_path, monkeypatch, str(FAKE_STLINK_SERVER))
+    monkeypatch.setenv(STLINK_SERVER_SCENARIO_VARIABLE, OPEN_DEV_REFUSED)
+    first, _ = st_link_session_service(tmp_path / "first", monkeypatch)
+    second = None
+    other = None
+    try:
+        started_first = start_debug_session(first, mode="attach")
+        assert started_first["ok"] is True, started_first
+        # Another program asks stlink-server for a probe and is refused, so the log holds the line.
+        other = socket.create_connection(("127.0.0.1", port), timeout=scaled_time_bound(5))
+        other.sendall(b"open" + bytes([10]))
+        wait_for_stlink_server_event(stlink_events, "open_refused")
+        other.close()
+        other = None
+        second, _ = st_link_session_service(tmp_path / "second", monkeypatch, probe_id="STLINK456")
+        monkeypatch.setenv(ST_LINK_SCENARIO_VARIABLE, "probe_already_held_by_another_server")
+        started_second = second.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": START_TIMEOUT_S})
+        assert first.call("debug_stop_session")["ok"] is True
+    finally:
+        if other is not None:
+            other.close()
+        first.close()
+        if second is not None:
+            # Its refused start keeps the session for cleanup, which its close reports by raising.
+            with contextlib.suppress(RuntimeError):
+                second.close()
+            second.coordinator.close()
+
+    assert started_second["ok"] is False, started_second
+    assert started_second["error_type"] == "target_not_detected", started_second
+
+
+def test_the_recorded_server_ends_back_the_wait_and_the_way_out_of_a_refused_open() -> None:
+    """The committed rounds behind the half second and behind the catalogue's numbers.
+
+    Ended at once, stlink-server left the next start refused in 6 of 40 cycles;
+    ended after the probe's USB was released or after half a second, in none of
+    79, and the USB was released well inside half a second in every cycle that
+    measured it. After every start refused with `OPEN_DEV FAIL` in either round,
+    the next start came up."""
+    ends = json.loads(SERVER_ENDS_RECORDING.read_text(encoding="utf-8"))
+    summary = ends["summary"]
+    at_once = summary["at_once"]
+    waited = [summary["after_the_usb_released"], summary["after_half_a_second"]]
+    assert stlink_server.STLINK_SERVER_RELEASE_WAIT_S == 0.5
+    assert (len(at_once["next_starts_refused_in_cycles"]), at_once["next_starts"]) == (6, 40), at_once
+    assert all(variant["next_starts_refused_in_cycles"] == [] for variant in waited), waited
+    assert sum(variant["next_starts"] for variant in waited) == 79, waited
+    released = [ms for variant in waited for ms in variant["usb_released_after_ms"] if ms is not None]
+    assert released and max(released) < stlink_server.STLINK_SERVER_RELEASE_WAIT_S * 1000, released
+
+    came_up: list[bool] = []
+    restarts = json.loads(RESTARTS_RECORDING.read_text(encoding="utf-8"))["summary"]
+    for block in restarts.values():
+        if isinstance(block, dict) and "after_each_refusal" in block:
+            refused_to_open = set(block["probe_server_open_dev_fail_in_cycles"])
+            came_up.extend(entry["next_came_up"] for entry in block["after_each_refusal"] if entry["cycle"] in refused_to_open)
+    cycles = ends["scenarios"]["server_ends"]
+    for index, cycle in enumerate(cycles):
+        if cycle["ready_at_s"] is None and any("OPEN_DEV FAIL" in str(line["line"]) for line in cycle["probe_server_output"] or []):
+            came_up.append(cycles[index + 1]["ready_at_s"] is not None)
+    assert came_up and all(came_up), came_up
+
+    remedy = " ".join(remediation_fields("probe_server_open_failed", "stlink")["remediation"])
+    assert f"{len(came_up)} of {len(came_up)}" in remedy, remedy
+    assert "6 of 40" in remedy, remedy
+    assert "0 of 79" in remedy, remedy
+
+
+def test_open_connections_are_read_from_the_kernels_table_as_the_container_recorded_it() -> None:
+    """The /proc/net/tcp lines recorded in the bench container before each end: stlink-server's listening socket and closed clients only.
+
+    Neither is a connection anybody still holds: the listening socket is the
+    server's own, and a client's side in TIME_WAIT is already closed."""
+    cycles = json.loads(SERVER_ENDS_RECORDING.read_text(encoding="utf-8"))["scenarios"]["server_ends"]
+    lines = [line for cycle in cycles for line in cycle.get("tcp_lines_before_the_end") or []]
+    assert any(line.split()[3] == "0A" for line in lines) and any(line.split()[3] == "06" for line in lines), lines
+
+    assert stlink_server.established_server_side(lines, 7184) == 0
