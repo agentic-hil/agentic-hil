@@ -81,10 +81,6 @@ ENVELOPE_KEYS = {
 }
 TODAY_COM_READ_KEYS = {"ok", "tool", "port_id", "bytes_read", "buffer_remaining_bytes", "overflow_bytes", "data", "log_path", "summary"} | ENVELOPE_KEYS
 TODAY_CAN_READ_KEYS = {"ok", "tool", "bus_id", "adapter", "frames_read", "frames", "adapter_result", "log_path", "summary"} | ENVELOPE_KEYS
-TODAY_DESCRIPTIONS = {
-    "com_read": "Read buffered feedback from an active COM port session. Use this instead of screen, minicom, or picocom.",
-    "can_read": "Read CAN frames from an active configured CAN bus session. Use this instead of candump.",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -1019,31 +1015,30 @@ def test_tools_call_takes_until_and_until_id_and_refuses_a_bad_value(tmp_path: P
     assert_refused_for(refused_can["structuredContent"], "until_id")
 
 
-SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
-
-
-@pytest.mark.parametrize(("tool", "argument"), [("can_read", "until_id")])
-def test_the_read_descriptions_gain_one_sentence_and_the_arguments_describe_themselves(tool: str, argument: str) -> None:
-    """Each description keeps what it says today and gains one sentence, of at
-    most 130 characters because every tool description shares one budget,
-    saying the call can wait instead of being polled. The new argument
-    describes itself in under 200 characters, and `until_id` says the extended
-    flag is not compared. com_read's description has outgrown this; the test
-    below keeps what it pinned there."""
-    entry = next(item for item in MCP_TOOLS if item["name"] == tool)
-    today = SENTENCE_BREAK.split(TODAY_DESCRIPTIONS[tool])
+def test_the_can_read_description_still_says_what_it_reads_what_it_replaces_and_that_it_waits() -> None:
+    """can_read's description was held to its two sentences from before
+    `until_id` plus one of at most 130 characters, because every tool
+    description then shared one total budget. That budget is gone (#641), and
+    the description now says more about a read, so what the pin held is kept
+    as meaning and not as wording: one sentence says it reads CAN frames from a
+    session, one that it stands in for candump, and one that with until_id the
+    call waits instead of being polled. `until_id` still describes itself in
+    under 200 characters and says the extended flag is not compared."""
+    entry = next(item for item in MCP_TOOLS if item["name"] == "can_read")
     sentences = SENTENCE_BREAK.split(entry["description"].strip())
-    added = [sentence for sentence in sentences if sentence not in today]
 
-    assert all(sentence in sentences for sentence in today), entry["description"]
-    assert len(added) == 1, added
-    assert len(added[0]) <= 130, added
-    assert re.search(r"wait|until", added[0], re.IGNORECASE), added
-    described = entry["inputSchema"]["properties"].get(argument, {}).get("description")
+    assert any(re.search(r"\bread", sentence, re.IGNORECASE) and re.search(r"\bCAN frames?\b", sentence) and re.search(r"\bsession\b", sentence) for sentence in sentences), sentences
+    assert any(re.search(r"\binstead of\b", sentence) and re.search(r"\bcandump\b", sentence) for sentence in sentences), sentences
+    assert any(
+        re.search(r"\buntil_id\b", sentence) and re.search(r"\bwaits?\b", sentence, re.IGNORECASE) and not re.search(r"\b(never|not|no)\b\s+wait", sentence, re.IGNORECASE) for sentence in sentences
+    ), sentences
+    described = entry["inputSchema"]["properties"]["until_id"].get("description")
     assert isinstance(described, str) and described, entry["inputSchema"]
     assert len(described) < 200, described
-    if argument == "until_id":
-        assert "extended" in described.lower(), described
+    assert "extended" in described.lower(), described
+
+
+SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
 
 
 def test_the_com_read_description_still_says_what_it_reads_what_it_replaces_and_that_it_waits() -> None:
