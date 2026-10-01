@@ -68,8 +68,10 @@ debug:
   # the GDB that speaks this target is not on that PATH. `adopt-hardware`
   # fills it in, and so does `project_config_set` behind the description grant.
   gdb_executable: null
-  allowed_symbols: ["main", "sensor_state", "capture_done", "capture_buffer"]
-  allow_all_symbols: false
+  # Every symbol resolves. To narrow that, set allow_all_symbols false and list
+  # the names in allowed_symbols, for example ["main", "sensor_state"].
+  allowed_symbols: []
+  allow_all_symbols: true
 
 artifacts:
   allowed_roots: ["."]       # the whole workspace, recursively; see Artifact Roots below
