@@ -22,7 +22,8 @@ as `st-link-gdbserver-recording.json`, the second round, the teardown one, as
 `st-link-session-stops-recording.json`, the sixth, the stlink-server one,
 as `st-link-server-race-recording.json`, and the seventh, the restart one
 through stlink-server, as `st-link-server-restart-recording.json`, and the
-eighth, the sharing one, as `st-link-server-sharing-recording.json`; each is always attached to the test
+eighth, the sharing one, as `st-link-server-sharing-recording.json`, and the ninth, the ends of
+stlink-server, as `st-link-server-ends-recording.json`; each is always attached to the test
 report as a property as well, which is how a run in the bench image, whose
 environment this module cannot set, hands its recording out. The fourth also makes calls through the product's
 own MCP server, on a copy of the tier's configuration with the probe on `type:
@@ -30,7 +31,8 @@ stlink` and on the tier's own configuration, because what it asks is whether
 the product's next call still reaches the probe. The fifth runs the product's
 own sessions through that server and drives no server or GDB itself. The
 eighth does both: the product's calls and sessions, and a server and GDB of
-its own beside them.
+its own beside them. The ninth calls the product's OpenOCD probe_target after its
+stlink-server ends.
 """
 
 from __future__ import annotations
@@ -56,7 +58,7 @@ from agentic_hil.process import terminate_process_tree
 
 from . import test_bench_debug_sessions as debug_sessions
 from . import test_bench_stlink_sessions as stlink_sessions
-from .conftest import BENCH_ONLY, Bench, put_on_board
+from .conftest import BENCH_ONLY, DEMO_IMAGE, Bench, built_where_it_stands, put_on_board
 from .pyocd_gdbserver_recordings import (
     COMMAND_TIMEOUT_S,
     COUNTER,
@@ -219,6 +221,27 @@ RESTART_BLOCKS: tuple[tuple[str, dict], ...] = (
 SHARING_OUTPUT_NAME = "st-link-server-sharing-recording.json"
 SHARING_CYCLES_ENV = "AGENTIC_HIL_RECORDING_SHARING_CYCLES"
 DEFAULT_SHARING_CYCLES = 3
+# The ninth round: how a session's stlink-server is ended. In the seventh,
+# starts made right after an stlink-server was ended in the product's order
+# (the GDB server killed, stlink-server terminated at once) were refused with
+# `TCPCMD OPEN_DEV FAIL` in 36 of 120 cycles, a pause of 2 s before the start
+# changing nothing; the sixth, which closed GDB before it ended stlink-server,
+# had none in 240. Each variant waits for something else between the kill and
+# stlink-server's SIGTERM: nothing, stlink-server's side of the GDB server's
+# connection closed, its USB node released, or half a second. The variants are
+# taken in turn and every start is made at once, so each start meets the end
+# of the variant before it. The cycles after them each end their
+# stlink-server one of two ways and are followed at once by the product's
+# probe_target on the tier's own configuration (OpenOCD) instead.
+SERVER_ENDS_OUTPUT_NAME = "st-link-server-ends-recording.json"
+SERVER_END_CYCLES_ENV = "AGENTIC_HIL_RECORDING_SERVER_END_CYCLES"
+DEFAULT_SERVER_END_CYCLES = 40
+SERVER_END_VARIANTS = ("at_once", "after_its_client_closed", "after_the_usb_released", "after_half_a_second")
+SERVER_END_WAIT_LIMIT_S = 3.0
+SERVER_END_OPENOCD_VARIANTS = ("at_once", "after_its_client_closed")
+SERVER_END_OPENOCD_CYCLES = 10
+# /proc/net/tcp's state codes.
+TCP_STATES = {"01": "ESTABLISHED", "02": "SYN_SENT", "03": "SYN_RECV", "04": "FIN_WAIT1", "05": "FIN_WAIT2", "06": "TIME_WAIT", "07": "CLOSE", "08": "CLOSE_WAIT", "09": "LAST_ACK", "0A": "LISTEN", "0B": "CLOSING"}
 
 
 def cubeclt_root() -> Path:
@@ -789,6 +812,48 @@ class StLinkRecorder(Recorder):
         record["probe_server_output"] = probe_server.output()[lines_before:]
         record["left_running"] = sorted(process["name"] for process in all_processes() if process["name"] in ("stlink-server", "ST-LINK_gdbserver"))
         return record, time.monotonic()
+
+    def server_end_cycle(self, variant: str, cycle: int, stlink_server: str, previous: str | None, *, whole: bool) -> dict:
+        """One session through an stlink-server started for it, its GDB server killed, and that stlink-server ended as `variant` says.
+
+        `previous` is how the cycle before ended its stlink-server, which is what
+        this cycle's start meets. stlink-server's sockets on its port and the
+        USB nodes it holds are read with a client, right after the kill and
+        right before the SIGTERM."""
+        record: dict = {"variant": variant, "cycle": cycle, "previous_end": previous}
+        probe_server, record["probe_server_listening_after_ms"] = self.probe_server_started(stlink_server)
+        pid = probe_server.process.pid
+        if record["probe_server_listening_after_ms"] is not None:
+            port = free_port()
+            server = GdbServer(self.server_argv(port, extra=["-g", "-t"]), self.environment, self.cwd)
+            self.live.append(server)
+            ready = self.wait_until_listening(server, port, STARTUP_TIMEOUT_S)
+            record["ready_at_s"] = ready["at_s"] if ready is not None else None
+            if ready is None:
+                record["refused"] = self.finish(server)
+            else:
+                client, _ = self.connect(port)
+                record["at_connect"] = {key: value for key, value in self.core_state(client).items() if key in ("s_halt", COUNTER, "pc")}
+                record["with_a_client"] = {"connections": server_side_states(STLINK_SERVER_PORT), "usb_handles": usb_handles(pid)}
+                record["end"] = self.kill(server)
+                killed = time.monotonic()
+                record["killed_at_s"] = round(killed - probe_server.started, 3)
+                record["at_the_kill"] = {"connections": server_side_states(STLINK_SERVER_PORT), "usb_handles": usb_handles(pid)}
+                record["waited"] = wait_before_the_server_end(variant, pid, killed)
+                if variant != "at_once":
+                    record["before_the_end"] = {"connections": server_side_states(STLINK_SERVER_PORT), "usb_handles": usb_handles(pid)}
+                if whole:
+                    record["tcp_lines_before_the_end"] = tcp_lines(STLINK_SERVER_PORT)
+                record["probe_server_end"] = self.probe_server_ended(probe_server)
+                record["probe_server_ended_at_s"] = round(time.monotonic() - probe_server.started, 3)
+                record["gdb_exit"] = {key: value for key, value in self.close_client(client).items() if key in ("closed", "error")}
+                output = server.output()
+                record["gdb_server_output"] = output if whole else [line for line in output if line["stream"] == "stderr"]
+        if "probe_server_end" not in record:
+            record["probe_server_end"] = self.probe_server_ended(probe_server)
+        record["probe_server_output"] = probe_server.output()
+        record["left_running"] = sorted(process["name"] for process in all_processes() if process["name"] in ("stlink-server", "ST-LINK_gdbserver"))
+        return record
 
     def verbose_idle(self, log_file: Path) -> dict:
         """What the server prints, at full logging, while the core sits halted with GDB idle, then runs, then is halted again.
@@ -1542,6 +1607,52 @@ def end_stlink_servers_left_running() -> list[dict]:
     return ended
 
 
+def tcp_lines(port: int) -> list[str]:
+    """The lines of /proc/net/tcp and /proc/net/tcp6 with `port` at either end, as the kernel prints them."""
+    wanted = f":{port:04X}"
+    lines = []
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        with suppress(OSError):
+            for line in Path(table).read_text(encoding="ascii").splitlines()[1:]:
+                fields = line.split()
+                if len(fields) > 3 and (fields[1].endswith(wanted) or fields[2].endswith(wanted)):
+                    lines.append(line.strip())
+    return lines
+
+
+def server_side_states(port: int) -> list[str]:
+    """The state of every socket whose own end is `port`, the listening one included."""
+    wanted = f":{port:04X}"
+    fields = [line.split() for line in tcp_lines(port)]
+    return sorted(TCP_STATES.get(entry[3], entry[3]) for entry in fields if entry[1].endswith(wanted))
+
+
+def wait_before_the_server_end(variant: str, pid: int, killed: float) -> dict:
+    """Wait as `variant` says; and when, in ms after the kill, stlink-server's side of the connection was closed and its USB node released.
+
+    Closed is no socket of its own on its port left established or waiting for
+    it to close; released is no /dev/bus/usb node among its descriptors. Both
+    are looked for every 5 ms for as long as the variant waits."""
+    waited: dict = {"client_closed_after_ms": None, "usb_released_after_ms": None}
+    if variant == "at_once":
+        return waited
+    until = killed + (0.5 if variant == "after_half_a_second" else SERVER_END_WAIT_LIMIT_S)
+    while True:
+        now = time.monotonic()
+        if waited["client_closed_after_ms"] is None and not {"ESTABLISHED", "CLOSE_WAIT"} & set(server_side_states(STLINK_SERVER_PORT)):
+            waited["client_closed_after_ms"] = int((now - killed) * 1000)
+        if waited["usb_released_after_ms"] is None and usb_handles(pid) == 0:
+            waited["usb_released_after_ms"] = int((now - killed) * 1000)
+        if variant == "after_its_client_closed" and waited["client_closed_after_ms"] is not None:
+            break
+        if variant == "after_the_usb_released" and waited["usb_released_after_ms"] is not None:
+            break
+        if now >= until:
+            waited["waited_out"] = variant != "after_half_a_second"
+            break
+        time.sleep(0.005)
+    return waited
+
 def test_record_st_link_server_sharing(
     bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property, stlink_bench: Bench, stlink_servers, mcp_servers
 ) -> None:
@@ -1662,6 +1773,125 @@ def test_record_st_link_server_sharing(
         restored = put_on_board(bench, firmware)
         assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}{chr(10)}{json.dumps(restored, indent=1, default=str)}"
 
+
+def summarize_server_ends(entries: list[dict], openocd: list[dict]) -> dict:
+    """Per variant: its ends, what was seen at them, and the starts and OpenOCD calls made right after them."""
+
+    def lines(entry: dict, key: str) -> list[str]:
+        return [line["line"] for line in entry.get(key) or [] if isinstance(line, dict)]
+
+    summary: dict = {}
+    for variant in SERVER_END_VARIANTS:
+        ended = [entry for entry in entries if entry["variant"] == variant and "killed_at_s" in entry]
+        met = [entry for entry in entries if entry.get("previous_end") == variant]
+        refused = [entry for entry in met if entry.get("ready_at_s") is None]
+
+        def waited(key: str, ended: list[dict] = ended) -> list[int]:
+            return sorted(entry["waited"][key] for entry in ended if entry["waited"].get(key) is not None)
+
+        summary[variant] = {
+            "ends": len(ended),
+            "next_starts": len(met),
+            "next_starts_refused_in_cycles": [entry["cycle"] for entry in refused],
+            "refusal_reasons": sorted({line for entry in refused for line in lines(entry.get("refused") or {}, "output") if line.startswith("Reason:")}),
+            "probe_server_lines_at_refusals": sorted({line for entry in refused for line in lines(entry, "probe_server_output") if line.startswith("Error:") and "recv returned 0" not in line}),
+            "client_closed_after_ms": waited("client_closed_after_ms"),
+            "usb_released_after_ms": waited("usb_released_after_ms"),
+            "waited_out": len([entry for entry in ended if entry["waited"].get("waited_out")]),
+            "usb_handles_with_a_client": sorted({entry["with_a_client"]["usb_handles"] for entry in ended}, key=str),
+            "usb_handles_at_the_kill": sorted({entry["at_the_kill"]["usb_handles"] for entry in ended}, key=str),
+            "connections_at_the_kill": sorted({" ".join(entry["at_the_kill"]["connections"]) for entry in ended}),
+            "connections_before_the_end": sorted({" ".join(entry["before_the_end"]["connections"]) for entry in ended if "before_the_end" in entry}),
+            "left_running_after_a_cycle": sorted({name for entry in ended for name in entry.get("left_running") or []}),
+        }
+    for variant in SERVER_END_OPENOCD_VARIANTS:
+        calls = [entry for entry in openocd if entry["variant"] == variant]
+        answers = [entry.get("openocd_probe_target_next") or {} for entry in calls]
+        summary[f"openocd_after_{variant}"] = {
+            "calls": len([entry for entry in calls if "openocd_probe_target_next" in entry]),
+            "refused_in_cycles": [entry["cycle"] for entry, answer in zip(calls, answers, strict=True) if answer.get("ok") is not True],
+            "refusals": sorted({json.dumps({key: answer.get(key) for key in ("error_type", "summary", "backend_error")}, sort_keys=True) for answer in answers if answer.get("ok") is not True}),
+            "session_starts_refused_in_cycles": [entry["cycle"] for entry in calls if "ready_at_s" in entry and entry["ready_at_s"] is None],
+        }
+    return summary
+
+
+@pytest.fixture
+def demo_built(bench: Bench) -> Path:
+    """The demo's ELF built here, with nothing put on the board.
+
+    The ninth round's own cycles are the first to open the probe in its run,
+    so a probe the run before left refusing OpenOCD is met by them first; the
+    round puts the demo on the board at its end."""
+    failure = built_where_it_stands(bench.project)
+    if failure is not None:
+        pytest.fail(f"the demo firmware did not build here: {failure}", pytrace=False)
+    image = bench.project / DEMO_IMAGE
+    assert image.is_file(), f"the build left no ELF at {image}"
+    return image
+
+
+def test_record_st_link_server_ends(bench: Bench, demo_built: Path, gdb: None, tmp_path: Path, record_property, mcp_servers) -> None:
+    """The ninth round: each way of ending a session's stlink-server, and what the next start, or OpenOCD, meets after it.
+
+    The variants take turns cycle by cycle, `SERVER_END_VARIANTS` times the
+    cycle count, every start made at once; then `SERVER_END_OPENOCD_CYCLES`
+    cycles end theirs one of `SERVER_END_OPENOCD_VARIANTS` ways in turn, each
+    followed at once by the product's probe_target on the tier's own
+    configuration."""
+    firmware = demo_built
+    root, recorder, private_values, recording = recording_for(bench, firmware, tmp_path)
+    stlink_server = os.environ.get(STLINK_SERVER_ENV) or shutil.which("stlink-server")
+    if not stlink_server or not Path(stlink_server).is_file():
+        pytest.fail(f"no stlink-server on PATH and none named by {STLINK_SERVER_ENV}", pytrace=False)
+    cycles = int(os.environ.get(SERVER_END_CYCLES_ENV) or DEFAULT_SERVER_END_CYCLES)
+    recording["server_ends"] = {
+        "variants": list(SERVER_END_VARIANTS),
+        "cycles_per_variant": cycles,
+        "wait_limit_s": SERVER_END_WAIT_LIMIT_S,
+        "openocd_variants": list(SERVER_END_OPENOCD_VARIANTS),
+        "openocd_cycles": SERVER_END_OPENOCD_CYCLES,
+        "stlink_server_sha256": hashlib.sha256(Path(stlink_server).read_bytes()).hexdigest(),
+        "stlink_server_on_path": shutil.which("stlink-server") == stlink_server,
+        "in_a_container": {"dockerenv": Path("/.dockerenv").exists(), "containerenv": Path("/run/.containerenv").exists()},
+    }
+    entries: list[dict] = []
+    openocd: list[dict] = []
+
+    def openocd_probe_target() -> dict:
+        server = mcp_servers()
+        try:
+            return product_answer(server.tool("probe_target"))
+        finally:
+            server.shut_down()
+
+    try:
+        previous: str | None = None
+        refusals_in_a_row = 0
+        for index in range(cycles * len(SERVER_END_VARIANTS)):
+            variant = SERVER_END_VARIANTS[index % len(SERVER_END_VARIANTS)]
+            entry = recorder.server_end_cycle(variant, index + 1, stlink_server, previous, whole=index < len(SERVER_END_VARIANTS))
+            entries.append(entry)
+            previous = variant
+            refusals_in_a_row = refusals_in_a_row + 1 if entry.get("ready_at_s") is None else 0
+            if refusals_in_a_row >= RACE_REFUSALS_IN_A_ROW_LIMIT:
+                recording["server_ends"]["ended_early"] = f"{refusals_in_a_row} starts in a row were refused"
+                break
+        for index in range(SERVER_END_OPENOCD_CYCLES if refusals_in_a_row < RACE_REFUSALS_IN_A_ROW_LIMIT else 0):
+            variant = SERVER_END_OPENOCD_VARIANTS[index % len(SERVER_END_OPENOCD_VARIANTS)]
+            entry = recorder.server_end_cycle(variant, index + 1, stlink_server, None, whole=False)
+            entry["openocd_probe_target_next"] = openocd_probe_target()
+            openocd.append(entry)
+    finally:
+        recorder.cleanup()
+        left = end_stlink_servers_left_running()
+        recording["scenarios"]["server_ends"] = entries
+        recording["scenarios"]["openocd_after_the_end"] = openocd
+        recording["stlink_servers_ended_at_the_end"] = left
+        recording["summary"] = summarize_server_ends(entries, openocd)
+        write_recording(recording, root, private_values, record_property, SERVER_ENDS_OUTPUT_NAME)
+        restored = put_on_board(bench, firmware)
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}{chr(10)}{json.dumps(restored, indent=1, default=str)}"
 
 def test_record_st_link_gdbserver_restart(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
     """The third round: the next server started right after a session's server was killed, and after waits.
