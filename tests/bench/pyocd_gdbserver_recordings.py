@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from agentic_hil.backends.gdbdebug import reserve_tcp_port
 from agentic_hil.config import GDB_AUTODETECT_CANDIDATES
@@ -115,7 +116,7 @@ class GdbServer:
 
     def wait_for_exit(self, timeout_s: float) -> int | None:
         try:
-            return self.process.wait(timeout=timeout_s)
+            return self.process.wait(timeout=scaled_time_bound(timeout_s))
         except subprocess.TimeoutExpired:
             return None
 
@@ -405,7 +406,7 @@ def gdb_executable(environment: dict[str, str]) -> str:
 
 
 def gdb_version(gdb: str) -> str:
-    answered = subprocess.run([gdb, "--version"], capture_output=True, text=True, timeout=30, check=False)
+    answered = subprocess.run([gdb, "--version"], capture_output=True, text=True, timeout=scaled_time_bound(30), check=False)
     return answered.stdout.splitlines()[0] if answered.stdout else ""
 
 
@@ -429,7 +430,7 @@ def test_record_pyocd_gdbserver(bench: Bench, firmware: Path, gdb: None, tmp_pat
         "image": "the demo firmware the tier builds",
         "scenarios": {},
     }
-    help_text = subprocess.run([executable, "gdbserver", "--help"], capture_output=True, text=True, env=environment, timeout=60, check=False)
+    help_text = subprocess.run([executable, "gdbserver", "--help"], capture_output=True, text=True, env=environment, timeout=scaled_time_bound(60), check=False)
     recording["gdbserver_help"] = {"returncode": help_text.returncode, "stdout": help_text.stdout.splitlines()}
     scenarios = recording["scenarios"]
     try:
