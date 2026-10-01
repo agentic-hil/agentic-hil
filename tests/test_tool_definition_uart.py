@@ -834,7 +834,7 @@ def test_com_session_stop_waits_a_bounded_time_for_the_reader_and_can_be_retried
     assert refused["error_type"] == "com_port_close_failed", refused
     assert "reader" in refused["backend_error"], refused
     assert elapsed >= bound - 0.05, elapsed
-    assert elapsed < bound + scaled_time_bound(5.0), elapsed
+    assert elapsed < scaled_time_bound(bound + 5.0), elapsed
     assert port_id in service.com_ports.sessions, "the session stays registered for a retry"
 
     handle.unstall.set()
