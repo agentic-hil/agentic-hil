@@ -224,6 +224,25 @@ def reset_usb_device(
         closer(fd)
 
 
+class USBDeviceNotOpenable(RuntimeError):
+    """The node came back and this account still may not open it inside the wait."""
+
+
+def _is_openable(node_path: Path, open_fn: Callable[..., int], close_fn: Callable[[int], None]) -> OSError | None:
+    """Open the node read-write and close it at once, or the error that refused it.
+
+    Nothing is read, written or reset: the open is the question, and the answer is
+    the whole of what is wanted. The flags are the ones `reset_usb_device` uses, so
+    an open that succeeds here is the open that one will make."""
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = open_fn(str(node_path), flags)
+    except OSError as error:
+        return error
+    close_fn(fd)
+    return None
+
+
 def wait_for_usb_device(
     *,
     sysfs_root: Path,
@@ -235,25 +254,54 @@ def wait_for_usb_device(
     poll_interval_s: float = 0.25,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    open_fn: Callable[..., int] = os.open,
+    close_fn: Callable[[int], None] = os.close,
 ) -> USBDeviceIdentity:
-    """Wait a bounded interval for the same identity to become visible again."""
+    """Wait a bounded interval for the same identity to become visible and openable again.
+
+    Visible is not enough, and that is the whole of what this wait used to ask.
+    The kernel creates `/dev/bus/usb/BBB/DDD` at device registration, which is
+    when `os.stat` starts answering, and udev applies its `MODE`, `GROUP` and
+    `uaccess` afterwards. A wait that returned on the stat alone therefore handed
+    three single-shot calls a node this account could not yet open: a
+    `debugger_probes_list` that has to succeed on its first attempt with the same
+    window open on the usbfs node, and the two the caller makes about the tty.
+
+    So the node is also opened read-write and closed again, inside the same
+    deadline, and a `PermissionError` or a node that vanished between the two
+    steps is polled over like an absent one. Nothing else is retried: an open
+    refused for any other reason is a refusal this wait must not sit on. The
+    deadline is the only bound, as before, and the last error raises rather than
+    being swallowed, so what the wait gave up on is the line the caller reports.
+    """
     if timeout_s <= 0 or poll_interval_s <= 0:
         raise ValueError("USB visibility wait bounds must be positive")
     deadline = clock() + timeout_s
     while True:
+        refusal: OSError | None = None
         try:
-            return find_usb_device(
+            identity = find_usb_device(
                 sysfs_root=sysfs_root,
                 device_root=device_root,
                 expected_serial=expected_serial,
                 expected_vid=expected_vid,
                 expected_pid=expected_pid,
             )
-        except USBDeviceNotFound:
-            remaining = deadline - clock()
-            if remaining <= 0:
-                raise
-            sleep(min(poll_interval_s, remaining))
+        except USBDeviceNotFound as not_found:
+            pending: Exception = not_found
+        else:
+            refusal = _is_openable(Path(identity.node_path), open_fn, close_fn)
+            if refusal is None:
+                return identity
+            if not isinstance(refusal, (PermissionError, FileNotFoundError)):
+                raise refusal
+            pending = USBDeviceNotOpenable(
+                f"the USB node came back and could not be opened within the wait: {type(refusal).__name__}, errno={refusal.errno}"
+            )
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise pending
+        sleep(min(poll_interval_s, remaining))
 
 
 def tty_device_snapshot(
