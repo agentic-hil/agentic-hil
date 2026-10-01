@@ -536,6 +536,17 @@ def a_node_that_exists(tmp_path: Path) -> tuple[Path, Path]:
     return sysfs, tmp_path / "dev" / "bus" / "usb"
 
 
+def a_character_node(path: Path) -> SimpleNamespace:
+    """What `os.stat` answers for the node, on any host.
+
+    The node `a_node_that_exists` writes is a plain file, and Windows' stat has no
+    `st_rdev`, so the wait is handed the device node's stat the way the discovery
+    cases above are. The file still has to exist: absence is the wait's own case.
+    """
+    path.stat()
+    return SimpleNamespace(st_mode=stat.S_IFCHR | 0o660, st_rdev=0)
+
+
 def test_the_visibility_wait_also_requires_the_node_to_be_openable(tmp_path: Path) -> None:
     """A stat that answers is not a node this account may open yet.
 
@@ -571,6 +582,7 @@ def test_the_visibility_wait_also_requires_the_node_to_be_openable(tmp_path: Pat
         sleep=slept.append,
         open_fn=open_fn,
         close_fn=closed.append,
+        stat_fn=a_character_node,
     )
 
     # Polled over the two refusals and returned on the open that worked.
@@ -602,6 +614,7 @@ def test_a_node_that_never_becomes_openable_raises_rather_than_returning(tmp_pat
             sleep=lambda _seconds: None,
             open_fn=refuse,
             close_fn=lambda _fd: None,
+            stat_fn=a_character_node,
         )
 
     assert "could not be opened within the wait" in str(refused.value)
@@ -630,6 +643,7 @@ def test_an_open_refused_for_another_reason_is_not_waited_out(tmp_path: Path) ->
             sleep=slept.append,
             open_fn=refuse,
             close_fn=lambda _fd: None,
+            stat_fn=a_character_node,
         )
 
     assert refused.value.errno == errno.ENODEV

@@ -256,6 +256,7 @@ def wait_for_usb_device(
     sleep: Callable[[float], None] = time.sleep,
     open_fn: Callable[..., int] = os.open,
     close_fn: Callable[[int], None] = os.close,
+    stat_fn: Callable[[Path], Any] = os.stat,
 ) -> USBDeviceIdentity:
     """Wait a bounded interval for the same identity to become visible and openable again.
 
@@ -286,6 +287,7 @@ def wait_for_usb_device(
                 expected_serial=expected_serial,
                 expected_vid=expected_vid,
                 expected_pid=expected_pid,
+                stat_fn=stat_fn,
             )
         except USBDeviceNotFound as not_found:
             pending: Exception = not_found
