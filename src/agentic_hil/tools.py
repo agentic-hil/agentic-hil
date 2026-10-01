@@ -8,6 +8,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import yaml
 
@@ -341,12 +342,23 @@ class AgenticHILToolService:
         unknown or partial hardware effect) drops it rather than resolve a
         symbol against an image the board may no longer be running.
 
+        "Confirmed" is `overall_success`, the documented predicate, and not `ok`
+        on its own. A result may carry `ok: true` and still fail one of the other
+        markers, and such a result proves nothing about the image on the board:
+        one of them was a probe listing a pyOCD flash never got past, still
+        wearing the `ok: true` of the enumeration that succeeded, which made an
+        ELF the board never received this bench's proven symbol source, which is
+        the exact outcome the paragraph above exists to prevent. Where such a
+        result does prove the flash never started, the third branch keeps the
+        source the board is still running; where it does not, the image is
+        unproven and the source is dropped.
+
         The pre-staging artifact is kept, not the staged copy: staging is
         released as soon as the backend returns, while this path stays readable
         for as long as the file does. Its digest is kept with it and revalidated
         at dump time, so a rebuild that replaces the file cannot be read while
         the result still claims the flashed image's bytes."""
-        if result.get("ok") is True:
+        if overall_success(result):
             self._symbol_elf = artifact if Path(str(artifact["resolved_path"])).suffix.lower() == ".elf" else None
             return
         if result.get("side_effect_status") != "not_started":
@@ -399,6 +411,15 @@ class AgenticHILToolService:
             with suppress(BaseException):
                 state["sessions"].append(self.com_ports.session_stop(port_id))
             raise
+        # `ok` rather than `overall_success`, and deliberately: the wait asks
+        # whether output is coming, which is a fact about the flash and its reset
+        # and not about whether the call may be reported as a success. A flash
+        # that reached the board and could then not be audited did reset it, so
+        # the banner is on its way, and not waiting would answer with an empty
+        # capture about a board that booted while the audit failure it is really
+        # about is reported anyway. What must not reach here as `ok: true` is a
+        # gate that refused before the flash: those are refusals in their own
+        # right (the pyOCD backend's `_listing_refusal`), so they arrive false.
         capture, stop = self.com_ports.capture_finish(checked, "flash_firmware", wait=result.get("ok") is True)
         state["sessions"].append(stop)
         state.update(capture=capture, stop=stop)
@@ -3947,6 +3968,37 @@ def unprovisioned_tool_error(tool: str, workspace: Path) -> JsonObject:
     }
 
 
+def root_folder(uri: str) -> Path | None:
+    """The local folder an MCP root names, or None for any root that is not one.
+
+    Decoded once and by hand rather than through `url2pathname`, which on
+    Windows leaves `file:///c%3A/...`, the spelling VS Code sends, as a path
+    with no drive. A root on another machine, or one that is not an existing
+    directory, names nothing this server could bind."""
+    parts = urlsplit(uri)
+    if parts.scheme.lower() != "file" or parts.query or parts.fragment:
+        return None
+    path = unquote(parts.path)
+    if parts.netloc not in ("", "localhost"):
+        if os.name != "nt":
+            return None
+        path = f"//{parts.netloc}{path}"
+    elif os.name == "nt" and len(path) > 2 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    folder = Path(path)
+    if not folder.is_absolute() or not folder.is_dir():
+        return None
+    return folder.resolve()
+
+
+def _loads_configuration(folder: Path) -> bool:
+    try:
+        load_authoritative_config(folder)
+    except ConfigError:
+        return False
+    return True
+
+
 class UnprovisionedToolService:
     """The MCP server for a workspace whose configuration does not exist yet.
 
@@ -3963,6 +4015,35 @@ class UnprovisionedToolService:
         self._frontend = frontend
         self._service: AgenticHILToolService | None = None
         self._lock = threading.RLock()
+        # Whether the host declared at initialize that it answers `roots/list`.
+        # Only then is it asked which folder it has open.
+        self.host_names_folders = False
+
+    @property
+    def movable(self) -> bool:
+        """Whether a folder the host names may still become the workspace.
+
+        Only until a configuration is bound: after that the session has a
+        policy, a state directory and possibly a run, and none of them moves."""
+        with self._lock:
+            return self._service is None
+
+    def serve_host_roots(self, uris: list[str]) -> None:
+        """Serve the folder the host has open, when its roots name exactly one.
+
+        One local folder is that folder, configured or not, so a configuration
+        generated from here is generated for it. Several are narrowed to the ones
+        with a configuration that loads, and serve only if that leaves one. Any
+        other answer leaves the workspace where the server started: guessing
+        between projects would bind the wrong bench's policy."""
+        folders = list(dict.fromkeys(folder for uri in uris if (folder := root_folder(uri)) is not None))
+        if len(folders) > 1:
+            folders = [folder for folder in folders if _loads_configuration(folder)]
+        if len(folders) != 1:
+            return
+        with self._lock:
+            if self._service is None:
+                self.workspace = folders[0]
 
     @property
     def config(self) -> AgenticHILConfig | None:

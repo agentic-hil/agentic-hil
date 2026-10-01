@@ -19,10 +19,12 @@ probe node udev left as it leaves a device no rule applies to.
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import os
 import re
 import stat
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -66,6 +68,11 @@ PROBE_GROUP_GID = 46
 # The attributes the product reads off each USB device.
 SYSFS_ATTRIBUTES = ("idVendor", "idProduct", "busnum", "devnum", "serial")
 
+POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX device nodes, modes and account groups; on Windows the check answers nothing before it reads one")
+# A mode that admits nobody admits root all the same, so the refusal these pin
+# cannot happen for a process that is root.
+NOT_ROOT_ONLY = pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX modes, and root may open a node whatever its mode says")
+
 STARTER_PROFILE: JsonObject = {
     "target": {"name": "nucleo-f446re-starter", "controller": "stm32f446ret6"},
     "debuggers": {"dut": {"timeout_s": 60, "permissions": {}}},
@@ -100,6 +107,15 @@ class RecordedHost:
         self.group_names = {int(gid): name for gid, name in credentials["group_names"].items()}
         self.owner_names = {node["st_uid"]: node["owner"] for node in place["nodes"]}
         self.group_names.update({node["st_gid"]: node["group"] for node in place["nodes"]})
+        # The user namespace each place ran in, as the recording captured it:
+        # `/proc/self/gid_map` and `/proc/sys/kernel/overflowgid`, word for word.
+        # The host's map is the whole range in one line; both container places map
+        # the invoking account's gid and a 65536-wide block beside it, which is
+        # what rootless Podman's /etc/subgid gives it. Replayed rather than stated
+        # so a case is about the container that was recorded: a stated pair said
+        # the overflow group was outside the map, and the recorded map covers it.
+        self.gid_map: str | None = place["gid_map"]
+        self.overflow_gid: str | None = str(place["overflowgid"])
 
     def asks(self) -> bool:
         return True
@@ -116,6 +132,11 @@ class RecordedHost:
 
     def may_open(self, path: str) -> bool:
         return self.nodes[path]["access_rw"]
+
+    def gid_is_mapped(self, gid: int) -> bool:
+        # The product's own reading of the two files, handed the recorded text:
+        # reimplementing it here would make the assertion about this class.
+        return device_access.gid_is_mapped_by(gid, self.gid_map, self.overflow_gid)
 
     def login_groups(self) -> frozenset[int]:
         return self.login
@@ -162,8 +183,46 @@ def with_no_udev_rule(tmp_path: Path) -> RecordedHost:
     return host
 
 
+def with_the_owning_group_mapped(tmp_path: Path, place: str) -> RecordedHost:
+    """One recorded place with a user namespace that maps every group id.
+
+    Composed from a recorded place, and says so the way `added_after_this_login`
+    and `with_no_udev_rule` do: the nodes, the modes and the account are the
+    recorded ones, and the map is a plain host's, the whole range in one line. A
+    namespace that maps everything can have no unmapped owner, so the group the
+    node names is a group here, whatever its number is.
+    """
+    host = recorded_host(tmp_path, place)
+    host.gid_map = RECORDING[ON_THE_HOST]["gid_map"]
+    return host
+
+
+class AskedLocalHost(device_access.LocalHost):
+    """This machine, asked.
+
+    The suite's own host answers `asks()` False so no assertion is decided by the
+    developer's groups or by whatever is plugged in (see `tests/conftest.py`).
+    The readers below it are this machine's all the same, and a test that hands
+    them a path under `tmp_path` exercises the code the bench runs without
+    asking anything of a device: nothing here is a device node."""
+
+    def asks(self) -> bool:
+        return True
+
+
 def flat(text: str) -> str:
     return " ".join(text.split())
+
+
+def _database_name(read: Callable[[], str]) -> str | None:
+    """What the account database answers, or None where it names no such number.
+
+    The same two refusals `LocalHost` itself folds into None: a number with no
+    entry, and one too large for the database to hold at all."""
+    try:
+        return read()
+    except (KeyError, OverflowError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +264,46 @@ def test_without_a_probe_id_the_one_attached_probe_is_the_one_checked(tmp_path: 
     assert probe is not None and probe["node"] == PROBE_NODE, probe
 
 
+def test_without_a_probe_id_a_backend_that_opens_no_st_link_adopts_nobodys_probe(tmp_path: Path) -> None:
+    """The sole attached ST-Link is not every entry's probe.
+
+    `attached_probes` recognises the ST-Link USB identity and no other, so a
+    pyOCD or CMSIS-DAP entry that pins no serial has no probe here this module can
+    find. Answering with the one ST-Link on the workstation attached an unrelated
+    board's verdict to it: `doctor` exited non-zero naming a `/dev/bus/usb/...`
+    node the configuration never touches, `init` and `setup` repeated it as a
+    warning, and in a multi-debugger file that one verdict was copied onto every
+    entry with no serial. An entry that cannot be shown to open an ST-Link answers
+    nothing, which is what this module does everywhere else it cannot tell.
+    """
+    host = recorded_host(tmp_path, WITHHOLDING_THE_GROUPS)
+
+    assert device_access.probe_access(None, host=host, opens_an_stlink=False) is None
+    # A serial settles it whatever the backend is: a serial that matches one of
+    # the ST-Links on this USB names that ST-Link and nothing has to be decided.
+    named = device_access.probe_access(PROBE_SERIAL, host=host, opens_an_stlink=False)
+    assert named is not None and named["node"] == PROBE_NODE, named
+
+
+@pytest.mark.parametrize(
+    ("debugger_type", "interface_cfg", "opens_one"),
+    [
+        ("stlink", "", True),
+        ("openocd", "interface/stlink.cfg", True),
+        ("openocd", "interface/stlink-dap.cfg", True),
+        ("openocd", "/opt/openocd/share/openocd/scripts/interface/stlink.cfg", True),
+        ("openocd", "interface/cmsis-dap.cfg", False),
+        ("openocd", "interface/jlink.cfg", False),
+        ("pyocd", "", False),
+    ],
+)
+def test_which_backends_open_an_st_link(debugger_type: str, interface_cfg: str, opens_one: bool) -> None:
+    """STM32CubeProgrammer has no other transport; OpenOCD's is whatever its
+    interface script names; pyOCD's is not written down anywhere the configuration
+    can be read, because it opens ST-Links and CMSIS-DAP probes alike."""
+    assert device_access.backend_opens_an_stlink(debugger_type, interface_cfg) is opens_one
+
+
 def test_the_container_that_keeps_the_groups_may_open_both(tmp_path: Path) -> None:
     host = recorded_host(tmp_path, KEEPING_THE_GROUPS)
 
@@ -215,7 +314,24 @@ def test_the_container_that_keeps_the_groups_may_open_both(tmp_path: Path) -> No
     assert port is not None and port["ok"] is True, port
 
 
-def test_the_container_that_withholds_the_groups_may_open_neither_and_says_which_group(tmp_path: Path) -> None:
+def test_the_container_that_withholds_the_groups_may_open_neither_and_says_the_group_is_not_mapped(tmp_path: Path) -> None:
+    """The remedy has to be the one that works, and adding an account to `nogroup` is not it.
+
+    In a rootless container every host group with no mapping inside the namespace
+    is reported as the overflow group, which is what the recording captured: the
+    nodes are owned by 65534 `nogroup` there, and the map the same recording
+    carries is rootless Podman's own (`0 1001 1` and `1 165536 65536`). Naming
+    that group as the one an administrator adds this account to is advice that
+    changes nothing, because there is no such group in the namespace to be in.
+    What the bench runner itself does is map the groups in (`--group-add
+    keep-groups`, tools/bench_in_container.py), and that is what the sentence has
+    to say.
+
+    The whole of this place is replayed, the map included: 65534 falls inside that
+    second range, so a reading that only asks whether some line covers the number
+    answers that the group is mapped and hands back the remedy that cannot work,
+    in exactly the container this case is about.
+    """
     host = recorded_host(tmp_path, WITHHOLDING_THE_GROUPS)
 
     probe = device_access.probe_access(PROBE_SERIAL, host=host)
@@ -229,13 +345,132 @@ def test_the_container_that_withholds_the_groups_may_open_neither_and_says_which
         # The group that owns the node as this process sees it: in a rootless
         # container every host group outside its map is the overflow group.
         assert check["group"] == "nogroup"
-        assert check["cause"] == "not_in_group"
+        assert check["cause"] == "group_not_mapped", check
         assert check["login_in_group"] is False
         assert check["account_in_group"] is False
         assert node in check["summary"] and "nogroup" in check["summary"]
+        # The remedy that works, and not the one that cannot.
+        assert "not mapped into this user namespace" in check["summary"], check["summary"]
+        assert "keep-groups" in check["summary"], check["summary"]
+        assert f"adds it to {check['group']}" not in check["summary"], check["summary"]
         assert check["remediation"] == remediation_fields(device_access.DEVICE_ACCESS_DENIED, scope)["remediation"]
         assert check["do_not"] == remediation_fields(device_access.DEVICE_ACCESS_DENIED, scope)["do_not"]
     assert port is not None and port["link"] == BY_ID_PATH and BY_ID_PATH in port["summary"]
+
+
+def test_a_group_the_namespace_does_map_is_still_a_group_to_be_added_to(tmp_path: Path) -> None:
+    """The other side of the same fork, so the new cause cannot swallow the old one.
+
+    On a host, and in a namespace that maps every group id, an account outside the
+    owning group is exactly what it looks like: a group that exists here and that
+    an administrator adds the account to once. The number is the same 65534 the
+    container reports, so it is the map and not the number that decides this.
+    """
+    host = with_the_owning_group_mapped(tmp_path, WITHHOLDING_THE_GROUPS)
+
+    port = device_access.port_access(BY_ID_PATH, host=host)
+
+    assert port is not None and port["cause"] == "not_in_group", port
+    assert "an administrator adds it to nogroup once" in port["summary"], port["summary"]
+
+
+@pytest.mark.parametrize(
+    ("gid", "gid_map", "overflow_gid", "mapped"),
+    [
+        # A plain host: one line, the whole range, and the overflow number is an
+        # ordinary group there because no owner can be unmapped at all.
+        (65534, "0          0 4294967295", "65534", True),
+        (46, "0          0 4294967295", "65534", True),
+        # The recorded rootless container: 65534 falls inside the second range,
+        # and is still what the kernel reports for an owner it cannot name.
+        (65534, "0       1001          1\n         1     165536      65536", "65534", False),
+        # A gid no line covers, which is the other unmapped shape.
+        (70000, "0       1001          1\n         1     165536      65536", "65534", False),
+        # A group the same namespace does map, and is not the overflow number.
+        (46, "0       1001          1\n         1     165536      65536", "65534", True),
+        # An overflow id this kernel was configured differently for.
+        (60000, "0       1001          1\n         1     165536      65536", "60000", False),
+        # True wherever nothing says otherwise: no map to read, a map this reader
+        # cannot parse, and an overflow file that says nothing a gid could be.
+        (65534, None, "65534", True),
+        (65534, "not a map at all", "65534", True),
+        (65534, "0       1001          1\n         1     165536      65536", None, True),
+        (65534, "0       1001          1\n         1     165536      65536", "", True),
+    ],
+)
+def test_what_the_namespace_reports_as_an_unmapped_owning_group(gid: int, gid_map: str | None, overflow_gid: str | None, mapped: bool) -> None:
+    """The two shapes of an owner this namespace has no group for, and the tolerance around them.
+
+    The kernel reports an owner it has no mapping for as the overflow id, whether
+    or not that id is itself inside some range of the map, so the number alone is
+    not the question and neither is the range alone. A namespace that maps the
+    whole space is the one place the overflow id means nothing of the sort,
+    because nothing there can be unmapped.
+    """
+    assert device_access.gid_is_mapped_by(gid, gid_map, overflow_gid) is mapped
+
+
+def test_this_machine_binds_the_two_proc_files_the_mapping_question_rests_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one `gid_is_mapped` a bench actually runs, over the two files it reads.
+
+    Every case above hands `gid_is_mapped_by` its text directly, the parametrized
+    one and `RecordedHost` alike, so `LocalHost.gid_is_mapped` is the single place
+    the two `/proc` paths are bound to that reader's two parameters and the only
+    one a bench goes through. Bound the other way round it still answers, and
+    answers True: the overflow file's single field trips the `len(fields) != 3`
+    tolerance, and this reader answers True wherever nothing says otherwise. That
+    is every group mapped on every host, the cause this module grew for disabled,
+    and nothing red anywhere. So the binding is asserted here, on the recorded
+    container's own pair, where the two files disagree about 65534.
+    """
+    container = RECORDING[WITHHOLDING_THE_GROUPS]
+    overflow_gid = int(container["overflowgid"])
+    gid_map_file = tmp_path / "gid_map"
+    overflow_gid_file = tmp_path / "overflowgid"
+    gid_map_file.write_text(f"{container['gid_map']}\n", encoding="utf-8")
+    overflow_gid_file.write_text(f"{overflow_gid}\n", encoding="utf-8")
+    monkeypatch.setattr(device_access, "PROC_GID_MAP", gid_map_file)
+    monkeypatch.setattr(device_access, "PROC_OVERFLOW_GID", overflow_gid_file)
+
+    # The owner the recorded container reports for a node it has no group for.
+    assert AskedLocalHost().gid_is_mapped(overflow_gid) is False
+    # And a group the same namespace does map, so this is not the map refusing
+    # every number put to it.
+    assert AskedLocalHost().gid_is_mapped(PROBE_GROUP_GID) is True
+
+    # The host's map in the same two files: the number is the one the container
+    # answered False for, and the map is what moved.
+    gid_map_file.write_text(f"{RECORDING[ON_THE_HOST]['gid_map']}\n", encoding="utf-8")
+    assert AskedLocalHost().gid_is_mapped(overflow_gid) is True
+
+
+def test_an_account_database_that_cannot_be_read_is_not_a_claim_about_the_account(tmp_path: Path) -> None:
+    """A uid with no passwd entry is the case this check exists for, and the one it guessed at.
+
+    `docker run -u 4242` and an arbitrary uid under OpenShift have no entry, so
+    `account_groups` answers None, and None is falsy: the sentence fell through to
+    "this account is not in the group plugdev", a positive statement about a
+    database nothing read. The JSON stayed honest at `account_in_group: null`; the
+    sentence a person reads did not. It is also exactly where "log in again"
+    against "ask an administrator" is the decision being made, so guessing one is
+    the worst of the three answers available.
+    """
+    host = recorded_host(tmp_path, ON_THE_HOST)
+    host.account = None  # type: ignore[assignment]
+    for node in host.nodes.values():
+        if node["st_gid"] == PROBE_GROUP_GID:
+            node["access_rw"] = False
+    host.login = host.login - {PROBE_GROUP_GID}
+
+    port = device_access.port_access(BY_ID_PATH, host=host)
+
+    assert port is not None and port["ok"] is False, port
+    assert port["cause"] == "account_unknown", port
+    assert port["account_in_group"] is None, port
+    assert "no entry in the account database" in port["summary"], port["summary"]
+    # Both remedies named, because which one applies is what could not be read.
+    assert "log in again" in port["summary"] and "an administrator adds it to plugdev" in port["summary"], port["summary"]
+    assert "this account is not in the group" not in port["summary"], port["summary"]
 
 
 def test_an_account_added_to_the_group_after_this_login_is_told_to_log_in_again(tmp_path: Path) -> None:
@@ -253,7 +488,8 @@ def test_an_account_added_to_the_group_after_this_login_is_told_to_log_in_again(
         assert "log in again" in check["summary"]
 
 
-def test_a_probe_node_left_as_root_root_says_no_udev_rule_applies(tmp_path: Path) -> None:
+def test_a_probe_node_left_as_root_root_says_no_udev_rule_applies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    on_linux(monkeypatch)
     host = with_no_udev_rule(tmp_path)
 
     probe = device_access.probe_access(PROBE_SERIAL, host=host)
@@ -262,6 +498,64 @@ def test_a_probe_node_left_as_root_root_says_no_udev_rule_applies(tmp_path: Path
     assert probe["cause"] == "no_udev_rule"
     assert (probe["owner"], probe["group"], probe["mode"]) == ("root", "root", "crw-rw-r--")
     assert "no udev rule" in probe["summary"]
+
+
+def on_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The platform whose device nodes are udev's, stated rather than inherited.
+
+    The recordings are a Linux bench's, and the sentences that name a udev rule
+    are given on Linux only, so a test about one says which platform it is asking
+    about instead of passing or failing on where the suite happens to run."""
+    monkeypatch.setattr(device_access.sys, "platform", "linux")
+
+
+def a_node_owned_by_wheel(tmp_path: Path) -> RecordedHost:
+    """The recorded host with the port's node as a macOS tty is left.
+
+    Composed, and said to be: `crw-rw---- root:wheel` is how that platform leaves
+    a serial device, and gid 0 there is `wheel` rather than `root`. Only the
+    numbers and the names change; the kernel's answer is the recorded one for a
+    node this account may not open."""
+    host = recorded_host(tmp_path, ON_THE_HOST)
+    host.group_names[0] = "wheel"
+    host.nodes[PORT_NODE] = {**host.nodes[PORT_NODE], "st_mode": 0o020660, "st_uid": 0, "st_gid": 0, "access_rw": False}
+    return host
+
+
+def test_a_platform_without_udev_is_never_told_to_install_a_udev_rule(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """gid 0 is `wheel` on macOS, and there is no udev there to write a rule for.
+
+    `no_udev_rule` reads "root:root is how udev leaves a device no rule applies
+    to", and it was keyed on the two numbers alone. A `crw-rw---- root:wheel` tty
+    this account cannot open therefore produced that sentence, which contradicts
+    itself (the node it just printed is not root:root) and prescribes a rule file
+    for a system with no udev at all. What is true there is the group step, which
+    is what the account is actually missing.
+    """
+    monkeypatch.setattr(device_access.sys, "platform", "darwin")
+    host = a_node_owned_by_wheel(tmp_path)
+
+    port = device_access.port_access(BY_ID_PATH, host=host)
+
+    assert port is not None and port["ok"] is False, port
+    assert (port["owner"], port["group"], port["mode"]) == ("root", "wheel", "crw-rw----")
+    assert port["cause"] == "not_in_group", port
+    assert "udev" not in port["summary"], port["summary"]
+    assert "an administrator adds it to wheel once" in port["summary"], port["summary"]
+
+
+def test_the_same_node_on_linux_still_reads_as_a_group_udev_gave_it_to(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gating is the platform and not the group's name: a Linux node owned by
+    a group named `wheel` is a group this account is missing, and one owned by
+    `root` is the state udev leaves a device no rule applies to."""
+    on_linux(monkeypatch)
+    host = a_node_owned_by_wheel(tmp_path)
+
+    port = device_access.port_access(BY_ID_PATH, host=host)
+
+    assert port is not None and port["cause"] == "not_in_group", port
+    host.group_names[0] = "root"
+    assert device_access.port_access(BY_ID_PATH, host=host)["cause"] == "no_udev_rule"  # type: ignore[index]
 
 
 def test_the_remediation_names_the_udev_rule_and_the_group_step(tmp_path: Path) -> None:
@@ -275,6 +569,87 @@ def test_the_remediation_names_the_udev_rule_and_the_group_step(tmp_path: Path) 
         assert section in steps
         assert any("chmod" in step for step in fields["do_not"])
         assert any("root" in step for step in fields["do_not"])
+
+
+# ---------------------------------------------------------------------------
+# A node the host could not stat at all.
+
+
+def a_stat_that_fails(tmp_path: Path, failure: device_access.NodeFailure) -> RecordedHost:
+    """The recorded host with `os.stat` refusing every node, the way a closed directory on the way to one makes it."""
+    host = recorded_host(tmp_path, ON_THE_HOST)
+    host.status = lambda path: failure  # type: ignore[method-assign, return-value]
+    return host
+
+
+def test_a_node_whose_attributes_may_not_even_be_read_is_a_refusal_that_names_the_errno(tmp_path: Path) -> None:
+    """EACCES on the stat itself is the refusal this check exists to give, not a silence.
+
+    A directory on the way to the node this account may not search, or a security
+    module that denies the node, refuses `os.stat` before any mode can be read.
+    Opening it would be refused too, so the answer is a refusal, and the errno is
+    the whole evidence for it."""
+    refused = device_access.NodeFailure(name="EACCES", number=errno.EACCES, message=f"[Errno 13] Permission denied: '{PORT_NODE}'")
+    host = a_stat_that_fails(tmp_path, refused)
+
+    port = device_access.port_access(BY_ID_PATH, host=host)
+
+    assert port is not None and port["ok"] is False, port
+    assert port["error_type"] == device_access.DEVICE_ACCESS_DENIED
+    assert port["cause"] == "stat_refused"
+    assert (port["errno"], port["node"], port["link"]) == ("EACCES", PORT_NODE, BY_ID_PATH)
+    # The decisive line itself, in the sentence a person reads.
+    assert refused.message in port["summary"], port["summary"]
+    assert "EACCES" in port["summary"]
+    assert port["remediation"] == remediation_fields(device_access.DEVICE_ACCESS_DENIED, device_access.COM_PORT_SCOPE)["remediation"]
+
+
+def test_a_stat_that_failed_for_another_reason_is_a_check_that_could_not_be_made(tmp_path: Path) -> None:
+    """Not a refusal and not a silence: nothing was denied, and the errno says why nothing could be said."""
+    broken = device_access.NodeFailure(name="EIO", number=errno.EIO, message=f"[Errno 5] Input/output error: '{PROBE_NODE}'")
+    host = a_stat_that_fails(tmp_path, broken)
+
+    probe = device_access.probe_access(PROBE_SERIAL, host=host)
+
+    assert probe is not None, probe
+    assert probe["ok"] is True, probe
+    assert probe["status"] == "undetermined"
+    assert probe["errno"] == "EIO"
+    assert "error_type" not in probe and "remediation" not in probe
+    assert broken.message in probe["summary"], probe["summary"]
+
+
+@NOT_ROOT_ONLY
+def test_this_machine_keeps_the_errno_of_a_stat_it_could_not_make(tmp_path: Path) -> None:
+    """The reader's own half: a directory this account may not search, which is how EACCES reaches the stat."""
+    closed = tmp_path / "closed"
+    closed.mkdir()
+    node = closed / "ttyACM0"
+    node.write_text("", encoding="utf-8")
+    closed.chmod(0o000)
+    try:
+        failure = AskedLocalHost().status(str(node))
+    finally:
+        closed.chmod(0o700)
+
+    assert isinstance(failure, device_access.NodeFailure), failure
+    assert (failure.name, failure.number) == ("EACCES", errno.EACCES)
+    assert "Permission denied" in failure.message
+
+
+def test_doctor_shows_a_check_it_could_not_make_and_stays_green_over_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing was refused, so nothing is failed, and the errno is in the report rather than nowhere."""
+    a_bench_bound_to_the_recorded_probe_and_port(tmp_path, monkeypatch)
+    broken = device_access.NodeFailure(name="ENOTDIR", number=errno.ENOTDIR, message=f"[Errno 20] Not a directory: '{PORT_NODE}'")
+    monkeypatch.setattr(device_access, "HOST", a_stat_that_fails(tmp_path, broken))
+
+    report = doctor()
+
+    assert report["ok"] is True, report
+    assert report["unhealthy"] == [], report["unhealthy"]
+    port = report["com_ports"]["dut_uart"]["device_access"]
+    assert (port["ok"], port["status"], port["errno"]) == (True, "undetermined", "ENOTDIR")
+    assert flat(broken.message) in flat(render_result(report, "doctor")), port
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +697,125 @@ def test_the_suite_never_asks_the_machine_it_runs_on() -> None:
 
 
 # ---------------------------------------------------------------------------
+# What this machine itself reads. Every place above replays a recorded host, so
+# nothing exercised `LocalHost` beyond `asks()`: a reader narrowed to R_OK, or
+# `os.getgrouplist` called with its arguments the wrong way round, failed
+# nothing. These ask the real readers about paths under `tmp_path`, which are
+# files rather than device nodes, so no device is touched and no group of the
+# account running the suite decides an assertion.
+
+
+@POSIX_ONLY
+def test_a_device_name_the_host_cannot_look_up_at_all_is_not_checked_and_raises_nothing() -> None:
+    """A configured device name with an embedded NUL: every reader refuses it, and `doctor` asks them of it.
+
+    `os.path.realpath`, `os.stat` and `os.access` all raise ValueError rather than
+    OSError on such a name, and `doctor` catches neither, so an unguarded reader
+    took the command down on a traceback where it used to report the string. The
+    node has no other spelling to find, so the answer is the one for a name this
+    host does not have."""
+    name = "/dev/tty\0ACM0"
+    host = AskedLocalHost()
+
+    assert host.realpath(name) == name
+    assert host.status(name) is None
+    assert host.may_open(name) is False
+    assert device_access.port_access(name, host=host) is None
+
+
+@POSIX_ONLY
+def test_this_machine_reads_a_nodes_mode_owner_and_group_the_way_os_stat_does(tmp_path: Path) -> None:
+    node = tmp_path / "node"
+    node.write_text("", encoding="utf-8")
+    node.chmod(0o640)
+    found = os.stat(node)
+
+    status = AskedLocalHost().status(str(node))
+
+    assert isinstance(status, device_access.NodeStatus)
+    assert (status.mode, status.uid, status.gid) == (found.st_mode, found.st_uid, found.st_gid)
+    assert stat.filemode(status.mode) == "-rw-r-----"
+
+
+@POSIX_ONLY
+def test_this_machine_says_nothing_about_a_node_that_is_not_there(tmp_path: Path) -> None:
+    """The one silence the check keeps: a configured port whose node this host does not have."""
+    assert AskedLocalHost().status(str(tmp_path / "ttyACM9")) is None
+
+
+@POSIX_ONLY
+def test_this_machine_follows_a_link_to_its_node_and_leaves_a_dangling_one_named(tmp_path: Path) -> None:
+    """A /dev/serial/by-id link is followed to the tty it names, and an unplugged one resolves to the name it points at.
+
+    Not strictly: a link whose target is gone has to come back as the target's
+    own path rather than raise, because that is a port the board is simply not
+    plugged into and the check answers nothing for it."""
+    root = Path(os.path.realpath(tmp_path))
+    node = tmp_path / "ttyACM0"
+    node.write_text("", encoding="utf-8")
+    (tmp_path / "by-id").symlink_to(node)
+    (tmp_path / "by-id-unplugged").symlink_to(tmp_path / "ttyACM1")
+    host = AskedLocalHost()
+
+    assert host.realpath(str(tmp_path / "by-id")) == str(root / "ttyACM0")
+    assert host.realpath(str(tmp_path / "by-id-unplugged")) == str(root / "ttyACM1")
+    assert host.realpath(str(node)) == str(root / "ttyACM0")
+
+
+@NOT_ROOT_ONLY
+def test_this_machine_asks_the_kernel_for_reading_and_writing_together(tmp_path: Path) -> None:
+    """Both rights, not either: a serial port a session may read and not write is one it cannot run a plan over."""
+    modes = {0o600: True, 0o400: False, 0o200: False, 0o000: False}
+    host = AskedLocalHost()
+
+    for mode, answer in modes.items():
+        node = tmp_path / f"mode-{mode:03o}"
+        node.write_text("", encoding="utf-8")
+        node.chmod(mode)
+        assert host.may_open(str(node)) is answer, oct(mode)
+
+
+@POSIX_ONLY
+def test_this_machine_reads_this_logins_groups_and_the_accounts_own_separately(tmp_path: Path) -> None:
+    """The two sets the check's verdict parts on: what this process holds, and what the database says now."""
+    import pwd
+
+    host = AskedLocalHost()
+
+    login = host.login_groups()
+    account = host.account_groups()
+
+    assert os.getgid() in login and os.getegid() in login
+    assert set(os.getgroups()) <= login
+    try:
+        entry = pwd.getpwuid(os.getuid())
+    except KeyError:
+        # A uid the account database does not name (`docker run -u 4242`): the
+        # reader says so with None rather than an empty set, which would read as
+        # an account in no group at all.
+        assert account is None
+        return
+    assert account is not None
+    assert entry.pw_gid in account
+    assert account == frozenset(os.getgrouplist(entry.pw_name, entry.pw_gid))
+
+
+@POSIX_ONLY
+def test_this_machine_names_the_owner_and_the_group_behind_a_number(tmp_path: Path) -> None:
+    import grp
+    import pwd
+
+    host = AskedLocalHost()
+
+    assert host.group_name(os.getgid()) == _database_name(lambda: grp.getgrgid(os.getgid()).gr_name)
+    assert host.user_name(os.getuid()) == _database_name(lambda: pwd.getpwuid(os.getuid()).pw_name)
+    unnamed = next((gid for gid in range(4200000, 4200064) if _database_name(lambda gid=gid: grp.getgrgid(gid).gr_name) is None), None)
+    assert unnamed is not None, "no unnamed gid in the probed range, so the fallback to the number cannot be asked for"
+    # None, so the check falls back to the number rather than printing "None" as a group.
+    assert host.group_name(unnamed) is None
+
+
+# ---------------------------------------------------------------------------
 # `doctor`.
 
 
@@ -351,6 +845,35 @@ def test_doctor_fails_the_check_for_a_probe_and_a_port_this_account_may_not_open
     # In the headline, where a caller that keeps only `summary` reads it.
     assert probe["summary"] in report["summary"]
     assert port["summary"] in report["summary"]
+
+
+def test_doctor_does_not_attach_a_neighbouring_st_links_verdict_to_a_pyocd_debugger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bench whose only hardware-driving debugger is pyOCD, on a workstation with an unrelated Nucleo plugged in.
+
+    The entry pins no serial, so the sole attached ST-Link was checked and its
+    verdict attached to it. `doctor` then exited non-zero over a node the
+    configuration never touches, and `init` and `setup` repeated the same headline
+    as a warning. The port beside it is the bench's own and still answers, so this
+    is the probe half going quiet rather than the check going away.
+    """
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_type="pyocd",
+        com_ports_yaml=f'com_ports:\n  dut_uart:\n    device: "{BY_ID_PATH}"\n    baudrate: 115200\n',
+    )
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr(device_access, "HOST", recorded_host(tmp_path, WITHHOLDING_THE_GROUPS))
+
+    report = doctor()
+
+    assert "device_access" not in report["debuggers"]["dut"], report["debuggers"]["dut"]
+    assert PROBE_NODE not in report["summary"], report["summary"]
+    # The bench's own port is named by the configuration, so it is still checked.
+    port = report["com_ports"]["dut_uart"]["device_access"]
+    assert (port["ok"], port["node"]) == (False, PORT_NODE), port
+    assert report["unhealthy"] == [DOCTOR_DEVICE_ACCESS_FINDING], report["unhealthy"]
 
 
 def test_doctor_stays_green_where_this_account_may_open_both(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

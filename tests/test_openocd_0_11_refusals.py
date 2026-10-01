@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 from conftest import write_config
 
+import agentic_hil.backends.openocd as openocd_backend
 from agentic_hil.backends.common import NOT_CONTACTED
 from agentic_hil.config import load_config
 from agentic_hil.tools import AgenticHILToolService
@@ -45,6 +46,13 @@ RECORDINGS = json.loads((FIXTURES / "openocd_0_11_bench_recordings.json").read_t
 # runner withholds: the backend has to be bound to the serial OpenOCD names.
 SERIAL = RECORDINGS["probe_serial"]
 RESET = RECORDINGS["recordings"]["reset_target_run"]
+# A server that stopped somewhere this layer cannot place from a command of
+# ours: the release line of the OpenOCD this module is about, and then the line
+# #604 recorded from the real binary with the probe's group withheld. The
+# transcript fake answers the release read with it too, which is the whole of the
+# scenario: the read really did fail, and `adapter serial` really was the
+# fallback the server was started with.
+ACCESS_REFUSED = {"stdout": "", "stderr": "Open On-Chip Debugger 0.11.0\nError: libusb_open() failed with LIBUSB_ERROR_ACCESS\n", "returncode": 1}
 
 
 def play(monkeypatch: pytest.MonkeyPatch, recorded: dict) -> None:
@@ -126,3 +134,169 @@ def test_the_same_refusal_of_a_serial_this_backend_did_not_send_stays_an_unconfi
     assert result.get("hardware_state") != "unchanged", result
     assert result["cleanup_required"] is True, result
     assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"], result
+
+
+def session_log(config, started: dict) -> dict:
+    """The session log the start's result names, where the server's own output is kept."""
+    return json.loads((Path(config.work_dir) / started["log_path"]).read_text(encoding="utf-8"))
+
+
+def test_a_debug_session_the_same_refusal_stops_is_read_as_the_rejected_command_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The debug server puts the same `-c` on its command line, so the same reading has to apply.
+
+    A session start builds the server's argv with the probe selection the tool
+    path uses, including the documented `adapter serial` fallback taken when the
+    release could not be read, and 0.11 refuses it inside the interpreter at the
+    first argument. The tool path answers `debugger_command_rejected` naming
+    `adapter serial`; the start classified from the output's words alone and
+    answered `error_type: debugger_error`, `backend_error_type:
+    unknown_debugger_error` and "Debug server exited before the GDB port became
+    ready." with no `rejected_commands`, for a server that provably stopped before
+    `init`.
+
+    The markers were already right and the decisive line was already in
+    `server_stderr_tail`, so nothing about what this does to the bench changes:
+    this is the classification catching up with the transcript. The bench stays in
+    service either way, and that is asserted here so it cannot regress the other
+    way.
+    """
+    from test_debug_sessions import debug_service, start_debug_session
+
+    play(monkeypatch, RESET)
+    service = debug_service(tmp_path, debugger_executable=FAKE_TRANSCRIPT, probe_id=SERIAL)
+    try:
+        # `attach`, because a `load` start that spawned a server cannot rule the
+        # firmware load out on the coordination layer's own evidence and keeps the
+        # unconfirmed reading it had: that reading is not what this is about, and
+        # changing it would be a product decision rather than a classification.
+        started = start_debug_session(service, "attach")
+        status = service.call("debug_get_session_status")
+    finally:
+        service.close()
+
+    assert started["ok"] is False, started
+    assert started["error_type"] == "debugger_command_rejected", started
+    assert started["backend_error_type"] == "command_rejected_before_init", started
+    assert started["rejected_commands"] == ["adapter serial"], started
+    # The decisive line, still where it always was: the session log the result names.
+    assert f'invalid subcommand "serial {SERIAL}"' in session_log(service.config, started)["server_stderr_tail"], started
+    # And still not an incident: nothing opened the probe, so nothing has to be
+    # inspected before the next call.
+    assert started["side_effect_status"] == "not_started", started
+    assert started["retry_safe"] is True, started
+    assert started.get("quarantined") is not True, started
+    assert not blocking_record_states(service.config), blocking_record_states(service.config)
+    assert status.get("active") is not True, status
+
+
+def test_the_start_names_the_configuration_stage_read_that_sent_it_to_adapter_serial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The start is a result the probe selection feeds, so it carries the read that failed.
+
+    `OpenOCDProbeSelection.read_failure` is what tells the two `adapter serial`
+    fallbacks apart: the release really is 0.12.0 or newer, or nothing here could
+    find out. The tool path puts it on every failure of the call it shaped and the
+    `not_supported` refusal publishes it itself; the start built its result from
+    `rejected_openocd_commands` alone, so on the debug path the wrapper that
+    swallowed `--version`, an explicitly supported `debuggers.<name>.executable`,
+    was named nowhere: the session log holds the server's output, not the release
+    read's.
+
+    The fake answers the read with the same non-zero exit it answers everything
+    with, which is the whole of the scenario: the release read really did fail
+    here, and `adapter serial` really was the fallback the server was started
+    with.
+    """
+    from test_debug_sessions import debug_service, start_debug_session
+
+    play(monkeypatch, RESET)
+    service = debug_service(tmp_path, debugger_executable=FAKE_TRANSCRIPT, probe_id=SERIAL)
+    try:
+        started = start_debug_session(service, "attach")
+    finally:
+        service.close()
+
+    assert started["ok"] is False, started
+    read_failure = started["probe_selection_read_failure"]
+    assert "OpenOCD release read" in read_failure, read_failure
+    # First, because the release and the driver the generic causes talk about are
+    # what could not be read: this is the repair.
+    assert started["likely_causes"][0] == read_failure, started
+    # And the rejected command is still there, unchanged.
+    assert started["rejected_commands"] == ["adapter serial"], started
+
+
+def test_a_server_that_died_for_another_reason_keeps_the_reading_it_had(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction: only a command this backend sent may be read this way.
+
+    A server whose output names no command of ours stopped somewhere this layer
+    cannot place, and the generic classification is the honest answer for it.
+    """
+    from test_debug_sessions import debug_service, start_debug_session
+
+    play(monkeypatch, ACCESS_REFUSED)
+    service = debug_service(tmp_path, debugger_executable=FAKE_TRANSCRIPT, probe_id=SERIAL)
+    try:
+        started = start_debug_session(service, "attach")
+    finally:
+        service.close()
+
+    assert started["ok"] is False, started
+    assert "rejected_commands" not in started, started
+    assert started["error_type"] != "debugger_command_rejected", started
+    assert "LIBUSB_ERROR_ACCESS" in session_log(service.config, started)["server_stderr_tail"], started
+    # The failed release read still travels, because it is still why this server
+    # was started with `adapter serial` at all. What it may not do is say where
+    # the server stopped: that is what the output alone decides.
+    assert "OpenOCD release read" in started["probe_selection_read_failure"], started
+
+
+@pytest.mark.parametrize(
+    ("recorded", "backend_error_type", "a_cause_the_backend_holds", "causes"),
+    [
+        (RESET, "command_rejected_before_init", "a configuration script used a run-stage command before 'init'", 4),
+        (ACCESS_REFUSED, "adapter_access_denied", "add the user to the group the probe's udev rule gives it to", 3),
+    ],
+    ids=["a-rejected-selector", "a-probe-this-user-may-not-open"],
+)
+def test_the_start_offers_the_causes_the_backend_holds_for_the_stop_it_classified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: dict, backend_error_type: str, a_cause_the_backend_holds: str, causes: int
+) -> None:
+    """The read line leads the causes; it does not replace them.
+
+    The tool path publishes both sets for the same two errors, with the read line
+    in front (`_run_openocd` prepends it to
+    `OPENOCD_CAUSES_BY_BACKEND_ERROR.get(backend_error_type) or
+    self._likely_causes(error_type)`). The start assigned instead, so whatever it
+    classified, `likely_causes` was exactly one line: the failed read. For a
+    server that stopped on `LIBUSB_ERROR_ACCESS` that sends an agent after the
+    wrapper that swallowed `--version` while the repair is the group the probe's
+    udev rule names, which this backend holds the words for and did not offer.
+    """
+    from test_debug_sessions import debug_service, start_debug_session
+    from test_openocd_access_denied import HostOs
+
+    # The libusb line is read as a refusal only off Windows, where the same error
+    # also means a device another program holds, so the host the backend sees is
+    # fixed for both cases rather than for one of them.
+    monkeypatch.setattr(openocd_backend, "os", HostOs("posix"), raising=False)
+    play(monkeypatch, recorded)
+    service = debug_service(tmp_path, debugger_executable=FAKE_TRANSCRIPT, probe_id=SERIAL)
+    try:
+        started = start_debug_session(service, "attach")
+    finally:
+        service.close()
+
+    assert started["ok"] is False, started
+    assert started["backend_error_type"] == backend_error_type, started
+    read_failure = started["probe_selection_read_failure"]
+    assert "OpenOCD release read" in read_failure, read_failure
+    assert started["likely_causes"][0] == read_failure, started["likely_causes"]
+    assert a_cause_the_backend_holds in " ".join(started["likely_causes"][1:]), started["likely_causes"]
+    # The read line and the table's own entries, and nothing else.
+    assert len(started["likely_causes"]) == causes, started["likely_causes"]

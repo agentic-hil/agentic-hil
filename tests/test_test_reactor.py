@@ -684,7 +684,7 @@ def test_the_debugger_free_com_repair_names_a_version_3_bench_s_identity(tmp_pat
     identified = write_config(
         tmp_path / "identified",
         config_version=3,
-        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM7"\n    serial_number: "066AFF303435"\n    baudrate: 115200\n',
+        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM7"\n    serial_number: "066BFF505050"\n    baudrate: 115200\n',
     )
     assert load_config(str(identified)).com_ports["dut_uart"].device == "COM7"
 

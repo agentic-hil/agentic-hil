@@ -2046,11 +2046,18 @@ def test_remember_symbol_elf_keeps_only_the_source_still_proven_on_the_target(tm
     unconfirmed flash that may have written part of a new image drops it too. The
     one failure that keeps the previous ELF is a flash that provably never
     reached the target, because then the board still runs what it ran before.
+
+    "Confirmed" is `overall_success`, not `ok` on its own. A gate that refused
+    before the flash started can still carry `ok: true` (a pyOCD probe listing
+    whose action log could not be written is one), and reading that as a
+    confirmed flash made an ELF the board never received this bench's proven
+    symbol source, which is the one thing this decision exists to prevent.
     """
     service = stlink_dump_service(tmp_path)
     try:
         elf = service.artifacts.validate_local_path("build/app.elf")["artifact"]
         binary = {"resolved_path": str(tmp_path / "build" / "app.bin"), "path": "build/app.bin"}
+        other_elf = {"resolved_path": str(tmp_path / "build" / "other.elf"), "path": "build/other.elf"}
 
         service._remember_symbol_elf(elf, {"ok": True})
         assert service._symbol_elf is elf
@@ -2069,6 +2076,20 @@ def test_remember_symbol_elf_keeps_only_the_source_still_proven_on_the_target(tm
         service._remember_symbol_elf(elf, {"ok": True})
         service._remember_symbol_elf(binary, {"ok": False, "side_effect_status": "not_started"})
         assert service._symbol_elf is elf
+
+        # `ok: true` whose own predicate fails is not a confirmed flash. This
+        # one never started, so the previous ELF still describes the board and
+        # the artifact nobody flashed must not take its place.
+        service._remember_symbol_elf(elf, {"ok": True})
+        service._remember_symbol_elf(other_elf, {"ok": True, "audit_ok": False, "target_contacted": False, "side_effect_status": "not_started"})
+        assert service._symbol_elf is elf
+
+        # And where such a result does not prove the flash never started, the
+        # image on the board is unproven, so the source is dropped rather than
+        # left answering for a build that may have been half replaced.
+        service._remember_symbol_elf(elf, {"ok": True})
+        service._remember_symbol_elf(other_elf, {"ok": True, "audit_ok": False, "side_effect_status": "committed"})
+        assert service._symbol_elf is None
     finally:
         service.close()
 

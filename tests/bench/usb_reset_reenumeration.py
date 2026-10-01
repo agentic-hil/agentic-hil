@@ -111,6 +111,52 @@ def stlink_identity(listing: dict, expected_serial: str) -> tuple[str, str]:
 
 
 def matching_available_port(listing: dict, serial: str, vid: str, pid: str) -> dict:
+    found = available_port_matching(listing, serial, vid, pid)
+    if found is None:
+        pytest.fail(
+            "Agentic HIL did not rediscover exactly one UART with the configured ST-Link identity", pytrace=False
+        )
+    return found
+
+
+def wait_for_the_configured_uart(server, serial: str, vid: str, pid: str, private_values, timeout_s: float = VISIBILITY_TIMEOUT_S) -> dict:
+    """Poll the product's own listing until the rediscovered UART is there and openable.
+
+    Re-enumeration is exactly what this stage induces, and `cdc_acm` binds and
+    creates `/dev/ttyACM*` after the usbfs node exists, with udev correcting the
+    new node's group and ACL after that again. Asking once, the moment the usbfs
+    wait returned, failed on timing rather than on behaviour: `matching_available_port`
+    hard-fails when the UART is not already back, and `com_session_start` fails
+    outright on a node that exists and is not yet group- or ACL-corrected, because
+    comports.py keeps EACCES out of PORT_BUSY_ERRNOS deliberately and nothing
+    retries it. The recording's own `uart_open_failure` field is where that
+    outcome was being recorded instead of waited out.
+
+    The listing is the product's, so this adds no device access of its own; the
+    node's openability is asked of the kernel with `os.access`, which opens
+    nothing. The bound is the same visibility bound the usbfs wait uses, and what
+    it gave up on is reported by the single-shot calls that follow, unchanged.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        _, listing = server.call("com_ports_list")
+        require_product_success(listing, "com_ports_list after reset", private_values)
+        found = available_port_matching(listing, serial, vid, pid)
+        if found is not None:
+            device = str(found.get("device") or "")
+            if device and os.access(device, os.R_OK | os.W_OK):
+                return listing
+        if time.monotonic() >= deadline:
+            return listing
+        time.sleep(0.25)
+
+
+def available_port_matching(listing: dict, serial: str, vid: str, pid: str) -> dict | None:
+    """The one rediscovered UART with this identity, or None where there is not exactly one.
+
+    What `matching_available_port` reads, without the refusal: a poll asks this and
+    waits, and the single-shot call after the wait is the one that fails.
+    """
     available = listing.get("available_com_ports")
     ports = available.get("ports") if isinstance(available, dict) else None
     matches = [
@@ -123,11 +169,7 @@ def matching_available_port(listing: dict, serial: str, vid: str, pid: str) -> d
         and f"{port['vid']:04x}" == vid
         and f"{port['pid']:04x}" == pid
     ]
-    if len(matches) != 1:
-        pytest.fail(
-            "Agentic HIL did not rediscover exactly one UART with the configured ST-Link identity", pytrace=False
-        )
-    return matches[0]
+    return matches[0] if len(matches) == 1 else None
 
 
 def test_usbdevfs_reset_is_recovered_by_the_same_mcp_server_and_demo_uart(
@@ -287,8 +329,10 @@ def test_usbdevfs_reset_is_recovered_by_the_same_mcp_server_and_demo_uart(
             pytest.fail("the same MCP server did not confirm the target after USB reset", pytrace=False)
         probe_after_reset = True
 
-        _, after_listing = server.call("com_ports_list")
-        require_product_success(after_listing, "com_ports_list after reset", private_values)
+        # The tty is created after the usbfs node and corrected after that again,
+        # so the two single-shot calls below get a bounded wait of their own rather
+        # than the instant the usbfs wait returned.
+        after_listing = wait_for_the_configured_uart(server, serial, vid, pid, private_values)
         after_port = matching_available_port(after_listing, serial, vid, pid)
         before_device = str(before_port.get("device") or "")
         after_device = str(after_port.get("device") or "")

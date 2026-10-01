@@ -557,6 +557,39 @@ def test_retain_for_cleanup_leaves_a_record_the_next_run_will_not_take(
     assert run_lock.lock_path().exists()
 
 
+def test_a_cleanup_required_lock_is_refused_even_when_the_run_asked_to_queue(
+    a_machine_of_this_tests_own: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record is never broken, and never queued on either.
+
+    Queueing is how every run without `--no-wait` meets a holder, and it works
+    because a holder finishes. This holder has already finished: it left the mark
+    because it could not confirm its container removed, and only an operator who
+    stops that container clears the file. A run that queued here would poll every
+    two seconds until its own limit, with no age bound and nothing that could ever
+    free it, and then fail having reached nothing. So it is refused at once, told
+    to wait or not, with the record left exactly where it stands.
+    """
+    holder = run_lock.RunLock(tool=ci_linux.TOOL_NAME, runs_for=ci_linux.RUNS_FOR)
+    holder.acquire(wait=False)
+    holder.retain_for_cleanup("container agentic-hil-loop-xyz still exists after removal")
+    only_these_are_running(monkeypatch)  # the holder's pid reads dead, as it is
+
+    def a_wait_that_could_never_end(seconds: float) -> None:
+        raise AssertionError("the run queued on a record only an operator can clear")
+
+    monkeypatch.setattr(run_lock, "wait_for_the_holder", a_wait_that_could_never_end)
+
+    contender = run_lock.RunLock(tool=ci_linux.TOOL_NAME, runs_for=ci_linux.RUNS_FOR)
+    with pytest.raises(run_lock.RunLockBusy) as refused:
+        contender.acquire()  # told to wait, as every caller without --no-wait is
+
+    # The refusal carries what the record holds and the step that clears it.
+    assert "still exists after removal" in str(refused.value)
+    assert "remove the lock file by hand" in str(refused.value)
+    assert run_lock.lock_path().exists()
+
+
 def test_a_cleanup_record_survives_the_version_1_reader_an_older_checkout_runs(
     a_machine_of_this_tests_own: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

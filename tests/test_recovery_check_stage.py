@@ -239,6 +239,44 @@ def test_initial_status_call_exception_is_a_recorded_preflight_refusal() -> None
     assert "/private/runner/home" not in str(refused.value.evidence)
 
 
+def test_a_refused_run_start_is_reported_through_its_redacted_copy(tmp_path: Path) -> None:
+    """The message pytest writes into the JUnit body carries no probe serial.
+
+    A `bench_run_start` refusal names its resources, and a debugger resource with
+    a `probe_id` locks as `probe:<folded serial>`, so the raw result can carry the
+    serial. Every sibling path in this stage raises with the redacted copy; this
+    one interpolated the result itself, and the stage re-raises, so pytest wrote
+    the unredacted text into the `<failure>` body. bench_in_container.py redacts
+    the whole JUnit file afterwards, and the three `--live-device-tree` gate steps
+    run this module without it.
+    """
+    stage = _load_stage()
+    refusal = {
+        "ok": False,
+        "error_type": "permission_denied",
+        "summary": "bench_run_start refused: probe:stlink123 is held by another run",
+        "resources": ["probe:stlink123"],
+    }
+    server = FakeMcpServer(
+        [
+            ("hardware_lease_status", {"ok": True, "blocked": False, "incident_stands": False, "standing_incidents": []}),
+            ("bench_run_start", refusal),
+        ]
+    )
+
+    with pytest.raises(stage.RecoveryCheckRefused) as refused:
+        stage.run_recovery_check(server, "dut", object(), ("STLINK123",))
+
+    assert "failed its continue predicate" in str(refused.value)
+    assert "STLINK123" not in str(refused.value), str(refused.value)
+    assert "stlink123" not in str(refused.value), str(refused.value)
+    assert "[redacted]" in str(refused.value), str(refused.value)
+    # The refusal is still legible: its own error and headline reach the message.
+    assert "permission_denied" in str(refused.value), str(refused.value)
+    # No hardware call followed the refusal, which is what it refused.
+    assert [name for name, _ in server.calls] == ["hardware_lease_status", "bench_run_start"]
+
+
 class FakeMcpServer:
     def __init__(self, results: list[tuple[str, object]]) -> None:
         self.results = iter(results)

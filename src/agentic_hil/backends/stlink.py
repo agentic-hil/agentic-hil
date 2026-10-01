@@ -685,16 +685,56 @@ class STLinkBackend:
         return STLINK_CONNECT_MODES[self.config.debugger.connect_mode]  # type: ignore[return-value]
 
     # STM32CubeProgrammer's own report that the transport never existed, for any
-    # tool, plus (for the reads, whose command drives nothing of its own) its
-    # report that a probe was opened and nothing answered behind it. Both are
-    # read off the CLI's output, so each is a positive statement rather than the
-    # absence of one; `probe_unconfirmed` is not, and stays out.
+    # tool whose transcript does not also place a flash phase (the qualification
+    # `_proves_no_contact` applies below), plus (for the reads, whose command
+    # drives nothing of its own) its report that a probe was opened and nothing
+    # answered behind it. Both are read off the CLI's output, so each is a
+    # positive statement rather than the absence of one; `probe_unconfirmed` is
+    # not, and stays out.
     PRE_CONTACT_BACKEND_ERRORS = frozenset({"probe_not_found"})
     READ_ONLY_PRE_CONTACT_BACKEND_ERRORS = frozenset({"target_not_detected"})
 
-    def _proves_no_contact(self, tool: str, backend_error_type: str) -> bool:
+    def _proves_no_contact(self, tool: str, backend_error_type: str, output: str) -> bool:
         if backend_error_type in self.PRE_CONTACT_BACKEND_ERRORS:
-            return True
+            # The bucket alone is not a pre-contact claim for a tool whose own
+            # command drives the target, because two different kinds of line land
+            # in it. One is the prose the CLI prints while it is looking for a
+            # probe ("No ST-Link detected!", "no debug probe"), measured with
+            # nothing on USB, and a discovery failure by construction. The other
+            # is `ST-LINK error (DEV_NO_STLINK)`, which is not prose about a
+            # phase at all: it is the ST-Link driver library's code for "no
+            # device behind this handle". Measured only in that same probe-free
+            # run, where the handle never opened; whether the library also
+            # returns it for a handle that opened and then lost its device is not
+            # measured here, because no checked-in transcript carries it beside a
+            # flash-phase line.
+            #
+            # So the decision is taken from the transcript, with
+            # STLINK_FLASH_CHANGE_MARKERS, the set this file already uses for
+            # exactly this question: those lines are printed only after the phase
+            # they name has started, so one of them is positive evidence that a
+            # probe was there and was writing. Declining the no-contact claim
+            # when one is present is the conservative reading, and it is
+            # deliberately the assumed half rather than the measured one, because
+            # the two ways of being wrong are not the same size. Declining it for
+            # a run whose probe really was absent all along costs a refusal that
+            # is reported as an unconfirmed flash: an operator is sent to look at
+            # a board that is fine, and the retry they wanted needs the incident
+            # to stand down first. Granting it for a probe that dropped off USB
+            # mid-download publishes `target_contacted: false`,
+            # `side_effect_status: not_started`, `hardware_state: unchanged` and
+            # `retry_safe: true`, and opens no incident, for a board holding
+            # neither the old image nor the new one, and the next caller boots or
+            # trusts that flash on this layer's word.
+            #
+            # The reads keep the claim unconditional, for the reason the branch
+            # below exists: a `-r` read drives nothing of its own and cannot
+            # leave flash half changed, so a progress bar printed by its own
+            # upload must not be read as a flash change and quarantine a call
+            # that provably altered nothing.
+            if tool in (READ_ONLY_TOOLS | SESSIONLESS_DEBUG_READS):
+                return True
+            return not contains_any(output.lower(), STLINK_FLASH_CHANGE_MARKERS)
         # SESSIONLESS_DEBUG_READS beside the older READ_ONLY_TOOLS, for the
         # reason the pyOCD backend carries them: a `-r` read drives nothing of
         # its own, so "No STM32 target found" behind an opened probe is its
@@ -710,6 +750,10 @@ class STLinkBackend:
         # ST-Link transport is chosen with `interface`, an OpenOCD one with
         # interface_cfg. Same catalogue the MCP reference serves.
         error_type = self._public_error_type(backend_error_type)
+        # The whole transcript, which two of the readings below take: the erase
+        # abort point and the no-contact claim both answer their question out of
+        # what the CLI printed, and both have to see every stream it printed on.
+        output = f"{completed.stdout}{completed.stderr}"
         # `programmer_output` on every classified failure, not only on the erase
         # refusal that first carried it (#334). Whatever this run failed at, the
         # CLI wrote a line about it, and that line is what the classification,
@@ -724,7 +768,7 @@ class STLinkBackend:
             # unconfirmed, so no reading attaches a `hardware_state`/`retry_safe`
             # verdict and the coordination layer quarantines the incident as it
             # does any other unconfirmed effect.
-            abort_point = erase_abort_point(f"{completed.stdout}{completed.stderr}")
+            abort_point = erase_abort_point(output)
             result["erase_abort_point"] = abort_point
             # The generic `_summary_for_error` string cannot say more than "could
             # not erase", but the transcript reading can, and one of its readings
@@ -732,7 +776,7 @@ class STLinkBackend:
             # "the firmware was not written" there would contradict the result's
             # own `flash_change_underway` evidence.
             result["summary"] = self._erase_failure_summary(abort_point["reading"])
-        if self._proves_no_contact(tool, backend_error_type):
+        if self._proves_no_contact(tool, backend_error_type, output):
             # The ST-Link probe is the only transport STM32CubeProgrammer has
             # to the target, and "no ST-LINK detected" is its report that the
             # transport never existed for this run; "No STM32 target found" and
@@ -743,7 +787,10 @@ class STLinkBackend:
             # `_classify_output`; `probe_unconfirmed` (an exit status of 0
             # whose output is missing at least one line that confirms the
             # connection) deliberately is not, because it names no abort point
-            # at all, whether it printed some of them or none.
+            # at all, whether it printed some of them or none. The transcript
+            # goes with the pair because neither report is a claim about *when*
+            # it was printed: see `_proves_no_contact` for the flash phase that
+            # takes the claim back.
             result.update(NOT_CONTACTED)
         return result
 

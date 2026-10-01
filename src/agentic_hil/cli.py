@@ -90,7 +90,7 @@ from agentic_hil.coordination import (
     project_resource,
     standing_foreign_incidents,
 )
-from agentic_hil.device_access import port_access, probe_access
+from agentic_hil.device_access import backend_opens_an_stlink, port_access, probe_access
 from agentic_hil.devices import config_devices
 from agentic_hil.humanize import JSON_FLAG_HELP, PROTOCOL_COMMANDS, render_result, split_by_usb_identity, write_rendered
 from agentic_hil.junit import detached_junit_refusal, write_refusal_junit_xml
@@ -5217,7 +5217,19 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # first hardware call was where it found out (#604 named that refusal). A
     # node the check cannot find answers nothing and adds no entry: a probe that
     # is not on USB here stays what the checks above say about it.
-    probe_access_checks = {name: verdict for name in probed if (verdict := probe_access(config.debuggers[name].probe_id)) is not None}
+    #
+    # Each entry's own backend goes with its `probe_id`, because without a serial
+    # the sole attached probe is the one checked and the inventory behind that
+    # recognises an ST-Link and nothing else. An entry whose backend opens a
+    # CMSIS-DAP probe would otherwise inherit the verdict of an unrelated ST-Link
+    # plugged into the same workstation, so `doctor` exited non-zero naming a node
+    # the configuration never touches, and in a multi-debugger file one probe's
+    # verdict was copied onto every entry that pinned no serial.
+    probe_access_checks = {
+        name: verdict
+        for name, entry in ((name, config.debuggers[name]) for name in probed)
+        if (verdict := probe_access(entry.probe_id, opens_an_stlink=backend_opens_an_stlink(entry.type, entry.interface_cfg))) is not None
+    }
     port_access_checks = {
         port_id: verdict
         for port_id, port in config.com_ports.items()

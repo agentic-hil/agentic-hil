@@ -103,6 +103,13 @@ the installed executable explicitly. The installer log reported all three
 packages installed, including TrustedPackageCreator, even though the unattended
 XML marked that pack unselected.
 
+That stage is built and recorded against the default image's base alone, so
+`--cubeprogrammer-archive` together with `--distribution` is refused before
+anything is built, naming the head's own reason: Fedora 44 has no `apt-get` for
+the stage's package install, Ubuntu 22.04 and Debian 12 have no
+`libglib2.0-0t64` under that name, and Ubuntu 24.04, which does carry it, has
+had no build of the stage measured on it.
+
 A run finds the probe through sysfs by its USB vendor and product ids, never by
 a serial number; takes this machine's run lock; builds the image; runs the tier
 with the probe's nodes handed in; copies the JUnit report out; and reads pytest's
@@ -305,7 +312,10 @@ doctor, the build, the demo's plan and the pytest plugin. It takes the machine's
 run lock with `tools/run_lock.py take` before doctor, queued behind whoever holds
 it, for the life of the job's process, and gives it back with `give-back` after
 the pytest plugin's run whatever happened, so a tier started on the machine
-meanwhile waits for the job instead of meeting it on the board.
+meanwhile waits for the job instead of meeting it on the board. Each of those
+commands prints through `tools/withhold.py`, and the evidence is withheld in
+place before it is uploaded, so the job's log and its artifact name the probe's
+serial number and the machine's names as `[withheld]`, as this tool's do.
 
 Its second job runs this tool once for every distribution `--distribution`
 offers, one after another, after the first job whatever it found: each run

@@ -43,10 +43,16 @@ exclude tests/test_bench_in_container.py
 exclude tests/test_bench_distributions.py
 # The run lock's command is `tools/run_lock.py`, which never ships either.
 exclude tests/test_run_lock_command.py
+# The nightly's withholding is `tools/withhold.py`, imported the same way.
+exclude tests/test_withhold.py
 exclude tests/test_agent_registration_gate.py
 # The battery is `tools/bench_battery.py`, so its test imports out of the same
 # directory and cannot collect from a distribution that does not carry it.
 exclude tests/test_bench_battery.py
+# The peer firmware's statistics are held against its C source under
+# `tests/bench/firmware/`, which is repository content like the demo and never
+# ships, and the test reads it at module scope.
+exclude tests/test_bench_can_peer_statistics.py
 # The container test of the install eval's startup arm imports the verifier out
 # of evals/, which never ships, so it cannot collect from a distribution either.
 exclude tests/container/test_protocol_startup_refusal.py

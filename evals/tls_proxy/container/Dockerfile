@@ -69,9 +69,14 @@ WORKDIR /home/bench
 # https://astral.sh/uv/install.sh serves whatever is current, and piping a
 # download nobody checked into a shell is the one thing this project's
 # installers refuse to do. It is also what makes two runs of this eval
-# comparable, the same argument as the digest above. Bump both together.
-ARG UV_INSTALLER_VERSION=0.12.5
-ARG UV_INSTALLER_SHA256=504511fbbbd811aeaba6738abc79408956b6c7da0ca35437b3dcc24a41efc111
+# comparable, the same argument as the digest above. It is the same file
+# `install.sh` fetches, so the pair below is a copy of that script's and not a
+# second measurement. Bump all three together: the release chore in
+# docs/release-strategy.md names this file, and a static test in
+# tests/test_install_scripts.py refuses a tree where it has fallen behind, which
+# is how it aged two releases while the comment went on claiming otherwise.
+ARG UV_INSTALLER_VERSION=0.12.21
+ARG UV_INSTALLER_SHA256=0722d6c438395e39e1c27a86a79054d3b2820dd9399c7f8b0f6f84cd27ce36c3
 RUN curl -LsSf "https://astral.sh/uv/${UV_INSTALLER_VERSION}/install.sh" -o /tmp/uv-installer.sh \
     && echo "${UV_INSTALLER_SHA256}  /tmp/uv-installer.sh" | sha256sum -c - \
     && sh /tmp/uv-installer.sh \

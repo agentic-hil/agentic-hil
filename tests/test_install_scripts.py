@@ -149,6 +149,12 @@ POWERSHELL_UV_VERSION = re.compile(r"\$UvInstallerVersion = '(\d+\.\d+\.\d+)'")
 POWERSHELL_UV_SHA256 = re.compile(rf"\$UvInstallerSha256 = '({SHA256_HEX})'")
 POWERSHELL_UV_COMPARISON = re.compile(r"\$foundHash\s*-ne\s*\$UvInstallerSha256")
 POWERSHELL_UV_EXECUTION = re.compile(r"Invoke-Expression \(\[Text\.Encoding\]::UTF8\.GetString\(\$bytes\)\)")
+# The third place this repository fetches the uv installer: the TLS-proxy eval
+# image, which fetches the same file `install.sh` does and therefore carries the
+# same pair of constants rather than a second measurement of its own.
+TLS_PROXY_DOCKERFILE = REPOSITORY_ROOT / "evals" / "tls_proxy" / "container" / "Dockerfile"
+DOCKERFILE_UV_VERSION = re.compile(r"^ARG UV_INSTALLER_VERSION=(\d+\.\d+\.\d+)$", re.MULTILINE)
+DOCKERFILE_UV_SHA256 = re.compile(rf"^ARG UV_INSTALLER_SHA256=({SHA256_HEX})$", re.MULTILINE)
 
 # One line per agent on a successful registration, identical in both scripts,
 # because the operator reads whichever one their machine ran.
@@ -339,13 +345,21 @@ def test_both_scripts_check_the_pinned_uv_installer_before_they_run_it() -> None
     assert comparison.start() < execution.start(), "install.ps1 runs the uv installer before checking it"
 
 
-def test_both_scripts_pin_the_same_uv_release() -> None:
-    """Four constants, one release. A half-done bump is refused here, not on a bench.
+def test_every_site_that_fetches_the_uv_installer_pins_the_same_release() -> None:
+    """Five constants, one release. A half-done bump is refused here, not on a bench.
 
     `install.sh` and `install.ps1` fetch two different files from the same uv
     release, so their digests differ and their versions must not. Bumping one
     script and forgetting the other leaves two machines installing two different
     uv versions from one commit, which no operator would ever see reported.
+
+    The TLS-proxy eval image is the third site, and it fetches the very file
+    `install.sh` does, so its version *and* its digest are that script's. Its
+    comment has always said so ("the version `install.sh` pins and ... the hash
+    `install.sh` carries"), and with only the two scripts covered here the claim
+    aged two releases behind without anything noticing. There is no integrity hole
+    either way, since that download is digest-checked before `sh` runs it; what
+    was missing is anything that keeps the comment true.
     """
     shell_version = SHELL_UV_VERSION.search(_code_only(_shell_source()))
     powershell_version = POWERSHELL_UV_VERSION.search(_code_only(_powershell_source()))
@@ -353,6 +367,19 @@ def test_both_scripts_pin_the_same_uv_release() -> None:
     assert powershell_version is not None, "install.ps1 names no pinned uv version"
     assert shell_version.group(1) == powershell_version.group(1), (
         f"install.sh pins uv {shell_version.group(1)} and install.ps1 pins uv {powershell_version.group(1)}"
+    )
+    shell_digest = SHELL_UV_SHA256.search(_code_only(_shell_source()))
+    assert shell_digest is not None, "install.sh carries no pinned uv installer digest"
+    image = TLS_PROXY_DOCKERFILE.read_text(encoding="utf-8")
+    image_version = DOCKERFILE_UV_VERSION.search(image)
+    image_digest = DOCKERFILE_UV_SHA256.search(image)
+    assert image_version is not None, f"{TLS_PROXY_DOCKERFILE.name} names no pinned uv version"
+    assert image_digest is not None, f"{TLS_PROXY_DOCKERFILE.name} carries no pinned uv installer digest"
+    assert image_version.group(1) == shell_version.group(1), (
+        f"install.sh pins uv {shell_version.group(1)} and the TLS-proxy eval image pins uv {image_version.group(1)}"
+    )
+    assert image_digest.group(1) == shell_digest.group(1), (
+        "the TLS-proxy eval image fetches the file install.sh fetches, so it must carry install.sh's digest"
     )
 
 
@@ -384,6 +411,9 @@ def test_the_pin_bump_is_written_down_as_a_release_chore() -> None:
     assert "UV_INSTALLER_SHA256" in strategy
     assert "$UvInstallerVersion" in strategy
     assert "$UvInstallerSha256" in strategy
+    # And the third fetch site, which is the one that aged unnoticed while the
+    # chore named only the two scripts.
+    assert "evals/tls_proxy/container/Dockerfile" in strategy
 
 
 def test_the_shell_script_stops_on_a_failure_and_on_an_unset_variable() -> None:
