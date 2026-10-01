@@ -27,7 +27,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -998,45 +998,273 @@ DEFAULT_MAX_BUFFER_BYTES = 65536
 # src/agentic_hil/readuntil.py).
 UNTIL_DEFAULT_WAIT_S = 10.0
 WAIT_CAP_S = 60.0
+# What until takes: one text, or a list of 1 to 8, each at most 256 characters
+# (src/agentic_hil/readuntil.py).
+UNTIL_MAX_ENTRIES = 8
+UNTIL_MAX_CHARACTERS = 256
 # Ports of the com_read tests that need a setting COM_PORTS_YAML does not carry.
 BUFFER_PORT_ID = "tooldef_buffer"
 WRITE_ONLY_PORT_ID = "tooldef_write_only"
 READ_DEVICES = {BUFFER_PORT_ID: "/dev/ttyTOOLDEF11", WRITE_ONLY_PORT_ID: "/dev/ttyTOOLDEF12"}
 SMALL_MAX_BUFFER_BYTES = 64
 
-# `until` named on its own, not as "without until" or "no until".
-WITH_UNTIL = r"(?<!without )(?<!no )\buntil\b"
-WITHOUT_UNTIL = r"\b(?:without|no)\s+until\b"
-# A wait that ends on the first bytes to arrive, whatever they are.
-FIRST_BYTES = (
-    r"\bfirst\b[^.;]*\b(?:bytes?|data|feedback|output|chunk)\b"
-    r"|\bas soon as\b[^.;]*\b(?:bytes?|data|feedback|output|anything)\b"
-    r"|\bany\b[^.;]*\b(?:bytes?|data|feedback|output)\b[^.;]*\barriv"
+# until left out, in the words a definition may use for that.
+WITHOUT_UNTIL = (
+    r"\b(?:without|no)\s+(?:an?\s+)?until\b"
+    r"|\buntil\b\s+(?:is\s+)?(?:absent|omitted|unset|missing|not (?:given|set|passed))\b"
+    r"|\b(?:absent|omitted|unset)\s+until\b"
 )
 # An until entry that was not seen before the wait ended.
 MISS = (
     r"\bno match\b|\bnot (?:seen|found|matched)\b|\bwithout (?:a )?match\b|\bunmatched\b|\bnothing matches\b"
     r"|\bnever (?:seen|appears|arrives|matches)\b|\bmiss(?:es|ed)?\b|\btime[sd]? out\b|\btimeout\b|\bwait (?:ends|runs out|expires)\b"
 )
+# A negation denies what follows it up to the end of its own phrase: the next
+# comma, colon, bracket or joining word, so "not discarded but stays buffered"
+# keeps the bytes. A condition worded with a negation ("without until", "if
+# until is not seen") says when, and denies nothing.
+NEGATED = r"\b(?:no|not|never|nothing|none|neither|nor|without|cannot)\b|n't\b"
+CONDITION = rf"{WITHOUT_UNTIL}|{MISS}"
+PHRASE_BREAK = re.compile(r"[,:()]|\s(?:and|but|while|whereas)\s", re.IGNORECASE)
+
+
+def phrases(clause: str) -> list[str]:
+    return [part for part in PHRASE_BREAK.split(clause) if part.strip()]
+
+
+def affirms(unit: str, pattern: str) -> bool:
+    """Whether `unit` states `pattern` with no negation before it in its own phrase."""
+    for found in re.finditer(pattern, unit, re.IGNORECASE):
+        lead = PHRASE_BREAK.split(unit[: found.start()])[-1]
+        if not claims(re.sub(CONDITION, " ", lead, flags=re.IGNORECASE), NEGATED):
+            return True
+    return False
+
+
+def with_until(phrase: str) -> bool:
+    return claims(phrase, r"\buntil\b") and not claims(phrase, WITHOUT_UNTIL)
+
+
+# The relations a com_read definition could state the wrong way round. Each is
+# a named check over a text, so the controls below can show it accepts the true
+# statement and refuses the inverted one.
+
+ZERO = r"\b0(?:\.0)?\s?s?\b|\bzero\b|\bno wait\b|\bdoes not wait\b|\bat once\b|\bimmediately\b"
+ZERO_VALUE = r"\b0(?:\.0)?\s?s?\b|\bzero\b"
+TEN = r"\b10(?:\.0)?\s?(?:s|seconds?)?\b|\bten seconds\b"
+SIXTY = r"\b60(?:\.0)?\s?(?:s|seconds?)?\b|\bsixty seconds\b"
+CAPPED = r"\bcap(?:s|ped)?\b|\bclamp\w*|\bcut\b|\bat most\b|\bup to\b|\bno more than\b|\bmax(?:imum)?\b|\blimit(?:s|ed)?\b|\bceiling\b"
+REFUSED = r"\brefus\w*|\breject\w*|\binvalid\w*|\berror\b"
+
+
+def wait_defaults_follow_until(text: str) -> bool:
+    """comports.py:1265 and readuntil.py:34: without until a read waits 0 s
+    unless asked, with until 10 s. Each default is read in the phrase that
+    names its condition, so the two cannot trade places."""
+    zero = ten = False
+    for clause in clauses(text):
+        defaults = claims(clause, r"\bdefault")
+        for phrase in phrases(clause):
+            if claims(phrase, WITHOUT_UNTIL):
+                if claims(phrase, TEN):
+                    return False
+                zero = zero or (defaults and affirms(phrase, ZERO))
+            elif with_until(phrase):
+                if claims(phrase, ZERO_VALUE):
+                    return False
+                ten = ten or (defaults and affirms(phrase, TEN))
+    return zero and ten
+
+
+def waits_are_capped_at_sixty(text: str) -> bool:
+    """comports.py:1277 and readuntil.py:34: a longer wait is cut to 60 s, not refused."""
+    units = clauses(text)
+    capped = any(claims(unit, SIXTY) and affirms(unit, CAPPED) for unit in units)
+    refused = any(claims(unit, SIXTY) and affirms(unit, REFUSED) for unit in units)
+    return capped and not refused
+
+
+# A wait that ends on the first bytes to arrive, whatever they are.
+FIRST_BYTES = (
+    r"\bfirst\b[^.;]*\b(?:bytes?|data|feedback|output|chunk)\b"
+    r"|\bas soon as\b[^.;]*\b(?:bytes?|data|feedback|output|anything)\b"
+    r"|\bany\b[^.;]*\b(?:bytes?|data|feedback|output)\b[^.;]*\barriv"
+)
+
+
+def a_plain_wait_ends_at_the_first_bytes(text: str) -> bool:
+    """comports.py:1277-1284: without until, the first bytes buffered end a
+    wait, even part of a line. Said of a read without until, not of until."""
+    return any(
+        claims(clause, WITHOUT_UNTIL) and claims(clause, r"\bwait") and any(affirms(phrase, FIRST_BYTES) and not with_until(phrase) for phrase in phrases(clause))
+        for clause in clauses(text)
+    )
+
+
+def max_bytes_is_the_most_bytes_returned(text: str) -> bool:
+    """comports.py:1268 and 1286: a count of bytes, at least 1, not of characters or lines."""
+    units = clauses(text)
+    meant = any(affirms(unit, r"\b(?:most|max(?:imum)?|at most|up to|limit)\b[^.;]*\bbytes\b") for unit in units)
+    other_unit = any(affirms(unit, r"\b(?:characters?|chars|lines?)\b") for unit in units)
+    other_minimum = claims(text, r"\b(?:at least|minimum(?: of)?|min\.?)\s+(?!1\b)\d+")
+    return meant and not other_unit and not other_minimum
+
+
+def max_bytes_defaults_to_max_buffer_bytes(text: str) -> bool:
+    """comports.py:1264 and config.py:3600: unset, it is the port's
+    max_buffer_bytes, 65536 unless the entry sets another. 65536 is that
+    default, so a clause naming it says so; it is not a limit of max_bytes."""
+    units = clauses(text)
+    named = one_of(units, r"\bmax_buffer_bytes\b", r"\bdefault")
+    unconditional = any(claims(unit, rf"\b{DEFAULT_MAX_BUFFER_BYTES}\b") and not claims(unit, r"\bdefault|\bunless\b|\bconfigured\b") for unit in units)
+    return named and not unconditional
+
+
+REST = r"\brest\b|\bremainder\b|\bremaining\b|\bexcess\b|\bwhat (?:is left|remains|follows)\b"
+KEPT = r"\bbuffer(?:ed|s)?\b|\bnext\b|\blater\b|\bkept\b|\bstays?\b|\bremains?\b"
+LOST = r"\bdiscard\w*|\bdrop\w*|\blost\b|\blose\b|\bdelet\w*|\btruncat\w*|\bgone\b"
+
+
+def the_rest_stays_buffered(text: str) -> bool:
+    """comports.py:1286-1287 and 1329-1331: what a read does not return stays for the next one."""
+    units = clauses(text)
+    kept = any(claims(unit, REST) and affirms(unit, KEPT) for unit in units)
+    lost = any(claims(unit, REST) and affirms(unit, LOST) for unit in units)
+    return kept and not lost
+
+
+THROUGH = r"\bthrough\b|\bincluding\b|\bends? (?:with|at)\b|\bending (?:with|at)\b"
+
+
+def the_answer_runs_through_the_first_match(text: str) -> bool:
+    """comports.py:1326-1331: the bytes returned end with the earliest-ending match."""
+    return any(claims(unit, r"\bfirst\b") and claims(unit, r"\bmatch") and affirms(unit, THROUGH) for unit in clauses(text))
+
+
+LITERAL = r"\bliteral(?:ly)?\b|\bexact(?:ly)?\b|\bplain\b|\bverbatim\b|\bas is\b|\bcase-sensitive\b"
+PATTERN_LANGUAGE = r"\breg(?:ular expression|ex(?:es)?)\b|\bwildcards?\b|\bglob\b"
+
+
+def until_is_literal_text(text: str) -> bool:
+    """readuntil.py:87: bytes.find, so literal text, case counting, no pattern language."""
+    units = clauses(text)
+    return any(affirms(unit, LITERAL) for unit in units) and not any(affirms(unit, PATTERN_LANGUAGE) for unit in units)
+
+
+def until_limits_are_true(text: str) -> bool:
+    """readuntil.py:54-62: one text or a list of 1 to 8, each at most 256 characters."""
+    unlimited = any(affirms(unit, r"\bany (?:number|length|size)\b|\bunlimited\b|\bno (?:limit|maximum)\b") for unit in clauses(text))
+    counts = {int(count) for count in re.findall(r"\b(\d+)\s+(?:texts|entries|strings|patterns)\b", text, re.IGNORECASE)}
+    lengths = {int(length) for length in re.findall(r"\b(\d+)\s+(?:characters|chars)\b", text, re.IGNORECASE)}
+    return counts == {UNTIL_MAX_ENTRIES} and lengths <= {UNTIL_MAX_CHARACTERS} and not unlimited
+
+
+ENDS = r"\bends?\b|\bstops?\b|\bfinish\w*|\breturns?\b|\banswers?\b"
+
+
+def max_bytes_also_ends_an_until_wait(text: str) -> bool:
+    """comports.py:1321: with until, max_bytes buffered without a match ends the wait as well."""
+    units = clauses(text)
+    ends = any(claims(unit, r"\bmax_bytes\b") and claims(unit, r"\buntil\b|\bmatch") and affirms(unit, ENDS) for unit in units)
+    only_time = any(affirms(unit, r"\bonly\b[^.;]*\b(?:timeout|time|deadline|wait_timeout_s|seconds?)\b") for unit in units)
+    return ends and not only_time
+
+
 RETURNED = r"\breturn\w*|\bhand(?:s|ed)? out\b|\bgives?\b|\bgiven\b|\bwith\b"
 RECEIVED_BYTES = r"\b(?:bytes|data|feedback|output)\b|\barrived\b|\bbuffered\b|\breceived\b|\bso far\b"
-# Each byte is handed out once: a read takes what it returns off the buffer.
-CONSUMES = (
-    r"\bremov\w*|\bconsum\w*|\bdelet\w*|\bdrain\w*|\bonce\b|\bnot (?:returned|read|handed out) again\b"
-    r"|\btakes?\b[^.;]*\b(?:off|out of|from)\b[^.;]*\bbuffer"
-)
+
+
+def a_missed_until_is_an_ok_answer(text: str) -> bool:
+    """comports.py:1341-1355: no match by the end of the wait answers ok, with
+    until_matched false and the bytes that did arrive."""
+    missed = [unit for unit in clauses(text) if claims(unit, MISS)]
+    false = any(claims(unit, r"\buntil_matched\b[^.;]{0,12}\bfalse\b") for unit in missed)
+    true = any(claims(unit, r"\buntil_matched\b[^.;]{0,12}\btrue\b") for unit in missed)
+    ok = any(affirms(unit, r"\bok\b|\bsucce\w*|\bstill (?:returns|answers)\b") or claims(unit, r"\bnot an? (?:error|failure|refusal)\b") for unit in missed)
+    failed = any(affirms(unit, r"\berror\b|\bfail\w*|\brefus\w*") for unit in missed)
+    returned = any(claims(unit, RETURNED) and affirms(unit, RECEIVED_BYTES) for unit in missed)
+    return false and not true and ok and not failed and returned
+
+
+def a_read_needs_a_session_from_com_session_start(text: str) -> bool:
+    """comports.py:1613-1615: no session answers session_not_active, naming com_session_start."""
+    tied = one_of(sentences(text), r"\bcom_session_start\b", r"\b(?:else|otherwise|without|unless|fails?|returns?|gives?|answers?)\b[^.;]*\bsession_not_active\b")
+    never = claims(text, r"\bnever\b[^.;]*\bsession_not_active\b|\bsession_not_active\b[^.;]*\bnever\b")
+    return tied and not never
+
+
 READING_ALLOWED = (
     r"\ballow_read\b"
     r"|\bread(?:ing)?\b[^.;]*\b(?:allow\w*|permit\w*|disabled|grant\w*|off|denied)\b"
     r"|\b(?:allow\w*|permit\w*|disabled|grant\w*)\b[^.;]*\bread(?:ing)?\b"
 )
-# What until is: text compared as it is, not a pattern language. A word for
-# "as it is" counts unless it is itself negated ("not plain text").
-LITERAL = (
-    r"(?<!not )(?<!never )\b(?:literal(?:ly)?|exact(?:ly)?|plain|verbatim|as is|case-sensitive)\b"
-    r"|\bnot (?:as )?an? reg(?:ular expression|ex)\b"
+VERSION_1 = r"\bversion 1\b(?!\s*(?:and|or)\s+(?:later|newer|above|up))|\bv1\b"
+
+
+def reading_needs_allow_read_under_version_1_only(text: str) -> bool:
+    """types.py:591 and 605-606, comports.py:1239-1240: only a version 1
+    configuration can withhold reading, through allow_read; from version 2 on
+    reading needs no grant. Never a matter of allow_write."""
+    units = sentences(text)
+    tied = any(claims(unit, r"\bpermission_denied\b") and claims(unit, READING_ALLOWED) and claims(unit, VERSION_1) for unit in units)
+    unscoped = any(claims(unit, r"\ballow_read\b|\bpermission_denied\b") and not claims(unit, VERSION_1) for unit in units)
+    write = any(claims(unit, r"\bpermission_denied\b") and claims(unit, r"\ballow_write\b") for unit in units)
+    return tied and not unscoped and not write
+
+
+# Each byte is handed out once: a read takes what it returns off the buffer.
+CONSUMES = (
+    r"\b(?:returned|read|handed out|given)\s+(?:only\s+)?once\b|\bremov\w*|\bconsum\w*|\bdelet\w*|\bdrain\w*"
+    r"|\btakes?\b[^.;]*\b(?:off|out of)\b[^.;]*\bbuffer"
 )
-PATTERN_LANGUAGE = r"\breg(?:ular expression|ex(?:es)?)\b|\bwildcards?\b|\bglob\b"
+
+
+def each_byte_is_returned_once(text: str) -> bool:
+    """comports.py:1286-1287: a read takes what it returns out of the buffer."""
+    return any(claims(unit, r"\bbytes?\b|\bbuffer\w*|\bfeedback\b|\bdata\b") and affirms(unit, CONSUMES) for unit in clauses(text))
+
+
+READ_RELATIONS: list[tuple[Callable[[str], bool], str, str]] = [
+    (wait_defaults_follow_until, "Without until the default is 0 and a wait ends at the first bytes; with until the default is 10 s.", "Without until default 10 s, with until default 0 s; capped at 60 s."),
+    (wait_defaults_follow_until, "The default is 0 without until and 10 s with until.", "With until the default is 0; without until the default is 10 s."),
+    (waits_are_capped_at_sixty, "Waits are capped at 60 s.", "Never capped at 60 s."),
+    (waits_are_capped_at_sixty, "A longer wait is cut to 60 s, not refused.", "A wait over 60 s is refused as invalid."),
+    (a_plain_wait_ends_at_the_first_bytes, "A positive wait ends at the first bytes if until is absent.", "A wait without until never ends at the first bytes."),
+    (a_plain_wait_ends_at_the_first_bytes, "Without until, a wait ends as soon as any bytes are buffered.", "With until a wait ends at the first bytes, without until at the deadline."),
+    (max_bytes_is_the_most_bytes_returned, "Most bytes to return.", "Most characters to return."),
+    (max_bytes_is_the_most_bytes_returned, "The most bytes one read returns, at least 1.", "Most bytes to return, at least 2."),
+    (max_bytes_defaults_to_max_buffer_bytes, "Returns up to 65536 bytes by default unless max_buffer_bytes is configured.", "Defaults to max_buffer_bytes; at most 65536."),
+    (max_bytes_defaults_to_max_buffer_bytes, "Default: the port's max_buffer_bytes (65536 unless configured).", "At most 65536 bytes."),
+    (the_rest_stays_buffered, "The remainder is not discarded but stays buffered.", "The rest is dropped."),
+    (the_rest_stays_buffered, "Returns through the first match; the rest stays buffered for the next read.", "Never returns through the first match; the rest is never buffered."),
+    (the_answer_runs_through_the_first_match, "Returns the feedback through the first match.", "Never returns through the first match; the rest is never buffered."),
+    (until_is_literal_text, "Matched literally as bytes, not as a regex.", "Not a literal text: a regex."),
+    (until_is_literal_text, "Exact text, case-sensitive.", "A regex, not plain text."),
+    (until_limits_are_true, "Text, or up to 8 texts of at most 256 characters.", "Any number of texts of any length."),
+    (until_limits_are_true, "Text, or up to 8 texts.", "Text, or up to 16 texts."),
+    (max_bytes_also_ends_an_until_wait, "With until, the wait also ends once max_bytes are buffered without a match.", "With no match, only timeout can end the wait."),
+    (max_bytes_also_ends_an_until_wait, "A wait for until ends at a match or once max_bytes are buffered.", "max_bytes buffered never ends a wait for until."),
+    (
+        a_missed_until_is_an_ok_answer,
+        "If until is not seen in time, the answer is still ok, with until_matched false and the bytes so far.",
+        "No match at timeout: not ok, until_matched false, returns no received bytes.",
+    ),
+    (
+        a_missed_until_is_an_ok_answer,
+        "No match by the deadline is not an error: ok, until_matched false, and the bytes received are returned.",
+        "If until is not seen in time, the answer is ok with until_matched true and the bytes so far.",
+    ),
+    (a_read_needs_a_session_from_com_session_start, "Needs a session from com_session_start, else session_not_active.", "Needs a session from com_session_start; never session_not_active."),
+    (reading_needs_allow_read_under_version_1_only, "Under config version 1, permission_denied unless allow_read is true.", "Needs allow_read (else permission_denied)."),
+    (reading_needs_allow_read_under_version_1_only, "Config version 1 only: reading off gives permission_denied.", "Under config version 1, permission_denied unless allow_write."),
+    (each_byte_is_returned_once, "Each byte is returned once, as text and hex.", "Bytes are never removed from the buffer by a read."),
+]
+
+
+@pytest.mark.parametrize(("check", "true_statement", "inverted"), READ_RELATIONS, ids=[f"{check.__name__}-{index}" for index, (check, _, _) in enumerate(READ_RELATIONS)])
+def test_each_com_read_relation_check_refuses_its_inverted_statement(check: Callable[[str], bool], true_statement: str, inverted: str) -> None:
+    assert check(true_statement), true_statement
+    assert not check(inverted), inverted
 
 
 def test_com_read_is_listed_and_every_input_describes_itself_within_the_budget(listed: dict[str, dict]) -> None:
@@ -1061,21 +1289,17 @@ def test_com_read_port_id_is_a_configured_entry_and_not_a_device(listed: dict[st
     assert not names(definition_text(listed[READ_TOOL]), "com_port_not_configured"), definition_text(listed[READ_TOOL])
 
 
-def test_max_bytes_names_its_default_and_that_the_rest_stays_buffered(listed: dict[str, dict]) -> None:
-    """Without max_bytes a read returns up to the port's max_buffer_bytes, which
-    is everything the buffer can hold; with a smaller value the bytes past it
-    stay for the next read rather than being lost."""
-    described = property_text(listed[READ_TOOL], "max_bytes")
-    parts = clauses(described)
-    assert one_of(parts, r"\bmax_buffer_bytes\b", r"\bdefault"), described
-    # 65536 is the default of max_buffer_bytes, which a port may change; it is
-    # not a limit of max_bytes.
-    if re.search(rf"\b{DEFAULT_MAX_BUFFER_BYTES}\b", described):
-        assert one_of(parts, rf"\b{DEFAULT_MAX_BUFFER_BYTES}\b", r"\bdefault|\bunless\b|\bconfigured\b"), described
-    assert not claims(described, rf"\b(?:at most|up to|maximum(?: of)?|limit(?:ed)? (?:of|to))\s+{DEFAULT_MAX_BUFFER_BYTES}\b"), described
-    rest = r"\b(?:rest|remainder|remaining|beyond|past|excess|more|left)\b"
-    assert one_of(parts, rest, r"\bbuffer\w*|\bnext\b|\blater\b"), described
-    assert not one_of(parts, r"\b(?:rest|remainder|remaining|beyond|past|excess)\b", r"\b(?:discard\w*|drop\w*|lost|lose|delet\w*|truncat\w*)"), described
+def test_max_bytes_names_its_meaning_its_default_and_that_the_rest_stays_buffered(listed: dict[str, dict]) -> None:
+    """The most bytes one read returns, 1 or more as the schema says; without
+    it, the port's max_buffer_bytes, which is everything the buffer can hold;
+    with a smaller value the bytes past it stay for the next read rather than
+    being lost."""
+    tool = listed[READ_TOOL]
+    described = property_text(tool, "max_bytes")
+    assert tool["inputSchema"]["properties"]["max_bytes"].get("minimum") == 1, tool["inputSchema"]["properties"]["max_bytes"]
+    assert max_bytes_is_the_most_bytes_returned(described), described
+    assert max_bytes_defaults_to_max_buffer_bytes(described), described
+    assert the_rest_stays_buffered(described), described
 
 
 def test_wait_timeout_s_names_both_defaults_the_cap_and_its_unit(listed: dict[str, dict]) -> None:
@@ -1084,40 +1308,40 @@ def test_wait_timeout_s_names_both_defaults_the_cap_and_its_unit(listed: dict[st
     wait is longer than sixty. The two defaults are tied to their condition,
     and neither is stated the other way round."""
     described = property_text(listed[READ_TOOL], "wait_timeout_s")
-    parts = clauses(described)
     assert claims(described, r"\bseconds?\b|\b\d+(?:\.\d+)?\s?s\b"), described
-    assert one_of(parts, WITHOUT_UNTIL, r"\b0(?:\.0)?\s?s?\b|\bzero\b|\bdoes not wait\b|\bno wait\b|\bwithout waiting\b", r"\bdefault"), described
-    assert one_of(parts, WITH_UNTIL, rf"\b{UNTIL_DEFAULT_WAIT_S:g}(?:\.0)?\s?s?\b", r"\bdefault"), described
-    # Not inverted: ten seconds without until, or nothing with it.
-    assert not any(claims(part, WITHOUT_UNTIL) and claims(part, r"\b10\b") and not claims(part, r"\b0\b") for part in parts), described
-    assert not any(claims(part, r"\bwith\s+until\b") and claims(part, r"\b0\b") and not claims(part, r"\b10\b") for part in parts), described
-    # The cap is applied, not refused.
-    assert one_of(parts, rf"\b{WAIT_CAP_S:g}(?:\.0)?\s?s?\b", r"\bat most\b|\bcap\w*|\bmax(?:imum)?\b|\blimit\w*|\bup to\b|\bno more than\b|\bclamp\w*|\bceiling\b"), described
-    assert not claims(described, r"\b60\b[^.;]*\b(?:refus|reject|invalid|error)|\b(?:refus|reject|invalid|error)\w*\b[^.;]*\b60\b"), described
+    assert wait_defaults_follow_until(described), described
+    assert waits_are_capped_at_sixty(described), described
 
 
 def test_a_wait_without_until_is_said_to_end_at_the_first_bytes(listed: dict[str, dict]) -> None:
     """A plain read with a wait returns as soon as anything is buffered, which
-    may be part of a line; only until waits on for more. The clause that says
-    so is not one about until."""
+    may be part of a line; only until waits on for more."""
     text = definition_text(listed[READ_TOOL])
-    first_bytes = [part for part in clauses(text) if claims(part, r"\bwait") and claims(part, FIRST_BYTES)]
-    assert any(not claims(part, WITH_UNTIL) for part in first_bytes), text
+    assert a_plain_wait_ends_at_the_first_bytes(text), text
 
 
-def test_until_names_how_it_matches_and_what_it_leaves(listed: dict[str, dict]) -> None:
-    """Literal text, compared as the bytes the port's encoding gives it; the
-    answer runs through the first match and what follows stays buffered."""
-    described = property_text(listed[READ_TOOL], "until")
-    parts = clauses(described)
-    assert one_of(parts, r"\bbytes?\b", r"\bencod\w*", r"\bport'?s?\b|\bconfigured\b"), described
-    assert claims(described, LITERAL), described
-    # A pattern language is named only to be denied: each mention follows a
-    # negation in its own clause ("not a regex"), unlike "a regex, not plain text".
-    asserted = [part for part in parts for found in re.finditer(PATTERN_LANGUAGE, part, re.IGNORECASE) if not claims(part[: found.start()], NEGATION)]
-    assert not asserted, asserted
-    assert one_of(parts, r"\bthrough\b|\bup to\b|\bending\b|\bincluding\b", r"\bfirst\b", r"\bmatch"), described
-    assert one_of(parts, r"\brest\b|\bafter\b|\bfollow\w*|\bbeyond\b|\bremainder\b", r"\bbuffer\w*|\bnext\b"), described
+def test_until_names_how_it_matches_its_limits_and_what_it_leaves(listed: dict[str, dict]) -> None:
+    """Literal text, compared as the bytes the port's encoding gives it, one or
+    up to 8 of them as the schema bounds them; the answer runs through the
+    first match and what follows stays buffered."""
+    tool = listed[READ_TOOL]
+    described = property_text(tool, "until")
+    schema = tool["inputSchema"]["properties"]["until"]
+    shapes = {shape["type"]: shape for shape in schema["oneOf"]}
+    assert shapes["string"]["maxLength"] == UNTIL_MAX_CHARACTERS, schema
+    assert (shapes["array"]["minItems"], shapes["array"]["maxItems"], shapes["array"]["items"]["maxLength"]) == (1, UNTIL_MAX_ENTRIES, UNTIL_MAX_CHARACTERS), schema
+    assert one_of(clauses(described), r"\bbytes?\b", r"\bencod\w*", r"\bport'?s?\b|\bconfigured\b"), described
+    assert until_is_literal_text(described), described
+    assert until_limits_are_true(described), described
+    assert the_answer_runs_through_the_first_match(described), described
+    assert the_rest_stays_buffered(described), described
+
+
+def test_a_full_max_bytes_is_said_to_end_a_wait_for_until(listed: dict[str, dict]) -> None:
+    """A wait for until ends at a match or once max_bytes are buffered, which
+    is all the answer could hold; the time is not the only way out."""
+    text = definition_text(listed[READ_TOOL])
+    assert max_bytes_also_ends_an_until_wait(text), text
 
 
 def test_a_missed_until_is_said_to_be_an_ok_answer_with_until_matched_false(listed: dict[str, dict]) -> None:
@@ -1125,30 +1349,22 @@ def test_a_missed_until_is_said_to_be_an_ok_answer_with_until_matched_false(list
     call: the answer is ok, until_matched is false, and the bytes that did
     arrive are returned."""
     text = definition_text(listed[READ_TOOL])
-    parts = clauses(text)
     assert not names(text, "until_matched"), text
-    assert one_of(parts, MISS, r"\buntil_matched\b", r"\bfalse\b"), text
-    assert not one_of(parts, MISS, r"\buntil_matched\b", r"\btrue\b"), text
-    assert one_of(parts, MISS, r"\bok\b|\bsucce\w*|\bnot an? (?:error|failure|refusal)\b|\bstill (?:returns|answers)\b"), text
-    assert one_of(parts, MISS, RETURNED, RECEIVED_BYTES), text
+    assert a_missed_until_is_an_ok_answer(text), text
 
 
 def test_com_read_says_what_it_needs_what_it_takes_and_what_it_returns(listed: dict[str, dict]) -> None:
     """The session com_session_start opened (else session_not_active), reading
-    allowed (else permission_denied, never a matter of allow_write), each byte
-    returned once, as text and as hex, with what is left counted."""
+    allowed where a version 1 configuration can withhold it (else
+    permission_denied, never a matter of allow_write), each byte returned once,
+    as text and as hex, with what is left counted."""
     text = definition_text(listed[READ_TOOL])
-    units = sentences(text)
-    parts = clauses(text)
     missing = names(text, "com_session_start", "session_not_active", "permission_denied", "buffer_remaining_bytes")
     assert not missing, (missing, text)
-    assert one_of(units, r"\bcom_session_start\b", r"\b(?:else|otherwise|without|unless|fails?|returns?|gives?|answers?)\b[^.;]*\bsession_not_active\b"), text
-    assert not claims(text, r"\bnever\b[^.;]*\bsession_not_active\b|\bsession_not_active\b[^.;]*\bnever\b"), text
-    assert one_of(units, r"\bpermission_denied\b", READING_ALLOWED), text
-    assert not claims(text, r"\bpermission_denied\b[^.;]*\ballow_write\b|\ballow_write\b[^.;]*\bpermission_denied\b"), text
-    assert one_of(parts, CONSUMES, r"\bbytes?\b|\bbuffer\w*|\bfeedback\b|\bdata\b"), text
-    assert not claims(text, r"\b(?:does not|doesn't|never|without)\s+(?:remov|consum|delet|clear|drain)\w*"), text
-    assert one_of(parts, r"\btext\b", r"\bhex\b"), text
+    assert a_read_needs_a_session_from_com_session_start(text), text
+    assert reading_needs_allow_read_under_version_1_only(text), text
+    assert each_byte_is_returned_once(text), text
+    assert one_of(clauses(text), r"\btext\b", r"\bhex\b"), text
     # A read: nothing it does reaches the board.
     assert not claims(text, r"\b(?:writes?|sends?|transmits?)\b[^.;]*\bto the (?:board|target|port|device)\b"), text
     assert listed[READ_TOOL]["annotations"]["readOnlyHint"] is True
@@ -1392,3 +1608,36 @@ def test_until_is_matched_as_literal_text(bench: SimpleNamespace, until: str, un
 
     assert result["ok"] is True, result
     assert result["until_matched"] is until_matched, result
+
+
+def test_a_full_max_bytes_ends_a_wait_for_until_at_once(bench: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """max_bytes buffered with no match among them ends a wait for until on the
+    spot: the answer could hold no more, so waiting on could not change it. It
+    is ok with until_matched false, and the bytes past max_bytes stay buffered."""
+    service, line = bench.service, bench.line
+    started(service)
+    clock = SimulatedWait()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(comports, "time", clock)
+        line.handle(PORT_ID).deliver(b"0123456789")
+        full = read(service, until="PASS", max_bytes=4, wait_timeout_s=30)
+
+    assert clock.now == 0.0, clock.now
+    assert full["ok"] is True, full
+    assert full["until_matched"] is False, full
+    assert (full["data"]["text"], full["buffer_remaining_bytes"]) == ("0123", 6), full
+
+
+@pytest.mark.parametrize(("max_bytes", "refused"), [pytest.param(1, False, id="one-is-taken"), pytest.param(0, True, id="zero-is-refused")])
+def test_max_bytes_is_one_or_more(bench: SimpleNamespace, max_bytes: int, refused: bool) -> None:
+    service, line = bench.service, bench.line
+    started(service)
+    line.handle(PORT_ID).deliver(b"ok\r\n")
+
+    result = read(service, max_bytes=max_bytes)
+
+    if refused:
+        assert (result["error_type"], result["field"]) == ("invalid_argument", "max_bytes"), result
+        return
+    assert (result["data"]["text"], result["buffer_remaining_bytes"]) == ("o", 3), result

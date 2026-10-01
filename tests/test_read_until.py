@@ -1022,13 +1022,14 @@ def test_tools_call_takes_until_and_until_id_and_refuses_a_bad_value(tmp_path: P
 SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
 
 
-@pytest.mark.parametrize(("tool", "argument"), [("com_read", "until"), ("can_read", "until_id")])
+@pytest.mark.parametrize(("tool", "argument"), [("can_read", "until_id")])
 def test_the_read_descriptions_gain_one_sentence_and_the_arguments_describe_themselves(tool: str, argument: str) -> None:
     """Each description keeps what it says today and gains one sentence, of at
     most 130 characters because every tool description shares one budget,
     saying the call can wait instead of being polled. The new argument
     describes itself in under 200 characters, and `until_id` says the extended
-    flag is not compared."""
+    flag is not compared. com_read's description has outgrown this; the test
+    below keeps what it pinned there."""
     entry = next(item for item in MCP_TOOLS if item["name"] == tool)
     today = SENTENCE_BREAK.split(TODAY_DESCRIPTIONS[tool])
     sentences = SENTENCE_BREAK.split(entry["description"].strip())
@@ -1043,6 +1044,23 @@ def test_the_read_descriptions_gain_one_sentence_and_the_arguments_describe_them
     assert len(described) < 200, described
     if argument == "until_id":
         assert "extended" in described.lower(), described
+
+
+def test_the_com_read_description_still_says_what_it_reads_what_it_replaces_and_that_it_waits() -> None:
+    """The one-added-sentence limit served a budget all tool descriptions
+    shared, which is gone; com_read's definition now carries what an agent
+    needs (#636). What the old sentences said still holds, in whatever words:
+    it reads from a COM port session, it is what to use instead of screen,
+    minicom or picocom, and one call can wait instead of being polled. `until`
+    describes itself in under 200 characters."""
+    entry = next(item for item in MCP_TOOLS if item["name"] == "com_read")
+    sentences = SENTENCE_BREAK.split(entry["description"].strip())
+
+    assert any(re.search(r"\bread\b", sentence, re.IGNORECASE) and re.search(r"\bCOM port\b", sentence) and re.search(r"\bsession\b", sentence) for sentence in sentences), entry["description"]
+    assert any(all(re.search(rf"\b{name}\b", sentence) for name in ("screen", "minicom", "picocom")) and re.search(r"\binstead\b", sentence) for sentence in sentences), entry["description"]
+    assert any(re.search(r"\bwait|\buntil\b", sentence, re.IGNORECASE) for sentence in sentences), entry["description"]
+    described = entry["inputSchema"]["properties"]["until"].get("description")
+    assert isinstance(described, str) and described and len(described) < 200, described
 
 
 # ---------------------------------------------------------------------------
