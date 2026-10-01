@@ -74,11 +74,28 @@ DEVICE_SELECTOR: JsonObject = {
     "additionalProperties": False,
     "required": ["kind"],
     "properties": {
-        "kind": {"type": "string", "enum": ["debugger", "uart", "can"]},
-        # Optional only for a debugger, and only when the project configures
-        # exactly one: with several, naming none is how the wrong board is taken.
-        "id": NONEMPTY_STRING,
-        "participant": NONEMPTY_STRING,
+        "kind": {
+            "type": "string",
+            "enum": ["debugger", "uart", "can"],
+            "description": "debugger (a `debuggers` entry), uart (`com_ports`) or can (`can_buses`). The board under test is not a kind.",
+        },
+        # Optional only for a debugger, and then it means the debugger this
+        # server is bound to, or the only one configured: with several and no
+        # binding, naming none is how the wrong board is taken, so it is refused.
+        "id": {
+            **NONEMPTY_STRING,
+            "description": (
+                "The config entry's name, else `unknown_device`. Required for uart and can; a debugger may leave it "
+                "out, meaning the one this server is bound to or the only one configured, else `invalid_argument`."
+            ),
+        },
+        "participant": {
+            **NONEMPTY_STRING,
+            "description": (
+                "Only for can, else `invalid_argument`. Required on a bus with `shares` (`can_participant_required`); "
+                "a name the bus lacks fails `can_participant_not_configured`."
+            ),
+        },
     },
 }
 
@@ -116,27 +133,59 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "bench_run_start",
         "description": (
-            "Declare a run that holds the devices a sequence like flash, reset, read needs until bench_run_stop; "
-            "without one the board is free between calls. The run may touch only those devices. A single call, or "
-            "flash_firmware with capture, needs no declared run."
+            "Declare a run holding the devices a sequence like flash, reset, read needs until bench_run_stop or "
+            "server exit, no timeout; without one the board is free between calls. All or nothing: a refused start "
+            "holds none. Other devices fail `undeclared_device`; a second start, `run_already_active`; a standing "
+            "incident, `resource_quarantined`. A single call, or flash_firmware with capture, needs no run."
         ),
         "inputSchema": object_schema(
             {
-                "devices": {"type": "array", "minItems": 1, "items": DEVICE_SELECTOR},
-                "label": NONEMPTY_STRING,
-                "wait_s": {"type": "number", "minimum": 0, "maximum": 900},
+                "devices": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": DEVICE_SELECTOR,
+                    "description": (
+                        "The devices the run holds, one selector each, all resolved before any is locked. Success "
+                        "returns them as `declared_devices`, with `run_label`."
+                    ),
+                },
+                "label": {
+                    **NONEMPTY_STRING,
+                    "description": (
+                        "Optional, no default: free text returned as `run_label` and shown as the holder's label to "
+                        "anyone refused `device_busy`."
+                    ),
+                },
+                "wait_s": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 900,
+                    "description": (
+                        "Seconds to wait for a device another holder has, 0 to 900. Default 0: a held device fails "
+                        "`device_busy` at once."
+                    ),
+                },
             },
             required=["devices"],
         ),
     },
     {
         "name": "bench_run_stop",
-        "description": "End the declared run and release its devices. Always call it when the run is finished; safe with no run open.",
+        "description": (
+            "End the bench_run_start run and release its devices (`released_devices`). With no run open it answers "
+            "`run_was_active: false`. A COM, CAN or debug session still open keeps its own device: `open_leases`, "
+            "`still_held_devices`. With an incident open it runs the recovery `recovery.auto_recover` allows (by "
+            "default reset into halt, then a probe re-read), reported in `recovery`."
+        ),
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
     {
         "name": "bench_run_status",
-        "description": "Report whether a run is open here and what it declared; read it when unsure whether you still hold the bench.",
+        "description": (
+            "Report whether this server has a run open (`run_active`), what it declared (`declared_devices`, "
+            "`run_label`) and which devices it holds (`held_devices`); read it when unsure whether you still hold the "
+            "bench. In memory only: what another process holds shows in hardware_lease_status."
+        ),
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
     # The plan is the declaration, so this tool takes no devices and no steps:
@@ -147,22 +196,74 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "test_reactor_run",
         "description": (
-            "Run this project's declarative test plan instead of `agentic-hil test-reactor`; read "
-            "agentic-hil://reference/test-plan before writing one. test_config_path picks another plan inside "
-            "workspace_root; detach: true, for long plans, answers at once with a run handle for test_reactor_status "
-            "and test_reactor_stop."
+            "Run this project's test plan instead of `agentic-hil test-reactor`; read "
+            "agentic-hil://reference/test-plan first. Refused before any step: `permission_denied`, "
+            "`run_already_active` (a bench_run_start run open), `device_busy` (at once). A failing step runs the "
+            "recovery `recovery.auto_recover` allows, result `recovery`. Plans stay in workspace_root; detach: "
+            "test_reactor_status, test_reactor_stop."
         ),
-        "inputSchema": object_schema({"test_config_path": NONEMPTY_STRING, "detach": {"type": "boolean", "default": False}}),
+        "inputSchema": object_schema(
+            {
+                "test_config_path": {
+                    **NONEMPTY_STRING,
+                    "description": (
+                        "Path inside workspace_root, relative to it; default `.agentic-hil/testconfig.yaml`. Missing: "
+                        "`test_config_not_found`; unreadable: `test_config_unreadable`; outside or malformed: "
+                        "`test_config_invalid`."
+                    ),
+                },
+                "detach": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Default false: answers at the plan's end with `ok`, `steps`. True: once a worker holds the "
+                        "devices (30 s max), not at the plan's end: `run`, `state` or the verdict; else "
+                        "`run_worker_unresponsive`."
+                    ),
+                },
+            }
+        ),
     },
     {
         "name": "test_reactor_status",
-        "description": "Say what a test run is doing; without run, list this bench's runs.",
-        "inputSchema": object_schema({"run": NONEMPTY_STRING}),
+        "description": (
+            "Read what a test plan run is doing: `state` starting, running, then finished or stopped, or worker_gone "
+            "(its process died, see hardware_lease_status), and `stop_requested_at`. `ok` means the read worked; "
+            "`run_ok` is the verdict once ended, `canonical_report_path` its own report; `report_path` is a mirror "
+            "the next run overwrites. Fails `run_not_found`, `run_state_invalid`."
+        ),
+        "inputSchema": object_schema(
+            {
+                "run": {
+                    **NONEMPTY_STRING,
+                    "description": (
+                        "A handle from test_reactor_run's `run`: `run-` and 16 hex digits, else `invalid_argument`. "
+                        "Leave it out to list this bench's runs: `runs`, `active_runs`."
+                    ),
+                },
+            }
+        ),
     },
     {
         "name": "test_reactor_stop",
-        "description": "Ask a test run to stop after its current step.",
-        "inputSchema": object_schema({"run": NONEMPTY_STRING}, required=["run"]),
+        "description": (
+            "Ask a test plan run to stop by writing a request it reads between steps. It finishes the step it is in "
+            "(a delay or device wait ends early), closes its devices and writes its report; one still starting ends "
+            "before any step. Answers at once `stop_requested: true`, also on a repeat; an ended run answers "
+            "`stop_requested: false`. Fails `run_state_invalid`, or `run_worker_gone` (its process died)."
+        ),
+        "inputSchema": object_schema(
+            {
+                "run": {
+                    **NONEMPTY_STRING,
+                    "description": (
+                        "A handle from test_reactor_run's `run`: `run-` and 16 hex digits, else `invalid_argument`; "
+                        "one this bench never issued fails `run_not_found`."
+                    ),
+                },
+            },
+            required=["run"],
+        ),
     },
     # Two optional arguments, and their types are the contract. There is no
     # `confirm_safe_state` boolean here and there will not be: that flag attests
@@ -210,8 +311,10 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "hardware_lease_status",
         "description": (
-            "Read who holds this bench and any open incident: its cleanup_reasons, quarantine_guidance and "
-            "incident_stands. Only an incident that stands needs hardware_recover."
+            "Read who holds this bench, from any process (`bench_held`, `held_devices`), and any open incident: "
+            "`blocked`, `cleanup_reasons`, `auto_recoverable`, `quarantine_guidance`, `next_step`. Only "
+            "`incident_stands: true` needs hardware_recover; otherwise the next hardware call settles it or stands it "
+            "down. `standing_incidents` are other projects' incidents, not yours to clear. Drives no device."
         ),
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
