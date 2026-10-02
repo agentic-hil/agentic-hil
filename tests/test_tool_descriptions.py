@@ -34,6 +34,7 @@ from test_config_reload import service as reload_service
 from test_config_write import bench as write_bench
 from test_config_write import changes
 from test_config_write import service as write_service
+from test_mcp_reference_resources import read_text
 from test_reactor_mcp_tools import RESET_PLAN, bound_service, call
 from test_recover_tool import config_changed_incident, config_for, open_incident, quarantine
 from test_run_lifecycle import bench_workspace
@@ -194,7 +195,9 @@ def test_accept_config_change_still_waits_for_the_operator() -> None:
 ROUTES: dict[str, tuple[str, ...]] = {
     "hardware_recover": (r"state files",),
     "project_config_create": (r"by hand",),
-    "test_reactor_run": (r"`?agentic-hil test-reactor`?", r"workspace_root", r"detach", r"test_reactor_status", r"test_reactor_stop"),
+    # The command it runs a plan like is said by the test-plan reference it links,
+    # and workspace_root by test_config_path, which holds the path to it.
+    "test_reactor_run": (r"detach", r"test_reactor_status", r"test_reactor_stop"),
     "project_config_reload_description": (r"restart",),
     "server_upgrade": (r"\buv\b", r"\bpipx\b", r"\bpip\b", r"no arguments"),
     "project_config_set": (r"editing the configuration file",),
@@ -216,6 +219,23 @@ def test_a_shortened_description_still_says_what_it_stands_in_for(name: str) -> 
 
 # ---------------------------------------------------------------------------
 # Where the guidance a description no longer carries is read.
+
+
+def test_the_test_plan_reference_says_the_tool_runs_a_plan_as_the_command_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """test_reactor_run no longer names `agentic-hil test-reactor`; the reference
+    its description links says the two drive one reactor, read the way a host
+    reads it."""
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, RESET_PLAN)
+    service = bound_service(workspace)
+    try:
+        text = read_text(service, TEST_PLAN_URI)
+    finally:
+        service.close()
+
+    parts = sentences(text)
+    both = [index for index, part in enumerate(parts) if "`test_reactor_run`" in part and "`agentic-hil test-reactor`" in part]
+    assert both, text
+    assert re.match(r"Both drive one reactor\b", parts[both[0] + 1]), parts[both[0] + 1]
 
 
 def test_a_config_changed_refusal_says_what_to_show_the_operator_and_both_ways_on(tmp_path: Path) -> None:

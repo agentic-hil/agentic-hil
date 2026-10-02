@@ -387,6 +387,29 @@ def permission_refused_before_any_step(text: str) -> bool:
     return stated(text, r"permission_denied", r"\bbefore\b|\bno step\b")
 
 
+ONE_BY_ONE = r"\bone by one\b|\bone at a time\b|\bsingle (tool )?calls?\b"
+NOT_USED = r"\b(never|not|don't)\s+use\b|\b(cannot|can't)\b"
+
+
+def calls_one_by_one_belong_to_a_bench_run(text: str) -> bool:
+    """A plan file is test_reactor_run's job; the calls an agent makes one by one
+    are held together by a bench_run_start run, inside which a plan is refused
+    (tools.py:1547-1566)."""
+    return stated(text, r"\buse\b", ONE_BY_ONE, r"\bbench_run_start\b", unless=NOT_USED + r"|\binstead of bench_run_start\b")
+
+
+def a_bench_run_is_read_by_its_own_status(text: str) -> bool:
+    """test_reactor_status reads a `run-` handle's record (runlifecycle.py:59,
+    1001); a bench_run_start run has none and bench_run_status reads it from this
+    server's memory (tools.py:1523, coordination.py:875-901)."""
+    return stated(text, r"\bbench_run_start\b", r"\buse bench_run_status\b", unless=NOT_USED + r"|\binstead of bench_run_status\b")
+
+
+def plan_stop_ends_the_run(text: str) -> bool:
+    """runlifecycle.py:1115-1177: test_reactor_stop asks a detached plan run to end; bench_run_stop does not reach it."""
+    return stated(text, r"\btest_reactor_stop\b", r"\b(ends?|stops?)\b", unless=NOT_USED + r"|\bbench_run_stop\b")
+
+
 def detach_defaults_to_false(text: str) -> bool:
     """contracts.py `detach` default and tools.py:1577-1579."""
     return stated(text, r"\bdefault", r"\bfalse\b", unless=r"\bdefault(s)?\b[^.;]*\btrue\b")
@@ -614,6 +637,11 @@ RELATIONS: list[tuple[Callable[[str], bool], str, str]] = [
     (inside_a_declared_run_refused, "Inside a bench_run_start run it fails `run_already_active`.", "Inside a bench_run_start run it uses the run's devices, never `run_already_active`."),
     (held_device_fails_at_once, "A device held elsewhere fails `device_busy` at once.", "It waits for a held device, up to 900 s, then `device_busy`."),
     (permission_refused_before_any_step, "A step whose permission is off fails `permission_denied` before any step runs.", "A step whose permission is off fails `permission_denied` when reached, after the earlier steps ran."),
+    (calls_one_by_one_belong_to_a_bench_run, "For calls made one by one, use bench_run_start.", "For calls made one by one, use this tool instead of bench_run_start."),
+    (calls_one_by_one_belong_to_a_bench_run, "For calls made one by one, use bench_run_start.", "For a plan file, use bench_run_start."),
+    (a_bench_run_is_read_by_its_own_status, "For a bench_run_start run, use bench_run_status.", "For a bench_run_start run, use this tool instead of bench_run_status."),
+    (a_bench_run_is_read_by_its_own_status, "For a bench_run_start run, use bench_run_status.", "For a test_reactor_run run, use bench_run_status."),
+    (plan_stop_ends_the_run, "With detach, test_reactor_stop ends it.", "With detach, test_reactor_stop cannot end it; bench_run_stop does."),
     (detach_defaults_to_false, "Default false: returns when the plan ends.", "Default true: answers at once."),
     (detach_defaults_to_false, "Default false.", "Default true, false waits."),
     (a_plain_run_answers_at_the_plans_end, "Default false: returns when the plan ends, with `steps` and `report_path`.", "Default false: answers at once with a handle; `steps` come from test_reactor_status."),
@@ -1011,6 +1039,21 @@ def test_test_reactor_status_tells_the_read_from_the_verdict_and_the_report_from
 
     assert run_ok_is_the_verdict(text), text
     assert canonical_report_outlives_the_mirror(text), text
+
+
+def test_the_plan_tools_say_when_a_bench_run_is_the_tool_instead(listed: dict[str, dict]) -> None:
+    """test_reactor_run runs a plan file; calls made one by one belong to a
+    bench_run_start run, which bench_run_status reads and test_reactor_status does
+    not. A detached plan run is ended by test_reactor_stop, whose request
+    `stop_requested_at` dates (runlifecycle.py:1023-1047, 1160-1177)."""
+    run = listed[PLAN_RUN]["description"]
+    status = listed[PLAN_STATUS]["description"]
+
+    assert stated(clauses(run)[0], r"\bruns?\b", r"\bplan\b"), run
+    assert calls_one_by_one_belong_to_a_bench_run(run), run
+    assert plan_stop_ends_the_run(run), run
+    assert a_bench_run_is_read_by_its_own_status(status), status
+    assert stated(status, r"\bstop_requested_at\b", rf"\b{PLAN_STOP}\b"), status
 
 
 def test_test_reactor_stop_says_what_it_asks_of_the_run(listed: dict[str, dict]) -> None:

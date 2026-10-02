@@ -43,6 +43,7 @@ from conftest import (
 )
 from test_debug_sessions import START_TIMEOUT_S, debug_service
 from test_debugger_processes import CALL_CEILING_S, FAKE_HUNG_DEBUGGER, config_with_debugger
+from test_mcp_reference_resources import read_text
 from test_read_until import close
 from test_tool_definition_uart import (
     NEGATION,
@@ -63,6 +64,7 @@ import agentic_hil.report as report_module
 from agentic_hil.bench import BenchMutex
 from agentic_hil.config import load_config
 from agentic_hil.devices import debugger_device
+from agentic_hil.knowledge import ERROR_URI_PREFIX
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.report import overall_success, report_state_path
 from agentic_hil.tools import AgenticHILToolService
@@ -530,12 +532,17 @@ def says_when_nothing_is_stored(text: str) -> bool:
     return absent and not misread
 
 
-def says_read_failures_apart(text: str) -> bool:
-    """An unreadable record is report_unreadable and a malformed one config_invalid, each apart from report_not_found."""
-    unreadable = one_of(clauses(text), r"\breport_unreadable\b", r"\bunreadable\b|\bcannot be read\b|\bcould not be read\b|\bpermission\b")
-    malformed = one_of(clauses(text), r"\bconfig_invalid\b", r"\bmalformed\b|\binvalid\b|\bdamaged\b|\bcorrupt|\bunsupported\b|\bnot valid\b|\bbad\b")
-    merged = any(re.search(r"\breport_not_found\b", part) and re.search(r"\breport_unreadable\b|\bconfig_invalid\b", part) for part in clauses(text))
-    return unreadable and malformed and not merged and says_when_nothing_is_stored(text)
+UNREADABLE = r"\breading it failed\b|\bcannot be read\b|\bcould not be read\b|\bunreadable\b"
+
+
+def says_unreadable_state_apart(meaning: str) -> bool:
+    """The catalogue's `report_unreadable`: a report state that exists and could
+    not be read, apart from one that reads and is damaged (`config_invalid`) and
+    from one that is not there (`report_not_found`)."""
+    unreadable = one_of(clauses(meaning), r"\bexists?\b", UNREADABLE)
+    damaged = one_of(clauses(meaning), r"\bconfig_invalid\b", r"\bdamaged\b|\bmalformed\b|\bcorrupt")
+    merged = any(re.search(r"\breport_not_found\b|\bconfig_invalid\b", part) and re.search(UNREADABLE, part, re.IGNORECASE) for part in clauses(meaning))
+    return unreadable and damaged and not merged
 
 
 def says_source_may_be_the_recovery_reset(text: str) -> bool:
@@ -762,10 +769,31 @@ def test_get_last_report_says_the_newest_report_can_be_the_recovery(listed: dict
     assert says_newest_report_may_be_the_recovery(text), text
 
 
+@pytest.mark.parametrize(("name", "other"), [(LAST_REPORT, CLASSIFY), (CLASSIFY, LAST_REPORT)])
+def test_each_report_tool_names_the_other_in_its_first_two_sentences(listed: dict[str, dict], name: str, other: str) -> None:
+    """Both read the same stored reports, so each says up front what it gives
+    that the other does not, and names the other."""
+    opening = " ".join(sentences(listed[name]["description"])[:2])
+    assert names(opening, other) == [], opening
+
+
 @pytest.mark.parametrize("name", REPORT_TOOLS)
-def test_the_report_tools_tell_a_missing_record_from_an_unreadable_or_malformed_one(listed: dict[str, dict], name: str) -> None:
+def test_the_report_tools_say_report_not_found_means_nothing_is_stored(listed: dict[str, dict], name: str) -> None:
     text = text_of(listed, name)
-    assert says_read_failures_apart(text), text
+    assert says_when_nothing_is_stored(text), text
+
+
+def test_the_catalogue_tells_an_unreadable_report_state_from_a_damaged_or_missing_one(tmp_path: Path) -> None:
+    """Which read failure is which left the report tools' descriptions for the
+    catalogue, where a refusal's remediation sends its caller. Resolved through
+    the resource a host reads: `report_unreadable` is a state that exists and
+    could not be read, and one that reads and is damaged answers `config_invalid`."""
+    service = new_service(tmp_path / "catalogue")
+    try:
+        entry = json.loads(read_text(service, ERROR_URI_PREFIX + "report_unreadable"))
+    finally:
+        close(service)
+    assert says_unreadable_state_apart(entry["meaning"]), entry["meaning"]
 
 
 def test_classify_last_error_names_its_result_fields(listed: dict[str, dict]) -> None:
@@ -962,7 +990,7 @@ PARAPHRASES = [
     ),
     (
         says_some_refusals_record_none,
-        ("Some refusals (allow_flash off, bad arguments) record none.",),
+        ("Some refusals (allow_flash off, bad arguments) record none.", "Some refusals, such as allow_flash off, record nothing."),
         ("Every refusal is recorded, allow_flash off included.", "Some refusals record none.", "All refusals (allow_flash off, bad arguments) are recorded."),
     ),
     (
@@ -971,12 +999,16 @@ PARAPHRASES = [
         ("report_not_found means the report file is damaged.", "None yet or unreadable: report_not_found."),
     ),
     (
-        says_read_failures_apart,
-        ("None yet: report_not_found; unreadable: report_unreadable; malformed: config_invalid.",),
+        says_unreadable_state_apart,
         (
-            "None yet: report_not_found; unreadable: report_not_found; malformed: config_invalid.",
-            "None yet, unreadable or malformed: report_not_found, report_unreadable or config_invalid.",
-            "None yet: report_not_found.",
+            "This project's report state exists and reading it failed. A report state that reads and is damaged answers `config_invalid` instead.",
+            "The state exists but cannot be read; a malformed one is config_invalid.",
+        ),
+        (
+            "This project's report state exists and reading it failed.",
+            "The report state exists and reading it failed; a damaged one answers this too.",
+            "The state exists and reading it failed, or it reads and is damaged: config_invalid.",
+            "Nothing is stored yet: report_not_found. The state exists and reading it failed, or is damaged: report_not_found or config_invalid.",
         ),
     ),
     (
@@ -1013,7 +1045,7 @@ def test_each_relation_accepts_its_paraphrases_and_rejects_their_inversions(chec
 MUTATIONS = [
     pytest.param(FLASH, ("reset_after_flash",), says_reset_default_is_false, (), r"\bdefault false\b", "Default true", id="true-false:reset-default"),
     pytest.param(FLASH, ("reset_after_flash",), says_true_resets, (), r"\breset the board after flashing\b", "True never resets the board after flashing", id="true-false:reset-effect"),
-    pytest.param(LAST_REPORT, None, says_outer_ok_even_for_a_failed_report, (), r"\bok is true\b", "ok is false", id="true-false:outer-ok"),
+    pytest.param(LAST_REPORT, None, says_outer_ok_even_for_a_failed_report, (), r"\bok stays true\b", "ok is false", id="true-false:outer-ok"),
     pytest.param(FLASH, None, needs_with_refusal, ("allow_flash",), r"\bneeds allow_flash, else\b", "allow_flash true:", id="required-optional:allow_flash-granted"),
     pytest.param(FLASH, None, needs_with_refusal, ("allow_flash",), r"\bneeds allow_flash\b", "Needs no allow_flash", id="required-optional:allow_flash-waived"),
     pytest.param(UPLOAD, None, needs_with_refusal, ("allow_upload",), r"\bneeds (?:artifacts\.)?allow_upload\b", "allow_upload is optional", id="required-optional:allow_upload"),
@@ -1021,15 +1053,15 @@ MUTATIONS = [
     pytest.param(UPLOAD, None, says_content_addressed, (), r"\bbytes and extension\b", "bytes or extension", id="and-or:content-address"),
     pytest.param(FLASH, None, says_one_image_input, (), r"\bnot with image_path\b", "with image_path, both required", id="and-or:image-input"),
     pytest.param(LAST_REPORT, None, says_how_to_judge_the_stored_verdict, (), r"\bjudge report\.ok\b[^.]*", "judge report.ok alone", id="and-or:stored-verdict"),
-    pytest.param(CLASSIFY, None, says_record_outlives_successes, (), r"\bkeep it\b", "clear it", id="negated-effect:record-cleared"),
-    pytest.param(LAST_REPORT, None, says_touches_no_board, (), r"\bno board needed\b", "Needs a board", id="negated-effect:report-needs-board"),
+    pytest.param(CLASSIFY, None, says_record_outlives_successes, (), r"\bkeeps that failure through later successes\b", "clears that failure at the next success", id="negated-effect:record-cleared"),
+    pytest.param(LAST_REPORT, None, says_touches_no_board, (), r"\bneeds no board\b", "Needs a board", id="negated-effect:report-needs-board"),
     pytest.param(UPLOAD, None, says_touches_no_board, (), r"\bno board needed\b", "needs a board", id="negated-effect:upload-needs-board"),
     pytest.param(FLASH, None, says_recovery_is_attempted_not_promised, (), r"\bmay try\b", "always does", id="negated-effect:recovery-promised"),
     pytest.param(FLASH, ("capture",), says_capture_failure_keeps_the_image, (), r"\bimage written\b", "nothing written", id="negated-effect:capture-image"),
     pytest.param(LAST_REPORT, None, says_reading_changes_nothing, (), r"\bchanges nothing\b", "clears it", id="negated-effect:report-read"),
     pytest.param(FLASH, None, says_every_call_flashes_again, (), r"\bevery call writes it again\b", "a repeated call skips an unchanged image", id="negated-effect:flash-again"),
     pytest.param(LAST_REPORT, None, says_newest_report_may_be_the_recovery, (), r"\bit can be\b", "it is never", id="negated-effect:recovery-report"),
-    pytest.param(CLASSIFY, None, says_some_refusals_record_none, (), r"\bsome refusals (\([^)]*\)) record none\b", r"All refusals \1 are recorded", id="negated-effect:refusals-recorded"),
+    pytest.param(CLASSIFY, None, says_some_refusals_record_none, (), r"\bsome refusals, such as ([^,]*), record nothing\b", r"All refusals, \1 included, are recorded", id="negated-effect:refusals-recorded"),
     pytest.param(FLASH, None, says_debug_session_makes_flash_busy, (), r"\bresource_busy: debug_stop_session first\b", "It stops any debug session itself", id="negated-effect:debug-session"),
     pytest.param(UPLOAD, ("data_base64",), says_size_limit, (), r"\bdecoded\b", "Encoded", id="size:encoded"),
     pytest.param(UPLOAD, ("data_base64",), says_size_limit, (), r"\bMiB\b", "bytes", id="size:unit"),
@@ -1039,7 +1071,8 @@ MUTATIONS = [
     pytest.param(FLASH, ("image_path",), says_bin_needs_flash_address, (), r"\bpyOCD and STM32CubeProgrammer\b", "OpenOCD", id="backend:bin-address"),
     pytest.param(FLASH, ("image_path",), says_pyocd_does_not_verify, (), r"\bpyOCD does not verify\b", "OpenOCD does not verify", id="backend:verify"),
     pytest.param(FLASH, None, says_what_it_writes_and_through_what, (), r"\bnot st-flash\b", "OpenOCD only, not st-flash", id="backend:restriction"),
-    pytest.param(LAST_REPORT, None, says_read_failures_apart, (), r"\bunreadable: report_unreadable\b", "unreadable: report_not_found", id="read-failure:merged"),
+    pytest.param(LAST_REPORT, None, says_when_nothing_is_stored, (), r"\bnone yet: report_not_found\b", "None yet or unreadable: report_not_found", id="read-failure:merged"),
+    pytest.param(CLASSIFY, None, says_when_nothing_is_stored, (), r"\bno failure yet: report_not_found\b", "no failure yet or a damaged record: report_not_found", id="read-failure:merged-classify"),
     pytest.param(FLASH, ("capture", "until"), says_until_limits, (), r"\b256 characters\b", "256 bytes", id="capture:until-unit"),
     pytest.param(FLASH, ("capture", "wait_timeout_s"), says_wait_bounds, (), r"\bseconds\b", "Milliseconds", id="capture:wait-unit"),
 ]
