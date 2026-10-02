@@ -47,6 +47,8 @@ import yaml
 from result_text import assert_text_projects
 from support import scaled_time_bound
 
+from agentic_hil.knowledge import remediation_fields
+
 from .conftest import BENCH_ONLY, COMMAND_TIMEOUT_S, Bench, child_command
 
 pytestmark = [pytest.mark.bench, BENCH_ONLY]
@@ -1047,6 +1049,7 @@ def test_a_red_plan_leaves_a_junit_document_with_its_failure_its_skipped_steps_a
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
         "retry_safe": False,
+        **remediation_fields("junit_xml_requires_synchronous_run"),
     }, refused
     assert not (bench.project / refused_junit).exists(), "a refused detached start wrote a JUnit document"
     assert cli_handles(bench) == before, "a refused detached start left a run record behind"
