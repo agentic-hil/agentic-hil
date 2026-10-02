@@ -431,8 +431,9 @@ def test_stop_names_its_result_fields_and_outcomes(listed: dict[str, dict]) -> N
     """No session: ok, `active` false (gdbdebug.py L417-418). A teardown it
     could not prove: ok false, `status` cleanup_required, `hardware_state`
     unknown, the bench quarantined, with `halt_not_confirmed`,
-    `detach_resume_not_confirmed` or `cleanup_failed` (gdbdebug.py L460,
-    L476; tools.py L2421)."""
+    `breakpoints_not_removed` (on a server ended before GDB detaches, #624),
+    `detach_resume_not_confirmed` or `cleanup_failed` (gdbdebug.py
+    `stop_session`, `_TEARDOWN_PROOFS`; tools.py L2421)."""
     tool = listed[STOP]
     description = str(tool["description"])
     definition = definition_text(tool)
@@ -450,7 +451,7 @@ def test_stop_names_its_result_fields_and_outcomes(listed: dict[str, dict]) -> N
         assert HELD.search(sentence), sentence
         assert not re.search(r"\bok\W{0,3}true\b|\bactive\W{0,3}false\b|\bsafe_state_confirmed\W{0,3}true\b", sentence), sentence
 
-    for outcome in ("halt_not_confirmed", "detach_resume_not_confirmed", "cleanup_failed"):
+    for outcome in (*(proof.error_type for proof in gdbdebug._TEARDOWN_PROOFS), "cleanup_failed"):
         assert outcome in definition, (outcome, definition)
 
 
