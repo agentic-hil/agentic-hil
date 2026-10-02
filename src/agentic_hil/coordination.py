@@ -2005,13 +2005,13 @@ class HardwareCoordinator:
         half of the bench state the incident happened to live in.
         """
         if not safe_state_confirmed:
-            return {"ok": False, "tool": "hardware_recover", "error_type": "operator_confirmation_required", "summary": "Recovery requires explicit operator confirmation of physical safe state."}
+            return {"ok": False, "tool": "hardware_recover", "error_type": "operator_confirmation_required", "summary": "Recovery requires explicit operator confirmation of physical safe state.", **remediation_fields("operator_confirmation_required")}
         if not quarantine_id:
-            return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_id_required", "summary": "Recovery requires the current quarantine_id from lease-status."}
+            return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_id_required", "summary": "Recovery requires the current quarantine_id from lease-status.", **remediation_fields("quarantine_id_required")}
         with self._guard:
             self._require_open()
             if self.project_lock is not None or self.leases:
-                return {"ok": False, "tool": "hardware_recover", "error_type": "resource_busy", "summary": "Live owner still holds project resources."}
+                return {"ok": False, "tool": "hardware_recover", "error_type": "resource_busy", "summary": "Live owner still holds project resources.", **remediation_fields("resource_busy")}
             try:
                 project_lock = self._acquire_lock(self.project_key, [self.project_key])
             except CoordinationError as error:
@@ -2021,9 +2021,9 @@ class HardwareCoordinator:
                 record = self._read_record(self.project_key) or {}
                 state = record.get("state")
                 if state not in {"cleanup_required", "quarantined", "recovery_pending"}:
-                    return {"ok": False, "tool": "hardware_recover", "error_type": "resource_not_quarantined", "summary": "Project has no quarantined incident to recover."}
+                    return {"ok": False, "tool": "hardware_recover", "error_type": "resource_not_quarantined", "summary": "Project has no quarantined incident to recover.", **remediation_fields("resource_not_quarantined")}
                 if record.get("quarantine_id") != quarantine_id or not self._record_matches_project(record):
-                    return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_changed", "summary": "Quarantine incident changed; inspect lease-status and confirm the current incident."}
+                    return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_changed", "summary": "Quarantine incident changed; inspect lease-status and confirm the current incident.", **remediation_fields("quarantine_changed")}
                 if not self._record_config_acceptable(record, accept_config_change):
                     return {
                         "ok": False,
@@ -2038,7 +2038,7 @@ class HardwareCoordinator:
                     }
                 resources = [item for item in record.get("resources", []) if isinstance(item, str)]
                 if len(resources) != len(set(resources)):
-                    return {"ok": False, "tool": "hardware_recover", "error_type": "coordination_state_invalid", "summary": "Quarantine resource markers are inconsistent."}
+                    return {"ok": False, "tool": "hardware_recover", "error_type": "coordination_state_invalid", "summary": "Quarantine resource markers are inconsistent.", **remediation_fields("coordination_state_invalid")}
                 resuming = state == "recovery_pending"
                 for resource in sorted(set(resources)):
                     locks.append(self._acquire_lock(resource, resources))
@@ -2064,7 +2064,7 @@ class HardwareCoordinator:
                         or resource not in marker_resources
                         or not set(marker_resources) <= set(resources)
                     ):
-                        return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_changed", "summary": "Quarantine resource markers changed; recovery remains blocked.", "resource": resource}
+                        return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_changed", "summary": "Quarantine resource markers changed; recovery remains blocked.", "resource": resource, **remediation_fields("quarantine_changed")}
                 audit_event = {
                     "event": "recovery",
                     **({"recovery": "incident_resolved", "reason": reason} if reason else {}),
@@ -2086,7 +2086,7 @@ class HardwareCoordinator:
                 try:
                     safe_append_text(self.root / "recovery.jsonl", json.dumps(audit_event) + "\n")
                 except BaseException as error:
-                    return {"ok": False, "tool": "hardware_recover", "error_type": "recovery_audit_failed", "summary": "Recovery audit could not be persisted; quarantine remains active.", "backend_error": str(error), "audit_ok": False, "cleanup_required": True, "quarantined": True, "quarantine_id": quarantine_id}
+                    return {"ok": False, "tool": "hardware_recover", "error_type": "recovery_audit_failed", "summary": "Recovery audit could not be persisted; quarantine remains active.", "backend_error": str(error), "audit_ok": False, "cleanup_required": True, "quarantined": True, "quarantine_id": quarantine_id, **remediation_fields("recovery_audit_failed")}
                 released = self._base_record("released", resources)
                 released.update({"recovered_at": utc_now_iso(), "safe_state_confirmed": True, "recovered_quarantine_id": quarantine_id})
                 try:
@@ -2099,7 +2099,7 @@ class HardwareCoordinator:
                 except BaseException as error:
                     if isinstance(error, (KeyboardInterrupt, SystemExit)):
                         raise
-                    return {"ok": False, "tool": "hardware_recover", "error_type": "recovery_persist_failed", "summary": "Recovery could not persist all released markers; rerun recovery with the same quarantine_id to resume it.", "backend_error": str(error), "retry_safe": True, "cleanup_required": True, "quarantined": True, "quarantine_id": quarantine_id}
+                    return {"ok": False, "tool": "hardware_recover", "error_type": "recovery_persist_failed", "summary": "Recovery could not persist all released markers; rerun recovery with the same quarantine_id to resume it.", "backend_error": str(error), "retry_safe": True, "cleanup_required": True, "quarantined": True, "quarantine_id": quarantine_id, **remediation_fields("recovery_persist_failed")}
                 self.blocked = False
                 self.audit_incident = False
                 self.adopted_reason = None
@@ -2198,6 +2198,7 @@ class HardwareCoordinator:
                     "resources": requested,
                     "retry_safe": True,
                     "backend_error": str(error),
+                    **remediation_fields("resource_busy"),
                 }
             ) from error
         return lock
@@ -2333,7 +2334,7 @@ class HardwareCoordinator:
 
     def _require_open(self) -> None:
         if self._state != "open":
-            raise CoordinationError({"ok": False, "error_type": "coordination_closed", "summary": "Hardware coordinator is closed.", "side_effect_committed": False})
+            raise CoordinationError({"ok": False, "error_type": "coordination_closed", "summary": "Hardware coordinator is closed.", "side_effect_committed": False, **remediation_fields("coordination_closed")})
 
     def _valid_lease(self, lease: HardwareLease) -> bool:
         return (
@@ -2405,7 +2406,7 @@ class HardwareCoordinator:
                 locks.append(lock)
                 marker = self._read_record(resource)
                 if marker is not None and marker.get("state") not in {None, "released"} and marker.get("project_resource") != expected_project:
-                    raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Physical resource marker belongs to a different unresolved project incident.", "resource": resource})
+                    raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Physical resource marker belongs to a different unresolved project incident.", "resource": resource, **remediation_fields("coordination_state_invalid")})
                 incident = {**self._base_record("quarantined", resources), "quarantined_at": utc_now_iso(), "reason": reason, "quarantine_id": self.quarantine_id}
                 self._write_record(resource, incident)
         finally:
@@ -2419,13 +2420,13 @@ def _read_record_at(path: Path, resource: str) -> JsonObject | None:
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError, ConfigError) as error:
-        raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state could not be read and requires operator recovery.", "resource": resource, **filesystem_error_detail(error)}) from error
+        raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state could not be read and requires operator recovery.", "resource": resource, **filesystem_error_detail(error), **remediation_fields("coordination_state_invalid")}) from error
     try:
         value = json.loads(text)
     except ValueError as error:
-        raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state is corrupted and requires operator recovery.", "resource": resource, "backend_error": str(error)}) from error
+        raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state is corrupted and requires operator recovery.", "resource": resource, "backend_error": str(error), **remediation_fields("coordination_state_invalid")}) from error
     if not isinstance(value, dict) or value.get("version") not in {1, LEASE_VERSION}:
-        raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state is invalid and requires operator recovery.", "resource": resource})
+        raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state is invalid and requires operator recovery.", "resource": resource, **remediation_fields("coordination_state_invalid")})
     if value.get("version") == 1:
         value = {**value, "version": LEASE_VERSION}
         if value.get("state") in {"cleanup_required", "quarantined"}:
@@ -2439,7 +2440,7 @@ def _read_record_at(path: Path, resource: str) -> JsonObject | None:
         and all(value.get(field) is None or isinstance(value.get(field), str) for field in ("quarantine_id", "project_resource", "workspace", "config_path", "config_sha256", "owner_marker", "recovered_quarantine_id"))
     )
     if not typed:
-        raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state has invalid field types and requires operator recovery.", "resource": resource})
+        raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state has invalid field types and requires operator recovery.", "resource": resource, **remediation_fields("coordination_state_invalid")})
     return value
 
 

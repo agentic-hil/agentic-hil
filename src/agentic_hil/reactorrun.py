@@ -20,6 +20,7 @@ from agentic_hil.config import ConfigError
 from agentic_hil.coordination import CoordinationError
 from agentic_hil.devices import declared_keys
 from agentic_hil.junit import result_with_junit_xml, write_refusal_junit_xml
+from agentic_hil.knowledge import remediation_fields, with_run_remediation
 from agentic_hil.report import write_report
 from agentic_hil.runlifecycle import RunRegistration, new_run_handle, start_detached_run
 from agentic_hil.test_reactor import (
@@ -125,21 +126,25 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
             service.coordinator.begin_run(plan, label=test_config.name, wait_s=wait_s, stop_requested=registration.stop_requested)
         except CoordinationError as error:
             service.close()
+            # The refusal's own advice when the coordinator chose one for it,
+            # and otherwise the advice for the type it refused with.
             return write_report(
                 config,
-                {
-                    "tool": "test_reactor",
-                    "name": test_config.name,
-                    "test_config_path": test_config.path,
-                    **plan_digest_field(test_config),
-                    "steps": [],
-                    "cleanup": [],
-                    "cleanup_ok": True,
-                    "declared_devices": devices,
-                    **error.result,
-                    "summary": str(error.result.get("summary", "A device this plan declares is unavailable.")) + " No step ran.",
-                    "run": registration.handle,
-                },
+                with_run_remediation(
+                    {
+                        "tool": "test_reactor",
+                        "name": test_config.name,
+                        "test_config_path": test_config.path,
+                        **plan_digest_field(test_config),
+                        "steps": [],
+                        "cleanup": [],
+                        "cleanup_ok": True,
+                        "declared_devices": devices,
+                        **error.result,
+                        "summary": str(error.result.get("summary", "A device this plan declares is unavailable.")) + " No step ran.",
+                        "run": registration.handle,
+                    }
+                ),
             )
     # Published only now: a run says it is running once it holds the devices it
     # declared, so a handle reported as running is a handle that has the bench.
@@ -194,6 +199,7 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
                 "summary": "Per-device service cleanup raised an exception.",
                 "exception_type": type(error).__name__,
                 "backend_error": str(error),
+                **remediation_fields("cleanup_exception"),
             },
         }
         result["ok"] = False
@@ -203,6 +209,9 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
         result.setdefault("step_error_type", result.get("error_type"))
         result["error_type"] = "cleanup_failed"
         result["summary"] = "Test reactor sequence failed during cleanup."
+        # The advice on the result was for the type this replaces.
+        result.pop("remediation", None)
+        result.pop("do_not", None)
         if primary_error is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
             primary_error = error
     try:
@@ -218,6 +227,7 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
                 "summary": "Agentic HIL service cleanup raised an exception.",
                 "exception_type": type(error).__name__,
                 "backend_error": str(error),
+                **remediation_fields("cleanup_exception"),
             },
         }
         result["ok"] = False
@@ -227,9 +237,12 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
         result.setdefault("step_error_type", result.get("error_type"))
         result["error_type"] = "cleanup_failed"
         result["summary"] = "Test reactor sequence failed during cleanup."
+        # The advice on the result was for the type this replaces.
+        result.pop("remediation", None)
+        result.pop("do_not", None)
         if primary_error is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
             primary_error = error
-    written = write_report(config, {**result, "run": registration.handle})
+    written = write_report(config, with_run_remediation({**result, "run": registration.handle}))
     if primary_error is not None:
         if written.get("audit_ok") is False:
             primary_error.args = (*primary_error.args, "Final reactor audit failed.")

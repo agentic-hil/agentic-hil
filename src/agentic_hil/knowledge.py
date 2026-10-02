@@ -348,6 +348,15 @@ def permission_denied_fields(permission: str | None) -> JsonObject:
 # that is blocking them.
 EXCLUSIVE_PERMISSION_SCOPE = "exclusive"
 
+# The scope for the test reactor's own reading of an error type that other
+# routes answer with too. `cleanup_failed` is also what a debug session says
+# when its own teardown fails, and there the move is that session's; a plan
+# run's cleanup failure is the run's devices and its recovery, and handing a
+# reader the debug session's advice would send them to stop a session that
+# belonged to a service that has already closed. Every failed run result names
+# this scope, so a type with no scoped entry falls back to its bare one.
+TEST_REACTOR_SCOPE = "test_reactor"
+
 
 def exclusive_permission_fields(blocking: str, debugger_id: str | None) -> JsonObject:
     """The key an exclusivity refusal is about, and the direction it has to move.
@@ -1548,6 +1557,187 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "different devices to get around it. The board is shared, and the incident is about the board.",
         ),
     ),
+    # The coordinator's own refusals. They reach a caller through
+    # `hardware_recover`, `agentic-hil recover`, `agentic-hil lease-status` and
+    # every hardware tool whose lock the coordinator takes, so each entry has to
+    # be true at all of those doors and names the payload field that tells the
+    # cases apart where one type covers several.
+    "resource_busy": ErrorRemedy(
+        meaning=(
+            "A lock this call needs is held, so nothing was driven and nothing changed. The payload says whose hold "
+            "it is. A refusal that carries `resources` met the machine-wide lock of another Agentic HIL process or "
+            "command (or a lock file that could not be opened at all, which `backend_error` then says), and "
+            "`resources` lists what this call asked for, not who holds it. A refusal with no `resources` was refused "
+            "by this server or command itself: a debugger tool while this server's own debug session holds the "
+            "debugger, or a recovery while this server still holds a lease of its own."
+        ),
+        remediation=(
+            "When the refusal carries `resources`, call `hardware_lease_status`: `owner_active` says whether a live "
+            "owner holds the project, and `device_holds` names the runs holding devices. Wait for that owner to end, "
+            "or stop it (`test_reactor_stop` with its handle for a plan run), then call again; the retry is safe.",
+            "When a debugger tool is refused with no `resources`, this server's own debug session holds the "
+            "debugger. End it with `debug_stop_session`, then call the tool again.",
+            "When a recovery is refused with no `resources`, this server still holds a session or a run of its own. "
+            "End it (`debug_stop_session`, `com_session_stop`, `can_session_stop` or `bench_run_stop`), then "
+            "recover again.",
+        ),
+        do_not=(
+            "Do not delete lock files to get past this. The hold belongs to a live owner, and removing it lets two "
+            "owners drive one board.",
+            "Do not retry in a tight loop. The hold ends when its owner ends it, and polling does not shorten it.",
+        ),
+    ),
+    "coordination_closed": ErrorRemedy(
+        meaning=(
+            "The hardware coordinator this call went to has been closed, which happens only while the server or "
+            "command that owns it shuts down. Nothing was locked or driven, and nothing changed."
+        ),
+        remediation=(
+            "Start the server or the command again and make the call against the new one; the retry is safe.",
+        ),
+        do_not=(
+            "Do not keep calling the server that is shutting down. Its coordinator does not reopen, so every call "
+            "to it answers the same way.",
+        ),
+    ),
+    "operator_confirmation_required": ErrorRemedy(
+        meaning=(
+            "A recovery was asked for without the operator's confirmation that the board is in a safe state, so "
+            "nothing was cleared and the quarantine stands. Clearing a quarantine attests a physical state, and only "
+            "a person at the bench can make that claim."
+        ),
+        remediation=(
+            "The operator checks the board as `quarantine_guidance` describes, then runs "
+            "`agentic-hil recover --confirm-safe-state --quarantine-id <quarantine_id>` with the id "
+            "`agentic-hil lease-status` reports.",
+            "Over MCP, `hardware_recover` carries the confirmation as `operator_statement`: ask the operator what "
+            "state the bench is in and pass their answer in their words.",
+        ),
+        do_not=(
+            "Do not confirm a safe state nobody has looked at. The confirmation is written to the recovery ledger as "
+            "the operator's, and it is the one claim no process can make for them.",
+        ),
+    ),
+    "coordination_state_invalid": ErrorRemedy(
+        meaning=(
+            "A coordination record this call depends on is not one it can trust, so the call stopped at that "
+            "record. The fields say which record and why. `resource` names a lease or "
+            "project record that could not be read (`error_class` and `errno` say what the operating system "
+            "answered), that is not JSON (`backend_error`), that was written by another version, that has fields "
+            "of the wrong type, or that belongs to a different unresolved project incident. A recovery says its "
+            "incident markers are inconsistent. `unlockable_lock_keys` is a declared device whose lock key the "
+            "machine-wide mutex does not lock, refused before the run took anything.\n\n"
+            "The same type inside an `audit_error` after a hardware action is the canonical audit ledger under "
+            "`state_root`: its digest sidecar is corrupted or has an invalid format, or the ledger's size disagrees "
+            "with the sidecar. There the action itself already ran; what failed is its evidence, and `audit_ok` is "
+            "false on the result."
+        ),
+        remediation=(
+            "Read which record the refusal names and why: `resource` with `error_class` and `errno`, "
+            "`backend_error`, or the summary.",
+            "A permission, a full disk or a file another program holds open is fixed where it is, and the same call "
+            "then reads the record again; nothing else has to change.",
+            "A record that is corrupted, from another version or inconsistent is the operator's to judge: no command "
+            "rewrites a coordination record or the canonical ledger, and `agentic-hil lease-status` and "
+            "`agentic-hil recover` stop on the same record. Hand the operator the refusal as it is, with the record "
+            "it names.",
+            "`unlockable_lock_keys` is a defect in a device kind, not a bench fault: report it with the plan that "
+            "declared the device.",
+        ),
+        do_not=(
+            "Do not delete or hand-edit the coordination records, the canonical ledger or its digest sidecar to get "
+            "past this. They are what keeps a second owner off a board nobody has confirmed, and an edited ledger is "
+            "evidence that can no longer be checked.",
+            "Do not move `state_root` to start from empty records. Every incident and hold under the old root would "
+            "become invisible while the hardware it describes stays where it is.",
+        ),
+    ),
+    "quarantine_id_required": ErrorRemedy(
+        meaning=(
+            "The recovery named no quarantine id, so nothing was cleared. A recovery signs for one incident by its "
+            "id, so that a signature never clears an incident nobody looked at."
+        ),
+        remediation=(
+            "Read `quarantine_id` from `agentic-hil lease-status` and pass it: "
+            "`agentic-hil recover --confirm-safe-state --quarantine-id <quarantine_id>`.",
+        ),
+        do_not=(
+            "Do not guess an id or reuse one from an older result. An id names one incident, and a newer incident "
+            "gets a new one.",
+        ),
+    ),
+    "resource_not_quarantined": ErrorRemedy(
+        meaning=(
+            "The recovery found no quarantined incident on this project, so there was nothing to clear and nothing "
+            "changed. Usually another recovery or the next hardware call already cleared it between the status read "
+            "and this recovery."
+        ),
+        remediation=(
+            "Call `hardware_lease_status`. With nothing standing, carry on with the work the incident held up.",
+            "An incident listed under `standing_incidents` belongs to another project and resolves only in that "
+            "project's workspace.",
+        ),
+        do_not=(
+            "Do not sign again for an incident that is no longer there, and do not delete coordination records to "
+            "make the answer change.",
+        ),
+    ),
+    "quarantine_changed": ErrorRemedy(
+        meaning=(
+            "The incident this recovery signed for is not the one on record, so nothing was cleared and the "
+            "quarantine stands. With no `resource`, the project's incident has another id now (a newer incident "
+            "replaced it) or belongs to another project. With `resource`, the incident id matched but that "
+            "resource's marker is missing or disagrees with it: another state, another id, another project, another "
+            "configuration, or a resource list that does not match the incident's."
+        ),
+        remediation=(
+            "Read `agentic-hil lease-status` again, check the board against the incident it names now, and sign for "
+            "that `quarantine_id`.",
+            "When the refusal names a `resource`, that marker is the disagreement. If it is another project's "
+            "incident on the same device, `standing_incidents` names it and it resolves in that project's workspace "
+            "first.",
+            "When the same id is refused again on the same `resource`, nothing on this side reconciles that marker: "
+            "hand the operator the refusal with the `agentic-hil lease-status` output.",
+        ),
+        do_not=(
+            "Do not edit or delete the marker to make it match, and do not sign again with the old id.",
+            "Do not sign for the new id without looking at the board. A newer incident is a new state to check.",
+        ),
+    ),
+    "recovery_audit_failed": ErrorRemedy(
+        meaning=(
+            "The recovery's line could not be written to the recovery ledger under `state_root`. The ledger line is "
+            "written before any marker is released, so nothing was cleared: the quarantine stands under the same "
+            "`quarantine_id`. `backend_error` says what the write answered."
+        ),
+        remediation=(
+            "Fix the cause `backend_error` names (a permission, a full disk, a file held open elsewhere), then run "
+            "the same recovery again with the same `quarantine_id`.",
+        ),
+        do_not=(
+            "Do not clear the quarantine some other way. A recovery that is not in the ledger is one nobody can "
+            "account for later.",
+            "Do not move `state_root` to get a writable ledger. The incident lives under the old root and would only "
+            "become invisible.",
+        ),
+    ),
+    "recovery_persist_failed": ErrorRemedy(
+        meaning=(
+            "The recovery is in the ledger, but not every marker it releases could be written, so the quarantine "
+            "stands. `backend_error` says what the write answered. A failure after the project was marked "
+            "`recovery_pending` leaves it there; a failure on that mark itself leaves the project in the state it "
+            "was in."
+        ),
+        remediation=(
+            "Fix the cause `backend_error` names, then run the recovery again with the same `quarantine_id`; the "
+            "retry is safe. A project left `recovery_pending` resumes from there, and the rerun's ledger line says "
+            "`resumed`.",
+        ),
+        do_not=(
+            "Do not treat the bench as recovered. Until the rerun completes, the quarantine stands.",
+            "Do not delete markers to finish the recovery by hand.",
+        ),
+    ),
     "device_busy": ErrorRemedy(
         meaning=(
             "A physical device is held by another owner for the duration of their run. The refusal names the holder in "
@@ -2097,6 +2287,456 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not delete the coordination state to get past this: the records beside the one that could not be "
             "written belong to runs that may still be going, and the leases and the audit trail under the same root "
             "are what `agentic-hil lease-status` and `agentic-hil recover` read.",
+        ),
+    ),
+    # A plan run's own lifecycle: the handle a detached start prints, the
+    # record behind it, and the ways a run ends that are not a verdict on the
+    # firmware.
+    "run_not_found": ErrorRemedy(
+        meaning=(
+            "This bench has no record under the handle in `run`, so nothing was asked of any run. The handle may be "
+            "mistyped, may belong to another bench or another `state_root`, may be older than the 100 newest ended "
+            "runs a bench keeps records of, or may be from a start that never published a record."
+        ),
+        remediation=(
+            "Call `test_reactor_status` with no `run`: it lists every handle this bench still has a record of, "
+            "newest first.",
+            "For a run that ended long ago, its report is still where its result said; `get_last_report` reads the "
+            "newest one.",
+        ),
+        do_not=(
+            "Do not take a missing record as proof the run is gone and start the plan again on that basis. Check "
+            "`hardware_lease_status` first: a run another bench or root started can still hold these devices.",
+        ),
+    ),
+    "run_state_invalid": ErrorRemedy(
+        meaning=(
+            "A run record, or the directory that holds them, could not be read, so this bench cannot say what the "
+            "run is doing. The run itself is not judged by this: it may be going exactly as asked. "
+            "`backend_error` (and `record_error` with `record_path` on a detached start) says why; a record written "
+            "by another version of Agentic HIL is refused the same way, with the summary saying so and no "
+            "`backend_error`. A stop by name is refused for the same record, because it reads the record first."
+        ),
+        remediation=(
+            "Fix what `backend_error` or `record_error` names (a permission, a full disk, a file held open "
+            "elsewhere) and ask again; the retry is safe.",
+            "A record from another version is read by the version that started the run; or wait for the run's own "
+            "report.",
+            "`hardware_lease_status` says whether the run still holds devices while its record cannot be read.",
+        ),
+        do_not=(
+            "Do not delete or rewrite the record. It is the only thing naming that run, and a run whose record is "
+            "gone can no longer be watched or stopped by name.",
+            "Do not start the plan again on the assumption that the run ended.",
+        ),
+    ),
+    "run_worker_failed": ErrorRemedy(
+        meaning=(
+            "The detached run's worker process ended before it published a record, so no run exists under the "
+            "handle and nothing was locked or driven. `exit_code` is how it ended and `worker_output` is what it "
+            "printed."
+        ),
+        remediation=(
+            "Read `worker_output` and `exit_code`: they usually hold the refusal the worker met.",
+            "Run the same plan without detaching to get that refusal as a result of its own, fix what it names, then "
+            "start again; the retry is safe.",
+        ),
+        do_not=(
+            "Do not restart the detached run unchanged in a loop. The worker will end the same way until the cause "
+            "in `worker_output` is fixed.",
+            "Do not delete the runs directory to clear this. Other runs' records live there.",
+        ),
+    ),
+    "run_worker_unresponsive": ErrorRemedy(
+        meaning=(
+            "The detached run's worker did not publish a record within the startup window, and it may still be "
+            "alive. A cooperative stop was planted under the handle in `run` before this answer, so a worker that "
+            "does come up ends at its first step boundary instead of running the plan. `retry_safe` is false: the "
+            "worker's state is unknown, and it may still be taking the devices."
+        ),
+        remediation=(
+            "Ask `test_reactor_status` for this `run` a little later. A worker that came up late shows as stopped; "
+            "`run_not_found` means it never registered.",
+            "Call `hardware_lease_status` to see whether anything still holds the plan's devices, and start the "
+            "plan again only once they are free.",
+            "`worker_output` shows how far the worker got.",
+        ),
+        do_not=(
+            "Do not start the plan again at once or in a loop. A late worker and a new one would queue for the same "
+            "devices.",
+            "Do not delete the planted stop: it is what keeps a late worker from driving the board behind a start "
+            "that reported failure.",
+        ),
+    ),
+    "run_worker_gone": ErrorRemedy(
+        meaning=(
+            "The process that was running this plan is gone and left no orderly end, so there is nobody to stop and "
+            "the run has no report and no verdict of its own. The bench is the dead-owner case the coordinator "
+            "handles."
+        ),
+        remediation=(
+            "Call `hardware_lease_status`: it reads and heals the dead owner's holds, and names a `quarantine_id` "
+            "if the run had reached the board.",
+            "With an incident standing, recover it the way `resource_quarantined` describes; then start the plan "
+            "again for a verdict.",
+        ),
+        do_not=(
+            "Do not read the missing report as a pass or a failure. The run has no verdict.",
+            "Do not delete the run record or the lock files, and do not send another stop; nothing is there to "
+            "honour it.",
+        ),
+    ),
+    "run_stopped": ErrorRemedy(
+        meaning=(
+            "The run ended on a stop request, which may be one somebody asked for by its handle or the stop a "
+            "detached start planted after a worker that did not answer in time. It is neither a pass nor a failure "
+            "of the firmware. `stopped_after_step` is the last top-level step that ran (0 when the stop came while "
+            "the run was still waiting for a device, and then `resource` and `waited_s` say which device and how "
+            "long). The steps that ran keep their records. The devices the run opened were closed the way a "
+            "passing run closes them, and no recovery ran, because nothing was left unconfirmed."
+        ),
+        remediation=(
+            "Read `stopped_after_step` and `steps` for what did run and what it showed.",
+            "Start the plan again for a verdict on the whole plan; the retry is safe.",
+            "A stop nobody here asked for came from another caller holding the handle, or from a stop a detached "
+            "start planted.",
+        ),
+        do_not=(
+            "Do not count the steps that never ran as passed.",
+            "Do not report the plan as failed either: a stopped run has no verdict on the steps it did not reach.",
+        ),
+    ),
+    "reactor_exception": ErrorRemedy(
+        meaning=(
+            "The test reactor raised outside any step, which is a defect in Agentic HIL rather than a verdict on the "
+            "firmware. Every containment step was attempted, the report was written with no steps and with "
+            "`cleanup` and `cleanup_ok` from the containment, and `exception_type` names what was raised. The run's "
+            "own call does not answer with this result but raises, so an MCP client sees an internal error and the "
+            "command line a traceback; the type is read from the report and from the run's status."
+        ),
+        remediation=(
+            "Read the report (`get_last_report`) for `cleanup` and `cleanup_ok`: they say whether the devices were "
+            "closed.",
+            "Call `hardware_lease_status` to see whether anything was left held or quarantined, and resolve that "
+            "first.",
+            "Report the defect with `exception_type` and the report.",
+        ),
+        do_not=(
+            "Do not rerun the plan in a loop. The same defect raises the same way.",
+            "Do not trust an older report as this run's. The report path is shared, and the run's own report is "
+            "the one written now.",
+        ),
+    ),
+    "interrupted": ErrorRemedy(
+        meaning=(
+            "The run was interrupted (Ctrl+C or a process exit) before it finished. Every containment step was "
+            "attempted and the report was written with no steps and with `cleanup` and `cleanup_ok` from the "
+            "containment. The run record behind its handle names this run `reactor_exception`."
+        ),
+        remediation=(
+            "Read the report (`get_last_report`) for `cleanup` and `cleanup_ok`, then call `hardware_lease_status` "
+            "to see whether anything was left held or quarantined.",
+            "Start the plan again for a verdict.",
+        ),
+        do_not=(
+            "Do not read the steps that did not run as passed.",
+            "Do not delete lock files to free the bench. What the containment could not close is shown by "
+            "`hardware_lease_status` and resolves through recovery.",
+        ),
+    ),
+    "junit_xml_requires_synchronous_run": ErrorRemedy(
+        meaning=(
+            "A JUnit file was asked for beside a detached start. The file is written by the command that waits for "
+            "the run's verdict, and a detached start returns before there is one, so the start was refused and no "
+            "run began."
+        ),
+        remediation=(
+            "Run the plan without `--detach` when a CI job needs the JUnit file; or detach without `--junit-xml` "
+            "and follow the run with `test_reactor_status` and its JSON report.",
+        ),
+        do_not=(
+            "Do not expect the detached worker to write the file later. Nothing writes it for a detached run.",
+        ),
+    ),
+    "junit_xml_write_failed": ErrorRemedy(
+        meaning=(
+            "The run happened and its JSON report stands; only the JUnit file could not be written to `junit_xml`. "
+            "A run that failed on its own keeps its own `error_type`, and the write failure is in `junit_xml_error` "
+            "beside it, whose `backend_error` says what the write answered."
+        ),
+        remediation=(
+            "Fix the path or the permission the `backend_error` in `junit_xml_error` names, then run the plan again "
+            "with `--junit-xml` if the CI job needs the file.",
+        ),
+        do_not=(
+            "Do not read the missing file as a test failure, or as a pass. The run's verdict is in its JSON report.",
+        ),
+    ),
+    "cleanup_exception": ErrorRemedy(
+        meaning=(
+            "A cleanup action raised instead of answering: a device's close during a run's cleanup, or the reactor's "
+            "or the service's own close after it. `exception_type` and `backend_error` say what was raised; `device` "
+            "and `action` on the cleanup entry say which close. What that close left behind is unconfirmed."
+        ),
+        remediation=(
+            "Call `hardware_lease_status`: `owner_active`, `device_holds` and `incident_stands` say whether anything "
+            "was left held or quarantined, and an incident resolves the way `resource_quarantined` describes.",
+            "Report the defect with `exception_type`, `backend_error`, `device` and `action`.",
+        ),
+        do_not=(
+            "Do not delete lock files or coordination records to free what the close left.",
+            "Do not rerun the plan at once. The next run meets the same unconfirmed state.",
+        ),
+    ),
+    "cleanup_failed:test_reactor": ErrorRemedy(
+        meaning=(
+            "The plan run could not close everything it opened. `cleanup_errors` lists each close that failed, by "
+            "`device`, `action` and its `result`. A step that had already failed keeps its own type in "
+            "`step_error_type` beside `failed_step`, and a run asked to stop keeps `stopped`; the run's `error_type` "
+            "says cleanup because a bench left in an unknown state outranks the verdict. When a device's close "
+            "failed, a recovery of the probes the run drove was attempted and `recovery` says how it came out; a "
+            "failed close of the reactor or the service after the run brings no `recovery` of its own."
+        ),
+        remediation=(
+            "Read `cleanup_errors` for which device and which close failed, and what it answered.",
+            "Read `recovery` where the run has one, then `hardware_lease_status`: with `incident_stands` true, "
+            "resolve the incident the way `resource_quarantined` describes before the next run.",
+            "Where `failed_step` is set, `step_error_type` is that step's own outcome; judge the firmware by it once "
+            "the bench is settled.",
+        ),
+        do_not=(
+            "Do not call `debug_stop_session`, `com_session_stop` or `can_session_stop` from another server to "
+            "settle this. The run's sessions belonged to its own service, which has closed, and a retry with no new "
+            "evidence leaves an unconfirmed state unconfirmed.",
+            "Do not delete coordination records or lock files to free the bench.",
+        ),
+    ),
+    # The reactor's verdicts on a step. Each is a firmware or plan outcome the
+    # step's own record holds the evidence for, so the entries send the reader
+    # to the step at `failed_step` rather than to the bench.
+    "comparator_unmet": ErrorRemedy(
+        meaning=(
+            "A step read what it was told to read and the value did not satisfy the comparator. This is a verdict "
+            "on the firmware or the plan, not a bench fault. The failing step's record (`steps` at `failed_step`, "
+            "and inside a repeat block its `iterations`) holds `comparator` and what was seen: `received_tail` and "
+            "`bytes_received` for a serial read, `frames_tail` and `frames_read` for a CAN read, `reading` and "
+            "`captured_value` (and `masked_value` under a mask) for a symbol."
+        ),
+        remediation=(
+            "Compare what was seen with `comparator`. Zero bytes or zero frames points at the line before the "
+            "firmware: wiring, baud rate or bitrate, or a board that did not boot.",
+            "Fix the firmware or the plan, whichever is wrong, and run the plan again.",
+        ),
+        do_not=(
+            "Do not loosen the comparator or widen `timeout_s` until it passes without knowing why it failed.",
+            "Do not call it a bench fault. The read worked; the value is the finding.",
+        ),
+    ),
+    "symbol_size_mismatch": ErrorRemedy(
+        meaning=(
+            "A symbol read returned a different size than the plan declared, so the value was not compared. "
+            "`expected_size_bytes` is what the plan said and `size_bytes` is what the read returned."
+        ),
+        remediation=(
+            "Compare `expected_size_bytes` with `size_bytes`, then correct the plan or the firmware, whichever "
+            "changed.",
+        ),
+        do_not=(
+            "Do not drop `size_bytes` from the plan to get past this. It is the check that the plan and the image "
+            "agree on what the symbol is.",
+        ),
+    ),
+    "symbol_width_not_numeric": ErrorRemedy(
+        meaning=(
+            "A numeric comparator was applied to a symbol that is not a 1, 2, 4 or 8 byte integer "
+            "(`integer_widths`), so there was no number to compare and nothing was judged."
+        ),
+        remediation=(
+            "Point the comparator at a scalar the firmware keeps in one of `integer_widths`, or compare the bytes "
+            "another way. Declaring `size_bytes` on the step makes the plan check refuse a width like this before "
+            "the run starts.",
+        ),
+        do_not=(
+            "Do not treat this as a failed assertion about the firmware. The comparison never happened.",
+        ),
+    ),
+    "uart_expect_timeout": ErrorRemedy(
+        meaning=(
+            "A serial expect step did not see `expected_text` or `expected_pattern` within `timeout_s`. "
+            "`received_tail` is the end of what did arrive (`received_tail_truncated` when more came before it), "
+            "and `bytes_received` and `reads` say how much and how often."
+        ),
+        remediation=(
+            "Read `received_tail`: output that is there but different is a firmware or plan finding; fix whichever "
+            "is wrong.",
+            "Zero `bytes_received` points at the port, the wiring, the baud rate or a board that did not boot.",
+        ),
+        do_not=(
+            "Do not raise `timeout_s` or loosen the pattern until it passes without reading what arrived.",
+        ),
+    ),
+    "unexpected_stop": ErrorRemedy(
+        meaning=(
+            "The target stopped, but not at the breakpoint the step was waiting for. `stop` is where and why it "
+            "stopped and `expected_breakpoint_id` is the one the step named."
+        ),
+        remediation=(
+            "Read `stop`: a fault, a different breakpoint or a halt from outside each say something different about "
+            "the firmware or the plan. Fix that and run the plan again.",
+        ),
+        do_not=(
+            "Do not add breakpoints or widen timeouts to get past the stop. Where the target stopped is the "
+            "finding.",
+        ),
+    ),
+    "breakpoint_cleanup_failed": ErrorRemedy(
+        meaning=(
+            "The target stopped, but the breakpoint the step set could not be cleared afterwards, so the step is "
+            "not a pass, wherever the target stopped. `breakpoint_cleanup` holds what the clear answered; the run's "
+            "`cleanup` shows how the debug session was closed."
+        ),
+        remediation=(
+            "Read `breakpoint_cleanup` for why the clear failed, then `cleanup` and `hardware_lease_status` for the "
+            "state the session was closed in.",
+            "Run the plan again once the bench is settled.",
+        ),
+        do_not=(
+            "Do not read the step as passed because the target stopped. A breakpoint left in the target changes "
+            "what the next run sees.",
+        ),
+    ),
+    "uart_session_not_owned": ErrorRemedy(
+        meaning=(
+            "The plan closed a serial session it had already closed, or never opened. Nothing was sent to the port "
+            "and the session was not touched."
+        ),
+        remediation=(
+            "Fix the order of the plan's open and close steps. A close inside a repeat block runs on every "
+            "iteration, so a session opened once outside it is closed by the first and refused by the second.",
+            "The run's own cleanup closes whatever it still holds, so nothing is left to close by hand.",
+        ),
+        do_not=(
+            "Do not read this as a fault of the port or the board. It is the plan's order.",
+        ),
+    ),
+    "can_session_not_owned": ErrorRemedy(
+        meaning=(
+            "The plan closed a CAN session it had already closed, or never opened. Nothing was sent on the bus and "
+            "the session was not touched."
+        ),
+        remediation=(
+            "Fix the order of the plan's open and close steps. A close inside a repeat block runs on every "
+            "iteration, so a session opened once outside it is closed by the first and refused by the second.",
+            "The run's own cleanup closes whatever it still holds, so nothing is left to close by hand.",
+        ),
+        do_not=(
+            "Do not read this as a fault of the adapter, the bus or the board. It is the plan's order.",
+        ),
+    ),
+    "step_exception": ErrorRemedy(
+        meaning=(
+            "A step raised instead of answering, which is a defect in Agentic HIL rather than a verdict on the "
+            "firmware. Whether the step reached the board is unknown, so the run failed at that step and a "
+            "recovery of the probes it drove was attempted (`recovery` says how it came out). `exception_type` and "
+            "`backend_error` say what was raised."
+        ),
+        remediation=(
+            "Call `hardware_lease_status` and resolve anything left standing.",
+            "Report the defect with `exception_type` and `backend_error`, then run the plan again once.",
+        ),
+        do_not=(
+            "Do not count it as a firmware verdict.",
+            "Do not rerun the plan in a loop. The same defect raises the same way.",
+        ),
+    ),
+    "preflight_exception": ErrorRemedy(
+        meaning=(
+            "The check that runs before the first step raised instead of answering, which is a defect in Agentic "
+            "HIL. No step ran and nothing was driven. `validation_error` holds `exception_type` and "
+            "`backend_error`, with `field` `$` because the check was about the whole plan."
+        ),
+        remediation=(
+            "Report the defect with `exception_type`, `backend_error` and the plan that triggered it.",
+        ),
+        do_not=(
+            "Do not rewrite the plan to dodge it. The plan was not judged, and a plan edited around a defect hides "
+            "it from the next run.",
+        ),
+    ),
+    "test_config_not_found": ErrorRemedy(
+        meaning=(
+            "There is no plan file at `path`, so nothing was parsed, locked or driven. With no path given, the run "
+            "looks for `.agentic-hil/testconfig.yaml`, and a relative path is resolved against `workspace_root`, "
+            "not against the shell's working directory."
+        ),
+        remediation=(
+            "Pass the plan's path relative to the workspace root, or create the plan at "
+            "`.agentic-hil/testconfig.yaml`.",
+        ),
+        do_not=(
+            "Do not repoint `workspace_root` at the plan's directory. That key is what the configuration authorizes.",
+        ),
+    ),
+    "test_config_unreadable": ErrorRemedy(
+        meaning=(
+            "The plan file at `path` exists but could not be read, so nothing was parsed, locked or driven. "
+            "`backend_error` says what the read answered."
+        ),
+        remediation=(
+            "Fix what `backend_error` names (usually a permission or a file another program holds open), then run "
+            "the plan again.",
+        ),
+        do_not=(
+            "Do not widen the permissions of the whole workspace to read one file.",
+        ),
+    ),
+    "test_config_schema_invalid": ErrorRemedy(
+        meaning=(
+            "The plan schema bundled with this installation could not be used (`schema` names it, `schema_error` "
+            "says why), so the plan was never checked and nothing ran. The plan is not the problem; the "
+            "installation is."
+        ),
+        remediation=(
+            "Repair the installation: `agentic-hil upgrade`, or reinstall Agentic HIL, then check it with "
+            "`agentic-hil --version` and run the plan again.",
+        ),
+        do_not=(
+            "Do not edit or loosen the plan to get past this. It was never read against the schema.",
+            "Do not edit the schema inside the installation. The next upgrade replaces it, and until then every "
+            "plan is checked against a schema nobody shipped.",
+        ),
+    ),
+    "audit_failed": ErrorRemedy(
+        meaning=(
+            "The action ran, but its evidence could not be written: `audit_ok` is false and `audit_error` says "
+            "which write failed. A step that drove the board did so; what is missing is the record of it, and the "
+            "bench may have been quarantined for it. `classify_last_error` answers the same type for the same case."
+        ),
+        remediation=(
+            "Read `audit_error` and fix the write it names (a permission, a full disk, the audit ledger).",
+            "Call `hardware_lease_status`: an incident the missing evidence raised stands until it is resolved the "
+            "way `resource_quarantined` describes.",
+        ),
+        do_not=(
+            "Do not run the step again just to get a clean record. The action already happened once, and repeating "
+            "it changes the board again.",
+        ),
+    ),
+    "step_failed": ErrorRemedy(
+        meaning=(
+            "A step's result failed one of the run's success checks without naming an error type of its own. Most "
+            "often the call worked but giving its lease back did not (`lease_state`, `cleanup_required`, "
+            "`quarantined`), or its `side_effect_status` or `hardware_state` is unknown. The run failed at that "
+            "step and a recovery of the probes it drove was attempted (`recovery` says how it came out)."
+        ),
+        remediation=(
+            "Read the step's record at `failed_step`: which success check it failed is in its own fields.",
+            "Call `hardware_lease_status` and read the run's `recovery`; resolve anything left standing, then run "
+            "the plan again.",
+        ),
+        do_not=(
+            "Do not read a step's `ok: true` as a pass when the run names it `step_failed`. A call that left the "
+            "bench in an unknown state is not a pass.",
         ),
     ),
     # The most common refusal on this surface, and for a long time the one that
@@ -5376,6 +6016,33 @@ def remediation_fields(error_type: str | None, scope: str | None = None, *, perm
     if remedy.do_not:
         payload["do_not"] = [step.format(**values) for step in remedy.do_not]
     return payload
+
+
+def run_remediation_fields(run_error: object) -> JsonObject:
+    """The advice for the error a plan run publishes, whatever that error is.
+
+    Looked up by the published type itself, under `TEST_REACTOR_SCOPE` with the
+    bare entry behind it, rather than from a list of the types a run is known to
+    fail with: a run passes up whatever its failing step answered, a debug
+    session's target type included, and a list would leave every type it did
+    not name without the fix its entry already holds. Empty for a value that is
+    not a type, and for a type the catalogue has no entry for."""
+    if not isinstance(run_error, str) or not run_error:
+        return {}
+    return remediation_fields(run_error, TEST_REACTOR_SCOPE)
+
+
+def with_run_remediation(result: JsonObject) -> JsonObject:
+    """`result`, a failed run's answer, with the advice for the error it publishes.
+
+    A result that carries advice already keeps it: that advice was chosen where
+    more was known than the type, such as the scope a coordinator refusal was
+    answered under or the permission key a preflight refusal names. Filled in
+    place and returned, so a caller can wrap the answer it is about to hand
+    back."""
+    if result.get("ok") is False and "remediation" not in result:
+        result.update(run_remediation_fields(result.get("error_type")))
+    return result
 
 
 def _needs_a_permission_key(remedy: ErrorRemedy) -> bool:

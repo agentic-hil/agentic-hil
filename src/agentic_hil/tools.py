@@ -2338,7 +2338,14 @@ class AgenticHILToolService:
                     if self._result_requires_quarantine(result):
                         lease.quarantine("debug_session_start_unconfirmed", audit_broken=result.get("audit_ok") is False)
                     return self._lease_result(result, lease)
-                return {"ok": False, "tool": name, "error_type": "resource_busy", "summary": "Debugger resource already has an active owner lease.", "retry_safe": True}
+                return {
+                    "ok": False,
+                    "tool": name,
+                    "error_type": "resource_busy",
+                    "summary": "Debugger resource already has an active owner lease.",
+                    "retry_safe": True,
+                    **remediation_fields("resource_busy"),
+                }
             else:
                 try:
                     resources = (DEBUGGER_DISCOVERY_RESOURCE,) if name == "debugger_probes_list" else debugger_effect_resources(self.config)

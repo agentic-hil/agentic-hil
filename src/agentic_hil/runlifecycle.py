@@ -45,6 +45,7 @@ from agentic_hil.config import (
     display_path,
     safe_read_text,
 )
+from agentic_hil.knowledge import remediation_fields, run_remediation_fields
 from agentic_hil.process import spawn_detached_process
 from agentic_hil.redact import filesystem_error_detail
 from agentic_hil.report import CANONICAL_REPORT_KEY, last_report_path
@@ -780,6 +781,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
                 "worker_output": output,
                 "retry_safe": True,
                 "side_effect_committed": False,
+                **remediation_fields("run_worker_failed"),
             }
         if time.monotonic() >= deadline:
             # The worker outlasted even the wait it was granted, so it is stuck
@@ -799,6 +801,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
                 "worker_output": output,
                 "retry_safe": False,
                 "side_effect_committed": False,
+                **remediation_fields("run_worker_unresponsive"),
             }
         time.sleep(WORKER_PUBLISH_POLL_S)
     state = str(record.get("state"))
@@ -858,7 +861,21 @@ def _detached_terminal_result(handle: str, record: JsonObject, report: str) -> J
         for field in ("failed_step", "stopped_after_step"):
             if record.get(field) is not None:
                 result[field] = record.get(field)
+        result.update(ended_run_remediation(record))
     return result
+
+
+def ended_run_remediation(record: JsonObject) -> JsonObject:
+    """The advice for the error an ended run's record names, for every answer built from that record.
+
+    The record keeps the type and not the advice, so the advice is looked up
+    again by the same rule the run's own result used. A refusal the run was
+    answered with under a narrower scope (another project's incident on a
+    device it declared) is read back here under its bare entry: the record does
+    not say which scope it was."""
+    if record.get("run_ok") is True:
+        return {}
+    return run_remediation_fields(record.get("error_type"))
 
 
 def _unreadable_record_refusal(config: AgenticHILConfig, handle: str, error: ConfigError) -> ConfigError:
@@ -995,6 +1012,7 @@ def run_status(config: AgenticHILConfig, handle: str | None = None) -> JsonObjec
             "run": handle,
             "retry_safe": False,
             "side_effect_committed": False,
+            **remediation_fields("run_not_found"),
         }
     state = str(record.get("state"))
     requested_at = stop_requested_at(config, handle)
@@ -1028,6 +1046,7 @@ def run_status(config: AgenticHILConfig, handle: str | None = None) -> JsonObjec
         "state": state,
         "stop_requested_at": requested_at,
         "summary": run_status_summary(state, record, requested_at),
+        **(ended_run_remediation(record) if state in TERMINAL_RUN_STATES else {}),
     }
 
 
@@ -1091,6 +1110,7 @@ def known_runs(config: AgenticHILConfig) -> JsonObject:
             "backend_error": str(error),
             "retry_safe": True,
             "side_effect_committed": False,
+            **remediation_fields("run_state_invalid"),
         }
     runs = []
     for path in paths:
@@ -1131,6 +1151,7 @@ def request_run_stop(config: AgenticHILConfig, handle: str) -> JsonObject:
             "run": handle,
             "retry_safe": False,
             "side_effect_committed": False,
+            **remediation_fields("run_not_found"),
         }
     state = str(record.get("state"))
     if state in TERMINAL_RUN_STATES:
@@ -1141,6 +1162,7 @@ def request_run_stop(config: AgenticHILConfig, handle: str) -> JsonObject:
             "state": state,
             "stop_requested": False,
             "summary": "This run had already ended, so nothing was asked of it.",
+            **ended_run_remediation(record),
         }
     if worker_is_gone(config, handle):
         return {
@@ -1156,6 +1178,7 @@ def request_run_stop(config: AgenticHILConfig, handle: str) -> JsonObject:
             ),
             "retry_safe": False,
             "side_effect_committed": False,
+            **remediation_fields("run_worker_gone"),
         }
     requested_at = utc_now_iso()
     atomic_write_text(stop_path(config, handle), json.dumps({"run": handle, "requested_at": requested_at, "requested_by_pid": os.getpid()}, indent=2) + "\n")
