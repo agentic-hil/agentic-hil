@@ -65,7 +65,7 @@ from test_error_catalogue_ec1_debug import (
 )
 from test_error_catalogue_ec2_artifacts_reports import DYNAMIC_SITES as ARTIFACT_DYNAMIC_SITES
 from test_error_catalogue_ec2_artifacts_reports import EXCLUDED_SITES as ARTIFACT_EXCLUDED_SITES
-from test_error_catalogue_ec2_artifacts_reports import Facts, clauses, fact_problems
+from test_error_catalogue_ec2_artifacts_reports import clauses
 from test_error_catalogue_ec3_run_coordination import CONSUMERS, NEGATION
 from test_error_catalogue_ec3_run_coordination import EXCLUDED as RUN_EXCLUDED
 from test_error_catalogue_ec3_run_coordination import PINNED_DYNAMIC as RUN_DYNAMIC_SITES
@@ -1443,10 +1443,17 @@ def test_an_entry_that_holds_a_lease_state_against_a_record_the_check_lets_throu
 COMMON_FIELDS = frozenset({"ok", "tool", "error_type", "summary"})
 
 
-def refusal_shapes(error_type: str) -> frozenset[frozenset[str]]:
-    """The fields each refusal of `error_type` carries beside its type, read at every site the scan found it written."""
+def sentence(node: ast.expr | None) -> str:
+    """The sentence a refusal is raised with, as written: a template keeps its placeholders."""
+    if node is None:
+        return ""
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else ast.unparse(node)
+
+
+def refusals(error_type: str) -> list[tuple[str, str, frozenset[str]]]:
+    """Each refusal of `error_type`, read at every site the scan found it written: (where, its sentence, the fields it carries beside its type)."""
     producers = producer_classes()
-    shapes = set()
+    found = []
     sites = {site for (found, _scope), written in scanned().pairs.items() if found == error_type for site in written}
     assert sites, error_type
     for module, function, line in sorted(sites):
@@ -1458,36 +1465,126 @@ def refusal_shapes(error_type: str) -> frozenset[frozenset[str]]:
             if isinstance(parent, ast.Call) and _callee(parent) in producers and parent.args and parent.args[0] is literal:
                 details = parent.args[2] if len(parent.args) > 2 else next((keyword.value for keyword in parent.keywords if keyword.arg == "details"), None)
                 assert details is None or (isinstance(details, ast.Dict) and all(isinstance(key, ast.Constant) for key in details.keys)), f"{module}:{line}: {ast.unparse(parent)}"
-                shapes.add(frozenset(key.value for key in details.keys) if details is not None else frozenset())  # type: ignore[union-attr]
+                summary = parent.args[1] if len(parent.args) > 1 else next((keyword.value for keyword in parent.keywords if keyword.arg == "summary"), None)
+                found.append((f"{module}:{line}", sentence(summary), frozenset(key.value for key in details.keys) if details is not None else frozenset()))  # type: ignore[union-attr]
             elif isinstance(parent, ast.Dict):
                 keys = [key for key in parent.keys if key is not None]
                 spread = [value for key, value in zip(parent.keys, parent.values, strict=True) if key is None]
                 assert all(isinstance(key, ast.Constant) for key in keys) and all(isinstance(value, ast.Call) and _callee(value) == "remediation_fields" for value in spread), f"{module}:{line}: {ast.unparse(parent)}"
-                shapes.add(frozenset(key.value for key in keys) - COMMON_FIELDS)  # type: ignore[attr-defined]
+                summary = next((value for key, value in zip(parent.keys, parent.values, strict=True) if isinstance(key, ast.Constant) and key.value == "summary"), None)
+                found.append((f"{module}:{line}", sentence(summary), frozenset(key.value for key in keys) - COMMON_FIELDS))  # type: ignore[attr-defined]
             else:
                 raise AssertionError(f"{module}:{line}: the fields of {ast.unparse(parent)} are not read")
-    return frozenset(shapes)
+    return found
 
 
-def test_the_mcp_command_untrusted_entry_names_the_fields_of_each_refusal_together() -> None:
+def refusal_shapes(error_type: str) -> frozenset[frozenset[str]]:
+    """The fields each refusal of `error_type` carries beside its type."""
+    return frozenset(fields for _where, _sentence, fields in refusals(error_type))
+
+
+PATH_ONLY = frozenset({"path"})
+# Each refusal of `mcp_command_untrusted`, told apart by a part of the
+# sentence the package raises it with: (that part, what sets it off as the
+# entry says it, the fields it carries beside its type). The candidate walk in
+# `cli.mcp_server_command` raises the first; `trusted_persistent_executable`
+# in `config` raises the rest.
+MCP_REFUSALS: tuple[tuple[str, str, frozenset[str]], ...] = (
+    ("No stable trusted Agentic HIL executable was found", r"\btried\b", frozenset({"rejected_candidates"})),
+    ("must resolve to an absolute path", r"\babsolute\b", PATH_ONLY),
+    ("must not come from the workspace or a temporary/cache directory", r"\b(?:project|workspace|temporary|cache)\b", PATH_ONLY),
+    ("has a parent directory that is", r"\bparent directory\b[^.;]*\b(?:belongs? to|owned by)\b", frozenset({"path", "directory", "mode", "uid"})),
+    ("must be trusted, executable, and writable by nobody but its owner", r"^(?=.*\bowner\b)(?=.*\bwrit(?:e|able)\b)(?=.*\bexecute bit\b)", frozenset({"path", "mode", "uid", "gid", "untrusted_because"})),
+    ("symlink must have a trusted owner and one link", r"\bsymlink\b[^.;]*\b(?:owner|owned by|belongs? to|links?)\b", PATH_ONLY),
+    ("changed during validation", r"\bchange[sd]?\b", PATH_ONLY),
+    ("symlink target does not exist", r"\btarget\b[^.;]*\b(?:does not exist|missing)\b", PATH_ONLY),
+    ("must not contain another symlink", r"\banother symlink\b", frozenset({"path", "target"})),
+    ("must be a regular executable", r"\bregular file\b", PATH_ONLY),
+)
+
+
+def test_each_mcp_command_untrusted_refusal_carries_the_fields_its_trigger_is_held_to() -> None:
+    """Every site the scan finds is told apart by one sentence, and carries the fields set beside it."""
+    told = set()
+    for where, said, carried in refusals("mcp_command_untrusted"):
+        rows = [row for row in MCP_REFUSALS if row[0] in said]
+        assert len(rows) == 1, f"{where}: {said}"
+        assert carried == rows[0][2], f"{where} carries {sorted(carried)}, held to {sorted(rows[0][2])}: {said}"
+        told.add(rows[0][0])
+
+    assert told == {row[0] for row in MCP_REFUSALS}
+
+
+def mcp_field_problems(meaning: str) -> list[str]:
     """Every refusal of the type, the one the candidate walk ends in and each one of a single path, read where it is raised.
 
     `path` stands in nearly every one of them, so a clause may name it once for
     all. Every other field a refusal carries is named in one clause with the
-    rest of that refusal's fields, and no clause names together fields that no
-    one refusal carries, such as a file's `gid` beside a parent's `directory`.
+    rest of that refusal's fields and with what sets that refusal off, and no
+    clause names together fields that no one refusal carries, such as a file's
+    `gid` beside a parent's `directory`. A clause that says what sets a refusal
+    off names no field that refusal does not carry, and a clause that names a
+    field says it is there: no negation.
     """
     shapes = refusal_shapes("mcp_command_untrusted")
     fields = frozenset().union(*shapes)
     assert {"rejected_candidates", "directory", "gid"} <= fields
+    said = clauses(meaning)
+    named = [frozenset(re.findall(r"`(\w+)`", clause)) & fields for clause in said]
+    problems = []
+    if not fields <= frozenset().union(*named):
+        problems.append(f"names no {sorted(fields - frozenset().union(*named))}")
+    for shape in shapes:
+        if not any(shape - {"path"} <= clause for clause in named):
+            problems.append(f"no clause names {sorted(shape - {'path'})} together")
+    for clause, carried in zip(said, named, strict=True):
+        if not any(carried <= shape for shape in shapes):
+            problems.append(f"names together {sorted(carried)}, which no one refusal carries: {clause}")
+        if carried and NEGATION.search(clause):
+            problems.append(f"names {sorted(carried)} in a negation: {clause}")
+        for raised, sets_off, carries in MCP_REFUSALS:
+            if re.search(sets_off, clause, re.IGNORECASE) and not carried <= carries:
+                problems.append(f"gives the refusal raised as {raised!r} {sorted(carried - carries)}, which it does not carry: {clause}")
+    for raised, sets_off, carries in MCP_REFUSALS:
+        own = carries - {"path"}
+        if own and not any(re.search(sets_off, clause, re.IGNORECASE) and own <= carried and not NEGATION.search(clause) for clause, carried in zip(said, named, strict=True)):
+            problems.append(f"no clause says what sets off the refusal raised as {raised!r} and that it adds {sorted(own)}")
+    return problems
+
+
+def test_the_mcp_command_untrusted_entry_names_the_fields_of_each_refusal_together() -> None:
     entry = catalogue_entry("mcp_command_untrusted")
     assert entry is not None
-    meaning = clauses(entry["meaning"])
-    named = [frozenset(re.findall(r"`(\w+)`", clause)) & fields for clause in meaning]
 
-    assert fields <= frozenset().union(*named), sorted(fields - frozenset().union(*named))
-    for shape in shapes:
-        assert any(shape - {"path"} <= clause for clause in named), f"no clause names {sorted(shape - {'path'})} together"
-    for clause, carried in zip(meaning, named, strict=True):
-        assert any(carried <= shape for shape in shapes), f"names together {sorted(carried)}, which no one refusal carries: {clause}"
-    assert fact_problems("mcp_command_untrusted", Facts(says=(r"`directory`[^.;]*\bparent directory\b|\bparent directory\b[^.;]*`directory`",))) == []
+    assert mcp_field_problems(entry["meaning"]) == []
+
+
+# The meaning with the fields of one refusal said away, named apart from what
+# sets that refusal off, or handed to a refusal that does not carry them: (as
+# the meaning says it, turned around).
+MCP_TURNED: dict[str, tuple[str, str]] = {
+    "never_adds_directory": ("or root adds `directory`", "or root never adds `directory`"),
+    "does_not_add_untrusted_because": ("execute bit adds `untrusted_because`", "execute bit does not add `untrusted_because`"),
+    "cannot_add_target": ("another symlink adds `target`", "another symlink cannot add `target`"),
+    "doesnt_add_directory": ("or root adds `directory`", "or root doesn't add `directory`"),
+    "adds_no_directory": ("or root adds `directory`", "or root adds no `directory`"),
+    "never_carries_path": ("A refusal of one path carries `path`", "A refusal of one path never carries `path`"),
+    "symlink_owner_adds_directory": ("a launcher whose parent directory belongs to", "a launcher symlink that belongs to"),
+    "symlink_owner_too_adds_directory": (
+        "a launcher whose parent directory belongs to an account other than this one or root adds",
+        "a launcher symlink owned by another account, or a launcher whose parent directory belongs to an account other than this one or root, adds",
+    ),
+    "missing_target_adds_target": ("whose target resolves through another symlink", "whose target is missing"),
+    "parent_directory_adds_file_fields": ("an executable refused for its owner, its write access or a missing execute bit adds", "a launcher whose parent directory belongs to another account adds"),
+    "directory_fields_without_their_trigger": ("a launcher whose parent directory belongs to an account other than this one or root adds", "a launcher refused for its directory adds"),
+    "file_fields_for_the_owner_only": ("an executable refused for its owner, its write access or a missing execute bit adds", "an executable refused for its owner adds"),
+}
+
+
+@pytest.mark.parametrize("turned", sorted(MCP_TURNED))
+def test_a_meaning_that_says_a_refusal_carries_fields_it_does_not_fails(turned: str) -> None:
+    said, wrong = MCP_TURNED[turned]
+    meaning = (catalogue_entry("mcp_command_untrusted") or {})["meaning"]
+    assert meaning.count(said) == 1, said
+
+    assert mcp_field_problems(meaning.replace(said, wrong)) != []
