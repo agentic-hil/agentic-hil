@@ -723,12 +723,15 @@ FACTS: dict[str, Facts] = {
         do_not=(r"another tool", r"allowed_roots"),
         never=(r"project_config_set", r"\.elf\b"),
     ),
+    # A destination the profile refuses is a configuration refusal nested as
+    # `audit_error`, with its own entry; naming that fix here as well prints it
+    # twice under one refusal.
     "audit_unavailable": Facts(
         says=(r"refused before it started", r"nothing was flashed, reset or written"),
         steps=(r"audit_error", r"agentic-hil doctor", r"call again"),
-        mentions=(r"agentic-hil init --force",),
+        mentions=(r"`audit_error` that names it carries its own remediation",),
         do_not=(r"by hand", r"delete report state"),
-        never=(r"quarantin", r"recover --confirm"),
+        never=(r"quarantin", r"recover --confirm", r"init --force"),
     ),
     "audit_failed_after_action": Facts(
         says=(
