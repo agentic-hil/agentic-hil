@@ -2341,9 +2341,12 @@ def test_the_cli_runs_no_more_calls_at_once_than_its_bound(fake_cli: dict) -> No
 
     calls = cli_calls(fake_cli["log"])
     assert len(calls) == 5
-    for entry in calls:
-        overlapping = [other for other in calls if other["started"] < entry["ended"] and entry["started"] < other["ended"]]
-        assert len(overlapping) <= 2
+    # The most calls running at one instant: at each call's start, every call
+    # that has started and not yet ended. Counting every call one call overlaps
+    # would also count a call that ended inside it and another that started
+    # after that, two that never ran at the same time.
+    at_once = max(sum(1 for other in calls if other["started"] <= entry["started"] < other["ended"]) for entry in calls)
+    assert at_once <= 2, [(entry["started"], entry["ended"]) for entry in calls]
 
 
 @pytest.mark.parametrize("mode", ["error", "wrong-model", "garbage", "nonzero"])
