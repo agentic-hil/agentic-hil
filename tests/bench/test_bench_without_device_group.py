@@ -8,7 +8,8 @@ port, naming the group each node belongs to, and `init` warns in the same words;
 both ask the kernel and open nothing. The first call that opens a device is
 refused by the device node's mode, and what the product says then decides
 whether the newcomer changes their account or goes looking for a probe that is
-already there.
+already there. A USB-UART adapter wired beside the probe is a serial port like
+any other, and its node is refused and named the same way.
 
 This stage runs only in `tools/bench_in_container.py --without-device-group`,
 which hands the container the probe's nodes and withholds every group they are
@@ -49,6 +50,7 @@ from .conftest import (
     BENCH_ONLY,
     COMMAND_TIMEOUT_S,
     DEMO,
+    USB_UART_ENV,
     WITHOUT_DEVICE_GROUP,
     Bench,
     child_command,
@@ -94,7 +96,8 @@ def nothing_here_may_be_opened(bench: Bench) -> None:
     ports = bench.configuration().get("com_ports") or {}
     if not ports:
         refuse("`init` bound no serial port on this bench, and this stage measures the refusal of one")
-    devices = [*usb_nodes(), *(Path(entry["device"]) for entry in ports.values())]
+    adapter = os.environ.get(USB_UART_ENV)
+    devices = [*usb_nodes(), *(Path(entry["device"]) for entry in ports.values()), *([Path(adapter)] if adapter else [])]
     opened = [str(node) for node in devices if os.access(node, os.R_OK | os.W_OK)]
     if opened:
         refuse(
@@ -241,8 +244,8 @@ def group_of(node: str) -> str:
         return str(gid)
 
 
-def test_doctor_fails_the_device_access_check_for_the_probe_and_the_port(bench: Bench) -> None:
-    """Both nodes named, each with the group that owns it, before any call opens either."""
+def doctor_names_both_nodes_and_their_groups(bench: Bench) -> None:
+    """The probe's node and the bench's configured port, each refused and named with the group that owns it."""
     code, report = bench.document("doctor")
 
     assert code != 0, report
@@ -259,6 +262,17 @@ def test_doctor_fails_the_device_access_check_for_the_probe_and_the_port(bench: 
         assert check["group"] in check["summary"], check["summary"]
         assert check["remediation"] and all(isinstance(step, str) and step for step in check["remediation"]), check
         assert check["summary"] in report["summary"], report["summary"]
+
+
+def test_doctor_fails_the_device_access_check_for_the_probe_and_the_port(bench: Bench) -> None:
+    """Both nodes named, each with the group that owns it, before any call opens either."""
+    doctor_names_both_nodes_and_their_groups(bench)
+
+
+@pytest.mark.usb_uart
+def test_doctor_fails_the_device_access_check_for_the_usb_uart_adapter_too(usb_uart_bench: Bench) -> None:
+    """The adapter's node is a serial port's like the probe's own: refused, and named with its group."""
+    doctor_names_both_nodes_and_their_groups(usb_uart_bench)
 
 
 def test_init_binds_the_probe_and_the_port_and_warns_this_account_may_not_open_them(tmp_path: Path) -> None:
