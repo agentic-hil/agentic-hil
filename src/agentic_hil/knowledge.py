@@ -1362,17 +1362,20 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "cache directories, and stay the same file while it is checked. On Linux and macOS it also has to be a "
             "regular file or one launcher symlink to one, owned by this account or root, executable, writable by no "
             "other account, in a directory owned by this account or root. `rejected_candidates` names every launcher "
-            "that was tried and why each failed; a refusal of one path carries `path` and, for an owner or mode, "
-            "`directory`, `mode` and `uid`."
+            "that was tried and why each failed. A refusal of one path carries `path`; an executable refused for its "
+            "owner, its write access or a missing execute bit adds `untrusted_because`, `mode`, `uid` and `gid`; a "
+            "launcher whose parent directory belongs to an account other than this one or root adds `directory`, "
+            "naming that parent directory, with its `mode` and `uid`; a launcher symlink whose target resolves "
+            "through another symlink adds `target`."
         ),
         remediation=(
             "Read `rejected_candidates`, or `path` and the fields beside it, for the reason each launcher failed.",
             "A launcher in the project, a temporary directory or a cache (a `uvx` or one-off run) cannot be "
             "registered: install Agentic HIL persistently with `uv tool install agentic-hil` or `pipx install "
             "agentic-hil`, and run the command again from that installation.",
-            "For an owner or a mode, have the operator fix the file or directory named: give it to this account, "
-            "`chmod go-w` to remove other accounts' write access, `chmod +x` where it is not executable. Then run the "
-            "command again.",
+            "For an owner or a mode, have the operator fix what the refusal names: give the file at `path`, or the "
+            "directory at `directory`, to this account, `chmod go-w` the file where other accounts can write it, "
+            "and `chmod +x` it where it is not executable. Then run the command again.",
             "A launcher that changed while it was checked was being replaced at that moment; run the command again "
             "once the installation has finished.",
         ),

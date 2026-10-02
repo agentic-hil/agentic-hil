@@ -59,7 +59,7 @@ from test_error_catalogue_ec1_debug import (
 )
 from test_error_catalogue_ec2_artifacts_reports import DYNAMIC_SITES as ARTIFACT_DYNAMIC_SITES
 from test_error_catalogue_ec2_artifacts_reports import EXCLUDED_SITES as ARTIFACT_EXCLUDED_SITES
-from test_error_catalogue_ec2_artifacts_reports import clauses
+from test_error_catalogue_ec2_artifacts_reports import Facts, clauses, fact_problems
 from test_error_catalogue_ec3_run_coordination import CONSUMERS
 from test_error_catalogue_ec3_run_coordination import EXCLUDED as RUN_EXCLUDED
 from test_error_catalogue_ec3_run_coordination import PINNED_DYNAMIC as RUN_DYNAMIC_SITES
@@ -1118,3 +1118,58 @@ def test_the_unknown_debugger_error_entry_lets_through_every_lease_state_the_che
         for text in naming:
             unnamed = [state for state in passing if not re.search(state, text)]
             assert not unnamed, f"the {part} names `lease_state` without the states that pass {unnamed}: {text}"
+
+
+# The fields a refusal written as a dict carries for every type, and the advice
+# merged into it: neither tells one refusal of a type from another.
+COMMON_FIELDS = frozenset({"ok", "tool", "error_type", "summary"})
+
+
+def refusal_shapes(error_type: str) -> frozenset[frozenset[str]]:
+    """The fields each refusal of `error_type` carries beside its type, read at every site the scan found it written."""
+    producers = producer_classes()
+    shapes = set()
+    sites = {site for (found, _scope), written in scanned().pairs.items() if found == error_type for site in written}
+    assert sites, error_type
+    for module, function, line in sorted(sites):
+        source = package_sources()[module]
+        literals = [node for node in ast.walk(definition(module, function)) if isinstance(node, ast.Constant) and node.value == error_type and node.lineno == line]
+        assert literals, f"{module}:{line}"
+        for literal in literals:
+            parent = source.parents[literal]
+            if isinstance(parent, ast.Call) and _callee(parent) in producers and parent.args and parent.args[0] is literal:
+                details = parent.args[2] if len(parent.args) > 2 else next((keyword.value for keyword in parent.keywords if keyword.arg == "details"), None)
+                assert details is None or (isinstance(details, ast.Dict) and all(isinstance(key, ast.Constant) for key in details.keys)), f"{module}:{line}: {ast.unparse(parent)}"
+                shapes.add(frozenset(key.value for key in details.keys) if details is not None else frozenset())  # type: ignore[union-attr]
+            elif isinstance(parent, ast.Dict):
+                keys = [key for key in parent.keys if key is not None]
+                spread = [value for key, value in zip(parent.keys, parent.values, strict=True) if key is None]
+                assert all(isinstance(key, ast.Constant) for key in keys) and all(isinstance(value, ast.Call) and _callee(value) == "remediation_fields" for value in spread), f"{module}:{line}: {ast.unparse(parent)}"
+                shapes.add(frozenset(key.value for key in keys) - COMMON_FIELDS)  # type: ignore[attr-defined]
+            else:
+                raise AssertionError(f"{module}:{line}: the fields of {ast.unparse(parent)} are not read")
+    return frozenset(shapes)
+
+
+def test_the_mcp_command_untrusted_entry_names_the_fields_of_each_refusal_together() -> None:
+    """Every refusal of the type, the one the candidate walk ends in and each one of a single path, read where it is raised.
+
+    `path` stands in nearly every one of them, so a clause may name it once for
+    all. Every other field a refusal carries is named in one clause with the
+    rest of that refusal's fields, and no clause names together fields that no
+    one refusal carries, such as a file's `gid` beside a parent's `directory`.
+    """
+    shapes = refusal_shapes("mcp_command_untrusted")
+    fields = frozenset().union(*shapes)
+    assert {"rejected_candidates", "directory", "gid"} <= fields
+    entry = catalogue_entry("mcp_command_untrusted")
+    assert entry is not None
+    meaning = clauses(entry["meaning"])
+    named = [frozenset(re.findall(r"`(\w+)`", clause)) & fields for clause in meaning]
+
+    assert fields <= frozenset().union(*named), sorted(fields - frozenset().union(*named))
+    for shape in shapes:
+        assert any(shape - {"path"} <= clause for clause in named), f"no clause names {sorted(shape - {'path'})} together"
+    for clause, carried in zip(meaning, named, strict=True):
+        assert any(carried <= shape for shape in shapes), f"names together {sorted(carried)}, which no one refusal carries: {clause}"
+    assert fact_problems("mcp_command_untrusted", Facts(says=(r"`directory`[^.;]*\bparent directory\b|\bparent directory\b[^.;]*`directory`",))) == []
