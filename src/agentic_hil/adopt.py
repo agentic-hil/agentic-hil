@@ -193,6 +193,7 @@ def _choose_debugger(document: JsonObject, requested: str | None) -> tuple[str, 
                     configured_debuggers=sorted(entries),
                 ),
                 "error_type": "unknown_device",
+                **remediation_fields("unknown_device"),
             }
         return requested, entries[requested]
     if len(entries) == 1:
@@ -437,6 +438,7 @@ def _different_board(debugger_name: str, configured: str, discovered: str) -> Js
         "reference": CONFIG_SHAPE_URI,
         **NOT_STARTED,
         "retry_safe": False,
+        **remediation_fields("hardware_mismatch"),
     }
 
 
@@ -1302,6 +1304,7 @@ def discover_under_hardware_lease(
             "summary": "The attached probe was read and the audit record of that read could not be written, so the probe is quarantined and nothing was written to the configuration.",
             **_combined_status(held),
             "retry_safe": False,
+            **remediation_fields("audit_failed_after_action"),
         }
     # A read whose own result says it could not establish the state it left the
     # board in -- an OpenOCD `init` reaped mid-attach reports `hardware_state:
@@ -1446,6 +1449,7 @@ def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject,
             "cleanup_required": True,
             "quarantined": True,
             "retry_safe": False,
+            **remediation_fields("audit_failed_after_action"),
         }
     return {**committed, **refusal, "report_path": committed.get("report_path"), "audit_ok": committed.get("audit_ok")}
 

@@ -407,6 +407,20 @@ GDB_NOT_CONFIGURED_SCOPE = "not_configured"
 # `not_configured`, which says nothing was ever found. This scope carries the
 # remediation for a GDB nobody configured that was there and is not now.
 GDB_AUTODETECTED_MISSING_SCOPE = "autodetected_missing"
+# The scope every refusal of attached-hardware discovery is looked up under:
+# `agentic-hil init`, `agentic-hil adopt-hardware`, `project_config_create` and
+# `project_config_adopt_hardware` all read the bench through it, and none of
+# them has a configured debugger yet to scope by. The same error_type means a
+# different thing there than on a configured bench (no `executable` to correct,
+# no probe_id to repoint), so discovery has its own entries where the advice
+# differs, and the lookup falls back to the bare entry where it does not.
+DISCOVERY_SCOPE = "discovery"
+# The two `not_supported` refusals of a configuration that does not settle which
+# in-circuit debugger or programmer a tool drives. They share the word with the
+# per-backend refusals and nothing else: the way out is a configuration change,
+# not another backend, so each has its own scope.
+UNBOUND_DEBUGGER_SCOPE = "unbound_debugger"
+UNNAMED_PROBE_SCOPE = "unnamed_probe"
 # Said by `doctor`, which parses the file at the moment it is asked and is
 # therefore always current, which is exactly why it cannot speak for a server
 # that has been running since before the last edit. It names both ways across,
@@ -2861,6 +2875,517 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not reach for `pyocd commander` or another debugger by hand to get the value anyway. That takes the "
             "probe out from under this bench's coordination while an incident over it may still be open, and it leaves "
             "the operator with no record of what ran.",
+        ),
+    ),
+    # -- The paths around a hardware action -------------------------------------
+    # The image a tool was handed, the record a report tool reads back, the
+    # configuration adoption fills in, and the dispatcher every tool passes
+    # through. Most of these refuse before anything reaches the board, and each
+    # entry says whether it did, because that is the first thing a caller
+    # deciding whether to call again has to know (#645).
+    "artifact_not_found": ErrorRemedy(
+        meaning=(
+            "The firmware image this call named does not exist, so nothing was validated, staged or flashed. Three "
+            "shapes answer with it: an `image_path` that names no file, resolved against the workspace root and not "
+            "against the directory the server was started from; an `artifact_id` that names no upload in this "
+            "project's upload directory; and an upload whose private staged copy could not be read back, which "
+            "carries a `backend_error`."
+        ),
+        remediation=(
+            "Check the path against the workspace root: a relative `image_path` is resolved there, so `build/app.elf` "
+            "is the file under the project, wherever the server was started from.",
+            "If the image has not been built yet, build it first, then call again with the path the build wrote.",
+            "For an `artifact_id`, upload the image again and use the id that upload returns. Uploads are kept per "
+            "project, so an id from another project names nothing here.",
+            "If the result carries a `backend_error`, the upload's staged copy could not be read back: that is a fault "
+            "of this host's temporary directory, not of the image, and an upload made once it is repaired works.",
+        ),
+        do_not=(
+            "Do not create a placeholder file at the path to get past this. The format checks refuse it, and with "
+            "them switched off it would be flashed.",
+            "Do not substitute an image from another build or another project because it exists. The board would run "
+            "firmware nobody asked for.",
+        ),
+    ),
+    "artifact_changed": ErrorRemedy(
+        meaning=(
+            "The image changed between the moment it was validated and the moment it was staged for the backend, so "
+            "nothing was sent to the board. Its content no longer matched the hash taken at validation, it was no "
+            "longer a single-link regular file, it could not be opened (the result carries a `backend_error`), or a "
+            "file appeared where validation found none, which only `validation.require_existing_file: false` "
+            "permits. The result is `retry_safe: true`: calling again validates and stages the file afresh."
+        ),
+        remediation=(
+            "Let the build that is writing the image finish.",
+            "Call again once the file is stable; the new call validates what is there now.",
+            "If the summary says the image did not exist when it was validated, build it first, then call again.",
+            "If it repeats while nothing writes the file, read `backend_error`: the open itself is failing, which is "
+            "a fault of the file or its directory that calling again does not change.",
+        ),
+        do_not=(
+            "Do not flash the image with a raw programmer run to get around this. What would reach the board is an "
+            "image nothing validated.",
+            "Do not call again in a tight loop while a build is still writing the image.",
+        ),
+    ),
+    "artifact_staging_failed": ErrorRemedy(
+        meaning=(
+            "The image passed validation and could not be copied into the private staging directory the backend "
+            "reads it from. That directory lives in this host's temporary directory, is created when the server "
+            "starts, and is neither in the workspace nor under `state_root`. `backend_error` names the failure; "
+            "nothing was sent to the board (`side_effect_status: not_started`), so calling again is safe."
+        ),
+        remediation=(
+            "Read `backend_error`: no space left, a write refused, or a read of the image itself failing part-way.",
+            "Free space in, or restore write access to, this host's temporary directory, then call again.",
+            "If the staging directory itself is gone (a temporary-directory cleaner removed it under a running "
+            "server), restart the MCP server, which creates a new one.",
+        ),
+        do_not=(
+            "Do not treat this as an incident to recover or sign for. Nothing reached the board and no lease was "
+            "quarantined over it.",
+            "Do not hand the image to the toolchain yourself because staging failed. Staging is what makes the bytes "
+            "flashed the bytes validated.",
+        ),
+    ),
+    "artifact_too_large": ErrorRemedy(
+        meaning=(
+            "The image is larger than this project accepts: `bytes` is its size, `max_bytes` the limit, set by "
+            "`artifacts.max_upload_size_mb` in MiB. The limit applies to an image named by path, to an upload and to "
+            "the staged copy alike, and it is checked before anything is sent to the board."
+        ),
+        remediation=(
+            "Compare `bytes` with `max_bytes` and check this is the file meant: an ELF carries its debug information "
+            "and can be many times the size of the image it programs.",
+            "For a flash, use the `.hex` or `.bin` of the same build, which holds only what is programmed; a debug "
+            "session needs the `.elf` and its symbols.",
+            "If the image really is this large, the limit is the operator's to raise. No tool writes "
+            "`artifacts.max_upload_size_mb`: it is edited in the configuration by hand and applies when the server "
+            "restarts.",
+        ),
+        do_not=(
+            "Do not truncate or split the image to fit. The board would be programmed with part of a firmware.",
+            "Do not program the image with a raw programmer run instead.",
+        ),
+    ),
+    "artifact_validation_failed": ErrorRemedy(
+        meaning=(
+            "The image was refused by the checks every image passes before it is flashed, and nothing was sent to the "
+            "board. `validation` holds one flag per check: `path_traversal_safe`, `within_workspace` (which nothing "
+            "relaxes), `allowed_root` (enforced under `validation.require_allowed_root`), `allowed_extension` "
+            "(enforced under `validation.require_allowed_extension`), `regular_file` and `single_link`, and the "
+            "format checks `elf_header`, `hex_parseable` and `bin_size_plausible`. A debug session also refuses an "
+            "image that is not an `.elf`, because it needs the symbols."
+        ),
+        remediation=(
+            "Read `validation` and the summary; the summary says which check stopped it.",
+            "A format check that is false means the file is not the image its extension claims: rebuild it, or point "
+            "at the build's real output. `regular_file` or `single_link` false means a link, a directory or a second "
+            "hard link: use the plain file the build wrote.",
+            "For a debug session, name the `.elf` of the build.",
+            "For `within_workspace`, `allowed_root` or `allowed_extension`, move or build the image inside the "
+            "workspace and under an allowed root, with an allowed extension.",
+            "A refusal by policy that is wrong for this project is the operator's to change in the configuration.",
+        ),
+        do_not=(
+            "Do not rename the file to an allowed extension. The format check reads the content, and an image that "
+            "got past it under a false name would be programmed as something it is not.",
+            "Do not edit `artifacts.allowed_roots`, `artifacts.allowed_extensions` or the `validation` switches "
+            "yourself. They are operator policy, no tool writes them, and a change applies only when the server "
+            "restarts.",
+        ),
+    ),
+    "output_validation_failed": ErrorRemedy(
+        meaning=(
+            "The `output_path` of `debug_dump_symbol_ihex`, or of a dump step in a test plan, which is checked before "
+            "the plan starts, was refused before anything was read from the board. It may not contain `..`, has to "
+            "stay inside the workspace (nothing relaxes that), has to sit under an allowed artifact root when "
+            "`validation.require_allowed_root` is on, and has to end in `.hex` or `.ihex`. `validation` holds the "
+            "flag for each."
+        ),
+        remediation=(
+            "Read `validation` to see which check refused the path.",
+            "Name a path inside the workspace under an allowed root with a `.hex` or `.ihex` extension, such as "
+            "`build/<symbol>.hex`.",
+            "Call again with it; nothing was read, so nothing is lost.",
+        ),
+        do_not=(
+            "Do not write the dump with another tool to put it where this refused it.",
+            "Do not edit `artifacts.allowed_roots` yourself to admit the path. It is operator policy.",
+        ),
+    ),
+    "audit_unavailable": ErrorRemedy(
+        meaning=(
+            "The call was refused before it started, because the bench could not record it. Every hardware action is "
+            "written to an audit trail first (its report under `reports.directory`, its action log under "
+            "`logs.directory`, the report state under `state_root`, a session's own log), and one of those could not "
+            "be prepared. `audit_error`, where the result carries one, says what failed: a configuration refusal with "
+            "its own `error_type`, or the exception class and its message. Nothing was flashed, reset or written to "
+            "the target."
+        ),
+        remediation=(
+            "Read `audit_error` for the path or the fault that stopped the record.",
+            "Have the operator repair the destination: `agentic-hil doctor` checks that `state_root` accepts writes. "
+            "Free the disk or restore write access. A destination this profile refuses outright is a configuration "
+            "refusal, and the `audit_error` that names it carries its own remediation for that path.",
+            "Call again once it is repaired. Nothing was started, so there is nothing to recover first.",
+        ),
+        do_not=(
+            "Do not run the toolchain or a terminal program by hand to get the action done unrecorded.",
+            "Do not delete report state or coordination records to make room. They are the record of what this "
+            "bench has already done.",
+        ),
+    ),
+    "audit_failed_after_action": ErrorRemedy(
+        meaning=(
+            "A hardware action ran and the record of it could not be written. Two paths end here. A hardware tool "
+            "ended in a filesystem or configuration fault, which is read as a broken audit: `audit_error` and "
+            "`backend_error` name it, and what the tool did to the board is unknown. Or "
+            "`project_config_adopt_hardware` or `project_config_create` read the probe and could not write the record "
+            "of that read or of its release; neither wrote anything to the configuration. Either way the bench is "
+            "quarantined under an audit-broken reason, no automatic recovery clears that, and an operator signs it "
+            "off."
+        ),
+        remediation=(
+            "Fix where the record goes first: `agentic-hil doctor` checks that `state_root` accepts writes, and "
+            "`audit_error` names the path or fault.",
+            "Read what is known: `get_last_report`, and `hardware_lease_status` for the reasons on the incident and "
+            "its `quarantine_guidance`.",
+            "Have the operator check the board and sign the incident off with `agentic-hil recover "
+            "--confirm-safe-state --quarantine-id <quarantine_id>`.",
+            "Call `hardware_lease_status` again to confirm the bench is free, then repeat the action.",
+        ),
+        do_not=(
+            "Do not repeat the action before the incident is settled. It is refused while the quarantine stands, and "
+            "an action with no record is what the quarantine is there to stop.",
+            "Do not delete reports, logs or coordination records to clear it.",
+        ),
+    ),
+    "hardware_action_exception": ErrorRemedy(
+        meaning=(
+            "The hardware action raised part-way through and the service caught it. What it did to the board is not "
+            "known: `side_effect_status: unknown`, `retry_safe: false`, and `backend_error` holds the exception. "
+            "`quarantined` says whether an incident stands over the bench. When it is false the service already "
+            "stood the incident down and the bench is free again; that settles the lock and says nothing about the "
+            "board."
+        ),
+        remediation=(
+            "Read `backend_error` for what raised.",
+            "If `quarantined` is true, read `hardware_lease_status`: its `quarantine_guidance` and `auto_recoverable` "
+            "say who settles the incident.",
+            "Establish the state of the board before repeating the action: `get_last_report` holds what was "
+            "recorded, and `probe_target` says whether the probe and the target still answer.",
+            "Report an exception that repeats identically as a defect, with `backend_error`.",
+        ),
+        do_not=(
+            "Do not call the same tool again in a loop. An action that raised once part-way and is repeated blind can "
+            "leave the board half-done twice.",
+            "Do not finish the action by hand with the toolchain.",
+        ),
+    ),
+    "service_closed": ErrorRemedy(
+        meaning=(
+            "This service has shut down and takes no more calls. Over MCP that happens only while the server process "
+            "is stopping. Nothing was started."
+        ),
+        remediation=(
+            "Restart or reconnect the MCP server.",
+            "Call `hardware_lease_status` on the new one before continuing, to see what the bench holds.",
+        ),
+        do_not=("Do not retry the call in a loop against this service. It does not reopen.",),
+    ),
+    "service_cleanup_required": ErrorRemedy(
+        meaning=(
+            "This service tried to shut down and the shutdown failed part-way: the backend, the artifact staging, a "
+            "COM port or CAN session, or a child process would not close. It takes no more calls. What it could not "
+            "close stays recorded as held, and the next server finds it as an incident."
+        ),
+        remediation=(
+            "Restart the MCP server.",
+            "Call `hardware_lease_status` on the new one: it names anything the old one left held.",
+            "If that incident needs an operator's signature, read its `quarantine_guidance`, then have the operator "
+            "sign with `agentic-hil recover --confirm-safe-state --quarantine-id <quarantine_id>`.",
+        ),
+        do_not=(
+            "Do not delete coordination records or lock files to make the new server start clean.",
+            "Do not keep calling this service; it does not reopen.",
+        ),
+    ),
+    "unknown_tool": ErrorRemedy(
+        meaning=(
+            "This server has no tool by that name in its version. The name is checked before anything else, so "
+            "nothing was started. A server with no configuration answers its own real tool names with "
+            "`config_file_not_found` instead."
+        ),
+        remediation=(
+            "List the tools with the MCP `tools/list` request and call one by its exact name.",
+            "A command of the `agentic-hil` command line, such as `agentic-hil doctor`, is not a tool; run it in a "
+            "shell.",
+            "If the name comes from documentation for another release, compare versions: this server's is in the MCP "
+            "`initialize` answer under `serverInfo`.",
+        ),
+        do_not=(
+            "Do not reach for raw debugger, serial or shell commands because a tool name was not found.",
+            "Do not guess near-miss names until one answers.",
+        ),
+    ),
+    "report_not_found": ErrorRemedy(
+        meaning=(
+            "There is nothing to read yet. `get_last_report` answers this when no hardware call has written a report "
+            "in this project; `classify_last_error` answers it when no failure is recorded, which includes every "
+            "recorded call having succeeded. Reports are kept per project, by configuration file and workspace, under "
+            "`state_root`."
+        ),
+        remediation=(
+            "Make the hardware call whose report you want first, then read it.",
+            "If a call was made and its report is not found, check this is the same server, configuration and "
+            "workspace that made it: another project's reports are not read here.",
+        ),
+        do_not=(
+            "Do not read this as a pass or a failure of anything. It says only that nothing is recorded.",
+            "Do not create or edit files under `state_root` to give the reader something to find.",
+        ),
+    ),
+    "report_unreadable": ErrorRemedy(
+        meaning=(
+            "This project's report state exists and reading it failed. `error_class` and `errno` say how; the path is "
+            "withheld on purpose. A report state that reads and is damaged answers `config_invalid` instead."
+        ),
+        remediation=(
+            "Read `error_class` and `errno`: a refused permission and a failing disk are different repairs.",
+            "Have the operator restore access to `state_root`; `agentic-hil doctor` checks it.",
+            "Until it is repaired, hardware calls meet the same fault and are refused as `audit_unavailable`.",
+        ),
+        do_not=(
+            "Do not delete or recreate the report state to get past it. It is this project's record of what ran.",
+            "Do not read this as an empty record or as a pass.",
+        ),
+    ),
+    "config_unreadable": ErrorRemedy(
+        meaning=(
+            "The configuration file exists and cannot be read: it is a directory or another non-regular file, the "
+            "operating system refused or failed the read, or, on the paths that write the file, its bytes are not "
+            "UTF-8. `path` and `backend_error` say which. Nothing was decided from it and nothing was written to it."
+        ),
+        remediation=(
+            "Read `path` and `backend_error`.",
+            "Have the operator fix the file where it is: restore read access, replace a directory with the file, or "
+            "save it again as UTF-8.",
+            "Call again once it reads; `agentic-hil doctor` reads it the same way and says when it does.",
+        ),
+        do_not=(
+            "Do not regenerate the file with `{reopen_command}` to get past this. That resets every permission in it "
+            "to the generated set and throws away what the operator decided.",
+            "Do not delete or move the file aside, and do not point `AGENTIC_HIL_CONFIG` at another file to get "
+            "around it.",
+        ),
+    ),
+    "config_changed_underneath": ErrorRemedy(
+        meaning=(
+            "Another process wrote the configuration between the moment this call planned its change and the moment "
+            "it would have written it, so nothing was written. `stale_keys` names each key whose `expected_value` "
+            "and `current_value` now differ, or `document_changed: true` says the file changed elsewhere. The result "
+            "is `retry_safe: true`."
+        ),
+        remediation=(
+            "Re-read the configuration with `project_config_describe` to see what it says now.",
+            "Plan again from what it says now. For adoption, call `project_config_adopt_hardware` again: it reads the "
+            "file afresh and fills in only what is still unset.",
+            "If it keeps happening, something else is writing the file; find it and ask the operator.",
+        ),
+        do_not=(
+            "Do not force the values the stale plan carried (listed under `carried` in an adoption) into the file "
+            "with `project_config_set`. They were planned against a file that no longer exists.",
+            "Do not send the same plan again unchanged.",
+        ),
+    ),
+    "unknown_device": ErrorRemedy(
+        meaning=(
+            "The call named a debugger, COM port or CAN bus id the configuration does not declare: an adoption "
+            "`debugger_id`, a device of a `bench_run_start` run, or a device of a test plan step. It is looked up in "
+            "the configuration, not on the bench. Nothing was held or started."
+        ),
+        remediation=(
+            "Read `configured_debuggers` or `configured_devices` on the result: those are the ids this configuration "
+            "declares.",
+            "Call again with one of them, spelled exactly.",
+            "If the device is attached and has no entry, read the configuration with `project_config_describe`. "
+            "Adding an entry is the operator's decision: `project_config_set` writes one only under "
+            "`permissions.allow_config_description_write`, and adoption never adds one.",
+        ),
+        do_not=(
+            "Do not create an entry yourself to make the id exist.",
+            "Do not substitute another declared id because it is the only one. It may be wired to another board.",
+        ),
+    ),
+    "hardware_mismatch": ErrorRemedy(
+        meaning=(
+            "The configured debugger entry names one probe and the attached probe is another: "
+            "`configured_probe_id` against `discovered_probe_id`. Adopting would describe two boards at once, so the "
+            "whole plan was refused and nothing was written."
+        ),
+        remediation=(
+            "Ask the operator which board this project is about, because each of the steps below answers a "
+            "different one.",
+            "If it is the configured board, attach it and call again.",
+            "If another configured entry is meant for the attached board, call again with that entry's `debugger_id`.",
+            "If the project moved to the attached board, the operator repoints `debuggers.<name>.probe_id` with "
+            "`project_config_set` or in the file.",
+        ),
+        do_not=(
+            "Do not clear or overwrite `probe_id` yourself to make adoption go through.",
+            "Do not adopt into another entry because it has no `probe_id` yet.",
+        ),
+    ),
+    "ambiguous_hardware": ErrorRemedy(
+        meaning=(
+            "More than one in-circuit debugger or programmer is attached, and discovery will not choose between "
+            "them: choosing is how the wrong board gets configured. `probes` lists every attached serial. Nothing "
+            "was read from a board and nothing was written."
+        ),
+        remediation=(
+            "Ask the operator which board this project is about.",
+            "Call `project_config_adopt_hardware` with its serial as `probe_id`.",
+            "Or leave only that one connected and run the same discovery again.",
+        ),
+        do_not=(
+            "Do not pick a serial from `probes` yourself.",
+            "Do not read this as a fault to retry. The answer is the same until a board is named or unplugged.",
+        ),
+    ),
+    f"not_supported:{UNBOUND_DEBUGGER_SCOPE}": ErrorRemedy(
+        meaning=(
+            "This tool drives one bound in-circuit debugger or programmer, and this configuration binds none: it "
+            "declares no debugger at all, or it declares several and the server bound none of them. "
+            "`configured_debuggers` lists what it declares. Calling again does not change that (`retry_safe: false`)."
+        ),
+        remediation=(
+            "Read `configured_debuggers`.",
+            "If it is empty, the configuration has no debugger: `project_config_create` generates one from the "
+            "attached hardware (it needs `permissions.allow_config_write`), or the operator runs `{reopen_command}`.",
+            "If it names several, drive them through `test_reactor_run` with a test plan that names the device of "
+            "each step (`{test_plan_reference}`). Keeping only one entry is the operator's decision.",
+        ),
+        do_not=(
+            "Do not retry the tool with other arguments. No argument binds a debugger.",
+            "Do not delete or hand-edit debugger entries to leave one.",
+        ),
+    ),
+    f"not_supported:{UNNAMED_PROBE_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The bound debugger entry names no `probe_id` while other entries exist, so which attached probe it "
+            "means is not settled. This is checked only when a tool is about to drive a board; nothing was started."
+        ),
+        remediation=(
+            "Find the serial of this entry's probe: `debugger_probes_list` lists attached probes on a `pyocd` or "
+            "`stlink` entry. OpenOCD cannot enumerate, so on an `openocd` entry read the serial off the probe or its "
+            "USB listing.",
+            "Write it with `project_config_adopt_hardware`, naming this entry as `debugger_id` and the serial as "
+            "`probe_id` (it needs `permissions.allow_config_description_write`).",
+            "Give every other entry its own `probe_id` the same way, so no two can mean one probe.",
+            "Call the tool again.",
+        ),
+        do_not=(
+            "Do not remove the other entries to make this one the only debugger.",
+            "Do not guess a serial. A wrong one fails at the connect, and a right one for another board flashes it.",
+        ),
+    ),
+    f"adapter_not_found:{DISCOVERY_SCOPE}": ErrorRemedy(
+        meaning=(
+            "Discovery found no in-circuit debugger or programmer to bind. Either the listing was authoritative and "
+            "empty, or the host's USB serial inventory shows a probe's serial port and read no serial off it, or a "
+            "`requested_probe_id` named a serial that is not among the attached ones in `probes`. Nothing was read "
+            "from a board and nothing was written."
+        ),
+        remediation=(
+            "If `requested_probe_id` is set, name one of the serials under `probes`, or attach the board with that "
+            "serial: selection chooses among attached probes and never adds one.",
+            "If the summary names a serial port with no serial behind it, check the probe is a genuine unit with its "
+            "driver installed, or install STM32CubeProgrammer, which reads the serial off the probe itself.",
+            "Otherwise nothing is attached: attach the probe with a data cable (not a charge-only one) and check its "
+            "driver.",
+            "Then bind it with `project_config_adopt_hardware`, or with `project_config_create` when there is no "
+            "configuration yet.",
+        ),
+        do_not=("Do not write a `probe_id` that discovery did not list into the configuration.",),
+    ),
+    f"target_not_detected:{DISCOVERY_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The in-circuit debugger or programmer `probe_id` answered, and its read-only hot-plug connect found no "
+            "target behind it. Nothing was reset or written."
+        ),
+        remediation=(
+            "Check the target is powered.",
+            "Check the debug wiring between probe and target, the SWD lines and any jumpers that connect them, and "
+            "that no other program holds the probe.",
+            "Firmware that disables the debug pins also looks like this; recovering such a part is the operator's "
+            "call, because discovery never connects under reset.",
+            "Run the same discovery again.",
+        ),
+        do_not=(
+            "Do not switch to another `probe_id` to get an answer.",
+            "Do not force a connect under reset or an erase by hand.",
+        ),
+    ),
+    f"debugger_not_executable:{DISCOVERY_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The toolchain discovery found is present on this host and will not run. Discovery uses the "
+            "STM32CubeProgrammer CLI when it resolves, and a broken install of it is refused here rather than "
+            "falling back to OpenOCD; OpenOCD on `PATH` is used when the CLI is absent. Discovery reads no configured "
+            "`executable`, and nothing was said to the board."
+        ),
+        remediation=(
+            "Read `not_executable_reason`, and the path in `executable` or the summary.",
+            "`permission_denied`: restore the execute bit with `chmod +x` on that path and check its filesystem is "
+            "not mounted `noexec`.",
+            "`not_an_executable_image`: `file <path>` says what it is instead; reinstall the toolchain for this "
+            "machine.",
+            "Run the same discovery again.",
+        ),
+        do_not=(
+            "Do not set `debuggers.<name>.executable` to get past this. Discovery does not read it.",
+            "Do not copy the toolchain into the workspace.",
+        ),
+    ),
+    "canonical_write_pending": ErrorRemedy(
+        meaning=(
+            "The report read back is a staged copy whose promotion to the canonical record failed (`audit_ok: false`, "
+            "`canonical_write_pending: true`). Its `ok` is neither a confirmed success nor a confirmed failure: the "
+            "run it describes is not recorded where the bench keeps its records."
+        ),
+        remediation=(
+            "Treat the run as unconfirmed, whatever its `ok` says.",
+            "Read `hardware_lease_status` for what the bench holds now.",
+            "Have the operator repair the state root's filesystem; `agentic-hil doctor` checks it.",
+            "Run the action again once records commit.",
+        ),
+        do_not=(
+            "Do not report the run as passed on the strength of this copy.",
+            "Do not edit or delete the staged report or the report state.",
+        ),
+    ),
+    "cleanup_required": ErrorRemedy(
+        meaning=(
+            "`debug_stop_session` stopped the session's processes and the probe lease could not be handed back "
+            "cleanly. `cleanup_reasons` says why, `lease_state` where the lease stands and `quarantined` whether an "
+            "incident is open. The debug session is over; what is unsettled is the record of the lease, not the "
+            "session."
+        ),
+        remediation=(
+            "Read `cleanup_reasons`.",
+            "If the only reason is `lease_release_unconfirmed`, the release record could not be written, which is a "
+            "host-side fault the bench recovers by machine: call `debug_stop_session` again, which retries the "
+            "release and answers that no session is active, without touching the board. Any later hardware call "
+            "retries it too.",
+            "If a reason ends in `audit_broken` (such as `debug_coordination_report_audit_broken`: the stop's report "
+            "could not be written), calling again answers the same refusal. The operator repairs the audit "
+            "destination (`agentic-hil doctor` checks it), checks the board and signs with `agentic-hil recover "
+            "--confirm-safe-state --quarantine-id <quarantine_id>`.",
+            "Read `hardware_lease_status` to confirm where the lease stands.",
+        ),
+        do_not=(
+            "Do not delete coordination records to release the lease.",
+            "Do not go after the session's processes by hand. They are already stopped.",
         ),
     ),
     # -- A capability this configuration does not have, and the way to one ------

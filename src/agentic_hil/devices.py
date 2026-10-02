@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import ClassVar, Protocol
 
 from agentic_hil.bench import BenchMutex, fold_resource_name, is_physical_resource
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.types import (
     AgenticHILConfig,
     CanBusConfig,
@@ -726,6 +727,7 @@ def debugger_device(config: AgenticHILConfig, debugger_id: str | None = None) ->
                 "configured_debuggers": sorted(config.debuggers),
                 "side_effect_committed": False,
                 "retry_safe": False,
+                **(remediation_fields("unknown_device") if name is not None else {}),
             }
         )
     return DebuggerDevice(config_id=name, debugger=config.debuggers[name])
@@ -757,6 +759,7 @@ def _unknown_device(kind: str, name: str, configured: list[str]) -> JsonObject:
         "configured_devices": configured,
         "side_effect_committed": False,
         "retry_safe": False,
+        **remediation_fields("unknown_device"),
     }
 
 

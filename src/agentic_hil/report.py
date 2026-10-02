@@ -25,6 +25,7 @@ from agentic_hil.config import (
     safe_write_text,
 )
 from agentic_hil.configstate import config_stale, config_status
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.redact import filesystem_error_detail
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -277,6 +278,7 @@ def staged_report_snapshot(snapshot: JsonObject) -> JsonObject:
     marker = {
         "error_type": "canonical_write_pending",
         "summary": "This per-run report copy was staged but not yet committed as a success.",
+        **remediation_fields("canonical_write_pending"),
     }
     return {**snapshot, "audit_ok": False, CANONICAL_PENDING_KEY: True, "audit_error": marker, "audit_errors": [marker]}
 
@@ -632,11 +634,11 @@ def read_report_state_entry(
         with safe_file_lock(report_lock_path(config)):
             state = read_report_state(config)
             if state is None:
-                return {"ok": False, "tool": tool, "error_type": "report_not_found", "summary": missing_summary}
+                return {"ok": False, "tool": tool, "error_type": "report_not_found", "summary": missing_summary, **remediation_fields("report_not_found")}
             report = state.get(key)
             if isinstance(report, dict):
                 return report
-            return {"ok": False, "tool": tool, "error_type": "report_not_found", "summary": missing_summary}
+            return {"ok": False, "tool": tool, "error_type": "report_not_found", "summary": missing_summary, **remediation_fields("report_not_found")}
     except ConfigError as error:
         # error.to_dict() carries details["path"] = the absolute state-root path;
         # drop it so no environment-derived path reaches the sink.
@@ -650,6 +652,7 @@ def read_report_state_entry(
             "error_type": "report_unreadable",
             "summary": "Agentic HIL report state could not be read.",
             **filesystem_error_detail(error),
+            **remediation_fields("report_unreadable"),
         }
 
 
@@ -858,7 +861,7 @@ def classify_failure_report(config: AgenticHILConfig, likely_causes: Callable[[s
     if report.get("ok") is not True and report.get("tool") == "classify_last_error" and report.get("error_type") not in {None, "report_not_found"}:
         return report
     if not report.get("ok") and report.get("error_type") == "report_not_found":
-        return {"ok": False, "tool": "classify_last_error", "error_type": "report_not_found", "summary": "No Agentic HIL failure has been recorded yet."}
+        return {"ok": False, "tool": "classify_last_error", "error_type": "report_not_found", "summary": "No Agentic HIL failure has been recorded yet.", **remediation_fields("report_not_found")}
     if overall_success(report):
         return {"ok": True, "tool": "classify_last_error", "error_type": None, "summary": "Last Agentic HIL failure record did not contain an error."}
     error_type = str(report.get("target_error_type") or report.get("error_type") or ("audit_failed" if report.get("audit_ok") is False else "unknown_debugger_error"))
@@ -910,6 +913,7 @@ def audit_unavailable(tool: str, error: Exception) -> JsonObject:
         "audit_error": error.to_dict()
         if isinstance(error, ConfigError)
         else {"error_type": type(error).__name__, "backend_error": str(error)},
+        **remediation_fields("audit_unavailable"),
     }
 
 

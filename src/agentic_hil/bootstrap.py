@@ -24,7 +24,7 @@ from agentic_hil.config import (
     generated_permissions,
     skeleton_debugger_scripts,
 )
-from agentic_hil.knowledge import remediation_fields
+from agentic_hil.knowledge import DISCOVERY_SCOPE, remediation_fields
 from agentic_hil.types import JsonObject, fold_hardware_id
 
 PROJECT_PROFILE = "agentic-hil.config.example.yaml"
@@ -1174,6 +1174,11 @@ def _placeholder_com_ports(profile: JsonObject) -> JsonObject:
 
 
 def _discovery_failure(error_type: str, summary: str, **details: object) -> JsonObject:
+    """A discovery refusal, with the advice its own error type has for discovery.
+
+    One lookup by the refusal's own type under the discovery scope: a type with a
+    `:discovery` entry is answered by that one, and every other type by its bare
+    entry, so no list of types stands between a discovery refusal and its advice."""
     return {
         "ok": False,
         "tool": "bootstrap_hardware_discovery",
@@ -1183,6 +1188,7 @@ def _discovery_failure(error_type: str, summary: str, **details: object) -> Json
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
         "cleanup_required": False,
+        **remediation_fields(error_type, DISCOVERY_SCOPE),
         **details,
     }
 

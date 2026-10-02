@@ -26,6 +26,7 @@ from agentic_hil.knowledge import (
     ARTIFACT_UPLOAD_PERMISSION,
     permission_denied_fields,
     permission_denied_summary,
+    remediation_fields,
 )
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -206,18 +207,19 @@ class ArtifactManager:
                     "side_effect_committed": False,
                     "side_effect_status": "not_started",
                     "retry_safe": True,
+                    **remediation_fields("artifact_not_found"),
                 }
             permanent = self._permanent_path_refusal(source, error, tool)
             if permanent is not None:
                 return permanent
-            return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact changed after validation.", "backend_error": str(error), "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+            return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact changed after validation.", "backend_error": str(error), "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True, **remediation_fields("artifact_changed")}
 
         temporary_path: Path | None = None
         staging_directory: Path | None = None
         try:
             source_stat = os.fstat(descriptor)
             if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_nlink != 1:
-                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact is no longer a single-link regular file.", "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact is no longer a single-link regular file.", "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True, **remediation_fields("artifact_changed")}
             if source_stat.st_size > self._max_upload_bytes():
                 return self._artifact_too_large(source_stat.st_size, tool)
             digest = hashlib.sha256()
@@ -248,9 +250,10 @@ class ArtifactManager:
                     "error_type": "artifact_changed",
                     "summary": "Firmware artifact did not exist when it was validated, so its content was never checked. Build the artifact first, then retry.",
                     "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True,
+                    **remediation_fields("artifact_changed"),
                 }
             if actual_sha256 != expected_sha256:
-                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact content changed after validation.", "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+                return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact content changed after validation.", "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True, **remediation_fields("artifact_changed")}
             staged_path = staging_directory / source.name
             os.replace(temporary_path, staged_path)
             temporary_path = None
@@ -265,6 +268,7 @@ class ArtifactManager:
                 "summary": "Firmware artifact could not be copied into private backend staging.",
                 "backend_error": str(error),
                 "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True,
+                **remediation_fields("artifact_staging_failed"),
             }
         finally:
             source_context.__exit__(None, None, None)
@@ -371,6 +375,7 @@ class ArtifactManager:
                 "error_type": "artifact_not_found",
                 "summary": "Uploaded artifact could not be found.",
                 "artifact_id": artifact_id,
+                **remediation_fields("artifact_not_found"),
             }
 
         validation = self.validate_local_path(str(resolved))
@@ -442,6 +447,7 @@ class ArtifactManager:
                 "error_type": "artifact_not_found",
                 "summary": "Firmware artifact could not be read.",
                 "backend_error": str(error),
+                **remediation_fields("artifact_not_found"),
             }
         finally:
             self.release_stage(staged["artifact"])
@@ -497,13 +503,14 @@ class ArtifactManager:
             "bytes": size_bytes,
             "max_bytes": self._max_upload_bytes(),
             "side_effect_committed": False,
+            **remediation_fields("artifact_too_large"),
         }
 
     def _validation_error(self, summary: str, validation: JsonObject, error_type: str = "artifact_validation_failed") -> JsonObject:
-        return {"ok": False, "tool": "flash_firmware", "error_type": error_type, "summary": summary, "validation": validation}
+        return {"ok": False, "tool": "flash_firmware", "error_type": error_type, "summary": summary, "validation": validation, **remediation_fields(error_type)}
 
     def _output_validation_error(self, tool: str, summary: str, validation: JsonObject) -> JsonObject:
-        return {"ok": False, "tool": tool, "error_type": "output_validation_failed", "summary": summary, "validation": validation}
+        return {"ok": False, "tool": tool, "error_type": "output_validation_failed", "summary": summary, "validation": validation, **remediation_fields("output_validation_failed")}
 
     def _is_under_allowed_roots(self, resolved_path: Path) -> bool:
         roots = [configured_work_path(self.config, root) for root in self.config.artifacts.allowed_roots]
