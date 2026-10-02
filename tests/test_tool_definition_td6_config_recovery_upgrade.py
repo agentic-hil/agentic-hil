@@ -472,23 +472,36 @@ def fills_only_placeholders_from_what_is_attached(text: str) -> bool:
 
 SET_VALUES_STAY = r"\b(?:set|chosen|configured|existing)\s+(?:\w+\s+)?values?\b[^.;]*\b(?:stays?|kept|keeps?|left|remains?)\b"
 EXCEPTION = r"\b(?:except|but|other\s+than|save\s+that)\b"
+# A COM device renamed to its stable name, verb, device and name in one phrase
+# that no `and` or `or` splits: "renames a COM device to its stable name", "a COM
+# device takes the same port's stable name". Reading a device and its name is
+# not a rename, and a rewrite verb that belongs to the identity_source does not
+# lend itself to the device.
+RENAME_VERB = r"\b(?:renames?|renamed|gives?|replaces?|rewrites?|changes?)\b"
+UNSPLIT = r"(?:(?!\b(?:and|or)\b)[^.;,])"
+DEVICE_RENAMED = (
+    rf"{RENAME_VERB}\s+(?:\w+\s+){{0,3}}?device\b{UNSPLIT}{{0,40}}?\bstable\s+name\b"
+    rf"|\bdevice\b(?:\s+\w+){{0,2}}?\s+(?:also\s+)?(?:takes?|gets?|becomes?|is\s+(?:renamed|replaced|rewritten|given))\b{UNSPLIT}{{0,40}}?\bstable\s+name\b"
+)
 STALE = r"\b(?:stale|outdated|wrong|disagree\w*|mismatch\w*|no\s+longer\s+match\w*)\b"
 
 
 def names_the_two_set_values_it_rewrites(text: str) -> bool:
     """Besides the placeholders, adoption writes over two values somebody set: a
-    COM device spelling the host can reassign takes the stable name of the same
-    port (adopt.py:238-252, 656-670), and an `identity_source` that no longer
-    agrees with the entry's keys is corrected (adopt.py:724-745). Both in one
+    COM device spelling the host can reassign is renamed to the stable name of
+    the same port, when `_stabilises_device` says so (adopt.py:236-253, 656-670),
+    and an `identity_source` that no longer agrees with the entry's keys is
+    corrected (adopt.py:724-745). Both in one
     sentence that frames them as beyond the placeholders (set values stay except
-    these, or it also does these), bound to the same port and to a stale
-    declaration, and neither negated nor pointed at another device."""
+    these, or it also does these), the rename in a phrase of its own
+    (`DEVICE_RENAMED`), bound to the same port and to a stale declaration, and
+    neither negated nor pointed at another device."""
     for sentence in sentences(text):
         words = prose(sentence)
         framed = (has(words, SET_VALUES_STAY) and has(words, EXCEPTION)) or has(words, r"\balso\b")
         if not framed or has(words, NEGATION):
             continue
-        device = has(words, r"\bdevice\b") and has(words, r"\bstable\s+name\b") and has(words, r"\bsame\s+port\b|\bits\s+(?:own\s+)?(?:port(?:'s)?\b|stable\s+name\b)")
+        device = has(words, DEVICE_RENAMED) and has(words, r"\bsame\s+port\b|\bits\s+(?:own\s+)?(?:port(?:'s)?\b|stable\s+name\b)")
         elsewhere = has(words, r"\b(?:another|other|different)\s+(?:\w+\s+)?(?:port|device)\b")
         declaration = mentions(sentence, "identity_source") and has(words, STALE) and has(words, r"\b(?:correct\w*|rewritten|rewrites?|fix\w*|updated?s?)\b")
         if device and declaration and not elsewhere:
@@ -906,6 +919,13 @@ CONTROLS: list[tuple[Callable[[str], bool], str, bool]] = [
     (names_the_two_set_values_it_rewrites, "It also gives a COM device its stable name and fixes a stale identity_source.", True),
     (names_the_two_set_values_it_rewrites, "It may also rename a COM device to its stable name and correct a stale identity_source.", True),
     (names_the_two_set_values_it_rewrites, "It may also rename a COM device to another port's stable name and correct a stale identity_source.", False),
+    (names_the_two_set_values_it_rewrites, "It may also read a COM device and its stable name and correct a stale identity_source.", False),
+    (names_the_two_set_values_it_rewrites, "It may also read a COM device and its stable name and rewrite a stale identity_source.", False),
+    (names_the_two_set_values_it_rewrites, "It may also list a COM device with its stable name and replace a stale identity_source.", False),
+    (names_the_two_set_values_it_rewrites, "It also cannot rename a COM device to its stable name or correct a stale identity_source.", False),
+    (names_the_two_set_values_it_rewrites, "It also won't rename a COM device to its stable name or correct a stale identity_source.", False),
+    (names_the_two_set_values_it_rewrites, "A COM device also takes its stable name, and a stale identity_source is corrected.", True),
+    (names_the_two_set_values_it_rewrites, "It also replaces a COM device spelling with its stable name and corrects a stale identity_source.", True),
     (names_the_two_set_values_it_rewrites, "It never gives a COM device its port's stable name nor fixes a stale identity_source.", False),
     (writes_nothing_without_apply, "Writes nothing unless apply is true.", True),
     (writes_nothing_without_apply, "Fills placeholders; writes only with apply: true.", True),
