@@ -1365,6 +1365,11 @@ def negated_before(text: str) -> bool:
     return re.search(rf"(?:{NEGATION.pattern})\s+(?:\w+\s+)?$", text, re.IGNORECASE) is not None
 
 
+# A subject said away up to the state named next: `neither a`, `nor a`, `no`,
+# `none of the`, and across the states it joins (`no missing or null one`).
+NO_SUBJECT = re.compile(rf"\b(?:neither|nor|no|none of)\s+(?:(?:a|an|the|or|and|{'|'.join(LEASE_STATES)})\s+)*$", re.IGNORECASE)
+
+
 def outside_parentheses(text: str) -> tuple[list[str], list[list[str]]]:
     """`text` cut at each comma outside parentheses, and each piece's asides: (pieces, asides by piece)."""
     pieces, depth, start = [], 0, 0
@@ -1384,9 +1389,11 @@ def lets_through(piece: str, state: str) -> list[bool]:
     before its verb, or else to the last one before it (`and so does a null
     one`). A verdict is turned only by a negation right before its own word, so
     `a missing one does not fail this check but a null one fails` lets the
-    missing one through and holds the null one. With no verdict at all, the
-    piece is a condition the record fails on, and a mention lets the state
-    through only where it is excluded (`neither `active` nor `released``).
+    missing one through and holds the null one. A negated subject turns it
+    again for each state in that subject: `neither a missing nor a null one
+    passes` holds both. With no verdict at all, the piece is a condition the
+    record fails on, and a mention lets the state through only where it is
+    excluded (`neither `active` nor `released``).
     """
     verdicts = [(found.start(), PASSES.fullmatch(found.group()) is not None, negated_before(piece[: found.start()])) for found in VERDICT.finditer(piece)]
     said = []
@@ -1395,7 +1402,7 @@ def lets_through(piece: str, state: str) -> list[bool]:
             said.append(negated_before(piece[: mention.start()]))
             continue
         _start, passes, negated = next((verdict for verdict in verdicts if verdict[0] > mention.start()), verdicts[-1])
-        said.append(passes != negated)
+        said.append((passes != negated) != (NO_SUBJECT.search(piece[: mention.start()]) is not None))
     return said
 
 
@@ -1452,6 +1459,7 @@ LEASE_TURNED: dict[str, tuple[str, str, str]] = {
     "meaning_fails_missing_only": ("meaning", "(a missing or null one passes this check)", "(a null one does not fail this check but a missing one fails)"),
     "remediation_reason_null_only": ("remediation", "(a missing or null one is no reason)", "(a missing one is no reason, but a null one is a reason)"),
     "remediation_reason_missing_only": ("remediation", "(a missing or null one is no reason)", "(a null one is no reason, but a missing one is a reason)"),
+    "meaning_neither_passes": ("meaning", "(a missing or null one passes this check)", "(neither a missing nor a null one passes this check)"),
 }
 
 # The entry with one statement about a lease state said another true way: (part,
@@ -1462,6 +1470,7 @@ LEASE_RESTATED: dict[str, tuple[str, str, str]] = {
     "meaning_so_does_null": ("meaning", "(a missing or null one passes this check)", "(a missing one passes this check, and so does a null one)"),
     "remediation_without_exception": ("remediation", "(a missing or null one is no reason)", "(a missing or null one is no reason, without exception)"),
     "remediation_neither_is_null": ("remediation", "(a missing or null one is no reason)", "(a missing one is no reason, and neither is a null one)"),
+    "meaning_neither_fails": ("meaning", "(a missing or null one passes this check)", "(neither a missing nor a null one fails this check)"),
 }
 
 
