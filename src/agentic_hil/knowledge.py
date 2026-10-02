@@ -4667,16 +4667,21 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "timeout:pyocd": ErrorRemedy(
         meaning=(
-            "pyOCD, or the GDB this backend reads symbols out of the flashed ELF with, did not finish before its "
-            "deadline: the version check, the probe listing, a run for probe_target, flash_firmware, reset_target or a "
-            "memory read, or a symbol lookup. A process that runs out of time is stopped at the deadline, so the result "
-            "knows about the board only what its state fields say. The probe listing and the symbol lookup never "
-            "contact the target."
+            "pyOCD, or the GDB this backend reads symbols out of the flashed ELF with or drives a debug session "
+            "through, did not finish before its deadline: the version check, the probe listing, a run for "
+            "probe_target, flash_firmware, reset_target or a memory read, a symbol lookup, the debug server's ready "
+            "line at a session start (`backend_error_type` `gdb_server_not_ready`), or one GDB/MI command inside a "
+            "session. A process that runs out of time is stopped at the deadline, so the result knows about the board "
+            "only what its state fields say. The probe listing and the symbol lookup never contact the target."
         ),
         remediation=(
             "Read `side_effect_status`, `target_contacted` and `target_state` first, where the result carries them. A "
-            "flash or a reset that timed out can have stopped partway, and the log at `log_path` holds what pyOCD "
-            "printed before it was stopped.",
+            "flash, a reset or a session command that timed out can have stopped partway, and the log at `log_path` "
+            "holds what pyOCD printed before it was stopped.",
+            "When `target_state` is `unknown` inside a debug session, call debug_halt: a confirmed halt settles the "
+            "unconfirmed state, and the session goes on from the halted core.",
+            "`gdb_server_not_ready` means `pyocd gdbserver` did not print `GDB server listening on port ...` for the "
+            "session's port in time; the server output in the log at `log_path` says why.",
             "The deadline comes from `debuggers.<name>.timeout_s`, and a slow bench that needs more is the operator's "
             "edit of the authoritative file: project_config_set does not write that key. The probe listing already "
             "waits at least 30 seconds whatever the key says.",
@@ -4690,16 +4695,22 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "timeout:stlink": ErrorRemedy(
         meaning=(
-            "STM32CubeProgrammer (STM32_Programmer_CLI), or the GDB this backend reads symbols out of the flashed ELF "
-            "with, did not finish before its deadline: the version check, the probe listing, a run for probe_target, "
-            "flash_firmware, reset_target or a memory read, or a symbol lookup. A process that runs out of time is "
+            "STM32CubeProgrammer (STM32_Programmer_CLI), ST-LINK_gdbserver, or the GDB this backend reads symbols out "
+            "of the flashed ELF with or drives a debug session through, did not finish before its deadline: the "
+            "version check, the probe listing, a run for probe_target, flash_firmware, reset_target or a memory read, "
+            "a symbol lookup, the debug server's ready line at a session start (`backend_error_type` "
+            "`gdb_server_not_ready`), or one GDB/MI command inside a session. A process that runs out of time is "
             "stopped at the deadline, so the result knows about the board only what its state fields say. The probe "
             "listing and the symbol lookup never contact the target."
         ),
         remediation=(
             "Read `side_effect_status`, `target_contacted` and `target_state` first, where the result carries them. A "
-            "flash or a reset that timed out can have stopped partway, and the log at `log_path` holds what "
-            "STM32CubeProgrammer printed before it was stopped.",
+            "flash, a reset or a session command that timed out can have stopped partway, and the log at `log_path` "
+            "holds what STM32CubeProgrammer or ST-LINK_gdbserver printed before it was stopped.",
+            "When `target_state` is `unknown` inside a debug session, call debug_halt: a confirmed halt settles the "
+            "unconfirmed state, and the session goes on from the halted core.",
+            "`gdb_server_not_ready` means ST-LINK_gdbserver did not print `Waiting for debugger connection...` in "
+            "time; the server output in the log at `log_path` says why.",
             "The deadline comes from `debuggers.<name>.timeout_s`, and a slow bench that needs more is the operator's "
             "edit of the authoritative file: project_config_set does not write that key.",
         ),
@@ -4735,10 +4746,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "debugger_not_found:pyocd": ErrorRemedy(
         meaning=(
             "The pyOCD this entry needs could not be run: `debuggers.<name>.executable` names nothing that exists, or, "
-            "left unset, no `pyocd` is on PATH. Nothing was started, so the target was not contacted and the board is "
-            "as the last call that reached it left it."
+            "left unset, no `pyocd` is on PATH. A debug session start reports the same when the operating system "
+            "refused to spawn its debug server, `pyocd gdbserver`, with the reason in `backend_error`. Nothing was "
+            "started, so the target was not contacted and the board is as the last call that reached it left it."
         ),
         remediation=(
+            "Read `backend_error` where the result carries it: it says why the spawn was refused.",
             "Install pyOCD into the environment the server runs from (`pip install agentic-hil[pyocd]` or "
             "`pip install pyocd`) so `pyocd` is on PATH, or name its binary by absolute path in "
             "`debuggers.<name>.executable`. That key is written with project_config_set behind "
@@ -4756,12 +4769,20 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning=(
             "The STM32CubeProgrammer command-line tool this entry needs, STM32_Programmer_CLI, could not be run: "
             "`debuggers.<name>.executable` names nothing that exists, or, left unset, it is neither on PATH nor in the "
-            "standard STM32CubeProgrammer and STM32CubeIDE install locations. Nothing was started, so the target was "
-            "not contacted and the board is as the last call that reached it left it."
+            "standard STM32CubeProgrammer and STM32CubeIDE install locations. At a debug session start it can instead "
+            "be ST-LINK_gdbserver (`backend_error_type` `gdb_server_not_found`): the path "
+            "`debuggers.<name>.gdb_server_executable` resolved to when the configuration loaded holds no file any "
+            "more, and `field` names that key. A session start reports the same when the operating system refused to "
+            "spawn the server, with the reason in `backend_error`. The target was not contacted, and the board is as "
+            "the last call that reached it left it."
         ),
         remediation=(
             "Install STM32CubeProgrammer, which brings STM32_Programmer_CLI, or put the directory that holds it on "
             "PATH.",
+            "For `gdb_server_not_found`, reinstall STM32CubeCLT, which brings ST-LINK_gdbserver, or name the server by "
+            "absolute path in `debuggers.<name>.gdb_server_executable`. The path is resolved when the configuration "
+            "loads, so a server installed elsewhere is adopted through `project_config_reload_description` or a "
+            "restart.",
             "Where it lives somewhere else, name the binary by absolute path in `debuggers.<name>.executable`. That key "
             "is written with project_config_set behind `allow_config_description_write`, and which toolchain a bench "
             "runs is the operator's, so get their word.",
@@ -4770,8 +4791,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not copy STM32_Programmer_CLI into the workspace and point the configuration at it. A configured "
             "executable inside the workspace is repository-controlled code running as the debugger.",
-            "Do not run STM32_Programmer_CLI by hand to get past it. A run this service did not start is one its "
-            "coordination cannot see or account for.",
+            "Do not run STM32_Programmer_CLI or ST-LINK_gdbserver by hand to get past it. A run this service did not "
+            "start is one its coordination cannot see or account for.",
         ),
     ),
     "debugger_not_found": ErrorRemedy(
