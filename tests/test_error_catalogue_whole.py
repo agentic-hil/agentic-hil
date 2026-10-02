@@ -22,9 +22,10 @@ a call calls, is a form the scan does not read, and it fails the scan.
 
 Every pair resolves through the real MCP resource read, the scoped key first
 and the bare key after it, exactly as `knowledge.lookup_remedy` does, or sits in
-`EXCLUDED` with a reason a test reads off the code. The number of modules and
-of types is pinned, so the scan cannot shrink unnoticed, and planted refusals
-prove each shape reaches the inventory and fails the guard.
+`EXCLUDED` with a reason a test reads off the code. The number of modules, of
+types and of producers (a type with a function that writes it) is pinned, so
+the scan cannot shrink unnoticed, and planted refusals prove each shape reaches
+the inventory and fails the guard.
 """
 
 from __future__ import annotations
@@ -312,6 +313,11 @@ class Inventory:
     @property
     def types(self) -> frozenset[str]:
         return frozenset(error_type for error_type, _scope in self.pairs)
+
+    @property
+    def producers(self) -> frozenset[tuple[str, str, str]]:
+        """Each type with a function that writes it, as (type, module, function)."""
+        return frozenset((error_type, module, function) for (error_type, _scope), sites in self.pairs.items() for module, function, _line in sites)
 
     def sites(self, pair: Pair) -> frozenset[tuple[str, str]]:
         return frozenset((module, function) for module, function, _line in self.pairs.get(pair, ()))
@@ -633,6 +639,13 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 
 SCANNED_MODULE_COUNT = 47
 COLLECTED_TYPE_COUNT = 214
+# A producer is a type together with a function that writes it. A type many
+# functions write, such as `invalid_argument`, keeps its place among the types
+# when one of those functions drops out of the scan, so the type count alone
+# misses that; this one moves. A new function that writes a type, or a
+# function that writes one it did not write before, adds one: raise the number
+# in the same change.
+PRODUCER_COUNT = 619
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
@@ -641,6 +654,8 @@ def pin_problems(inventory: Inventory) -> list[str]:
         problems.append(f"the scan read {len(inventory.modules)} modules, and the package has {SCANNED_MODULE_COUNT}")
     if len(inventory.types) != COLLECTED_TYPE_COUNT:
         problems.append(f"the scan collected {len(inventory.types)} types, and {COLLECTED_TYPE_COUNT} are pinned")
+    if len(inventory.producers) != PRODUCER_COUNT:
+        problems.append(f"the scan found {len(inventory.producers)} producers (a type and a function that writes it), and {PRODUCER_COUNT} are pinned")
     return problems
 
 
@@ -1089,9 +1104,28 @@ def test_a_module_left_out_of_the_scan_fails_the_pins() -> None:
 
     problems = pin_problems(inventory)
 
-    assert len(problems) == 2, problems
+    assert len(problems) == 3, problems
     assert f"read {SCANNED_MODULE_COUNT - 1} modules" in problems[0]
     assert "types" in problems[1]
+    assert "producers" in problems[2]
+
+
+def test_a_producer_the_scan_stops_reading_fails_the_pins() -> None:
+    """One of the functions that write `unsupported_agent` stops writing it: every module and every type is still found."""
+    source = Path(str(importlib.import_module("agentic_hil.cli").__file__)).read_text(encoding="utf-8")
+    written = '"error_type": "unsupported_agent", '
+    refusal = f'{written}"summary": summary, "agent": normalize_agent(agent)'
+    assert source.count(refusal) == 1
+    dropped = ("unsupported_agent", "cli", "_unsupported_agent")
+    assert dropped in scanned().producers
+    assert len({producer for producer in scanned().producers if producer[0] == dropped[0]}) > 1
+
+    inventory = scan(planted=MappingProxyType({"agentic_hil.cli": source.replace(refusal, refusal.removeprefix(written))}))
+    problems = pin_problems(inventory)
+
+    assert dropped not in inventory.producers
+    assert len(problems) == 1, problems
+    assert f"found {PRODUCER_COUNT - 1} producers" in problems[0]
 
 
 def test_every_function_that_takes_an_error_type_is_read() -> None:
