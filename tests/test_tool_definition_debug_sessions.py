@@ -269,7 +269,7 @@ def test_start_binds_each_grant_to_the_modes_that_need_it(listed: dict[str, dict
     # Mass erase refuses `load` rather than enabling it.
     assert "allow_mass_erase" in segments["load"], segments["load"]
     assert re.search(r"\b(not|never|without|unless|refused|refuses|denied)\b[^.;]*\ballow_mass_erase\b|\ballow_mass_erase" + OFF_AFTER, segments["load"]), segments["load"]
-    assert not re.search(r"\b(needs?|requires?)\s+(allow_\w+\s*(,|and)\s*)*allow_mass_erase\b", segments["load"]), segments["load"]
+    assert not re.search(r"\b(needs?|requires?)\s+(?:allow_\w+(?:\s*,\s*(?:and\s+)?|\s+and\s+))*allow_mass_erase\b", segments["load"]), segments["load"]
     assert "allow_mass_erase" not in segments["attach"] + segments["reset_halt"], segments
 
     # Raw debugger commands refuse every mode.
