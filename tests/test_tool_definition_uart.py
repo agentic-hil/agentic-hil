@@ -325,7 +325,48 @@ NO_LINE_ENDING = re.compile(
 # won't, doesn't, isn't) deny as plainly as `not`; the whole is one group, so it
 # can sit inside a longer pattern without its alternation leaking out.
 NEGATION = r"(?:\b(?:no|not|never|nothing|without|cannot)\b|n't\b)"
-ADDS_LINE_ENDING = r"\b(?:adds?|appends?|added|appended)\b[^.;]*\b(?:line ending|newline|terminator)\b"
+# How far back a negation reaches a predicate: to the start of its phrase, which
+# a full stop that closes a sentence, a semicolon, a comma or a colon ends (a
+# full stop inside "0.1" or "debug.allowed_symbols" ends nothing), and within the
+# phrase to the last `and`, `but` or `then`, which opens a predicate of its own:
+# "It doesn't change the stop reason and resumes the core" resumes it. `or` and
+# `nor` open none: "never halts or resumes" denies both.
+PHRASE_END = r"[;,:]|\.(?=\s|$)"
+PREDICATE_START = r"\b(?:and|but|then)\b"
+# A phrase opened by a negated subject denies all it says: "No damaged report
+# state answers `config_invalid`".
+NEGATED_SUBJECT = r"\s*(?:no|none|nothing|neither|never)\b"
+# An object that denies the predicate before it: "lifts nothing", "lifts no hold".
+NEGATED_OBJECT = r"\s+(?:nothing|none|no)\b"
+
+
+def denies(found: re.Match[str], negation: str = NEGATION) -> bool:
+    """Whether the predicate `found` matched is denied in the text it was found
+    in: a negation within its own predicate before it, a negated subject that
+    opens its phrase, or a negated object right after it. A negation elsewhere
+    in the sentence governs another predicate and denies nothing here."""
+    text = found.string
+    phrase = re.split(PHRASE_END, text[: found.start()])[-1]
+    predicate = re.split(PREDICATE_START, phrase, flags=re.IGNORECASE)[-1]
+    return bool(
+        re.search(negation, predicate, re.IGNORECASE)
+        or re.match(NEGATED_SUBJECT, phrase, re.IGNORECASE)
+        or re.match(NEGATED_OBJECT, text[found.end() :], re.IGNORECASE)
+    )
+
+
+def stated(pattern: str, text: str, negation: str = NEGATION, flags: int = re.IGNORECASE) -> bool:
+    """Whether some match of `pattern` in `text` is stated, not denied."""
+    return any(not denies(found, negation) for found in re.finditer(pattern, text, flags))
+
+
+def denied(pattern: str, text: str, negation: str = NEGATION, flags: int = re.IGNORECASE) -> bool:
+    """Whether some match of `pattern` in `text` is denied."""
+    return any(denies(found, negation) for found in re.finditer(pattern, text, flags))
+
+
+# A verb that adds, followed in its sentence by the line ending it would add.
+ADDS_LINE_ENDING = r"\b(?:adds?|appends?|added|appended)\b(?=[^.;]*\b(?:line ending|newline|terminator)\b)"
 DEFAULT_TRUE = re.compile(r"\bdefaults?\b[^.;]*\btrue\b|\btrue\b[^.;]*\bdefault\b", re.IGNORECASE)
 SECONDS = re.compile(r"\b(\d+(?:\.\d+)?)\s?s\b")
 # max(1 s, timeout_s + 0.5 s), with or without the units: the join bound in
@@ -478,9 +519,11 @@ def test_com_write_says_what_it_needs_what_it_sends_and_what_it_returns(listed: 
     assert one_of(units, r"\b(?:needs?|requires?)\b[^.;]*\ballow_write\b", r"\b(?:else|otherwise|without|fails?|returns?|gives?)\b[^.;]*\bpermission_denied\b"), text
     assert one_of(units, r"\btext\b", r"\bhex\b", r"\bnot both\b|\bexactly one\b|\bone of\b|\beither\b"), text
     assert NO_LINE_ENDING.search(text), text
-    # A sentence that speaks of adding a line ending says that none is added.
-    adding = [unit for unit in units if claims(unit, ADDS_LINE_ENDING)]
-    assert all(claims(unit, NEGATION) for unit in adding), adding
+    # A sentence that speaks of adding a line ending says that none is added:
+    # the adding itself is denied ("adds no line ending"), not another verb in
+    # the sentence ("adds a newline and doesn't pad it").
+    adding = [found for unit in units for found in re.finditer(ADDS_LINE_ENDING, unit, re.IGNORECASE)]
+    assert not [found.string for found in adding if not denies(found)], text
     # The configured limit, counted after encoding, with 4096 as its default only.
     assert one_of(units, r"\bmax_write_bytes\b", r"\bencod"), text
     assert one_of(parts, rf"\b{DEFAULT_MAX_WRITE_BYTES}\b", r"\bdefault\b"), text

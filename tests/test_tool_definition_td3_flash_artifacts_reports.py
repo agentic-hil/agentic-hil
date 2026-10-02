@@ -54,10 +54,13 @@ from test_tool_definition_uart import (
     claims,
     clauses,
     definition_text,
+    denied,
+    denies,
     names,
     one_of,
     property_text,
     sentences,
+    stated,
 )
 
 import agentic_hil
@@ -263,25 +266,38 @@ def says_debug_session_makes_flash_busy(text: str) -> bool:
     return busy and not takes_over
 
 
+# The reset as a verb or a noun, not the key `reset_after_flash`.
+RESET = r"\breset(?:s|ting)?\b"
+
+
+def true_denies_reset(text: str) -> bool:
+    """Some clause says `true` does not reset: a reset after `true` that a negation reaches."""
+    return any(denied(RESET, part[found.end() :]) for part in clauses(text) for found in re.finditer(r"\btrue\b", part, re.IGNORECASE))
+
+
 def says_reset_default_is_false(text: str) -> bool:
-    """reset_after_flash defaults to false and false does not reset; never a true default, never "true does not reset"."""
+    """reset_after_flash defaults to false and false does not reset; never a true default, never "true does not reset".
+    The negation has to reach the reset: "the board is reset and nothing is verified" resets it."""
     default = one_of(clauses(text), DEFAULT_FALSE)
-    unreset = one_of(clauses(text), r"\bfalse\b|\bdefault\b", rf"{NEGATION}[^.;]*\breset\b|\breset\b[^.;]*{NEGATION}|\bunreset\b")
-    true_unreset = claims(text, rf"\btrue\b[^.;]*{NEGATION}[^.;]*\breset")
-    return default and unreset and not claims(text, DEFAULT_TRUE) and not true_unreset
+    unreset = any(
+        re.search(r"\bfalse\b|\bdefault\b", part, re.IGNORECASE)
+        and (denied(RESET, part) or re.search(r"\bunreset\b|\breset\s+(?:is\s+not|isn't|does\s+not|doesn't|never)\b", part, re.IGNORECASE))
+        for part in clauses(text)
+    )
+    return default and unreset and not claims(text, DEFAULT_TRUE) and not true_denies_reset(text)
 
 
 def says_true_resets(text: str) -> bool:
-    """reset_after_flash resets the board once the flash is done: an affirmative clause, not a negated one."""
+    """reset_after_flash resets the board once the flash is done: a clause that states the reset, not one that denies it.
+    Only a negation that reaches the reset denies it: "true resets the board after flash and doesn't verify it" resets."""
     affirmed = any(
-        re.search(r"\breset", part, re.IGNORECASE)
+        stated(RESET, part)
         and re.search(r"\bflash", part, re.IGNORECASE)
         and re.search(r"\bafter\b|\bthen\b|\bonce\b", part, re.IGNORECASE)
-        and not re.search(NEGATION, part, re.IGNORECASE)
         and not re.search(r"\bfail", part, re.IGNORECASE)
         for part in clauses(text)
     )
-    inverted = claims(text, rf"\btrue\b[^.;]*{NEGATION}[^.;]*\breset|\btrue\b[^.;]*\b(?:stays|left|leaves)\s+(?:halted|unreset)\b")
+    inverted = true_denies_reset(text) or claims(text, r"\btrue\b[^.;]*\b(?:stays|left|leaves)\s+(?:halted|unreset)\b")
     return affirmed and not inverted
 
 
@@ -348,7 +364,10 @@ def says_bin_needs_flash_address(text: str) -> bool:
 
 def says_pyocd_does_not_verify(text: str) -> bool:
     """pyOCD runs no verify step; never OpenOCD or STM32CubeProgrammer named as the one that does not."""
-    unverified = one_of(clauses(text), r"\bpyOCD\b", rf"{NEGATION}[^.;]*\bverif|\bverify false\b|\bunverified\b")
+    unverified = any(
+        re.search(r"\bpyOCD\b", part, re.IGNORECASE) and (denied(r"\bverif\w*", part) or re.search(r"\bverify false\b|\bunverified\b", part, re.IGNORECASE))
+        for part in clauses(text)
+    )
     wrong = claims(
         text,
         r"\b(?:OpenOCD|STM32CubeProgrammer)\s+(?:does\s+not|doesn't|never|cannot)\s+verif"
@@ -438,15 +457,17 @@ def says_size_limit(text: str) -> bool:
 
 
 def says_bare_filename(text: str) -> bool:
-    """A bare file name, no path, whose extension sets the id's suffix."""
-    bare = one_of(clauses(text), rf"\bbare\b|{NEGATION}", r"\bpaths?\b|\bdirector|\bseparators?\b|/")
+    """A bare file name, no path, whose extension sets the id's suffix. A negation
+    counts only when it reaches the path: "a path, it doesn't matter which" allows one."""
+    path = r"\bpaths?\b|\bdirector\w*|\bseparators?\b|/"
+    bare = any(re.search(path, part, re.IGNORECASE) and (re.search(r"\bbare\b", part, re.IGNORECASE) or denied(path, part)) for part in clauses(text))
     suffix = one_of(clauses(text), r"\bextension\b|\bsuffix\b", r"\bartifact_id\b|\bid\b")
     return bare and suffix
 
 
 def says_touches_no_board(text: str) -> bool:
     """No board, probe or debugger is involved; never "needs a debugger"."""
-    untouched = one_of(clauses(text), NEGATION, r"\bboard\b|\bdebugger\b|\bhardware\b|\bprobe\b|\btarget\b")
+    untouched = any(denied(r"\bboard\b|\bdebugger\b|\bhardware\b|\bprobe\b|\btarget\b", part) for part in clauses(text))
     needs = claims(text, r"\b(?:needs?|requires?)\s+(?:a|an|the)\s+(?:bound\s+|configured\s+|connected\s+)?(?:debugger|probe|board|target)\b")
     return untouched and not needs
 
@@ -490,10 +511,7 @@ def says_reading_changes_nothing(text: str) -> bool:
         r"\bread",
         r"\bchanges nothing\b|\bconsumes nothing\b|\bnothing (?:is )?(?:changed|consumed|cleared)\b|\b(?:does not|doesn't|never)\s+(?:change|consume|clear)\b|\brepeat",
     )
-    consumed = any(
-        re.search(r"\bread", part, re.IGNORECASE) and re.search(r"\b(?:clears?|consumes?|removes?|deletes?|resets?)\b", part, re.IGNORECASE) and not re.search(NEGATION, part, re.IGNORECASE)
-        for part in clauses(text)
-    )
+    consumed = any(re.search(r"\bread", part, re.IGNORECASE) and stated(r"\b(?:clears?|consumes?|removes?|deletes?|resets?)\b", part) for part in clauses(text))
     return unchanged and not consumed
 
 
@@ -507,10 +525,13 @@ def says_record_outlives_successes(text: str) -> bool:
     """The failure record stays until a newer failure: a success does not clear it.
 
     Clearing is checked within one phrase ("a success clears it", "cleared by a
-    success"), and a negated phrase ("a success does not clear it") is the
-    claim itself, not its inversion."""
+    success"), and a negated phrase is the claim itself, not its inversion: the
+    negation within it ("a success does not clear it") or reaching it from
+    before ("it is not cleared by a success")."""
     stays = one_of(clauses(text), r"\bsuccess|\bsucceed", r"\bstays?\b|\bremains?\b|\bkept\b|\bkeeps?\b|\bpersists?\b|\bsurvives?\b|\buntil\b")
-    cleared = any(not re.search(NEGATION, match.group(0), re.IGNORECASE) for match in re.finditer(CLEARED_BY_SUCCESS, text, re.IGNORECASE))
+    cleared = any(
+        not re.search(NEGATION, match.group(0), re.IGNORECASE) and not denies(match) for match in re.finditer(CLEARED_BY_SUCCESS, text, re.IGNORECASE)
+    )
     return stays and not cleared
 
 
@@ -536,14 +557,12 @@ DAMAGED = r"\b(?:damaged|malformed|corrupt\w*)\b"
 
 
 def says_damaged_state_answers_config_invalid(clause: str) -> bool:
-    """A damaged state and `config_invalid` in one clause, in either order, with no
-    negation between them: "a damaged one answers `config_invalid`", never "a
-    damaged one never answers `config_invalid`"."""
-    for first, second in ((DAMAGED, r"\bconfig_invalid\b"), (r"\bconfig_invalid\b", DAMAGED)):
-        for match in re.finditer(rf"{first}(?P<between>[^.;]*?){second}", clause, re.IGNORECASE):
-            if not re.search(NEGATION, match.group("between"), re.IGNORECASE):
-                return True
-    return False
+    """A damaged state and `config_invalid` in one clause, in either order, that no
+    negation reaches, between them or before them: "a damaged one answers
+    `config_invalid`", never "a damaged one never answers `config_invalid`" and
+    never "No damaged report state answers `config_invalid`"."""
+    unnegated = rf"(?:(?!{NEGATION})[^.;])*?"
+    return stated(rf"{DAMAGED}{unnegated}\bconfig_invalid\b|\bconfig_invalid\b{unnegated}{DAMAGED}", clause)
 
 
 def says_unreadable_state_apart(meaning: str) -> bool:
@@ -814,8 +833,9 @@ def test_the_catalogue_tells_an_unreadable_report_state_from_a_damaged_or_missin
         (r"\banswers `config_invalid`", "never answers `config_invalid`"),
         (r"\banswers `config_invalid`", "cannot answer `config_invalid`"),
         (r"\bis damaged answers `config_invalid` instead", "is damaged answers this as well"),
+        (r"A report state that reads and is damaged answers `config_invalid` instead\.", "No damaged report state answers `config_invalid`."),
     ],
-    ids=["negated", "cannot", "merged"],
+    ids=["negated", "cannot", "merged", "subject"],
 )
 def test_the_unreadable_check_refuses_a_served_entry_that_inverts_the_damaged_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pattern: str, replacement: str) -> None:
     """A malformed report state raises `config_invalid` (report.py:666-673); only
@@ -897,12 +917,17 @@ PARAPHRASES = [
     ),
     (
         says_reset_default_is_false,
-        ("Default false: the board is not reset.",),
-        ("Defaults to true, so the board is reset.", "False by default.", "Default false: not reset; true never resets either."),
+        ("Default false: the board is not reset.", "Default false: not reset; true doesn't verify and resets after flash."),
+        ("Defaults to true, so the board is reset.", "False by default.", "Default false: not reset; true never resets either.", "Default false: the board is reset and nothing is verified."),
     ),
     (
         says_true_resets,
-        ("Reset the board after flashing.", "True: the board is reset once flashed."),
+        (
+            "Reset the board after flashing.",
+            "True: the board is reset once flashed.",
+            "On pyOCD, true resets the board after flash and doesn't verify it.",
+            "On pyOCD, true doesn't verify and resets the board after flashing.",
+        ),
         ("True never resets the board after flashing.", "True: the board is not reset after flashing.", "Resets the board."),
     ),
     (
@@ -944,7 +969,7 @@ PARAPHRASES = [
     (
         says_pyocd_does_not_verify,
         ("pyOCD does not verify (verify false).", "OpenOCD and STM32CubeProgrammer verify; pyOCD does not verify."),
-        ("OpenOCD does not verify; pyOCD does not either.", "pyOCD verifies.", "Every backend verifies."),
+        ("OpenOCD does not verify; pyOCD does not either.", "pyOCD verifies.", "Every backend verifies.", "On pyOCD the flash doesn't halt the core and verifies the image."),
     ),
     (
         says_capture_failure_keeps_the_image,
@@ -985,8 +1010,8 @@ PARAPHRASES = [
             "max_upload_size_mb defaults to 64 bytes, below it artifact_too_large.",
         ),
     ),
-    (says_bare_filename, ("Bare name, no path; its extension ends the artifact_id.",), ("A path to the file; its extension ends the artifact_id.", "Bare name, no path.")),
-    (says_touches_no_board, ("Reads files only, no board or debugger needed.",), ("Needs a configured debugger.", "Reads the report files.")),
+    (says_bare_filename, ("Bare name, no path; its extension ends the artifact_id.",), ("A path to the file; its extension ends the artifact_id.", "Bare name, no path.", "A file name or a path, it doesn't matter which; its extension ends the artifact_id.")),
+    (says_touches_no_board, ("Reads files only, no board or debugger needed.",), ("Needs a configured debugger.", "Reads the report files.", "It flashes the board and doesn't wait.")),
     (
         says_stored_in_upload_directory,
         ("Store a firmware image in artifacts.upload_directory.",),
@@ -1014,7 +1039,7 @@ PARAPHRASES = [
     (
         says_reading_changes_nothing,
         ("Return the newest stored report; reading changes nothing.", "A repeated read answers the same report."),
-        ("Return the newest stored report; reading clears it.", "Return the newest stored report."),
+        ("Return the newest stored report; reading clears it.", "Return the newest stored report.", "Repeated reads answer the same; reading clears the record and can't be undone."),
     ),
     (
         says_record_outlives_successes,
@@ -1023,6 +1048,7 @@ PARAPHRASES = [
             "It stays across successes, so a failed recovery reset names reset_target.",
             "It stays across successes; a success does not clear it.",
             "Successes and restarts keep it until a newer failure.",
+            "It stays until a newer failure and is not cleared by a success.",
         ),
         ("A success clears it.", "It stays until the next success clears it.", "It stays, but is cleared by a success.", "Successes and restarts clear it until a newer failure."),
     ),
@@ -1052,6 +1078,7 @@ PARAPHRASES = [
             "The state exists but cannot be read; a damaged state cannot answer `config_invalid`.",
             "The state exists but cannot be read; a malformed one can't answer config_invalid.",
             "The state exists but cannot be read; config_invalid is never a damaged one.",
+            "This project's report state exists and reading it failed. No damaged report state answers `config_invalid`.",
         ),
     ),
     (

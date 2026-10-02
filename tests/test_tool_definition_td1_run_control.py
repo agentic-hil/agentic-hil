@@ -78,6 +78,7 @@ from test_tool_definition_debug_sessions import (
 )
 from test_tool_definition_debug_symbol_info import NEGATED_NEED, allows_either_policy_key
 from test_tool_definition_uart import NEGATION as PLAIN_NEGATION
+from test_tool_definition_uart import denied, stated
 from test_tool_descriptions import DESCRIPTION_LIMIT, PROPERTY_DESCRIPTION_LIMIT
 
 from agentic_hil.backends import gdbdebug
@@ -114,10 +115,6 @@ CALL_ARGUMENTS: dict[str, dict] = {SET: {"location": {"symbol": BREAKPOINT_SYMBO
 NEGATION = re.compile(rf"{PLAIN_NEGATION}|\b(?:neither|nor|unchanged)\b", re.IGNORECASE)
 DENIED_BEFORE = r"\b(not|never|no|instead of|rather than)\s+(an?\s+)?"
 OK_NOT_FALSE = r"\bok\b(?!\W{0,3}false\b)"
-# Where a fragment ends: a full stop that closes a sentence, a semicolon, a
-# comma or a colon. A full stop inside a number ("0.1") or a key
-# ("debug.allowed_symbols") ends nothing.
-FRAGMENT_END = re.compile(r"[;,:]|\.(?=\s|$)")
 # A debugger entry's `timeout_s` may be any positive number (config.py
 # `positive_timeout_config`), so one below the 0.1 floor is a valid entry.
 ENTRY_BELOW_THE_FLOOR_S = 0.05
@@ -161,14 +158,11 @@ def first_sentence(text: str) -> str:
 
 
 def asserted(pattern: str, text: str, flags: int = re.IGNORECASE) -> bool:
-    """Whether `pattern` is stated rather than denied: some match of it has no
-    negation between the start of its own fragment and the match itself.
-    "Never halts the core" names the verb and does not state it."""
-    for found in re.finditer(pattern, text, flags):
-        fragment = FRAGMENT_END.split(text[: found.start()])[-1]
-        if not NEGATION.search(fragment):
-            return True
-    return False
+    """Whether `pattern` is stated rather than denied (`stated`, with this file's
+    negation): "Never halts the core" names the verb and does not state it, "a
+    confirmed halt lifts nothing" names the lift and denies it, and "It doesn't
+    change the stop reason and resumes the core" states the resume."""
+    return stated(pattern, text, NEGATION.pattern, flags)
 
 
 def backend_support_is_one_phrase(description: str) -> bool:
@@ -623,9 +617,15 @@ def a_repeated_set_adds_another(description: str) -> bool:
     )
 
 
+MOTION = r"\b(resum\w*|runs?|running|continu\w*|starts?)\b"
+
+
 def set_leaves_the_core_where_it_is(description: str) -> bool:
-    moving = [piece for piece in pieces(description) if re.search(r"\b(resum\w*|runs?|running|continu\w*|starts?)\b", piece, re.IGNORECASE)]
-    return any(re.search(r"\bresum", piece, re.IGNORECASE) and NEGATION.search(piece) for piece in moving) and all(NEGATION.search(piece) or CONTINUE in piece for piece in moving)
+    """A resume is denied, and every motion a piece names is denied or is
+    debug_continue's. The negation has to reach the motion itself: "It doesn't
+    change the stop reason and resumes the core" resumes it."""
+    moving = containing(pieces(description), MOTION, re.IGNORECASE)
+    return any(denied(r"\bresum\w*", piece, NEGATION.pattern) for piece in moving) and all(not asserted(MOTION, piece) or CONTINUE in piece for piece in moving)
 
 
 def set_names_an_unconfirmed_insert(description: str) -> bool:
@@ -848,7 +848,7 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
     (
         never_moves_the_core,
         ["Records a newly arrived stop; never halts or resumes the core.", "Neither halts nor resumes the core."],
-        ["Halts the core and returns the status.", "Never halts the core, then resumes the core.", "Reads the session.", "Never halts the core."],
+        ["Halts the core and returns the status.", "Never halts the core, then resumes the core.", "Reads the session.", "Never halts the core.", "It doesn't send GDB a command and halts or resumes the core."],
     ),
     (
         records_a_newly_arrived_stop,
@@ -950,6 +950,8 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
             "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; a confirmed halt can't lift it.",
             "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; a confirmed halt won't lift it.",
             "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; a confirmed halt doesn't lift it.",
+            "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; a confirmed halt lifts nothing.",
+            "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; a confirmed halt lifts no hold.",
             "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; an unconfirmed halt can lift it.",
             "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined.",
         ],
@@ -962,6 +964,7 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
             "Halts the core; safe to repeat.",
             "Halts the core; it is idempotent.",
             "A retry is safe whatever happened.",
+            "A repeat doesn't wait and is safe to retry.",
         ],
     ),
     (
@@ -997,7 +1000,7 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
     (
         continue_leaves_an_exception_stop_alone,
         ["A core stopped in an exception or debugger_error is not resumed.", "Never continues past an exception stop."],
-        ["A core stopped in an exception is resumed past it.", "Continues from an exception stop.", "An exception stop is resumed, not left alone."],
+        ["A core stopped in an exception is resumed past it.", "Continues from an exception stop.", "An exception stop is resumed, not left alone.", "A core stopped in an exception doesn't get a new stop and is resumed."],
     ),
     (
         continue_tells_good_stops_from_bad,
@@ -1046,7 +1049,7 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
     (
         set_leaves_the_core_where_it_is,
         ["The core is not resumed, debug_continue runs to it.", "Does not resume the core."],
-        ["Adds a breakpoint and resumes the core.", "Adds a breakpoint, the core runs to it."],
+        ["Adds a breakpoint and resumes the core.", "Adds a breakpoint, the core runs to it.", "It doesn't change the stop reason and resumes the core."],
     ),
     (
         set_names_an_unconfirmed_insert,
