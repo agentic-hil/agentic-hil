@@ -51,6 +51,7 @@ from test_config_write import bench as write_bench
 from test_config_write import changes, document_of
 from test_config_write import service as open_service
 from test_coordination import failing_write_record, restore_write_record
+from test_mcp_reference_resources import read_text
 from test_read_until import close, tools_call
 from test_recover_tool import config_for, edit_config, ledger
 from test_server_upgrade import (
@@ -1235,20 +1236,6 @@ def test_server_upgrade_says_what_it_runs_what_it_needs_and_what_this_server_kee
     ) == [], text
 
 
-def catalogue_entry_served(workspace: Path, error_type: str) -> dict:
-    """The entry `resources/read` serves for `error_type`, the one a refusal's catalogue link resolves to."""
-    uri = ERROR_URI_PREFIX + error_type
-    service = new_service(workspace)
-    try:
-        response = handle_mcp_message({"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": uri}}, service)
-    finally:
-        close(service)
-    assert isinstance(response, dict) and "error" not in response, response
-    contents = response["result"]["contents"]
-    assert [content["uri"] for content in contents] == [uri], contents
-    return json.loads(contents[0]["text"])
-
-
 # The refusals the definitions name no longer, and the entry an agent reads for
 # each: set and adoption refused under a hold (config_write_in_open_run), the
 # reload under a hold or an incident, the upgrade under a hold, and a recovery
@@ -1266,7 +1253,13 @@ CATALOGUE_CLAIMS: list[tuple[str, str, Callable[[str], bool]]] = [
 
 @pytest.mark.parametrize(("error_type", "field", "check"), CATALOGUE_CLAIMS, ids=[f"{error_type}-{field}" for error_type, field, _ in CATALOGUE_CLAIMS])
 def test_the_catalogue_says_what_the_definitions_leave_to_it(tmp_path: Path, error_type: str, field: str, check: Callable[[str], bool]) -> None:
-    value = catalogue_entry_served(tmp_path / "catalogue", error_type)[field]
+    # The entry `resources/read` serves for `error_type`, the one a refusal's
+    # catalogue link resolves to.
+    service = new_service(tmp_path / "catalogue")
+    try:
+        value = json.loads(read_text(service, ERROR_URI_PREFIX + error_type))[field]
+    finally:
+        close(service)
     text = " ".join(value) if isinstance(value, list) else str(value)
     assert check(text), (error_type, field, text)
 
