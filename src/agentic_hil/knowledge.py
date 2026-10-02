@@ -1002,6 +1002,50 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "an environment around a live process is the outcome being refused here, not a way past it.",
         ),
     ),
+    "upgrade_manager_not_established": ErrorRemedy(
+        meaning=(
+            "The upgrade could not tell which package manager holds the installation this process runs out of: the "
+            "environment directory in `prefix` could not be listed, so whether uv's receipt is in it is unknown. Each "
+            "manager's upgrade command replaces the installation, and the one a guess would have run crosses a "
+            "recorded exact pin without reading it, so no manager was run. The installation, its version and its "
+            "extras are as they were."
+        ),
+        remediation=(
+            "Read `prefix` and `python` on this result: the environment directory that could not be listed, and the "
+            "interpreter running out of it.",
+            "Have the operator make that directory listable by the account that ran the upgrade; it is usually a "
+            "permission or an ownership change on the directory itself.",
+            "Run the same upgrade again. With the directory readable, the owning manager is established and it is the "
+            "one that runs.",
+        ),
+        do_not=(
+            "Do not upgrade with `pip install --upgrade` or `uv pip install --upgrade` instead. On a uv tool "
+            "installation that crosses a recorded exact pin without reading it, reports success, and leaves uv's "
+            "receipt naming the old requirement.",
+            "Do not reinstall the package or delete the environment to get past this. Nothing was changed, and the "
+            "installation works as it did.",
+        ),
+    ),
+    "upgrade_manager_not_found": ErrorRemedy(
+        meaning=(
+            "The package manager that holds this installation is known, `manager` names it, and it is not on PATH "
+            "for the process that ran the upgrade, so it could not be run. Nothing was run and nothing was changed: "
+            "the installation, its version and its extras are as they were."
+        ),
+        remediation=(
+            "Put the manager in `manager` on PATH for the process that runs the upgrade, and run the upgrade again. "
+            "At a shell that is the shell's own PATH. Over MCP it is the environment the agent host started this "
+            "server with, so the host has to be started again from an environment that has it.",
+            "If the manager was removed from this machine, install it again first. The installation `python` runs "
+            "out of still belongs to it, and only it upgrades that installation with what it recorded.",
+        ),
+        do_not=(
+            "Do not upgrade with another manager, or with pip, in its place. A different manager replaces the "
+            "installation without the pin, the extras or the packages the owning one recorded for it.",
+            "Do not reinstall the package to get past this. Nothing was changed, and the installation works as it "
+            "did.",
+        ),
+    ),
     "config_file_not_found": ErrorRemedy(
         meaning=(
             "This workspace has no authoritative configuration, so there is no bench, no permission and no state "
@@ -1069,6 +1113,274 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not write the configuration again from scratch to get past this. `agentic-hil init --force` replaces "
             "the whole file, every narrowed permission included, so it throws away the operator's own decisions in "
             "order to fix one key.",
+        ),
+    ),
+    "config_schema_invalid": ErrorRemedy(
+        meaning=(
+            "The configuration schema this installation ships is not itself a valid JSON Schema, so no configuration "
+            "can be checked against it. The fault is in the installation: the configuration at `path` was never "
+            "validated, and nothing in it caused this. `schema_error` is the schema check's own account."
+        ),
+        remediation=(
+            "Reinstall Agentic HIL through the package manager that installed it, with the extras it was installed "
+            "with. The one-line installer repairs an existing installation in place: `curl -LsSf "
+            "https://agentic-hil.github.io/install.sh | sh`, or in PowerShell `irm "
+            "https://agentic-hil.github.io/install.ps1 | iex`.",
+            "In a development checkout, restore `src/agentic_hil/schemas/config.schema.json` from version control; "
+            "`schema_error` names what in it fails.",
+            "Then run `agentic-hil doctor`, which validates the configuration against the repaired schema.",
+        ),
+        do_not=(
+            "Do not edit the workspace configuration to get past this. It was never checked against anything.",
+            "Do not copy in a schema from another release. The schema and the code that reads the configuration are "
+            "one release's pair.",
+        ),
+    ),
+    "workspace_is_home": ErrorRemedy(
+        meaning=(
+            "`agentic-hil init` or `agentic-hil setup` ran in the home directory, or in a directory that contains it. "
+            "Both bind one authoritative configuration to the directory they run in, and home is not a project: "
+            "rooted there, it would govern every project on this machine at once. Nothing was written; `setup` keeps "
+            "the user-wide half it had already installed."
+        ),
+        remediation=(
+            "Change into the project this bench belongs to and run the same command again. If the project does not "
+            "exist yet, create its directory first (`mkdir my-project`, then `cd my-project`).",
+            "The user-wide half needs no project: `agentic-hil agent-install --agent <agent>` installs the skill and "
+            "the MCP registration for this user from any directory, home included.",
+        ),
+        do_not=(
+            "Do not point `AGENTIC_HIL_CONFIG` at a configuration whose `workspace_root` is the home directory to get "
+            "around this. It binds every project under home to one bench policy, which is what this refusal prevents.",
+        ),
+    ),
+    "config_exists": ErrorRemedy(
+        meaning=(
+            "Another command wrote this project's authoritative configuration at `path` while `agentic-hil init` or "
+            "`agentic-hil setup` was running: the file was not there when the command first looked, and it was there "
+            "when the command came to write. Nothing was written over it."
+        ),
+        remediation=(
+            "Run the same command again. It now finds the configuration, keeps it unchanged, and goes on to "
+            "`agentic-hil doctor`.",
+            "Find out what else was setting this project up at the same moment (a second terminal, a script, an "
+            "agent) and let one of them finish.",
+        ),
+        do_not=(
+            "Do not add `--force` to get past this. It regenerates the file from a fresh read and replaces the "
+            "configuration the other command just wrote, every narrowed permission included, which is the "
+            "operator's decision to take.",
+        ),
+    ),
+    "schema_exists": ErrorRemedy(
+        meaning=(
+            "`agentic-hil schema --output` or `agentic-hil test-schema --output` named a path where a file already "
+            "is, and without `--force` it is not replaced. Nothing was written."
+        ),
+        remediation=(
+            "Read the file at `path`. If it is an earlier copy of the same schema, written by this command for an "
+            "editor or a validator, run the command again with `--force` to replace it with this installation's copy.",
+            "Otherwise give `--output` a path that is free, or leave `--output` off to print the schema to standard "
+            "output.",
+        ),
+        do_not=(
+            "Do not add `--force` over a file you did not write with this command. It replaces the file whole, and "
+            "nothing that was in it is kept.",
+        ),
+    ),
+    "mcp_config_exists": ErrorRemedy(
+        meaning=(
+            "`agentic-hil mcp-config --output` named a path where a file already is, and without `--force` it is not "
+            "replaced. Nothing was written. With `--force` the file is written new, holding the agentic-hil server "
+            "entry and nothing else."
+        ),
+        remediation=(
+            "Read the file at `path`, usually the project's `.mcp.json`, before anything else: it can hold other "
+            "servers the project relies on.",
+            "Prefer the user-level registration, which writes no file into the project: `agentic-hil agent-install "
+            "--agent <agent>`.",
+            "If the file holds nothing but an earlier agentic-hil entry, run the command again with `--force`.",
+        ),
+        do_not=(
+            "Do not add `--force` while the file holds other servers. The file is written new with the agentic-hil "
+            "entry alone, and every other server in it is gone.",
+        ),
+    ),
+    "mcp_config_conflict": ErrorRemedy(
+        meaning=(
+            "The agent's user-level MCP configuration at `path` already has an `agentic-hil` entry that this "
+            "installation did not write and cannot attribute to itself; `existing_command`, where present, is what "
+            "that entry runs. It was left untouched, no registration was written, and `--force` does not apply to it."
+        ),
+        remediation=(
+            "Report the conflict to the operator, naming the file in `path` and what the entry runs in "
+            "`existing_command`, and stop. Whether that entry stays, is replaced or is removed is the operator's "
+            "decision.",
+            "Once the operator has resolved it in their own file, run the same command again; it then registers the "
+            "trusted launcher.",
+        ),
+        do_not=(
+            "Do not edit the file or remove the entry yourself and run the command again. The entry decides which "
+            "program an agent hands the hardware gate to, and it belongs to the operator.",
+            "Do not add `--force`. It never replaces an entry this installation did not write.",
+        ),
+    ),
+    "skill_conflict": ErrorRemedy(
+        meaning=(
+            "A skill file already stands at `target_path`, and it is not the Agentic HIL skill this installation "
+            "writes. It was left untouched, nothing was installed, and `--force` does not apply to it."
+        ),
+        remediation=(
+            "Report the conflict to the operator, naming the file in `target_path`, and stop. What happens to a skill "
+            "this installation did not write is the operator's decision.",
+            "Once the operator has moved that file away, run the same command again.",
+        ),
+        do_not=(
+            "Do not overwrite, edit or delete that file yourself and run the command again. It is someone else's "
+            "skill, and nobody has decided to replace it.",
+            "Do not add `--force`. It never replaces a skill this installation did not write.",
+        ),
+    ),
+    "skill_exists": ErrorRemedy(
+        meaning=(
+            "The Agentic HIL skill at `target_path` is one this installation wrote, it carries the same version as "
+            "the packaged copy at `source_path`, and its text differs: it was edited after it was written, or a "
+            "development build changed the packaged text without a new version. Nothing was written."
+        ),
+        remediation=(
+            "Compare the file at `target_path` with the packaged copy at `source_path` to see what differs.",
+            "If the difference is not wanted, run the same command again with `--force`, which replaces this managed "
+            "file with the packaged copy.",
+            "If it is a deliberate local edit, keeping it is the operator's decision, and leaving the file as it is "
+            "keeps it.",
+        ),
+        do_not=(
+            "Do not add `--force` over a local edit without the operator's word. It replaces the file whole, and the "
+            "edit is gone.",
+        ),
+    ),
+    "unsupported_agent": ErrorRemedy(
+        meaning=(
+            "The agent named in `agent` or `agents` is not one this installation knows, so it has no skill "
+            "directory, MCP configuration format or setup paths for it. Nothing was written. `allowed_agents` lists "
+            "the agents it does know, by the name each has here."
+        ),
+        remediation=(
+            "Run the same command again naming one of `allowed_agents`. Each also answers to its common aliases, "
+            "such as `claude` for `claude-code`.",
+            "For an agent outside that list that reads skills from a directory, `agentic-hil skill-install --agent "
+            "<name> --target <path of its skill file>` writes the skill there. Registering the MCP server with that "
+            "agent is a step the operator takes in the agent's own configuration; `agentic-hil mcp-config` prints the "
+            "command and arguments an entry needs.",
+        ),
+        do_not=(
+            "Do not name a listed agent that the agent in use is not, to get past this. The skill and the "
+            "registration would land where that other agent looks, and the agent in use would read neither.",
+        ),
+    ),
+    "agent_permissions_unreadable": ErrorRemedy(
+        meaning=(
+            "The agent's settings file at `path` cannot be used as it stands: it is not a JSON object, or, for "
+            "Claude Code, its `permissions` entry is not an object or its `permissions.deny` entry is not a list. The "
+            "file belongs to the agent and the operator, so it was left exactly as it was: no write refusal was added "
+            "to it by `init --agent` or `setup`, and none was taken back from it by `uninstall`."
+        ),
+        remediation=(
+            "Open the file at `path` and find what is wrong with it: a syntax error, or one of those two entries "
+            "holding another type.",
+            "Have the operator repair it in place, keeping the rules and settings it already holds.",
+            "Run the same command again.",
+        ),
+        do_not=(
+            "Do not delete or replace the file to get past this. It holds the operator's own settings and rules for "
+            "that agent, and a new file throws them away.",
+        ),
+    ),
+    "agent_project_record_unreadable": ErrorRemedy(
+        meaning=(
+            "A project bound through `AGENTIC_HIL_CONFIG` outside the projects directory has to be named in "
+            "`external-projects.json` before a write refusal is written for it, and that record did not read as the "
+            "record it has to be: it could not be opened, is not JSON, or is not a JSON object whose `configurations` "
+            "is a list of absolute paths. A record that may name projects and cannot be read is no ground to write "
+            "rules from, so this project was not recorded, no deny rule was written, and the file was left untouched. "
+            "`path` is the record this user's commands write to; a second copy can stand beside the other "
+            "configuration root, and an unreadable copy there refuses the same way."
+        ),
+        remediation=(
+            "Open `external-projects.json` at `path`, and the copy beside the other configuration root if there is "
+            "one, and find the one that does not read: a file this account cannot open, a syntax error, or an entry "
+            "that is not an absolute path.",
+            "Have the operator repair that file in place, keeping every path it names: a JSON object whose "
+            "`configurations` key holds a list of absolute configuration paths.",
+            "Run the same command again.",
+        ),
+        do_not=(
+            "Do not delete the record to get past this. The projects it names would read as gone, and a later setup "
+            "would take back the write refusals that protect them.",
+        ),
+    ),
+    "agent_project_record_unwritable": ErrorRemedy(
+        meaning=(
+            "A project bound through `AGENTIC_HIL_CONFIG` outside the projects directory has to be named in "
+            "`external-projects.json` before a write refusal is written for it, and the record could not be written "
+            "at `path`; the summary carries the error. No deny rule was written, because a rule for a project the "
+            "record does not name is one a later run reads as nobody's and takes back."
+        ),
+        remediation=(
+            "Read the error in the summary: it says why the write was refused, a permission, a read-only location, "
+            "or no usable configuration root at all.",
+            "Have the operator make the directory that holds `path` writable for this account, or clear the cause the "
+            "error names.",
+            "Run the same command again.",
+        ),
+        do_not=(
+            "Do not write the deny rule into the agent's settings by hand. Without the record no run can tell whose "
+            "it is, and a later setup takes it back.",
+        ),
+    ),
+    "agent_project_record_unremovable": ErrorRemedy(
+        meaning=(
+            "`agentic-hil uninstall` took back the write refusals this installation wrote and then could not remove "
+            "a record of projects it wrote, `external-projects.json`. `failed` names each file still standing, with "
+            "the error that refused its removal. The record names projects and grants nothing, so what is left is a "
+            "file, not a refusal in force."
+        ),
+        remediation=(
+            "Read `failed`: each entry is a record that is still there and the error that kept it there, a "
+            "permission, a read-only mount or an I/O error.",
+            "Have the operator clear that cause and delete the file, or run `agentic-hil uninstall` again once it is "
+            "cleared.",
+        ),
+        do_not=(
+            "Do not read this as write refusals still in force. They were taken back before the record was reached.",
+        ),
+    ),
+    "mcp_command_untrusted": ErrorRemedy(
+        meaning=(
+            "No Agentic HIL executable passed the check every MCP registration is written from, so nothing was "
+            "registered. The launcher has to be an absolute path outside this project and outside temporary and "
+            "cache directories, and stay the same file while it is checked. On Linux and macOS it also has to be a "
+            "regular file or one launcher symlink to one, owned by this account or root, executable, writable by no "
+            "other account, in a directory owned by this account or root. `rejected_candidates` names every launcher "
+            "that was tried and why each failed; a refusal of one path carries `path` and, for an owner or mode, "
+            "`directory`, `mode` and `uid`."
+        ),
+        remediation=(
+            "Read `rejected_candidates`, or `path` and the fields beside it, for the reason each launcher failed.",
+            "A launcher in the project, a temporary directory or a cache (a `uvx` or one-off run) cannot be "
+            "registered: install Agentic HIL persistently with `uv tool install agentic-hil` or `pipx install "
+            "agentic-hil`, and run the command again from that installation.",
+            "For an owner or a mode, have the operator fix the file or directory named: give it to this account, "
+            "`chmod go-w` to remove other accounts' write access, `chmod +x` where it is not executable. Then run the "
+            "command again.",
+            "A launcher that changed while it was checked was being replaced at that moment; run the command again "
+            "once the installation has finished.",
+        ),
+        do_not=(
+            "Do not register the bare command name or a relative path in the agent's configuration by hand. Which "
+            "program it starts would then depend on the directory and PATH the agent happens to have.",
+            "Do not point the registration at a copy inside the project. The project is the one tree the hardware "
+            "gate cannot trust.",
         ),
     ),
     "permission_denied:allow_config_description_write": ErrorRemedy(
@@ -2706,6 +3018,63 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "plan is checked against a schema nobody shipped.",
         ),
     ),
+    "run_report_not_found": ErrorRemedy(
+        meaning=(
+            "`agentic-hil run-evidence --report` named a file that is not there (`path`), so no evidence was written. "
+            "The report it reads is the JSON a test run produced: what `agentic-hil test-reactor --json` printed, "
+            "saved to a file, or the run's own report file, which the run's result names in `canonical_report_path`."
+        ),
+        remediation=(
+            "Check `path` against where the run's report actually went. A relative path is read from the directory "
+            "`run-evidence` runs in, which in a CI job is not always the one the run step wrote from.",
+            "If the run step wrote no file at all, read that step first: a run that never started, or output "
+            "redirected to another name, leaves nothing here.",
+            "Run `agentic-hil run-evidence` again with the path of the report the run wrote.",
+        ),
+        do_not=(
+            "Do not write a report by hand, or copy one from another run, to give the command something to read. The "
+            "evidence would describe a run that did not happen.",
+        ),
+    ),
+    "run_report_unreadable": ErrorRemedy(
+        meaning=(
+            "The file `agentic-hil run-evidence --report` named (`path`) is there and could not be read as UTF-8 "
+            "text, and `backend_error` says why: a permission, or bytes that are not UTF-8. No evidence was written."
+        ),
+        remediation=(
+            "Read `backend_error`. A permission error means the account running `run-evidence` cannot read the file; "
+            "give it read access and run the command again.",
+            "A decode error means the file is not UTF-8. Windows PowerShell 5.1 writes UTF-16 with `>`: read the "
+            "run's own report file (`canonical_report_path` on the run's result) instead, or save the output with "
+            "PowerShell 7 or later, whose `>` writes UTF-8.",
+            "Run `agentic-hil run-evidence` again.",
+        ),
+        do_not=(
+            "Do not write or edit the report by hand to get past this. The evidence is worth what the run wrote and "
+            "nothing more.",
+        ),
+    ),
+    "run_report_invalid": ErrorRemedy(
+        meaning=(
+            "The file `agentic-hil run-evidence --report` named (`path`) is text and is not a JSON object: it does "
+            "not parse as JSON (`backend_error` says where it stopped), or it parses as something other than an "
+            "object. No evidence was written. A saved run report is the whole of what `agentic-hil test-reactor "
+            "--json` printed to standard output, and nothing else."
+        ),
+        remediation=(
+            "Look at the start of the file. A human-readable result means the run was saved without `--json`; text "
+            "before the opening brace means standard error was mixed in, usually by `2>&1`; an empty file means the "
+            "run printed nothing, and its own step log says why; a byte order mark at the very start fails the parse "
+            "as well.",
+            "Save the run's output again with `--json` and standard output alone, or read the run's own report file "
+            "(`canonical_report_path` on the run's result) instead.",
+            "Run `agentic-hil run-evidence` again.",
+        ),
+        do_not=(
+            "Do not repair the report by hand until it parses. A document assembled to satisfy the parser describes "
+            "a run that did not happen, and the evidence is worth what the run wrote and nothing more.",
+        ),
+    ),
     "audit_failed": ErrorRemedy(
         meaning=(
             "The action ran, but its evidence could not be written: `audit_ok` is false and `audit_error` says "
@@ -3987,6 +4356,34 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not copy the toolchain into the workspace.",
         ),
     ),
+    f"timeout:{DISCOVERY_SCOPE}": ErrorRemedy(
+        meaning=(
+            "Discovery started a read-only toolchain read and reaped it when it did not finish within discovery's own "
+            "fixed deadline. The summary names which read: the STM32CubeProgrammer probe listing, or its hot-plug "
+            "connect to the target, which change nothing on the board and report `hardware_state: unchanged`; or "
+            "OpenOCD's init, targets and shutdown, whose `init` attaches to the target and can halt the core before "
+            "the process was reaped, so it reports `hardware_state: unknown`. No configuration was generated or "
+            "adopted from it."
+        ),
+        remediation=(
+            "Read the summary and `hardware_state` on this result: they say which read was reaped and whether it can "
+            "have left the core halted.",
+            "If `hardware_state` is `unknown` and this result came under `hardware_discovery` in a "
+            "`resource_quarantined` refusal, the board is held: follow that refusal's own `next_step` and remediation "
+            "before anything else touches it. With no such refusal around it nothing holds the board, and the core "
+            "may be sitting halted: have the operator reset or power-cycle the target before relying on it.",
+            "Check that no other program holds the in-circuit debugger or programmer, that its cable is a data cable "
+            "seated at both ends, and that the target is powered.",
+            "Run the same discovery again: `project_config_adopt_hardware` on a workspace that has a configuration, "
+            "otherwise the call or command that returned this.",
+        ),
+        do_not=(
+            "Do not set `debuggers.<name>.timeout_s` to give discovery longer. Discovery runs with its own fixed "
+            "deadline and reads no configured timeout.",
+            "Do not switch to another `probe_id` to get an answer. Another probe answering says nothing about the one "
+            "that timed out, and a configuration bound to it describes a different board.",
+        ),
+    ),
     "canonical_write_pending": ErrorRemedy(
         meaning=(
             "The report read back is a staged copy whose promotion to the canonical record failed (`audit_ok: false`, "
@@ -4641,6 +5038,32 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not repeat the call unchanged before the output is read. An unclassified failure names no cause, and a "
             "repeat over a contacted target can add a second unknown effect to the first.",
+        ),
+    ),
+    "unknown_debugger_error": ErrorRemedy(
+        meaning=(
+            "classify_last_error read back the last failure record and found no error type in it: the record named "
+            "neither `error_type` nor `target_error_type` and did not fail its audit, and it still failed one of the "
+            "checks every result is held to: `ok` not true, `target_ok` or `cleanup_ok` false, `cleanup_required` or "
+            "`quarantined` true, a `lease_state` other than `active` or `released`, `side_effect_status` `unknown` "
+            "or `partial`, or `hardware_state` `unknown`. This name stands in for the missing type. It is not "
+            "something a debugger reported, unlike the `backend_error_type` of the same name a `debugger_error` "
+            "carries. `source_tool` names the call that wrote the record, and `summary` is that call's own sentence."
+        ),
+        remediation=(
+            "Read `summary`, `source_tool` and `log_path` on this result: with no error type, they are what says "
+            "what happened. While no other call has finished since, `get_last_report` returns the whole record, and "
+            "the fields named above say which check it failed.",
+            "If the record has `quarantined` or `cleanup_required` true, or a `lease_state` other than `active` or "
+            "`released`, call `hardware_lease_status` and settle what it holds before the next hardware call.",
+            "If `side_effect_status` is `unknown` or `partial`, or `hardware_state` is `unknown`, treat the board's "
+            "state as unknown until a later call confirms it, such as a `probe_target` that succeeds.",
+        ),
+        do_not=(
+            "Do not report this as a debugger fault. The name stands for a missing error type, and the failing call's "
+            "own words are in `summary` and `log_path`.",
+            "Do not read this classification's own `ok: true` as the call having passed. It says the record was read "
+            "back; the record itself is a failure.",
         ),
     ),
     "reset_failed": ErrorRemedy(

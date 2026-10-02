@@ -556,12 +556,13 @@ def test_the_missing_configuration_entry_answers_both_of_its_readers() -> None:
 
 
 def test_an_error_nobody_wrote_a_fix_for_grows_no_invented_advice() -> None:
-    # `config_schema_invalid` rather than `config_invalid`, which this stood on
-    # until #460 gave it an entry: the bundled schema failing its own
-    # meta-validation is a defect in a release rather than something the caller
-    # of the moment can act on, so it is one of the error types nobody has
-    # written a fix for, and the rule this pins is that such a type grows none.
-    refusal = ConfigError("config_schema_invalid", "Bundled Agentic HIL configuration schema is invalid.", {"field": "state_root"}).to_dict()
+    # A type no code raises, rather than a real one. This stood on
+    # `config_invalid` until #460 gave it an entry, and then on
+    # `config_schema_invalid` until every type the package writes was given one
+    # (tests/test_error_catalogue_whole.py holds that), so an uncatalogued type
+    # is now only one like this. The rule this pins is unchanged: such a type
+    # grows no advice.
+    refusal = ConfigError("type_nobody_wrote_a_fix_for", "A refusal the catalogue has no entry for.", {"field": "state_root"}).to_dict()
 
     assert "remediation" not in refusal
     assert "do_not" not in refusal

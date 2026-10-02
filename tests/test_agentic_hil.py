@@ -6464,8 +6464,12 @@ def test_register_agent_mcp_checks_and_dispatches_through_the_one_mapping(tmp_pa
 
 
 def test_register_agent_mcp_refuses_an_agent_it_does_not_know_as_it_always_has() -> None:
-    """The refusal reads as it did before the mapping (#565): the same fields and words, the name as normalized."""
+    """The refusal reads as it did before the mapping (#565): the same fields and words, the name as normalized.
+
+    It also carries the catalogue's advice for `unsupported_agent`, like every refusal the command line builds.
+    """
     from agentic_hil import cli as cli_module
+    from agentic_hil.knowledge import remediation_fields
 
     for requested in ("not-an-agent", " Not_An_Agent "):
         assert register_agent_mcp(requested) == {
@@ -6474,6 +6478,7 @@ def test_register_agent_mcp_refuses_an_agent_it_does_not_know_as_it_always_has()
             "summary": "Agentic HIL does not know this agent's MCP config format.",
             "agent": "not-an-agent",
             "allowed_agents": cli_module.supported_skill_agents(),
+            **remediation_fields("unsupported_agent"),
         }
 
 
