@@ -61,6 +61,7 @@ from test_debug_sessions import (
     stlink_dump_service,
 )
 from test_debug_sessions import debug_service as session_service
+from test_gdbserver_sessions import pyocd_session_service, st_link_session_service
 from test_openocd_access_denied import HostOs
 
 from agentic_hil import debugger, elfsymbols, gdbmi, tools
@@ -89,25 +90,37 @@ Pair = tuple[str, str | None]
 # results carry, and the scope the service fills a refusal under.
 BACKEND_MODULES: dict[str, ModuleType] = {"openocd": openocd, "pyocd": pyocd, "stlink": stlink}
 
-# `GdbDebugSessions` runs the typed debug sessions, and only the OpenOCD backend
-# constructs it (pinned below), so every refusal its methods build is an
-# OpenOCD refusal. The module's own functions are shared, and named one by one
-# with the backends whose calls reach them (also pinned below).
+# `GdbDebugSessions` runs the typed debug sessions, and every backend constructs
+# it under its own name (#624, pinned below), so a refusal its methods build is
+# answered under the backend whose session it is. The scan reads each such site
+# once per backend, because what a site can answer can turn on the backend that
+# constructed the session (`PINNED_EXPRESSIONS`). The module's own functions are
+# shared, and named one by one with the backends whose calls reach them (also
+# pinned below).
 GDBDEBUG_SESSION_CLASS = "GdbDebugSessions"
+GDBDEBUG_SESSION_SCOPES: tuple[str, ...] = BACKENDS
 GDBDEBUG_FUNCTION_SCOPES: dict[str, tuple[str, ...]] = {
-    # The offline symbol read of the backends without a typed session.
+    # The offline symbol read of the backends that read memory without a session.
     "validate_debug_symbol": ("pyocd", "stlink"),
     "resolve_symbol_offline": ("pyocd", "stlink"),
     # Only `GdbDebugSessions.set_breakpoint` normalizes a location.
-    "normalize_breakpoint_location": ("openocd",),
-    "normalize_symbol_location": ("openocd",),
+    "normalize_breakpoint_location": GDBDEBUG_SESSION_SCOPES,
+    "normalize_symbol_location": GDBDEBUG_SESSION_SCOPES,
     # Only the typed sessions report where their target stopped.
-    "target_stop_fields": ("openocd",),
+    "target_stop_fields": GDBDEBUG_SESSION_SCOPES,
+}
+# The module's constants that hold error types, each with the backends whose
+# sessions answer with them.
+GDBDEBUG_CONSTANT_SCOPES: dict[str, tuple[str, ...]] = {
+    # The proofs a stop takes; `GdbDebugSessions.stop_session` answers with the
+    # first one it missed (`PINNED_EXPRESSIONS`).
+    "_TEARDOWN_PROOFS": GDBDEBUG_SESSION_SCOPES,
 }
 # Refusal builders in common.py that take the calling backend's name and
 # answer under it.
 COMMON_FUNCTION_SCOPES: dict[str, tuple[str, ...]] = {
-    "debug_session_unsupported": ("pyocd", "stlink"),
+    # The one backend that opens no session where no GDB server is found.
+    "debug_session_unsupported": ("stlink",),
     "reset_init_unsupported": ("pyocd", "stlink"),
 }
 
@@ -162,22 +175,37 @@ TOOLS_OTHER_AREAS: dict[str, str] = {
 
 # Expressions the scan cannot evaluate from the source alone, each pinned by
 # its exact text where it stands, with the values it can take and why. A
-# change to the expression is a change to this table.
-PINNED_EXPRESSIONS: dict[tuple[str, str, str], Callable[[], frozenset[str]]] = {
+# change to the expression is a change to this table. Each is handed the
+# backend whose session the site is read for, or None for a read that is not
+# one backend's, which answers what any of them can.
+PINNED_EXPRESSIONS: dict[tuple[str, str, str], Callable[[str | None], frozenset[str]]] = {
     # Reached only under `if not ok`, and `ok` is `stop_reason not in
     # ABNORMAL_STOP_REASONS`, so the argument is one of those reasons.
-    ("gdbdebug.py", "_stopped_result", "stop_error_type(stop_reason)"): lambda: frozenset(gdbdebug.stop_error_type(reason) for reason in gdbdebug.ABNORMAL_STOP_REASONS),
+    ("gdbdebug.py", "_stopped_result", "stop_error_type(stop_reason)"): lambda _backend: frozenset(gdbdebug.stop_error_type(reason) for reason in gdbdebug.ABNORMAL_STOP_REASONS),
     # The same reasons, set as `target_error_type` under `if stop_reason in
     # ABNORMAL_STOP_REASONS`.
-    ("gdbdebug.py", "target_stop_fields", "stop_error_type(stop_reason)"): lambda: frozenset(gdbdebug.stop_error_type(reason) for reason in gdbdebug.ABNORMAL_STOP_REASONS),
+    ("gdbdebug.py", "target_stop_fields", "stop_error_type(stop_reason)"): lambda _backend: frozenset(gdbdebug.stop_error_type(reason) for reason in gdbdebug.ABNORMAL_STOP_REASONS),
     # A debug server that stopped before its GDB port was ready: the session
-    # hands its output to the classifier it was constructed with, which is
-    # OpenOCD's (pinned below), without a tool, and publishes what that answers
-    # as it is, with `debugger_error` for a classification that matched nothing.
-    ("gdbdebug.py", "_start_failure", "backend_error_type if backend_error_type != 'unknown_debugger_error' else 'debugger_error'"): lambda: (
-        classifier_returns_without_a_tool(openocd) - {"unknown_debugger_error"}
-    )
-    | {"debugger_error"},
+    # hands its output to the classifier it was constructed with (pinned
+    # below), and the result carries what that answers, with `debugger_error`
+    # for a classification that matched nothing. On OpenOCD that is
+    # `_classify_output` without a tool. pyOCD's and stlink's readings of the
+    # same output always name an error type of their own, merged over this one
+    # (pinned below), so on those two this value never reaches a result.
+    ("gdbdebug.py", "_start_failure", "backend_error_type if backend_error_type != 'unknown_debugger_error' else 'debugger_error'"): lambda backend: (
+        (classifier_returns_without_a_tool(openocd) - {"unknown_debugger_error"}) | {"debugger_error"} if backend in {None, "openocd"} else frozenset()
+    ),
+    # A stop that did not get every teardown proof answers with the first one
+    # it missed, in the order `_TEARDOWN_PROOFS` takes them. On a server with a
+    # command that keeps the core halted when GDB detaches, that detach takes
+    # the breakpoints off, and the removal is proven without a command of its
+    # own (pinned below), so there the first proof missed is never that one.
+    ("gdbdebug.py", "stop_session", "unconfirmed[0].error_type"): lambda backend: frozenset(
+        proof.error_type for proof in gdbdebug._TEARDOWN_PROOFS if proof.error_type != "breakpoints_not_removed" or backend is None or server_steps_of(backend).detach_guard_command is None
+    ),
+    # ST-LINK_gdbserver's output is read against a table of its recorded
+    # refusals; the loop answers the name of the first one that matches.
+    ("stlink.py", "classify_gdb_server_output", "backend_error_type"): lambda _backend: frozenset(name for name, _pattern in stlink.ST_LINK_GDB_SERVER_REFUSALS),
 }
 
 
@@ -324,15 +352,16 @@ class Reader:
     argument means by it: the bare key.
     """
 
-    def __init__(self, *, keep_none: bool = False) -> None:
+    def __init__(self, *, keep_none: bool = False, backend: str | None = None) -> None:
         self._active: set[tuple[str, int, str]] = set()
         self._keep_none = keep_none
+        self._backend = backend
 
     def values(self, node: ast.expr, scope: Scope) -> frozenset[str | None]:
         if scope.function is not None:
             pinned = PINNED_EXPRESSIONS.get((scope.source.name, scope.function.name, ast.unparse(node)))
             if pinned is not None:
-                return frozenset(pinned())
+                return frozenset(pinned(self._backend))
         if isinstance(node, ast.Constant):
             if node.value is None:
                 return frozenset({None}) if self._keep_none else frozenset()
@@ -474,7 +503,7 @@ def error_type_expressions(source: Source) -> Iterator[ast.expr]:
 BACKEND_NAME_EXPRESSIONS = frozenset({"self.backend_name", "backend_name"})
 
 
-def _merge(node: ast.expr, scope: Scope) -> tuple[frozenset[str | None], tuple[str | None, ...] | None] | None:
+def _merge(node: ast.expr, scope: Scope, backend: str | None = None) -> tuple[frozenset[str | None], tuple[str | None, ...] | None] | None:
     """The types and scopes a `**remediation_fields(...)`-like call merges, or None when `node` is no such call.
 
     The scopes are None where the merge is under the backend's own name, which
@@ -486,16 +515,16 @@ def _merge(node: ast.expr, scope: Scope) -> tuple[frozenset[str | None], tuple[s
         return frozenset({"permission_denied"}), (EXCLUSIVE_PERMISSION_SCOPE,)
     if node.func.id != "remediation_fields":
         return None
-    types = Reader().values(node.args[0], scope)
+    types = Reader(backend=backend).values(node.args[0], scope)
     scope_node = node.args[1] if len(node.args) > 1 else next((keyword.value for keyword in node.keywords if keyword.arg == "scope"), None)
     if scope_node is None:
         return types, (None,)
     if ast.unparse(scope_node) in BACKEND_NAME_EXPRESSIONS:
         return types, None
-    return types, tuple(sorted(Reader(keep_none=True).values(scope_node, scope), key=str))
+    return types, tuple(sorted(Reader(keep_none=True, backend=backend).values(scope_node, scope), key=str))
 
 
-def _merge_beside(source: Source, node: ast.expr, scope: Scope) -> tuple[frozenset[str | None], tuple[str | None, ...] | None] | None:
+def _merge_beside(source: Source, node: ast.expr, scope: Scope, backend: str | None = None) -> tuple[frozenset[str | None], tuple[str | None, ...] | None] | None:
     """A merge in the same dict literal, or the same call, that writes the site."""
     parent = source.parents.get(node)
     if isinstance(parent, ast.keyword):
@@ -506,42 +535,61 @@ def _merge_beside(source: Source, node: ast.expr, scope: Scope) -> tuple[frozens
         spread = [keyword.value for keyword in parent.keywords if keyword.arg is None]
     else:
         return None
-    merges = [merge for merge in (_merge(value, scope) for value in spread) if merge is not None]
+    merges = [merge for merge in (_merge(value, scope, backend) for value in spread) if merge is not None]
     if not merges:
         return None
     assert len(merges) == 1, f"{source.name}:{node.lineno}: more than one remediation merged beside one error type"
     return merges[0]
 
 
-def _merges_in_function(function: ast.FunctionDef | None, scope: Scope) -> list[tuple[frozenset[str | None], tuple[str | None, ...] | None]]:
+def _merges_in_function(function: ast.FunctionDef | None, scope: Scope, backend: str | None = None) -> list[tuple[frozenset[str | None], tuple[str | None, ...] | None]]:
     """Every `<result>.update(remediation_fields(...))` the function makes."""
     if function is None:
         return []
     merges = []
     for node in ast.walk(function):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "update" and len(node.args) == 1:
-            merge = _merge(node.args[0], scope)
+            merge = _merge(node.args[0], scope, backend)
             if merge is not None:
                 merges.append(merge)
     return merges
 
 
-def attach_scopes(source: Source, node: ast.expr, function_name: str) -> tuple[str | None, ...]:
-    """The scope a refusal that merges nothing is filled under: the backend its result names."""
+def attach_scopes(source: Source, node: ast.expr, function_name: str, backend: str | None = None) -> tuple[str | None, ...]:
+    """The scope a refusal that merges nothing is filled under: the backend its result names.
+
+    `backend` is the one whose session a `GdbDebugSessions` site is read for;
+    a site read for no one backend is every session backend's.
+    """
     if source.module is tools:
         # The service's own refusals name no backend; the bare key serves them.
         return (None,)
-    for backend, module in BACKEND_MODULES.items():
+    for name, module in BACKEND_MODULES.items():
         if source.module is module:
-            return (backend,)
+            return (name,)
     if source.module is gdbdebug:
         if source.enclosing_class(node) == GDBDEBUG_SESSION_CLASS:
-            return ("openocd",)
+            return (backend,) if backend is not None else GDBDEBUG_SESSION_SCOPES
         if function_name in GDBDEBUG_FUNCTION_SCOPES:
             return GDBDEBUG_FUNCTION_SCOPES[function_name]
+        if function_name == "<module>" and module_constant(source, node) in GDBDEBUG_CONSTANT_SCOPES:
+            return GDBDEBUG_CONSTANT_SCOPES[module_constant(source, node)]  # type: ignore[index]
     if source.module is common and function_name in COMMON_FUNCTION_SCOPES:
         return COMMON_FUNCTION_SCOPES[function_name]
     raise AssertionError(f"{source.name}:{node.lineno}: an error_type in {function_name}, which no scope is pinned for")
+
+
+def module_constant(source: Source, node: ast.AST) -> str | None:
+    """The name of the module-level assignment `node` is written in, or None."""
+    while node in source.parents:
+        node = source.parents[node]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return None
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and source.parents.get(node) is source.tree:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = [target.id for target in targets if isinstance(target, ast.Name)]
+            return names[0] if len(names) == 1 == len(targets) else None
+    return None
 
 
 def is_a_debug_site(source: Source, node: ast.expr) -> bool:
@@ -557,20 +605,20 @@ def is_a_debug_site(source: Source, node: ast.expr) -> bool:
     return True
 
 
-def scopes_of_site(source: Source, node: ast.expr, values: frozenset[str | None]) -> tuple[str | None, ...]:
-    """Whose remediation a refusal built at `node` is looked up under."""
+def scopes_of_site(source: Source, node: ast.expr, values: frozenset[str | None], backend: str | None = None) -> tuple[str | None, ...]:
+    """Whose remediation a refusal built at `node`, for `backend`'s session where it is a session's, is looked up under."""
     function = source.enclosing_function(node)
     function_name = function.name if function is not None else "<module>"
     scope = Scope(source, function)
-    beside = _merge_beside(source, node, scope)
+    beside = _merge_beside(source, node, scope, backend)
     if beside is not None:
         types, scopes = beside
         assert types == values, f"{source.name}:{node.lineno}: merges the remediation of {sorted(types, key=str)} beside {sorted(values, key=str)}"
-        return scopes if scopes is not None else attach_scopes(source, node, function_name)
-    matching = [scopes for types, scopes in _merges_in_function(function, scope) if values <= types]
+        return scopes if scopes is not None else attach_scopes(source, node, function_name, backend)
+    matching = [scopes for types, scopes in _merges_in_function(function, scope, backend) if values <= types]
     if matching:
-        return tuple(sorted({one for scopes in matching for one in (scopes if scopes is not None else attach_scopes(source, node, function_name))}, key=str))
-    return attach_scopes(source, node, function_name)
+        return tuple(sorted({one for scopes in matching for one in (scopes if scopes is not None else attach_scopes(source, node, function_name, backend))}, key=str))
+    return attach_scopes(source, node, function_name, backend)
 
 
 # The debugger front end, the GDB/MI client and the ELF reader build no refusal
@@ -584,7 +632,7 @@ def scan(planted: Mapping[ModuleType, str] = MappingProxyType({})) -> dict[Pair,
     `planted` replaces a module's source with the text given, which is how the
     tests below prove that each shape of refusal reaches the inventory.
     """
-    reader = Reader()
+    readers = {backend: Reader(backend=backend) for backend in (None, *GDBDEBUG_SESSION_SCOPES)}
     sites: dict[Pair, list[str]] = {}
     unreadable: list[str] = []
     for module in SCANNED_MODULES:
@@ -592,16 +640,19 @@ def scan(planted: Mapping[ModuleType, str] = MappingProxyType({})) -> dict[Pair,
         for node in error_type_expressions(source):
             if not is_a_debug_site(source, node):
                 continue
-            try:
-                values = reader.values(node, Scope(source, source.enclosing_function(node)))
-            except UnreadableValue as error:
-                unreadable.append(f"{source.name}:{node.lineno}: {ast.unparse(node)} ({error})")
-                continue
-            scopes = scopes_of_site(source, node, values)
-            for value in values:
-                assert value is not None
-                for scope in scopes:
-                    sites.setdefault((value, scope), []).append(f"{source.name}:{node.lineno}")
+            # A session's site is read once for each backend that opens sessions.
+            in_a_session = source.module is gdbdebug and source.enclosing_class(node) == GDBDEBUG_SESSION_CLASS
+            for backend in GDBDEBUG_SESSION_SCOPES if in_a_session else (None,):
+                try:
+                    values = readers[backend].values(node, Scope(source, source.enclosing_function(node)))
+                except UnreadableValue as error:
+                    unreadable.append(f"{source.name}:{node.lineno}: {ast.unparse(node)} ({error})")
+                    break
+                scopes = scopes_of_site(source, node, values, backend)
+                for value in values:
+                    assert value is not None
+                    for scope in scopes:
+                        sites.setdefault((value, scope), []).append(f"{source.name}:{node.lineno}")
     assert not unreadable, f"error_type values the scan cannot read: {unreadable}"
     return {pair: tuple(sorted(set(lines))) for pair, lines in sites.items()}
 
@@ -619,28 +670,31 @@ def scanned_debug_pairs() -> dict[Pair, tuple[str, ...]]:
 INVENTORY_BY_TYPE: dict[str, tuple[str | None, ...]] = {
     "adapter_access_denied": ("openocd",),
     "adapter_not_found": BACKENDS,
+    # ST-LINK_gdbserver's own refusals at a session start (stlink.py).
+    "adapter_usb_error": ("stlink",),
     "artifact_validation_failed": (None,),
-    "audit_broken": ("openocd",),
+    "audit_broken": BACKENDS,
     "audit_unavailable": ("pyocd",),
-    "breakpoint_reconciliation_failed": ("openocd",),
-    "cleanup_failed": ("openocd",),
+    "breakpoint_reconciliation_failed": BACKENDS,
+    "breakpoints_not_removed": ("pyocd", "stlink"),
+    "cleanup_failed": BACKENDS,
     "cleanup_required": (None,),
     "config_file_not_found": ("openocd", "stlink"),
-    "debug_session_setup_failed": ("openocd",),
+    "debug_session_setup_failed": BACKENDS,
     "debugger_command_rejected": ("openocd",),
     "debugger_config_not_found": ("openocd",),
     "debugger_error": BACKENDS,
     # common.py merges the bare entry beside it, for every backend alike.
     "debugger_not_executable": (None,),
     "debugger_not_found": BACKENDS,
-    "detach_resume_not_confirmed": ("openocd",),
+    "detach_resume_not_confirmed": BACKENDS,
     "flash_erase_failed": BACKENDS,
     "flash_failed": BACKENDS,
-    "gdb_async_unsupported": ("openocd",),
+    "gdb_async_unsupported": BACKENDS,
     # A missing GDB merges under the GDB's state, not the backend's (gdbdebug.py).
     "gdb_not_found": (None, gdbdebug.GDB_AUTODETECTED_MISSING_SCOPE, gdbdebug.GDB_NOT_CONFIGURED_SCOPE),
-    "gdb_start_failed": ("openocd",),
-    "halt_not_confirmed": ("openocd",),
+    "gdb_start_failed": BACKENDS,
+    "halt_not_confirmed": BACKENDS,
     "interface_config_not_found": ("openocd",),
     "invalid_argument": (None, *BACKENDS),
     "memory_read_failed": BACKENDS,
@@ -652,25 +706,26 @@ INVENTORY_BY_TYPE: dict[str, tuple[str | None, ...]] = {
     # execution grant a debug_continue needs, and a granted key that blocks.
     "permission_denied": (None, "allow_debug_execution", EXCLUSIVE_PERMISSION_SCOPE, *BACKENDS),
     "probe_discovery_failed": BACKENDS,
+    "probe_server_open_failed": ("stlink",),
     "reset_failed": BACKENDS,
     "resource_busy": (None,),
-    "resource_quarantined": ("openocd",),
-    "session_already_active": ("openocd",),
+    "resource_quarantined": BACKENDS,
+    "session_already_active": BACKENDS,
     # gdbdebug.py merges the bare entry beside it, true for every kind of session.
     "session_not_active": (None,),
-    "stop_reason_not_available": ("openocd",),
-    "symbol_ambiguous": ("openocd",),
+    "stop_reason_not_available": BACKENDS,
+    "symbol_ambiguous": BACKENDS,
     "symbol_not_found": BACKENDS,
     "symbol_resolution_failed": BACKENDS,
     "symbol_source_changed": ("pyocd", "stlink"),
     "symbol_source_not_available": ("pyocd", "stlink"),
     "target_config_not_found": ("openocd",),
-    "target_exception": ("openocd",),
+    "target_exception": BACKENDS,
     "target_not_detected": BACKENDS,
     "target_state_unconfirmed": ("openocd", "stlink"),
     "target_type_invalid": ("pyocd",),
     "timeout": BACKENDS,
-    "unexpected_breakpoint": ("openocd",),
+    "unexpected_breakpoint": BACKENDS,
     "verify_failed": BACKENDS,
 }
 INVENTORY = frozenset((error_type, scope) for error_type, scopes in INVENTORY_BY_TYPE.items() for scope in scopes)
@@ -701,7 +756,7 @@ EXCLUDED: frozenset[Pair] = frozenset(OWNED_ELSEWHERE) | SILENT | frozenset(NEVE
 OWN_KEY_REQUIRED: dict[tuple[str, str], str] = {
     ("config_file_not_found", "openocd"): "the bare entry is about the Agentic HIL configuration file, and this is an OpenOCD script the debug server could not find",
     ("not_supported", "openocd"): "no bare `not_supported` is true for every refusal of that name, and the other backends' keys are about debug sessions",
-    ("audit_broken", "openocd"): "the bare key is the coordination ledger's, which #646 writes; this is the debug session's own evidence",
+    **{("audit_broken", backend): "the bare key is the coordination ledger's, which #646 writes; this is the debug session's own evidence" for backend in BACKENDS},
     **{("debugger_not_found", backend): "the executable that is missing, and where it comes from, is each backend's own" for backend in BACKENDS},
     **{("timeout", backend): "a GDB/MI session that stopped answering and a command-line tool that ran out of time are read differently" for backend in BACKENDS},
 }
@@ -732,10 +787,11 @@ WRITTEN_KEYS: frozenset[str] = frozenset(
         *(f"{error_type}:{backend}" for error_type in ("timeout", "debugger_not_found") for backend in BACKENDS),
         "config_file_not_found:openocd",
         "not_supported:openocd",
-        "audit_broken:openocd",
+        *(f"audit_broken:{backend}" for backend in BACKENDS),
         *BARE_KEY_REQUIRED,
         "adapter_access_denied",
         "breakpoint_reconciliation_failed",
+        "breakpoints_not_removed",
         "debug_session_setup_failed",
         "detach_resume_not_confirmed",
         "gdb_async_unsupported",
@@ -753,7 +809,6 @@ WRITTEN_KEYS: frozenset[str] = frozenset(
 WRITTEN_HERE: frozenset[Pair] = frozenset(
     {
         ("adapter_access_denied", "openocd"),
-        ("audit_broken", "openocd"),
         ("breakpoint_reconciliation_failed", "openocd"),
         ("cleanup_failed", "openocd"),
         ("config_file_not_found", "openocd"),
@@ -772,6 +827,9 @@ WRITTEN_HERE: frozenset[Pair] = frozenset(
         ("unexpected_breakpoint", "openocd"),
         *((error_type, backend) for backend in BACKENDS for error_type in ("debugger_error", "debugger_not_found", "output_write_failed", "probe_discovery_failed", "reset_failed", "symbol_not_found", "symbol_resolution_failed", "timeout")),
         *((error_type, backend) for backend in ("pyocd", "stlink") for error_type in ("symbol_source_changed", "symbol_source_not_available")),
+        # The debug sessions those two open (#624).
+        *(("breakpoints_not_removed", backend) for backend in ("pyocd", "stlink")),
+        *(("audit_broken", backend) for backend in BACKENDS),
     }
 )
 
@@ -894,26 +952,80 @@ def test_a_merge_of_another_types_advice_beside_a_refusal_fails_the_scan() -> No
 # The facts the scan's scopes rest on.
 
 
-def test_typed_debug_sessions_are_built_by_the_openocd_backend_alone() -> None:
-    """Why every refusal `GdbDebugSessions` builds is looked up under `openocd`."""
+# The classifier each backend constructs its sessions with, which is what
+# `_start_failure` reads a dead server's output with.
+SESSION_CLASSIFIERS = {
+    "openocd.py": "self._classify_output",
+    "pyocd.py": "lambda output: self._classify_output(output, 'debug_start_session')",
+    "stlink.py": "classify_gdb_server_output",
+}
+# The steps each backend constructs its sessions with: its own server's.
+SESSION_SERVER_STEPS = {"openocd.py": "OPENOCD_GDB_SERVER_STEPS", "pyocd.py": "PYOCD_GDB_SERVER_STEPS", "stlink.py": "ST_LINK_GDB_SERVER_STEPS"}
+
+
+def server_steps_of(backend: str) -> gdbdebug.GdbServerSteps:
+    """The `GdbServerSteps` `backend`'s sessions run on (pinned below)."""
+    return getattr(BACKEND_MODULES[backend], SESSION_SERVER_STEPS[f"{backend}.py"])
+
+
+def test_typed_debug_sessions_are_built_by_every_backend_under_its_own_name() -> None:
+    """Why a refusal `GdbDebugSessions` builds is looked up under the backend whose session it is (#624)."""
     constructions = []
     for module in (*BACKEND_MODULES.values(), gdbdebug, common, tools, debugger):
         source = source_of(module)
         constructions.extend((source.name, node) for node in ast.walk(source.tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == GDBDEBUG_SESSION_CLASS)
 
-    assert [name for name, _node in constructions] == ["openocd.py"]
-    (_name, call) = constructions[0]
-    keywords = {keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords}
-    assert keywords["backend_name"] == "self.backend_name", keywords
-    assert keywords["classify_server_output"] == "self._classify_output", keywords
+    assert sorted(name for name, _node in constructions) == sorted(f"{backend}.py" for backend in GDBDEBUG_SESSION_SCOPES)
+    for name, construction in constructions:
+        keywords = {keyword.arg: ast.unparse(keyword.value) for keyword in construction.keywords}
+        assert keywords["backend_name"] == "self.backend_name", (name, keywords)
+        assert keywords["classify_server_output"] == SESSION_CLASSIFIERS[name], (name, keywords)
+        assert keywords["server_steps"] == SESSION_SERVER_STEPS[name], (name, keywords)
+        # pyOCD and stlink read a dead server's output themselves (below);
+        # OpenOCD may answer None, leaving its classification standing.
+        assert keywords["read_start_failure"] == "self._debug_start_failure", (name, keywords)
+
+
+@pytest.mark.parametrize("backend", ["pyocd", "stlink"])
+def test_a_start_failure_on_pyocd_and_stlink_is_named_by_the_backends_own_reading(backend: str) -> None:
+    """Why `_start_failure`'s own classification reaches no result on these two
+    (`PINNED_EXPRESSIONS`): their reading returns one dict, which always names
+    an error type, and the session merges it over the classification."""
+    (function,) = source_of(BACKEND_MODULES[backend]).functions["_debug_start_failure"]
+    returns = [node for node in ast.walk(function) if isinstance(node, ast.Return)]
+    built = [node for node in ast.walk(function) if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "result"]
+
+    assert [ast.unparse(node) for node in returns] == ["return result"]
+    assert len(built) == 1 and isinstance(built[0].value, ast.Dict), [ast.unparse(node) for node in built]
+    assert "error_type" in [key.value for key in built[0].value.keys if isinstance(key, ast.Constant)]
+    assert not [node for node in ast.walk(function) if isinstance(node, ast.Delete)]
+    (start_failure,) = source_of(gdbdebug).functions["_start_failure"]
+    assert "result.update(read)" in [ast.unparse(node) for node in ast.walk(start_failure) if isinstance(node, ast.Call)]
+
+
+def test_where_gdbs_detach_keeps_the_core_halted_the_breakpoint_removal_needs_no_command() -> None:
+    """Why a stop on OpenOCD never answers `breakpoints_not_removed` (`PINNED_EXPRESSIONS`).
+
+    On a server with a detach guard command, GDB's detach carries the removal,
+    so the removal before the end answers proven before it sends anything. Of
+    the three servers, only OpenOCD's has that command."""
+    (function,) = source_of(gdbdebug).functions["_remove_breakpoints_before_end"]
+    docstring, guard, *_rest = function.body
+
+    assert isinstance(docstring, ast.Expr) and isinstance(docstring.value, ast.Constant), ast.unparse(docstring)
+    assert isinstance(guard, ast.If) and not guard.orelse, ast.unparse(guard)
+    assert ast.unparse(guard.test) == "self._server_steps.detach_guard_command is not None or not session.breakpoints"
+    assert [ast.unparse(statement) for statement in guard.body] == ["return True"]
+    assert [backend for backend in BACKENDS if server_steps_of(backend).detach_guard_command is not None] == ["openocd"]
 
 
 def calls_reaching(function_name: str, seen: frozenset[str] = frozenset()) -> Iterator[tuple[str, ast.Call]]:
     """Each call that reaches the module function `function_name`, with the backend it is made for.
 
     A call in a backend module is that backend's; a call inside
-    `GdbDebugSessions` is OpenOCD's; a call inside another module function of
-    gdbdebug.py is whatever reaches that one. A call anywhere else fails.
+    `GdbDebugSessions` is every backend's that opens sessions; a call inside
+    another module function of gdbdebug.py is whatever reaches that one. A call
+    anywhere else fails.
     """
     for module in SCANNED_MODULES:
         source = source_of(module)
@@ -924,7 +1036,7 @@ def calls_reaching(function_name: str, seen: frozenset[str] = frozenset()) -> It
             if module in BACKEND_MODULES.values():
                 yield module.__name__.rpartition(".")[2], node
             elif module is gdbdebug and source.enclosing_class(node) == GDBDEBUG_SESSION_CLASS:
-                yield "openocd", node
+                yield from ((backend, node) for backend in GDBDEBUG_SESSION_SCOPES)
             elif module is gdbdebug and caller is not None and source.enclosing_class(node) is None:
                 if caller.name not in seen:
                     yield from ((backend, node) for backend, _call in calls_reaching(caller.name, seen | {function_name}))
@@ -1064,28 +1176,39 @@ STATE_FIELDS = r"target_state|side_effect_status|target_contacted|halt_confirmed
 TIMEOUT_CEILING = r"debuggers\.\S+\.timeout_s"
 # A clause naming debug_stop_session and a word that repeats it, in either order.
 RETRIED_STOP = rf"(?=.*debug_stop_session)(?=.*(?:{RETRY}))"
+# What a stop reports each teardown proof by (gdbdebug.py `stop_session`).
+TEARDOWN_FIELDS = (r"halt_not_confirmed", r"breakpoints_removed_confirmed", r"detach_resume_guard_confirmed")
 
 CONTRACTS: dict[str, Contract] = {
     # gdbdebug.py 640-649, 696, 1033, 1207, 1241, 1387; openocd.py 499, 982.
     # Every wait is `min(debuggers.<id>.timeout_s, cap)` and a call's own
     # timeout_s only shortens it (gdbdebug.py 240, 419-421, 684-686).
     "timeout:openocd": Contract(means=(r"\bOpenOCD\b", r"\bGDB\b"), steps=(STATE_FIELDS, TIMEOUT_CEILING, r"debug_halt"), order=(STATE_FIELDS, TIMEOUT_CEILING), avoid=(RETRY,)),
-    # pyocd.py 251, 286, 736 and the offline symbol read (gdbdebug.py 1783).
-    "timeout:pyocd": Contract(means=(r"\bpyOCD\b",), steps=(STATE_FIELDS, TIMEOUT_CEILING), order=(STATE_FIELDS, TIMEOUT_CEILING), avoid=(RETRY,)),
-    # stlink.py 282, 308, 642 and the offline symbol read.
-    "timeout:stlink": Contract(means=(r"STM32CubeProgrammer",), steps=(STATE_FIELDS, TIMEOUT_CEILING), order=(STATE_FIELDS, TIMEOUT_CEILING), avoid=(RETRY,)),
+    # pyocd.py's command-line waits, the offline symbol read (gdbdebug.py), and
+    # since #624 the debug session's: the server's ready line and every GDB/MI
+    # command (gdbdebug.py, the same waits as on OpenOCD).
+    "timeout:pyocd": Contract(means=(r"\bpyOCD\b", r"\bGDB\b", r"gdb_server_not_ready"), steps=(STATE_FIELDS, TIMEOUT_CEILING, r"debug_halt"), order=(STATE_FIELDS, TIMEOUT_CEILING), avoid=(RETRY,)),
+    # stlink.py's command-line waits, the offline symbol read, and the session
+    # on ST-LINK_gdbserver (#624).
+    "timeout:stlink": Contract(means=(r"STM32CubeProgrammer", r"ST-LINK_gdbserver", r"gdb_server_not_ready"), steps=(STATE_FIELDS, TIMEOUT_CEILING, r"debug_halt"), order=(STATE_FIELDS, TIMEOUT_CEILING), avoid=(RETRY,)),
     # openocd.py OPENOCD_NOT_FOUND and the debug server spawn (gdbdebug.py 306).
     "debugger_not_found:openocd": Contract(means=(r"\bOpenOCD\b",), steps=(r"\bexecutable\b", r"\bPATH\b|install")),
-    "debugger_not_found:pyocd": Contract(means=(r"\bpyOCD\b",), steps=(r"\bexecutable\b", r"\bPATH\b|install")),
-    "debugger_not_found:stlink": Contract(means=(r"STM32CubeProgrammer|STM32_Programmer_CLI",), steps=(r"\bexecutable\b", r"\bPATH\b|install")),
+    # The session start spawns `pyocd gdbserver` (gdbdebug.py, the debug server spawn).
+    "debugger_not_found:pyocd": Contract(means=(r"\bpyOCD\b", r"debug server"), steps=(r"\bexecutable\b", r"\bPATH\b|install")),
+    # stlink.py: no ST-LINK_gdbserver where a session start looks for one
+    # (`backend_error_type` `gdb_server_not_found`), and the debug server spawn.
+    "debugger_not_found:stlink": Contract(
+        means=(r"STM32CubeProgrammer|STM32_Programmer_CLI", r"ST-LINK_gdbserver", r"gdb_server_not_found"), steps=(r"\bexecutable\b", r"\bPATH\b|install", r"gdb_server_executable")
+    ),
     # The backends' tables and bootstrap.py 230, 331, 500, 793 (probe discovery).
     "debugger_not_found": Contract(steps=(r"\bexecutable\b", r"\bPATH\b|install")),
     # The raw name the session start publishes (decision: no behaviour change).
     "config_file_not_found:openocd": Contract(means=(r"OpenOCD",), steps=(r"interface_cfg|target_cfg|\.cfg", r"log_path|stderr|output"), never=(r"project_config_create",)),
     # openocd.py list_probes: an adapter with no USB identity to list.
     "not_supported:openocd": Contract(means=(r"OpenOCD",), steps=(r"probe_id",)),
-    # gdbdebug.py 232: the session evidence latch; quarantined, refused until resolved.
-    "audit_broken:openocd": Contract(means=(r"audit|evidence",), steps=(r"operator",), avoid=(RETRY,)),
+    # gdbdebug.py 232: the session evidence latch; quarantined, refused until
+    # resolved. The sessions on every backend share it (#624).
+    **{f"audit_broken:{backend}": Contract(means=(r"audit|evidence",), steps=(r"operator",), avoid=(RETRY,)) for backend in BACKENDS},
     # The libusb refusal OpenOCD prints off Windows (openocd.py).
     "adapter_access_denied": Contract(means=(r"USB|libusb|adapter",), steps=(r"udev|group",), avoid=(r"\bsudo\b|\broot\b|administrator",)),
     # gdbdebug.py 566/575: cleanup_required, side_effect_status unknown; a
@@ -1128,10 +1251,19 @@ CONTRACTS: dict[str, Contract] = {
     "symbol_source_not_available": Contract(means=(r"ELF",), order=(r"flash_firmware", r"debug_symbol_info|debug_symbol_value|debug_dump_symbol_ihex"), steps=(r"\bELF\b",), avoid=(r"\.hex|\.bin",)),
     # gdbdebug.py 414-460: a retry repeats only the process cleanup, and only
     # after a cleanup-only failure (443-450); otherwise the proofs stay false.
-    "cleanup_failed": Contract(steps=(r"cleanup_errors?", r"probe_target"), beside=((r"debug_stop_session", r"halt_not_confirmed"),), avoid=(r"debug_stop_session",)),
+    "cleanup_failed": Contract(
+        means=TEARDOWN_FIELDS,
+        steps=(r"cleanup_errors?", r"probe_target"),
+        beside=tuple((r"debug_stop_session", field) for field in TEARDOWN_FIELDS),
+        avoid=(r"debug_stop_session",),
+    ),
     # gdbdebug.py 465-484 (#637): a retried stop cannot settle these.
     "halt_not_confirmed": Contract(steps=(r"probe_target",), avoid=(r"debug_stop_session",), never=(RETRIED_STOP,)),
     "detach_resume_not_confirmed": Contract(steps=(r"probe_target",), avoid=(r"debug_stop_session",), never=(RETRIED_STOP,)),
+    # gdbdebug.py `_remove_breakpoints_before_end` (#624): on a server ended
+    # before GDB detaches, the deletes and the list read back before the end;
+    # the stop then holds the session like a halt it could not confirm.
+    "breakpoints_not_removed": Contract(means=(r"breakpoints_removed_confirmed",), steps=(r"probe_target",), avoid=(r"debug_stop_session",), never=(RETRIED_STOP,)),
 }
 
 FORBIDDEN_CHARACTERS = tuple(chr(code) for code in (0x2013, 0x2014, 0x2192))
@@ -1202,15 +1334,33 @@ def test_the_settle_detector_reads_each_clause_on_its_own(step: str, expected_se
     assert offers_a_retried_stop(step) is expected_retry
 
 
-@pytest.mark.parametrize("error_type", ["halt_not_confirmed", "detach_resume_not_confirmed"])
-def test_an_unsettled_stop_names_the_call_that_settles_it(error_type: str) -> None:
-    """#637: a retried `debug_stop_session` forces both proofs false and settles nothing
-    (gdbdebug.py 437-447); the recovery probe_target runs first does."""
-    advice = remediation_fields(error_type, "openocd")
+UNSETTLED_STOPS = [(proof.error_type, backend) for proof in gdbdebug._TEARDOWN_PROOFS for backend in INVENTORY_BY_TYPE[proof.error_type]]
 
-    assert advice, f"no entry answers {error_type} under openocd"
+
+@pytest.mark.parametrize(("error_type", "backend"), UNSETTLED_STOPS, ids=[f"{error_type}-{backend}" for error_type, backend in UNSETTLED_STOPS])
+def test_an_unsettled_stop_names_the_call_that_settles_it(error_type: str, backend: str) -> None:
+    """#637: a retried `debug_stop_session` forces every proof false and settles nothing
+    (gdbdebug.py `stop_session`); the recovery probe_target runs first does."""
+    advice = remediation_fields(error_type, backend)
+
+    assert advice, f"no entry answers {error_type} under {backend}"
     assert any(settles(step) for step in advice["remediation"]), advice["remediation"]
     assert not [step for step in advice["remediation"] if offers_a_retried_stop(step)], advice["remediation"]
+
+
+# How many proofs a stop takes, in words: `_TEARDOWN_PROOFS` holds three since #624.
+PROOF_COUNTS = {2: r"\b(both|two)\s+(teardown\s+)?proofs\b", 3: r"\b(all three|three)\s+(teardown\s+)?proofs\b"}
+
+
+@pytest.mark.parametrize("key", ["cleanup_failed", *(proof.error_type for proof in gdbdebug._TEARDOWN_PROOFS)])
+def test_a_teardown_entry_counts_the_proofs_a_stop_takes(key: str) -> None:
+    entry = catalogue_entry(key)
+    assert entry is not None, key
+    text = " ".join([entry["meaning"], *entry["remediation"], *entry.get("do_not", [])])
+
+    for count, pattern in PROOF_COUNTS.items():
+        if count != len(gdbdebug._TEARDOWN_PROOFS):
+            assert not re.search(pattern, text, re.IGNORECASE), (pattern, text)
 
 
 # ---------------------------------------------------------------------------
@@ -1504,6 +1654,40 @@ def cleared_with_an_unreadable_breakpoint_list(tmp_path: Path, monkeypatch: pyte
         closed(service)
 
 
+# -- the sessions on the servers ended before GDB detaches (#624)
+
+GDB_SERVER_SESSION_SERVICE: dict[str, Callable[[Path, pytest.MonkeyPatch], tuple[AgenticHILToolService, Path]]] = {"pyocd": pyocd_session_service, "stlink": st_link_session_service}
+
+
+def stopped_on_a_gdb_server_with_an_unreadable_breakpoint_list(backend: str) -> Callable[[Path, pytest.MonkeyPatch], dict]:
+    """A stop over a breakpoint whose removal before the server's end cannot read the backend's list."""
+
+    def provoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+        service, _events = GDB_SERVER_SESSION_SERVICE[backend](tmp_path, monkeypatch)
+        try:
+            assert service.call(*START)["ok"] is True
+            assert service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}})["ok"] is True
+            monkeypatch.setattr(service.backend._debug, "_backend_breakpoint_numbers", lambda *_args, **_kwargs: None)
+            return service.call("debug_stop_session", {})
+        finally:
+            closed(service)
+
+    return provoke
+
+
+def called_on_a_gdb_server_after_the_audit_broke(backend: str, tool: str, arguments: dict) -> Callable[[Path, pytest.MonkeyPatch], dict]:
+    def provoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+        service, _events = GDB_SERVER_SESSION_SERVICE[backend](tmp_path, monkeypatch)
+        try:
+            assert service.call(*START)["ok"] is True
+            latch_audit_break(service)
+            return service.call(tool, arguments)
+        finally:
+            closed(service)
+
+    return provoke
+
+
 # -- the symbol tools over a session
 
 
@@ -1643,6 +1827,15 @@ REFUSALS = [
     Refusal("debug_list_breakpoints", "audit_broken", "openocd", called_after_the_audit_broke("debug_list_breakpoints", {})),
     Refusal("debug_set_breakpoint", "audit_broken", "openocd", called_after_the_audit_broke("debug_set_breakpoint", {"location": {"symbol": "test_done"}})),
     Refusal("debug_clear_breakpoints", "breakpoint_reconciliation_failed", "openocd", cleared_with_an_unreadable_breakpoint_list),
+    # the sessions on the servers ended before GDB detaches
+    *(
+        refusal
+        for backend in ("pyocd", "stlink")
+        for refusal in (
+            Refusal("debug_stop_session", "breakpoints_not_removed", backend, stopped_on_a_gdb_server_with_an_unreadable_breakpoint_list(backend)),
+            Refusal("debug_get_session_status", "audit_broken", backend, called_on_a_gdb_server_after_the_audit_broke(backend, "debug_get_session_status", {})),
+        )
+    ),
     # the symbol tools over a session
     Refusal("debug_symbol_info", "symbol_not_found", "openocd", symbol_over_a_session("debug_symbol_info", ABSENT_SYMBOL)),
     Refusal("debug_symbol_info", "symbol_resolution_failed", "openocd", symbol_over_a_session("debug_symbol_info", "g_pfnVectors")),

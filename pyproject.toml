@@ -128,7 +128,8 @@ markers = [
   "without_device_group: the bench stage with the probe's groups withheld; runs alone in tools/bench_in_container.py --without-device-group",
   "wheelhouse: installs the product from the package index tools/bench/Dockerfile builds into the bench image; runs only where that index is",
   "usb_uart: drives the board over the USB-UART adapter wired beside the probe; runs only where AGENTIC_HIL_BENCH_USB_UART names it",
-  "tdqs_model: scores the real tools/list with the real model through the Claude Code command line; deselected unless AGENTIC_HIL_TDQS_MODEL=1"
+  "tdqs_model: scores the real tools/list with the real model through the Claude Code command line; deselected unless AGENTIC_HIL_TDQS_MODEL=1",
+  "cubeclt: drives the board through the STM32CubeCLT tree AGENTIC_HIL_BENCH_CUBECLT names (tools/bench_in_container.py --cubeclt-archive builds one into the bench image); runs only where one is named"
 ]
 
 [tool.ruff]

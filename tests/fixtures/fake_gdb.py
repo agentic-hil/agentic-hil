@@ -2,6 +2,7 @@
 """Fake GDB/MI process for tests: token-numbered replies, delayed async *stopped records."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import socket
@@ -11,6 +12,7 @@ import time
 from pathlib import Path
 
 COMMAND_PATTERN = re.compile(r"^(\d+)(.*)$")
+RESULT_LINE_PATTERN = re.compile(r"^\d+\^")
 MEMORY_READ_PATTERN = re.compile(r"^-data-read-memory-bytes\s+(0x[0-9a-fA-F]+|\d+)\s+(\d+)$")
 ASYNC_STOP_DELAY_S = 0.02
 
@@ -183,6 +185,72 @@ CONNECT_DROPPED_MESSAGE = "Remote communication error.  Target disconnected: Con
 # GDB that connects to nothing.
 CONNECTS_TO_SERVER = "connects_to_server"
 server_connections: list[socket.socket] = []
+# pyOCD's GDB server as the GDB on the reference board saw it, replayed from the
+# recording beside this file (pyOCD 0.45.1, xPack arm-none-eabi-gdb 14.2.90,
+# 2026-10-01; scenario `session_ended_by_gdb_exit`). Opted into by name, and it
+# implies `connects_to_server`. What differs from the OpenOCD answers above is
+# all in the recording: `-target-select` answers `^connected` after a `*stopped`
+# record with no reason for the core pyOCD halted on connect, and
+# `monitor reset halt` answers `^done` after two console records, the second of
+# which is the only evidence the core is halted at the reset vector. pyOCD
+# answers `^done` to a monitor command it does not know as well, after an
+# `Error:` console record, so the status alone proves nothing.
+PYOCD_GDBSERVER = "pyocd_gdbserver"
+# The same reset with the confirmation missing: what pyOCD 0.45.1 prints when
+# the core is not halted after the reset. The line is pyOCD's own format string
+# (`ResetCommand.execute` in pyocd/commands/commands.py), not a recording; no
+# board that fails to halt on reset has been driven, and that recording is owed.
+PYOCD_RESET_UNCONFIRMED = "pyocd_reset_unconfirmed"
+PYOCD_RESET_FAILED_RECORD = '@"Failed to halt device on reset (state is RUNNING)\\n"'
+PYOCD_RECORDING = Path(__file__).with_name("pyocd_0_45_1_gdbserver_recordings.json")
+MONITOR_RESET_HALT = '-interpreter-exec console "monitor reset halt"'
+# ST-LINK_gdbserver as the GDB on the reference board saw it, replayed from the
+# recording beside this file (ST-LINK_gdbserver 7.14.0 from STM32CubeCLT 1.22.0,
+# xPack arm-none-eabi-gdb 14.2.90, 2026-10-01). Opted into by name, and it
+# implies `connects_to_server`. Every answer is the recorded one:
+# `-target-select` answers `^connected` after a `*stopped` record with no
+# reason for the core the server halted on connect (scenario
+# `session_attach_connect`, started with `-g`); `monitor reset` answers `^done`
+# after the target record that says the reset completed, and leaves the core
+# halted at the reset vector with no stop record (the same scenario, whose stop
+# poll after `monitor reset` timed out);
+# `monitor reset halt` and every monitor command the server does not know are
+# refused with `Protocol error with Rcmd`.
+ST_LINK_GDBSERVER = "st_link_gdbserver"
+# The same reset with its target record taken out: the recorded answer, minus
+# the one line that says the reset completed. No reset that failed to complete
+# has been recorded, so what the server prints then is not known; this is the
+# absence of the line the product waits for, not a line of its own.
+ST_LINK_RESET_UNCONFIRMED = "st_link_reset_unconfirmed"
+ST_LINK_RECORDING = Path(__file__).with_name("st_link_gdbserver_7_14_0_linux_recordings.json")
+ST_LINK_MONITOR_RESET = '-interpreter-exec console "monitor reset"'
+st_link_scenarios: dict | None = None
+
+
+def pyocd_recorded_records(command_prefix: str) -> list[str]:
+    """The records GDB printed before the result line of one recorded command."""
+    session = json.loads(PYOCD_RECORDING.read_text(encoding="utf-8"))["scenarios"]["session_ended_by_gdb_exit"]
+    steps = [step for step in session["connect"] if "command" in step] + [session["reset_halt"]]
+    step = next(step for step in steps if step["command"].startswith(command_prefix))
+    return [record for record in step["records"] if RESULT_LINE_PATTERN.match(record) is None]
+
+
+def st_link_recorded_answer(step: str) -> list[str]:
+    """Every record GDB printed for one step of the recorded `-g` session, its result line last."""
+    global st_link_scenarios
+    if st_link_scenarios is None:
+        st_link_scenarios = json.loads(ST_LINK_RECORDING.read_text(encoding="utf-8"))["scenarios"]
+    recorded = st_link_scenarios["session_attach_connect"][step]
+    if isinstance(recorded, list):
+        recorded = next(entry for entry in recorded if str(entry.get("command", "")).startswith("-target-select"))
+    return list(recorded["records"])
+
+
+def emit_recorded_answer(token: str, records: list[str]) -> None:
+    """The recorded records, with this command's token on the result line."""
+    for record in records:
+        result = RESULT_LINE_PATTERN.match(record)
+        emit(token + record[result.end() - 1 :] if result is not None else record)
 
 
 def emit(line: str) -> None:
@@ -389,7 +457,7 @@ def main() -> int:
         if command.startswith("-target-select"):
             if behavior() == "target_select_timeout":
                 continue
-            if has_behavior(CONNECTS_TO_SERVER):
+            if has_behavior(CONNECTS_TO_SERVER) or has_behavior(PYOCD_GDBSERVER) or has_behavior(ST_LINK_GDBSERVER):
                 refused = connect_to_server(command)
                 if refused is not None:
                     emit(f'{token}^error,msg="{refused}"')
@@ -397,6 +465,14 @@ def main() -> int:
             if connect_dropped(image):
                 close_server_connections()
                 emit(f'{token}^error,msg="{CONNECT_DROPPED_MESSAGE}"')
+                continue
+            if has_behavior(PYOCD_GDBSERVER):
+                for record in pyocd_recorded_records("-target-select"):
+                    emit(record)
+                emit(f"{token}^connected")
+                continue
+            if has_behavior(ST_LINK_GDBSERVER):
+                emit_recorded_answer(token, st_link_recorded_answer("connect"))
                 continue
             emit(f"{token}^done")
             if behavior() == "stopped_on_attach_hardfault":
@@ -418,6 +494,31 @@ def main() -> int:
                 emit(f'{token}^error,msg="Download failed"')
                 continue
             emit(f"{token}^done")
+        elif command.startswith("-interpreter-exec") and has_behavior(PYOCD_GDBSERVER):
+            if command != MONITOR_RESET_HALT:
+                # The fake's own words: no other monitor command was recorded,
+                # and a session over pyOCD sends none.
+                unrecorded = command.replace('"', "'")
+                emit(f'{token}^error,msg="fake GDB over pyOCD: no recording answers {unrecorded}"')
+                continue
+            reset_count += 1
+            records = pyocd_recorded_records(MONITOR_RESET_HALT)
+            if has_behavior(PYOCD_RESET_UNCONFIRMED):
+                records = [records[0], PYOCD_RESET_FAILED_RECORD]
+            for record in records:
+                emit(record)
+            emit(f"{token}^done")
+        elif command.startswith("-interpreter-exec") and has_behavior(ST_LINK_GDBSERVER):
+            if command == ST_LINK_MONITOR_RESET:
+                reset_count += 1
+                records = st_link_recorded_answer("monitor_reset")
+                if has_behavior(ST_LINK_RESET_UNCONFIRMED):
+                    records = [record for record in records if not record.startswith('@"')]
+                emit_recorded_answer(token, records)
+            elif command == MONITOR_RESET_HALT:
+                emit_recorded_answer(token, st_link_recorded_answer("monitor_reset_halt"))
+            else:
+                emit_recorded_answer(token, st_link_recorded_answer("unknown_monitor_command"))
         elif command.startswith("-interpreter-exec"):
             reset_count += 1
             if reset_count == 2 and behavior() == "post_load_reset_timeout":

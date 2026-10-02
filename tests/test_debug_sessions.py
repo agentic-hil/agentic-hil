@@ -2228,7 +2228,7 @@ def test_stlink_dump_does_not_open_the_typed_debug_session_family(tmp_path: Path
     for tool, result in results.items():
         assert result["ok"] is False, (tool, result)
         assert result["error_type"] == "not_supported", (tool, result)
-        assert "Typed debug sessions require the OpenOCD backend" in result["summary"], (tool, result)
+        assert "Typed debug sessions on the stlink backend run on a GDB server" in result["summary"], (tool, result)
         # The way out, in the summary itself, because a caller that reads only
         # the summary is the caller this refusal failed before.
         assert "`type: openocd`" in result["summary"], (tool, result)
@@ -2271,45 +2271,43 @@ def test_stlink_session_refusal_points_at_the_reads_it_does_serve(tmp_path: Path
     assert any("Three of the twelve" in entry for entry in refused["do_not"]), refused["do_not"]
 
 
-def test_pyocd_session_refusal_names_its_own_way_out(tmp_path: Path) -> None:
-    """The same remediation shape, ending at the probe pyOCD is actually driving.
+def test_pyocd_session_tools_without_a_session_ask_for_one(tmp_path: Path) -> None:
+    """pyOCD opens typed debug sessions now, so a session tool with none open asks for one.
 
-    The session half is what is genuinely refused here, and the refusal is not a
-    dead end: the way out is a `type` change, and the interface script named is
-    the one for the probe that is plugged in rather than an ST-Link by
-    assumption.
+    The answer is the one OpenOCD gives, `session_not_active`, and not the old
+    `not_supported` that sent a caller to another backend (#624).
 
-    The catalogue entry behind it is asserted in the same place because it moved
-    with the code. It used to explain why the reads were refused too, and that
-    paragraph would now be describing a refusal that no longer happens (#344).
+    The catalogue entry behind pyOCD's remaining `not_supported` is asserted in
+    the same place because it moved with the code: the one thing pyOCD still
+    refuses is `reset_target` with mode `init`, and an entry still describing
+    refused sessions would send a caller away from a backend that serves them.
     """
     config_path = write_config(tmp_path, debugger_type="pyocd", debugger_executable=FAKE_PYOCD, target_type="stm32f446re")
     service = AgenticHILToolService(load_config(str(config_path)))
     try:
-        refused = service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}})
-        halt_refused = service.call("debug_halt", {})
+        breakpoint_result = service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}})
+        halt_result = service.call("debug_halt", {})
+        status = service.call("debug_get_session_status")
     finally:
         service.close()
 
-    for result in (refused, halt_refused):
+    for result in (breakpoint_result, halt_result):
         assert result["ok"] is False, result
-        assert result["error_type"] == "not_supported", result
-        assert "`type: openocd`" in result["summary"], result
-        assert "interface/cmsis-dap.cfg" in result["summary"], result
-        assert result["target_contacted"] is False, result
-        remediation = " ".join(result["remediation"])
-        assert "`debuggers.<name>.type`" in remediation, result
-        assert "operator's decision" in remediation, result
+        assert result["error_type"] == "session_not_active", result
+    assert status["active"] is False, status
     entry = catalogue_entry("not_supported:pyocd")
     assert entry is not None
-    # The reads are served now, and the entry says so first, because a value out
-    # of RAM is what walks into this refusal and never needed a session.
-    assert "`debug_symbol_value`" in entry["remediation"][0]
-    assert "`debug_dump_symbol_ihex`" in entry["remediation"][0]
-    assert "`debug_symbol_info`" in entry["remediation"][0]
-    # And the sentence that used to explain why they were refused is gone rather
-    # than left describing a refusal that no longer happens.
-    assert "has not been established on a bench here" not in entry["meaning"]
+    assert "`pyocd gdbserver`" in entry["meaning"], entry
+    assert "mode `init`" in entry["meaning"], entry
+    # What a step that only wanted the core stopped does instead comes first.
+    assert "mode `halt`" in entry["remediation"][0], entry
+    remediation = " ".join(entry["remediation"])
+    assert "`debuggers.<name>.type`" in remediation, entry
+    assert "operator's decision" in remediation, entry
+    # The sentences that described refused sessions are gone rather than left
+    # describing a refusal that no longer happens.
+    assert "is not a debug server this server drives" not in entry["meaning"], entry
+    assert not any("Three of the twelve" in step for step in entry.get("do_not", [])), entry
 
 
 # --- pyOCD: the read half, on the connect that touches nothing ---------------
@@ -3413,7 +3411,7 @@ def test_stlink_symbol_value_still_refuses_the_rest_of_the_typed_family(tmp_path
 
     assert refused["ok"] is False, refused
     assert refused["error_type"] == "not_supported"
-    assert "Typed debug sessions require the OpenOCD backend" in refused["summary"]
+    assert "Typed debug sessions on the stlink backend run on a GDB server" in refused["summary"]
     assert "`type: openocd`" in refused["summary"]
 
 

@@ -25,6 +25,7 @@ asserts today's classification and today's prompt answer.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -48,6 +49,7 @@ from support import scaled_time_bound
 
 from agentic_hil.backends import gdbdebug
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
+from agentic_hil.backends.openocd import OPENOCD_GDB_SERVER_STEPS
 from agentic_hil.config import load_config
 from agentic_hil.tools import AgenticHILToolService
 
@@ -348,23 +350,23 @@ def test_an_attach_whose_first_connect_is_dropped_connects_again_after_each_line
     assert timelines(record) == [ONE_SESSION, ONE_SESSION]
 
 
-@pytest.mark.parametrize("backend_name", ["pyocd", "stlink"])
-def test_a_server_whose_line_has_no_recording_is_still_found_by_connecting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_name: str) -> None:
-    """pyOCD's gdbserver and ST-LINK_gdbserver keep the connect check.
+def test_a_server_whose_line_has_no_recording_is_still_found_by_connecting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A GDB server whose steps name no ready line keeps the connect check.
 
-    Neither backend runs a debug session yet, so the sessions are built the way
-    such a backend would build them, with the fake OpenOCD standing in for a
+    The sessions are built the way a backend whose server prints no line it
+    could be read by would build them, with the fake OpenOCD standing in for a
     GDB server that listens and never prints OpenOCD's line. The start still
     finds the port, by the connection that checks it before GDB's."""
     record = drive_fake_openocd(monkeypatch, tmp_path, line_after=NEVER)
-    config = load_config(str(write_config(tmp_path, debugger_type=backend_name, target_type="stm32f446re" if backend_name == "pyocd" else None, gdb_executable=FAKE_GDB, timeout_s=scaled_time_bound(START_TIMEOUT_S))))
+    config = load_config(str(write_config(tmp_path, gdb_executable=FAKE_GDB, timeout_s=scaled_time_bound(START_TIMEOUT_S))))
     image = write_image(tmp_path, CONNECTS_TO_SERVER)
     sessions = GdbDebugSessions(
         config,
-        backend_name=backend_name,
+        backend_name="openocd",
         resolve_server=lambda: {"ok": True, "executable_path": str(FAKE_OPENOCD)},
         build_server_args=lambda executable, port, reset: [sys.executable, executable, "-c", f"gdb_port {port}"],
         classify_server_output=lambda output: "unknown_debugger_error",
+        server_steps=dataclasses.replace(OPENOCD_GDB_SERVER_STEPS, ready_line=None),
     )
     try:
         started = sessions.start_session({"source": "workspace", "path": "build/app.elf", "resolved_path": str(image)}, "attach", scaled_time_bound(START_TIMEOUT_S))

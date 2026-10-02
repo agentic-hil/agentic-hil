@@ -3409,6 +3409,58 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Close whatever else holds the probe.",
         ),
     ),
+    # The probe enumerates and its USB link refuses every opener: recorded on the
+    # reference board after an ST-LINK_gdbserver killed while it held the probe's
+    # USB itself, in the direct stop round of
+    # tests/fixtures/st_link_gdbserver_7_14_0_linux_session_stops_recordings.json,
+    # with what gave the probe back measured in the same cycles.
+    "adapter_usb_error:stlink": ErrorRemedy(
+        meaning=(
+            "The in-circuit debugger or programmer enumerates, but its USB link refused STM32CubeProgrammer's tools: "
+            "ST-LINK_gdbserver printed `Target USB comms error`, STM32_Programmer_CLI `ST-LINK error (DEV_USB_COMM_ERR)`. "
+            "It was recorded after an ST-LINK_gdbserver had been killed while it held the probe's USB itself."
+        ),
+        remediation=(
+            "Call reset_target through an OpenOCD debugger entry for the same probe. In the recorded cycles that gave "
+            "the probe back every time (8 of 8), although the reset itself answered `target_not_detected`; it resets "
+            "the target, which then runs its firmware.",
+            "An OpenOCD probe_target alone does not give it back: after one, ST-LINK_gdbserver answered "
+            "`Target unknown error 19` and STM32_Programmer_CLI `ST-LINK error (DEV_TARGET_CMD_ERR)` until the reset.",
+            "ST-LINK_gdbserver's own advice is to reconnect the probe's USB cable; that was not measured.",
+            "To keep it from coming back, put stlink-server (STM32CubeCLT ships it) on PATH: debug sessions then reach "
+            "the probe through it, and in the recorded shared round no session stop left the probe refusing.",
+        ),
+        do_not=(
+            "Retry the same call unchanged: in every recorded cycle (8 of 8) the next server start and the next "
+            "STM32_Programmer_CLI call were refused again until the reset.",
+        ),
+    ),
+    # stlink-server could not open the probe for a GDB server reaching it through
+    # stlink-server: recorded on the reference board when stlink-server had been
+    # ended or restarted right after the previous session's GDB server was
+    # killed, with what the next start met, in
+    # tests/fixtures/st_link_gdbserver_7_14_0_linux_restarts_recordings.json and
+    # tests/fixtures/st_link_gdbserver_7_14_0_linux_server_ends_recordings.json.
+    "probe_server_open_failed:stlink": ErrorRemedy(
+        meaning=(
+            "stlink-server could not open the in-circuit debugger or programmer for the session's GDB server: its log "
+            "says `TCPCMD OPEN_DEV FAIL`. ST-LINK_gdbserver words the same start as `Failed to connect to device`, "
+            "the line a target that is off gives too, so the session reads stlink-server's log to tell them apart."
+        ),
+        remediation=(
+            "Stop the session, which the refused start keeps for cleanup, and start it again. In the recorded rounds the "
+            "next start came up after every such refusal (44 of 44), "
+            "with nothing changed on the board.",
+            "If it keeps coming back, look for a program that ends or restarts stlink-server while sessions use it. "
+            "Ended at once after a session's GDB server was killed, stlink-server left the next start refused in "
+            "6 of 40 recorded cycles; ended half a second later, or once it had released the probe's USB, in "
+            "0 of 79. Sessions end it the second way.",
+        ),
+        do_not=(
+            "Check the target's power and wiring first: the GDB server's line is the one a target that is off gives, "
+            "and in the recorded refusals the next start came up with no change to either.",
+        ),
+    ),
     # `doctor`'s device-access check, which `init` repeats as a warning. It asks
     # the kernel with `os.access` and opens nothing, so these are the refusals the
     # first hardware call would meet, said before it is made.
@@ -4439,11 +4491,15 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "not_supported:stlink": ErrorRemedy(
         meaning=(
             "This bench runs `type: stlink`, which drives STM32CubeProgrammer's CLI. That CLI programs, resets and "
-            "reads memory; it is not a debug server, so there is no session on this backend to hold a breakpoint, "
-            "resume a core, or report why one stopped. `debug_start_session`, `debug_stop_session`, "
-            "`debug_get_session_status`, `debug_set_breakpoint`, `debug_list_breakpoints`, `debug_clear_breakpoints`, "
-            "`debug_continue`, `debug_halt` and `debug_get_stop_reason` are refused here for that reason, and so is "
-            "`reset_target` with mode `init`, whose reset-init event script is an OpenOCD thing.\n\n"
+            "reads memory; it is not a debug server. Typed debug sessions on this backend run on ST-LINK_gdbserver, "
+            "the GDB server STM32CubeCLT installs beside the CLI (#624), and this debugger has none: "
+            "`debuggers.<name>.gdb_server_executable` is not set, and none was found beside the configured "
+            "STM32_Programmer_CLI or elsewhere on the host when the configuration loaded. Without it there is no "
+            "session on this backend to hold a breakpoint, resume a core, or report why one stopped, so "
+            "`debug_start_session`, `debug_stop_session`, `debug_get_session_status`, `debug_set_breakpoint`, "
+            "`debug_list_breakpoints`, `debug_clear_breakpoints`, `debug_continue`, `debug_halt` and "
+            "`debug_get_stop_reason` are refused. `reset_target` with mode `init` is refused here whatever is "
+            "configured, because its reset-init event script is an OpenOCD thing.\n\n"
             "What is *not* refused any more is the read half of the typed-debug family. `debug_symbol_info`, "
             "`debug_symbol_value` and `debug_dump_symbol_ihex` are served on this backend with no session behind them: "
             "the first resolves an address and a size out of the ELF `flash_firmware` put on the board and opens no "
@@ -4461,15 +4517,20 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "lives without touching the board. They resolve against the ELF this service flashed, so flash the ELF "
             "with `flash_firmware` first and keep the symbol in `debug.allowed_symbols`.",
             "If the step genuinely needs a session (a breakpoint, a resume, a stop reason, stepping), the way out is "
-            "a configuration change and not a different probe: the same ST-Link is a probe OpenOCD drives. Set "
+            "a configuration change and not a different probe. The smaller one keeps this backend: install "
+            "STM32CubeCLT, whose ST-LINK_gdbserver is found by itself beside its own STM32_Programmer_CLI, or name the "
+            "server as `debuggers.<name>.gdb_server_executable`. Sessions then run through it with the GDB "
+            "`debug.gdb_executable` names, and flashing, probing and reading are unchanged.",
+            "The other keeps the probe and changes the stack: the same in-circuit debugger is one OpenOCD drives. Set "
             "`debuggers.<name>.type` to `openocd`, with `interface_cfg: interface/stlink.cfg` and the `target_cfg` for "
             "this part, `target/stm32f4x.cfg` for an STM32F4.",
-            "The switch is one `project_config_set` call behind `allow_config_description_write`: send "
-            "`debuggers.<name>.type` together with the fields the new backend requires, and it lands whole or is "
-            "refused naming what is missing. Which debug stack a bench runs is the operator's decision, so report "
-            "the change and get their word before making it. Afterwards the server adopts it through "
-            "`project_config_reload_description` or a restart.",
-            "Say what the move costs before it is made, because parts of this bench change hands with it. OpenOCD has "
+            "Either is one `project_config_set` call behind `allow_config_description_write`: send "
+            "`debuggers.<name>.gdb_server_executable`, or `debuggers.<name>.type` together with the fields the new "
+            "backend requires, and it lands whole or is refused naming what is missing. Which debug stack a bench "
+            "runs is the operator's decision, so report the change and get their word before making it. Afterwards "
+            "the server adopts it through `project_config_reload_description` or a restart.",
+            "Say what the move to OpenOCD costs before it is made, because parts of this bench change hands with it. "
+            "OpenOCD has "
             "to be installed and reachable, by PATH or `debuggers.<name>.executable`. A typed debug session is GDB, so "
             "`debug.gdb_executable` has to name a GDB that speaks this target, such as `arm-none-eabi-gdb`. A "
             "`connect_mode: under_reset` on that debugger has to go: OpenOCD refuses the value at load with "
@@ -4484,66 +4545,55 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not read this as no debug on this bench. Three of the twelve typed-debug tools work here, and they are "
             "the three that answer what is in memory.",
-            "Do not reach for `openocd`, `gdb`, `st-util` or a raw debugger command to get a breakpoint anyway. That "
-            "bypasses the policy this refusal comes from, takes the probe out from under the bench's own coordination, "
-            "and leaves the operator with no record of what ran.",
-            "Do not swap the probe. The ST-Link is not what refused; the backend the configuration names for it is, "
-            "and the same probe serves both.",
+            "Do not reach for `openocd`, `gdb`, `ST-LINK_gdbserver`, `st-util` or a raw debugger command to get a "
+            "breakpoint anyway. That bypasses the policy this refusal comes from, takes the probe out from under the "
+            "bench's own coordination, and leaves the operator with no record of what ran.",
+            "Do not swap the probe. The in-circuit debugger is not what refused; the configuration around it is, and "
+            "the same probe serves both ways out.",
         ),
     ),
     "not_supported:pyocd": ErrorRemedy(
         meaning=(
-            "This bench runs `type: pyocd`, which this server drives through pyOCD's command-line tools. pyOCD is not "
-            "a debug server this server drives as one, so there is no session here to hold a breakpoint, resume a "
-            "core, or report why one stopped. `debug_start_session`, `debug_stop_session`, `debug_get_session_status`, "
-            "`debug_set_breakpoint`, `debug_list_breakpoints`, `debug_clear_breakpoints`, `debug_continue`, "
-            "`debug_halt` and `debug_get_stop_reason` are refused for that reason, and so is `reset_target` with mode "
-            "`init`, whose reset-init event script is an OpenOCD thing.\n\n"
-            "What is *not* refused any more is the read half of the typed-debug family. `debug_symbol_info`, "
-            "`debug_symbol_value` and `debug_dump_symbol_ihex` are served here with no session behind them: the first "
-            "resolves an address and a size out of the ELF `flash_firmware` put on the board and opens no probe at "
-            "all, and the other two read the target with pyOCD's own `savemem`. Refusing a read this tool can perform "
-            "was wider than the hardware's own limits (#344), the same gap #342 closed on the ST-Link backend. Those "
-            "two reads connect with `--connect attach`, which is the one of pyOCD's four connect modes its own "
-            "documentation describes as connecting to a running target without halting cores; the other three halt, "
-            "reset before connecting, or hold reset asserted, and a read taken under any of them would report a "
-            "disturbed board's bytes as a measurement.\n\n"
+            "This bench runs `type: pyocd`. The typed-debug family is served here: the session tools run through "
+            "`pyocd gdbserver` with the GDB `debug.gdb_executable` names (#624), and `debug_symbol_value` and "
+            "`debug_dump_symbol_ihex` also read the target with no session open, through pyOCD's own `savemem` on "
+            "`--connect attach`, the one of pyOCD's connect modes that neither halts nor resets the core.\n\n"
+            "What pyOCD refuses is `reset_target` with mode `init`. On OpenOCD that mode halts the core and then runs "
+            "the target's reset-init event script, which is where a board's clock tree, wait states and watchdog are "
+            "set up; pyOCD's commander has no equivalent, and sending its plain `reset halt` under that name would "
+            "report an initialised core that nobody initialised.\n\n"
             "Nothing was sent to the bench for this refusal. The target is exactly as the last call that did reach it "
             "left it."
         ),
         remediation=(
-            "First check whether a read answers the question. If what is wanted is a value out of the target (a "
-            "counter, a coverage buffer, a status word, a structure), `debug_symbol_value` and "
-            "`debug_dump_symbol_ihex` do that here without a session, and `debug_symbol_info` answers where a symbol "
-            "lives without touching the board. They resolve against the ELF this service flashed, so flash the ELF "
-            "with `flash_firmware` first, keep the symbol in `debug.allowed_symbols`, and have "
-            "`debug.gdb_executable` name a GDB that reads that image.",
-            "If the step genuinely needs a session (a breakpoint, a resume, a stop reason, stepping), the way out is "
-            "a configuration change rather than different hardware: the probe this backend is driving "
-            "is one OpenOCD drives too. Set `debuggers.<name>.type` to `openocd`, with the `interface_cfg` for the "
-            "probe that is actually plugged in (`interface/stlink.cfg` for an ST-Link, `interface/cmsis-dap.cfg` for "
-            "a CMSIS-DAP probe) and the `target_cfg` for this part.",
+            "If stopping the core is what the step needs, use mode `halt`: on pyOCD it is `reset halt`, and the core "
+            "stops at the reset vector. A typed debug session started with mode `reset_halt` does the same and keeps "
+            "the core under GDB for a breakpoint, a resume or a stop reason.",
+            "If the step genuinely needs the reset-init script, the way out is a configuration change rather than "
+            "different hardware: the probe this backend is driving is one OpenOCD drives too. Set "
+            "`debuggers.<name>.type` to `openocd`, with the `interface_cfg` for the probe that is actually plugged in "
+            "(`interface/stlink.cfg` for an ST-Link, `interface/cmsis-dap.cfg` for a CMSIS-DAP probe) and the "
+            "`target_cfg` for this part.",
             "The switch is one `project_config_set` call behind `allow_config_description_write`: send "
             "`debuggers.<name>.type` together with the fields the new backend requires, and it lands whole or is "
             "refused naming what is missing. Which debug stack a bench runs is the operator's decision, so report "
             "the change and get their word before making it. Afterwards the server adopts it through "
             "`project_config_reload_description` or a restart.",
             "Say what the move costs before it is made. OpenOCD has to be installed and reachable, by PATH or "
-            "`debuggers.<name>.executable`, and `debug.gdb_executable` has to name a GDB that speaks this target, "
-            "because a typed debug session is GDB. `debuggers.<name>.target_type` stops being read: OpenOCD is told "
-            "what the part is by `target_cfg`, so the CMSIS device-family pack that made pyOCD resolve the part is no "
-            "longer what decides whether the bench works, and a wrong `target_cfg` fails to detect the target rather "
-            "than adapting.",
-            "If the bench has to stay on pyOCD, report the step as unavailable on this configuration and name which of "
-            "the two halves was needed. A missing capability that is stated is a decision for the operator; one that "
-            "is worked around quietly is a plan that reports something it did not do.",
+            "`debuggers.<name>.executable`. `debuggers.<name>.target_type` stops being read: OpenOCD is told what the "
+            "part is by `target_cfg`, so the CMSIS device-family pack that made pyOCD resolve the part is no longer "
+            "what decides whether the bench works, and a wrong `target_cfg` fails to detect the target rather than "
+            "adapting.",
+            "If the bench has to stay on pyOCD, report the step as unavailable on this configuration. A missing "
+            "capability that is stated is a decision for the operator; one that is worked around quietly is a plan "
+            "that reports something it did not do.",
         ),
         do_not=(
-            "Do not read this as no debug on this bench. Three of the twelve typed-debug tools work here, and they are "
-            "the three that answer what is in memory.",
-            "Do not reach for `pyocd commander`, `pyocd gdbserver`, `gdb` or a raw debugger command to get a "
-            "breakpoint anyway. That bypasses the policy this refusal comes from and takes the probe out from under "
-            "the bench's own coordination.",
+            "Do not send mode `halt` and report the core as initialised. The reset-init script did not run, and a "
+            "step that needed it reads registers and memory a board that was never set up holds.",
+            "Do not reach for `pyocd commander`, `pyocd gdbserver`, `gdb` or a raw debugger command to run an "
+            "initialisation anyway. That bypasses the policy this refusal comes from and takes the probe out from "
+            "under the bench's own coordination.",
             "Do not swap the probe. The probe is not what refused; the backend the configuration names for it is.",
         ),
     ),
@@ -4617,16 +4667,21 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "timeout:pyocd": ErrorRemedy(
         meaning=(
-            "pyOCD, or the GDB this backend reads symbols out of the flashed ELF with, did not finish before its "
-            "deadline: the version check, the probe listing, a run for probe_target, flash_firmware, reset_target or a "
-            "memory read, or a symbol lookup. A process that runs out of time is stopped at the deadline, so the result "
-            "knows about the board only what its state fields say. The probe listing and the symbol lookup never "
-            "contact the target."
+            "pyOCD, or the GDB this backend reads symbols out of the flashed ELF with or drives a debug session "
+            "through, did not finish before its deadline: the version check, the probe listing, a run for "
+            "probe_target, flash_firmware, reset_target or a memory read, a symbol lookup, the debug server's ready "
+            "line at a session start (`backend_error_type` `gdb_server_not_ready`), or one GDB/MI command inside a "
+            "session. A process that runs out of time is stopped at the deadline, so the result knows about the board "
+            "only what its state fields say. The probe listing and the symbol lookup never contact the target."
         ),
         remediation=(
             "Read `side_effect_status`, `target_contacted` and `target_state` first, where the result carries them. A "
-            "flash or a reset that timed out can have stopped partway, and the log at `log_path` holds what pyOCD "
-            "printed before it was stopped.",
+            "flash, a reset or a session command that timed out can have stopped partway, and the log at `log_path` "
+            "holds what pyOCD printed before it was stopped.",
+            "When `target_state` is `unknown` inside a debug session, call debug_halt: a confirmed halt settles the "
+            "unconfirmed state, and the session goes on from the halted core.",
+            "`gdb_server_not_ready` means `pyocd gdbserver` did not print `GDB server listening on port ...` for the "
+            "session's port in time; the server output in the log at `log_path` says why.",
             "The deadline comes from `debuggers.<name>.timeout_s`, and a slow bench that needs more is the operator's "
             "edit of the authoritative file: project_config_set does not write that key. The probe listing already "
             "waits at least 30 seconds whatever the key says.",
@@ -4640,16 +4695,22 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "timeout:stlink": ErrorRemedy(
         meaning=(
-            "STM32CubeProgrammer (STM32_Programmer_CLI), or the GDB this backend reads symbols out of the flashed ELF "
-            "with, did not finish before its deadline: the version check, the probe listing, a run for probe_target, "
-            "flash_firmware, reset_target or a memory read, or a symbol lookup. A process that runs out of time is "
+            "STM32CubeProgrammer (STM32_Programmer_CLI), ST-LINK_gdbserver, or the GDB this backend reads symbols out "
+            "of the flashed ELF with or drives a debug session through, did not finish before its deadline: the "
+            "version check, the probe listing, a run for probe_target, flash_firmware, reset_target or a memory read, "
+            "a symbol lookup, the debug server's ready line at a session start (`backend_error_type` "
+            "`gdb_server_not_ready`), or one GDB/MI command inside a session. A process that runs out of time is "
             "stopped at the deadline, so the result knows about the board only what its state fields say. The probe "
             "listing and the symbol lookup never contact the target."
         ),
         remediation=(
             "Read `side_effect_status`, `target_contacted` and `target_state` first, where the result carries them. A "
-            "flash or a reset that timed out can have stopped partway, and the log at `log_path` holds what "
-            "STM32CubeProgrammer printed before it was stopped.",
+            "flash, a reset or a session command that timed out can have stopped partway, and the log at `log_path` "
+            "holds what STM32CubeProgrammer or ST-LINK_gdbserver printed before it was stopped.",
+            "When `target_state` is `unknown` inside a debug session, call debug_halt: a confirmed halt settles the "
+            "unconfirmed state, and the session goes on from the halted core.",
+            "`gdb_server_not_ready` means ST-LINK_gdbserver did not print `Waiting for debugger connection...` in "
+            "time; the server output in the log at `log_path` says why.",
             "The deadline comes from `debuggers.<name>.timeout_s`, and a slow bench that needs more is the operator's "
             "edit of the authoritative file: project_config_set does not write that key.",
         ),
@@ -4685,10 +4746,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "debugger_not_found:pyocd": ErrorRemedy(
         meaning=(
             "The pyOCD this entry needs could not be run: `debuggers.<name>.executable` names nothing that exists, or, "
-            "left unset, no `pyocd` is on PATH. Nothing was started, so the target was not contacted and the board is "
-            "as the last call that reached it left it."
+            "left unset, no `pyocd` is on PATH. A debug session start reports the same when the operating system "
+            "refused to spawn its debug server, `pyocd gdbserver`, with the reason in `backend_error`. Nothing was "
+            "started, so the target was not contacted and the board is as the last call that reached it left it."
         ),
         remediation=(
+            "Read `backend_error` where the result carries it: it says why the spawn was refused.",
             "Install pyOCD into the environment the server runs from (`pip install agentic-hil[pyocd]` or "
             "`pip install pyocd`) so `pyocd` is on PATH, or name its binary by absolute path in "
             "`debuggers.<name>.executable`. That key is written with project_config_set behind "
@@ -4706,12 +4769,20 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning=(
             "The STM32CubeProgrammer command-line tool this entry needs, STM32_Programmer_CLI, could not be run: "
             "`debuggers.<name>.executable` names nothing that exists, or, left unset, it is neither on PATH nor in the "
-            "standard STM32CubeProgrammer and STM32CubeIDE install locations. Nothing was started, so the target was "
-            "not contacted and the board is as the last call that reached it left it."
+            "standard STM32CubeProgrammer and STM32CubeIDE install locations. At a debug session start it can instead "
+            "be ST-LINK_gdbserver (`backend_error_type` `gdb_server_not_found`): the path "
+            "`debuggers.<name>.gdb_server_executable` resolved to when the configuration loaded holds no file any "
+            "more, and `field` names that key. A session start reports the same when the operating system refused to "
+            "spawn the server, with the reason in `backend_error`. The target was not contacted, and the board is as "
+            "the last call that reached it left it."
         ),
         remediation=(
             "Install STM32CubeProgrammer, which brings STM32_Programmer_CLI, or put the directory that holds it on "
             "PATH.",
+            "For `gdb_server_not_found`, reinstall STM32CubeCLT, which brings ST-LINK_gdbserver, or name the server by "
+            "absolute path in `debuggers.<name>.gdb_server_executable`. The path is resolved when the configuration "
+            "loads, so a server installed elsewhere is adopted through `project_config_reload_description` or a "
+            "restart.",
             "Where it lives somewhere else, name the binary by absolute path in `debuggers.<name>.executable`. That key "
             "is written with project_config_set behind `allow_config_description_write`, and which toolchain a bench "
             "runs is the operator's, so get their word.",
@@ -4720,8 +4791,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not copy STM32_Programmer_CLI into the workspace and point the configuration at it. A configured "
             "executable inside the workspace is repository-controlled code running as the debugger.",
-            "Do not run STM32_Programmer_CLI by hand to get past it. A run this service did not start is one its "
-            "coordination cannot see or account for.",
+            "Do not run STM32_Programmer_CLI or ST-LINK_gdbserver by hand to get past it. A run this service did not "
+            "start is one its coordination cannot see or account for.",
         ),
     ),
     "debugger_not_found": ErrorRemedy(
@@ -4803,6 +4874,59 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not retry the session or its commands to get the evidence written. Every call after the latch is "
             "refused, and the one that failed left no record of itself.",
+            "Do not start `openocd` and a GDB by hand to go on debugging. The latch refuses sessions so that no GDB "
+            "command reaches the board unrecorded, and a server this service did not start is one its coordination "
+            "cannot see, stop or account for.",
+            "Do not delete or edit reports or logs to make room. They are the evidence the operator checks the board "
+            "against.",
+            "Do not expect hardware_recover to settle it. A broken audit is the operator's own route.",
+        ),
+    ),
+    "audit_broken:pyocd": ErrorRemedy(
+        meaning=(
+            "The debug session's own evidence could not be written: the audit record of a GDB command, or the session "
+            "log at `log_path`, failed to persist (`backend_error_type` `audit_write_failed`). The service latches on "
+            "the first such failure. From then on it refuses every new debug session and every GDB command that is "
+            "not containment, debug_halt still runs, and the quarantine stands. A start refusal with this type is that "
+            "latch, set by an earlier failure."
+        ),
+        remediation=(
+            "Hand it to the operator. The audit destination is fixed first: free disk space, and permissions on the "
+            "reports and logs directories under `state_root`.",
+            "The operator then restarts the MCP server, which is what clears the latch, checks the board against the "
+            "last committed report (`get_last_report`), and ends the incident with `agentic-hil recover`.",
+        ),
+        do_not=(
+            "Do not retry the session or its commands to get the evidence written. Every call after the latch is "
+            "refused, and the one that failed left no record of itself.",
+            "Do not start `pyocd gdbserver` and a GDB by hand to go on debugging. The latch refuses sessions so that no GDB "
+            "command reaches the board unrecorded, and a server this service did not start is one its coordination "
+            "cannot see, stop or account for.",
+            "Do not delete or edit reports or logs to make room. They are the evidence the operator checks the board "
+            "against.",
+            "Do not expect hardware_recover to settle it. A broken audit is the operator's own route.",
+        ),
+    ),
+    "audit_broken:stlink": ErrorRemedy(
+        meaning=(
+            "The debug session's own evidence could not be written: the audit record of a GDB command, or the session "
+            "log at `log_path`, failed to persist (`backend_error_type` `audit_write_failed`). The service latches on "
+            "the first such failure. From then on it refuses every new debug session and every GDB command that is "
+            "not containment, debug_halt still runs, and the quarantine stands. A start refusal with this type is that "
+            "latch, set by an earlier failure."
+        ),
+        remediation=(
+            "Hand it to the operator. The audit destination is fixed first: free disk space, and permissions on the "
+            "reports and logs directories under `state_root`.",
+            "The operator then restarts the MCP server, which is what clears the latch, checks the board against the "
+            "last committed report (`get_last_report`), and ends the incident with `agentic-hil recover`.",
+        ),
+        do_not=(
+            "Do not retry the session or its commands to get the evidence written. Every call after the latch is "
+            "refused, and the one that failed left no record of itself.",
+            "Do not start ST-LINK_gdbserver and a GDB by hand to go on debugging. The latch refuses sessions so that no GDB "
+            "command reaches the board unrecorded, and a server this service did not start is one its coordination "
+            "cannot see, stop or account for.",
             "Do not delete or edit reports or logs to make room. They are the evidence the operator checks the board "
             "against.",
             "Do not expect hardware_recover to settle it. A broken audit is the operator's own route.",
@@ -5219,8 +5343,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning=(
             "A cleanup could not finish. In debug_stop_session it is the session's processes: GDB or the debug server "
             "could not be stopped (`cleanup_error`), the session stays `cleanup_required` with `hardware_state` "
-            "unknown, and `halt_not_confirmed` and `detach_resume_guard_confirmed` say whether the target was proven "
-            "halted and kept from resuming before that. In a test reactor run it is the run's teardown: "
+            "unknown, and `halt_not_confirmed`, `breakpoints_removed_confirmed` and `detach_resume_guard_confirmed` "
+            "say whether the target was proven halted, rid of the session's breakpoints and kept from resuming before "
+            "that. In a test reactor run it is the run's teardown: "
             "`cleanup_errors` lists each device and action that failed, and `step_error_type` keeps the failure that "
             "came before it."
         ),
@@ -5230,15 +5355,16 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Where it is the debug session, call probe_target. The automatic recovery the bench's "
             "`recovery.auto_recover` allows runs first: it reaps leftover debugger processes and reads the target "
             "back, and a confirmed read ends the incident and the session with it.",
-            "When `halt_not_confirmed` is false and `detach_resume_guard_confirmed` is true, debug_stop_session called "
-            "once more repeats only the process cleanup and can finish it.",
+            "When `halt_not_confirmed` is false and `breakpoints_removed_confirmed` and `detach_resume_guard_confirmed` "
+            "are true, debug_stop_session called once more repeats only the process cleanup and can finish it.",
             "An entry for a COM port or a CAN bus is that session's own teardown, which a probe read cannot speak for: "
             "the quarantine guidance on the result names what settles it. Where `recovery.auto_recover` is `off`, the "
             "incident is the operator's to end with `agentic-hil recover`.",
         ),
         do_not=(
-            "Do not call debug_stop_session again while `halt_not_confirmed` is true or `detach_resume_guard_confirmed` "
-            "is false. Over an unconfirmed target state a repeated stop forces both proofs false and settles nothing.",
+            "Do not call debug_stop_session again while `halt_not_confirmed` is true or `breakpoints_removed_confirmed` "
+            "or `detach_resume_guard_confirmed` is false. Over an unconfirmed target state a repeated stop forces every "
+            "proof false and settles nothing.",
             "Do not start a new debug session over it. debug_start_session is refused as `session_already_active` "
             "until this one ends.",
         ),
@@ -5258,8 +5384,34 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not call debug_stop_session again for this. A stop after an unconfirmed halt brings no new evidence: "
-            "both proofs are forced false and the incident stays where it is.",
+            "every proof is forced false and the incident stays where it is.",
             "Do not start a new debug session to get a fresh halt. debug_start_session is refused as "
+            "`session_already_active` until this one ends.",
+        ),
+    ),
+    "breakpoints_not_removed": ErrorRemedy(
+        meaning=(
+            "debug_stop_session confirmed the halt and cleaned up the session's processes, and could not confirm that "
+            "this session's breakpoints were taken off the target before the session ended "
+            "(`breakpoints_removed_confirmed` false). pyOCD and ST-LINK_gdbserver are ended before GDB detaches, so "
+            "GDB's detach cannot carry the removal there: the stop deletes the breakpoints and reads the backend's "
+            "list back first, and that delete or read failed, or the list still held some. The session stays "
+            "`cleanup_required` with `hardware_state` unknown: a breakpoint left on the target is a hardware "
+            "comparator the next opener of the probe can meet."
+        ),
+        remediation=(
+            "Read the session log at `log_path`: `breakpoint_removal` names the stage the removal stopped at, and "
+            "`remaining_backend_breakpoints` the numbers GDB still listed.",
+            "Call probe_target. The automatic recovery the bench's `recovery.auto_recover` allows runs first: it reaps "
+            "any leftover debugger process and reads the target back through the probe, and a confirmed read ends the "
+            "incident and the session with it; debug_get_session_status then reports it stopped.",
+            "Where `recovery.auto_recover` is `off`, or the probe's `allow_probe` is closed, the incident is the "
+            "operator's to end with `agentic-hil recover` after checking the board.",
+        ),
+        do_not=(
+            "Do not call debug_stop_session again for this. A stop after an unconfirmed removal brings no new evidence: "
+            "every proof is forced false and the incident stays where it is.",
+            "Do not start a new debug session to clear them. debug_start_session is refused as "
             "`session_already_active` until this one ends.",
         ),
     ),
@@ -5279,7 +5431,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not call debug_stop_session again for this. A stop after an unconfirmed detach brings no new evidence: "
-            "both proofs are forced false and the incident stays where it is.",
+            "every proof is forced false and the incident stays where it is.",
             "Do not start a new debug session to get a fresh halt. debug_start_session is refused as "
             "`session_already_active` until this one ends.",
         ),
@@ -6912,6 +7064,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "tool": "openocd",
         "type": {"status": "optional", "value": "openocd", "note": "Default. Omit only if no other backend is meant. Settable over MCP behind allow_config_description_write, and switching an entry to this backend has to carry interface_cfg and target_cfg in the same call, because OpenOCD reaches the board through no other route; an entry that does not name them is refused rather than left half switched. Send executable in that call too, or `null` to have OpenOCD discovered on PATH: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to `openocd` on PATH, except on the untouched starter entry, which stays inert until somebody names a toolchain in it. An absolute path or a value containing a separator is resolved against workspace_root and must exist."},
+        "gdb_server_executable": {"status": "ignored", "note": "OpenOCD is its own GDB server: a typed debug session runs `executable` with a `gdb_port` on a port this server reserves."},
         "probe_id": {"status": "optional", "note": "Adapter serial number. OpenOCD 0.12.0 and newer are passed `adapter serial <probe_id>`; an older release is passed the adapter driver's own serial command (`hla_serial`, `st-link serial` or `cmsis_dap_serial`), and a call whose driver has none is refused `not_supported` before OpenOCD is started for it. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "OpenOCD selects the target through target_cfg."},
         "interface": {"status": "ignored", "note": "OpenOCD selects the transport through interface_cfg."},
@@ -6924,6 +7077,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "tool": "STM32_Programmer_CLI (STM32CubeProgrammer)",
         "type": {"status": "required", "value": "stlink", "note": "Settable over MCP behind allow_config_description_write. Switching an entry to this backend needs no other key of this surface: interface defaults to SWD, and interface_cfg and target_cfg are ignored here, so they may stay in the entry. Send executable in the same call, or `null` to have STM32_Programmer_CLI discovered: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to STM32_Programmer_CLI on PATH, then the standard STM32CubeProgrammer and STM32CubeIDE install locations."},
+        "gdb_server_executable": {"status": "discovered", "note": "The GDB server typed debug sessions run: ST-LINK_gdbserver, which STM32CubeCLT installs beside STM32_Programmer_CLI because the CLI has none. Falls back to the one in the same STM32CubeCLT tree as `executable` (`STLink-gdb-server/bin` beside `STM32CubeProgrammer/bin`), then ST-LINK_gdbserver on PATH, then the STM32CubeCLT installations under C:/ST. Held to the rules `executable` is. Started with `-cp` naming the CLI's directory, `-i <probe_id>`, `-d` for SWD and `-g`, so the connect neither resets nor moves the core. Unset and not found, flashing, probing and reading are unchanged and the debug session tools are refused naming this key."},
         "probe_id": {"status": "optional", "note": "ST-Link serial number, passed as `sn=<probe_id>`. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "STM32CubeProgrammer identifies the part itself."},
         "interface": {"status": "required", "default": "SWD", "enum": ["SWD", "JTAG"], "note": "Passed as `port=<interface>`."},
@@ -6935,13 +7089,14 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
     "pyocd": {
         "tool": "pyocd",
         "type": {"status": "required", "value": "pyocd", "note": "Settable over MCP behind allow_config_description_write. Switching an entry to this backend needs no other key of this surface, because target_type is not one it writes and pyOCD guesses from the probe's board ID when it is unset; a bench that needs a specific part still has to have target_type in the file. Send executable in the same call, or `null` to have pyocd discovered: an executable already in the entry was chosen for the backend the entry is leaving."},
-        "executable": {"status": "discovered", "note": "Falls back to `pyocd` on PATH. Install with `pip install agentic-hil[pyocd]` or `pip install pyocd`."},
+        "executable": {"status": "discovered", "note": "Falls back to `pyocd` on PATH. Install with `pip install agentic-hil[pyocd]` or `pip install pyocd`. Typed debug sessions run `pyocd gdbserver` from the same executable, on a port this server reserves for the session, with the same `--uid`, `--target` and `-W` every other call carries and pyOCD's semihosting console switched off, so the server opens no port of its own beside the one GDB connects to."},
+        "gdb_server_executable": {"status": "ignored", "note": "Typed debug sessions run `pyocd gdbserver` from `executable`."},
         "probe_id": {"status": "optional", "note": "Probe unique ID, passed as `--uid`. pyOCD matches it as a case-insensitive substring and strips a leading `<type>:`, so give the full ID. Required once more than one debugger is configured."},
         "target_type": {"status": "required", "note": "Passed as `--target`. Omitted entirely when unset, leaving pyOCD to guess from the probe's board ID. Most vendor parts resolve only after a CMSIS pack is installed."},
         "interface": {"status": "ignored"},
         "interface_cfg": {"status": "ignored"},
         "target_cfg": {"status": "ignored"},
-        "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "Nothing this key could say reaches pyOCD, so `under_reset` is refused at load rather than accepted and ignored. A bench that needs the flash to connect under reset runs it on `type: stlink`. The one connect option this server does pass to pyOCD is not this key's: the typed-debug memory reads send `--connect attach`, fixed, because it is the only mode pyOCD documents as reaching a running core without halting or resetting it."},
+        "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "Nothing this key could say reaches pyOCD, so `under_reset` is refused at load rather than accepted and ignored. A bench that needs the flash to connect under reset runs it on `type: stlink`. The one connect option this server does pass to pyOCD is not this key's: the typed-debug memory reads with no session open send `--connect attach`, fixed, because it is the only mode pyOCD documents as reaching a running core without halting or resetting it. A typed debug session does not read this key either: whether it resets or attaches is the `mode` of `debug_start_session`, carried out by GDB against `pyocd gdbserver`."},
         "flash_address": {"status": "conditional", "note": "Required to flash a .bin, which carries no load address; passed as `--base-address`. Not read for .elf or .hex."},
     },
 }
@@ -7308,6 +7463,10 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # refused naming exactly what is missing, and the call lands a whole entry
     # or changes nothing.
     #
+    # `gdb_server_executable` is `executable` again for the one backend whose
+    # CLI has no GDB server: which program runs for a debug session on this
+    # probe, a fact about the bench like the CLI beside it (#624).
+    #
     # `connect_mode` joins them under the same right. It is not a
     # permission and it widens nothing: the two values it takes are both a flash
     # this configuration already allows, and the difference between them is
@@ -7318,7 +7477,7 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # the permissions grant it would sit with the keys that decide authority,
     # where nobody could set it without also being able to grant themselves
     # flashing.
-    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("type", "probe_id", "executable", "interface_cfg", "target_cfg", "connect_mode")),
+    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("type", "probe_id", "executable", "gdb_server_executable", "interface_cfg", "target_cfg", "connect_mode")),
     # `serial_number` is in the description half for the same reason `probe_id`
     # is: it is what an attached board hands you, and it says which unit this
     # entry is rather than what may be done to it. `vid`/`pid` come off the same
@@ -8627,7 +8786,7 @@ MCP_RESOURCES: list[JsonObject] = [
         DEBUGGER_BACKENDS_URI,
         "debugger-backends",
         "Required fields per debugger backend",
-        "Which of type, executable, probe_id, target_type, interface, interface_cfg, target_cfg, connect_mode and flash_address each of openocd, stlink and pyocd requires, discovers, ignores, or refuses; when probe_id becomes mandatory; when flash_address is needed; which backend can connect under reset; and which of bootstrap discovery's two enumerations answers on a given host, which decides the type and executable a generated entry gets.",
+        "Which of type, executable, gdb_server_executable, probe_id, target_type, interface, interface_cfg, target_cfg, connect_mode and flash_address each of openocd, stlink and pyocd requires, discovers, ignores, or refuses; when probe_id becomes mandatory; when flash_address is needed; which backend can connect under reset; and which of bootstrap discovery's two enumerations answers on a given host, which decides the type and executable a generated entry gets.",
         JSON_MIME,
     ),
     _resource_descriptor(

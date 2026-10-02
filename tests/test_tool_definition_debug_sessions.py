@@ -24,8 +24,9 @@ import re
 from pathlib import Path
 
 import pytest
-from conftest import DEFAULT_TEST_PERMISSIONS, FAKE_PYOCD, write_config
+from conftest import DEFAULT_TEST_PERMISSIONS, write_config
 from test_debug_sessions import debug_service, start_debug_session, stlink_dump_service
+from test_gdbserver_sessions import pyocd_session_service, st_link_session_service
 
 import agentic_hil
 from agentic_hil.backends import gdbdebug
@@ -45,6 +46,17 @@ CONFIGURED_DEBUGGER_TIMEOUT_DEFAULT = "60"
 # `max(0.1, timeout_s)` in `start_session` and `stop_session`).
 TIMEOUT_FLOOR = "0.1"
 BACKEND_NAMES = ("OpenOCD", "pyOCD", "STM32CubeProgrammer")
+# The GDB servers typed sessions run on (#624): OpenOCD is its own, pyOCD runs
+# `pyocd gdbserver` (pyocd.py `opens_debug_sessions`), and STM32CubeProgrammer
+# runs ST-LINK_gdbserver when its entry has one, configured or found (stlink.py
+# `opens_debug_sessions`); without one it answers `not_supported` (common.py
+# `debug_session_unsupported`).
+SESSION_SERVERS = ("OpenOCD", "pyOCD", "ST-LINK_gdbserver")
+SESSION_NAMES = (*BACKEND_NAMES, "ST-LINK_gdbserver")
+# "OpenOCD only" and its spellings: a claim that one backend alone runs them.
+ONE_BACKEND_ONLY = re.compile(r"\b(OpenOCD|pyOCD|STM32CubeProgrammer)(\s+backend)?[\s-]+only\b|\bonly\s+(on\s+|with\s+|under\s+)?(the\s+)?(OpenOCD|pyOCD|STM32CubeProgrammer)\b")
+# STM32CubeProgrammer runs sessions only through that server, so it is named with it.
+CUBE_PROGRAMMER_WITH_ITS_SERVER = re.compile(r"\bSTM32CubeProgrammer\s+(with|through|via|over|running|using)\s+(its\s+|an?\s+)?ST-LINK_gdbserver\b")
 IDENTIFIER = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
 
 SECONDS = re.compile(r"\bseconds?\b|\b\d+(?:\.\d+)? ?s\b", re.IGNORECASE)
@@ -170,31 +182,49 @@ def test_both_lifecycle_tools_are_listed_with_every_input_property_described(lis
         assert undescribed == [], (name, undescribed)
 
 
+def names_a_server(name: str, text: str) -> bool:
+    return re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text) is not None
+
+
+def backend_support_is_one_phrase(description: str) -> bool:
+    """One sentence says where sessions run: every server in `SESSION_SERVERS`
+    named before the `not_supported` that answers everywhere else, no backend
+    claimed as the only one, STM32CubeProgrammer never named apart from the
+    ST-LINK_gdbserver it needs, and neither OpenOCD nor pyOCD on the refusing
+    side. Kept to one sentence on purpose, so a change to the support edits
+    one place; within it any wording that keeps the two sides apart passes."""
+    naming = [sentence for sentence in description_sentences(description) if any(names_a_server(name, sentence) for name in SESSION_NAMES)]
+    if len(naming) != 1:
+        return False
+    parts = re.split(r"[;,:]", naming[0])
+    refusing = [index for index, part in enumerate(parts) if "not_supported" in part]
+    if not refusing:
+        return False
+    running, rest = parts[: refusing[0]], parts[refusing[0]:]
+    return (
+        all(any(names_a_server(server, part) for part in running) for server in SESSION_SERVERS)
+        and not any(ONE_BACKEND_ONLY.search(part) for part in running)
+        and all(CUBE_PROGRAMMER_WITH_ITS_SERVER.search(part) for part in running if names_a_server("STM32CubeProgrammer", part))
+        and not any(names_a_server("OpenOCD", part) or names_a_server("pyOCD", part) for part in rest)
+        and all(re.search(r"\b(without|no|missing)\b", part) for part in rest if names_a_server("ST-LINK_gdbserver", part))
+        and all(re.search(r"\b(else|otherwise|others?|other (backends?|setups?|debuggers?)|elsewhere|any other|without)\b", part) for part in rest if "not_supported" in part)
+    )
+
+
 @pytest.mark.parametrize("name", LIFECYCLE_TOOLS)
-def test_backend_support_is_one_phrase_saying_openocd_runs_sessions_and_the_others_refuse(listed: dict[str, dict], name: str) -> None:
-    """Typed sessions exist only under OpenOCD on this code (openocd.py
-    `debug_start_session`); pyOCD and STM32CubeProgrammer refuse both calls
-    with `not_supported` (pyocd.py and stlink.py, `debug_session_unsupported`).
-    Kept to one sentence of the description, and out of the property
-    descriptions, so a change to the support edits one place."""
+def test_backend_support_is_one_phrase_naming_every_server_sessions_run_on(listed: dict[str, dict], name: str) -> None:
+    """Typed sessions run on OpenOCD (openocd.py), on pyOCD through `pyocd
+    gdbserver` (pyocd.py) and on STM32CubeProgrammer through ST-LINK_gdbserver
+    (stlink.py), each `opens_debug_sessions` (#624); STM32CubeProgrammer with
+    no server refuses both calls with `not_supported` (common.py
+    `debug_session_unsupported`). Kept to one sentence of the description, and
+    out of the property descriptions, so a change to the support edits one
+    place."""
     tool = listed[name]
     description = str(tool["description"])
 
-    naming_a_backend = [sentence for sentence in description_sentences(description) if any(backend in sentence for backend in BACKEND_NAMES)]
-    assert len(naming_a_backend) == 1, (name, naming_a_backend, description)
-    sentence = naming_a_backend[0]
-    parts = re.split(r"[;,:]", sentence)
-
-    supported = [part for part in parts if "OpenOCD" in part]
-    assert supported, sentence
-    assert all(re.search(r"\b(only|required|needs?|requires?|runs?|supports?)\b", part) for part in supported), sentence
-    # The direction: OpenOCD is never the backend that refuses.
-    assert not any("not_supported" in part for part in supported), sentence
-    refusing = [part for part in parts if "not_supported" in part]
-    assert refusing, sentence
-    assert all(re.search(r"\b(others?|other backends?|pyOCD|STM32CubeProgrammer|elsewhere|any other)\b", part) for part in refusing), sentence
-
-    in_properties = {prop: text for prop, text in property_texts(tool).items() if any(backend in text for backend in BACKEND_NAMES)}
+    assert backend_support_is_one_phrase(description), (name, description)
+    in_properties = {prop: text for prop, text in property_texts(tool).items() if any(names_a_server(backend, text) for backend in SESSION_NAMES)}
     assert in_properties == {}, in_properties
 
 
@@ -219,8 +249,9 @@ def test_start_says_what_it_opens_and_how_the_session_is_inspected_and_ended(lis
 def test_start_names_its_prerequisites_on_the_bench(listed: dict[str, dict]) -> None:
     """GDB from `debug.gdb_executable` or found on PATH (gdbdebug.py
     `resolve_gdb_executable`, config.py `GDB_AUTODETECT_CANDIDATES`), and the
-    debugger entry's own scripts the debug server is started with (openocd.py
-    `_debug_server_args`, `interface_cfg` and `target_cfg`)."""
+    debugger entry's own executable or scripts the debug server is started
+    with (each backend's `_debug_server_args`: openocd.py with `interface_cfg`
+    and `target_cfg`, pyocd.py and stlink.py from the entry's executable)."""
     description = str(listed[START]["description"])
 
     needs = containing(clauses(description), r"\b(needs?|requires?)\b", re.IGNORECASE)
@@ -400,8 +431,9 @@ def test_stop_names_its_result_fields_and_outcomes(listed: dict[str, dict]) -> N
     """No session: ok, `active` false (gdbdebug.py L417-418). A teardown it
     could not prove: ok false, `status` cleanup_required, `hardware_state`
     unknown, the bench quarantined, with `halt_not_confirmed`,
-    `detach_resume_not_confirmed` or `cleanup_failed` (gdbdebug.py L460,
-    L476; tools.py L2421)."""
+    `breakpoints_not_removed` (on a server ended before GDB detaches, #624),
+    `detach_resume_not_confirmed` or `cleanup_failed` (gdbdebug.py
+    `stop_session`, `_TEARDOWN_PROOFS`; tools.py L2421)."""
     tool = listed[STOP]
     description = str(tool["description"])
     definition = definition_text(tool)
@@ -419,7 +451,7 @@ def test_stop_names_its_result_fields_and_outcomes(listed: dict[str, dict]) -> N
         assert HELD.search(sentence), sentence
         assert not re.search(r"\bok\W{0,3}true\b|\bactive\W{0,3}false\b|\bsafe_state_confirmed\W{0,3}true\b", sentence), sentence
 
-    for outcome in ("halt_not_confirmed", "detach_resume_not_confirmed", "cleanup_failed"):
+    for outcome in (*(proof.error_type for proof in gdbdebug._TEARDOWN_PROOFS), "cleanup_failed"):
         assert outcome in definition, (outcome, definition)
 
 
@@ -634,30 +666,43 @@ def test_the_start_takes_only_an_elf_from_inside_the_workspace(tmp_path: Path) -
     assert both["error_type"] == "invalid_argument", both
 
 
-def pyocd_service(tmp_path: Path) -> AgenticHILToolService:
-    config_path = write_config(tmp_path, debugger_type="pyocd", debugger_executable=FAKE_PYOCD, target_type="stm32f446re")
-    elf_path = tmp_path / "build" / "app.elf"
-    elf_path.parent.mkdir(parents=True, exist_ok=True)
-    elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
-    return AgenticHILToolService(load_config(str(config_path)))
-
-
-@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
-def test_both_lifecycle_calls_answer_not_supported_where_sessions_do_not_exist(tmp_path: Path, backend: str) -> None:
-    """STM32CubeProgrammer and pyOCD refuse the stop as well as the start, so
-    the "no session answers ok" outcome is an OpenOCD answer only."""
-    service = stlink_dump_service(tmp_path) if backend == "stlink" else pyocd_service(tmp_path)
+@pytest.mark.parametrize("backend", ["pyocd", "stlink"])
+def test_both_lifecycle_calls_run_on_every_server_the_descriptions_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    """pyOCD, and STM32CubeProgrammer with ST-LINK_gdbserver, open and end a
+    session as OpenOCD does, through the fake server and the fake GDB that
+    replay each one's recording (test_gdbserver_sessions.py)."""
+    session_service = pyocd_session_service if backend == "pyocd" else st_link_session_service
+    service, _ = session_service(tmp_path, monkeypatch)
     try:
+        started = start_debug_session(service, mode="attach")
+        stopped = service.call(STOP)
+    finally:
+        service.close()
+
+    assert started["ok"] is True, (backend, started)
+    assert stopped["ok"] is True, (backend, stopped)
+    assert stopped["safe_state_confirmed"] is True, (backend, stopped)
+
+
+def test_both_lifecycle_calls_on_stlink_without_a_gdb_server_answer_not_supported_naming_the_ways_out(tmp_path: Path) -> None:
+    """With no ST-LINK_gdbserver configured or found, STM32CubeProgrammer
+    refuses the stop as well as the start, before anything is spawned, and
+    names both ways to a session: the server, or the same debugger under
+    OpenOCD (common.py `debug_session_unsupported`)."""
+    service = stlink_dump_service(tmp_path)
+    try:
+        assert service.config.debugger.gdb_server_executable is None
         started = service.call(START, {"image_path": "build/app.elf"})
         stopped = service.call(STOP)
     finally:
         service.close()
 
     for result in (started, stopped):
-        assert result["ok"] is False, (backend, result)
-        assert result["error_type"] == "not_supported", (backend, result)
-        assert "OpenOCD" in result["summary"], (backend, result)
-        assert result["target_contacted"] is False, (backend, result)
+        assert result["ok"] is False, result
+        assert result["error_type"] == "not_supported", result
+        assert "gdb_server_executable" in result["summary"], result
+        assert "type: openocd" in result["summary"], result
+        assert result["target_contacted"] is False, result
 
 
 def recording(target: object, attribute: str, seen: list, monkeypatch: pytest.MonkeyPatch, position: int, run_with: float) -> None:

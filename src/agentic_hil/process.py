@@ -214,9 +214,18 @@ def _register_process_group(child: subprocess.Popen) -> subprocess.Popen:
     return child
 
 
-def terminate_process_tree(child: subprocess.Popen, timeout_s: float) -> None:
+def terminate_process_tree(child: subprocess.Popen, timeout_s: float, *, graceful: bool = True) -> None:
+    """End the child and everything it started, and confirm they are gone.
+
+    ``graceful`` first asks the tree to stop (SIGTERM on POSIX) and kills only
+    what ignores the request. ``graceful=False`` kills straight away, for a
+    process whose own shutdown does something the caller must not let happen:
+    ST-LINK_gdbserver resumes the core on SIGTERM, and only an immediate kill
+    leaves a halted core halted. Windows always ends the tree without a
+    request, so the flag changes nothing there.
+    """
     try:
-        _terminate_process_tree(child, timeout_s)
+        _terminate_process_tree(child, timeout_s, graceful=graceful)
     except BaseException as error:
         with _PROCESS_RECORDS_LOCK:
             record = _PROCESS_RECORDS.setdefault(id(child), ManagedProcessRecord(child, owner_marker=_PROCESS_OWNER.get()))
@@ -225,7 +234,7 @@ def terminate_process_tree(child: subprocess.Popen, timeout_s: float) -> None:
         raise
 
 
-def _terminate_process_tree(child: subprocess.Popen, timeout_s: float) -> None:
+def _terminate_process_tree(child: subprocess.Popen, timeout_s: float, *, graceful: bool = True) -> None:
     if os.name == "nt":
         if getattr(child, "_agentic_hil_tree_reaped", False) is True:
             _forget_process(child)
@@ -257,7 +266,7 @@ def _terminate_process_tree(child: subprocess.Popen, timeout_s: float) -> None:
 
     child_pgid = _child_process_group(child)
     if child_pgid is None or child_pgid == os.getpgrp():
-        _terminate_single_child(child, timeout_s)
+        _terminate_single_child(child, timeout_s, graceful=graceful)
         _forget_process(child)
         return
 
@@ -283,7 +292,7 @@ def _terminate_process_tree(child: subprocess.Popen, timeout_s: float) -> None:
     # refuses to read empty. That swallows nothing: a group holding a live member
     # this run may not signal refuses the liveness probe the same way for the
     # whole wait, and still raises below, naming the pid and the signal.
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    for sig in (signal.SIGTERM, signal.SIGKILL) if graceful else (signal.SIGKILL,):
         delivered = _signal_process_group(child_pgid, sig)
         if _wait_for_process_group(child, child_pgid, timeout_s):
             _forget_process(child)
@@ -293,7 +302,7 @@ def _terminate_process_tree(child: subprocess.Popen, timeout_s: float) -> None:
                 f"Could not signal process group {child_pgid} with {signal.Signals(sig).name} while killing pid {child.pid}, "
                 f"and the group still had a member after a {max(0.1, timeout_s):g}s wait."
             )
-    _terminate_single_child(child, timeout_s)
+    _terminate_single_child(child, timeout_s, graceful=graceful)
     if _process_group_exists(child_pgid):
         raise RuntimeError("Process group remained active after SIGKILL.")
     _forget_process(child)
@@ -331,10 +340,13 @@ def _child_process_group(child: subprocess.Popen) -> int | None:
         return None
 
 
-def _terminate_single_child(child: subprocess.Popen, timeout_s: float) -> None:
+def _terminate_single_child(child: subprocess.Popen, timeout_s: float, *, graceful: bool = True) -> None:
     if child.poll() is None:
         with suppress(ProcessLookupError):
-            child.terminate()
+            if graceful:
+                child.terminate()
+            else:
+                child.kill()
     try:
         child.wait(timeout=max(0.1, timeout_s))
     except subprocess.TimeoutExpired:

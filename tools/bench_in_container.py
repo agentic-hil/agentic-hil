@@ -219,6 +219,14 @@ IMAGE = "agentic-hil-bench-tier"
 CUBEPROGRAMMER_ARCHIVE_SHA256 = "6a9e60a5a048c45eb3241f9bb66bdc2e6cbd0119fb2e42568dc059fc6167442a"
 CUBEPROGRAMMER_CONTEXT_PATH = Path("build-inputs") / "cubeprogrammer.zip"
 CUBEPROGRAMMER_BUILD_TARGET = "bench-tier-cubeprogrammer"
+# The licensed STM32CubeCLT for Linux archive (1.22.0), for the optional layer
+# that carries STM32_Programmer_CLI and ST-LINK_gdbserver, so the bench tier can
+# open typed debug sessions on the STM32CubeProgrammer backend. Staged the same
+# way, digest first; tools/bench/extract_cubeclt.py pins the same digest and
+# takes the two programs out of the installer without running any of it.
+CUBECLT_ARCHIVE_SHA256 = "8bebfb8811e28dcc26977c058a6109cdea4bcc930b2c4cf833d8309036b93b0d"
+CUBECLT_CONTEXT_PATH = Path("build-inputs") / "cubeclt.zip"
+CUBECLT_BUILD_TARGET = "bench-tier-cubeclt"
 # The distributions the tier's image is also built on, each from a head of its
 # own under tools/bench/distributions: the base image and the packages that
 # distribution carries OpenOCD, the cross compiler, GDB, CMake and Python in.
@@ -236,7 +244,9 @@ SHARED_PART_STARTS = "WORKDIR "
 # `--cubeprogrammer-archive` asks for it by `--target`, so the combination is
 # refused up front rather than paid for: left to run it builds the whole shared
 # part first, several minutes, and fails at the last stage. A new head needs an
-# entry of its own here, which a test holds this list to.
+# entry of its own here, which a test holds this list to. The STM32CubeCLT layer
+# is refused on each head for the same reason: it installs the same library with
+# the same apt line and is built and smoke-tested against the same one base.
 CUBEPROGRAMMER_HEAD_REFUSALS = {
     # Fedora has no apt at all, so the install line cannot even start.
     "fedora-44": "Fedora packages no `apt-get`, which is what that layer installs its packages with",
@@ -1019,40 +1029,50 @@ def sweep_leftovers(runtime: str, uid: int, voice: Voice) -> None:
         raise LeftBehind(runtime, unresolved)
 
 
-def stage_cubeprogrammer_archive(archive: Path, context: Path) -> Path:
-    """Copy the verified licensed payload into this run's throwaway build context."""
+def stage_licensed_archive(archive: Path, context: Path, what: str, context_path: Path, expected_sha256: str) -> Path:
+    """Copy a verified licensed payload into this run's throwaway build context."""
     try:
         metadata = archive.lstat()
         if not stat.S_ISREG(metadata.st_mode):
-            raise Refused(EXIT_BUILD_FAILED, "the CubeProgrammer archive must be a regular file")
+            raise Refused(EXIT_BUILD_FAILED, f"the {what} archive must be a regular file")
     except OSError:
-        raise Refused(EXIT_BUILD_FAILED, "the CubeProgrammer archive could not be checked") from None
-    destination = context / CUBEPROGRAMMER_CONTEXT_PATH
+        raise Refused(EXIT_BUILD_FAILED, f"the {what} archive could not be checked") from None
+    destination = context / context_path
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
         shutil.copyfile(archive, destination)
         staged_metadata = destination.lstat()
         if not stat.S_ISREG(staged_metadata.st_mode):
-            raise Refused(EXIT_BUILD_FAILED, "the staged CubeProgrammer archive is not a regular file")
+            raise Refused(EXIT_BUILD_FAILED, f"the staged {what} archive is not a regular file")
         digest = hashlib.sha256()
         with destination.open("rb") as staged:
             while chunk := staged.read(1024 * 1024):
                 digest.update(chunk)
         actual = digest.hexdigest()
-        if actual != CUBEPROGRAMMER_ARCHIVE_SHA256:
+        if actual != expected_sha256:
             raise Refused(
                 EXIT_BUILD_FAILED,
-                f"the staged CubeProgrammer archive has SHA-256 {actual}, expected {CUBEPROGRAMMER_ARCHIVE_SHA256}",
+                f"the staged {what} archive has SHA-256 {actual}, expected {expected_sha256}",
             )
     except OSError:
         with suppress(OSError):
             destination.unlink()
-        raise Refused(EXIT_BUILD_FAILED, "the CubeProgrammer archive could not be staged and verified") from None
+        raise Refused(EXIT_BUILD_FAILED, f"the {what} archive could not be staged and verified") from None
     except Refused:
         with suppress(OSError):
             destination.unlink()
         raise
     return destination
+
+
+def stage_cubeprogrammer_archive(archive: Path, context: Path) -> Path:
+    """Copy the verified licensed STM32CubeProgrammer payload into this run's throwaway build context."""
+    return stage_licensed_archive(archive, context, "CubeProgrammer", CUBEPROGRAMMER_CONTEXT_PATH, CUBEPROGRAMMER_ARCHIVE_SHA256)
+
+
+def stage_cubeclt_archive(archive: Path, context: Path) -> Path:
+    """Copy the verified licensed STM32CubeCLT payload into this run's throwaway build context."""
+    return stage_licensed_archive(archive, context, "STM32CubeCLT", CUBECLT_CONTEXT_PATH, CUBECLT_ARCHIVE_SHA256)
 
 
 def image_name(distribution: str | None) -> str:
@@ -1108,6 +1128,7 @@ def build_image(
     voice: Voice,
     cubeprogrammer_archive: Path | None = None,
     distribution: str | None = None,
+    cubeclt_archive: Path | None = None,
 ) -> str:
     """Build the image from the committed tree; the id the build wrote."""
     context = workdir / "context"
@@ -1117,6 +1138,8 @@ def build_image(
         raise Refused(EXIT_BUILD_FAILED, f"the tree of {commit[:12]} could not be staged: {error}") from None
     if cubeprogrammer_archive is not None:
         stage_cubeprogrammer_archive(cubeprogrammer_archive, context)
+    if cubeclt_archive is not None:
+        stage_cubeclt_archive(cubeclt_archive, context)
     ignore = context / "tools" / "bench" / "Dockerfile.dockerignore"
     if not ignore.is_file():
         raise Refused(EXIT_BUILD_FAILED, f"commit {commit[:12]} carries no tools/bench/Dockerfile.dockerignore to build with")
@@ -1138,6 +1161,8 @@ def build_image(
     ]
     if cubeprogrammer_archive is not None:
         command.extend(("--target", CUBEPROGRAMMER_BUILD_TARGET))
+    if cubeclt_archive is not None:
+        command.extend(("--target", CUBECLT_BUILD_TARGET))
     command.append(str(context))
     on = "" if distribution is None else f" on {distribution}"
     voice(f"building the bench tier's image{on} from commit {commit[:12]} with {runtime}")
@@ -1497,6 +1522,16 @@ def parse_options(argv: list[str] | None) -> argparse.Namespace:
         metavar="ZIP",
         help="Build the optional STM32CubeProgrammer image layer from this runner-local, SHA-256-pinned licensed archive.",
     )
+    parser.add_argument(
+        "--cubeclt-archive",
+        type=Path,
+        default=None,
+        metavar="ZIP",
+        help=(
+            "Build the optional STM32CubeCLT image layer (STM32_Programmer_CLI and ST-LINK_gdbserver, for typed debug "
+            "sessions on the STM32CubeProgrammer backend) from this runner-local, SHA-256-pinned licensed archive."
+        ),
+    )
     parser.add_argument("--no-wait", action="store_true", help="Refuse instead of queueing when another run holds this machine.")
     parser.add_argument("--build-only", action="store_true", help="Build the image and stop; needs no probe and runs anywhere.")
     parser.add_argument(
@@ -1563,6 +1598,20 @@ def main(argv: list[str] | None = None) -> int:
                 f"--cubeprogrammer-archive cannot be combined with --distribution {options.distribution}: "
                 f"{CUBEPROGRAMMER_HEAD_REFUSALS[options.distribution]}; nothing was built",
             )
+        if options.cubeclt_archive is not None and options.distribution is not None:
+            raise Refused(
+                EXIT_CANNOT_RUN_HERE,
+                f"--cubeclt-archive cannot be combined with --distribution {options.distribution}: "
+                f"{CUBEPROGRAMMER_HEAD_REFUSALS[options.distribution]}; nothing was built",
+            )
+        if options.cubeclt_archive is not None and options.cubeprogrammer_archive is not None:
+            # Each layer is an image target of its own and a build has one
+            # target; the STM32CubeCLT tree carries its own STM32_Programmer_CLI.
+            raise Refused(
+                EXIT_CANNOT_RUN_HERE,
+                "--cubeclt-archive cannot be combined with --cubeprogrammer-archive: each builds an image target of its "
+                "own, and the STM32CubeCLT layer carries its own STM32_Programmer_CLI; nothing was built",
+            )
         runtime = pick_runtime(options.runtime)
         if options.live_device_tree and runtime != "podman":
             raise Refused(
@@ -1628,6 +1677,7 @@ def main(argv: list[str] | None = None) -> int:
             voice,
             cubeprogrammer_archive=options.cubeprogrammer_archive,
             distribution=options.distribution,
+            cubeclt_archive=options.cubeclt_archive,
         )
         prune_images(runtime, voice)
         if not running:

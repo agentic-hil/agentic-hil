@@ -103,6 +103,8 @@ CONSUMERS = frozenset(
         "_likely_causes",
         "_summary_for_error",
         "_failure_summary",
+        "_gdb_server_summary",
+        "_gdb_server_likely_causes",
     }
 )
 

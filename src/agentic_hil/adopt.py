@@ -514,8 +514,8 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
     # The other toolchain a bench names, and the one nothing else could fill in.
     # `debug.gdb_executable` is not a backend's binary, so it is proposed
     # whatever `type` the entry carries: the typed session drives GDB on the
-    # OpenOCD backend, and the stlink and pyocd memory reads resolve their
-    # symbols with it offline, so every backend here has a use for it. Sorted by
+    # OpenOCD and pyOCD backends, and the stlink and pyocd memory reads resolve
+    # their symbols with it offline, so every backend here has a use for it. Sorted by
     # the same three-way rule as everything above, which is what makes a GDB an
     # operator chose come back under `kept` rather than being replaced by
     # whichever one happens to be first on this host's PATH.
