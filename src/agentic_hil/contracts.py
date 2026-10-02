@@ -285,20 +285,26 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "hardware_recover",
         "description": (
-            "Clear this bench's quarantine instead of deleting state files. A reason naming no hardware contact needs "
-            "no argument; any other needs operator_statement: ask the operator in chat and pass their answer verbatim, "
-            "never one they did not give."
+            "Clear a standing quarantine instead of deleting state files; touches no hardware, needs "
+            "permissions.allow_recover; none standing: nothing_to_recover. A no-contact reason clears with no argument; "
+            "others answer recovery_requires_physical_check: ask the operator, pass their answer verbatim as "
+            "operator_statement, never invent one. Failure keeps it standing; recovery_persist_failed resumes on retry."
         ),
         "inputSchema": object_schema(
             {
-                "operator_statement": NONEMPTY_STRING,
+                "operator_statement": {
+                    **NONEMPTY_STRING,
+                    "description": (
+                        "The operator's own answer, asked in chat, passed verbatim; recorded in the ledger as theirs. "
+                        "Never invent one. No statement clears an audit_broken reason: only its operator_command does."
+                    ),
+                },
                 "accept_config_change": {
                     "type": "boolean",
                     "default": False,
                     "description": (
-                        "Only after the operator has reviewed the two digests a config_changed refusal reports: "
-                        "accepts that the configuration changed after the incident. Recorded in the ledger beside "
-                        "both digests."
+                        "Default false. True only after the operator has reviewed both digests a config_changed refusal "
+                        "reports: accepts the configuration change since the incident; recorded in the ledger."
                     ),
                 },
             }
@@ -329,8 +335,10 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "project_config_describe",
         "description": (
-            "List the configuration keys you may change and the permission that opens each locked one; read it before "
-            "project_config_set instead of guessing."
+            "List the keys project_config_set may change: writable_keys with current_value and value_schema, locked_keys "
+            "naming in unlocked_by the permission that opens each. Read it before project_config_set instead of "
+            "guessing; it needs no permission. writes_blocked_by_open_run is true while this server holds a run or "
+            "session. Bad YAML answers config_invalid, an unreadable file config_unreadable."
         ),
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
@@ -342,22 +350,27 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "project_config_set",
         "description": (
-            "Change named configuration keys instead of editing the configuration file yourself. "
-            "allow_config_description_write gates the device description, allow_config_permissions_write the "
-            "permissions, which can only be narrowed."
+            "Change named keys instead of editing the configuration file. Device keys need "
+            "permissions.allow_config_description_write, permission keys allow_config_permissions_write and can only be "
+            "narrowed, else permission_denied; closing either binds at once, closing allow_config_permissions_write "
+            "freezes every permission (permissions_frozen). config_write_in_open_run while a run or session is held."
         ),
         "inputSchema": object_schema(
             {
                 "changes": {
                     "type": "array",
                     "minItems": 1,
+                    "description": (
+                        "One or more {key, value} pairs, each key at most once, validated together: an unknown or "
+                        "repeated key or a value its value_schema refuses answers invalid_argument and nothing is written."
+                    ),
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
                         "required": ["key", "value"],
                         "properties": {
-                            "key": {"type": "string", "minLength": 1, "description": "Dotted configuration key, e.g. debuggers.dut.probe_id. project_config_describe lists the ones this caller may set."},
-                            "value": {"type": ["string", "number", "integer", "boolean", "null"], "description": "A single scalar. Objects and arrays are refused: a whole subtree is content the agent authored, which is what this tool exists not to accept."},
+                            "key": {"type": "string", "minLength": 1, "description": "Dotted key project_config_describe lists. Not in force until re-read (reload_required): project_config_reload_description takes target, debuggers, com_ports, can_buses keys, not debug or permissions."},
+                            "value": {"type": ["string", "number", "integer", "boolean", "null"], "description": "A single scalar matching the key's value_schema; objects and arrays are refused. A permission key takes only false: true answers permission_widening_denied, since only the operator widens."},
                         },
                     },
                 }
@@ -372,15 +385,17 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "project_config_adopt_hardware",
         "description": (
-            "Fill this configuration's hardware placeholders from the attached probe instead of printing values for a "
-            "person to retype; writes only with apply: true."
+            "Fill hardware placeholders from the attached probe rather than values to retype; writes only with apply "
+            "true. No flash or erase: carried lists what it fills, kept what somebody set, unavailable what is missing. "
+            "Each read step may take 10 s; one leaving the board state unknown answers resource_quarantined and "
+            "recovery may reset it into halt. config_write_in_open_run while a run or session is held."
         ),
         "inputSchema": object_schema(
             {
-                "apply": {"type": "boolean", "default": False, "description": "Write the plan. Without it the call reads hardware and the configuration and changes nothing."},
-                "probe_id": {**NONEMPTY_STRING, "description": "Which attached probe this is about. Needed when more than one is attached; it selects among the attached probes and never adds one."},
-                "debugger_id": {**NONEMPTY_STRING, "description": "Which configured debugger entry receives the values. Only needed when the configuration declares more than one."},
-                "com_port_id": {**NONEMPTY_STRING, "description": "Which com_ports entry receives the discovered device. Created with every permission false if it does not exist."},
+                "apply": {"type": "boolean", "default": False, "description": "Default false writes nothing. true writes carried via project_config_set (allow_config_description_write, else permission_denied), then call project_config_reload_description; none: applied false."},
+                "probe_id": {**NONEMPTY_STRING, "description": "Serial of the attached probe to read; defaults to the entry's configured probe_id. Without either, several attached probes answer ambiguous_hardware. Selects among attached probes, never adds one."},
+                "debugger_id": {**NONEMPTY_STRING, "description": "Configured debuggers entry that receives the values; needed when there are several (else invalid_argument). Not configured: unknown_device. An entry naming another probe: hardware_mismatch."},
+                "com_port_id": {**NONEMPTY_STRING, "description": "com_ports entry for the discovered device; default: the one naming it, else the only one, else a new dut_uart, created with every permission false. Several, none named: unavailable."},
             }
         ),
     },
@@ -392,8 +407,10 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "project_config_reload_description",
         "description": (
-            "Re-read target, debuggers, com_ports and can_buses (never permissions) from the configuration file after a "
-            "board was added, instead of asking for a restart."
+            "Re-read target, debuggers, com_ports and can_buses after project_config_set, project_config_adopt_hardware "
+            "or an edit instead of a restart; description_changes lists what moved. Never permissions or debug: new "
+            "devices get all false, changed grants need a restart (restart_required_for). config_reload_in_open_run "
+            "while a run or session is held, resource_quarantined while an incident stands."
         ),
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
@@ -409,8 +426,10 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "server_upgrade",
         "description": (
-            "Upgrade this installation on disk to the newest release instead of running uv, pipx or pip; takes no "
-            "arguments, never a version you name."
+            "Upgrade to the newest release with the uv, pipx or pip that installed this copy; no arguments, needs "
+            "permissions.allow_upgrade. On Windows (upgrade_cli_only_on_host) the operator runs agentic-hil upgrade. "
+            "upgrade_in_open_run while a run or session is held. Each manager run may take 600 s. running_version stays "
+            "old until restart. On failure the operator runs any reinstall_command."
         ),
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
