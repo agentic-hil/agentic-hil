@@ -637,15 +637,15 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # ---------------------------------------------------------------------------
 # What the pins hold.
 
-SCANNED_MODULE_COUNT = 47
-COLLECTED_TYPE_COUNT = 214
+SCANNED_MODULE_COUNT = 48
+COLLECTED_TYPE_COUNT = 217
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
 # misses that; this one moves. A new function that writes a type, or a
 # function that writes one it did not write before, adds one: raise the number
 # in the same change.
-PRODUCER_COUNT = 619
+PRODUCER_COUNT = 642
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
@@ -959,7 +959,13 @@ EXCLUDED: dict[Pair, Exclusion] = {
     ),
     ("memory_read_failed", "stlink"): Exclusion(
         SILENT_REASON,
-        frozenset({("backends.stlink", "STLinkBackend._failure_result"), ("backends.stlink", "STLinkBackend.debug_symbol_value")}),
+        frozenset(
+            {
+                ("backends.gdbdebug", "GdbDebugSessions._read_memory_bytes"),
+                ("backends.stlink", "STLinkBackend._failure_result"),
+                ("backends.stlink", "STLinkBackend.debug_symbol_value"),
+            }
+        ),
         check_silent(("memory_read_failed", "stlink")),
     ),
     ("verify_failed", "openocd"): Exclusion(
