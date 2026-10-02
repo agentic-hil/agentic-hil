@@ -1149,7 +1149,13 @@ def test_no_two_new_entries_give_the_same_advice() -> None:
             steps[step] = error_type
 
 
-PACKAGE_SOURCE = "\n".join(path.read_text(encoding="utf-8") for path in sorted(Path(inspect.getsourcefile(can_module_under_test) or "").parent.rglob("*.py")))
+# The catalogue itself is left out: a step whose name only the catalogue
+# spells would otherwise vouch for itself.
+PACKAGE_SOURCE = "\n".join(
+    path.read_text(encoding="utf-8")
+    for path in sorted(Path(inspect.getsourcefile(can_module_under_test) or "").parent.rglob("*.py"))
+    if path.name != "knowledge.py"
+)
 # A name with an underscore in it is a tool, a field or a config key, which is
 # what a step has to name. Words without one (`channel`, `ip link set`) are
 # prose or commands and are not checked.
