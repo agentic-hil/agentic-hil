@@ -138,10 +138,11 @@ def test_a_declared_bench_that_cannot_be_set_up_is_a_failure(tmp_path: Path) -> 
     assert "not bound to hardware" in str(raised.value)
 
 
-def test_the_session_fixture_reports_no_setup_failure_as_a_skip() -> None:
+@pytest.mark.parametrize("name", ["configured_bench", "bench", "usb_uart_bench"])
+def test_the_session_fixtures_report_no_setup_failure_as_a_skip(name: str) -> None:
     """The sibling entry point exits 2 on the same two conditions; one of them was wrong."""
     tree = ast.parse(BENCH_CONFTEST.read_text(encoding="utf-8"))
-    fixture = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "bench")
+    fixture = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == name)
 
     skips = [node for node in ast.walk(fixture) if isinstance(node, ast.Attribute) and node.attr == "skip"]
 
@@ -180,10 +181,11 @@ def the_items() -> list[AnItem]:
 
 
 def selected_after(monkeypatch: pytest.MonkeyPatch, **environment: str) -> tuple[list[str], list[str]]:
-    from tests.bench.conftest import BENCH_ENV, DEVICE_GROUPS_ENV, pytest_collection_modifyitems
+    from tests.bench.conftest import BENCH_ENV, DEVICE_GROUPS_ENV, USB_UART_ENV, pytest_collection_modifyitems
 
     monkeypatch.delenv(BENCH_ENV, raising=False)
     monkeypatch.delenv(DEVICE_GROUPS_ENV, raising=False)
+    monkeypatch.delenv(USB_UART_ENV, raising=False)
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
     items, config = the_items(), AConfig()
@@ -436,3 +438,111 @@ def test_the_question_a_clean_login_is_asked_is_answered_by_the_interpreter_that
     assert answer["python"] == sys.executable
     assert answer["pip"] is (importlib.util.find_spec("pip") is not None)
     assert answer["managed"] == "" or Path(answer["managed"]).name == "EXTERNALLY-MANAGED", answer
+
+
+# -- the tests that drive the board over the USB-UART adapter ---------------
+
+ADAPTER = "tests/bench/test_bench_usb_uart.py::test_the_inventory_lists_the_adapter_by_its_usb_identity"
+
+
+def selected_beside_an_adapter_test(monkeypatch: pytest.MonkeyPatch, *extra: AnItem, **environment: str) -> tuple[list[str], list[str], object]:
+    """What a bench run keeps and deselects of the usual items, one adapter test and `extra`, and the lines it reports after collection."""
+    from tests.bench import conftest
+
+    for name in (conftest.DEVICE_GROUPS_ENV, conftest.USB_UART_ENV):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(conftest.BENCH_ENV, "1")
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    items, config = [*the_items(), AnItem(ADAPTER, "bench", conftest.USB_UART), *extra], AConfig()
+    conftest.pytest_collection_modifyitems(config, items)
+    said = conftest.pytest_report_collectionfinish(config)
+    return [item.nodeid for item in items], [item.nodeid for item in config.deselected], said
+
+
+def test_a_bench_run_handed_no_adapter_deselects_its_tests_and_one_line_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deselected, not skipped, since a skip fails the tier, and said in one line
+    like the tests the package index leaves out: a bench without the adapter is
+    still a bench, and these tests have nothing to drive on it."""
+    from tests.bench import conftest
+
+    kept, deselected, said = selected_beside_an_adapter_test(monkeypatch)
+
+    assert (kept, deselected) == (REST, [STAGE, ADAPTER])
+    assert isinstance(said, str) and "\n" not in said, said
+    assert said.startswith(f"tests marked {conftest.USB_UART}: deselected, "), said
+    assert conftest.USB_UART_ENV in said, said
+
+
+def test_a_bench_run_handed_the_adapter_runs_its_tests_beside_the_rest(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.bench import conftest
+
+    kept, deselected, said = selected_beside_an_adapter_test(monkeypatch, **{conftest.USB_UART_ENV: "/dev/ttyUSB0"})
+
+    assert (kept, deselected, said) == ([*REST, ADAPTER], [STAGE], None)
+
+
+def test_the_stage_without_the_device_group_speaks_of_the_adapter_only_for_its_own_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """That stage runs alone, so an adapter test outside it is deselected there
+    whatever the run was handed, and is no reason for the line; one inside it
+    is."""
+    from tests.bench import conftest
+
+    withheld = {conftest.DEVICE_GROUPS_ENV: conftest.DEVICE_GROUPS_WITHHELD}
+    in_the_stage = "tests/bench/test_bench_without_device_group.py::test_adapter"
+    staged = AnItem(in_the_stage, "bench", conftest.WITHOUT_DEVICE_GROUP, conftest.USB_UART)
+
+    outside = selected_beside_an_adapter_test(monkeypatch, **withheld)
+    inside = selected_beside_an_adapter_test(monkeypatch, staged, **withheld)
+    handed = selected_beside_an_adapter_test(monkeypatch, staged, **withheld, **{conftest.USB_UART_ENV: "/dev/ttyUSB0"})
+
+    assert outside == ([STAGE], [*REST, ADAPTER], None)
+    assert inside[:2] == ([STAGE], [*REST, ADAPTER, in_the_stage])
+    assert isinstance(inside[2], str) and inside[2].startswith(f"tests marked {conftest.USB_UART}: deselected, "), inside[2]
+    assert handed == ([STAGE, in_the_stage], [*REST, ADAPTER], None)
+
+
+def test_a_run_that_lacks_both_the_index_and_the_adapter_says_each_in_a_line_of_its_own(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from tests.bench import conftest
+
+    monkeypatch.setattr(conftest, "BENCH_IMAGE", tmp_path / "bench-test-image")
+    monkeypatch.setattr(conftest, "WHEELHOUSE", tmp_path / "wheelhouse")
+
+    kept, deselected, said = selected_beside_an_adapter_test(monkeypatch, AnItem(INSTALLING, "bench", conftest.NEEDS_THE_WHEELHOUSE))
+
+    assert (kept, deselected) == (REST, [STAGE, ADAPTER, INSTALLING])
+    assert isinstance(said, list) and len(said) == 2, said
+    assert said[0].startswith(f"tests marked {conftest.NEEDS_THE_WHEELHOUSE}: deselected, "), said
+    assert said[1].startswith(f"tests marked {conftest.USB_UART}: deselected, "), said
+
+
+def test_off_a_bench_an_adapter_test_is_left_to_its_own_mark(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test of the tier skips there by its own mark, and nothing is said."""
+    from tests.bench import conftest
+
+    monkeypatch.delenv(conftest.BENCH_ENV, raising=False)
+    monkeypatch.delenv(conftest.USB_UART_ENV, raising=False)
+    items, config = [*the_items(), AnItem(ADAPTER, "bench", conftest.USB_UART)], AConfig()
+
+    conftest.pytest_collection_modifyitems(config, items)
+
+    assert [item.nodeid for item in items] == [*[item.nodeid for item in the_items()], ADAPTER]
+    assert (config.deselected, conftest.pytest_report_collectionfinish(config)) == ([], None)
+
+
+def test_a_module_over_both_lines_marks_the_adapters_tests_and_only_those() -> None:
+    """The mark is what deselects them on a bench without the adapter, so a
+    parameter that lost it would run there and fail its setup instead."""
+    from tests.bench.conftest import OVER_BOTH_LINES, PROBE_PORT, USB_UART
+
+    marks = {line.values[0]: [mark.name for mark in line.marks] for line in OVER_BOTH_LINES}
+
+    assert marks == {PROBE_PORT: [], USB_UART: [USB_UART]}
+
+
+def test_the_adapter_mark_is_declared_where_strict_markers_look(pytestconfig: pytest.Config) -> None:
+    from tests.bench.conftest import USB_UART
+
+    declared = pytestconfig.getini("markers")
+
+    assert [line for line in declared if line.startswith(f"{USB_UART}:")], declared

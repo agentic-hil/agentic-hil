@@ -23,11 +23,13 @@ stands in it, byte for byte elsewhere, without following a link, passes over a
 PATH that does not exist, and names each file it changed.
 
 What is withheld: the serial number of every in-circuit debugger or programmer
-attached to this machine, found through sysfs the way the runner finds it, and
-this machine's host name, home directory and user. With no attached probe
-showing a serial number, the one a configuration names is not known here, so
-both refuse before they run or change anything: what followed would name the
-board in public.
+and of every USB-UART adapter attached to this machine, found through sysfs the
+way the runner finds them, and this machine's host name, home directory and
+user. The adapters count because the product's port inventory lists every
+serial port on the machine, theirs among them. With no attached probe showing a
+serial number, the one a configuration names is not known here, so both refuse
+before they run or change anything: what followed would name the board in
+public.
 
 Exit statuses: 2 refused, 1 a file could not be read or written, 127 the
 command could not be started, and otherwise the command's own, 128 plus the
@@ -48,7 +50,7 @@ from typing import BinaryIO
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bench_in_container import Redactor, discover_probes, host_identities  # noqa: E402
+from bench_in_container import Redactor, discover_probes, discover_usb_uarts, host_identities  # noqa: E402
 
 EXIT_UNREADABLE = 1
 EXIT_REFUSED = 2
@@ -67,10 +69,11 @@ def say(text: str, redact: Redactor) -> None:
 
 
 def what_to_withhold() -> tuple[Redactor, Redactor | None]:
-    """This machine's names alone, for this tool's own lines, and with every probe's serial, or None without one."""
+    """This machine's names alone, for this tool's own lines, and with every serial, or None without a probe's."""
     names = host_identities()
     serials = [serial for probe in discover_probes() for serial in probe.serial_numbers]
-    return Redactor(names), Redactor([*names, *serials]) if serials else None
+    adapters = [serial for adapter in discover_usb_uarts() for serial in adapter.serial_numbers]
+    return Redactor(names), Redactor([*names, *serials, *adapters]) if serials else None
 
 
 def refuse(redact: Redactor, outcome: str) -> int:

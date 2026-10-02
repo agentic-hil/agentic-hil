@@ -1010,7 +1010,8 @@ def test_every_distribution_the_runner_builds_runs_its_whole_tier_one_after_anot
     reason: the runner is the step's process and the SIGINT a cancelled run
     sends reaches it rather than a shell. After a red distribution the next
     still runs; after a cancel, none. Each takes the machine's run lock itself,
-    as the gate's run does, and queues for it.
+    as the gate's run does, and queues for it, and each states, as the gate's
+    does, that the board's USB-UART adapter is there.
     """
     ran = distribution_steps()
 
@@ -1018,7 +1019,7 @@ def test_every_distribution_the_runner_builds_runs_its_whole_tier_one_after_anot
     for distribution, step, _ in ran:
         line = run_lines({"steps": [step]})[0]
         command = shlex.split(line)
-        assert command == ["exec", "python3", DISTRIBUTION_RUNNER, "--distribution", distribution, "--output", f"{DISTRIBUTION_RESULTS}/{distribution}"], command
+        assert command == ["exec", "python3", DISTRIBUTION_RUNNER, "--distribution", distribution, "--require-usb-uart", "--output", f"{DISTRIBUTION_RESULTS}/{distribution}"], command
         assert step["if"] == "${{ !cancelled() }}", step
         assert "working-directory" not in step, step
         assert not RAW_HARDWARE.search(line), line
@@ -1159,6 +1160,10 @@ def test_the_gate_runs_the_runner_and_nothing_else() -> None:
     allowed to open it, which only a container that withholds the groups the
     probe is opened through can put the product in, and which every other test
     of the tier would fail in.
+
+    Both state that the board's USB-UART adapter is there: the runner hands it
+    in either way, and without the statement a bench that lost it would pass
+    with the tests that drive the board over it deselected.
     """
     lines = [
         line
@@ -1177,8 +1182,8 @@ def test_the_gate_runs_the_runner_and_nothing_else() -> None:
         for word in ("pip", "agentic-hil", "podman", "docker", "sudo"):
             assert word not in command, command
     source_args = ["--source", "../under-test", "--expected-commit", "$(git -C ../under-test rev-parse HEAD)"]
-    assert tier[3:] == [*source_args, "--output", GATE_RESULTS], tier
-    assert stage[3:] == [*source_args, "--without-device-group", "--output", GATE_STAGE_RESULTS], stage
+    assert tier[3:] == [*source_args, "--require-usb-uart", "--output", GATE_RESULTS], tier
+    assert stage[3:] == [*source_args, "--without-device-group", "--require-usb-uart", "--output", GATE_STAGE_RESULTS], stage
 
 
 def test_the_stage_without_the_device_group_runs_after_the_tier_unless_the_run_was_cancelled() -> None:
