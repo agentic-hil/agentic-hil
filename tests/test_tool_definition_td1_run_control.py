@@ -297,10 +297,11 @@ def lists_the_session_record_without_asking_gdb(description: str) -> bool:
     """`list_breakpoints` answers from the session's own list and sends GDB
     nothing; only `debug_clear_breakpoints` reads GDB's list (gdbdebug.py
     `list_breakpoints`, `_backend_breakpoint_numbers`). Every mention of GDB is
-    the one the list does without, or the one the clear checks."""
+    the one the list does without, or the one the clear checks; the GDB server
+    a session runs on is another process (`needs_the_session_gdb_server`)."""
     record = [clause for clause in clauses(description) if re.search(r"\b(own (record|list)|session's (record|list)|local|cached?)\b", clause, re.IGNORECASE)]
     without_gdb = any(re.search(r"\b(without|not|never)\s+(asking|querying|reading|consulting)\s+GDB\b", clause) for clause in record)
-    gdb_pieces = containing(pieces(description), r"\bGDB\b")
+    gdb_pieces = containing(pieces(description), r"\bGDB\b(?!\s+servers?\b)")
     return without_gdb and all(re.search(r"\b(without|not|never)\s+(asking|querying|reading|consulting)\s+GDB\b", piece) or CLEAR in piece for piece in gdb_pieces)
 
 
@@ -895,8 +896,14 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
         [
             "Lists them from the session's own record without asking GDB. debug_clear_breakpoints removes them and checks GDB.",
             "Answers from the local list, not querying GDB.",
+            "Lists them from the session's own record without asking GDB. GDB server only, exactly one debugger configured; else not_supported.",
         ],
-        ["Lists the breakpoints GDB reports.", "Lists the session's own record, then asks GDB.", "Lists the breakpoints from the session's own record."],
+        [
+            "Lists the breakpoints GDB reports.",
+            "Lists the session's own record, then asks GDB.",
+            "Lists the breakpoints from the session's own record.",
+            "Lists them from the session's own record without asking GDB, then asks GDB and the GDB server.",
+        ],
     ),
     (
         an_abnormal_stop_is_a_good_read,
