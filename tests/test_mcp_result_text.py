@@ -503,10 +503,13 @@ def test_every_catalogue_entry_is_named_by_the_advice_it_left_out(key: str) -> N
         assert_text_projects(result)
 
 
-def test_advice_without_a_catalogue_entry_is_counted_and_names_no_uri() -> None:
+def test_advice_without_a_catalogue_entry_is_counted_and_names_no_uri(monkeypatch: pytest.MonkeyPatch) -> None:
     """An error_type the catalogue has no entry for still has its repeated
     likely_causes left out and counted, and its text carries no `advice_uri`:
-    there is no entry for one to name."""
+    there is no entry for one to name. `timeout` has entries of its own since
+    #644, so they are taken out for this one test to have a type without one."""
+    for key in [key for key in ERROR_CATALOGUE if key.partition(":")[0] == "timeout"]:
+        monkeypatch.delitem(ERROR_CATALOGUE, key)
     assert not [key for key in ERROR_CATALOGUE if key.partition(":")[0] == "timeout"]
     built = {
         "ok": False,

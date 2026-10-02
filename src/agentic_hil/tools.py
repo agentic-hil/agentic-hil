@@ -84,6 +84,8 @@ from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.devices import DeviceError, can_device, resolve_devices, uart_device
 from agentic_hil.knowledge import (
     RECOVERY_PHYSICAL_CHECK_ERROR,
+    UNBOUND_DEBUGGER_SCOPE,
+    UNNAMED_PROBE_SCOPE,
     attach_quarantine_guidance,
     permission_denied_next_step,
     permission_denied_summary,
@@ -403,7 +405,7 @@ class AgenticHILToolService:
             # probe's cleanup.
             refusal = {key: value for key, value in opened.items() if key not in _CAPTURE_SESSION_FIELDS}
             if opened.get("ok") is True:
-                refusal.update({"error_type": "audit_unavailable", "summary": "The flash was not started: the capture's COM port session opened, but it could not be audited."})
+                refusal.update({"error_type": "audit_unavailable", "summary": "The flash was not started: the capture's COM port session opened, but it could not be audited.", **remediation_fields("audit_unavailable")})
             return {**refusal, "ok": False, "tool": "flash_firmware", **NOT_STARTED}
         try:
             result = self.backend.flash_firmware(artifact, True)
@@ -484,7 +486,7 @@ class AgenticHILToolService:
             return validation
         artifact = validation["artifact"]
         if Path(str(artifact["resolved_path"])).suffix.lower() != ".elf":
-            return tool_error("debug_start_session", "artifact_validation_failed", "Debug sessions require an ELF artifact with debug symbols.")
+            return {**tool_error("debug_start_session", "artifact_validation_failed", "Debug sessions require an ELF artifact with debug symbols."), **remediation_fields("artifact_validation_failed")}
         staged = self.artifacts.stage_for_backend(artifact, "debug_start_session")
         if not staged["ok"]:
             return staged
@@ -601,7 +603,8 @@ class AgenticHILToolService:
     def call(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         with self._lifecycle_lock:
             if self._state != "open":
-                result: JsonObject = {"ok": False, "tool": name, "error_type": "service_closed" if self._state == "closed" else "service_cleanup_required", "summary": "Agentic HIL service is not accepting new calls.", "side_effect_committed": False, "cleanup_required": self._state == "cleanup_required"}
+                error_type = "service_closed" if self._state == "closed" else "service_cleanup_required"
+                result: JsonObject = {"ok": False, "tool": name, "error_type": error_type, "summary": "Agentic HIL service is not accepting new calls.", "side_effect_committed": False, "cleanup_required": self._state == "cleanup_required", **remediation_fields(error_type)}
             else:
                 result = self._call_unlocked(name, arguments)
                 # A status read reports the incident as it found it and leaves it
@@ -637,6 +640,8 @@ class AgenticHILToolService:
             # operator checks on the physical board before signing
             # `--confirm-safe-state`. One catalogue (knowledge.py), one attach
             # point, so every tool's quarantine reads the same way.
+            if name in debugger_tools():
+                result = attach_debugger_remediation(result)
             result = attach_quarantine_guidance(result)
             if "config_status" in result:
                 return result
@@ -992,7 +997,7 @@ class AgenticHILToolService:
             if name in implicit_run_tools() and not self.coordinator.run_active and not self.coordinator.incident_stands:
                 return self._in_implicit_run(name, args, lambda: self._dispatch_tool(name, args, blocked_before, action))
             return self._dispatch_tool(name, args, blocked_before, action)
-        return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool."}
+        return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool.", **remediation_fields("unknown_tool")}
 
     def _in_implicit_run(self, name: str, args: JsonObject, action) -> JsonObject:
         """Perform one bare effect call as the single-action run it really is.
@@ -1104,10 +1109,11 @@ class AgenticHILToolService:
                     if poison_error is not None:
                         error.args = (*error.args, f"Quarantine error: {poison_error}")
                     raise
+                error_type = "audit_failed_after_action" if isinstance(error, (ConfigError, OSError)) else "hardware_action_exception"
                 result: JsonObject = {
                     "ok": False,
                     "tool": name,
-                    "error_type": "audit_failed_after_action" if isinstance(error, (ConfigError, OSError)) else "hardware_action_exception",
+                    "error_type": error_type,
                     "summary": "Hardware action failed and its physical state is unconfirmed.",
                     "side_effect_status": "unknown",
                     "retry_safe": False,
@@ -1115,6 +1121,7 @@ class AgenticHILToolService:
                     "quarantined": quarantined_now,
                     "quarantine_id": self.coordinator.quarantine_id,
                     "backend_error": str(error),
+                    **remediation_fields(error_type),
                 }
                 if poison_error is not None:
                     result["quarantine_error"] = str(poison_error)
@@ -2331,7 +2338,14 @@ class AgenticHILToolService:
                     if self._result_requires_quarantine(result):
                         lease.quarantine("debug_session_start_unconfirmed", audit_broken=result.get("audit_ok") is False)
                     return self._lease_result(result, lease)
-                return {"ok": False, "tool": name, "error_type": "resource_busy", "summary": "Debugger resource already has an active owner lease.", "retry_safe": True}
+                return {
+                    "ok": False,
+                    "tool": name,
+                    "error_type": "resource_busy",
+                    "summary": "Debugger resource already has an active owner lease.",
+                    "retry_safe": True,
+                    **remediation_fields("resource_busy"),
+                }
             else:
                 try:
                     resources = (DEBUGGER_DISCOVERY_RESOURCE,) if name == "debugger_probes_list" else debugger_effect_resources(self.config)
@@ -2415,7 +2429,7 @@ class AgenticHILToolService:
                     self._debug_lease = None
                     return self._recommit_lease_report(written, lease)
                 if lease.state != "active":
-                    written = self._lease_result({**result, "ok": False, "error_type": "cleanup_required", "summary": "Debug process cleanup completed, but prior target state remains unconfirmed."}, lease)
+                    written = self._lease_result({**result, "ok": False, "error_type": "cleanup_required", "summary": "Debug process cleanup completed, but prior target state remains unconfirmed.", **remediation_fields("cleanup_required")}, lease)
                 return self._recommit_lease_report(written, lease)
             else:
                 lease.quarantine("debug_session_cleanup_unconfirmed", audit_broken=result.get("audit_ok") is False)
@@ -2918,6 +2932,7 @@ def unbound_debugger_error(tool: str, config: AgenticHILConfig) -> JsonObject:
         "side_effect_status": "not_started",
         # No argument to this tool can change the outcome; retrying only wastes turns.
         "retry_safe": False,
+        **remediation_fields("not_supported", UNBOUND_DEBUGGER_SCOPE),
     }
 
 
@@ -2979,7 +2994,41 @@ def unnamed_probe_error(tool: str, config: AgenticHILConfig) -> JsonObject:
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         "retry_safe": False,
+        **remediation_fields("not_supported", UNNAMED_PROBE_SCOPE),
     }
+
+
+def attach_debugger_remediation(result: JsonObject) -> JsonObject:
+    """A debugger-backed refusal with the catalogue's advice for its backend (#644).
+
+    The backends and the debug session answer most of their refusals without the
+    remediation fields, and the advice for those depends on which debugger said
+    it: an OpenOCD timeout and a pyOCD timeout are different waits with different
+    reads. So the one place a debugger tool's result leaves the service fills it
+    here, under the rule below and nowhere else:
+
+    - only a top-level refusal (`ok` false) with an `error_type` is filled; a
+      success that names a target fault (`target_error_type`) is the session's
+      own report and carries its own `suggested_actions`, and a refusal nested
+      inside another object belongs to whatever produced that object;
+    - a refusal that already carries `remediation` keeps it: the producer that
+      wrote advice for its own case knows more than the catalogue does;
+    - a refusal that names no `backend` is left alone, because the scoped entry
+      is chosen by it and a bare fallback without it would be a guess;
+    - the lookup is the catalogue's own, scoped first and bare second, so a
+      pair #516 deliberately keeps silent stays silent: neither key exists.
+    """
+    if result.get("ok") is not False or "remediation" in result:
+        return result
+    error_type = result.get("error_type")
+    backend = result.get("backend")
+    if not isinstance(error_type, str) or not error_type or not isinstance(backend, str) or not backend:
+        return result
+    permission = result.get("permission")
+    advice = remediation_fields(error_type, backend, permission=permission if isinstance(permission, str) and permission else None)
+    if not advice:
+        return result
+    return {**result, **advice}
 
 
 def debugger_tools() -> set[str]:
@@ -4086,7 +4135,7 @@ class UnprovisionedToolService:
                 self._bind()
             return result
         if name not in MCP_TOOL_NAMES:
-            return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool."}
+            return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool.", **remediation_fields("unknown_tool")}
         return unprovisioned_tool_error(name, self.workspace)
 
     def close(self) -> None:

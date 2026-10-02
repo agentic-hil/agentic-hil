@@ -9,7 +9,7 @@ before or while calling it. What a result explains at the moment it applies
 (why a call was refused, what a state it names means, what to do after a given
 answer) is read in that result, or in the catalogue entry that result carries.
 
-So this file holds three things. The size of the whole list and of each entry.
+So this file holds three things. The size of each entry and of each property.
 The rules that stay in a description whatever their length. And, for guidance a
 description no longer carries, the result that carries it instead, reached
 through the tool that returns it rather than read out of a table, because a
@@ -34,6 +34,7 @@ from test_config_reload import service as reload_service
 from test_config_write import bench as write_bench
 from test_config_write import changes
 from test_config_write import service as write_service
+from test_mcp_reference_resources import read_text
 from test_reactor_mcp_tools import RESET_PLAN, bound_service, call
 from test_recover_tool import config_changed_incident, config_for, open_incident, quarantine
 from test_run_lifecycle import bench_workspace
@@ -51,7 +52,6 @@ from agentic_hil.knowledge import (
 )
 from agentic_hil.tools import PROJECT_CONFIG_CREATE, AgenticHILToolService, UnprovisionedToolService
 
-DESCRIPTIONS_TOTAL_LIMIT = 5000
 DESCRIPTION_LIMIT = 400
 PROPERTY_DESCRIPTION_LIMIT = 200
 
@@ -102,23 +102,20 @@ def prose_of(result: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# The size of the list.
-
-
-def test_all_descriptions_together_stay_within_five_thousand_characters() -> None:
-    """The whole list, the three entries whose wording changes elsewhere included."""
-    described = descriptions()
-    assert sorted(described) == sorted(MCP_TOOL_NAMES)
-    assert {"com_read", "can_read", "flash_firmware"} <= set(described)
-
-    total = sum(len(text) for text in described.values())
-    longest = sorted(((len(text), name) for name, text in described.items()), reverse=True)[:8]
-    assert total <= DESCRIPTIONS_TOTAL_LIMIT, f"{total} characters, longest {longest}"
+# The size of each entry.
 
 
 def test_no_description_is_over_four_hundred_characters() -> None:
-    over = {name: len(text) for name, text in descriptions().items() if len(text) > DESCRIPTION_LIMIT}
+    """Every listed tool, measured on its own.
 
+    The limit is per entry and per property, never for the list as a whole: a
+    whole-list ceiling would make each new tool shorten the ones already there,
+    while these two grow with the number of tools and of their parameters.
+    """
+    described = descriptions()
+    assert sorted(described) == sorted(MCP_TOOL_NAMES)
+
+    over = {name: len(text) for name, text in described.items() if len(text) > DESCRIPTION_LIMIT}
     assert over == {}, over
 
 
@@ -198,7 +195,9 @@ def test_accept_config_change_still_waits_for_the_operator() -> None:
 ROUTES: dict[str, tuple[str, ...]] = {
     "hardware_recover": (r"state files",),
     "project_config_create": (r"by hand",),
-    "test_reactor_run": (r"`?agentic-hil test-reactor`?", r"workspace_root", r"detach", r"test_reactor_status", r"test_reactor_stop"),
+    # The command it runs a plan like is said by the test-plan reference it links,
+    # and workspace_root by test_config_path, which holds the path to it.
+    "test_reactor_run": (r"detach", r"test_reactor_status", r"test_reactor_stop"),
     "project_config_reload_description": (r"restart",),
     "server_upgrade": (r"\buv\b", r"\bpipx\b", r"\bpip\b", r"no arguments"),
     "project_config_set": (r"editing the configuration file",),
@@ -220,6 +219,23 @@ def test_a_shortened_description_still_says_what_it_stands_in_for(name: str) -> 
 
 # ---------------------------------------------------------------------------
 # Where the guidance a description no longer carries is read.
+
+
+def test_the_test_plan_reference_says_the_tool_runs_a_plan_as_the_command_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """test_reactor_run no longer names `agentic-hil test-reactor`; the reference
+    its description links says the two drive one reactor, read the way a host
+    reads it."""
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, RESET_PLAN)
+    service = bound_service(workspace)
+    try:
+        text = read_text(service, TEST_PLAN_URI)
+    finally:
+        service.close()
+
+    parts = sentences(text)
+    both = [index for index, part in enumerate(parts) if "`test_reactor_run`" in part and "`agentic-hil test-reactor`" in part]
+    assert both, text
+    assert re.match(r"Both drive one reactor\b", parts[both[0] + 1]), parts[both[0] + 1]
 
 
 def test_a_config_changed_refusal_says_what_to_show_the_operator_and_both_ways_on(tmp_path: Path) -> None:

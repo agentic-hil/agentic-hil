@@ -774,7 +774,7 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
     requested_agents = agents or []
     invalid = [agent for agent in requested_agents if resolve_skill_agent(agent) is None]
     if invalid:
-        return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know one or more requested agents.", "agents": invalid, "allowed_agents": supported_skill_agents()}
+        return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know one or more requested agents.", "agents": invalid, "allowed_agents": supported_skill_agents(), **remediation_fields("unsupported_agent")}
 
     result = replace_installation(tool=CLI_UPGRADE_TOOL)
     if not result.get("upgraded_on_disk"):
@@ -1268,7 +1268,7 @@ def _smooth_user_permissions() -> list[str]:
 
 
 def _unsupported_agent(agent: str, summary: str) -> JsonObject:
-    return {"ok": False, "error_type": "unsupported_agent", "summary": summary, "agent": normalize_agent(agent), "allowed_agents": supported_skill_agents()}
+    return {"ok": False, "error_type": "unsupported_agent", "summary": summary, "agent": normalize_agent(agent), "allowed_agents": supported_skill_agents(), **remediation_fields("unsupported_agent")}
 
 
 def _registration_restart(agent: SkillAgent, mcp_result: JsonObject) -> JsonObject:
@@ -1423,7 +1423,7 @@ def uninstall_agent_integration(agents: list[str] | None = None) -> JsonObject:
     requested = agents or []
     invalid = [agent for agent in requested if resolve_skill_agent(agent) is None]
     if invalid:
-        return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know one or more requested agents.", "agents": invalid, "allowed_agents": supported_skill_agents()}
+        return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know one or more requested agents.", "agents": invalid, "allowed_agents": supported_skill_agents(), **remediation_fields("unsupported_agent")}
 
     wanted = {resolved.id for name in requested if (resolved := resolve_skill_agent(name)) is not None}
     # Read before the agent removal below, which takes back the record these are
@@ -1876,6 +1876,7 @@ def _with_external_project_record_taken_back(result: JsonObject) -> JsonObject:
             "error_type": "agent_project_record_unremovable",
             "failed": [*result.get("failed", []), *failed],
             "summary": f"{result['summary']} A project record this installation wrote could not be removed and a live file was left behind: {detail}.",
+            **remediation_fields("agent_project_record_unremovable"),
         }
     return result
 
@@ -1883,7 +1884,7 @@ def _with_external_project_record_taken_back(result: JsonObject) -> JsonObject:
 def _remove_claude_code_deny_rules(agent: SkillAgent, path: Path) -> JsonObject:
     document = _load_json_object(path)
     if document is None:
-        return _uninstall_step(f"{path} is not a JSON object; left untouched.", ok=False, error_type="agent_permissions_unreadable", path=str(path))
+        return _uninstall_step(f"{path} is not a JSON object; left untouched.", ok=False, error_type="agent_permissions_unreadable", path=str(path), **remediation_fields("agent_permissions_unreadable"))
     permissions = document.get("permissions")
     deny = permissions.get("deny") if isinstance(permissions, dict) else None
     if not isinstance(deny, list):
@@ -2879,7 +2880,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     target_path = _target if _target is not None else initialized_config_path(workspace)
     validate_legacy_config_selector(config_path, workspace, target_path)
     if _path_entry_exists(target_path) and not force:
-        return {"ok": False, "error_type": "config_exists", "summary": "Agentic HIL configuration already exists. Use --force to overwrite it.", "path": str(target_path)}
+        return {"ok": False, "error_type": "config_exists", "summary": "Agentic HIL configuration already exists. Use --force to overwrite it.", "path": str(target_path), **remediation_fields("config_exists")}
     if not _locked:
         # `generation_locks` beside the file lock and held across the whole locked
         # pass: on the repair path the read below takes its device locks into this
@@ -3561,7 +3562,7 @@ def schema(output: str | None = None, force: bool = False) -> JsonObject | int:
         return _printed_document(text)
     output_path = Path(output)
     if output_path.exists() and not force:
-        return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL configuration schema already exists. Use --force to overwrite it.", "path": output}
+        return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL configuration schema already exists. Use --force to overwrite it.", "path": output, **remediation_fields("schema_exists")}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text, encoding="utf-8")
     return {"ok": True, "summary": "Agentic HIL configuration schema written.", "path": output}
@@ -3573,7 +3574,7 @@ def test_schema(output: str | None = None, force: bool = False) -> JsonObject | 
         return _printed_document(text)
     output_path = Path(output)
     if output_path.exists() and not force:
-        return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL test configuration schema already exists. Use --force to overwrite it.", "path": output}
+        return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL test configuration schema already exists. Use --force to overwrite it.", "path": output, **remediation_fields("schema_exists")}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text, encoding="utf-8")
     return {"ok": True, "summary": "Agentic HIL test configuration schema written.", "path": output}
@@ -3810,7 +3811,7 @@ def mcp_config(output: str | None = None, force: bool = False) -> JsonObject | i
     if not is_path_within_frozen(output_path, workspace):
         raise ConfigError("unsafe_configured_path", "MCP project configuration output must stay inside the current workspace.", {"path": str(output_path), "workspace_root": str(workspace)})
     if _path_entry_exists(output_path) and not force:
-        return {"ok": False, "error_type": "mcp_config_exists", "summary": "MCP configuration already exists. Use --force to overwrite it.", "path": output}
+        return {"ok": False, "error_type": "mcp_config_exists", "summary": "MCP configuration already exists. Use --force to overwrite it.", "path": output, **remediation_fields("mcp_config_exists")}
     safe_directory(output_path.parent)
     atomic_write_text(output_path, text, workspace=workspace)
     return {"ok": True, "summary": "Agentic HIL MCP configuration written.", "path": str(output_path)}
@@ -4361,6 +4362,7 @@ def _record_external_configuration(config_path: Path) -> JsonObject | None:
             "error_type": "agent_project_record_unreadable",
             "summary": f"{path} is not the record of Agentic HIL projects it has to be, so this project could not be recorded and no deny rule was written; left untouched.",
             "path": str(path),
+            **remediation_fields("agent_project_record_unreadable"),
         }
     absolute = absolute_without_symlinks(config_path)
     already = any(os.path.normcase(str(entry)) == os.path.normcase(str(absolute)) for entry in recorded)
@@ -4391,6 +4393,7 @@ def _record_external_configuration(config_path: Path) -> JsonObject | None:
             "error_type": "agent_project_record_unwritable",
             "summary": f"{path} could not be written ({error}), so this project could not be recorded and no deny rule was written.",
             "path": str(path),
+            **remediation_fields("agent_project_record_unwritable"),
         }
     return None
 
@@ -4523,7 +4526,7 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
         }
     document = _load_json_object(path)
     if document is None:
-        return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} is not a JSON object; left untouched.", "path": str(path)}
+        return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} is not a JSON object; left untouched.", "path": str(path), **remediation_fields("agent_permissions_unreadable")}
 
     removed: list[str] = []
     if agent_id == "claude-code":
@@ -4531,10 +4534,10 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
         # rules never removes the operator's own.
         permissions = document.setdefault("permissions", {})
         if not isinstance(permissions, dict):
-            return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} has a non-object permissions entry; left untouched.", "path": str(path)}
+            return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} has a non-object permissions entry; left untouched.", "path": str(path), **remediation_fields("agent_permissions_unreadable")}
         deny = permissions.setdefault("deny", [])
         if not isinstance(deny, list):
-            return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} has a non-list deny entry; left untouched.", "path": str(path)}
+            return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} has a non-list deny entry; left untouched.", "path": str(path), **remediation_fields("agent_permissions_unreadable")}
         if not _configuration_the_projects_walk_finds(config_path):
             unrecorded = _record_external_configuration(config_path)
             if unrecorded is not None:
@@ -4594,7 +4597,7 @@ def register_agent_mcp(agent: str | None = None, force: bool = False, *, command
     resolved = resolve_skill_agent(requested)
     agent_id = resolved.id if resolved else normalize_agent(requested)
     if agent_id not in MCP_CONFIG_WRITERS:
-        return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know this agent's MCP config format.", "agent": agent_id, "allowed_agents": supported_skill_agents()}
+        return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know this agent's MCP config format.", "agent": agent_id, "allowed_agents": supported_skill_agents(), **remediation_fields("unsupported_agent")}
     command = mcp_server_command() if command is None else _trusted_mcp_command(command)
     if not _locked:
         with secure_user_file_lock(_agent_mcp_config_path(agent_id)):
@@ -4668,7 +4671,7 @@ def _register_codex_mcp(command: str, force: bool) -> JsonObject:
     entry = servers.get("agentic-hil") if isinstance(servers, dict) else None
     desired_entry = {"command": command, "args": ["mcp-stdio"], "enabled": True}
     if not has_managed and entry is not None:
-        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "codex", "format": "codex-toml", "path": str(path), **_existing_command_field(entry), "summary": "An unmanaged Codex agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "codex", "format": "codex-toml", "path": str(path), **_existing_command_field(entry), "summary": "An unmanaged Codex agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP, **remediation_fields("mcp_config_conflict")}
     if has_managed and not isinstance(entry, dict):
         return {"ok": False, "error_type": "config_invalid", "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "The Agentic HIL managed markers do not contain an agentic-hil MCP table; left untouched."}
     if has_managed and entry == desired_entry:
@@ -4766,7 +4769,7 @@ def _register_opencode_mcp(command: str, force: bool) -> JsonObject:
     existing_entry = servers.get("agentic-hil")
     kind = _opencode_mcp_entry_kind(existing_entry, desired_entry) if "agentic-hil" in servers else None
     if "agentic-hil" in servers and kind is None:
-        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "opencode", "format": "opencode-json", "path": str(path), **_existing_command_field(existing_entry), "summary": "An unmanaged opencode agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "opencode", "format": "opencode-json", "path": str(path), **_existing_command_field(existing_entry), "summary": "An unmanaged opencode agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP, **remediation_fields("mcp_config_conflict")}
     if kind == "current":
         return {"ok": True, "skipped": True, "agent": "opencode", "format": "opencode-json", "path": str(path), "summary": "opencode MCP entry already registered."}
     data.setdefault("$schema", "https://opencode.ai/config.json")
@@ -4787,7 +4790,7 @@ def _register_claude_mcp(command: str, force: bool) -> JsonObject:
     existing_entry = servers.get("agentic-hil")
     kind = _claude_mcp_entry_kind(existing_entry, desired_entry) if "agentic-hil" in servers else None
     if "agentic-hil" in servers and kind is None:
-        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), **_existing_command_field(existing_entry), "summary": "An unmanaged Claude agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), **_existing_command_field(existing_entry), "summary": "An unmanaged Claude agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP, **remediation_fields("mcp_config_conflict")}
     if kind == "current":
         return {"ok": True, "skipped": True, "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "summary": "Claude MCP entry already registered."}
     servers["agentic-hil"] = desired_entry
@@ -5682,7 +5685,7 @@ def install_skill(agent: str | None = None, target: str | None = None, force: bo
     requested_agent = agent or "opencode"
     resolved_agent = resolve_skill_agent(requested_agent)
     if resolved_agent is None and target is None:
-        return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know this agent's default skill directory. Provide --target to install anyway.", "agent": normalize_agent(requested_agent), "allowed_agents": supported_skill_agents()}
+        return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know this agent's default skill directory. Provide --target to install anyway.", "agent": normalize_agent(requested_agent), "allowed_agents": supported_skill_agents(), **remediation_fields("unsupported_agent")}
     agent_id = resolved_agent.id if resolved_agent else normalize_agent(requested_agent)
     agent_name = resolved_agent.display_name if resolved_agent else agent_id
     source_path = bundled_skill_path()
@@ -5725,13 +5728,13 @@ def install_skill(agent: str | None = None, target: str | None = None, force: bo
         existing_version = skill_version(existing_text)
         managed_skill = is_agentic_hil_setup_skill(existing_text)
         if not managed_skill:
-            return {"ok": False, "error_type": "skill_conflict", "summary": "Target skill file contains unmanaged content and was left untouched; --force never replaces foreign skills.", "next_step": CONFLICT_NEXT_STEP, "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "existing_version": existing_version, "version": source_version}
+            return {"ok": False, "error_type": "skill_conflict", "summary": "Target skill file contains unmanaged content and was left untouched; --force never replaces foreign skills.", "next_step": CONFLICT_NEXT_STEP, "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "existing_version": existing_version, "version": source_version, **remediation_fields("skill_conflict")}
         if existing_version != source_version:
             secure_atomic_write_text(target_path, source_text)
             registration = register_skill(resolved_agent, str(target_path), source_version, requested_agent)
             return {"ok": True, **legacy_note, "summary": f"Agentic HIL {agent_name} skill updated to match the current CLI package.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "previous_version": existing_version, "version": source_version, "installed": False, "updated": True, "registered": registration.get("ok") is True if registration else False, "registration": registration}
         if not force:
-            return {"ok": False, "error_type": "skill_exists", "summary": "Managed Agentic HIL skill differs from the packaged copy. Use --force to repair it.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "existing_version": existing_version, "version": source_version}
+            return {"ok": False, "error_type": "skill_exists", "summary": "Managed Agentic HIL skill differs from the packaged copy. Use --force to repair it.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "existing_version": existing_version, "version": source_version, **remediation_fields("skill_exists")}
     secure_atomic_write_text(target_path, source_text)
     registration = register_skill(resolved_agent, str(target_path), source_version, requested_agent)
     return {"ok": True, **legacy_note, "summary": f"Agentic HIL {agent_name} skill installed.", "agent": agent_id, "requested_agent": requested_agent, "skill": SKILL_NAME, "source_path": str(source_path), "target_path": str(target_path), "version": source_version, "installed": True, "updated": False, "registered": registration.get("ok") is True if registration else False, "registration": registration}

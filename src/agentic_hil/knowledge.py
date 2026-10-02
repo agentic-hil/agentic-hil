@@ -348,6 +348,15 @@ def permission_denied_fields(permission: str | None) -> JsonObject:
 # that is blocking them.
 EXCLUSIVE_PERMISSION_SCOPE = "exclusive"
 
+# The scope for the test reactor's own reading of an error type that other
+# routes answer with too. `cleanup_failed` is also what a debug session says
+# when its own teardown fails, and there the move is that session's; a plan
+# run's cleanup failure is the run's devices and its recovery, and handing a
+# reader the debug session's advice would send them to stop a session that
+# belonged to a service that has already closed. Every failed run result names
+# this scope, so a type with no scoped entry falls back to its bare one.
+TEST_REACTOR_SCOPE = "test_reactor"
+
 
 def exclusive_permission_fields(blocking: str, debugger_id: str | None) -> JsonObject:
     """The key an exclusivity refusal is about, and the direction it has to move.
@@ -407,6 +416,20 @@ GDB_NOT_CONFIGURED_SCOPE = "not_configured"
 # `not_configured`, which says nothing was ever found. This scope carries the
 # remediation for a GDB nobody configured that was there and is not now.
 GDB_AUTODETECTED_MISSING_SCOPE = "autodetected_missing"
+# The scope every refusal of attached-hardware discovery is looked up under:
+# `agentic-hil init`, `agentic-hil adopt-hardware`, `project_config_create` and
+# `project_config_adopt_hardware` all read the bench through it, and none of
+# them has a configured debugger yet to scope by. The same error_type means a
+# different thing there than on a configured bench (no `executable` to correct,
+# no probe_id to repoint), so discovery has its own entries where the advice
+# differs, and the lookup falls back to the bare entry where it does not.
+DISCOVERY_SCOPE = "discovery"
+# The two `not_supported` refusals of a configuration that does not settle which
+# in-circuit debugger or programmer a tool drives. They share the word with the
+# per-backend refusals and nothing else: the way out is a configuration change,
+# not another backend, so each has its own scope.
+UNBOUND_DEBUGGER_SCOPE = "unbound_debugger"
+UNNAMED_PROBE_SCOPE = "unnamed_probe"
 # Said by `doctor`, which parses the file at the moment it is asked and is
 # therefore always current, which is exactly why it cannot speak for a server
 # that has been running since before the last edit. It names both ways across,
@@ -979,6 +1002,50 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "an environment around a live process is the outcome being refused here, not a way past it.",
         ),
     ),
+    "upgrade_manager_not_established": ErrorRemedy(
+        meaning=(
+            "The upgrade could not tell which package manager holds the installation this process runs out of: the "
+            "environment directory in `prefix` could not be listed, so whether uv's receipt is in it is unknown. Each "
+            "manager's upgrade command replaces the installation, and the one a guess would have run crosses a "
+            "recorded exact pin without reading it, so no manager was run. The installation, its version and its "
+            "extras are as they were."
+        ),
+        remediation=(
+            "Read `prefix` and `python` on this result: the environment directory that could not be listed, and the "
+            "interpreter running out of it.",
+            "Have the operator make that directory listable by the account that ran the upgrade; it is usually a "
+            "permission or an ownership change on the directory itself.",
+            "Run the same upgrade again. With the directory readable, the owning manager is established and it is the "
+            "one that runs.",
+        ),
+        do_not=(
+            "Do not upgrade with `pip install --upgrade` or `uv pip install --upgrade` instead. On a uv tool "
+            "installation that crosses a recorded exact pin without reading it, reports success, and leaves uv's "
+            "receipt naming the old requirement.",
+            "Do not reinstall the package or delete the environment to get past this. Nothing was changed, and the "
+            "installation works as it did.",
+        ),
+    ),
+    "upgrade_manager_not_found": ErrorRemedy(
+        meaning=(
+            "The package manager that holds this installation is known, `manager` names it, and it is not on PATH "
+            "for the process that ran the upgrade, so it could not be run. Nothing was run and nothing was changed: "
+            "the installation, its version and its extras are as they were."
+        ),
+        remediation=(
+            "Put the manager in `manager` on PATH for the process that runs the upgrade, and run the upgrade again. "
+            "At a shell that is the shell's own PATH. Over MCP it is the environment the agent host started this "
+            "server with, so the host has to be started again from an environment that has it.",
+            "If the manager was removed from this machine, install it again first. The installation `python` runs "
+            "out of still belongs to it, and only it upgrades that installation with what it recorded.",
+        ),
+        do_not=(
+            "Do not upgrade with another manager, or with pip, in its place. A different manager replaces the "
+            "installation without the pin, the extras or the packages the owning one recorded for it.",
+            "Do not reinstall the package to get past this. Nothing was changed, and the installation works as it "
+            "did.",
+        ),
+    ),
     "config_file_not_found": ErrorRemedy(
         meaning=(
             "This workspace has no authoritative configuration, so there is no bench, no permission and no state "
@@ -1046,6 +1113,277 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not write the configuration again from scratch to get past this. `agentic-hil init --force` replaces "
             "the whole file, every narrowed permission included, so it throws away the operator's own decisions in "
             "order to fix one key.",
+        ),
+    ),
+    "config_schema_invalid": ErrorRemedy(
+        meaning=(
+            "The configuration schema this installation ships is not itself a valid JSON Schema, so no configuration "
+            "can be checked against it. The fault is in the installation: the configuration at `path` was never "
+            "validated, and nothing in it caused this. `schema_error` is the schema check's own account."
+        ),
+        remediation=(
+            "Reinstall Agentic HIL through the package manager that installed it, with the extras it was installed "
+            "with. The one-line installer repairs an existing installation in place: `curl -LsSf "
+            "https://agentic-hil.github.io/install.sh | sh`, or in PowerShell `irm "
+            "https://agentic-hil.github.io/install.ps1 | iex`.",
+            "In a development checkout, restore `src/agentic_hil/schemas/config.schema.json` from version control; "
+            "`schema_error` names what in it fails.",
+            "Then run `agentic-hil doctor`, which validates the configuration against the repaired schema.",
+        ),
+        do_not=(
+            "Do not edit the workspace configuration to get past this. It was never checked against anything.",
+            "Do not copy in a schema from another release. The schema and the code that reads the configuration are "
+            "one release's pair.",
+        ),
+    ),
+    "workspace_is_home": ErrorRemedy(
+        meaning=(
+            "`agentic-hil init` or `agentic-hil setup` ran in the home directory, or in a directory that contains it. "
+            "Both bind one authoritative configuration to the directory they run in, and home is not a project: "
+            "rooted there, it would govern every project on this machine at once. Nothing was written; `setup` keeps "
+            "the user-wide half it had already installed."
+        ),
+        remediation=(
+            "Change into the project this bench belongs to and run the same command again. If the project does not "
+            "exist yet, create its directory first (`mkdir my-project`, then `cd my-project`).",
+            "The user-wide half needs no project: `agentic-hil agent-install --agent <agent>` installs the skill and "
+            "the MCP registration for this user from any directory, home included.",
+        ),
+        do_not=(
+            "Do not point `AGENTIC_HIL_CONFIG` at a configuration whose `workspace_root` is the home directory to get "
+            "around this. It binds every project under home to one bench policy, which is what this refusal prevents.",
+        ),
+    ),
+    "config_exists": ErrorRemedy(
+        meaning=(
+            "Another command wrote this project's authoritative configuration at `path` while `agentic-hil init` or "
+            "`agentic-hil setup` was running: the file was not there when the command first looked, and it was there "
+            "when the command came to write. Nothing was written over it."
+        ),
+        remediation=(
+            "Run the same command again. It now finds the configuration, keeps it unchanged, and goes on to "
+            "`agentic-hil doctor`.",
+            "Find out what else was setting this project up at the same moment (a second terminal, a script, an "
+            "agent) and let one of them finish.",
+        ),
+        do_not=(
+            "Do not add `--force` to get past this. It regenerates the file from a fresh read and replaces the "
+            "configuration the other command just wrote, every narrowed permission included, which is the "
+            "operator's decision to take.",
+        ),
+    ),
+    "schema_exists": ErrorRemedy(
+        meaning=(
+            "`agentic-hil schema --output` or `agentic-hil test-schema --output` named a path where a file already "
+            "is, and without `--force` it is not replaced. Nothing was written."
+        ),
+        remediation=(
+            "Read the file at `path`. If it is an earlier copy of the same schema, written by this command for an "
+            "editor or a validator, run the command again with `--force` to replace it with this installation's copy.",
+            "Otherwise give `--output` a path that is free, or leave `--output` off to print the schema to standard "
+            "output.",
+        ),
+        do_not=(
+            "Do not add `--force` over a file you did not write with this command. It replaces the file whole, and "
+            "nothing that was in it is kept.",
+        ),
+    ),
+    "mcp_config_exists": ErrorRemedy(
+        meaning=(
+            "`agentic-hil mcp-config --output` named a path where a file already is, and without `--force` it is not "
+            "replaced. Nothing was written. With `--force` the file is written new, holding the agentic-hil server "
+            "entry and nothing else."
+        ),
+        remediation=(
+            "Read the file at `path`, usually the project's `.mcp.json`, before anything else: it can hold other "
+            "servers the project relies on.",
+            "Prefer the user-level registration, which writes no file into the project: `agentic-hil agent-install "
+            "--agent <agent>`.",
+            "If the file holds nothing but an earlier agentic-hil entry, run the command again with `--force`.",
+        ),
+        do_not=(
+            "Do not add `--force` while the file holds other servers. The file is written new with the agentic-hil "
+            "entry alone, and every other server in it is gone.",
+        ),
+    ),
+    "mcp_config_conflict": ErrorRemedy(
+        meaning=(
+            "The agent's user-level MCP configuration at `path` already has an `agentic-hil` entry that this "
+            "installation did not write and cannot attribute to itself; `existing_command`, where present, is what "
+            "that entry runs. It was left untouched, no registration was written, and `--force` does not apply to it."
+        ),
+        remediation=(
+            "Report the conflict to the operator, naming the file in `path` and what the entry runs in "
+            "`existing_command`, and stop. Whether that entry stays, is replaced or is removed is the operator's "
+            "decision.",
+            "Once the operator has resolved it in their own file, run the same command again; it then registers the "
+            "trusted launcher.",
+        ),
+        do_not=(
+            "Do not edit the file or remove the entry yourself and run the command again. The entry decides which "
+            "program an agent hands the hardware gate to, and it belongs to the operator.",
+            "Do not add `--force`. It never replaces an entry this installation did not write.",
+        ),
+    ),
+    "skill_conflict": ErrorRemedy(
+        meaning=(
+            "A skill file already stands at `target_path`, and it is not the Agentic HIL skill this installation "
+            "writes. It was left untouched, nothing was installed, and `--force` does not apply to it."
+        ),
+        remediation=(
+            "Report the conflict to the operator, naming the file in `target_path`, and stop. What happens to a skill "
+            "this installation did not write is the operator's decision.",
+            "Once the operator has moved that file away, run the same command again.",
+        ),
+        do_not=(
+            "Do not overwrite, edit or delete that file yourself and run the command again. It is someone else's "
+            "skill, and nobody has decided to replace it.",
+            "Do not add `--force`. It never replaces a skill this installation did not write.",
+        ),
+    ),
+    "skill_exists": ErrorRemedy(
+        meaning=(
+            "The Agentic HIL skill at `target_path` is one this installation wrote, it carries the same version as "
+            "the packaged copy at `source_path`, and its text differs: it was edited after it was written, or a "
+            "development build changed the packaged text without a new version. Nothing was written."
+        ),
+        remediation=(
+            "Compare the file at `target_path` with the packaged copy at `source_path` to see what differs.",
+            "If the difference is not wanted, run the same command again with `--force`, which replaces this managed "
+            "file with the packaged copy.",
+            "If it is a deliberate local edit, keeping it is the operator's decision, and leaving the file as it is "
+            "keeps it.",
+        ),
+        do_not=(
+            "Do not add `--force` over a local edit without the operator's word. It replaces the file whole, and the "
+            "edit is gone.",
+        ),
+    ),
+    "unsupported_agent": ErrorRemedy(
+        meaning=(
+            "The agent named in `agent` or `agents` is not one this installation knows, so it has no skill "
+            "directory, MCP configuration format or setup paths for it. Nothing was written. `allowed_agents` lists "
+            "the agents it does know, by the name each has here."
+        ),
+        remediation=(
+            "Run the same command again naming one of `allowed_agents`. Each also answers to its common aliases, "
+            "such as `claude` for `claude-code`.",
+            "For an agent outside that list that reads skills from a directory, `agentic-hil skill-install --agent "
+            "<name> --target <path of its skill file>` writes the skill there. Registering the MCP server with that "
+            "agent is a step the operator takes in the agent's own configuration; `agentic-hil mcp-config` prints the "
+            "command and arguments an entry needs.",
+        ),
+        do_not=(
+            "Do not name a listed agent that the agent in use is not, to get past this. The skill and the "
+            "registration would land where that other agent looks, and the agent in use would read neither.",
+        ),
+    ),
+    "agent_permissions_unreadable": ErrorRemedy(
+        meaning=(
+            "The agent's settings file at `path` cannot be used as it stands: it is not a JSON object, or, for "
+            "Claude Code, its `permissions` entry is not an object or its `permissions.deny` entry is not a list. The "
+            "file belongs to the agent and the operator, so it was left exactly as it was: no write refusal was added "
+            "to it by `init --agent` or `setup`, and none was taken back from it by `uninstall`."
+        ),
+        remediation=(
+            "Open the file at `path` and find what is wrong with it: a syntax error, or one of those two entries "
+            "holding another type.",
+            "Have the operator repair it in place, keeping the rules and settings it already holds.",
+            "Run the same command again.",
+        ),
+        do_not=(
+            "Do not delete or replace the file to get past this. It holds the operator's own settings and rules for "
+            "that agent, and a new file throws them away.",
+        ),
+    ),
+    "agent_project_record_unreadable": ErrorRemedy(
+        meaning=(
+            "A project bound through `AGENTIC_HIL_CONFIG` outside the projects directory has to be named in "
+            "`external-projects.json` before a write refusal is written for it, and that record did not read as the "
+            "record it has to be: it could not be opened, is not JSON, or is not a JSON object whose `configurations` "
+            "is a list of absolute paths. A record that may name projects and cannot be read is no ground to write "
+            "rules from, so this project was not recorded, no deny rule was written, and the file was left untouched. "
+            "`path` is the record this user's commands write to; a second copy can stand beside the other "
+            "configuration root, and an unreadable copy there refuses the same way."
+        ),
+        remediation=(
+            "Open `external-projects.json` at `path`, and the copy beside the other configuration root if there is "
+            "one, and find the one that does not read: a file this account cannot open, a syntax error, or an entry "
+            "that is not an absolute path.",
+            "Have the operator repair that file in place, keeping every path it names: a JSON object whose "
+            "`configurations` key holds a list of absolute configuration paths.",
+            "Run the same command again.",
+        ),
+        do_not=(
+            "Do not delete the record to get past this. The projects it names would read as gone, and a later setup "
+            "would take back the write refusals that protect them.",
+        ),
+    ),
+    "agent_project_record_unwritable": ErrorRemedy(
+        meaning=(
+            "A project bound through `AGENTIC_HIL_CONFIG` outside the projects directory has to be named in "
+            "`external-projects.json` before a write refusal is written for it, and the record could not be written "
+            "at `path`; the summary carries the error. No deny rule was written, because a rule for a project the "
+            "record does not name is one a later run reads as nobody's and takes back."
+        ),
+        remediation=(
+            "Read the error in the summary: it says why the write was refused, a permission, a read-only location, "
+            "or no usable configuration root at all.",
+            "Have the operator make the directory that holds `path` writable for this account, or clear the cause the "
+            "error names.",
+            "Run the same command again.",
+        ),
+        do_not=(
+            "Do not write the deny rule into the agent's settings by hand. Without the record no run can tell whose "
+            "it is, and a later setup takes it back.",
+        ),
+    ),
+    "agent_project_record_unremovable": ErrorRemedy(
+        meaning=(
+            "`agentic-hil uninstall` took back the write refusals this installation wrote and then could not remove "
+            "a record of projects it wrote, `external-projects.json`. `failed` names each file still standing, with "
+            "the error that refused its removal. The record names projects and grants nothing, so what is left is a "
+            "file, not a refusal in force."
+        ),
+        remediation=(
+            "Read `failed`: each entry is a record that is still there and the error that kept it there, a "
+            "permission, a read-only mount or an I/O error.",
+            "Have the operator clear that cause and delete the file, or run `agentic-hil uninstall` again once it is "
+            "cleared.",
+        ),
+        do_not=(
+            "Do not read this as write refusals still in force. They were taken back before the record was reached.",
+        ),
+    ),
+    "mcp_command_untrusted": ErrorRemedy(
+        meaning=(
+            "No Agentic HIL executable passed the check every MCP registration is written from, so nothing was "
+            "registered. The launcher has to be an absolute path outside this project and outside temporary and "
+            "cache directories, and stay the same file while it is checked. On Linux and macOS it also has to be a "
+            "regular file or one launcher symlink to one, owned by this account or root, executable, writable by no "
+            "other account, in a directory owned by this account or root. `rejected_candidates` names every launcher "
+            "that was tried and why each failed. A refusal of one path carries `path`; an executable refused for its "
+            "owner, its write access or a missing execute bit adds `untrusted_because`, `mode`, `uid` and `gid`; a "
+            "launcher whose parent directory belongs to an account other than this one or root adds `directory`, "
+            "naming that parent directory, with its `mode` and `uid`; a launcher symlink whose target resolves "
+            "through another symlink adds `target`."
+        ),
+        remediation=(
+            "Read `rejected_candidates`, or `path` and the fields beside it, for the reason each launcher failed.",
+            "A launcher in the project, a temporary directory or a cache (a `uvx` or one-off run) cannot be "
+            "registered: install Agentic HIL persistently with `uv tool install agentic-hil` or `pipx install "
+            "agentic-hil`, and run the command again from that installation.",
+            "For an owner or a mode, have the operator fix what the refusal names: give the file at `path`, or the "
+            "directory at `directory`, to this account, `chmod go-w` the file where other accounts can write it, "
+            "and `chmod +x` it where it is not executable. Then run the command again.",
+            "A launcher that changed while it was checked was being replaced at that moment; run the command again "
+            "once the installation has finished.",
+        ),
+        do_not=(
+            "Do not register the bare command name or a relative path in the agent's configuration by hand. Which "
+            "program it starts would then depend on the directory and PATH the agent happens to have.",
+            "Do not point the registration at a copy inside the project. The project is the one tree the hardware "
+            "gate cannot trust.",
         ),
     ),
     "permission_denied:allow_config_description_write": ErrorRemedy(
@@ -1534,6 +1872,187 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "different devices to get around it. The board is shared, and the incident is about the board.",
         ),
     ),
+    # The coordinator's own refusals. They reach a caller through
+    # `hardware_recover`, `agentic-hil recover`, `agentic-hil lease-status` and
+    # every hardware tool whose lock the coordinator takes, so each entry has to
+    # be true at all of those doors and names the payload field that tells the
+    # cases apart where one type covers several.
+    "resource_busy": ErrorRemedy(
+        meaning=(
+            "A lock this call needs is held, so nothing was driven and nothing changed. The payload says whose hold "
+            "it is. A refusal that carries `resources` met the machine-wide lock of another Agentic HIL process or "
+            "command (or a lock file that could not be opened at all, which `backend_error` then says), and "
+            "`resources` lists what this call asked for, not who holds it. A refusal with no `resources` was refused "
+            "by this server or command itself: a debugger tool while this server's own debug session holds the "
+            "debugger, or a recovery while this server still holds a lease of its own."
+        ),
+        remediation=(
+            "When the refusal carries `resources`, call `hardware_lease_status`: `owner_active` says whether a live "
+            "owner holds the project, and `device_holds` names the runs holding devices. Wait for that owner to end, "
+            "or stop it (`test_reactor_stop` with its handle for a plan run), then call again; the retry is safe.",
+            "When a debugger tool is refused with no `resources`, this server's own debug session holds the "
+            "debugger. End it with `debug_stop_session`, then call the tool again.",
+            "When a recovery is refused with no `resources`, this server still holds a session or a run of its own. "
+            "End it (`debug_stop_session`, `com_session_stop`, `can_session_stop` or `bench_run_stop`), then "
+            "recover again.",
+        ),
+        do_not=(
+            "Do not delete lock files to get past this. The hold belongs to a live owner, and removing it lets two "
+            "owners drive one board.",
+            "Do not retry in a tight loop. The hold ends when its owner ends it, and polling does not shorten it.",
+        ),
+    ),
+    "coordination_closed": ErrorRemedy(
+        meaning=(
+            "The hardware coordinator this call went to has been closed, which happens only while the server or "
+            "command that owns it shuts down. Nothing was locked or driven, and nothing changed."
+        ),
+        remediation=(
+            "Start the server or the command again and make the call against the new one; the retry is safe.",
+        ),
+        do_not=(
+            "Do not keep calling the server that is shutting down. Its coordinator does not reopen, so every call "
+            "to it answers the same way.",
+        ),
+    ),
+    "operator_confirmation_required": ErrorRemedy(
+        meaning=(
+            "A recovery was asked for without the operator's confirmation that the board is in a safe state, so "
+            "nothing was cleared and the quarantine stands. Clearing a quarantine attests a physical state, and only "
+            "a person at the bench can make that claim."
+        ),
+        remediation=(
+            "The operator checks the board as `quarantine_guidance` describes, then runs "
+            "`agentic-hil recover --confirm-safe-state --quarantine-id <quarantine_id>` with the id "
+            "`agentic-hil lease-status` reports.",
+            "Over MCP, `hardware_recover` carries the confirmation as `operator_statement`: ask the operator what "
+            "state the bench is in and pass their answer in their words.",
+        ),
+        do_not=(
+            "Do not confirm a safe state nobody has looked at. The confirmation is written to the recovery ledger as "
+            "the operator's, and it is the one claim no process can make for them.",
+        ),
+    ),
+    "coordination_state_invalid": ErrorRemedy(
+        meaning=(
+            "A coordination record this call depends on is not one it can trust, so the call stopped at that "
+            "record. The fields say which record and why. `resource` names a lease or "
+            "project record that could not be read (`error_class` and `errno` say what the operating system "
+            "answered), that is not JSON (`backend_error`), that was written by another version, that has fields "
+            "of the wrong type, or that belongs to a different unresolved project incident. A recovery says its "
+            "incident markers are inconsistent. `unlockable_lock_keys` is a declared device whose lock key the "
+            "machine-wide mutex does not lock, refused before the run took anything.\n\n"
+            "The same type inside an `audit_error` after a hardware action is the canonical audit ledger under "
+            "`state_root`: its digest sidecar is corrupted or has an invalid format, or the ledger's size disagrees "
+            "with the sidecar. There the action itself already ran; what failed is its evidence, and `audit_ok` is "
+            "false on the result."
+        ),
+        remediation=(
+            "Read which record the refusal names and why: `resource` with `error_class` and `errno`, "
+            "`backend_error`, or the summary.",
+            "A permission, a full disk or a file another program holds open is fixed where it is, and the same call "
+            "then reads the record again; nothing else has to change.",
+            "A record that is corrupted, from another version or inconsistent is the operator's to judge: no command "
+            "rewrites a coordination record or the canonical ledger, and `agentic-hil lease-status` and "
+            "`agentic-hil recover` stop on the same record. Hand the operator the refusal as it is, with the record "
+            "it names.",
+            "`unlockable_lock_keys` is a defect in a device kind, not a bench fault: report it with the plan that "
+            "declared the device.",
+        ),
+        do_not=(
+            "Do not delete or hand-edit the coordination records, the canonical ledger or its digest sidecar to get "
+            "past this. They are what keeps a second owner off a board nobody has confirmed, and an edited ledger is "
+            "evidence that can no longer be checked.",
+            "Do not move `state_root` to start from empty records. Every incident and hold under the old root would "
+            "become invisible while the hardware it describes stays where it is.",
+        ),
+    ),
+    "quarantine_id_required": ErrorRemedy(
+        meaning=(
+            "The recovery named no quarantine id, so nothing was cleared. A recovery signs for one incident by its "
+            "id, so that a signature never clears an incident nobody looked at."
+        ),
+        remediation=(
+            "Read `quarantine_id` from `agentic-hil lease-status` and pass it: "
+            "`agentic-hil recover --confirm-safe-state --quarantine-id <quarantine_id>`.",
+        ),
+        do_not=(
+            "Do not guess an id or reuse one from an older result. An id names one incident, and a newer incident "
+            "gets a new one.",
+        ),
+    ),
+    "resource_not_quarantined": ErrorRemedy(
+        meaning=(
+            "The recovery found no quarantined incident on this project, so there was nothing to clear and nothing "
+            "changed. Usually another recovery or the next hardware call already cleared it between the status read "
+            "and this recovery."
+        ),
+        remediation=(
+            "Call `hardware_lease_status`. With nothing standing, carry on with the work the incident held up.",
+            "An incident listed under `standing_incidents` belongs to another project and resolves only in that "
+            "project's workspace.",
+        ),
+        do_not=(
+            "Do not sign again for an incident that is no longer there, and do not delete coordination records to "
+            "make the answer change.",
+        ),
+    ),
+    "quarantine_changed": ErrorRemedy(
+        meaning=(
+            "The incident this recovery signed for is not the one on record, so nothing was cleared and the "
+            "quarantine stands. With no `resource`, the project's incident has another id now (a newer incident "
+            "replaced it) or belongs to another project. With `resource`, the incident id matched but that "
+            "resource's marker is missing or disagrees with it: another state, another id, another project, another "
+            "configuration, or a resource list that does not match the incident's."
+        ),
+        remediation=(
+            "Read `agentic-hil lease-status` again, check the board against the incident it names now, and sign for "
+            "that `quarantine_id`.",
+            "When the refusal names a `resource`, that marker is the disagreement. If it is another project's "
+            "incident on the same device, `standing_incidents` names it and it resolves in that project's workspace "
+            "first.",
+            "When the same id is refused again on the same `resource`, nothing on this side reconciles that marker: "
+            "hand the operator the refusal with the `agentic-hil lease-status` output.",
+        ),
+        do_not=(
+            "Do not edit or delete the marker to make it match, and do not sign again with the old id.",
+            "Do not sign for the new id without looking at the board. A newer incident is a new state to check.",
+        ),
+    ),
+    "recovery_audit_failed": ErrorRemedy(
+        meaning=(
+            "The recovery's line could not be written to the recovery ledger under `state_root`. The ledger line is "
+            "written before any marker is released, so nothing was cleared: the quarantine stands under the same "
+            "`quarantine_id`. `backend_error` says what the write answered."
+        ),
+        remediation=(
+            "Fix the cause `backend_error` names (a permission, a full disk, a file held open elsewhere), then run "
+            "the same recovery again with the same `quarantine_id`.",
+        ),
+        do_not=(
+            "Do not clear the quarantine some other way. A recovery that is not in the ledger is one nobody can "
+            "account for later.",
+            "Do not move `state_root` to get a writable ledger. The incident lives under the old root and would only "
+            "become invisible.",
+        ),
+    ),
+    "recovery_persist_failed": ErrorRemedy(
+        meaning=(
+            "The recovery is in the ledger, but not every marker it releases could be written, so the quarantine "
+            "stands. `backend_error` says what the write answered. A failure after the project was marked "
+            "`recovery_pending` leaves it there; a failure on that mark itself leaves the project in the state it "
+            "was in."
+        ),
+        remediation=(
+            "Fix the cause `backend_error` names, then run the recovery again with the same `quarantine_id`; the "
+            "retry is safe. A project left `recovery_pending` resumes from there, and the rerun's ledger line says "
+            "`resumed`.",
+        ),
+        do_not=(
+            "Do not treat the bench as recovered. Until the rerun completes, the quarantine stands.",
+            "Do not delete markers to finish the recovery by hand.",
+        ),
+    ),
     "device_busy": ErrorRemedy(
         meaning=(
             "A physical device is held by another owner for the duration of their run. The refusal names the holder in "
@@ -1640,6 +2159,288 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "it turns a precise refusal back into `com_port_not_configured`.",
             "Do not point it at whichever device happens to be free. A serial device name is an enumeration order, so "
             "a guess is a stimulus sent to whatever board took that name.",
+        ),
+    ),
+    "com_port_not_configured": ErrorRemedy(
+        meaning=(
+            "The `port_id` names no entry under `com_ports` in the authoritative configuration, so there was nothing "
+            "to open. Nothing was opened, contacted or written. `configured_ports` lists the names this configuration "
+            "does declare. A name that is declared but has no `device` yet is answered with `com_port_not_bound` "
+            "instead, so this refusal means the name in the call is not one the project declares."
+        ),
+        remediation=(
+            "Call the tool again with one of the names in `configured_ports`. A name copied from a test plan or an "
+            "older configuration that is not in that list is the mistake to fix.",
+            "If the port really belongs to this project, the authoritative configuration has to declare it under "
+            "`com_ports`, which is the operator's file to change; `agentic-hil com-ports` lists the devices this host "
+            "has to bind it to.",
+        ),
+        do_not=(
+            "Do not pass a device name (`COM7`, `/dev/ttyACM0`) as `port_id`. The tools reach a port only by its "
+            "configured name, which is what ties it to its permissions and its identity check.",
+        ),
+    ),
+    "com_port_open_failed": ErrorRemedy(
+        meaning=(
+            "Opening the configured device failed, so no session was started. `backend_error` is the line the open "
+            "failed with, and `likely_causes` reads it: on a POSIX host a permission refusal (`EACCES`) means this "
+            "user may not open the device node. On Windows a port another program holds is refused here too, because "
+            "that refusal carries no number to tell it apart; on POSIX the same case is `com_port_busy`. No session "
+            "was registered and the port is not held for it. With `retry_safe` true the failed open left no handle "
+            "behind. With `cleanup_error` present, a handle the failed open left standing would not close, and that "
+            "is recorded under `cleanup_reasons`."
+        ),
+        remediation=(
+            "Read `backend_error` and `likely_causes` first: they say whether the device is missing, held by another "
+            "program, or closed to this user.",
+            "On Linux, a permission refusal is fixed by adding the user to the group that owns the device (`dialout` "
+            "on Debian and Ubuntu, `uucp` on Arch and Fedora) and logging in again; `ls -l` on the device shows its "
+            "group.",
+            "A missing device means the adapter is unplugged or the host lists it under another name: plug it in, and "
+            "`agentic-hil com-ports` shows what this host lists right now. On Windows, close the terminal, IDE serial "
+            "monitor or flashing tool that holds the port.",
+            "With `cleanup_error` present, call `com_session_start` again once the cause is fixed: that open is what "
+            "settles the recorded handle, since the operating system refuses it if the handle is really still held.",
+        ),
+        do_not=(
+            "Do not switch the entry to a different device just because that one opens. A device name is an "
+            "enumeration order, so another name that opens is usually another board.",
+        ),
+    ),
+    "serial_backend_not_available": ErrorRemedy(
+        meaning=(
+            "pyserial, the backend Agentic HIL reaches serial ports through, could not be imported in the process that "
+            "answered. `backend_error` is the import's own line with its type: `ModuleNotFoundError` means the package "
+            "is not installed in that environment, any other type means it is installed and failed inside its own "
+            "imports. Nothing was opened or contacted. Under `available_com_ports` or `com_ports` this is only the "
+            "host listing missing; a `com_ports` entry that names hardware (`serial_number`, `vid`, `pid` or "
+            "`resource_id`) is then refused by `com_session_start` as `com_port_identity_unverified` with the identity "
+            "status `backend_unavailable`, not with this type."
+        ),
+        remediation=(
+            "Install Agentic HIL with its runtime dependencies into the environment that answered, the one the MCP "
+            "server or the `agentic-hil` command runs from. pyserial is one of those dependencies, so a complete "
+            "install brings it.",
+            "Restart the MCP server afterwards, so that it runs on the installed package, then call the tool again. "
+            "The `agentic-hil` command needs no restart: run it again.",
+            "If `backend_error` is not `ModuleNotFoundError`, pyserial is present and broken: reinstall it in that same "
+            "environment.",
+        ),
+        do_not=(
+            "Do not install pyserial into a different Python environment than the one that runs the server. The "
+            "server imports only from its own interpreter, so the refusal stays exactly as it is.",
+        ),
+    ),
+    "com_port_discovery_failed": ErrorRemedy(
+        meaning=(
+            "Enumerating the host's serial ports raised an operating system error, so this is a listing that could "
+            "not be taken, not a finding that no port is attached. `backend_error` is that error. Nothing was opened. "
+            "While enumeration fails, a `com_ports` entry that names hardware cannot be checked against what is "
+            "behind its device name, and `com_session_start` refuses it as `com_port_identity_unverified`."
+        ),
+        remediation=(
+            "List again with `com_ports_list` or `agentic-hil com-ports`. `likely_causes` names a USB serial driver "
+            "whose state changed during discovery, and a second listing a moment later shows whether that has passed.",
+            "If every listing fails, look at the host's USB serial driver rather than at the configuration: reconnect "
+            "the adapter, or reinstall its driver.",
+        ),
+        do_not=(
+            "Do not remove `serial_number`, `vid` or `pid` from a `com_ports` entry so that it opens without the "
+            "check. The listing is what proves the device name still leads to the right board, and a failed listing "
+            "proves nothing either way.",
+        ),
+    ),
+    "com_port_identity_unverified": ErrorRemedy(
+        meaning=(
+            "This `com_ports` entry names its hardware, so it is opened only after the host confirms that its device "
+            "name still leads to that hardware, and that check could not run. It is not a mismatch: nothing was found "
+            "to be the wrong board, there was no way to tell. The port was not opened and nothing was written. "
+            "`identity.status` says which way the check had no answer: `backend_unavailable` (the host's serial ports "
+            "could not be listed), `port_not_enumerated` (the listing does not name this device exactly once), "
+            "`serial_unknown` (the port reports no serial number to compare) or `usb_ids_unknown` (the port reports "
+            "no USB vendor and product id while the entry names them). `retry_safe` is true."
+        ),
+        remediation=(
+            "Read `identity.status` and `identity.summary`, and restore the check that status names: install the "
+            "serial backend for `backend_unavailable`; plug the board in, or check that `device` is the name this host "
+            "lists for it, for `port_not_enumerated`; use an adapter and driver that report the missing serial or USB "
+            "ids for `serial_unknown` and `usb_ids_unknown`.",
+            "Then call `com_session_start` again. Nothing was touched, so there is nothing to recover.",
+        ),
+        do_not=(
+            "Do not delete `serial_number`, `vid` or `pid` from the entry to get it opened. Drop them only if the "
+            "entry genuinely names no fixed board; removing them to silence this refusal opens a name that nothing "
+            "checks.",
+        ),
+    ),
+    "com_reader_start_failed": ErrorRemedy(
+        meaning=(
+            "The port was opened, but the background reader that buffers its input could not be started, so the "
+            "session was not kept. The port was closed again and `cleanup_confirmed` is true. Nothing was written to "
+            "the line by this call, although the open applied the entry's `assert_dtr` and `assert_rts` as every "
+            "open does. `backend_error` says why the reader would not start."
+        ),
+        remediation=(
+            "Call `com_session_start` again: the port was closed cleanly, so a new start begins from nothing.",
+            "If it fails the same way again, `backend_error` names what the server process could not do, and "
+            "restarting the MCP server is the repair.",
+        ),
+        do_not=(
+            "Do not read the port with another serial program in the meantime. It would hold the device, and the next "
+            "`com_session_start` could not open it.",
+        ),
+    ),
+    "com_port_close_failed": ErrorRemedy(
+        meaning=(
+            "Closing the port, or stopping its reader, did not confirm, and `backend_error` says which part failed and "
+            "how. The session remains registered so that the close can be retried: until it is, `com_read` and "
+            "`com_write` on this port answer `session_not_active`, and `com_ports_list` shows it with "
+            "`session_active` false. The failure is recorded under `cleanup_reasons`. `quarantined` is true only when "
+            "the audit log broke as well; then no later call can close the session, and the incident stands until an "
+            "operator recovers it."
+        ),
+        remediation=(
+            "Call `com_session_stop` again with the same `port_id`. The close is retried from the registered session, "
+            "and a stop that succeeds releases the port.",
+            "`com_session_start` on the same port retries the close as well, and opens a fresh session once it "
+            "succeeds.",
+            "Read `quarantine_guidance` for what the failed close leaves unconfirmed. If `quarantined` is true, fix "
+            "the audit destination first, then follow that guidance to the operator's signature.",
+        ),
+        do_not=(
+            "Do not sign `agentic-hil recover --confirm-safe-state` for this while `quarantined` is false. Nothing is "
+            "held for a signature: the next stop or start settles the handle, and the operating system refuses that "
+            "open by itself if the handle is really stuck.",
+        ),
+    ),
+    "serial_write_failed": ErrorRemedy(
+        meaning=(
+            "The write raised before it confirmed, so how much of the stimulus reached the line is unknown. Some of it "
+            "may have arrived and been acted on, or none of it. `retry_safe` is false for that reason, and the write "
+            "is recorded under `cleanup_reasons` as `com_write_effect_unconfirmed`. `backend_error` and "
+            "`likely_causes` say what the driver reported."
+        ),
+        remediation=(
+            "Call `com_read` first: what the target answered, or did not, is the best evidence of how much of the "
+            "stimulus it received.",
+            "Bring the target to a known state before the next stimulus that depends on its state, by its own "
+            "protocol or controls, or with `reset_target` where the configuration allows it.",
+            "Read `quarantine_guidance` for what the failed write leaves unconfirmed.",
+        ),
+        do_not=(
+            "Do not send the same stimulus again as if nothing went out. Part of it may already be on the target, and "
+            "a second copy can apply a command twice.",
+        ),
+    ),
+    "serial_write_incomplete": ErrorRemedy(
+        meaning=(
+            "The line took only part of the payload: `bytes_written` of `bytes_requested` reached it, even after a "
+            "bounded retry of the remainder, and `data` shows exactly which bytes. The rest never left the host. This "
+            "is confirmed rather than unknown, so the session stays open and usable, and the short write is recorded "
+            "under `cleanup_reasons` without holding the port. `likely_causes` names the usual reasons: a "
+            "`write_timeout_s` too short for the payload at this baudrate, flow control, or a disconnect partway."
+        ),
+        remediation=(
+            "Call `com_read` to see how the target took the partial command.",
+            "Then send only what is missing, the bytes from offset `bytes_written` on, where the protocol accepts a "
+            "command arriving in two pieces. Otherwise bring the target to a known state and send the command as a "
+            "new one.",
+            "If short writes keep happening, have the operator raise `write_timeout_s` for this port, or check flow "
+            "control and the cable.",
+        ),
+        do_not=(
+            "Do not repeat the whole payload. Its first `bytes_written` bytes are already on the target, and sending "
+            "them again hands it those bytes twice.",
+        ),
+    ),
+    "com_buffer_clear_failed": ErrorRemedy(
+        meaning=(
+            "`clear_buffer` asked for the port's receive buffers to be emptied and clearing them failed, so whether "
+            "old input is still queued is unknown. A session that was already active stays open and usable, and the "
+            "refusal carries no `cleanup_confirmed`. A session this call had just opened was closed again instead, "
+            "and `cleanup_confirmed` is true. Where the clear had already reached the driver, it is recorded under "
+            "`cleanup_reasons` as `com_buffer_clear_unconfirmed`. `backend_error` is the driver's line."
+        ),
+        remediation=(
+            "Read `cleanup_confirmed`: true means the new session was closed again, so call `com_session_start` with "
+            "`clear_buffer` again once the driver accepts the clear.",
+            "Without it, the session that was already active is still open: call `com_read` once and discard what it "
+            "returns, so that input the reader collected before the failed clear is not taken for an answer.",
+        ),
+        do_not=(
+            "Do not take the first reply after this for a fresh answer to the next stimulus. Input queued before the "
+            "failed clear may still arrive with it.",
+        ),
+    ),
+    "session_not_active": ErrorRemedy(
+        meaning=(
+            "The tool needs a session that is not running, so nothing was sent and nothing was read. A COM call names "
+            "its port in `port_id`, a CAN call its bus in `bus_id`, and a debug call refers to the one debug session. "
+            "A COM session is not running when it was never started, when it was stopped, or when its reader failed; "
+            "in that last case `reader_error` carries the reader's own error. A debug session is not running when it "
+            "was stopped, ended in an error, or its GDB process exited."
+        ),
+        remediation=(
+            "For a COM port, call `com_session_start` with the same `port_id`, then repeat the call.",
+            "For a CAN bus, call `can_session_start` with the same `bus_id`, and on a bus with `shares` the same "
+            "`participant`, then repeat the call.",
+            "For a debug session, call `debug_start_session`. A debug session that ended in an error, or whose GDB "
+            "process exited, has to be stopped with `debug_stop_session` before `debug_start_session` accepts a new "
+            "one.",
+            "When a COM refusal carries `reader_error`, read it first: the reader failed, and `com_session_start` with "
+            "the same `port_id` replaces the failed session with a new one.",
+        ),
+        do_not=(
+            "Do not retry the call in a loop hoping the session comes back. Nothing restarts a session but its start "
+            "tool.",
+            "Do not reach the device directly instead, with a serial terminal, a CAN tool or GDB of your own. That "
+            "bypasses the lock, the permissions and the log.",
+        ),
+    ),
+    "serial_read_failed": ErrorRemedy(
+        meaning=(
+            "The background reader of a COM session failed: the driver raised while reading, and `reader_error` "
+            "carries its `backend_error` and `likely_causes`. The session is no longer active. Input the reader had "
+            "already buffered is not lost: the next `com_read` still hands it out, with `reader_error` beside it, and "
+            "only an empty buffer is refused as `session_not_active`. The COM tools carry this type nested under "
+            "`reader_error`. `flash_firmware` with a `capture` answers it as its own `error_type` when the capture's "
+            "reader failed after a good flash: the firmware was flashed and the target reset, the capture session was "
+            "stopped, and `capture` holds what was read before the failure."
+        ),
+        remediation=(
+            "Read `likely_causes` and `backend_error` in `reader_error`. A port that was disconnected is the first of "
+            "them, and the adapter has to be back before a new session can open.",
+            "Call `com_read` to collect what the reader buffered before it failed; those bytes were received from the "
+            "target.",
+            "Then call `com_session_start` with the same `port_id`: it replaces the failed session with a new one.",
+        ),
+        do_not=(
+            "Do not keep calling `com_read` or `com_write` on the failed session in the hope it recovers. A failed "
+            "reader does not restart; only `com_session_start` opens the port again.",
+        ),
+    ),
+    "audit_write_failed": ErrorRemedy(
+        meaning=(
+            "The background reader received bytes it could not append to the session's COM log, so the evidence of "
+            "what the target sent is incomplete. The session stopped, and the project is quarantined with the cleanup "
+            "reason `com_reader_audit_broken`: while that incident stands, hardware calls are refused as "
+            "`resource_quarantined`. This error is shown in `com_ports_list`, under the port's `reader_error`, with "
+            "`backend_error` saying why the log write failed. `flash_firmware` with a `capture` answers it as its own "
+            "`error_type` when this happened to the capture's reader after the flash, and `capture` holds what was "
+            "read. `com_session_stop` cannot close such a session cleanly either: it answers `com_port_close_failed` "
+            "with `quarantined` true. The incident stands until an operator recovers it."
+        ),
+        remediation=(
+            "Fix what `backend_error` names first: free disk space, or restore write permission where `log_path` "
+            "points, since every later record goes to the same place.",
+            "Then an operator reads `quarantine_guidance`, checks the board against it, and runs `agentic-hil recover "
+            "--confirm-safe-state --quarantine-id <quarantine_id>` with the id `agentic-hil lease-status` reports.",
+        ),
+        do_not=(
+            "Do not delete or truncate the log to make room. It holds the record of what the target sent up to the "
+            "failure.",
+            "Do not sign `--confirm-safe-state` before the log is writable again. The next record would fail the "
+            "same way.",
         ),
     ),
     "undeclared_device": ErrorRemedy(
@@ -1801,6 +2602,513 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not delete the coordination state to get past this: the records beside the one that could not be "
             "written belong to runs that may still be going, and the leases and the audit trail under the same root "
             "are what `agentic-hil lease-status` and `agentic-hil recover` read.",
+        ),
+    ),
+    # A plan run's own lifecycle: the handle a detached start prints, the
+    # record behind it, and the ways a run ends that are not a verdict on the
+    # firmware.
+    "run_not_found": ErrorRemedy(
+        meaning=(
+            "This bench has no record under the handle in `run`, so nothing was asked of any run. The handle may be "
+            "mistyped, may belong to another bench or another `state_root`, may be older than the 100 newest ended "
+            "runs a bench keeps records of, or may be from a start that never published a record."
+        ),
+        remediation=(
+            "Call `test_reactor_status` with no `run`: it lists every handle this bench still has a record of, "
+            "newest first.",
+            "For a run that ended long ago, its report is still where its result said; `get_last_report` reads the "
+            "newest one.",
+        ),
+        do_not=(
+            "Do not take a missing record as proof the run is gone and start the plan again on that basis. Check "
+            "`hardware_lease_status` first: a run another bench or root started can still hold these devices.",
+        ),
+    ),
+    "run_state_invalid": ErrorRemedy(
+        meaning=(
+            "A run record, or the directory that holds them, could not be read, so this bench cannot say what the "
+            "run is doing. The run itself is not judged by this: it may be going exactly as asked. "
+            "`backend_error` (and `record_error` with `record_path` on a detached start) says why; a record written "
+            "by another version of Agentic HIL is refused the same way, with the summary saying so and no "
+            "`backend_error`. A stop by name is refused for the same record, because it reads the record first."
+        ),
+        remediation=(
+            "Fix what `backend_error` or `record_error` names (a permission, a full disk, a file held open "
+            "elsewhere) and ask again; the retry is safe.",
+            "A record from another version is read by the version that started the run; or wait for the run's own "
+            "report.",
+            "`hardware_lease_status` says whether the run still holds devices while its record cannot be read.",
+        ),
+        do_not=(
+            "Do not delete or rewrite the record. It is the only thing naming that run, and a run whose record is "
+            "gone can no longer be watched or stopped by name.",
+            "Do not start the plan again on the assumption that the run ended.",
+        ),
+    ),
+    "run_worker_failed": ErrorRemedy(
+        meaning=(
+            "The detached run's worker process ended before it published a record, so no run exists under the "
+            "handle and nothing was locked or driven. `exit_code` is how it ended and `worker_output` is what it "
+            "printed."
+        ),
+        remediation=(
+            "Read `worker_output` and `exit_code`: they usually hold the refusal the worker met.",
+            "Run the same plan without detaching to get that refusal as a result of its own, fix what it names, then "
+            "start again; the retry is safe.",
+        ),
+        do_not=(
+            "Do not restart the detached run unchanged in a loop. The worker will end the same way until the cause "
+            "in `worker_output` is fixed.",
+            "Do not delete the runs directory to clear this. Other runs' records live there.",
+        ),
+    ),
+    "run_worker_unresponsive": ErrorRemedy(
+        meaning=(
+            "The detached run's worker did not publish a record within the startup window, and it may still be "
+            "alive. A cooperative stop was planted under the handle in `run` before this answer, so a worker that "
+            "does come up ends at its first step boundary instead of running the plan. `retry_safe` is false: the "
+            "worker's state is unknown, and it may still be taking the devices."
+        ),
+        remediation=(
+            "Ask `test_reactor_status` for this `run` a little later. A worker that came up late shows as stopped; "
+            "`run_not_found` means it never registered.",
+            "Call `hardware_lease_status` to see whether anything still holds the plan's devices, and start the "
+            "plan again only once they are free.",
+            "`worker_output` shows how far the worker got.",
+        ),
+        do_not=(
+            "Do not start the plan again at once or in a loop. A late worker and a new one would queue for the same "
+            "devices.",
+            "Do not delete the planted stop: it is what keeps a late worker from driving the board behind a start "
+            "that reported failure.",
+        ),
+    ),
+    "run_worker_gone": ErrorRemedy(
+        meaning=(
+            "The process that was running this plan is gone and left no orderly end, so there is nobody to stop and "
+            "the run has no report and no verdict of its own. The bench is the dead-owner case the coordinator "
+            "handles."
+        ),
+        remediation=(
+            "Call `hardware_lease_status`: it reads and heals the dead owner's holds, and names a `quarantine_id` "
+            "if the run had reached the board.",
+            "With an incident standing, recover it the way `resource_quarantined` describes; then start the plan "
+            "again for a verdict.",
+        ),
+        do_not=(
+            "Do not read the missing report as a pass or a failure. The run has no verdict.",
+            "Do not delete the run record or the lock files, and do not send another stop; nothing is there to "
+            "honour it.",
+        ),
+    ),
+    "run_stopped": ErrorRemedy(
+        meaning=(
+            "The run ended on a stop request, which may be one somebody asked for by its handle or the stop a "
+            "detached start planted after a worker that did not answer in time. It is neither a pass nor a failure "
+            "of the firmware. `stopped_after_step` is the last top-level step that ran (0 when the stop came while "
+            "the run was still waiting for a device, and then `resource` and `waited_s` say which device and how "
+            "long). The steps that ran keep their records. The devices the run opened were closed the way a "
+            "passing run closes them, and no recovery ran, because nothing was left unconfirmed."
+        ),
+        remediation=(
+            "Read `stopped_after_step` and `steps` for what did run and what it showed.",
+            "Start the plan again for a verdict on the whole plan; the retry is safe.",
+            "A stop nobody here asked for came from another caller holding the handle, or from a stop a detached "
+            "start planted.",
+        ),
+        do_not=(
+            "Do not count the steps that never ran as passed.",
+            "Do not report the plan as failed either: a stopped run has no verdict on the steps it did not reach.",
+        ),
+    ),
+    "reactor_exception": ErrorRemedy(
+        meaning=(
+            "The test reactor raised outside any step, which is a defect in Agentic HIL rather than a verdict on the "
+            "firmware. Every containment step was attempted, the report was written with no steps and with "
+            "`cleanup` and `cleanup_ok` from the containment, and `exception_type` names what was raised. The run's "
+            "own call does not answer with this result but raises, so an MCP client sees an internal error and the "
+            "command line a traceback; the type is read from the report and from the run's status."
+        ),
+        remediation=(
+            "Read the report (`get_last_report`) for `cleanup` and `cleanup_ok`: they say whether the devices were "
+            "closed.",
+            "Call `hardware_lease_status` to see whether anything was left held or quarantined, and resolve that "
+            "first.",
+            "Report the defect with `exception_type` and the report.",
+        ),
+        do_not=(
+            "Do not rerun the plan in a loop. The same defect raises the same way.",
+            "Do not trust an older report as this run's. The report path is shared, and the run's own report is "
+            "the one written now.",
+        ),
+    ),
+    "interrupted": ErrorRemedy(
+        meaning=(
+            "The run was interrupted (Ctrl+C or a process exit) before it finished. Every containment step was "
+            "attempted and the report was written with no steps and with `cleanup` and `cleanup_ok` from the "
+            "containment. The run record behind its handle names this run `reactor_exception`."
+        ),
+        remediation=(
+            "Read the report (`get_last_report`) for `cleanup` and `cleanup_ok`, then call `hardware_lease_status` "
+            "to see whether anything was left held or quarantined.",
+            "Start the plan again for a verdict.",
+        ),
+        do_not=(
+            "Do not read the steps that did not run as passed.",
+            "Do not delete lock files to free the bench. What the containment could not close is shown by "
+            "`hardware_lease_status` and resolves through recovery.",
+        ),
+    ),
+    "junit_xml_requires_synchronous_run": ErrorRemedy(
+        meaning=(
+            "A JUnit file was asked for beside a detached start. The file is written by the command that waits for "
+            "the run's verdict, and a detached start returns before there is one, so the start was refused and no "
+            "run began."
+        ),
+        remediation=(
+            "Run the plan without `--detach` when a CI job needs the JUnit file; or detach without `--junit-xml` "
+            "and follow the run with `test_reactor_status` and its JSON report.",
+        ),
+        do_not=(
+            "Do not expect the detached worker to write the file later. Nothing writes it for a detached run.",
+        ),
+    ),
+    "junit_xml_write_failed": ErrorRemedy(
+        meaning=(
+            "The run happened and its JSON report stands; only the JUnit file could not be written to `junit_xml`. "
+            "A run that failed on its own keeps its own `error_type`, and the write failure is in `junit_xml_error` "
+            "beside it, whose `backend_error` says what the write answered."
+        ),
+        remediation=(
+            "Fix the path or the permission the `backend_error` in `junit_xml_error` names, then run the plan again "
+            "with `--junit-xml` if the CI job needs the file.",
+        ),
+        do_not=(
+            "Do not read the missing file as a test failure, or as a pass. The run's verdict is in its JSON report.",
+        ),
+    ),
+    "cleanup_exception": ErrorRemedy(
+        meaning=(
+            "A cleanup action raised instead of answering: a device's close during a run's cleanup, or the reactor's "
+            "or the service's own close after it. `exception_type` and `backend_error` say what was raised; `device` "
+            "and `action` on the cleanup entry say which close. What that close left behind is unconfirmed."
+        ),
+        remediation=(
+            "Call `hardware_lease_status`: `owner_active`, `device_holds` and `incident_stands` say whether anything "
+            "was left held or quarantined, and an incident resolves the way `resource_quarantined` describes.",
+            "Report the defect with `exception_type`, `backend_error`, `device` and `action`.",
+        ),
+        do_not=(
+            "Do not delete lock files or coordination records to free what the close left.",
+            "Do not rerun the plan at once. The next run meets the same unconfirmed state.",
+        ),
+    ),
+    "cleanup_failed:test_reactor": ErrorRemedy(
+        meaning=(
+            "The plan run could not close everything it opened. `cleanup_errors` lists each close that failed, by "
+            "`device`, `action` and its `result`. A step that had already failed keeps its own type in "
+            "`step_error_type` beside `failed_step`, and a run asked to stop keeps `stopped`; the run's `error_type` "
+            "says cleanup because a bench left in an unknown state outranks the verdict. When a device's close "
+            "failed, a recovery of the probes the run drove was attempted and `recovery` says how it came out; a "
+            "failed close of the reactor or the service after the run brings no `recovery` of its own."
+        ),
+        remediation=(
+            "Read `cleanup_errors` for which device and which close failed, and what it answered.",
+            "Read `recovery` where the run has one, then `hardware_lease_status`: with `incident_stands` true, "
+            "resolve the incident the way `resource_quarantined` describes before the next run.",
+            "Where `failed_step` is set, `step_error_type` is that step's own outcome; judge the firmware by it once "
+            "the bench is settled.",
+        ),
+        do_not=(
+            "Do not call `debug_stop_session`, `com_session_stop` or `can_session_stop` from another server to "
+            "settle this. The run's sessions belonged to its own service, which has closed, and a retry with no new "
+            "evidence leaves an unconfirmed state unconfirmed.",
+            "Do not delete coordination records or lock files to free the bench.",
+        ),
+    ),
+    # The reactor's verdicts on a step. Each is a firmware or plan outcome the
+    # step's own record holds the evidence for, so the entries send the reader
+    # to the step at `failed_step` rather than to the bench.
+    "comparator_unmet": ErrorRemedy(
+        meaning=(
+            "A step read what it was told to read and the value did not satisfy the comparator. This is a verdict "
+            "on the firmware or the plan, not a bench fault. The failing step's record (`steps` at `failed_step`, "
+            "and inside a repeat block its `iterations`) holds `comparator` and what was seen: `received_tail` and "
+            "`bytes_received` for a serial read, `frames_tail` and `frames_read` for a CAN read, `reading` and "
+            "`captured_value` (and `masked_value` under a mask) for a symbol."
+        ),
+        remediation=(
+            "Compare what was seen with `comparator`. Zero bytes or zero frames points at the line before the "
+            "firmware: wiring, baud rate or bitrate, or a board that did not boot.",
+            "Fix the firmware or the plan, whichever is wrong, and run the plan again.",
+        ),
+        do_not=(
+            "Do not loosen the comparator or widen `timeout_s` until it passes without knowing why it failed.",
+            "Do not call it a bench fault. The read worked; the value is the finding.",
+        ),
+    ),
+    "symbol_size_mismatch": ErrorRemedy(
+        meaning=(
+            "A symbol read returned a different size than the plan declared, so the value was not compared. "
+            "`expected_size_bytes` is what the plan said and `size_bytes` is what the read returned."
+        ),
+        remediation=(
+            "Compare `expected_size_bytes` with `size_bytes`, then correct the plan or the firmware, whichever "
+            "changed.",
+        ),
+        do_not=(
+            "Do not drop `size_bytes` from the plan to get past this. It is the check that the plan and the image "
+            "agree on what the symbol is.",
+        ),
+    ),
+    "symbol_width_not_numeric": ErrorRemedy(
+        meaning=(
+            "A numeric comparator was applied to a symbol that is not a 1, 2, 4 or 8 byte integer "
+            "(`integer_widths`), so there was no number to compare and nothing was judged."
+        ),
+        remediation=(
+            "Point the comparator at a scalar the firmware keeps in one of `integer_widths`, or compare the bytes "
+            "another way. Declaring `size_bytes` on the step makes the plan check refuse a width like this before "
+            "the run starts.",
+        ),
+        do_not=(
+            "Do not treat this as a failed assertion about the firmware. The comparison never happened.",
+        ),
+    ),
+    "uart_expect_timeout": ErrorRemedy(
+        meaning=(
+            "A serial expect step did not see `expected_text` or `expected_pattern` within `timeout_s`. "
+            "`received_tail` is the end of what did arrive (`received_tail_truncated` when more came before it), "
+            "and `bytes_received` and `reads` say how much and how often."
+        ),
+        remediation=(
+            "Read `received_tail`: output that is there but different is a firmware or plan finding; fix whichever "
+            "is wrong.",
+            "Zero `bytes_received` points at the port, the wiring, the baud rate or a board that did not boot.",
+        ),
+        do_not=(
+            "Do not raise `timeout_s` or loosen the pattern until it passes without reading what arrived.",
+        ),
+    ),
+    "unexpected_stop": ErrorRemedy(
+        meaning=(
+            "The target stopped, but not at the breakpoint the step was waiting for. `stop` is where and why it "
+            "stopped and `expected_breakpoint_id` is the one the step named."
+        ),
+        remediation=(
+            "Read `stop`: a fault, a different breakpoint or a halt from outside each say something different about "
+            "the firmware or the plan. Fix that and run the plan again.",
+        ),
+        do_not=(
+            "Do not add breakpoints or widen timeouts to get past the stop. Where the target stopped is the "
+            "finding.",
+        ),
+    ),
+    "breakpoint_cleanup_failed": ErrorRemedy(
+        meaning=(
+            "The target stopped, but the breakpoint the step set could not be cleared afterwards, so the step is "
+            "not a pass, wherever the target stopped. `breakpoint_cleanup` holds what the clear answered; the run's "
+            "`cleanup` shows how the debug session was closed."
+        ),
+        remediation=(
+            "Read `breakpoint_cleanup` for why the clear failed, then `cleanup` and `hardware_lease_status` for the "
+            "state the session was closed in.",
+            "Run the plan again once the bench is settled.",
+        ),
+        do_not=(
+            "Do not read the step as passed because the target stopped. A breakpoint left in the target changes "
+            "what the next run sees.",
+        ),
+    ),
+    "uart_session_not_owned": ErrorRemedy(
+        meaning=(
+            "The plan closed a serial session it had already closed, or never opened. Nothing was sent to the port "
+            "and the session was not touched."
+        ),
+        remediation=(
+            "Fix the order of the plan's open and close steps. A close inside a repeat block runs on every "
+            "iteration, so a session opened once outside it is closed by the first and refused by the second.",
+            "The run's own cleanup closes whatever it still holds, so nothing is left to close by hand.",
+        ),
+        do_not=(
+            "Do not read this as a fault of the port or the board. It is the plan's order.",
+        ),
+    ),
+    "can_session_not_owned": ErrorRemedy(
+        meaning=(
+            "The plan closed a CAN session it had already closed, or never opened. Nothing was sent on the bus and "
+            "the session was not touched."
+        ),
+        remediation=(
+            "Fix the order of the plan's open and close steps. A close inside a repeat block runs on every "
+            "iteration, so a session opened once outside it is closed by the first and refused by the second.",
+            "The run's own cleanup closes whatever it still holds, so nothing is left to close by hand.",
+        ),
+        do_not=(
+            "Do not read this as a fault of the adapter, the bus or the board. It is the plan's order.",
+        ),
+    ),
+    "step_exception": ErrorRemedy(
+        meaning=(
+            "A step raised instead of answering, which is a defect in Agentic HIL rather than a verdict on the "
+            "firmware. Whether the step reached the board is unknown, so the run failed at that step and a "
+            "recovery of the probes it drove was attempted (`recovery` says how it came out). `exception_type` and "
+            "`backend_error` say what was raised."
+        ),
+        remediation=(
+            "Call `hardware_lease_status` and resolve anything left standing.",
+            "Report the defect with `exception_type` and `backend_error`, then run the plan again once.",
+        ),
+        do_not=(
+            "Do not count it as a firmware verdict.",
+            "Do not rerun the plan in a loop. The same defect raises the same way.",
+        ),
+    ),
+    "preflight_exception": ErrorRemedy(
+        meaning=(
+            "The check that runs before the first step raised instead of answering, which is a defect in Agentic "
+            "HIL. No step ran and nothing was driven. `validation_error` holds `exception_type` and "
+            "`backend_error`, with `field` `$` because the check was about the whole plan."
+        ),
+        remediation=(
+            "Report the defect with `exception_type`, `backend_error` and the plan that triggered it.",
+        ),
+        do_not=(
+            "Do not rewrite the plan to dodge it. The plan was not judged, and a plan edited around a defect hides "
+            "it from the next run.",
+        ),
+    ),
+    "test_config_not_found": ErrorRemedy(
+        meaning=(
+            "There is no plan file at `path`, so nothing was parsed, locked or driven. With no path given, the run "
+            "looks for `.agentic-hil/testconfig.yaml`, and a relative path is resolved against `workspace_root`, "
+            "not against the shell's working directory."
+        ),
+        remediation=(
+            "Pass the plan's path relative to the workspace root, or create the plan at "
+            "`.agentic-hil/testconfig.yaml`.",
+        ),
+        do_not=(
+            "Do not repoint `workspace_root` at the plan's directory. That key is what the configuration authorizes.",
+        ),
+    ),
+    "test_config_unreadable": ErrorRemedy(
+        meaning=(
+            "The plan file at `path` exists but could not be read, so nothing was parsed, locked or driven. "
+            "`backend_error` says what the read answered."
+        ),
+        remediation=(
+            "Fix what `backend_error` names (usually a permission or a file another program holds open), then run "
+            "the plan again.",
+        ),
+        do_not=(
+            "Do not widen the permissions of the whole workspace to read one file.",
+        ),
+    ),
+    "test_config_schema_invalid": ErrorRemedy(
+        meaning=(
+            "The plan schema bundled with this installation could not be used (`schema` names it, `schema_error` "
+            "says why), so the plan was never checked and nothing ran. The plan is not the problem; the "
+            "installation is."
+        ),
+        remediation=(
+            "Repair the installation: `agentic-hil upgrade`, or reinstall Agentic HIL, then check it with "
+            "`agentic-hil --version` and run the plan again.",
+        ),
+        do_not=(
+            "Do not edit or loosen the plan to get past this. It was never read against the schema.",
+            "Do not edit the schema inside the installation. The next upgrade replaces it, and until then every "
+            "plan is checked against a schema nobody shipped.",
+        ),
+    ),
+    "run_report_not_found": ErrorRemedy(
+        meaning=(
+            "`agentic-hil run-evidence --report` named a file that is not there (`path`), so no evidence was written. "
+            "The report it reads is the JSON a test run produced: what `agentic-hil test-reactor --json` printed, "
+            "saved to a file, or the run's own report file, which the run's result names in `canonical_report_path`."
+        ),
+        remediation=(
+            "Check `path` against where the run's report actually went. A relative path is read from the directory "
+            "`run-evidence` runs in, which in a CI job is not always the one the run step wrote from.",
+            "If the run step wrote no file at all, read that step first: a run that never started, or output "
+            "redirected to another name, leaves nothing here.",
+            "Run `agentic-hil run-evidence` again with the path of the report the run wrote.",
+        ),
+        do_not=(
+            "Do not write a report by hand, or copy one from another run, to give the command something to read. The "
+            "evidence would describe a run that did not happen.",
+        ),
+    ),
+    "run_report_unreadable": ErrorRemedy(
+        meaning=(
+            "The file `agentic-hil run-evidence --report` named (`path`) is there and could not be read as UTF-8 "
+            "text, and `backend_error` says why: a permission, or bytes that are not UTF-8. No evidence was written."
+        ),
+        remediation=(
+            "Read `backend_error`. A permission error means the account running `run-evidence` cannot read the file; "
+            "give it read access and run the command again.",
+            "A decode error means the file is not UTF-8. Windows PowerShell 5.1 writes UTF-16 with `>`: read the "
+            "run's own report file (`canonical_report_path` on the run's result) instead, or save the output with "
+            "PowerShell 7 or later, whose `>` writes UTF-8.",
+            "Run `agentic-hil run-evidence` again.",
+        ),
+        do_not=(
+            "Do not write or edit the report by hand to get past this. The evidence is worth what the run wrote and "
+            "nothing more.",
+        ),
+    ),
+    "run_report_invalid": ErrorRemedy(
+        meaning=(
+            "The file `agentic-hil run-evidence --report` named (`path`) is text and is not a JSON object: it does "
+            "not parse as JSON (`backend_error` says where it stopped), or it parses as something other than an "
+            "object. No evidence was written. A saved run report is the whole of what `agentic-hil test-reactor "
+            "--json` printed to standard output, and nothing else."
+        ),
+        remediation=(
+            "Look at the start of the file. A human-readable result means the run was saved without `--json`; text "
+            "before the opening brace means standard error was mixed in, usually by `2>&1`; an empty file means the "
+            "run printed nothing, and its own step log says why; a byte order mark at the very start fails the parse "
+            "as well.",
+            "Save the run's output again with `--json` and standard output alone, or read the run's own report file "
+            "(`canonical_report_path` on the run's result) instead.",
+            "Run `agentic-hil run-evidence` again.",
+        ),
+        do_not=(
+            "Do not repair the report by hand until it parses. A document assembled to satisfy the parser describes "
+            "a run that did not happen, and the evidence is worth what the run wrote and nothing more.",
+        ),
+    ),
+    "audit_failed": ErrorRemedy(
+        meaning=(
+            "The action ran, but its evidence could not be written: `audit_ok` is false and `audit_error` says "
+            "which write failed. A step that drove the board did so; what is missing is the record of it, and the "
+            "bench may have been quarantined for it. `classify_last_error` answers the same type for the same case."
+        ),
+        remediation=(
+            "Read `audit_error` and fix the write it names (a permission, a full disk, the audit ledger).",
+            "Call `hardware_lease_status`: an incident the missing evidence raised stands until it is resolved the "
+            "way `resource_quarantined` describes.",
+        ),
+        do_not=(
+            "Do not run the step again just to get a clean record. The action already happened once, and repeating "
+            "it changes the board again.",
+        ),
+    ),
+    "step_failed": ErrorRemedy(
+        meaning=(
+            "A step's result failed one of the run's success checks without naming an error type of its own. Most "
+            "often the call worked but giving its lease back did not (`lease_state`, `cleanup_required`, "
+            "`quarantined`), or its `side_effect_status` or `hardware_state` is unknown. The run failed at that "
+            "step and a recovery of the probes it drove was attempted (`recovery` says how it came out)."
+        ),
+        remediation=(
+            "Read the step's record at `failed_step`: which success check it failed is in its own fields.",
+            "Call `hardware_lease_status` and read the run's `recovery`; resolve anything left standing, then run "
+            "the plan again.",
+        ),
+        do_not=(
+            "Do not read a step's `ok: true` as a pass when the run names it `step_failed`. A call that left the "
+            "bench in an unknown state is not a pass.",
         ),
     ),
     # The most common refusal on this surface, and for a long time the one that
@@ -2581,6 +3889,545 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "the operator with no record of what ran.",
         ),
     ),
+    # -- The paths around a hardware action -------------------------------------
+    # The image a tool was handed, the record a report tool reads back, the
+    # configuration adoption fills in, and the dispatcher every tool passes
+    # through. Most of these refuse before anything reaches the board, and each
+    # entry says whether it did, because that is the first thing a caller
+    # deciding whether to call again has to know (#645).
+    "artifact_not_found": ErrorRemedy(
+        meaning=(
+            "The firmware image this call named does not exist, so nothing was validated, staged or flashed. Three "
+            "shapes answer with it: an `image_path` that names no file, resolved against the workspace root and not "
+            "against the directory the server was started from; an `artifact_id` that names no upload in this "
+            "project's upload directory; and an upload whose private staged copy could not be read back, which "
+            "carries a `backend_error`."
+        ),
+        remediation=(
+            "Check the path against the workspace root: a relative `image_path` is resolved there, so `build/app.elf` "
+            "is the file under the project, wherever the server was started from.",
+            "If the image has not been built yet, build it first, then call again with the path the build wrote.",
+            "For an `artifact_id`, upload the image again and use the id that upload returns. Uploads are kept per "
+            "project, so an id from another project names nothing here.",
+            "If the result carries a `backend_error`, the upload's staged copy could not be read back: that is a fault "
+            "of this host's temporary directory, not of the image, and an upload made once it is repaired works.",
+        ),
+        do_not=(
+            "Do not create a placeholder file at the path to get past this. The format checks refuse it, and with "
+            "them switched off it would be flashed.",
+            "Do not substitute an image from another build or another project because it exists. The board would run "
+            "firmware nobody asked for.",
+        ),
+    ),
+    "artifact_changed": ErrorRemedy(
+        meaning=(
+            "The image changed between the moment it was validated and the moment it was staged for the backend, so "
+            "nothing was sent to the board. Its content no longer matched the hash taken at validation, it was no "
+            "longer a single-link regular file, it could not be opened (the result carries a `backend_error`), or a "
+            "file appeared where validation found none, which only `validation.require_existing_file: false` "
+            "permits. The result is `retry_safe: true`: calling again validates and stages the file afresh."
+        ),
+        remediation=(
+            "Let the build that is writing the image finish.",
+            "Call again once the file is stable; the new call validates what is there now.",
+            "If the summary says the image did not exist when it was validated, build it first, then call again.",
+            "If it repeats while nothing writes the file, read `backend_error`: the open itself is failing, which is "
+            "a fault of the file or its directory that calling again does not change.",
+        ),
+        do_not=(
+            "Do not flash the image with a raw programmer run to get around this. What would reach the board is an "
+            "image nothing validated.",
+            "Do not call again in a tight loop while a build is still writing the image.",
+        ),
+    ),
+    "artifact_staging_failed": ErrorRemedy(
+        meaning=(
+            "The image passed validation and could not be copied into the private staging directory the backend "
+            "reads it from. That directory lives in this host's temporary directory, is created when the server "
+            "starts, and is neither in the workspace nor under `state_root`. `backend_error` names the failure; "
+            "nothing was sent to the board (`side_effect_status: not_started`), so calling again is safe."
+        ),
+        remediation=(
+            "Read `backend_error`: no space left, a write refused, or a read of the image itself failing part-way.",
+            "Free space in, or restore write access to, this host's temporary directory, then call again.",
+            "If the staging directory itself is gone (a temporary-directory cleaner removed it under a running "
+            "server), restart the MCP server, which creates a new one.",
+        ),
+        do_not=(
+            "Do not treat this as an incident to recover or sign for. Nothing reached the board and no lease was "
+            "quarantined over it.",
+            "Do not hand the image to the toolchain yourself because staging failed. Staging is what makes the bytes "
+            "flashed the bytes validated.",
+        ),
+    ),
+    "artifact_too_large": ErrorRemedy(
+        meaning=(
+            "The image is larger than this project accepts: `bytes` is its size, `max_bytes` the limit, set by "
+            "`artifacts.max_upload_size_mb` in MiB. The limit applies to an image named by path, to an upload and to "
+            "the staged copy alike, and it is checked before anything is sent to the board."
+        ),
+        remediation=(
+            "Compare `bytes` with `max_bytes` and check this is the file meant: an ELF carries its debug information "
+            "and can be many times the size of the image it programs.",
+            "For a flash, use the `.hex` or `.bin` of the same build, which holds only what is programmed; a debug "
+            "session needs the `.elf` and its symbols.",
+            "If the image really is this large, the limit is the operator's to raise. No tool writes "
+            "`artifacts.max_upload_size_mb`: it is edited in the configuration by hand and applies when the server "
+            "restarts.",
+        ),
+        do_not=(
+            "Do not truncate or split the image to fit. The board would be programmed with part of a firmware.",
+            "Do not program the image with a raw programmer run instead.",
+        ),
+    ),
+    "artifact_validation_failed": ErrorRemedy(
+        meaning=(
+            "The image was refused by the checks every image passes before it is flashed, and nothing was sent to the "
+            "board. `validation` holds one flag per check: `path_traversal_safe`, `within_workspace` (which nothing "
+            "relaxes), `allowed_root` (enforced under `validation.require_allowed_root`), `allowed_extension` "
+            "(enforced under `validation.require_allowed_extension`), `regular_file` and `single_link`, and the "
+            "format checks `elf_header`, `hex_parseable` and `bin_size_plausible`. A debug session also refuses an "
+            "image that is not an `.elf`, because it needs the symbols."
+        ),
+        remediation=(
+            "Read `validation` and the summary; the summary says which check stopped it.",
+            "A format check that is false means the file is not the image its extension claims: rebuild it, or point "
+            "at the build's real output. `regular_file` or `single_link` false means a link, a directory or a second "
+            "hard link: use the plain file the build wrote.",
+            "For a debug session, name the `.elf` of the build.",
+            "For `within_workspace`, `allowed_root` or `allowed_extension`, move or build the image inside the "
+            "workspace and under an allowed root, with an allowed extension.",
+            "A refusal by policy that is wrong for this project is the operator's to change in the configuration.",
+        ),
+        do_not=(
+            "Do not rename the file to an allowed extension. The format check reads the content, and an image that "
+            "got past it under a false name would be programmed as something it is not.",
+            "Do not edit `artifacts.allowed_roots`, `artifacts.allowed_extensions` or the `validation` switches "
+            "yourself. They are operator policy, no tool writes them, and a change applies only when the server "
+            "restarts.",
+        ),
+    ),
+    "output_validation_failed": ErrorRemedy(
+        meaning=(
+            "The `output_path` of `debug_dump_symbol_ihex`, or of a dump step in a test plan, which is checked before "
+            "the plan starts, was refused before anything was read from the board. It may not contain `..`, has to "
+            "stay inside the workspace (nothing relaxes that), has to sit under an allowed artifact root when "
+            "`validation.require_allowed_root` is on, and has to end in `.hex` or `.ihex`. `validation` holds the "
+            "flag for each."
+        ),
+        remediation=(
+            "Read `validation` to see which check refused the path.",
+            "Name a path inside the workspace under an allowed root with a `.hex` or `.ihex` extension, such as "
+            "`build/<symbol>.hex`.",
+            "Call again with it; nothing was read, so nothing is lost.",
+        ),
+        do_not=(
+            "Do not write the dump with another tool to put it where this refused it.",
+            "Do not edit `artifacts.allowed_roots` yourself to admit the path. It is operator policy.",
+        ),
+    ),
+    "audit_unavailable": ErrorRemedy(
+        meaning=(
+            "The call was refused before it started, because the bench could not record it. Every hardware action is "
+            "written to an audit trail first (its report under `reports.directory`, its action log under "
+            "`logs.directory`, the report state under `state_root`, a session's own log), and one of those could not "
+            "be prepared. `audit_error`, where the result carries one, says what failed: a configuration refusal with "
+            "its own `error_type`, or the exception class and its message. Nothing was flashed, reset or written to "
+            "the target."
+        ),
+        remediation=(
+            "Read `audit_error` for the path or the fault that stopped the record.",
+            "Have the operator repair the destination: `agentic-hil doctor` checks that `state_root` accepts writes. "
+            "Free the disk or restore write access. A destination this profile refuses outright is a configuration "
+            "refusal, and the `audit_error` that names it carries its own remediation for that path.",
+            "Call again once it is repaired. Nothing was started, so there is nothing to recover first.",
+        ),
+        do_not=(
+            "Do not run the toolchain or a terminal program by hand to get the action done unrecorded.",
+            "Do not delete report state or coordination records to make room. They are the record of what this "
+            "bench has already done.",
+        ),
+    ),
+    "audit_failed_after_action": ErrorRemedy(
+        meaning=(
+            "A hardware action ran and the record of it could not be written. Two paths end here. A hardware tool "
+            "ended in a filesystem or configuration fault, which is read as a broken audit: `audit_error` and "
+            "`backend_error` name it, and what the tool did to the board is unknown. Or "
+            "`project_config_adopt_hardware` or `project_config_create` read the probe and could not write the record "
+            "of that read or of its release; neither wrote anything to the configuration. Either way the bench is "
+            "quarantined under an audit-broken reason, no automatic recovery clears that, and an operator signs it "
+            "off."
+        ),
+        remediation=(
+            "Fix where the record goes first: `agentic-hil doctor` checks that `state_root` accepts writes, and "
+            "`audit_error` names the path or fault.",
+            "Read what is known: `get_last_report`, and `hardware_lease_status` for the reasons on the incident and "
+            "its `quarantine_guidance`.",
+            "Have the operator check the board and sign the incident off with `agentic-hil recover "
+            "--confirm-safe-state --quarantine-id <quarantine_id>`.",
+            "Call `hardware_lease_status` again to confirm the bench is free, then repeat the action.",
+        ),
+        do_not=(
+            "Do not repeat the action before the incident is settled. It is refused while the quarantine stands, and "
+            "an action with no record is what the quarantine is there to stop.",
+            "Do not delete reports, logs or coordination records to clear it.",
+        ),
+    ),
+    "hardware_action_exception": ErrorRemedy(
+        meaning=(
+            "The hardware action raised part-way through and the service caught it. What it did to the board is not "
+            "known: `side_effect_status: unknown`, `retry_safe: false`, and `backend_error` holds the exception. "
+            "`quarantined` says whether an incident stands over the bench. When it is false the service already "
+            "stood the incident down and the bench is free again; that settles the lock and says nothing about the "
+            "board."
+        ),
+        remediation=(
+            "Read `backend_error` for what raised.",
+            "If `quarantined` is true, read `hardware_lease_status`: its `quarantine_guidance` and `auto_recoverable` "
+            "say who settles the incident.",
+            "Establish the state of the board before repeating the action: `get_last_report` holds what was "
+            "recorded, and `probe_target` says whether the probe and the target still answer.",
+            "Report an exception that repeats identically as a defect, with `backend_error`.",
+        ),
+        do_not=(
+            "Do not call the same tool again in a loop. An action that raised once part-way and is repeated blind can "
+            "leave the board half-done twice.",
+            "Do not finish the action by hand with the toolchain.",
+        ),
+    ),
+    "service_closed": ErrorRemedy(
+        meaning=(
+            "This service has shut down and takes no more calls. Over MCP that happens only while the server process "
+            "is stopping. Nothing was started."
+        ),
+        remediation=(
+            "Restart or reconnect the MCP server.",
+            "Call `hardware_lease_status` on the new one before continuing, to see what the bench holds.",
+        ),
+        do_not=("Do not retry the call in a loop against this service. It does not reopen.",),
+    ),
+    "service_cleanup_required": ErrorRemedy(
+        meaning=(
+            "This service tried to shut down and the shutdown failed part-way: the backend, the artifact staging, a "
+            "COM port or CAN session, or a child process would not close. It takes no more calls. What it could not "
+            "close stays recorded as held, and the next server finds it as an incident."
+        ),
+        remediation=(
+            "Restart the MCP server.",
+            "Call `hardware_lease_status` on the new one: it names anything the old one left held.",
+            "If that incident needs an operator's signature, read its `quarantine_guidance`, then have the operator "
+            "sign with `agentic-hil recover --confirm-safe-state --quarantine-id <quarantine_id>`.",
+        ),
+        do_not=(
+            "Do not delete coordination records or lock files to make the new server start clean.",
+            "Do not keep calling this service; it does not reopen.",
+        ),
+    ),
+    "unknown_tool": ErrorRemedy(
+        meaning=(
+            "This server has no tool by that name in its version. The name is checked before anything else, so "
+            "nothing was started. A server with no configuration answers its own real tool names with "
+            "`config_file_not_found` instead."
+        ),
+        remediation=(
+            "List the tools with the MCP `tools/list` request and call one by its exact name.",
+            "A command of the `agentic-hil` command line, such as `agentic-hil doctor`, is not a tool; run it in a "
+            "shell.",
+            "If the name comes from documentation for another release, compare versions: this server's is in the MCP "
+            "`initialize` answer under `serverInfo`.",
+        ),
+        do_not=(
+            "Do not reach for raw debugger, serial or shell commands because a tool name was not found.",
+            "Do not guess near-miss names until one answers.",
+        ),
+    ),
+    "report_not_found": ErrorRemedy(
+        meaning=(
+            "There is nothing to read yet. `get_last_report` answers this when no hardware call has written a report "
+            "in this project; `classify_last_error` answers it when no failure is recorded, which includes every "
+            "recorded call having succeeded. Reports are kept per project, by configuration file and workspace, under "
+            "`state_root`."
+        ),
+        remediation=(
+            "Make the hardware call whose report you want first, then read it.",
+            "If a call was made and its report is not found, check this is the same server, configuration and "
+            "workspace that made it: another project's reports are not read here.",
+        ),
+        do_not=(
+            "Do not read this as a pass or a failure of anything. It says only that nothing is recorded.",
+            "Do not create or edit files under `state_root` to give the reader something to find.",
+        ),
+    ),
+    "report_unreadable": ErrorRemedy(
+        meaning=(
+            "This project's report state exists and reading it failed. `error_class` and `errno` say how; the path is "
+            "withheld on purpose. A report state that reads and is damaged answers `config_invalid` instead."
+        ),
+        remediation=(
+            "Read `error_class` and `errno`: a refused permission and a failing disk are different repairs.",
+            "Have the operator restore access to `state_root`; `agentic-hil doctor` checks it.",
+            "Until it is repaired, hardware calls meet the same fault and are refused as `audit_unavailable`.",
+        ),
+        do_not=(
+            "Do not delete or recreate the report state to get past it. It is this project's record of what ran.",
+            "Do not read this as an empty record or as a pass.",
+        ),
+    ),
+    "config_unreadable": ErrorRemedy(
+        meaning=(
+            "The configuration file exists and cannot be read: it is a directory or another non-regular file, the "
+            "operating system refused or failed the read, or, on the paths that write the file, its bytes are not "
+            "UTF-8. `path` and `backend_error` say which. Nothing was decided from it and nothing was written to it."
+        ),
+        remediation=(
+            "Read `path` and `backend_error`.",
+            "Have the operator fix the file where it is: restore read access, replace a directory with the file, or "
+            "save it again as UTF-8.",
+            "Call again once it reads; `agentic-hil doctor` reads it the same way and says when it does.",
+        ),
+        do_not=(
+            "Do not regenerate the file with `{reopen_command}` to get past this. That resets every permission in it "
+            "to the generated set and throws away what the operator decided.",
+            "Do not delete or move the file aside, and do not point `AGENTIC_HIL_CONFIG` at another file to get "
+            "around it.",
+        ),
+    ),
+    "config_changed_underneath": ErrorRemedy(
+        meaning=(
+            "Another process wrote the configuration between the moment this call planned its change and the moment "
+            "it would have written it, so nothing was written. `stale_keys` names each key whose `expected_value` "
+            "and `current_value` now differ, or `document_changed: true` says the file changed elsewhere. The result "
+            "is `retry_safe: true`."
+        ),
+        remediation=(
+            "Re-read the configuration with `project_config_describe` to see what it says now.",
+            "Plan again from what it says now. For adoption, call `project_config_adopt_hardware` again: it reads the "
+            "file afresh and fills in only what is still unset.",
+            "If it keeps happening, something else is writing the file; find it and ask the operator.",
+        ),
+        do_not=(
+            "Do not force the values the stale plan carried (listed under `carried` in an adoption) into the file "
+            "with `project_config_set`. They were planned against a file that no longer exists.",
+            "Do not send the same plan again unchanged.",
+        ),
+    ),
+    "unknown_device": ErrorRemedy(
+        meaning=(
+            "The call named a debugger, COM port or CAN bus id the configuration does not declare: an adoption "
+            "`debugger_id`, a device of a `bench_run_start` run, or a device of a test plan step. It is looked up in "
+            "the configuration, not on the bench. Nothing was held or started."
+        ),
+        remediation=(
+            "Read `configured_debuggers` or `configured_devices` on the result: those are the ids this configuration "
+            "declares.",
+            "Call again with one of them, spelled exactly.",
+            "If the device is attached and has no entry, read the configuration with `project_config_describe`. "
+            "Adding an entry is the operator's decision: `project_config_set` writes one only under "
+            "`permissions.allow_config_description_write`, and adoption never adds one.",
+        ),
+        do_not=(
+            "Do not create an entry yourself to make the id exist.",
+            "Do not substitute another declared id because it is the only one. It may be wired to another board.",
+        ),
+    ),
+    "hardware_mismatch": ErrorRemedy(
+        meaning=(
+            "The configured debugger entry names one probe and the attached probe is another: "
+            "`configured_probe_id` against `discovered_probe_id`. Adopting would describe two boards at once, so the "
+            "whole plan was refused and nothing was written."
+        ),
+        remediation=(
+            "Ask the operator which board this project is about, because each of the steps below answers a "
+            "different one.",
+            "If it is the configured board, attach it and call again.",
+            "If another configured entry is meant for the attached board, call again with that entry's `debugger_id`.",
+            "If the project moved to the attached board, the operator repoints `debuggers.<name>.probe_id` with "
+            "`project_config_set` or in the file.",
+        ),
+        do_not=(
+            "Do not clear or overwrite `probe_id` yourself to make adoption go through.",
+            "Do not adopt into another entry because it has no `probe_id` yet.",
+        ),
+    ),
+    "ambiguous_hardware": ErrorRemedy(
+        meaning=(
+            "More than one in-circuit debugger or programmer is attached, and discovery will not choose between "
+            "them: choosing is how the wrong board gets configured. `probes` lists every attached serial. Nothing "
+            "was read from a board and nothing was written."
+        ),
+        remediation=(
+            "Ask the operator which board this project is about.",
+            "Call `project_config_adopt_hardware` with its serial as `probe_id`.",
+            "Or leave only that one connected and run the same discovery again.",
+        ),
+        do_not=(
+            "Do not pick a serial from `probes` yourself.",
+            "Do not read this as a fault to retry. The answer is the same until a board is named or unplugged.",
+        ),
+    ),
+    f"not_supported:{UNBOUND_DEBUGGER_SCOPE}": ErrorRemedy(
+        meaning=(
+            "This tool drives one bound in-circuit debugger or programmer, and this configuration binds none: it "
+            "declares no debugger at all, or it declares several and the server bound none of them. "
+            "`configured_debuggers` lists what it declares. Calling again does not change that (`retry_safe: false`)."
+        ),
+        remediation=(
+            "Read `configured_debuggers`.",
+            "If it is empty, the configuration has no debugger: `project_config_create` generates one from the "
+            "attached hardware (it needs `permissions.allow_config_write`), or the operator runs `{reopen_command}`.",
+            "If it names several, drive them through `test_reactor_run` with a test plan that names the device of "
+            "each step (`{test_plan_reference}`). Keeping only one entry is the operator's decision.",
+        ),
+        do_not=(
+            "Do not retry the tool with other arguments. No argument binds a debugger.",
+            "Do not delete or hand-edit debugger entries to leave one.",
+        ),
+    ),
+    f"not_supported:{UNNAMED_PROBE_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The bound debugger entry names no `probe_id` while other entries exist, so which attached probe it "
+            "means is not settled. This is checked only when a tool is about to drive a board; nothing was started."
+        ),
+        remediation=(
+            "Find the serial of this entry's probe: `debugger_probes_list` lists attached probes on a `pyocd` or "
+            "`stlink` entry. OpenOCD cannot enumerate, so on an `openocd` entry read the serial off the probe or its "
+            "USB listing.",
+            "Write it with `project_config_adopt_hardware`, naming this entry as `debugger_id` and the serial as "
+            "`probe_id` (it needs `permissions.allow_config_description_write`).",
+            "Give every other entry its own `probe_id` the same way, so no two can mean one probe.",
+            "Call the tool again.",
+        ),
+        do_not=(
+            "Do not remove the other entries to make this one the only debugger.",
+            "Do not guess a serial. A wrong one fails at the connect, and a right one for another board flashes it.",
+        ),
+    ),
+    f"adapter_not_found:{DISCOVERY_SCOPE}": ErrorRemedy(
+        meaning=(
+            "Discovery found no in-circuit debugger or programmer to bind. Either the listing was authoritative and "
+            "empty, or the host's USB serial inventory shows a probe's serial port and read no serial off it, or a "
+            "`requested_probe_id` named a serial that is not among the attached ones in `probes`. Nothing was read "
+            "from a board and nothing was written."
+        ),
+        remediation=(
+            "If `requested_probe_id` is set, name one of the serials under `probes`, or attach the board with that "
+            "serial: selection chooses among attached probes and never adds one.",
+            "If the summary names a serial port with no serial behind it, check the probe is a genuine unit with its "
+            "driver installed, or install STM32CubeProgrammer, which reads the serial off the probe itself.",
+            "Otherwise nothing is attached: attach the probe with a data cable (not a charge-only one) and check its "
+            "driver.",
+            "Then bind it with `project_config_adopt_hardware`, or with `project_config_create` when there is no "
+            "configuration yet.",
+        ),
+        do_not=("Do not write a `probe_id` that discovery did not list into the configuration.",),
+    ),
+    f"target_not_detected:{DISCOVERY_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The in-circuit debugger or programmer `probe_id` answered, and its read-only hot-plug connect found no "
+            "target behind it. Nothing was reset or written."
+        ),
+        remediation=(
+            "Check the target is powered.",
+            "Check the debug wiring between probe and target, the SWD lines and any jumpers that connect them, and "
+            "that no other program holds the probe.",
+            "Firmware that disables the debug pins also looks like this; recovering such a part is the operator's "
+            "call, because discovery never connects under reset.",
+            "Run the same discovery again.",
+        ),
+        do_not=(
+            "Do not switch to another `probe_id` to get an answer.",
+            "Do not force a connect under reset or an erase by hand.",
+        ),
+    ),
+    f"debugger_not_executable:{DISCOVERY_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The toolchain discovery found is present on this host and will not run. Discovery uses the "
+            "STM32CubeProgrammer CLI when it resolves, and a broken install of it is refused here rather than "
+            "falling back to OpenOCD; OpenOCD on `PATH` is used when the CLI is absent. Discovery reads no configured "
+            "`executable`, and nothing was said to the board."
+        ),
+        remediation=(
+            "Read `not_executable_reason`, and the path in `executable` or the summary.",
+            "`permission_denied`: restore the execute bit with `chmod +x` on that path and check its filesystem is "
+            "not mounted `noexec`.",
+            "`not_an_executable_image`: `file <path>` says what it is instead; reinstall the toolchain for this "
+            "machine.",
+            "Run the same discovery again.",
+        ),
+        do_not=(
+            "Do not set `debuggers.<name>.executable` to get past this. Discovery does not read it.",
+            "Do not copy the toolchain into the workspace.",
+        ),
+    ),
+    f"timeout:{DISCOVERY_SCOPE}": ErrorRemedy(
+        meaning=(
+            "Discovery started a read-only toolchain read and reaped it when it did not finish within discovery's own "
+            "fixed deadline. The summary names which read: the STM32CubeProgrammer probe listing, or its hot-plug "
+            "connect to the target, which change nothing on the board and report `hardware_state: unchanged`; or "
+            "OpenOCD's init, targets and shutdown, whose `init` attaches to the target and can halt the core before "
+            "the process was reaped, so it reports `hardware_state: unknown`. No configuration was generated or "
+            "adopted from it."
+        ),
+        remediation=(
+            "Read the summary and `hardware_state` on this result: they say which read was reaped and whether it can "
+            "have left the core halted.",
+            "If `hardware_state` is `unknown` and this result came under `hardware_discovery` in a "
+            "`resource_quarantined` refusal, the board is held: follow that refusal's own `next_step` and remediation "
+            "before anything else touches it. With no such refusal around it nothing holds the board, and the core "
+            "may be sitting halted: have the operator reset or power-cycle the target before relying on it.",
+            "Check that no other program holds the in-circuit debugger or programmer, that its cable is a data cable "
+            "seated at both ends, and that the target is powered.",
+            "Run the same discovery again: `project_config_adopt_hardware` on a workspace that has a configuration, "
+            "otherwise the call or command that returned this.",
+        ),
+        do_not=(
+            "Do not set `debuggers.<name>.timeout_s` to give discovery longer. Discovery runs with its own fixed "
+            "deadline and reads no configured timeout.",
+            "Do not switch to another `probe_id` to get an answer. Another probe answering says nothing about the one "
+            "that timed out, and a configuration bound to it describes a different board.",
+        ),
+    ),
+    "canonical_write_pending": ErrorRemedy(
+        meaning=(
+            "The report read back is a staged copy whose promotion to the canonical record failed (`audit_ok: false`, "
+            "`canonical_write_pending: true`). Its `ok` is neither a confirmed success nor a confirmed failure: the "
+            "run it describes is not recorded where the bench keeps its records."
+        ),
+        remediation=(
+            "Treat the run as unconfirmed, whatever its `ok` says.",
+            "Read `hardware_lease_status` for what the bench holds now.",
+            "Have the operator repair the state root's filesystem; `agentic-hil doctor` checks it.",
+            "Run the action again once records commit.",
+        ),
+        do_not=(
+            "Do not report the run as passed on the strength of this copy.",
+            "Do not edit or delete the staged report or the report state.",
+        ),
+    ),
+    "cleanup_required": ErrorRemedy(
+        meaning=(
+            "`debug_stop_session` stopped the session's processes and the probe lease could not be handed back "
+            "cleanly. `cleanup_reasons` says why, `lease_state` where the lease stands and `quarantined` whether an "
+            "incident is open. The debug session is over; what is unsettled is the record of the lease, not the "
+            "session."
+        ),
+        remediation=(
+            "Read `cleanup_reasons`.",
+            "If the only reason is `lease_release_unconfirmed`, the release record could not be written, which is a "
+            "host-side fault the bench recovers by machine: call `debug_stop_session` again, which retries the "
+            "release and answers that no session is active, without touching the board. Any later hardware call "
+            "retries it too.",
+            "If a reason ends in `audit_broken` (such as `debug_coordination_report_audit_broken`: the stop's report "
+            "could not be written), calling again answers the same refusal. The operator repairs the audit "
+            "destination (`agentic-hil doctor` checks it), checks the board and signs with `agentic-hil recover "
+            "--confirm-safe-state --quarantine-id <quarantine_id>`.",
+            "Read `hardware_lease_status` to confirm where the lease stands.",
+        ),
+        do_not=(
+            "Do not delete coordination records to release the lease.",
+            "Do not go after the session's processes by hand. They are already stopped.",
+        ),
+    ),
     # -- A capability this configuration does not have, and the way to one ------
     # Scoped per backend, because "not supported" is only half an answer: the
     # useful half is which configuration would support it, and that differs by
@@ -2735,6 +4582,704 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "policy this refusal comes from and takes the probe out from under the bench's own coordination.",
             "Do not inspect the hardware or run `agentic-hil recover` for this result. It is a refused call, not an "
             "unconfirmed target state.",
+        ),
+    ),
+    # -- The debugger backends and the debug session, in their own words (#644) --
+    "timeout:openocd": ErrorRemedy(
+        meaning=(
+            "OpenOCD, or the GDB a debug session drives through it, did not answer before its deadline. The wait that "
+            "ran out is one of these: OpenOCD's version check, an OpenOCD run for probe_target, flash_firmware or "
+            "reset_target, the debug server's ready line at a session start (`backend_error_type` "
+            "`gdb_server_not_ready`), or one GDB/MI command inside a session, a symbol lookup included. A process that "
+            "runs out of time is stopped at the deadline, so the result knows about the board only what its state "
+            "fields say."
+        ),
+        remediation=(
+            "Read `target_state`, `side_effect_status`, `target_contacted` and `cleanup_required` first, where the "
+            "result carries them. A version check reaches nothing, and a flash, a reset or a session command can have "
+            "stopped partway.",
+            "When `target_state` is `unknown` inside a debug session, call debug_halt: a confirmed halt settles the "
+            "unconfirmed state, and the session goes on from the halted core.",
+            "`gdb_server_not_ready` means OpenOCD did not print `Listening on port ... for gdb connections` in time. "
+            "That line needs OpenOCD 0.11.0 or newer, so an older OpenOCD, or one configured to log elsewhere, times "
+            "out here every time; the server output in the log at `log_path` says which.",
+            "Every wait is bounded by `debuggers.<name>.timeout_s`, and a call's own `timeout_s`, where a tool takes "
+            "one, only shortens it. A slow bench that needs a longer ceiling is the operator's edit of the "
+            "authoritative file: project_config_set does not write that key.",
+        ),
+        do_not=(
+            "Do not repeat an effectful call (flash_firmware, reset_target, debug_continue) before the state fields say "
+            "where the one that timed out left the board. A second run over an unknown state adds a second unknown.",
+            "Do not raise `timeout_s` in the call to wait longer. It can only shorten the configured ceiling.",
+        ),
+    ),
+    "timeout:pyocd": ErrorRemedy(
+        meaning=(
+            "pyOCD, or the GDB this backend reads symbols out of the flashed ELF with, did not finish before its "
+            "deadline: the version check, the probe listing, a run for probe_target, flash_firmware, reset_target or a "
+            "memory read, or a symbol lookup. A process that runs out of time is stopped at the deadline, so the result "
+            "knows about the board only what its state fields say. The probe listing and the symbol lookup never "
+            "contact the target."
+        ),
+        remediation=(
+            "Read `side_effect_status`, `target_contacted` and `target_state` first, where the result carries them. A "
+            "flash or a reset that timed out can have stopped partway, and the log at `log_path` holds what pyOCD "
+            "printed before it was stopped.",
+            "The deadline comes from `debuggers.<name>.timeout_s`, and a slow bench that needs more is the operator's "
+            "edit of the authoritative file: project_config_set does not write that key. The probe listing already "
+            "waits at least 30 seconds whatever the key says.",
+        ),
+        do_not=(
+            "Do not repeat a flash, a reset or a memory read before the state fields say where the one that timed out "
+            "left the board. A second run over an unknown state adds a second unknown.",
+            "Do not run `pyocd` by hand to see whether it is faster. The bench's coordination does not see that run, "
+            "and the board it drives is the one this incident is about.",
+        ),
+    ),
+    "timeout:stlink": ErrorRemedy(
+        meaning=(
+            "STM32CubeProgrammer (STM32_Programmer_CLI), or the GDB this backend reads symbols out of the flashed ELF "
+            "with, did not finish before its deadline: the version check, the probe listing, a run for probe_target, "
+            "flash_firmware, reset_target or a memory read, or a symbol lookup. A process that runs out of time is "
+            "stopped at the deadline, so the result knows about the board only what its state fields say. The probe "
+            "listing and the symbol lookup never contact the target."
+        ),
+        remediation=(
+            "Read `side_effect_status`, `target_contacted` and `target_state` first, where the result carries them. A "
+            "flash or a reset that timed out can have stopped partway, and the log at `log_path` holds what "
+            "STM32CubeProgrammer printed before it was stopped.",
+            "The deadline comes from `debuggers.<name>.timeout_s`, and a slow bench that needs more is the operator's "
+            "edit of the authoritative file: project_config_set does not write that key.",
+        ),
+        do_not=(
+            "Do not repeat a flash, a reset or a memory read before the state fields say where the one that timed out "
+            "left the board. A second run over an unknown state adds a second unknown.",
+            "Do not run `STM32_Programmer_CLI` by hand to see whether it is faster. The bench's coordination does not "
+            "see that run, and the board it drives is the one this incident is about.",
+        ),
+    ),
+    "debugger_not_found:openocd": ErrorRemedy(
+        meaning=(
+            "The OpenOCD this entry needs could not be run: `debuggers.<name>.executable` names nothing that exists, "
+            "or, left unset, no `openocd` is on PATH. A debug session start reports the same when the operating system "
+            "refused to spawn its debug server, with the reason in `backend_error`. Nothing was started, so the target "
+            "was not contacted and the board is as the last call that reached it left it."
+        ),
+        remediation=(
+            "Read `backend_error` where the result carries it, and `likely_causes`: they say whether the binary is "
+            "missing or the spawn was refused.",
+            "Install OpenOCD (0.11.0 or newer for debug sessions) and put it on PATH, or name its binary by absolute "
+            "path in `debuggers.<name>.executable`. That key is written with project_config_set behind "
+            "`allow_config_description_write`, and which toolchain a bench runs is the operator's, so get their word.",
+            "Run `agentic-hil doctor` afterwards: it repeats the lookup and reports the version once OpenOCD runs.",
+        ),
+        do_not=(
+            "Do not copy an OpenOCD binary into the workspace and point the configuration at it. A configured "
+            "executable inside the workspace is repository-controlled code running as the debugger.",
+            "Do not run `openocd` by hand to get past it. A server this service did not start is one its coordination "
+            "cannot see, stop or account for.",
+        ),
+    ),
+    "debugger_not_found:pyocd": ErrorRemedy(
+        meaning=(
+            "The pyOCD this entry needs could not be run: `debuggers.<name>.executable` names nothing that exists, or, "
+            "left unset, no `pyocd` is on PATH. Nothing was started, so the target was not contacted and the board is "
+            "as the last call that reached it left it."
+        ),
+        remediation=(
+            "Install pyOCD into the environment the server runs from (`pip install agentic-hil[pyocd]` or "
+            "`pip install pyocd`) so `pyocd` is on PATH, or name its binary by absolute path in "
+            "`debuggers.<name>.executable`. That key is written with project_config_set behind "
+            "`allow_config_description_write`, and which toolchain a bench runs is the operator's, so get their word.",
+            "Run `agentic-hil doctor` afterwards: it repeats the lookup and reports the version once pyOCD runs.",
+        ),
+        do_not=(
+            "Do not install pyOCD into the workspace and point the configuration at it. A configured executable inside "
+            "the workspace is repository-controlled code running as the debugger.",
+            "Do not run `pyocd` by hand to get past it. A run this service did not start is one its coordination "
+            "cannot see or account for.",
+        ),
+    ),
+    "debugger_not_found:stlink": ErrorRemedy(
+        meaning=(
+            "The STM32CubeProgrammer command-line tool this entry needs, STM32_Programmer_CLI, could not be run: "
+            "`debuggers.<name>.executable` names nothing that exists, or, left unset, it is neither on PATH nor in the "
+            "standard STM32CubeProgrammer and STM32CubeIDE install locations. Nothing was started, so the target was "
+            "not contacted and the board is as the last call that reached it left it."
+        ),
+        remediation=(
+            "Install STM32CubeProgrammer, which brings STM32_Programmer_CLI, or put the directory that holds it on "
+            "PATH.",
+            "Where it lives somewhere else, name the binary by absolute path in `debuggers.<name>.executable`. That key "
+            "is written with project_config_set behind `allow_config_description_write`, and which toolchain a bench "
+            "runs is the operator's, so get their word.",
+            "Run `agentic-hil doctor` afterwards: it repeats the lookup and reports the version once the tool runs.",
+        ),
+        do_not=(
+            "Do not copy STM32_Programmer_CLI into the workspace and point the configuration at it. A configured "
+            "executable inside the workspace is repository-controlled code running as the debugger.",
+            "Do not run STM32_Programmer_CLI by hand to get past it. A run this service did not start is one its "
+            "coordination cannot see or account for.",
+        ),
+    ),
+    "debugger_not_found": ErrorRemedy(
+        meaning=(
+            "The debugger program a call needed could not be run: it is not where the configuration points, not on "
+            "PATH, or it was found and disappeared before it could be started. Probe discovery says so when neither "
+            "STM32CubeProgrammer's command-line tool nor OpenOCD is installed. Nothing was started, so the target was "
+            "not contacted."
+        ),
+        remediation=(
+            "Read `summary`, and `executable` or `tools_searched` where present: they name the program that was looked "
+            "for and where.",
+            "Install the toolchain the summary names and put it on PATH, or, for a configured entry, name the binary by "
+            "absolute path in `debuggers.<name>.executable` with the operator's word.",
+            "Run `agentic-hil doctor` afterwards: it repeats the lookup and reports what it finds.",
+        ),
+        do_not=(
+            "Do not copy a toolchain binary into the workspace and point the configuration at it. A configured "
+            "executable inside the workspace is repository-controlled code running as the debugger.",
+            "Do not drive the probe by hand with whatever debugger happens to be installed. The bench's coordination "
+            "does not see that run.",
+        ),
+    ),
+    "config_file_not_found:openocd": ErrorRemedy(
+        meaning=(
+            "OpenOCD, started as a debug session's server, exited because it could not find a file it was told to "
+            "read, and that file is neither of the two scripts the entry names: most often a script `interface_cfg` or "
+            "`target_cfg` pulls in with `source [find ...]`, missing from this OpenOCD's script tree. This is "
+            "OpenOCD's script, not the Agentic HIL configuration file. The server stopped before the target was "
+            "reached."
+        ),
+        remediation=(
+            "Read the server output in the log at `log_path` (`server_stderr_tail`): OpenOCD names the file it could "
+            "not find.",
+            "Check that the OpenOCD this entry runs has a complete script tree. The file has to resolve wherever "
+            "`interface_cfg` and `target_cfg` resolve, and `agentic-hil doctor` says of each whether it is a search "
+            "name or a path, and for a path whether the file is there.",
+            "Install the missing scripts or a complete OpenOCD, or point `OPENOCD_SCRIPTS` at the tree that has them, "
+            "then start the session again with debug_start_session.",
+        ),
+        do_not=(
+            "Do not copy OpenOCD scripts into the repository to supply the missing file. A script inside the "
+            "workspace is repository-controlled Tcl running in the debugger.",
+            "Do not run `openocd` directly to get past it.",
+        ),
+    ),
+    "not_supported:openocd": ErrorRemedy(
+        meaning=(
+            "debugger_probes_list has no enumeration for this entry's adapter. OpenOCD has no command that lists "
+            "connected probes, and this host lists a probe from its USB serial inventory only for adapters whose USB "
+            "identity it can read there; `interface_cfg` names another one. Nothing was contacted."
+        ),
+        remediation=(
+            "Read the probe's serial off its label, or off the adapter vendor's own listing tool, and record it as "
+            "`debuggers.<name>.probe_id` with project_config_set behind `allow_config_description_write`, with the "
+            "operator's word.",
+            "The calls that act on the probe, probe_target, flash_firmware, reset_target and the debug session, select "
+            "it by that `probe_id` and are unaffected by this refusal.",
+        ),
+        do_not=(
+            "Do not guess a `probe_id` from a vendor id or a port name. A selector that matches the wrong probe is the "
+            "wrong-board risk the id exists to rule out.",
+        ),
+    ),
+    "audit_broken:openocd": ErrorRemedy(
+        meaning=(
+            "The debug session's own evidence could not be written: the audit record of a GDB command, or the session "
+            "log at `log_path`, failed to persist (`backend_error_type` `audit_write_failed`). The service latches on "
+            "the first such failure. From then on it refuses every new debug session and every GDB command that is "
+            "not containment, debug_halt still runs, and the quarantine stands. A start refusal with this type is that "
+            "latch, set by an earlier failure."
+        ),
+        remediation=(
+            "Hand it to the operator. The audit destination is fixed first: free disk space, and permissions on the "
+            "reports and logs directories under `state_root`.",
+            "The operator then restarts the MCP server, which is what clears the latch, checks the board against the "
+            "last committed report (`get_last_report`), and ends the incident with `agentic-hil recover`.",
+        ),
+        do_not=(
+            "Do not retry the session or its commands to get the evidence written. Every call after the latch is "
+            "refused, and the one that failed left no record of itself.",
+            "Do not delete or edit reports or logs to make room. They are the evidence the operator checks the board "
+            "against.",
+            "Do not expect hardware_recover to settle it. A broken audit is the operator's own route.",
+        ),
+    ),
+    "adapter_access_denied": ErrorRemedy(
+        meaning=(
+            "OpenOCD reached the probe on USB and was refused opening it: libusb answered `LIBUSB_ERROR_ACCESS`. The "
+            "probe is attached, and this user may not open its USB device. The debug session start reports it under "
+            "this name; probe_target, flash_firmware and reset_target report it as `adapter_not_found` with this "
+            "`backend_error_type`. It is read only off Windows: there the same libusb error can also mean that another "
+            "program holds the device. "
+            "The target was not reached."
+        ),
+        remediation=(
+            "Have the operator give this user access to the probe's USB device: install the udev rule for the probe "
+            "(OpenOCD ships one as `60-openocd.rules`) and add this user to the group the rule gives the device to, "
+            "plugdev on Debian and Ubuntu, then log in again so the new group applies.",
+            "`ls -l /dev/bus/usb/<bus>/<device>`, with the bus and device numbers lsusb prints for the probe, shows the "
+            "owner, group and mode the device node has.",
+            "Start the session again with debug_start_session once the user is in that group.",
+        ),
+        do_not=(
+            "Do not run the server or OpenOCD as root, or through sudo, to get past it. The debugger would then run "
+            "with every right on the host, and the next start as this user fails the same way.",
+        ),
+    ),
+    "breakpoint_reconciliation_failed": ErrorRemedy(
+        meaning=(
+            "debug_clear_breakpoints could not prove that the backend holds no breakpoints: GDB's breakpoint list "
+            "could not be read, or it still listed breakpoints after the deletes (`remaining_backend_breakpoints`). The "
+            "cleanup is unconfirmed: `cleanup_required` is true and `side_effect_status` is `unknown`."
+        ),
+        remediation=(
+            "Read `remaining_backend_breakpoints` and the log at `log_path`: the numbers GDB still lists, or why its "
+            "list could not be read.",
+            "Call debug_clear_breakpoints again. A retry reads GDB's own list first and deletes only what GDB reports, "
+            "so it is safe to repeat.",
+            "A result with `backend_reconciled` true settles the unconfirmed cleanup, and the session goes on from "
+            "there.",
+        ),
+        do_not=(
+            "Do not call debug_continue while the clear is unconfirmed. A breakpoint GDB still holds can stop the "
+            "target where the test does not expect it.",
+        ),
+    ),
+    "debug_session_setup_failed": ErrorRemedy(
+        meaning=(
+            "debug_start_session spawned the debug server and could not start the threads that read its output, so "
+            "the start was abandoned before GDB ran. `backend_error` holds the host's reason, usually a host out of "
+            "threads or memory. The server was then stopped: `cleanup_confirmed` says it was, and `cleanup_required` "
+            "with `cleanup_error` says it could not be."
+        ),
+        remediation=(
+            "Read `backend_error`, and `cleanup_required` and `cleanup_error` for what is left: a cleanup that failed "
+            "leaves a debug server the session still owns.",
+            "When `cleanup_confirmed` and `retry_safe` are both true, the server is gone and nothing reached the "
+            "target: call debug_start_session again once the host has the resources back.",
+            "When `cleanup_required` is true, the probe is held under an incident, and the quarantine guidance on the "
+            "result names what settles it.",
+        ),
+        do_not=(
+            "Do not kill the leftover debug server by hand. The session still owns it, and the recovery that reaps it "
+            "records that it did.",
+        ),
+    ),
+    "gdb_start_failed": ErrorRemedy(
+        meaning=(
+            "debug_start_session started the debug server, and the GDB `debug.gdb_executable` names could not be "
+            "started for GDB/MI. `backend_error` holds the reason. The debug server was then stopped: "
+            "`cleanup_confirmed` says it was, and `cleanup_required` with `cleanup_error` says it could not be."
+        ),
+        remediation=(
+            "Read `backend_error`, and the configured `debug.gdb_executable`, which project_config_describe reports. A "
+            "GDB built for another machine, or against a Python or a shared library this host lacks, exits at once.",
+            "Point `debug.gdb_executable` at a GDB that runs on this host and knows this target's architecture "
+            "(`arm-none-eabi-gdb` or `gdb-multiarch` for an Arm Cortex-M part) with project_config_set, with the "
+            "operator's word, and "
+            "restart the MCP server, which reads `debug` only at startup.",
+            "Read `cleanup_required` and `cleanup_error` as well: a server the cleanup could not stop still holds the "
+            "probe under an incident, and the quarantine guidance on the result names what settles it.",
+            "When `cleanup_confirmed` and `retry_safe` are both true, call debug_start_session again once GDB runs.",
+        ),
+        do_not=(
+            "Do not drive the board with a GDB started by hand to get past it. A session outside the service has no "
+            "evidence, no breakpoint ledger and no containment.",
+        ),
+    ),
+    "gdb_async_unsupported": ErrorRemedy(
+        meaning=(
+            "The GDB this bench names refused `-gdb-set mi-async on`. A debug session needs asynchronous GDB/MI to "
+            "interrupt a running target when a wait times out, so this GDB cannot run one. The refusal comes before "
+            "the target is connected: `target_contacted` is false and the board did not change."
+        ),
+        remediation=(
+            "Read `backend_error` for GDB's own words.",
+            "Point `debug.gdb_executable` at a GDB release that accepts asynchronous MI; GDB 7.8 and newer have the "
+            "setting. The change is project_config_set behind `allow_config_description_write`, with the operator's "
+            "word, and the MCP server restarts to use it, because it reads `debug` only at startup.",
+        ),
+        do_not=(
+            "Do not repeat debug_start_session with the same GDB. It refuses the setting the same way every time.",
+            "Do not run a session in synchronous MI by hand. A timeout in it cannot interrupt the target, and the "
+            "board keeps running with nobody watching it.",
+        ),
+    ),
+    "interface_config_not_found": ErrorRemedy(
+        meaning=(
+            "OpenOCD, started as a debug session's server, exited because it could not find the script "
+            "`debuggers.<name>.interface_cfg` names. The debug session start reports it under this name; probe_target, "
+            "flash_firmware and reset_target report the same failure as `debugger_config_not_found`. The server stopped "
+            "before the target was reached."
+        ),
+        remediation=(
+            "Read the server output in the log at `log_path`: OpenOCD names what it looked for.",
+            "Check `debuggers.<name>.interface_cfg` with project_config_describe or `agentic-hil doctor`. A search "
+            "name such as `interface/stlink.cfg` has to resolve in this OpenOCD's script tree, and a path has to be "
+            "absolute, exist and lie outside the workspace.",
+            "Correct it with project_config_set behind `allow_config_description_write`, with the operator's word, or "
+            "install the OpenOCD scripts the search name expects, then start the session again with "
+            "debug_start_session.",
+        ),
+        do_not=(
+            "Do not copy OpenOCD scripts into the repository and point the configuration at them. A script inside the "
+            "workspace is repository-controlled Tcl running in the debugger.",
+            "Do not run `openocd` directly to get past it.",
+        ),
+    ),
+    "target_config_not_found": ErrorRemedy(
+        meaning=(
+            "OpenOCD, started as a debug session's server, exited because it could not find the script "
+            "`debuggers.<name>.target_cfg` names. The debug session start reports it under this name; probe_target, "
+            "flash_firmware and reset_target report the same failure as `debugger_config_not_found`. The server stopped "
+            "before the target was reached."
+        ),
+        remediation=(
+            "Read the server output in the log at `log_path`: OpenOCD names what it looked for.",
+            "Check `debuggers.<name>.target_cfg` with project_config_describe or `agentic-hil doctor`. It has to match "
+            "the MCU family; a search name such as `target/stm32f4x.cfg` has to resolve in this OpenOCD's script tree, "
+            "and a path has to be absolute, exist and lie outside the workspace.",
+            "Correct it with project_config_set behind `allow_config_description_write`, with the operator's word, or "
+            "install the OpenOCD scripts the search name expects, then start the session again with "
+            "debug_start_session.",
+        ),
+        do_not=(
+            "Do not copy OpenOCD scripts into the repository and point the configuration at them. A script inside the "
+            "workspace is repository-controlled Tcl running in the debugger.",
+            "Do not run `openocd` directly to get past it.",
+        ),
+    ),
+    "session_already_active": ErrorRemedy(
+        meaning=(
+            "debug_start_session was refused because this server still has a debug session that has not ended: a "
+            "running one, or one left in `cleanup_required` by a stop or a start that could not finish. `session` in "
+            "the refusal describes it. Nothing was started."
+        ),
+        remediation=(
+            "Read `session` in the refusal: its status says whether it is running or waiting on a cleanup.",
+            "End a running one with debug_stop_session, then call debug_start_session for the new one.",
+            "One in `cleanup_required` is held under the incident its last result named. Read that result's own entry "
+            "first, because a stop repeated over an unconfirmed halt settles nothing.",
+        ),
+        do_not=(
+            "Do not kill the debug server or GDB by hand to free the probe. The session record still names them, and "
+            "the next start is refused the same way.",
+        ),
+    ),
+    "stop_reason_not_available": ErrorRemedy(
+        meaning=(
+            "debug_get_stop_reason had no stop to report: this session has recorded no stop yet. The session is "
+            "active, and nothing changed on the target."
+        ),
+        remediation=(
+            "Run the target with debug_continue to a breakpoint, or stop it where it is with debug_halt; then call "
+            "debug_get_stop_reason.",
+        ),
+        do_not=(
+            "Do not read this refusal as a target that is running, or as one that stopped cleanly. It says only that "
+            "no stop has been recorded.",
+        ),
+    ),
+    "target_exception": ErrorRemedy(
+        meaning=(
+            "The target stopped in an exception or a fault: a debug session found the core halted in its handler "
+            "(`stop_reason` `exception` or `fault`) on a continue, a halt or right at the attach. A session reports "
+            "it with `ok` true, `target_ok` false and `target_error_type` `target_exception`, and a test reactor step "
+            "publishes the same type as its own `error_type`. The core is halted, and the stop record says why."
+        ),
+        remediation=(
+            "Read the stop record first: `frame` (function, address, file, line), `exception_type`, `fault_type` and "
+            "`signal` say where the core stopped and what it took.",
+            "Collect the evidence the diagnosis needs while the core is still halted: debug_symbol_value for the "
+            "variables that matter, debug_dump_symbol_ihex for a buffer or a fault log in memory, and the firmware's "
+            "own log.",
+            "Once the evidence is in hand, end the session with debug_stop_session and bring the target back from reset "
+            "with reset_target, or start a fresh session with debug_start_session, before the test runs again.",
+        ),
+        do_not=(
+            "Do not call debug_continue to get past it. The core goes back into the handler or takes the same fault "
+            "again, and the stop record that says where it happened is replaced.",
+        ),
+    ),
+    "unexpected_breakpoint": ErrorRemedy(
+        meaning=(
+            "The target stopped at a breakpoint the session did not expect: one GDB holds that this session did not "
+            "set or set and forgot, or a `BKPT` instruction or an assert in the firmware itself. A session reports it "
+            "with `ok` true, `target_ok` false and `target_error_type` `unexpected_breakpoint`, and a test reactor "
+            "step publishes the same type as its own `error_type`. The core is halted there."
+        ),
+        remediation=(
+            "Read `frame` and `backend_breakpoint_id` in the stop record, and compare them with what "
+            "debug_list_breakpoints reports.",
+            "For a stale breakpoint, call debug_clear_breakpoints and set only the expected ones again with "
+            "debug_set_breakpoint.",
+            "For a `BKPT` or an assert in the firmware, collect the log and the memory evidence, then reset the target "
+            "or restart the debug session.",
+        ),
+        do_not=(
+            "Do not call debug_continue blindly. The target is halted where nobody planned it to stop, and resuming "
+            "runs on from a state the test did not set up.",
+        ),
+    ),
+    "debugger_error": ErrorRemedy(
+        meaning=(
+            "The debugger failed, and its output matched none of the failures this server classifies. The backend's "
+            "own name for it travels in `backend_error_type`: `unknown_debugger_error` for a probe, flash or reset run, "
+            "`gdb_error` for a GDB/MI command in a debug session. A debug session can also stop with `stop_reason` "
+            "`debugger_error`, and a test reactor step publishes the same type as its own `error_type`."
+        ),
+        remediation=(
+            "Read what the debugger printed: the log at `log_path`, and `programmer_output` where the result carries "
+            "it, end with the debugger's own words for what went wrong.",
+            "Call classify_last_error: it reads the last failure report back and names its classification and likely "
+            "causes.",
+            "Read `side_effect_status` and `target_state` before the next call that drives the board. A failure after "
+            "the target was contacted leaves it where the debugger stopped.",
+        ),
+        do_not=(
+            "Do not repeat the call unchanged before the output is read. An unclassified failure names no cause, and a "
+            "repeat over a contacted target can add a second unknown effect to the first.",
+        ),
+    ),
+    "unknown_debugger_error": ErrorRemedy(
+        meaning=(
+            "classify_last_error read back the last failure record and found no error type in it: the record named "
+            "neither `error_type` nor `target_error_type` and did not fail its audit, and it still failed one of the "
+            "checks every result is held to: `ok` not true, `target_ok` or `cleanup_ok` false, `cleanup_required` or "
+            "`quarantined` true, a `lease_state` that is set and is neither `active` nor `released` (a missing or "
+            "null one passes this check), `side_effect_status` `unknown` or `partial`, or `hardware_state` "
+            "`unknown`. This name stands in for the missing type. It is not something a debugger reported, unlike "
+            "the `backend_error_type` of the same name a `debugger_error` carries. `source_tool` names the call that "
+            "wrote the record, and `summary` is that call's own sentence."
+        ),
+        remediation=(
+            "Read `summary`, `source_tool` and `log_path` on this result: with no error type, they are what says "
+            "what happened. While no other call has finished since, `get_last_report` returns the whole record, and "
+            "the fields named above say which check it failed.",
+            "If the record has `quarantined` or `cleanup_required` true, or a `lease_state` that is set and is neither "
+            "`active` nor `released` (a missing or null one is no reason), call `hardware_lease_status` and settle "
+            "what it holds before the next hardware call.",
+            "If `side_effect_status` is `unknown` or `partial`, or `hardware_state` is `unknown`, treat the board's "
+            "state as unknown until a later call confirms it, such as a `probe_target` that succeeds.",
+        ),
+        do_not=(
+            "Do not report this as a debugger fault. The name stands for a missing error type, and the failing call's "
+            "own words are in `summary` and `log_path`.",
+            "Do not read this classification's own `ok: true` as the call having passed. It says the record was read "
+            "back; the record itself is a failure.",
+        ),
+    ),
+    "reset_failed": ErrorRemedy(
+        meaning=(
+            "A reset the debugger was asked for did not complete: the backend reported a reset failure, or the reset "
+            "never printed its success marker. It is reset_target's own failure, or the reset after a flash: a "
+            "flash_firmware result with `side_effect_status` `partial` wrote the image, and only the reset after it "
+            "failed. A test reactor step publishes the same type as its own `error_type`."
+        ),
+        remediation=(
+            "Read `side_effect_status`, `target_state` and `quarantined` first: they say whether the reset was "
+            "attempted and whether the board is now held under an incident.",
+            "Call probe_target to read the target back. Where the bench's `recovery.auto_recover` is `reset_halt` and "
+            "the probe grants `allow_reset`, the automatic recovery runs first, drives the target into a defined "
+            "halted state and reads it back, which ends the incident; elsewhere the incident is the operator's.",
+            "Check what `likely_causes` names before the next reset: the reset line between the in-circuit debugger or "
+            "programmer and the target, the target's power, and for OpenOCD the `reset_config` in `target_cfg`.",
+        ),
+        do_not=(
+            "Do not repeat reset_target or flash_firmware to get past it before the state fields and probe_target "
+            "have said where the target is. A second reset over an unconfirmed one adds a second unknown, and a "
+            "reflash over a partial one writes the board blind.",
+        ),
+    ),
+    "probe_discovery_failed": ErrorRemedy(
+        meaning=(
+            "Probe discovery could not run, so it says nothing about which probes are attached: the debugger's listing "
+            "command failed or answered something that is not a probe listing, or the USB serial inventory a listing "
+            "reads could not be read. Nothing was contacted."
+        ),
+        remediation=(
+            "Read `summary` first, and `backend_error` or `programmer_output` where present: `discovered_by` says "
+            "which listing ran, and these say what it answered.",
+            "Fix what they name, the debugger install, the serial backend or a probe that USB does not see, and call "
+            "debugger_probes_list again.",
+        ),
+        do_not=(
+            "Do not set, change or remove `probe_id` on the strength of this result. The listing did not run, so an "
+            "empty or partial answer is no evidence about the bench.",
+        ),
+    ),
+    "output_write_failed": ErrorRemedy(
+        meaning=(
+            "debug_dump_symbol_ihex could not leave the Intel HEX file at `output_path`: its directory could not be "
+            "prepared, the file could not be written, or the programmer confirmed the read and left no parseable Intel "
+            "HEX behind. The failure is the file's. A test reactor step publishes the same type as its own "
+            "`error_type`."
+        ),
+        remediation=(
+            "Read `backend_error` where present: the file system's own reason, such as a missing or read-only "
+            "directory, a path outside the workspace, or a full disk.",
+            "Call debug_dump_symbol_ihex again with an `output_path` inside the workspace that this user can write.",
+            "Read `target_contacted`: true means the bytes left the target and only the file is missing, and a debug "
+            "session's dump read the target before writing too.",
+        ),
+        do_not=(
+            "Do not reset or reflash the target over this. The read leaves the target as it found it, and the failure "
+            "is the output file's.",
+        ),
+    ),
+    "symbol_not_found": ErrorRemedy(
+        meaning=(
+            "The symbol passed `debug.allowed_symbols` and is absent from the symbol table of the ELF that describes "
+            "the target: misspelled, removed by the compiler or the linker, or never part of this build. A test "
+            "reactor step publishes the same type as its own `error_type`."
+        ),
+        remediation=(
+            "Check the name against the firmware source and the linker map: it is matched as the linked identifier.",
+            "If it is defined and missing from the ELF, the build dropped it: an unused object is removed by the "
+            "linker's garbage collection and a static one can be folded away. Mark it `volatile` or "
+            "`__attribute__((used))`, rebuild, and flash the new ELF with flash_firmware.",
+        ),
+        do_not=(
+            "Do not add names to `debug.allowed_symbols` to get past this. The allowlist was passed, and widening it "
+            "changes what may be read, not what is in the image.",
+        ),
+    ),
+    "symbol_resolution_failed": ErrorRemedy(
+        meaning=(
+            "GDB found no usable address or size for the symbol: it answered something this server could not parse, "
+            "or the ELF's symbol table has the name without a size, more than once, or could not be read at all. A "
+            "test reactor step publishes the same type as its own `error_type`."
+        ),
+        remediation=(
+            "Read `symbol_table_lookup` where present, and `summary`. `no_size` is a symbol the ELF lists without a "
+            "size, which an assembly label without a `.size` directive is; `ambiguous` is a name defined more than "
+            "once; `unreadable` is an ELF the server could not parse.",
+            "Give the object a size and a single definition the toolchain records (a C object, or `.size` on an "
+            "assembly label), rebuild, flash it with flash_firmware, and confirm it with debug_symbol_info before "
+            "reading it.",
+        ),
+        do_not=(
+            "Do not repeat the same read unchanged. The ELF and the GDB that answered are the same, so the answer is "
+            "too.",
+        ),
+    ),
+    "symbol_ambiguous": ErrorRemedy(
+        meaning=(
+            "The name matches more than one symbol in the ELF, typically a `static` object defined in several "
+            "translation units, and GDB will not pick one. A test reactor step publishes the same type as its own "
+            "`error_type`."
+        ),
+        remediation=(
+            "Give the object a name that is unique in the image, then rebuild and flash it with flash_firmware.",
+        ),
+        do_not=(
+            "Do not read an address by hand in place of the symbol. The value tools read only a name that resolves to "
+            "one object, so the guess would bypass the check that makes the read mean something.",
+        ),
+    ),
+    "symbol_source_changed": ErrorRemedy(
+        meaning=(
+            "The ELF flashed through this service has changed on disk since it was flashed (its digest no longer "
+            "matches, because it was rebuilt or replaced), or it can no longer be read, so its symbol table is not "
+            "proven to describe the image on the target. Nothing was contacted. A test reactor step publishes the "
+            "same type as its own `error_type`."
+        ),
+        remediation=(
+            "Flash the current build with flash_firmware, so the image on the target and the ELF on disk are the same "
+            "file again.",
+            "Then call debug_symbol_info, debug_symbol_value or debug_dump_symbol_ihex again.",
+        ),
+        do_not=(
+            "Do not read symbols out of the rebuilt ELF by hand with GDB. Its addresses describe a build that is not "
+            "on the target.",
+        ),
+    ),
+    "symbol_source_not_available": ErrorRemedy(
+        meaning=(
+            "No ELF has been flashed through this service, so no symbol table is known to describe the image on the "
+            "target. The pyOCD and STM32CubeProgrammer backends answer symbol reads out of the ELF the last "
+            "successful flash_firmware wrote, and there is none: no flash has succeeded in this session, the image was "
+            "a .hex or a .bin, or the firmware was flashed outside Agentic HIL. Nothing was contacted. A test reactor "
+            "step publishes the same type as its own `error_type`."
+        ),
+        remediation=(
+            "Flash the ELF itself with flash_firmware: the `.elf` the build produced carries the symbols, and the "
+            "flash records it.",
+            "Then call debug_symbol_info, debug_symbol_value or debug_dump_symbol_ihex again.",
+        ),
+        do_not=(
+            "Do not flash a .hex or a .bin to get symbols. Neither carries a symbol table, and the reads stay refused.",
+        ),
+    ),
+    "cleanup_failed": ErrorRemedy(
+        meaning=(
+            "A cleanup could not finish. In debug_stop_session it is the session's processes: GDB or the debug server "
+            "could not be stopped (`cleanup_error`), the session stays `cleanup_required` with `hardware_state` "
+            "unknown, and `halt_not_confirmed` and `detach_resume_guard_confirmed` say whether the target was proven "
+            "halted and kept from resuming before that. In a test reactor run it is the run's teardown: "
+            "`cleanup_errors` lists each device and action that failed, and `step_error_type` keeps the failure that "
+            "came before it."
+        ),
+        remediation=(
+            "Read `cleanup_error`, or each entry of `cleanup_errors`, with the log at `log_path`: they name what could "
+            "not be stopped or closed.",
+            "Where it is the debug session, call probe_target. The automatic recovery the bench's "
+            "`recovery.auto_recover` allows runs first: it reaps leftover debugger processes and reads the target "
+            "back, and a confirmed read ends the incident and the session with it.",
+            "When `halt_not_confirmed` is false and `detach_resume_guard_confirmed` is true, debug_stop_session called "
+            "once more repeats only the process cleanup and can finish it.",
+            "An entry for a COM port or a CAN bus is that session's own teardown, which a probe read cannot speak for: "
+            "the quarantine guidance on the result names what settles it. Where `recovery.auto_recover` is `off`, the "
+            "incident is the operator's to end with `agentic-hil recover`.",
+        ),
+        do_not=(
+            "Do not call debug_stop_session again while `halt_not_confirmed` is true or `detach_resume_guard_confirmed` "
+            "is false. Over an unconfirmed target state a repeated stop forces both proofs false and settles nothing.",
+            "Do not start a new debug session over it. debug_start_session is refused as `session_already_active` "
+            "until this one ends.",
+        ),
+    ),
+    "halt_not_confirmed": ErrorRemedy(
+        meaning=(
+            "debug_stop_session cleaned up the session's processes and could not confirm that the target was halted "
+            "before the session ended (`halt_not_confirmed` true). The session stays `cleanup_required` with "
+            "`hardware_state` unknown: the core may be running whatever it ran when the connection went away."
+        ),
+        remediation=(
+            "Call probe_target. The automatic recovery the bench's `recovery.auto_recover` allows runs first: it reaps "
+            "any leftover debugger process and reads the target back through the probe, and a confirmed read ends the "
+            "incident and the session with it; debug_get_session_status then reports it stopped.",
+            "Where `recovery.auto_recover` is `off`, or the probe's `allow_probe` is closed, the incident is the "
+            "operator's to end with `agentic-hil recover` after checking the board.",
+        ),
+        do_not=(
+            "Do not call debug_stop_session again for this. A stop after an unconfirmed halt brings no new evidence: "
+            "both proofs are forced false and the incident stays where it is.",
+            "Do not start a new debug session to get a fresh halt. debug_start_session is refused as "
+            "`session_already_active` until this one ends.",
+        ),
+    ),
+    "detach_resume_not_confirmed": ErrorRemedy(
+        meaning=(
+            "debug_stop_session confirmed the halt and cleaned up the session's processes, and could not confirm the "
+            "guard that keeps the backend from resuming the target when GDB detaches "
+            "(`detach_resume_guard_confirmed` false). The session stays `cleanup_required` with `hardware_state` "
+            "unknown: the target may have been resumed as the connection closed."
+        ),
+        remediation=(
+            "Call probe_target. The automatic recovery the bench's `recovery.auto_recover` allows runs first: it reaps "
+            "any leftover debugger process and reads the target back through the probe, and a confirmed read ends the "
+            "incident and the session with it; debug_get_session_status then reports it stopped.",
+            "Where `recovery.auto_recover` is `off`, or the probe's `allow_probe` is closed, the incident is the "
+            "operator's to end with `agentic-hil recover` after checking the board.",
+        ),
+        do_not=(
+            "Do not call debug_stop_session again for this. A stop after an unconfirmed detach brings no new evidence: "
+            "both proofs are forced false and the incident stays where it is.",
+            "Do not start a new debug session to get a fresh halt. debug_start_session is refused as "
+            "`session_already_active` until this one ends.",
         ),
     ),
     # -- The debugger that is not a probe, in the two states it goes missing in --
@@ -3160,6 +5705,669 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "wire.",
         ),
     ),
+    "bridge_process_reap_failed": ErrorRemedy(
+        meaning=(
+            "Found under `cleanup_error` of a `can_session_start` refusal, never on its own. A CAN process bridge "
+            "failed its open, this server ended the bridge's process tree, and it could not confirm that the process "
+            "was gone: ending it raised, or the threads reading its output were still alive afterwards. A bridge that "
+            "may still be running may still hold the adapter's channel, so the session stays registered with "
+            "`cleanup_required: true` and keeps the bus."
+        ),
+        remediation=(
+            "Read `backend_error` inside `cleanup_error`: it is the error ending the process raised, or the note that "
+            "its output threads outlived it. A `close_response` beside it means the bridge did not confirm a safe "
+            "state either.",
+            "Look on this machine for the process the refusal's `command` started. While it runs it may still have "
+            "the channel open, and the bus is not free until it has gone.",
+            "The next `can_session_start` on this bus tears the registered session down first and retries the "
+            "cleanup, and answers `can_adapter_close_failed` if that teardown fails too. When this refusal reports "
+            "`quarantined: true`, that teardown fails on the lease whatever the bridge does, and the way out is the "
+            "sign-off described under `resource_quarantined`.",
+        ),
+        do_not=(
+            "Do not end processes by name to clear this. `command` names the bridge this session started, and a "
+            "loose match may be another session's bridge or another program.",
+            "Do not open the channel from another program while this session is registered: the bridge may still be "
+            "driving it.",
+        ),
+    ),
+    "bridge_safe_state_unconfirmed": ErrorRemedy(
+        meaning=(
+            "Found under `cleanup_error` of a `can_session_start` refusal, and in words as the `backend_error` of "
+            "`can_adapter_close_failed`. A CAN process bridge was asked to put its controller in a safe state and "
+            "close, never confirmed that it had, and this server then ended its process anyway. Only the bridge can "
+            "confirm a safe state, so once its process has ended there is nothing left to confirm it with, and the "
+            "bus stays held."
+        ),
+        remediation=(
+            "Read `close_response`, the bridge's answer to the close: `can_adapter_timeout` means it did not answer "
+            "in time, `can_adapter_process_exited` that it was already gone, `can_adapter_close_interrupted` that "
+            "sending the close raised, and an answer without `safe_state_confirmed: true` that it replied without "
+            "confirming.",
+            "`safe_state_confirmed` stays false from here on. Every later `can_session_stop` and `can_session_start` "
+            "on this bus finds the process ended and answers `can_adapter_close_failed`, for as long as this server "
+            "runs.",
+            "Check the bench by hand (the controller off the bus, the target in a known state), then restart the MCP "
+            "server. The new server may find the bus `resource_quarantined`, and that entry names the sign-off.",
+        ),
+        do_not=(
+            "Do not make a bridge answer `safe_state_confirmed: true` without having put its controller in a safe "
+            "state. That field is the only evidence this server has about the bus.",
+            "Do not call `can_session_stop` in a loop waiting for this to clear. Nothing over MCP can confirm a safe "
+            "state for a process that has ended.",
+        ),
+    ),
+    "can_adapter_close_failed": ErrorRemedy(
+        meaning=(
+            "A CAN session could not be closed. `can_session_stop` was closing it, or `can_session_start` was "
+            "replacing a session still registered on the bus or closing the one a failed receive-queue clear left. "
+            "Either the adapter's close raised and the session stays registered on this server for a cleanup retry, "
+            "or the adapter closed and the lease on the bus would not release."
+        ),
+        remediation=(
+            "Read `backend_error`. Present, it is what the adapter's close raised; absent, the adapter closed and the "
+            "lease would not release, which `cleanup_reasons` and `quarantine_id` explain.",
+            "On a direct adapter (`socketcan`, `peak`) whose close raised, `can_session_stop` called again runs the "
+            "driver's shutdown again, and a shutdown that completes ends the session and frees the bus.",
+            "A process bridge that ended without confirming a safe state cannot confirm it afterwards: every "
+            "`can_session_stop` and `can_session_start` on this bus answers this refusal again, with the same "
+            "`backend_error`, for as long as this server runs.",
+            "In that case, and whenever the lease is quarantined, check the bench by hand and restart the MCP "
+            "server. The new server may find the bus `resource_quarantined`, and that entry names the sign-off.",
+            "`can_buses_list` shows the session still registered on the bus, with its `adapter_status`.",
+        ),
+        do_not=(
+            "Do not call `can_session_stop` or `can_session_start` over and over on a process bus. Once the bridge "
+            "has ended unconfirmed, every call answers the same, and nothing over MCP changes that.",
+            "Do not open the adapter or its channel from another program while the session is registered: an adapter "
+            "whose close failed may still have the channel open.",
+        ),
+    ),
+    "can_adapter_close_interrupted": ErrorRemedy(
+        meaning=(
+            "Found as the `close_response` under a `cleanup_error`, never on its own. Sending the close request to a "
+            "CAN process bridge raised or was interrupted before the bridge answered, so whether the bridge put its "
+            "controller in a safe state is unknown, and this server went on to end its process."
+        ),
+        remediation=(
+            "Read the `cleanup_error` this sits in. Its type, `bridge_safe_state_unconfirmed` or "
+            "`bridge_process_reap_failed`, says what became of the process, and that entry says what to do next.",
+            "`stderr_tail`, when present, is the bridge's last output before the interrupt and may show what it was "
+            "doing with the controller.",
+        ),
+        do_not=(
+            "Do not take an interrupted close for a close that never started. The request may have reached the "
+            "bridge, and the bridge may have acted on part of it.",
+        ),
+    ),
+    "can_adapter_invalid_request": ErrorRemedy(
+        meaning=(
+            "A request to the CAN process bridge (`open`, `send`, `read` or `close`) could not be serialized or "
+            "written to the bridge's stdin. A value that cannot be written as JSON stops it before the write; a write "
+            "or flush that fails on the pipe can stop it partway, so the bridge may have received part of the "
+            "request."
+        ),
+        remediation=(
+            "Read `stderr_tail`: a bridge that crashed or closed its input usually says why in its last lines, and "
+            "that is the cause to fix.",
+            "The refusal carries `side_effect_status: unknown` because the write may have stopped partway, and on a "
+            "send part of the frame request may have reached the bridge. On a send or read the lease is then "
+            "quarantined, so the next call on this bus answers `resource_quarantined`.",
+            "`can_session_stop` then answers `can_adapter_close_failed`, because a quarantined lease does not "
+            "release; check the bench and follow the sign-off under `resource_quarantined`.",
+        ),
+        do_not=(
+            "Do not resend on the assumption that the bridge received none of it. Part of the request may have "
+            "reached it.",
+        ),
+    ),
+    "can_adapter_not_found": ErrorRemedy(
+        meaning=(
+            "The CAN bus is configured `adapter: process`, and the bridge it names is not a file at the resolved "
+            "path: nothing is there, or the path is a directory or a dangling link. No process was started."
+        ),
+        remediation=(
+            "Check `can_buses.<id>.executable`. A relative path is resolved against the workspace root "
+            "(`workspace_root`), not against the directory the server was started from.",
+            "Fix the path, or put the bridge where it points, then call `can_session_start` again.",
+        ),
+        do_not=(
+            "Do not point `executable` at a program without checking that it is the bridge for this adapter: "
+            "whatever it names is started and spoken to as one.",
+        ),
+    ),
+    "can_adapter_open_failed": ErrorRemedy(
+        meaning=(
+            "The CAN adapter would not open. For a direct adapter the python-can bus constructor raised; for a "
+            "process bridge, the bridge answered its `open` with this refusal."
+        ),
+        remediation=(
+            "Read `backend_error`, the driver's or the bridge's own reason: a missing device, a busy channel, a bus "
+            "parameter the adapter rejected.",
+            "Match it against `likely_causes`. If another program holds the adapter (a vendor tool, another server, a "
+            "script), close that program first; most drivers hand out one handle per channel.",
+            "Once the cause is fixed, call `can_session_start` again. When the refusal also carries `cleanup_error`, "
+            "the bridge would not close either and stays registered, and the entry for that type comes first.",
+        ),
+        do_not=(
+            "Do not open the channel from a python-can script to see whether it works while a start is pending. The "
+            "next start then fails on the handle that script holds.",
+        ),
+    ),
+    "can_adapter_process_exited": ErrorRemedy(
+        meaning=(
+            "The CAN process bridge was not running when this server came to write a request to it, so that request "
+            "was not written: the bridge exited or was killed, during its own `open` or after it, or this session "
+            "had already ended it. What it last did on the bus before it went is unknown."
+        ),
+        remediation=(
+            "Read `stderr_tail`: the bridge's last output usually says why it exited, an exception, a driver error or "
+            "a device that went away.",
+            "A bridge that has exited cannot confirm a safe state any more, so from here `can_session_stop` answers "
+            "`can_adapter_close_failed` every time it is called, for as long as this server runs.",
+            "Fix what made it exit, check the bench by hand, then restart the MCP server; the new server may answer "
+            "`resource_quarantined` for this bus first, and that entry names the sign-off.",
+        ),
+        do_not=(
+            "Do not start the bridge by hand to take the bus back. This server still holds the bus for the session "
+            "it lost, and a second bridge on the channel is outside every record.",
+        ),
+    ),
+    "can_adapter_process_start_failed": ErrorRemedy(
+        meaning=(
+            "The CAN process bridge configured for this bus is a file, and the operating system would not start it. "
+            "Nothing ran, so the bus was not touched."
+        ),
+        remediation=(
+            "Read `backend_error`: a permission error means the file may not be executed, an exec-format error that "
+            "the system does not know how to run it, and a missing file usually means its interpreter is missing.",
+            "A `.py` bridge is run with this server's own Python interpreter and needs no executable bit. Any other "
+            "file is run directly, and needs the executable bit and, for a script, an interpreter line.",
+            "It is started in its own directory, the one holding `can_buses.<id>.executable`; check that the "
+            "directory still exists and this account may enter it.",
+        ),
+        do_not=(
+            "Do not wrap the bridge in a shell command line to get it started. `executable` is one file path, and "
+            "nothing in it is handed to a shell.",
+        ),
+    ),
+    "can_adapter_timeout": ErrorRemedy(
+        meaning=(
+            "The CAN process bridge did not answer a request in the time it was given. The request had been written, "
+            "so whether the bridge acted on it is unknown, and on a send whether the frame reached the bus is unknown "
+            "too."
+        ),
+        remediation=(
+            "Read `side_effect_status`: `unknown` means the bridge had the request and did not say what it did, so on "
+            "a send the frame may be on the bus.",
+            "`stderr_tail` holds the bridge's last output, often where it is blocked: its driver, a full transmit "
+            "queue, a controller in bus-off.",
+            "On a send or read the lease is quarantined, so the next call on this bus answers `resource_quarantined`; "
+            "check the bus from the target's side and follow that entry.",
+            "If the bridge is only slow to open or to send, raise `can_buses.<id>.timeout_s`, the time those requests "
+            "are given; a read is given the shorter of its own wait and that time, plus a second, and a close one second.",
+        ),
+        do_not=(
+            "Do not send the frame again to find out whether the first one went out. A duplicate stimulus on a live "
+            "bus is the outcome the unknown status exists to prevent.",
+        ),
+    ),
+    "can_backend_not_available": ErrorRemedy(
+        meaning=(
+            "python-can could not be imported by the interpreter running this server, so a direct adapter "
+            "(`socketcan` or `peak`) cannot be opened. A `process` bridge is a separate program that imports what it "
+            "needs itself, so this server needs python-can only for a direct adapter."
+        ),
+        remediation=(
+            "Read `backend_error`: `ModuleNotFoundError` means python-can is not installed there, and any other "
+            "import error means it is installed and fails while loading, often on a vendor library.",
+            "Install `agentic-hil[can]` into the environment the MCP server runs from, with that environment's own "
+            "Python, then call `can_session_start` again; restart the server if the import still fails.",
+        ),
+        do_not=(
+            "Do not install python-can into a different Python than the one the MCP client starts. The install looks "
+            "done and the server keeps failing the same way.",
+        ),
+    ),
+    "can_broker_authentication_failed": ErrorRemedy(
+        meaning=(
+            "The broker for this shared CAN bus refused this client's authentication key. The broker writes its key "
+            "beside its descriptor in the lock directory and every participant reads it from there, so a refusal "
+            "means the key this client read is not the one the broker holds: the broker was replaced between the "
+            "two reads, or the file changed after the broker wrote it."
+        ),
+        remediation=(
+            "Read `backend_error`, the connection library's own reason. `retry_safe` is false, so the attach was not "
+            "retried.",
+            "Call `can_session_start` once more: it reads the descriptor and the key afresh, which settles a broker "
+            "that was replaced between the two reads.",
+            "If it repeats, stop every participant on the bus with `can_session_stop` so the broker exits; the next "
+            "start begins a broker with a new key.",
+        ),
+        do_not=(
+            "Do not copy, edit or replace the key file to make the two agree. The key is how the broker tells its "
+            "participants from any other local process.",
+        ),
+    ),
+    "can_broker_counter_mismatch": ErrorRemedy(
+        meaning=(
+            "The broker's connection counter had moved on since this client read the broker descriptor: another "
+            "participant attached in between. The client retries this a fixed number of times and then until its "
+            "start deadline, so reaching the caller means it was already retried until the deadline with attaches "
+            "landing all along."
+        ),
+        remediation=(
+            "Compare `broker_counter` with `client_counter`: a gap means attaches landed between this client's read "
+            "of the descriptor and its own attach.",
+            "`retry_safe` is true, and the attach was already retried until the deadline; call `can_session_start` "
+            "again once the other participants' starts have settled.",
+        ),
+        do_not=(
+            "Do not start participants on this bus in a tight loop from several runs at once. Every attach moves the "
+            "counter the others are waiting on.",
+        ),
+    ),
+    "can_broker_invalid_message": ErrorRemedy(
+        meaning=(
+            "The broker for this shared CAN bus and this client could not read each other: the broker received a "
+            "message it cannot parse, or it answered the attach with something that is not an answer. Both ends are "
+            "code from this package, so this is a fault in the broker connection rather than on the bus."
+        ),
+        remediation=(
+            "Read `summary`: it says which end could not read the other.",
+            "The broker keeps running while any participant is attached, so it is replaced only after every "
+            "participant has detached and it exits; stop the others with `can_session_stop`, then call "
+            "`can_session_start` again.",
+        ),
+        do_not=(
+            "Do not end the broker process by hand while participants are attached. Each of them loses its run with "
+            "no incident on record.",
+        ),
+    ),
+    "can_broker_not_bus_owner": ErrorRemedy(
+        meaning=(
+            "The broker named by the descriptor for this shared CAN bus does not hold the bus lock it claims to own, "
+            "so the client would not talk to it. Either the lock is free and the descriptor is left over from a "
+            "broker that ended without cleaning up, or the lock is held with no holder record, or it is held by a "
+            "different owner than the descriptor names."
+        ),
+        remediation=(
+            "Read `bus_lock_held`: false means the bus lock is free and the descriptor is stale, which a start that "
+            "may launch a broker clears away by itself; true means a process holds the lock.",
+            "`bus_lock_holder`, when present, names the owner, process and host holding the lock, and "
+            "`claimed_broker_pid` the process the descriptor names. The bus lock is the same one a single-owner "
+            "`can_session_start` takes, so the holder may be a session opened without a participant, or another "
+            "server.",
+            "Stop that holder's session with `can_session_stop` where it runs, then call `can_session_start` again. "
+            "With the lock held and no holder named, `retry_safe` was true and the attach was already retried until "
+            "its deadline, so the holder never identified itself.",
+        ),
+        do_not=(
+            "Do not delete the descriptor, the lock or the holder record by hand. A held lock belongs to a live "
+            "process, and taking its files away lets a second owner onto the same bus.",
+        ),
+    ),
+    "can_broker_protocol_mismatch": ErrorRemedy(
+        meaning=(
+            "The broker running for this shared CAN bus and this client speak a different version of the broker "
+            "protocol, so they cannot be attached. Usually one server was upgraded while a broker started by an "
+            "older one still serves its participants."
+        ),
+        remediation=(
+            "Compare `broker_protocol_digest` with `client_protocol_digest` and the protocol versions beside them: "
+            "the client's are this server's, and the broker was started by a server on another release.",
+            "Let the old broker exit: stop the participants attached to it with `can_session_stop` in the servers "
+            "that started them, or restart those servers, then call `can_session_start` again so a broker of this "
+            "release starts.",
+        ),
+        do_not=(
+            "Do not downgrade this server to match the old broker. The next fresh broker would mismatch the other "
+            "way, and both servers would be on a release nobody chose.",
+        ),
+    ),
+    "can_broker_stopping": ErrorRemedy(
+        meaning=(
+            "The broker for this shared CAN bus was shutting down when the attach reached it, because its last "
+            "participant had just detached, and it accepts no new participant. The client retries until its start "
+            "deadline, expecting to find the old broker gone and a fresh broker started, so reaching the caller "
+            "means the old broker's shutdown outlasted that deadline."
+        ),
+        remediation=(
+            "`retry_safe` is true and the attach was retried until the start deadline: the old broker was still "
+            "shutting down for that whole time.",
+            "Call `can_session_start` again; once the old broker has exited, a fresh broker is started for the bus.",
+        ),
+        do_not=(
+            "Do not end the stopping broker by hand. It is closing the adapter, and cutting that short leaves the "
+            "bus in whatever state the close had reached.",
+        ),
+    ),
+    "can_broker_unavailable": ErrorRemedy(
+        meaning=(
+            "No broker for this shared CAN bus could be reached or started in time. The client retries every outcome "
+            "that is safe to retry until its start deadline, so this refusal has already been retried until that "
+            "deadline."
+        ),
+        remediation=(
+            "Read `summary`: it says which step failed (an endpoint that could not be reached, no key beside the "
+            "descriptor, a handshake that did not finish, or a started broker that never published), and "
+            "`backend_error` carries the connection's own error when there was one.",
+            "`broker_log`, when the refusal names it, holds every broker ever started for this bus, so only lines "
+            "written after this start can belong to this attempt, and there may be none.",
+            "When `broker_start_timeout_s` is shorter than `bus_timeout_s`, the broker may still have been opening "
+            "its adapter when the client gave up and ended it; a slow adapter open is the usual cause.",
+            "Call `can_session_start` again only after something changed; the same attempt already ran to its "
+            "deadline.",
+        ),
+        do_not=(
+            "Do not delete the descriptor or the bus lock to force a new broker. A client clears a stale descriptor "
+            "itself when the lock behind it is free, and a held lock belongs to a live process.",
+        ),
+    ),
+    "can_broker_wrong_bus": ErrorRemedy(
+        meaning=(
+            "The broker endpoint this client reached owns a different bus than the one it asked for. A bus is "
+            "identified by its adapter and channel, so the descriptor this client read led to a broker for another "
+            "bus: the configuration of this bus changed after one side loaded it, or the descriptor is not that "
+            "broker's own."
+        ),
+        remediation=(
+            "Compare `broker_bus_key` with `client_bus_key`: the first is the bus the broker serves, the second the "
+            "one this server derived from its configuration.",
+            "`retry_safe` is false and the attach was not retried. Check that the configuration this server loaded "
+            "still names the adapter and channel the bench uses, then call `can_session_start` once more.",
+        ),
+        do_not=(
+            "Do not edit `channel` on an entry only to make the two keys agree. The key follows the physical bus, "
+            "and a channel spelled to match is a claim on a medium the entry does not describe.",
+        ),
+    ),
+    "can_bus_gated": ErrorRemedy(
+        meaning=(
+            "The broker for this shared CAN bus refused the attach because an earlier bus-scoped incident gated the "
+            "bus. The gate lasts as long as this broker: it accepts no new participant until every participant has "
+            "detached and it exits, and a fresh broker starts ungated."
+        ),
+        remediation=(
+            "Read `incident`: its `reason` and `detail` say what failed on the adapter when the bus was gated.",
+            "Check the bench for that cause, then stop every participant still attached to this bus with "
+            "`can_session_stop`, in the servers that hold them.",
+            "Once the last one has detached the broker exits, and `can_session_start` then starts a fresh broker that "
+            "is not gated.",
+        ),
+        do_not=(
+            "Do not keep calling `can_session_start` while participants stay attached. The gate holds for the life of "
+            "the broker, and every attach is answered the same.",
+        ),
+    ),
+    "can_bus_incident": ErrorRemedy(
+        meaning=(
+            "A fault on this shared CAN bus aborted the run of every participant attached to it, and the broker gated "
+            "the bus: it accepts no new participant and answers each later call of an aborted participant with this "
+            "refusal. The fault was the adapter's send or read raising or failing, or one a participant reported."
+        ),
+        remediation=(
+            "Read `abort`: its `reason` (`can_adapter_send_raised`, `can_adapter_send_failed`, "
+            "`can_adapter_read_raised`, `can_adapter_read_failed`, `can_adapter_invalid_response`, or one a "
+            "participant reported) and `detail` say what failed on the adapter.",
+            "`aborted_participants` lists every run aborted with this one, and `bus_gated` is true: the bus is not "
+            "running for anyone until the broker exits.",
+            "This server quarantined its lease on the bus, so its next call answers `resource_quarantined` and "
+            "`can_session_stop` answers `can_adapter_close_failed` while the quarantine stands. Check the bench, "
+            "then follow the sign-off under `resource_quarantined`.",
+        ),
+        do_not=(
+            "Do not start a new participant on this bus to carry on the test. The broker refuses it with "
+            "`can_bus_gated` for as long as it runs.",
+        ),
+    ),
+    "can_bus_not_configured": ErrorRemedy(
+        meaning=(
+            "The `bus_id` is not a key of `can_buses` in the authoritative configuration this server loaded, so "
+            "nothing was opened or sent."
+        ),
+        remediation=(
+            "Pick an id from `configured_buses` beside this refusal: those are exactly the buses this server knows.",
+            "`can_buses_list` shows each of them with its adapter, channel and shares. A bus that should exist has "
+            "to be declared under `can_buses` in the authoritative configuration.",
+        ),
+        do_not=(
+            "Do not pass the adapter's channel name (`can0`, `PCAN_USBBUS1`) as the id. The id is the configuration's "
+            "key, and the channel is a field inside it.",
+        ),
+    ),
+    "can_bus_not_shared": ErrorRemedy(
+        meaning=(
+            "A participant session was asked for on a CAN bus that declares no `shares:`, which makes it a "
+            "single-owner bus without participants. When `can_session_start` named a participant this server did "
+            "find configured, the refusal comes from the broker, which loads the configuration itself when it "
+            "starts: the file was edited after this server loaded it, and the broker read the bus without shares."
+        ),
+        remediation=(
+            "Check the bus in `can_buses_list`: a bus without `shares` is opened by one session, so call "
+            "`can_session_start` without `participant`.",
+            "If the bus should be shared, compare the configuration file with what `can_buses_list` shows: an entry "
+            "changed since the server loaded it is not the one this call was checked against, and restarting the "
+            "server brings the two together again.",
+        ),
+        do_not=(
+            "Do not add a `shares:` block only to get past this. Sharing decides who may transmit on the bus, and "
+            "is declared for that reason.",
+        ),
+    ),
+    "can_listen_only_conflict": ErrorRemedy(
+        meaning=(
+            "The broker refused the attach because listen-only belongs to the whole bus: a participant that requires "
+            "a silent bus and one that may transmit cannot be attached together, and a participant that may "
+            "transmit cannot attach to a bus configured `listen_only: true`."
+        ),
+        remediation=(
+            "Read `conflicting_participants`: empty means the bus itself is `listen_only` and this participant may "
+            "transmit; otherwise it lists the attached participants this one conflicts with.",
+            "Run the two kinds one after the other: stop the conflicting ones with `can_session_stop` first. A "
+            "share's `requires_listen_only` and its `permissions.allow_write` decide which kind it is.",
+            "A participant that never transmits does not need `permissions.allow_write`; without it, it attaches "
+            "beside participants that require a silent bus.",
+        ),
+        do_not=(
+            "Do not turn off the bus's `listen_only` to let a participant that transmits onto it. A bus configured "
+            "silent is a claim about the medium that the bench and the other runs rely on.",
+        ),
+    ),
+    "can_participant_busy": ErrorRemedy(
+        meaning=(
+            "The broker for this shared CAN bus already has a participant of this name attached, and it seats one "
+            "attach per name. The client retried until its start deadline, and the name stayed attached for that "
+            "whole time."
+        ),
+        remediation=(
+            "`can_buses_list` shows this server's `active_participants` on the bus; if the name is there, end that "
+            "session with `can_session_stop` first.",
+            "Otherwise the attach belongs to a session outside this server, or to one that ended without detaching. "
+            "`retry_safe` is true and the attach was already retried until the deadline, so call "
+            "`can_session_start` again once the broker has let the name go, and check `agentic-hil lease-status` "
+            "for who holds the participant if it does not.",
+        ),
+        do_not=(
+            "Do not use one participant name from two runs. A name is one view with one frame budget, and a second "
+            "attach is refused for that reason.",
+        ),
+    ),
+    "can_participant_filter_violation": ErrorRemedy(
+        meaning=(
+            "The frame's identifier is outside this participant's view of the shared CAN bus, so the broker would not "
+            "transmit it: it was not sent. A view matches the identifier and its format together, so an extended "
+            "identifier falls outside a filter written for the standard identifier with the same number."
+        ),
+        remediation=(
+            "Compare `frame` with `view`: `view` holds the participant's filter, frame budget and permissions, and "
+            "`frame` the identifier and format that fell outside it.",
+            "Check `extended` on the frame; a filter term matches only frames of its own format.",
+            "If the participant should send it, widen the filter in `can_buses.<id>.shares`. A running broker keeps "
+            "the configuration it started with, so the change applies to the next broker.",
+        ),
+        do_not=(
+            "Do not send the frame through another participant whose view happens to allow it. The view is what "
+            "this test is permitted to put on the bus.",
+        ),
+    ),
+    "can_participant_frame_budget_exhausted": ErrorRemedy(
+        meaning=(
+            "This participant used the whole frame budget of its share on the shared CAN bus, so the broker aborted "
+            "its run. Only this participant is affected: the bus keeps running for the others."
+        ),
+        remediation=(
+            "Compare `max_frames` with `frames_used`; from here every call of this participant answers "
+            "`can_participant_incident`.",
+            "Stop the participant with `can_session_stop` and attach it again with `can_session_start`: a fresh "
+            "attach counts its frames from zero.",
+            "If the test needs more frames, raise `max_frames` on the share in `can_buses.<id>.shares`; a broker "
+            "reads it when it starts.",
+        ),
+        do_not=(
+            "Do not split one test across several participant names to get more frames. The budget is how much one "
+            "test may put on the bus.",
+        ),
+    ),
+    "can_participant_incident": ErrorRemedy(
+        meaning=(
+            "This participant's run on the shared CAN bus was aborted by an incident scoped to it alone: it used up "
+            "its frame budget, its receive queue overflowed, or it reported an incident of its own. Only this "
+            "participant was aborted; the bus was not gated and the other participants were not touched."
+        ),
+        remediation=(
+            "Read `abort`: its `reason` is `can_participant_frame_budget_exhausted`, "
+            "`can_participant_receive_overflow` or one the participant reported, and `detail` holds the limits it ran "
+            "into or what the participant reported.",
+            "Stop this participant with `can_session_stop` and attach it again with `can_session_start`; the abort "
+            "belongs to this attach, and a fresh one starts clean.",
+            "For an overflow, read more often with `can_read`, or narrow the share's `filter` so fewer frames queue "
+            "for it.",
+        ),
+        do_not=(
+            "Do not stop the other participants on the bus over this. Their runs were not aborted, and the bus is "
+            "still carrying their traffic.",
+        ),
+    ),
+    "can_participant_lock_required": ErrorRemedy(
+        meaning=(
+            "This server took the lease for a participant and, attaching it, found that its bench mutex does not "
+            "hold that participant's lock. The lease and the lock are taken together, so this is the server's own "
+            "bookkeeping disagreeing with itself, not another run holding the name."
+        ),
+        remediation=(
+            "`participant_lock` names the lock that was expected and not held. `retry_safe` is true: call "
+            "`can_session_start` again, which takes the lease and the lock afresh.",
+            "If it repeats, check `agentic-hil lease-status` and restart the MCP server: its bench mutex and its "
+            "leases no longer agree, and a fresh server takes both anew.",
+        ),
+        do_not=(
+            "Do not take the participant lock by hand or from a second process to satisfy the check. The lock is "
+            "what keeps two runs off one participant name.",
+        ),
+    ),
+    "can_participant_not_configured": ErrorRemedy(
+        meaning=(
+            "The participant named is not a share of this CAN bus. From this server it means the authoritative "
+            "configuration declares no such share; from the broker, that the configuration the broker loaded when it "
+            "started declares none, which differs from this server's after an edit."
+        ),
+        remediation=(
+            "Pick a name from `configured_participants`, the shares declared on this bus.",
+            "If the name should exist, declare it under `can_buses.<id>.shares`. A running broker keeps the "
+            "configuration it started with, so a new share is seen once every participant has detached and a fresh "
+            "broker starts.",
+        ),
+        do_not=(
+            "Do not borrow another participant's name because it is configured. Its view, budget and permissions "
+            "belong to that participant, and two runs cannot share one.",
+        ),
+    ),
+    "can_participant_required": ErrorRemedy(
+        meaning=(
+            "This CAN bus declares `shares:`, so it is shared through a broker and every call on it has to name the "
+            "participant it acts as. The call named none and was refused before anything was opened or sent."
+        ),
+        remediation=(
+            "Pick one of `configured_participants` and pass it as `participant` to `can_session_start`, `can_send`, "
+            "`can_read` and `can_session_stop` alike.",
+            "`can_buses_list` shows each share's view (its `filter`, `max_frames` and permissions), which tells the "
+            "one this test should use.",
+        ),
+        do_not=(
+            "Do not remove `shares:` from the bus to use it without a participant. Other runs sharing the bus would "
+            "lose the views that keep their traffic apart.",
+        ),
+    ),
+    "can_queue_clear_failed": ErrorRemedy(
+        meaning=(
+            "`can_session_start` was clearing the receive queue (`clear_rx_queue: true`, the default) and a read "
+            "during the drain failed, answered in a shape that is not a drain, or could not be audited. A session "
+            "this call had just opened was closed again; one that was already running stays open."
+        ),
+        remediation=(
+            "Read `backend_result`, the adapter's own answer to the failed read, and `frames_drained`: the frames "
+            "already read off the queue were discarded and cannot be read again.",
+            "`retry_safe` is true only when nothing was drained; then call `can_session_start` again.",
+            "If the drain keeps failing, start with `clear_rx_queue: false` and read what is queued with `can_read`, "
+            "which reports a failing read as its own refusal.",
+        ),
+        do_not=(
+            "Do not assume the queue is empty after this refusal. It was not cleared, and frames from before the "
+            "start may still be read as if they were new.",
+        ),
+    ),
+    "can_queue_clear_limit": ErrorRemedy(
+        meaning=(
+            "The receive queue did not become empty within the bounded drain `can_session_start` runs before it "
+            "reports a session, a fixed number of reads within about a second: frames arrived as fast as they were "
+            "read. The bus is busy, which is a fact about the bus and not a fault."
+        ),
+        remediation=(
+            "`frames_drained` is how many frames were read and discarded before the limit. A session this call had "
+            "just opened was closed again.",
+            "On a bus that never falls silent, start with `clear_rx_queue: false`, then read with `can_read` and "
+            "`until_id` to stop at the frame the test waits for.",
+        ),
+        do_not=(
+            "Do not call `can_session_start` again and again waiting for a quiet moment. A bus with continuous "
+            "traffic gives none, and every attempt discards another batch of frames.",
+        ),
+    ),
+    "can_read_failed": ErrorRemedy(
+        meaning=(
+            "The direct CAN adapter's receive raised during `can_read`. A receive transmits nothing, so nothing was "
+            "sent and the read may be repeated; what failed is the adapter or its link."
+        ),
+        remediation=(
+            "Read `backend_error`, the driver's own error: a link that went down, an adapter unplugged or reset, a "
+            "controller in bus-off.",
+            "When `retry_safe` is true, call `can_read` again once the link is back. A link that stays down fails "
+            "every read the same way; `can_session_stop` and then `can_session_start` reopens the adapter.",
+        ),
+        do_not=(
+            "Do not take this refusal as a silent bus. A failed read says nothing about the traffic on it.",
+        ),
+    ),
+    "can_send_failed": ErrorRemedy(
+        meaning=(
+            "The CAN adapter did not report the frame as sent. Whether it reached the bus depends on where the send "
+            "failed, and `side_effect_status` says what is known: the adapter may have handed it to the controller "
+            "before failing."
+        ),
+        remediation=(
+            "Read `side_effect_status`. Only when it is `not_started` did nothing reach the bus, and only then is it "
+            "safe to send the frame again.",
+            "When it is `unknown`, the frame may be on the wire: check the bus from the target before sending "
+            "anything else, and expect the lease to be quarantined, so the next call answers `resource_quarantined`.",
+            "`backend_error` is the driver's own reason: a link that went down, no other node acknowledging the "
+            "frame, a controller in bus-off.",
+        ),
+        do_not=(
+            "Do not resend on the assumption that a failed send transmitted nothing. With `unknown`, a duplicate "
+            "stimulus on a live bus is the risk.",
+        ),
+    ),
     "can_adapter_protocol_unsupported": ErrorRemedy(
         meaning=(
             "A CAN process bridge answered its `open` request with something this protocol does not accept: a "
@@ -3236,6 +6444,33 @@ def remediation_fields(error_type: str | None, scope: str | None = None, *, perm
     if remedy.do_not:
         payload["do_not"] = [step.format(**values) for step in remedy.do_not]
     return payload
+
+
+def run_remediation_fields(run_error: object) -> JsonObject:
+    """The advice for the error a plan run publishes, whatever that error is.
+
+    Looked up by the published type itself, under `TEST_REACTOR_SCOPE` with the
+    bare entry behind it, rather than from a list of the types a run is known to
+    fail with: a run passes up whatever its failing step answered, a debug
+    session's target type included, and a list would leave every type it did
+    not name without the fix its entry already holds. Empty for a value that is
+    not a type, and for a type the catalogue has no entry for."""
+    if not isinstance(run_error, str) or not run_error:
+        return {}
+    return remediation_fields(run_error, TEST_REACTOR_SCOPE)
+
+
+def with_run_remediation(result: JsonObject) -> JsonObject:
+    """`result`, a failed run's answer, with the advice for the error it publishes.
+
+    A result that carries advice already keeps it: that advice was chosen where
+    more was known than the type, such as the scope a coordinator refusal was
+    answered under or the permission key a preflight refusal names. Filled in
+    place and returned, so a caller can wrap the answer it is about to hand
+    back."""
+    if result.get("ok") is False and "remediation" not in result:
+        result.update(run_remediation_fields(result.get("error_type")))
+    return result
 
 
 def _needs_a_permission_key(remedy: ErrorRemedy) -> bool:

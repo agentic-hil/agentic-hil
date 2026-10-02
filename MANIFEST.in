@@ -43,6 +43,10 @@ exclude tests/test_bench_in_container.py
 exclude tests/test_bench_distributions.py
 # The run lock's command is `tools/run_lock.py`, which never ships either.
 exclude tests/test_run_lock_command.py
+# The tool-definition score is `tools/tool_definition_score.py`, which never
+# ships, and both of its tests import it at module scope.
+exclude tests/test_tool_definition_score.py
+exclude tests/test_tool_definition_score_model.py
 # The nightly's withholding is `tools/withhold.py`, imported the same way.
 exclude tests/test_withhold.py
 exclude tests/test_agent_registration_gate.py

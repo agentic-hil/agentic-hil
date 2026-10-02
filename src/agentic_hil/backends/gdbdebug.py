@@ -990,7 +990,7 @@ class GdbDebugSessions:
         if session is None or session.status in {"stopped", "error", "cleanup_required"} or session.gdb is None or not session.gdb.is_running():
             if session is not None and session.status == "cleanup_required":
                 return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "resource_quarantined", "summary": "Debug session requires cleanup before further effects.", "cleanup_required": True, "quarantined": True, "hardware_state": "unknown"}
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "session_not_active", "summary": "No debug session is active. Start one with debug_start_session first."}
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "session_not_active", "summary": "No debug session is active. Start one with debug_start_session first.", **remediation_fields("session_not_active")}
         return {"ok": True, "session": session}
 
     def _gdb_command(self, session: GdbDebugSession, command: str, timeout_s: float | None = None, *, containment: bool = False):

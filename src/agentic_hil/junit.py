@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from xml.etree import ElementTree
 
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.test_reactor import RUN_STOPPED_ERROR, result_error_type, result_failed, step_results
 from agentic_hil.types import JsonObject
 
@@ -76,6 +77,7 @@ def detached_junit_refusal(junit_xml_path: str) -> JsonObject:
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
         "retry_safe": False,
+        **remediation_fields(JUNIT_DETACHED_ERROR),
     }
 
 
@@ -130,9 +132,14 @@ def result_with_junit_xml(result: JsonObject, junit_xml_path: str, *, plan_steps
                 "summary": "The JUnit XML report could not be written where --junit-xml said.",
                 "exception_type": type(error).__name__,
                 "backend_error": str(error),
+                **remediation_fields(JUNIT_WRITE_ERROR),
             },
         }
         failed.setdefault("error_type", JUNIT_WRITE_ERROR)
+        # A run that failed on its own keeps its own type and the advice for it;
+        # the write failure is the error only of a run that had none.
+        if failed["error_type"] == JUNIT_WRITE_ERROR and "remediation" not in failed:
+            failed.update(remediation_fields(JUNIT_WRITE_ERROR))
         return failed
     return {**result, "junit_xml": written}
 

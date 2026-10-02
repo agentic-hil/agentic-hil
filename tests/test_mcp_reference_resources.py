@@ -157,7 +157,10 @@ def test_every_key_a_template_can_produce_is_readable(service: AgenticHILToolSer
 
 def test_a_uri_this_server_does_not_serve_is_refused_as_a_missing_resource(service: AgenticHILToolService) -> None:
     unknown = mcp(service, "resources/read", {"uri": f"{RESOURCE_SCHEME}://reference/does-not-exist"})
-    unwritten_scope = mcp(service, "resources/read", {"uri": ERROR_URI_PREFIX + "timeout:openocd"})
+    # A pair #516 keeps silent, with no bare entry under it either; both are
+    # pinned in test_debug_backend_refusals.py. `timeout:openocd` stood here
+    # until #644 wrote it.
+    unwritten_scope = mcp(service, "resources/read", {"uri": ERROR_URI_PREFIX + "verify_failed:openocd"})
 
     # -32002, not a method error: a client has to be able to tell "no such
     # resource" from "this server cannot serve resources at all".
@@ -553,12 +556,13 @@ def test_the_missing_configuration_entry_answers_both_of_its_readers() -> None:
 
 
 def test_an_error_nobody_wrote_a_fix_for_grows_no_invented_advice() -> None:
-    # `config_schema_invalid` rather than `config_invalid`, which this stood on
-    # until #460 gave it an entry: the bundled schema failing its own
-    # meta-validation is a defect in a release rather than something the caller
-    # of the moment can act on, so it is one of the error types nobody has
-    # written a fix for, and the rule this pins is that such a type grows none.
-    refusal = ConfigError("config_schema_invalid", "Bundled Agentic HIL configuration schema is invalid.", {"field": "state_root"}).to_dict()
+    # A type no code raises, rather than a real one. This stood on
+    # `config_invalid` until #460 gave it an entry, and then on
+    # `config_schema_invalid` until every type the package writes was given one
+    # (tests/test_error_catalogue_whole.py holds that), so an uncatalogued type
+    # is now only one like this. The rule this pins is unchanged: such a type
+    # grows no advice.
+    refusal = ConfigError("type_nobody_wrote_a_fix_for", "A refusal the catalogue has no entry for.", {"field": "state_root"}).to_dict()
 
     assert "remediation" not in refusal
     assert "do_not" not in refusal

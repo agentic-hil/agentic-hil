@@ -50,6 +50,7 @@ from agentic_hil.knowledge import (
     permission_key,
     plan_schema_document,
     remediation_fields,
+    with_run_remediation,
 )
 from agentic_hil.knowledge import DEFAULT_TEST_CONFIG_PATH as DEFAULT_TEST_CONFIG_PATH
 from agentic_hil.knowledge import PLAN_FEATURE_VERSION_KEY as PLAN_FEATURE_VERSION_KEY
@@ -3296,7 +3297,10 @@ class TestReactor:
             # so there is nothing unconfirmed to recover, and driving the board
             # again to establish a state nothing disturbed would be the incident.
             result["recovery"] = self._recover_after_failed_run()
-        return result
+        # The fix for whatever the run failed with, a type a step passed up
+        # included, and the run's own reading of a cleanup failure rather than a
+        # debug session's.
+        return with_run_remediation(result)
 
     def _recover_after_failed_run(self) -> JsonObject:
         """Recover every probe the run drove, each through its own bound service.
@@ -3656,4 +3660,5 @@ def exception_result(tool: str, error_type: str, summary: str, error: BaseExcept
         "summary": summary,
         "exception_type": type(error).__name__,
         "backend_error": str(error),
+        **remediation_fields(error_type),
     }

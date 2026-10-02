@@ -943,6 +943,7 @@ def _changed_underneath(target_path: Path, stale: list[JsonObject]) -> JsonObjec
         "reference": CONFIG_SHAPE_URI,
         **NOT_STARTED,
         "retry_safe": True,
+        **remediation_fields("config_changed_underneath"),
     }
 
 
@@ -975,6 +976,7 @@ def _document_changed_underneath(target_path: Path) -> JsonObject:
         "reference": CONFIG_SHAPE_URI,
         **NOT_STARTED,
         "retry_safe": True,
+        **remediation_fields("config_changed_underneath"),
     }
 
 
