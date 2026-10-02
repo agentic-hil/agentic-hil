@@ -25,6 +25,7 @@ configures or can answer with.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import json
 import pathlib
@@ -64,7 +65,7 @@ import agentic_hil.report as report_module
 from agentic_hil.bench import BenchMutex
 from agentic_hil.config import load_config
 from agentic_hil.devices import debugger_device
-from agentic_hil.knowledge import ERROR_URI_PREFIX
+from agentic_hil.knowledge import ERROR_CATALOGUE, ERROR_URI_PREFIX
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.report import overall_success, report_state_path
 from agentic_hil.tools import AgenticHILToolService
@@ -533,14 +534,27 @@ def says_when_nothing_is_stored(text: str) -> bool:
 
 
 UNREADABLE = r"\breading it failed\b|\bcannot be read\b|\bcould not be read\b|\bunreadable\b"
+DAMAGED = r"\b(?:damaged|malformed|corrupt\w*)\b"
+
+
+def says_damaged_state_answers_config_invalid(clause: str) -> bool:
+    """A damaged state and `config_invalid` in one clause, in either order, with no
+    negation between them: "a damaged one answers `config_invalid`", never "a
+    damaged one never answers `config_invalid`"."""
+    for first, second in ((DAMAGED, r"\bconfig_invalid\b"), (r"\bconfig_invalid\b", DAMAGED)):
+        for match in re.finditer(rf"{first}(?P<between>[^.;]*?){second}", clause, re.IGNORECASE):
+            if not re.search(NEGATED_PHRASE, match.group("between"), re.IGNORECASE):
+                return True
+    return False
 
 
 def says_unreadable_state_apart(meaning: str) -> bool:
     """The catalogue's `report_unreadable`: a report state that exists and could
-    not be read, apart from one that reads and is damaged (`config_invalid`) and
-    from one that is not there (`report_not_found`)."""
+    not be read (an OSError or ValueError on the read, report.py:646-656), apart
+    from one that reads and is damaged, which raises `config_invalid`
+    (report.py:666-673, 642-645), and from one that is not there (`report_not_found`)."""
     unreadable = one_of(clauses(meaning), r"\bexists?\b", UNREADABLE)
-    damaged = one_of(clauses(meaning), r"\bconfig_invalid\b", r"\bdamaged\b|\bmalformed\b|\bcorrupt")
+    damaged = any(says_damaged_state_answers_config_invalid(part) for part in clauses(meaning))
     merged = any(re.search(r"\breport_not_found\b|\bconfig_invalid\b", part) and re.search(UNREADABLE, part, re.IGNORECASE) for part in clauses(meaning))
     return unreadable and damaged and not merged
 
@@ -796,6 +810,31 @@ def test_the_catalogue_tells_an_unreadable_report_state_from_a_damaged_or_missin
     assert says_unreadable_state_apart(entry["meaning"]), entry["meaning"]
 
 
+@pytest.mark.parametrize(
+    ("pattern", "replacement"),
+    [
+        (r"\banswers `config_invalid`", "never answers `config_invalid`"),
+        (r"\bis damaged answers `config_invalid` instead", "is damaged answers this as well"),
+    ],
+    ids=["negated", "merged"],
+)
+def test_the_unreadable_check_refuses_a_served_entry_that_inverts_the_damaged_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pattern: str, replacement: str) -> None:
+    """A malformed report state raises `config_invalid` (report.py:666-673); only
+    an OSError or ValueError on the read is `report_unreadable` (report.py:646-656).
+    The same entry, with that mapping negated or folded into this one, has to fail
+    the check when it is read the way a host reads it."""
+    planted, count = re.subn(pattern, replacement, ERROR_CATALOGUE["report_unreadable"].meaning)
+    assert count == 1, ERROR_CATALOGUE["report_unreadable"].meaning
+    monkeypatch.setitem(ERROR_CATALOGUE, "report_unreadable", dataclasses.replace(ERROR_CATALOGUE["report_unreadable"], meaning=planted))
+    service = new_service(tmp_path / "catalogue")
+    try:
+        entry = json.loads(read_text(service, ERROR_URI_PREFIX + "report_unreadable"))
+    finally:
+        close(service)
+    assert entry["meaning"] == planted
+    assert not says_unreadable_state_apart(entry["meaning"]), entry["meaning"]
+
+
 def test_classify_last_error_names_its_result_fields(listed: dict[str, dict]) -> None:
     text = text_of(listed, CLASSIFY)
     missing = names(text, "error_type", "likely_causes", "source_tool", "report_path", "log_path", "report_not_found")
@@ -1009,6 +1048,9 @@ PARAPHRASES = [
             "The report state exists and reading it failed; a damaged one answers this too.",
             "The state exists and reading it failed, or it reads and is damaged: config_invalid.",
             "Nothing is stored yet: report_not_found. The state exists and reading it failed, or is damaged: report_not_found or config_invalid.",
+            "This project's report state exists and reading it failed. A report state that reads and is damaged never answers `config_invalid`.",
+            "The state exists but cannot be read; a malformed one does not answer config_invalid.",
+            "The state exists but cannot be read; config_invalid is never a damaged one.",
         ),
     ),
     (
