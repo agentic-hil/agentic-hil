@@ -9,9 +9,11 @@ when its recovery may still reset the board, how long one read or one manager
 run may take, which incidents a relayed statement may clear and what a failed
 recovery leaves, or that an upgraded server keeps running the old release.
 These tests ask the definitions a host receives through `tools/list` to say
-those things, and every claim they ask for is first shown to be what the code
-does, through `tools/call`, against stand-ins for hardware discovery, the
-package manager and pyserial. No probe, port or board is touched.
+those things, or, for a refusal a definition leaves to the error catalogue, the
+catalogue entry `resources/read` serves for it. Every claim they ask for is
+first shown to be what the code does, through `tools/call`, against stand-ins
+for hardware discovery, the package manager and pyserial. No probe, port or
+board is touched.
 
 The metadata tests check meaning, not wording. A claim is checked as a
 relation inside one sentence, clause or segment (the refusal and the hold that
@@ -26,6 +28,7 @@ rather than passing a definition that says the opposite.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -48,7 +51,7 @@ from test_config_write import bench as write_bench
 from test_config_write import changes, document_of
 from test_config_write import service as open_service
 from test_coordination import failing_write_record, restore_write_record
-from test_read_until import close
+from test_read_until import close, tools_call
 from test_recover_tool import config_for, edit_config, ledger
 from test_server_upgrade import (
     UV_EXACT_PIN_HINT,
@@ -68,6 +71,7 @@ from test_tool_definition_uart import (
     clauses,
     install_line,
     listed_tools,
+    new_service,
     sentences,
 )
 
@@ -79,9 +83,11 @@ from agentic_hil.coordination import LEASE_RELEASE_RETRY_REASON, HardwareCoordin
 from agentic_hil.knowledge import (
     CONFIG_DESCRIPTION_RIGHT,
     CONFIG_PERMISSIONS_RIGHT,
+    ERROR_URI_PREFIX,
     RECOVERY_PHYSICAL_CHECK_ERROR,
     recovery_operator_command,
 )
+from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.tools import PROJECT_CONFIG_CREATE, AgenticHILToolService, UnprovisionedToolService
 
 TD6_TOOLS = (
@@ -210,16 +216,6 @@ def names_a_held_bench(unit: str) -> bool:
     """A run or a session, as alternatives, and a hold in one unit, with no exception to them."""
     words = prose(unit)
     return has(words, RUN_OR_SESSION) and has(words, HOLD_WORD) and not has(words, HOLD_NEGATION) and not has(words, r"\bboth\b")
-
-
-def held_refusal(code: str) -> Callable[[str], bool]:
-    """A clause that names `code` together with the run or session hold that produces it."""
-
-    def check(text: str) -> bool:
-        return any(mentions(unit, code) and names_a_held_bench(unit) for unit in clauses(text))
-
-    check.__name__ = f"held_refusal({code})"
-    return check
 
 
 def needs_the_grant(grant: str) -> Callable[[str], bool]:
@@ -451,21 +447,18 @@ def unknown_state_may_reset_into_halt(text: str) -> bool:
     )
 
 
-def reports_carried_kept_and_unavailable(text: str) -> bool:
-    """Each of the three plan lists beside what it holds, read with its own name blanked."""
-    found = {"carried": False, "kept": False, "unavailable": False}
-    for unit in segments(text):
-        for field in found:
-            if not mentions(unit, field):
-                continue
-            meaning = prose(re.sub(identifier(field), " ", unit))
-            if field == "carried":
-                found[field] |= has(meaning, r"\b(?:fills?|filled|writes?|written)\b") and not has(meaning, r"\b(?:somebody|someone)\b") and not has(meaning, NEGATION)
-            elif field == "kept":
-                found[field] |= has(meaning, r"\b(?:somebody|someone)\b[^.;]*\bset\b") and not has(meaning, r"\bfills?\b") and not has(meaning, NEGATION)
-            else:
-                found[field] |= has(meaning, r"\bnot\s+(?:found|attached|discovered|answered)\b|\bcould\s+not\b|\bmissing\b")
-    return all(found.values())
+def fills_only_placeholders_from_what_is_attached(text: str) -> bool:
+    """What adoption fills is the keys still holding a placeholder, with what the
+    attached hardware answers; never every key."""
+    return any(
+        has(unit, r"\bfill(?:s|ed|ing)?\b")
+        and has(unit, r"\bplaceholders?\b")
+        and has(prose(unit), r"\battached\b")
+        and not has(unit, r"\b(?:every|all|any)\s+(?:\w+\s+)?keys?\b")
+        and not has(prose(unit), NEGATION)
+        and not has(prose(unit), HOLD_NEGATION)
+        for unit in clauses(text)
+    )
 
 
 WITHOUT_APPLY = r"\bwrites?\s+nothing\b[^.;]*\b(?:unless|without|until)\b[^.;]*\bapply\b|\bwrites?\s+only\s+(?:with|when|if)\b[^.;]*\bapply\b"
@@ -588,10 +581,6 @@ def follows_a_write_instead_of_a_restart(text: str) -> bool:
     )
 
 
-def refuses_under_an_incident(text: str) -> bool:
-    return any(mentions(unit, "resource_quarantined") and has(prose(unit), r"\bincidents?\b|\bquarantined?\b") and not has(prose(unit), NEGATION) for unit in clauses(text))
-
-
 def reports_what_changed(text: str) -> bool:
     return any(
         mentions(unit, "description_changes") and has(prose(unit), r"\b(?:lists?|names?|reports?)\b") and has(prose(unit), r"\b(?:moved|changed)\b") and not has(prose(unit), NEGATION)
@@ -615,8 +604,17 @@ def touches_no_hardware(text: str) -> bool:
     )
 
 
-def answers_nothing_to_recover_when_none_stands(text: str) -> bool:
-    return any(mentions(unit, "nothing_to_recover") and has(prose(unit), r"\bnone\b|\bno\s+(?:incident|quarantine)\b") and has(prose(unit), r"\bstand(?:s|ing)?\b") for unit in clauses(text))
+def called_when_the_lease_status_shows_an_incident(text: str) -> bool:
+    """The moment to call it is the one hardware_lease_status reports incident_stands."""
+    return any(
+        mentions(unit, "hardware_lease_status")
+        and mentions(unit, "incident_stands")
+        and has(unit, r"\b(?:when|once|if)\b")
+        and not has(unit, r"\bfalse\b")
+        and not has(prose(unit), NEGATION)
+        and not has(prose(unit), HOLD_NEGATION)
+        for unit in clauses(text)
+    )
 
 
 def no_contact_clears_alone_and_physical_needs_a_statement(text: str) -> bool:
@@ -630,20 +628,6 @@ def no_contact_clears_alone_and_physical_needs_a_statement(text: str) -> bool:
         for unit in clauses(text)
     )
     return alone and statement
-
-
-def failure_keeps_it_standing_and_persist_resumes(text: str) -> bool:
-    """A failed recovery leaves the incident standing, and the one failure that
-    wrote part of the release is resumed by calling again."""
-    standing = any(
-        has(prose(unit), r"\bfail(?:s|ed|ure)?\b") and has(prose(unit), r"\b(?:keeps?|leaves?|stays?|remains?)\b") and has(prose(unit), r"\bstand(?:s|ing)\b") and not has(prose(unit), NEGATION)
-        for unit in clauses(text)
-    )
-    resumes = any(
-        mentions(unit, "recovery_persist_failed") and has(prose(unit), r"\bresum") and has(prose(unit), r"\b(?:retry|retried|again|rerun)\b") and not has(prose(unit), NEGATION)
-        for unit in clauses(text)
-    )
-    return standing and resumes
 
 
 def audit_broken_clears_only_by_the_operator_command(text: str) -> bool:
@@ -711,6 +695,53 @@ def failure_hands_reinstall_command_to_the_operator(text: str) -> bool:
     )
 
 
+# The refusals a definition leaves to the error catalogue, as its entries say them.
+
+RUN_AND_SESSION_TOGETHER = r"\bboth\b|\btogether\b|\bas\s+well\s+as\b|\bruns?\s+and\b"
+
+
+def arises_while_a_run_or_session_is_held(text: str) -> bool:
+    """A sentence that puts the refusal while this server holds something, with a
+    run and a session among the alternatives that count as a hold."""
+    return any(
+        has(unit, r"\bwhile\b[^.;]*" + HOLD_WORD)
+        and has(unit, r"\bruns?\b[^.;]*\bor\b[^.;]*\bsessions?\b|\bsessions?\b[^.;]*\bor\b[^.;]*\bruns?\b")
+        and not has(unit, RUN_AND_SESSION_TOGETHER)
+        and not has(unit, NEGATION)
+        and not has(unit, HOLD_NEGATION)
+        for unit in map(prose, sentences(text))
+    )
+
+
+def held_by_an_incident(text: str) -> bool:
+    """The resource is refused because an incident holds it."""
+    return any(
+        has(unit, r"\bincidents?\b") and has(unit, r"\bheld\s+by\b|\bholds?\b|\bstands?\b") and not has(unit, NEGATION) and not has(unit, HOLD_NEGATION)
+        for unit in map(prose, segments(text))
+    )
+
+
+def the_quarantine_still_stands(text: str) -> bool:
+    """A failed recovery leaves the quarantine standing, not stood down."""
+    return any(
+        has(unit, r"\b(?:quarantine|incident)\b")
+        and has(unit, r"\bstands\b")
+        and not has(unit, r"\bstands?\b[^.;]*\bdown\b")
+        and not has(unit, NEGATION)
+        and not has(unit, HOLD_NEGATION)
+        for unit in map(prose, segments(text))
+    )
+
+
+def a_rerun_resumes(text: str) -> bool:
+    """Running the recovery again picks up where the failed one stopped, said in
+    prose: a quoted `resumed` is the ledger's word, not the claim."""
+    return any(
+        has(unit, r"\bresum") and has(unit, r"\b(?:retry|retried|again|rerun)\b") and not has(unit, NEGATION) and not has(unit, HOLD_NEGATION)
+        for unit in (prose(re.sub(r"`[^`]*`", " ", sentence)) for sentence in sentences(text))
+    )
+
+
 # ---------------------------------------------------------------------------
 # Each check against sentences it has to accept and reject.
 
@@ -723,6 +754,8 @@ CONTROLS: list[tuple[Callable[[str], bool], str, bool]] = [
     (bounded_per_step(10), "Each read step may take 10 s.", True),
     (bounded_per_step(10), "The call finishes within 10 s.", False),
     (bounded_per_step(10), "Each read step may take 10 s, the whole call at most 10 s.", False),
+    (bounded_per_step(10), "Serial of the attached probe to read, each read step taking up to 10 s; defaults to the configured probe_id.", True),
+    (bounded_per_step(10), "Serial of the attached probe to read, the whole call taking up to 10 s.", False),
     (bounded_per_step(600), "Each manager run may take 600 s.", True),
     (bounded_per_step(600), "The upgrade takes 600 s in all.", False),
     (lists_writable_and_locked_keys, "List the keys: writable_keys, each with current_value and value_schema, and locked_keys, each naming in unlocked_by the permission that opens it.", True),
@@ -757,6 +790,8 @@ CONTROLS: list[tuple[Callable[[str], bool], str, bool]] = [
     (binds_each_grant_to_its_half, "allow_config_description_write and allow_config_permissions_write gate the device keys and the permissions.", False),
     (binds_each_grant_to_its_half, "Device keys never need allow_config_description_write, permission keys never need allow_config_permissions_write.", False),
     (permission_keys_only_narrow, "Permission keys need allow_config_permissions_write and can only be narrowed.", True),
+    (permission_keys_only_narrow, "Permissions only narrow: closing allow_config_permissions_write freezes them all at once (permissions_frozen).", True),
+    (permission_keys_only_narrow, "Permissions can be widened, not only narrowed: closing allow_config_permissions_write freezes them all at once.", False),
     (permission_keys_only_narrow, "Permission keys can be widened and narrowed.", False),
     (permission_keys_only_narrow, "Permission keys can only be widened.", False),
     (permission_keys_only_narrow, "Permission keys are not only narrowed.", False),
@@ -766,19 +801,13 @@ CONTROLS: list[tuple[Callable[[str], bool], str, bool]] = [
     (names_the_refusal_without_a_grant, "allow_config_description_write gates the device description.", False),
     (closing_a_config_grant_binds_at_once, "Device keys need allow_config_description_write, permission keys allow_config_permissions_write; closing either binds at once.", True),
     (closing_a_config_grant_binds_at_once, "Closing allow_config_description_write binds on the next call.", True),
+    (closing_a_config_grant_binds_at_once, "Permissions only narrow: closing allow_config_permissions_write freezes them all at once (permissions_frozen).", True),
+    (closing_a_config_grant_binds_at_once, "Permissions only narrow: closing allow_config_permissions_write freezes them all after a restart.", False),
     (closing_a_config_grant_binds_at_once, "Closing either binds after a restart.", False),
     (closing_a_config_grant_binds_at_once, "Closing either does not bind at once.", False),
     (freezes_permissions_when_the_grant_closes, "closing allow_config_permissions_write freezes every permission (permissions_frozen).", True),
     (freezes_permissions_when_the_grant_closes, "closing allow_config_permissions_write never freezes a permission (permissions_frozen).", False),
     (freezes_permissions_when_the_grant_closes, "closing allow_config_description_write freezes every permission (permissions_frozen).", False),
-    (held_refusal("config_write_in_open_run"), "Refused while this server holds a run or session (config_write_in_open_run).", True),
-    (held_refusal("config_write_in_open_run"), "config_write_in_open_run while a session or a run is held.", True),
-    (held_refusal("config_write_in_open_run"), "config_write_in_open_run unless this server holds a run or session.", False),
-    (held_refusal("config_write_in_open_run"), "config_write_in_open_run is never caused by a held run or session.", False),
-    (held_refusal("config_write_in_open_run"), "Refused while this server holds a run (config_write_in_open_run).", False),
-    (held_refusal("config_write_in_open_run"), "Refused while this server holds a run or session; config_write_in_open_run otherwise.", False),
-    (held_refusal("config_write_in_open_run"), "Refused only while this server holds both a run and a session (config_write_in_open_run).", False),
-    (held_refusal("config_write_in_open_run"), "config_write_in_open_run while a run and a session are held.", False),
     (not_in_force_until_reread, "This server keeps its loaded configuration until it re-reads the file (reload_required).", True),
     (not_in_force_until_reread, "Until project_config_reload_description runs this server still answers out of the old description (reload_required).", True),
     (not_in_force_until_reread, "Not in force until re-read (reload_required).", True),
@@ -802,6 +831,8 @@ CONTROLS: list[tuple[Callable[[str], bool], str, bool]] = [
     (changes_are_all_or_nothing, "One or more pairs: an unknown or repeated key answers invalid_argument and the others are written.", False),
     (changes_are_all_or_nothing, "Pairs: an unknown or repeated key answers invalid_argument and nothing is written.", False),
     (key_is_listed_by_describe, "Dotted configuration key. project_config_describe lists the ones this caller may set.", True),
+    (key_is_listed_by_describe, "Call it after project_config_describe lists the keys, rather than editing the configuration file.", True),
+    (key_is_listed_by_describe, "Call it without project_config_describe listing the keys.", False),
     (key_is_listed_by_describe, "Dotted configuration key.", False),
     (key_is_listed_by_describe, "Dotted key project_config_describe never lists.", False),
     (value_is_one_scalar_matching_its_schema, "A single scalar matching the key's value_schema; objects and arrays are refused.", True),
@@ -822,10 +853,10 @@ CONTROLS: list[tuple[Callable[[str], bool], str, bool]] = [
     (unknown_state_may_reset_into_halt, "One leaving the board state unknown answers resource_quarantined and recovery may reset it into halt.", True),
     (unknown_state_may_reset_into_halt, "One leaving the board state unknown answers resource_quarantined and it is never reset into halt.", False),
     (unknown_state_may_reset_into_halt, "An unknown state answers resource_quarantined; recovery may reset it into halt.", False),
-    (reports_carried_kept_and_unavailable, "carried lists what it fills, kept what somebody set, unavailable what was not found.", True),
-    (reports_carried_kept_and_unavailable, "carried lists what somebody set, kept what it fills, unavailable what was not found.", False),
-    (reports_carried_kept_and_unavailable, "carried lists what it fills, kept what somebody set, unavailable what it found.", False),
-    (reports_carried_kept_and_unavailable, "carried lists what it never fills, kept what somebody set, unavailable what is missing.", False),
+    (fills_only_placeholders_from_what_is_attached, "Fill the configuration keys that still hold placeholders with what hardware discovery finds for the attached probe.", True),
+    (fills_only_placeholders_from_what_is_attached, "Fill every configuration key, placeholder or set, with what the attached probe reports.", False),
+    (fills_only_placeholders_from_what_is_attached, "Fill the placeholders with values you type, never from the attached probe.", False),
+    (fills_only_placeholders_from_what_is_attached, "Overwrite the keys somebody set with what the attached probe reports.", False),
     (writes_nothing_without_apply, "Writes nothing unless apply is true.", True),
     (writes_nothing_without_apply, "Fills placeholders; writes only with apply: true.", True),
     (writes_nothing_without_apply, "Writes nothing unless apply is false.", False),
@@ -853,6 +884,16 @@ CONTROLS: list[tuple[Callable[[str], bool], str, bool]] = [
         False,
     ),
     (probe_id_defaults_and_disambiguates, "Which attached probe this is about. Needed when more than one is attached; it selects among the attached probes and never adds one.", False),
+    (
+        probe_id_defaults_and_disambiguates,
+        "Serial of the attached probe to read; defaults to the configured probe_id. With neither, several attached probes answer ambiguous_hardware. Selects, never adds one.",
+        True,
+    ),
+    (
+        probe_id_defaults_and_disambiguates,
+        "Serial of the attached probe to read; defaults to the configured probe_id. With neither, several attached probes answer ambiguous_hardware. Selects, or adds one.",
+        False,
+    ),
     (
         debugger_id_names_a_configured_entry,
         "Configured debuggers entry that receives the values; needed when there are several (else invalid_argument). A name not configured answers unknown_device.",
@@ -886,11 +927,6 @@ CONTROLS: list[tuple[Callable[[str], bool], str, bool]] = [
     (follows_a_write_instead_of_a_restart, "Re-read the file after project_config_set, project_config_adopt_hardware or an edit instead of a restart.", True),
     (follows_a_write_instead_of_a_restart, "Re-read the file after a board was added, instead of asking for a restart.", False),
     (follows_a_write_instead_of_a_restart, "Restart instead of calling this after project_config_set or project_config_adopt_hardware.", False),
-    (held_refusal("config_reload_in_open_run"), "Refused while this server holds a run or session (config_reload_in_open_run) or an incident stands.", True),
-    (held_refusal("config_reload_in_open_run"), "config_reload_in_open_run never comes from a run or session this server holds.", False),
-    (held_refusal("config_reload_in_open_run"), "config_reload_in_open_run only while both a run and a session are held.", False),
-    (refuses_under_an_incident, "Refused while an incident stands (resource_quarantined).", True),
-    (refuses_under_an_incident, "resource_quarantined never comes from an incident.", False),
     (reports_what_changed, "description_changes lists what moved.", True),
     (reports_what_changed, "description_changes is always empty.", False),
     (reports_what_changed, "description_changes never lists what moved.", False),
@@ -903,8 +939,10 @@ CONTROLS: list[tuple[Callable[[str], bool], str, bool]] = [
     (needs_the_grant("allow_recover"), "Touches no hardware, needs permissions.allow_recover.", True),
     (needs_the_grant("allow_recover"), "Touches no hardware, needs no allow_recover.", False),
     (needs_the_grant("allow_recover"), "allow_recover is not needed.", False),
-    (answers_nothing_to_recover_when_none_stands, "With none standing it answers nothing_to_recover.", True),
-    (answers_nothing_to_recover_when_none_stands, "It answers nothing_to_recover while one stands.", False),
+    (called_when_the_lease_status_shows_an_incident, "Call it when hardware_lease_status shows incident_stands, rather than deleting state files.", True),
+    (called_when_the_lease_status_shows_an_incident, "Call it when hardware_lease_status shows incident_stands false.", False),
+    (called_when_the_lease_status_shows_an_incident, "Never call it when hardware_lease_status shows incident_stands.", False),
+    (called_when_the_lease_status_shows_an_incident, "Call it whatever hardware_lease_status shows.", False),
     (
         no_contact_clears_alone_and_physical_needs_a_statement,
         "A reason naming no hardware contact clears with no argument; any other answers recovery_requires_physical_check: ask the operator in chat and pass their answer verbatim as operator_statement.",
@@ -925,10 +963,6 @@ CONTROLS: list[tuple[Callable[[str], bool], str, bool]] = [
         "A reason naming no hardware contact needs no argument; any other needs operator_statement: ask the operator in chat and pass their answer verbatim.",
         False,
     ),
-    (failure_keeps_it_standing_and_persist_resumes, "Failure keeps it standing; recovery_persist_failed resumes on retry.", True),
-    (failure_keeps_it_standing_and_persist_resumes, "Failure clears it anyway; recovery_persist_failed resumes on retry.", False),
-    (failure_keeps_it_standing_and_persist_resumes, "Failure keeps it standing; recovery_persist_failed never resumes on retry.", False),
-    (failure_keeps_it_standing_and_persist_resumes, "Failure keeps it standing.", False),
     (audit_broken_clears_only_by_the_operator_command, "No statement clears an audit_broken reason: only its operator_command does.", True),
     (audit_broken_clears_only_by_the_operator_command, "A statement clears an audit_broken reason, as its operator_command does.", False),
     (audit_broken_clears_only_by_the_operator_command, "No statement clears an audit_broken reason.", False),
@@ -945,15 +979,15 @@ CONTROLS: list[tuple[Callable[[str], bool], str, bool]] = [
     (upgrades_with_the_manager_that_installed_it, "Upgrade to the newest release, not with the uv, pipx or pip that installed it.", False),
     (takes_no_arguments, "Takes no arguments, never a version you name.", True),
     (takes_no_arguments, "no arguments, needs permissions.allow_upgrade.", True),
+    (takes_no_arguments, "Use it when the operator asks; it takes no arguments and needs allow_upgrade.", True),
     (takes_no_arguments, "Takes a version you name.", False),
     (takes_no_arguments, "Takes no arguments except a version.", False),
     (needs_the_grant("allow_upgrade"), "Needs permissions.allow_upgrade.", True),
     (needs_the_grant("allow_upgrade"), "Needs no allow_upgrade.", False),
     (windows_is_the_operators_command, "Windows answers upgrade_cli_only_on_host: the operator runs agentic-hil upgrade.", True),
+    (windows_is_the_operators_command, "On Windows, ask the operator to run agentic-hil upgrade (upgrade_cli_only_on_host).", True),
     (windows_is_the_operators_command, "On Windows you run agentic-hil upgrade yourself (upgrade_cli_only_on_host).", False),
     (windows_is_the_operators_command, "Windows upgrades in place.", False),
-    (held_refusal("upgrade_in_open_run"), "upgrade_in_open_run while a run or session holds the bench.", True),
-    (held_refusal("upgrade_in_open_run"), "upgrade_in_open_run even without a run or session holding the bench.", False),
     (keeps_running_the_old_release_until_restart, "running_version stays old until restart.", True),
     (keeps_running_the_old_release_until_restart, "running_version remains unchanged until this server restarts.", True),
     (keeps_running_the_old_release_until_restart, "running_version moves to the new release at once.", False),
@@ -962,6 +996,35 @@ CONTROLS: list[tuple[Callable[[str], bool], str, bool]] = [
     (failure_hands_reinstall_command_to_the_operator, "On failure the operator runs any reinstall_command.", True),
     (failure_hands_reinstall_command_to_the_operator, "On failure never run reinstall_command.", False),
     (failure_hands_reinstall_command_to_the_operator, "On failure you run reinstall_command yourself.", False),
+    (
+        arises_while_a_run_or_session_is_held,
+        "A configuration write was attempted while this server holds hardware: a declared run, an open COM or CAN session, or a debug session.",
+        True,
+    ),
+    (arises_while_a_run_or_session_is_held, "Refused while a session or a run is held.", True),
+    (arises_while_a_run_or_session_is_held, "A configuration write was attempted while this server holds no run or session.", False),
+    (arises_while_a_run_or_session_is_held, "Refused only while this server holds both a run and a session.", False),
+    (arises_while_a_run_or_session_is_held, "Refused while this server holds a declared run and an open COM or CAN session.", False),
+    (arises_while_a_run_or_session_is_held, "Refused while this server holds a declared run.", False),
+    (arises_while_a_run_or_session_is_held, "Refused while this server holds a run or session, except a debug session.", False),
+    (held_by_an_incident, "A hardware resource is held by an unresolved incident, so nothing was touched.", True),
+    (held_by_an_incident, "Refused while an incident stands.", True),
+    (held_by_an_incident, "A hardware resource is held by another owner, so nothing was touched.", False),
+    (held_by_an_incident, "A hardware resource is not held by any incident.", False),
+    (held_by_an_incident, "No incident holds the resource.", False),
+    (the_quarantine_still_stands, "The ledger line is written before any marker is released, so nothing was cleared: the quarantine stands under the same quarantine_id.", True),
+    (the_quarantine_still_stands, "The recovery is in the ledger, but not every marker it releases could be written, so the quarantine stands.", True),
+    (the_quarantine_still_stands, "The recovery could not be written, so the quarantine no longer stands.", False),
+    (the_quarantine_still_stands, "The recovery could not be written, so the quarantine was cleared.", False),
+    (the_quarantine_still_stands, "The next hardware call stands the incident down.", False),
+    (
+        a_rerun_resumes,
+        "Fix the cause, then run the recovery again; the retry is safe. A project left recovery_pending resumes from there, and the rerun's ledger line says resumed.",
+        True,
+    ),
+    (a_rerun_resumes, "Fix the cause, then run the recovery again. A project left recovery_pending starts over, and the rerun's ledger line says fresh.", False),
+    (a_rerun_resumes, "A project left recovery_pending never resumes, whatever the rerun does.", False),
+    (a_rerun_resumes, "A project left `recovery_pending` starts over, and the rerun's ledger line says `resumed`.", False),
 ]
 
 
@@ -971,19 +1034,21 @@ def test_each_check_accepts_the_claim_and_rejects_its_inversion(check: Callable[
 
 
 # A set definition inside the budget that keeps every keyword and inverts two
-# claims an agent acts on: which grant a write needs, and which hold refuses it.
+# claims an agent acts on: which grant a write needs, and that permissions only
+# ever narrow.
 MISLEADING_SET = (
-    "Change named keys instead of editing the configuration file. Device keys never need allow_config_description_write, "
-    "permission keys never need allow_config_permissions_write and can only be narrowed, else permission_denied; closing either "
-    "binds at once. Refused only while this server holds both a run and a session (config_write_in_open_run)."
+    "Write values you choose to named keys of the configuration file. Call it after project_config_describe lists the keys, "
+    "rather than editing the configuration file. Device keys need allow_config_permissions_write, permission keys "
+    "allow_config_description_write, else permission_denied. Permissions also widen: closing allow_config_permissions_write "
+    "freezes them all at once (permissions_frozen)."
 )
 
 
-def test_a_set_definition_that_inverts_the_grants_and_the_hold_fails_its_checks() -> None:
+def test_a_set_definition_that_inverts_the_grants_and_the_narrowing_fails_its_checks() -> None:
     assert len(MISLEADING_SET) <= DESCRIPTION_LIMIT
-    assert unmet(MISLEADING_SET, binds_each_grant_to_its_half, held_refusal("config_write_in_open_run")) == [
+    assert unmet(MISLEADING_SET, binds_each_grant_to_its_half, permission_keys_only_narrow) == [
         "binds_each_grant_to_its_half",
-        "held_refusal(config_write_in_open_run)",
+        "permission_keys_only_narrow",
     ], MISLEADING_SET
 
 
@@ -1095,12 +1160,12 @@ def test_project_config_set_says_which_grant_opens_what_and_when_a_write_is_in_f
     text = description(tool)
     assert unmet(
         text,
+        key_is_listed_by_describe,
         binds_each_grant_to_its_half,
         permission_keys_only_narrow,
         names_the_refusal_without_a_grant,
         closing_a_config_grant_binds_at_once,
         freezes_permissions_when_the_grant_closes,
-        held_refusal("config_write_in_open_run"),
     ) == [], text
     assert unmet(property_text(tool, "/changes"), changes_are_all_or_nothing) == [], property_text(tool, "/changes")
     key = property_text(tool, "/changes/items/key")
@@ -1114,16 +1179,14 @@ def test_project_config_adopt_hardware_says_what_it_reads_fills_keeps_and_refuse
     text = description(tool)
     assert unmet(
         text,
+        fills_only_placeholders_from_what_is_attached,
         no_flash_or_erase_and_no_reset_claim,
-        reports_carried_kept_and_unavailable,
         writes_nothing_without_apply,
-        bounded_per_step(10),
         unknown_state_may_reset_into_halt,
-        held_refusal("config_write_in_open_run"),
     ) == [], text
     assert unmet(definition_text(tool), tells_to_reload_after_writing, no_flash_or_erase_and_no_reset_claim) == [], definition_text(tool)
     assert unmet(property_text(tool, "/apply"), apply_writes_through_project_config_set, nothing_carried_answers_applied_false) == [], property_text(tool, "/apply")
-    assert unmet(property_text(tool, "/probe_id"), probe_id_defaults_and_disambiguates) == [], property_text(tool, "/probe_id")
+    assert unmet(property_text(tool, "/probe_id"), probe_id_defaults_and_disambiguates, bounded_per_step(10)) == [], property_text(tool, "/probe_id")
     assert unmet(property_text(tool, "/debugger_id"), debugger_id_names_a_configured_entry, refuses_another_board) == [], property_text(tool, "/debugger_id")
     com_port = property_text(tool, "/com_port_id")
     assert unmet(com_port, com_port_default_chain, created_with_every_permission_false, several_unnamed_ports_answer_unavailable) == [], com_port
@@ -1139,8 +1202,6 @@ def test_project_config_reload_description_says_what_it_takes_what_it_never_take
         never_takes_permissions_or_debug,
         new_devices_arrive_granted_nothing,
         changed_permissions_need_a_restart,
-        held_refusal("config_reload_in_open_run"),
-        refuses_under_an_incident,
     ) == [], text
 
 
@@ -1150,11 +1211,10 @@ def test_hardware_recover_says_what_it_clears_what_it_needs_and_whose_words_a_st
     assert unmet(
         text,
         clears_the_standing_quarantine,
+        called_when_the_lease_status_shows_an_incident,
         touches_no_hardware,
         needs_the_grant("allow_recover"),
-        answers_nothing_to_recover_when_none_stands,
         no_contact_clears_alone_and_physical_needs_a_statement,
-        failure_keeps_it_standing_and_persist_resumes,
     ) == [], text
     assert unmet(definition_text(tool), audit_broken_clears_only_by_the_operator_command) == [], definition_text(tool)
     assert unmet(property_text(tool, "/operator_statement"), operator_statement_is_the_operators_words) == [], property_text(tool, "/operator_statement")
@@ -1169,11 +1229,46 @@ def test_server_upgrade_says_what_it_runs_what_it_needs_and_what_this_server_kee
         takes_no_arguments,
         needs_the_grant("allow_upgrade"),
         windows_is_the_operators_command,
-        held_refusal("upgrade_in_open_run"),
         bounded_per_step(600),
         keeps_running_the_old_release_until_restart,
         failure_hands_reinstall_command_to_the_operator,
     ) == [], text
+
+
+def catalogue_entry_served(workspace: Path, error_type: str) -> dict:
+    """The entry `resources/read` serves for `error_type`, the one a refusal's catalogue link resolves to."""
+    uri = ERROR_URI_PREFIX + error_type
+    service = new_service(workspace)
+    try:
+        response = handle_mcp_message({"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": uri}}, service)
+    finally:
+        close(service)
+    assert isinstance(response, dict) and "error" not in response, response
+    contents = response["result"]["contents"]
+    assert [content["uri"] for content in contents] == [uri], contents
+    return json.loads(contents[0]["text"])
+
+
+# The refusals the definitions name no longer, and the entry an agent reads for
+# each: set and adoption refused under a hold (config_write_in_open_run), the
+# reload under a hold or an incident, the upgrade under a hold, and a recovery
+# that could not be written down or could not release every marker.
+CATALOGUE_CLAIMS: list[tuple[str, str, Callable[[str], bool]]] = [
+    ("config_write_in_open_run", "meaning", arises_while_a_run_or_session_is_held),
+    ("config_reload_in_open_run", "meaning", arises_while_a_run_or_session_is_held),
+    ("upgrade_in_open_run", "meaning", arises_while_a_run_or_session_is_held),
+    ("resource_quarantined", "meaning", held_by_an_incident),
+    ("recovery_audit_failed", "meaning", the_quarantine_still_stands),
+    ("recovery_persist_failed", "meaning", the_quarantine_still_stands),
+    ("recovery_persist_failed", "remediation", a_rerun_resumes),
+]
+
+
+@pytest.mark.parametrize(("error_type", "field", "check"), CATALOGUE_CLAIMS, ids=[f"{error_type}-{field}" for error_type, field, _ in CATALOGUE_CLAIMS])
+def test_the_catalogue_says_what_the_definitions_leave_to_it(tmp_path: Path, error_type: str, field: str, check: Callable[[str], bool]) -> None:
+    value = catalogue_entry_served(tmp_path / "catalogue", error_type)[field]
+    text = " ".join(value) if isinstance(value, list) else str(value)
+    assert check(text), (error_type, field, text)
 
 
 # ---------------------------------------------------------------------------
@@ -1842,6 +1937,14 @@ def recover_service(config: Any) -> AgenticHILToolService:
     return AgenticHILToolService(config, frontend="mcp")
 
 
+def lease_status(service: AgenticHILToolService) -> dict:
+    """hardware_lease_status through `tools/call`. A standing incident flags it
+    isError, so it is read as it is answered rather than through `call`."""
+    response = handle_mcp_message(tools_call(1, "hardware_lease_status", {}), service)
+    assert isinstance(response, dict) and "result" in response, response
+    return response["result"]["structuredContent"]
+
+
 def test_recover_with_nothing_standing_answers_nothing_to_recover_without_the_grant(tmp_path: Path, no_hardware: None) -> None:
     config = config_for(tmp_path, allow_recover=False)
     service = recover_service(config)
@@ -1870,15 +1973,20 @@ def test_recover_without_the_grant_answers_permission_denied(tmp_path: Path, no_
 
 
 def test_a_no_contact_reason_clears_with_no_argument_and_touches_no_hardware(tmp_path: Path, no_hardware: None) -> None:
+    """hardware_lease_status shows the incident standing, the recovery clears it, and the status shows it gone."""
     config = config_for(tmp_path)
     incident = standing_incident(config, LEASE_RELEASE_RETRY_REASON)
     service = recover_service(config)
     try:
+        before = lease_status(service)
         cleared = call(service, RECOVER, {})
+        after = lease_status(service)
         again = call(service, RECOVER, {})
     finally:
         close(service)
 
+    assert before["incident_stands"] is True, before
+    assert after["incident_stands"] is False, after
     assert cleared["ok"] is True, cleared
     assert cleared["recovered_quarantine_id"] == incident
     assert cleared["resumed"] is False, cleared

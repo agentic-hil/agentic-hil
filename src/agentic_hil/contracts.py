@@ -285,10 +285,10 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "hardware_recover",
         "description": (
-            "Clear a standing quarantine instead of deleting state files; touches no hardware, needs "
-            "permissions.allow_recover; none standing: nothing_to_recover. A no-contact reason clears with no argument; "
-            "others answer recovery_requires_physical_check: ask the operator, pass their answer verbatim as "
-            "operator_statement, never invent one. Failure keeps it standing; recovery_persist_failed resumes on retry."
+            "Clear the standing quarantine that blocks hardware calls. Call it when hardware_lease_status shows "
+            "incident_stands, rather than deleting state files. It needs allow_recover and touches no hardware. A "
+            "no-contact reason clears with no argument. Any other reason answers recovery_requires_physical_check: ask "
+            "the operator, pass their answer verbatim as operator_statement, never invent one."
         ),
         "inputSchema": object_schema(
             {
@@ -350,10 +350,10 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "project_config_set",
         "description": (
-            "Change named keys instead of editing the configuration file. Device keys need "
-            "permissions.allow_config_description_write, permission keys allow_config_permissions_write and can only be "
-            "narrowed, else permission_denied; closing either binds at once, closing allow_config_permissions_write "
-            "freezes every permission (permissions_frozen). config_write_in_open_run while a run or session is held."
+            "Write values you choose to named keys of the configuration file. Call it after project_config_describe "
+            "lists the keys, rather than editing the configuration file. Device keys need allow_config_description_write, "
+            "permission keys allow_config_permissions_write, else permission_denied. Permissions only narrow: closing "
+            "allow_config_permissions_write freezes them all at once (permissions_frozen)."
         ),
         "inputSchema": object_schema(
             {
@@ -385,15 +385,15 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "project_config_adopt_hardware",
         "description": (
-            "Fill hardware placeholders from the attached probe rather than values to retype; writes only with apply "
-            "true. No flash or erase: carried lists what it fills, kept what somebody set, unavailable what is missing. "
-            "Each read step may take 10 s; one leaving the board state unknown answers resource_quarantined and "
-            "recovery may reset it into halt. config_write_in_open_run while a run or session is held."
+            "Fill the configuration keys that still hold placeholders with what hardware discovery finds for the "
+            "attached probe. Call it once a board is attached, so nobody has to retype its serial; project_config_set sets "
+            "values you choose. It writes only when apply is true and never flashes or erases. A read that leaves the "
+            "board state unknown may get it reset into halt by recovery (resource_quarantined)."
         ),
         "inputSchema": object_schema(
             {
                 "apply": {"type": "boolean", "default": False, "description": "Default false writes nothing. true writes carried via project_config_set (allow_config_description_write, else permission_denied), then call project_config_reload_description; none: applied false."},
-                "probe_id": {**NONEMPTY_STRING, "description": "Serial of the attached probe to read; defaults to the entry's configured probe_id. Without either, several attached probes answer ambiguous_hardware. Selects among attached probes, never adds one."},
+                "probe_id": {**NONEMPTY_STRING, "description": "Serial of the attached probe to read, each read step taking up to 10 s; defaults to the configured probe_id. With neither, several attached probes answer ambiguous_hardware. Selects, never adds one."},
                 "debugger_id": {**NONEMPTY_STRING, "description": "Configured debuggers entry that receives the values; needed when there are several (else invalid_argument). Not configured: unknown_device. An entry naming another probe: hardware_mismatch."},
                 "com_port_id": {**NONEMPTY_STRING, "description": "com_ports entry for the discovered device; default: the one naming it, else the only one, else a new dut_uart, created with every permission false. Several, none named: unavailable."},
             }
@@ -407,10 +407,10 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "project_config_reload_description",
         "description": (
-            "Re-read target, debuggers, com_ports and can_buses after project_config_set, project_config_adopt_hardware "
-            "or an edit instead of a restart; description_changes lists what moved. Never permissions or debug: new "
-            "devices get all false, changed grants need a restart (restart_required_for). config_reload_in_open_run "
-            "while a run or session is held, resource_quarantined while an incident stands."
+            "Re-read target, debuggers, com_ports and can_buses from this workspace's configuration into the running "
+            "server, never permissions or debug. Call it after project_config_set, project_config_adopt_hardware or a "
+            "hand edit, rather than a restart. New devices get every permission false; changed grants need a restart "
+            "(restart_required_for). description_changes lists what moved."
         ),
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
@@ -426,10 +426,10 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "server_upgrade",
         "description": (
-            "Upgrade to the newest release with the uv, pipx or pip that installed this copy; no arguments, needs "
-            "permissions.allow_upgrade. On Windows (upgrade_cli_only_on_host) the operator runs agentic-hil upgrade. "
-            "upgrade_in_open_run while a run or session is held. Each manager run may take 600 s. running_version stays "
-            "old until restart. On failure the operator runs any reinstall_command."
+            "Upgrade this installation to the newest release with the uv, pipx or pip that installed it. Use it when the "
+            "operator asks; it takes no arguments and needs allow_upgrade. Each manager run may take 600 s. "
+            "running_version stays old until this server restarts. On Windows, ask the operator to run agentic-hil "
+            "upgrade (upgrade_cli_only_on_host). On failure the operator runs any reinstall_command."
         ),
         "inputSchema": EMPTY_OBJECT_SCHEMA,
     },
