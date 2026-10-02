@@ -454,12 +454,14 @@ def test_stop_says_what_it_closes_and_what_stays_held(listed: dict[str, dict]) -
     broker stops after the last (canbroker.py:962-975). The session's lease is
     released (can.py:712-715), but inside a declared run the run keeps the bus
     (coordination.py:1170-1173). can_send and can_read then answer
-    `session_not_active` (can.py:909-922)."""
+    `session_not_active` (can.py:909-922). That only the named participant
+    detaches is the `participant` property's claim."""
     text = listed[STOP]["description"]
 
     assert START in text, text
     assert stated(text, r"\badapter\b", r"\b(leaves|closes|closed|shut)\b"), text
-    assert other_participants_stay(text), text
+    participant = property_text(listed[STOP], "participant")
+    assert other_participants_stay(participant), participant
     assert lease_is_released(text), text
     assert a_declared_run_keeps_the_bus(text), text
     for sibling in ("can_send", "can_read"):

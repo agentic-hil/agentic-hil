@@ -292,13 +292,16 @@ SESSION_ENDED = r"\b(ends?|closes?|terminates?|tears? down)\b[^.;,]{0,25}\bsessi
 
 
 def halt_keeps_the_session_open(description: str) -> bool:
-    """The session stays open after a halt; `debug_stop_session` is what ends
-    it (gdbdebug.py `halt` leaves `session.status` halted)."""
+    """The session stays open after a halt (gdbdebug.py `halt` leaves
+    `session.status` halted); if the halt names `debug_stop_session`, it is
+    what ends it, and nothing else is said to end the session. That
+    `debug_stop_session` ends it is that tool's own claim
+    (test_tool_definition_debug_sessions)."""
     units = clauses(description)
     kept = [clause for clause in units if re.search(r"\bsession\b", clause) and re.search(KEPT_OPEN, clause, re.IGNORECASE) and not re.search(r"\b(not|never|no longer)\b", clause)]
     ending = containing(units, rf"\b{STOP}\b")
     claims_end = [clause for clause in units if STOP not in clause and re.search(SESSION_ENDED, clause, re.IGNORECASE)]
-    return bool(kept) and bool(ending) and all(asserted(ENDS.pattern, clause) for clause in ending) and not claims_end
+    return bool(kept) and all(asserted(ENDS.pattern, clause) for clause in ending) and not claims_end
 
 
 def needs_no_execution_grant_if_named(text: str) -> bool:
@@ -526,11 +529,15 @@ SET_REFUSALS = {
 
 
 def set_names_its_refusals(description: str) -> bool:
-    """Each refusal is named next to what it is about, and none of them is
-    denied or paired with `ok` true."""
+    """The grant refusal is named next to the grant; every other refusal the
+    definition names is named next to what it is about too, and none of them
+    is denied or paired with `ok` true. The location rules are the `location`
+    property's claims, and the catalogue carries what each code means."""
+    if not containing(pieces(description), r"\bpermission_denied\b"):
+        return False
     for error_type, about in SET_REFUSALS.items():
         found = containing(pieces(description), rf"\b{error_type}\b")
-        if not found or not all(re.search(about, piece) for piece in found):
+        if not all(re.search(about, piece) for piece in found):
             return False
         if re.search(DENIED_BEFORE + error_type, description, re.IGNORECASE) or any(re.search(r"\bok\W{0,3}true\b", piece) for piece in found):
             return False
@@ -740,8 +747,13 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
     ),
     (
         halt_keeps_the_session_open,
-        ["Stops the core; the session stays open; debug_stop_session ends it.", "Halts the core and keeps the session open; debug_stop_session closes it."],
         [
+            "Stops the core; the session stays open; debug_stop_session ends it.",
+            "Halts the core and keeps the session open; debug_stop_session closes it.",
+            "Halts the core in the session, which stays open.",
+        ],
+        [
+            "Halts the core in the session, which stays open; the next call ends the session.",
             "Stops the core and ends the session.",
             "Stops the core; the session stays open; debug_stop_session keeps it.",
             "Stops the core; the session does not stay open; debug_stop_session ends it.",
@@ -854,10 +866,11 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
     ),
     (
         set_names_its_refusals,
-        ["Refused: permission_denied (grant), invalid_argument (location), debugger_error (GDB)."],
+        ["Refused: permission_denied (grant), invalid_argument (location), debugger_error (GDB).", "A location without a grant answers permission_denied."],
         [
             "Refused: permission_denied (location), invalid_argument (grant), debugger_error (GDB).",
-            "Refused: permission_denied (grant), invalid_argument (location).",
+            "Refused: invalid_argument (location), debugger_error (GDB).",
+            "A location without a grant answers permission_denied, invalid_argument (grant).",
             "Never permission_denied (grant), invalid_argument (location), debugger_error (GDB).",
             "Refused: permission_denied (grant), invalid_argument (location), debugger_error (GDB) with ok true.",
         ],
