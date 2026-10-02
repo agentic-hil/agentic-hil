@@ -8,16 +8,24 @@ standing fix.
 
 The fix a refusal needs can turn on the backend that answered it, and the
 catalogue already says so with keys of the form `<error_type>:<backend>`. So
-the inventory here is a set of pairs, the error type and the backend whose
-remediation a refusal of that type is looked up under, and an entry is the
-scoped key where there is one and the bare key otherwise.
+the inventory here is a set of pairs, the error type and the scope its
+remediation is looked up under, and an entry is the scoped key where there is
+one and the bare key otherwise. The scope is read off the source as well: a
+site that merges `remediation_fields(<type>, <scope>)` itself is looked up
+under that scope, and every other refusal a debugger-backed tool returns is
+filled where the result leaves the tool service, under the backend the result
+names.
 
-Three things are held here. The inventory is read off the source, so a refusal
+Five things are held here. The inventory is read off the source, so a refusal
 added later without an entry fails the guard, and it is pinned as well, so the
-scan cannot shrink unnoticed. Every pair in it resolves at its URI. And every
-tool path, driven through the tool service against the suite's fake debugger,
-fake GDB and recorded transcripts, hands the entry's steps out in the refusal
-itself. No probe, board or debugger process is touched.
+scan cannot shrink unnoticed; planted refusals prove the scan reads each shape
+it claims to. Every pair in it resolves at its URI, and the bare entries other
+producers fall back to resolve at their own. Each entry written here says what
+its producers' code makes true, clause by clause. The service fills a refusal
+that carries no advice of its own, and leaves alone what it must not touch.
+And every tool path, driven through the tool service against the suite's fake
+debugger, fake GDB and recorded transcripts, hands the entry's steps out in
+the refusal itself. No probe, board or debugger process is touched.
 """
 
 from __future__ import annotations
@@ -25,14 +33,14 @@ from __future__ import annotations
 import ast
 import json
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 
 import pytest
-from conftest import FAKE_OPENOCD, FAKE_OPENOCD_ACCESS_DENIED, write_config
+from conftest import DEFAULT_TEST_PERMISSIONS, FAKE_OPENOCD, FAKE_OPENOCD_ACCESS_DENIED, write_config
 from test_debug_backend_refusals import (
     FAKE_BY_TYPE,
     FAKE_PYOCD_RESET_REFUSED,
@@ -59,35 +67,34 @@ from agentic_hil import debugger, elfsymbols, gdbmi, tools
 from agentic_hil.backends import common, gdbdebug, openocd, pyocd, stlink
 from agentic_hil.config import load_config
 from agentic_hil.gdbmi import GdbMiCommandResult
-from agentic_hil.knowledge import ERROR_CATALOGUE, ERROR_URI_PREFIX, catalogue_entry, lookup_remedy, remediation_fields
+from agentic_hil.knowledge import (
+    ERROR_CATALOGUE,
+    ERROR_URI_PREFIX,
+    EXCLUSIVE_PERMISSION_SCOPE,
+    ErrorRemedy,
+    catalogue_entry,
+    lookup_remedy,
+    remediation_fields,
+)
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.tools import AgenticHILToolService
 
 BACKENDS = ("openocd", "pyocd", "stlink")
+Pair = tuple[str, str | None]
 
 # ---------------------------------------------------------------------------
 # Where the debug refusals are built, and whose remediation each one is.
 
-# Each backend module answers under its own name; that is the scope
-# `_failure_result` and every other merge in it passes.
+# Each backend module answers under its own name: that is the `backend` its
+# results carry, and the scope the service fills a refusal under.
 BACKEND_MODULES: dict[str, ModuleType] = {"openocd": openocd, "pyocd": pyocd, "stlink": stlink}
-
-# Overrides inside a backend module: the site merges under a scope of its own.
-SITE_SCOPES: dict[tuple[str, str], tuple[str, ...]] = {
-    ("openocd.py", "_probe_selection_refusal"): ("openocd_probe_selection",),
-}
 
 # `GdbDebugSessions` runs the typed debug sessions, and only the OpenOCD backend
 # constructs it (pinned below), so every refusal its methods build is an
-# OpenOCD refusal. The module's own functions are shared, and named one by one.
+# OpenOCD refusal. The module's own functions are shared, and named one by one
+# with the backends whose calls reach them (also pinned below).
 GDBDEBUG_SESSION_CLASS = "GdbDebugSessions"
 GDBDEBUG_FUNCTION_SCOPES: dict[str, tuple[str, ...]] = {
-    # A missing GDB, met by the OpenOCD session start and by the offline symbol
-    # read of the two sessionless backends alike. Each of the three merges
-    # under a scope of its own, the GDB's state, not the backend's.
-    "configured_gdb_missing": (None,),
-    "no_gdb_on_this_bench": (gdbdebug.GDB_NOT_CONFIGURED_SCOPE,),
-    "autodetected_gdb_missing": (gdbdebug.GDB_AUTODETECTED_MISSING_SCOPE,),
     # The offline symbol read of the backends without a typed session.
     "validate_debug_symbol": ("pyocd", "stlink"),
     "resolve_symbol_offline": ("pyocd", "stlink"),
@@ -97,22 +104,16 @@ GDBDEBUG_FUNCTION_SCOPES: dict[str, tuple[str, ...]] = {
     # Only the typed sessions report where their target stopped.
     "target_stop_fields": ("openocd",),
 }
+# Refusal builders in common.py that take the calling backend's name and
+# answer under it.
 COMMON_FUNCTION_SCOPES: dict[str, tuple[str, ...]] = {
     "debug_session_unsupported": ("pyocd", "stlink"),
     "reset_init_unsupported": ("pyocd", "stlink"),
-    "not_executable_refusal": BACKENDS,
 }
 
 # The debug paths of the tool service. Each answers before any backend is
-# asked, so nothing scopes it: the bare key is the one a refusal of theirs is
-# served by. `flash_firmware`'s own argument checks are the flash path's.
-# Two of them refuse with `not_supported` for a reason that is neither
-# backend's, a probe the call cannot be routed to, and are named a scope of
-# their own, so the catalogue can say what fixes each.
-TOOLS_SITE_SCOPES: dict[str, tuple[str, ...]] = {
-    "unbound_debugger_error": ("unbound_debugger",),
-    "unnamed_probe_error": ("unnamed_probe",),
-}
+# asked, and its refusal names no backend, so the bare key is the one a
+# refusal of theirs is served by.
 TOOLS_DEBUG_FUNCTIONS = frozenset(
     {
         "debugger_info",
@@ -132,10 +133,32 @@ TOOLS_DEBUG_FUNCTIONS = frozenset(
         "debug_symbol_value",
         "debug_dump_symbol_ihex",
         "_coordinated_debug_call",
+        "_debug_permission_failure",
         "unbound_debugger_error",
         "unnamed_probe_error",
     }
 )
+# Every other function of the tool service that writes an error type, with the
+# change whose area it is. A function in neither set fails the scan: a new
+# helper is classified once, by whoever adds it, instead of passing unread.
+TOOLS_OTHER_AREAS: dict[str, str] = {
+    **dict.fromkeys(
+        (
+            "call",
+            "_call_unlocked",
+            "_dispatch_tool",
+            "tool_error",
+            "_flash_capturing",
+            "flash_firmware",
+            "_config_write_denied",
+            "_create_in_open_run_refusal",
+            "unprovisioned_tool_error",
+        ),
+        "#645: the dispatcher, flash, artifacts and configuration writes",
+    ),
+    "_capture_result": "#635: the COM capture a flash opens",
+    **dict.fromkeys(("hardware_recover", "test_reactor_run", "_lock_cleanup_refusal"), "#646: runs, coordination and recovery"),
+}
 
 # Expressions the scan cannot evaluate from the source alone, each pinned by
 # its exact text where it stands, with the values it can take and why. A
@@ -202,9 +225,10 @@ class Source:
     functions: dict[str, list[ast.FunctionDef]] = field(default_factory=dict)
 
     @classmethod
-    def of(cls, module: ModuleType) -> Source:
+    def of(cls, module: ModuleType, text: str | None = None) -> Source:
+        """`module`'s source, or `text` read as if it were that module's."""
         path = Path(str(module.__file__))
-        source = cls(module, path.name, ast.parse(path.read_text(encoding="utf-8")))
+        source = cls(module, path.name, ast.parse(path.read_text(encoding="utf-8") if text is None else text))
         for node in ast.walk(source.tree):
             for child in ast.iter_child_nodes(node):
                 source.parents[child] = node
@@ -238,7 +262,7 @@ class Scope:
 
     source: Source
     function: ast.FunctionDef | None
-    bindings: tuple[tuple[str, frozenset[str]], ...] = ()
+    bindings: tuple[tuple[str, frozenset[str | None]], ...] = ()
 
     def __hash__(self) -> int:
         return hash((self.source.name, id(self.function), self.bindings))
@@ -294,19 +318,24 @@ def _argument(call: ast.Call, function: ast.FunctionDef, parameter: str) -> ast.
 
 
 class Reader:
-    """Evaluates an `error_type` expression to every string it can take."""
+    """Evaluates an `error_type` expression to every string it can take.
 
-    def __init__(self) -> None:
+    With `keep_none` a literal None is one of the values, which is what a scope
+    argument means by it: the bare key.
+    """
+
+    def __init__(self, *, keep_none: bool = False) -> None:
         self._active: set[tuple[str, int, str]] = set()
+        self._keep_none = keep_none
 
-    def values(self, node: ast.expr, scope: Scope) -> frozenset[str]:
+    def values(self, node: ast.expr, scope: Scope) -> frozenset[str | None]:
         if scope.function is not None:
             pinned = PINNED_EXPRESSIONS.get((scope.source.name, scope.function.name, ast.unparse(node)))
             if pinned is not None:
-                return pinned()
+                return frozenset(pinned())
         if isinstance(node, ast.Constant):
             if node.value is None:
-                return frozenset()
+                return frozenset({None}) if self._keep_none else frozenset()
             if isinstance(node.value, str):
                 return frozenset({node.value})
         elif isinstance(node, ast.IfExp):
@@ -319,7 +348,7 @@ class Reader:
             return self._call(node, scope)
         raise UnreadableValue(f"{scope.source.name}:{node.lineno}: {ast.unparse(node)}")
 
-    def _name(self, name: str, scope: Scope) -> frozenset[str]:
+    def _name(self, name: str, scope: Scope) -> frozenset[str | None]:
         bound = dict(scope.bindings)
         if name in bound:
             return bound[name]
@@ -334,7 +363,7 @@ class Reader:
             return frozenset({named})
         raise UnreadableValue(f"{scope.source.name}: {name}")
 
-    def _parameter(self, name: str, scope: Scope) -> frozenset[str]:
+    def _parameter(self, name: str, scope: Scope) -> frozenset[str | None]:
         """A parameter no call-site binding fixes: what every caller in the module passes."""
         assert scope.function is not None
         key = (scope.source.name, scope.function.lineno, name)
@@ -342,7 +371,7 @@ class Reader:
             return frozenset()
         self._active.add(key)
         try:
-            values: frozenset[str] = frozenset()
+            values: frozenset[str | None] = frozenset()
             calls = _calls_to(scope.source, scope.function.name)
             if not calls:
                 raise UnreadableValue(f"{scope.source.name}:{scope.function.name}: parameter {name} has no caller in the module")
@@ -355,7 +384,7 @@ class Reader:
         finally:
             self._active.discard(key)
 
-    def _call(self, node: ast.Call, scope: Scope) -> frozenset[str]:
+    def _call(self, node: ast.Call, scope: Scope) -> frozenset[str | None]:
         func = node.func
         # `{...}.get(key, default)`: any value of the literal, or the default.
         if isinstance(func, ast.Attribute) and func.attr == "get" and isinstance(func.value, ast.Dict):
@@ -388,14 +417,14 @@ class Reader:
                 continue
         return self._returns(scope.source, function, tuple(bindings))
 
-    def _returns(self, source: Source, function: ast.FunctionDef, bindings: tuple[tuple[str, frozenset[str]], ...]) -> frozenset[str]:
+    def _returns(self, source: Source, function: ast.FunctionDef, bindings: tuple[tuple[str, frozenset[str | None]], ...]) -> frozenset[str | None]:
         key = (source.name, function.lineno, "<return>")
         if key in self._active:
             return frozenset()
         self._active.add(key)
         try:
             callee = Scope(source, function, bindings)
-            values: frozenset[str] = frozenset()
+            values: frozenset[str | None] = frozenset()
             for node in ast.walk(function):
                 if isinstance(node, ast.Return) and node.value is not None:
                     values |= self.values(node.value, callee)
@@ -411,31 +440,100 @@ class Reader:
 ERROR_TYPE_FIELDS = frozenset({"error_type", "target_error_type"})
 
 
+def _names_an_error_type_field(target: ast.expr) -> bool:
+    return isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant) and target.slice.value in ERROR_TYPE_FIELDS
+
+
+def _is_tool_error_call(node: ast.Call) -> bool:
+    return isinstance(node.func, ast.Name) and node.func.id == "tool_error" and len(node.args) > 1
+
+
+def _is_error_type_setdefault(node: ast.Call) -> bool:
+    return isinstance(node.func, ast.Attribute) and node.func.attr == "setdefault" and len(node.args) == 2 and isinstance(node.args[0], ast.Constant) and node.args[0].value in ERROR_TYPE_FIELDS
+
+
 def error_type_expressions(source: Source) -> Iterator[ast.expr]:
     """Every expression `source` writes as an error type: a dict value, a keyword,
-    a subscript assignment, and the error type `tool_error` is called with."""
+    a subscript assignment with or without an annotation, a `setdefault`, and
+    the error type `tool_error` is called with."""
     for node in ast.walk(source.tree):
         if isinstance(node, ast.Dict):
             yield from (value for key, value in zip(node.keys, node.values, strict=True) if isinstance(key, ast.Constant) and key.value in ERROR_TYPE_FIELDS)
         elif isinstance(node, ast.keyword) and node.arg in ERROR_TYPE_FIELDS:
             yield node.value
         elif isinstance(node, ast.Assign):
-            yield from (node.value for target in node.targets if isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant) and target.slice.value in ERROR_TYPE_FIELDS)
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "tool_error" and len(node.args) > 1:
+            yield from (node.value for target in node.targets if _names_an_error_type_field(target))
+        elif isinstance(node, ast.AnnAssign) and node.value is not None and _names_an_error_type_field(node.target):
+            yield node.value
+        elif isinstance(node, ast.Call) and (_is_tool_error_call(node) or _is_error_type_setdefault(node)):
             yield node.args[1]
 
 
-def scopes_of_site(source: Source, node: ast.expr) -> tuple[str | None, ...] | None:
-    """Whose remediation a refusal built at `node` is looked up under, or None when the site is not a debug one."""
-    function = source.enclosing_function(node)
-    function_name = function.name if function is not None else "<module>"
+# The scope argument that names the backend answering. A merge under it is the
+# same lookup the service's fill performs, so it is read the same way.
+BACKEND_NAME_EXPRESSIONS = frozenset({"self.backend_name", "backend_name"})
+
+
+def _merge(node: ast.expr, scope: Scope) -> tuple[frozenset[str | None], tuple[str | None, ...] | None] | None:
+    """The types and scopes a `**remediation_fields(...)`-like call merges, or None when `node` is no such call.
+
+    The scopes are None where the merge is under the backend's own name, which
+    the site's place decides (`attach_scopes`).
+    """
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+        return None
+    if node.func.id == "exclusive_permission_fields":
+        return frozenset({"permission_denied"}), (EXCLUSIVE_PERMISSION_SCOPE,)
+    if node.func.id != "remediation_fields":
+        return None
+    types = Reader().values(node.args[0], scope)
+    scope_node = node.args[1] if len(node.args) > 1 else next((keyword.value for keyword in node.keywords if keyword.arg == "scope"), None)
+    if scope_node is None:
+        return types, (None,)
+    if ast.unparse(scope_node) in BACKEND_NAME_EXPRESSIONS:
+        return types, None
+    return types, tuple(sorted(Reader(keep_none=True).values(scope_node, scope), key=str))
+
+
+def _merge_beside(source: Source, node: ast.expr, scope: Scope) -> tuple[frozenset[str | None], tuple[str | None, ...] | None] | None:
+    """A merge in the same dict literal, or the same call, that writes the site."""
+    parent = source.parents.get(node)
+    if isinstance(parent, ast.keyword):
+        parent = source.parents.get(parent)
+    if isinstance(parent, ast.Dict):
+        spread = [value for key, value in zip(parent.keys, parent.values, strict=True) if key is None]
+    elif isinstance(parent, ast.Call):
+        spread = [keyword.value for keyword in parent.keywords if keyword.arg is None]
+    else:
+        return None
+    merges = [merge for merge in (_merge(value, scope) for value in spread) if merge is not None]
+    if not merges:
+        return None
+    assert len(merges) == 1, f"{source.name}:{node.lineno}: more than one remediation merged beside one error type"
+    return merges[0]
+
+
+def _merges_in_function(function: ast.FunctionDef | None, scope: Scope) -> list[tuple[frozenset[str | None], tuple[str | None, ...] | None]]:
+    """Every `<result>.update(remediation_fields(...))` the function makes."""
+    if function is None:
+        return []
+    merges = []
+    for node in ast.walk(function):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "update" and len(node.args) == 1:
+            merge = _merge(node.args[0], scope)
+            if merge is not None:
+                merges.append(merge)
+    return merges
+
+
+def attach_scopes(source: Source, node: ast.expr, function_name: str) -> tuple[str | None, ...]:
+    """The scope a refusal that merges nothing is filled under: the backend its result names."""
     if source.module is tools:
-        if function_name not in TOOLS_DEBUG_FUNCTIONS:
-            return None
-        return TOOLS_SITE_SCOPES.get(function_name, (None,))
+        # The service's own refusals name no backend; the bare key serves them.
+        return (None,)
     for backend, module in BACKEND_MODULES.items():
         if source.module is module:
-            return SITE_SCOPES.get((source.name, function_name), (backend,))
+            return (backend,)
     if source.module is gdbdebug:
         if source.enclosing_class(node) == GDBDEBUG_SESSION_CLASS:
             return ("openocd",)
@@ -446,33 +544,71 @@ def scopes_of_site(source: Source, node: ast.expr) -> tuple[str | None, ...] | N
     raise AssertionError(f"{source.name}:{node.lineno}: an error_type in {function_name}, which no scope is pinned for")
 
 
+def is_a_debug_site(source: Source, node: ast.expr) -> bool:
+    """Whether a refusal built at `node` is this area's. Only the tool service holds other areas' sites."""
+    if source.module is not tools:
+        return True
+    function = source.enclosing_function(node)
+    function_name = function.name if function is not None else "<module>"
+    if function_name in TOOLS_OTHER_AREAS:
+        return False
+    if function_name not in TOOLS_DEBUG_FUNCTIONS:
+        raise AssertionError(f"tools.py:{node.lineno}: an error_type in {function_name}, which is neither a debug path nor named for another area")
+    return True
+
+
+def scopes_of_site(source: Source, node: ast.expr, values: frozenset[str | None]) -> tuple[str | None, ...]:
+    """Whose remediation a refusal built at `node` is looked up under."""
+    function = source.enclosing_function(node)
+    function_name = function.name if function is not None else "<module>"
+    scope = Scope(source, function)
+    beside = _merge_beside(source, node, scope)
+    if beside is not None:
+        types, scopes = beside
+        assert types == values, f"{source.name}:{node.lineno}: merges the remediation of {sorted(types, key=str)} beside {sorted(values, key=str)}"
+        return scopes if scopes is not None else attach_scopes(source, node, function_name)
+    matching = [scopes for types, scopes in _merges_in_function(function, scope) if values <= types]
+    if matching:
+        return tuple(sorted({one for scopes in matching for one in (scopes if scopes is not None else attach_scopes(source, node, function_name))}, key=str))
+    return attach_scopes(source, node, function_name)
+
+
 # The debugger front end, the GDB/MI client and the ELF reader build no refusal
-# today; scanning them makes one that appears later fail `scopes_of_site`.
+# today; scanning them makes one that appears later fail `attach_scopes`.
 SCANNED_MODULES: tuple[ModuleType, ...] = (gdbdebug, openocd, pyocd, stlink, common, tools, debugger, gdbmi, elfsymbols)
 
 
-@cache
-def scanned_debug_pairs() -> dict[tuple[str, str | None], tuple[str, ...]]:
-    """Every (error_type, scope) pair the debug paths can answer, with the `file:line` sites."""
+def scan(planted: Mapping[ModuleType, str] = MappingProxyType({})) -> dict[Pair, tuple[str, ...]]:
+    """Every (error_type, scope) pair the debug paths can answer, with the `file:line` sites.
+
+    `planted` replaces a module's source with the text given, which is how the
+    tests below prove that each shape of refusal reaches the inventory.
+    """
     reader = Reader()
-    sites: dict[tuple[str, str | None], list[str]] = {}
+    sites: dict[Pair, list[str]] = {}
     unreadable: list[str] = []
     for module in SCANNED_MODULES:
-        source = source_of(module)
+        source = Source.of(module, planted[module]) if module in planted else source_of(module)
         for node in error_type_expressions(source):
-            scopes = scopes_of_site(source, node)
-            if scopes is None:
+            if not is_a_debug_site(source, node):
                 continue
             try:
                 values = reader.values(node, Scope(source, source.enclosing_function(node)))
             except UnreadableValue as error:
                 unreadable.append(f"{source.name}:{node.lineno}: {ast.unparse(node)} ({error})")
                 continue
+            scopes = scopes_of_site(source, node, values)
             for value in values:
+                assert value is not None
                 for scope in scopes:
                     sites.setdefault((value, scope), []).append(f"{source.name}:{node.lineno}")
     assert not unreadable, f"error_type values the scan cannot read: {unreadable}"
     return {pair: tuple(sorted(set(lines))) for pair, lines in sites.items()}
+
+
+@cache
+def scanned_debug_pairs() -> dict[Pair, tuple[str, ...]]:
+    return scan()
 
 
 # ---------------------------------------------------------------------------
@@ -494,21 +630,26 @@ INVENTORY_BY_TYPE: dict[str, tuple[str | None, ...]] = {
     "debugger_command_rejected": ("openocd",),
     "debugger_config_not_found": ("openocd",),
     "debugger_error": BACKENDS,
-    "debugger_not_executable": BACKENDS,
+    # common.py merges the bare entry beside it, for every backend alike.
+    "debugger_not_executable": (None,),
     "debugger_not_found": BACKENDS,
     "detach_resume_not_confirmed": ("openocd",),
     "flash_erase_failed": BACKENDS,
     "flash_failed": BACKENDS,
     "gdb_async_unsupported": ("openocd",),
+    # A missing GDB merges under the GDB's state, not the backend's (gdbdebug.py).
     "gdb_not_found": (None, gdbdebug.GDB_AUTODETECTED_MISSING_SCOPE, gdbdebug.GDB_NOT_CONFIGURED_SCOPE),
     "gdb_start_failed": ("openocd",),
     "halt_not_confirmed": ("openocd",),
     "interface_config_not_found": ("openocd",),
     "invalid_argument": (None, *BACKENDS),
     "memory_read_failed": BACKENDS,
-    "not_supported": ("openocd", "openocd_probe_selection", "pyocd", "stlink", "unbound_debugger", "unnamed_probe"),
+    # None: the tool service's refusals for a call no probe can be routed to.
+    "not_supported": (None, "openocd", "openocd_probe_selection", "pyocd", "stlink"),
     "output_write_failed": BACKENDS,
-    "permission_denied": (None, *BACKENDS),
+    # The permission helpers merge the bare entry, or a scope of their own: the
+    # execution grant a debug_continue needs, and a granted key that blocks.
+    "permission_denied": (None, "allow_debug_execution", EXCLUSIVE_PERMISSION_SCOPE, *BACKENDS),
     "probe_discovery_failed": BACKENDS,
     "reset_failed": BACKENDS,
     "resource_busy": (None,),
@@ -532,8 +673,6 @@ INVENTORY_BY_TYPE: dict[str, tuple[str | None, ...]] = {
 }
 INVENTORY = frozenset((error_type, scope) for error_type, scopes in INVENTORY_BY_TYPE.items() for scope in scopes)
 
-Pair = tuple[str, str | None]
-
 # Pairs whose entry another change writes. The guard leaves them to it.
 OWNED_ELSEWHERE: dict[Pair, str] = {
     ("session_not_active", "openocd"): "#635 writes one bare entry, true for the COM, CAN and debug sessions alike",
@@ -541,12 +680,12 @@ OWNED_ELSEWHERE: dict[Pair, str] = {
     ("cleanup_required", None): "#645 writes the dispatcher's refusals, and this one is the dispatcher's",
     ("artifact_validation_failed", None): "#645 writes the artifact refusals; `debug_start_session` refuses with the validator's word",
     ("audit_unavailable", "pyocd"): "#645 writes one bare entry for every module that loses its audit trail",
-    ("not_supported", "unbound_debugger"): "#645 writes the dispatcher's scoped `not_supported` keys",
-    ("not_supported", "unnamed_probe"): "#645 writes the dispatcher's scoped `not_supported` keys",
+    ("not_supported", None): "#645 writes the dispatcher's `not_supported` refusals, the unbound debugger and the unnamed probe",
 }
 
 # Pairs #516 decided stay silent until somebody writes that tool's own steps,
-# pinned silent by test_debug_backend_refusals.py.
+# pinned silent by test_debug_backend_refusals.py, which also pins that none
+# of the three types grows a bare entry the service's fill could fall back to.
 SILENT: frozenset[Pair] = frozenset((bucket, backend) for bucket, backend in SILENT_PAIRS)
 
 # Values the scan reads that never reach a tool result. None does: every site
@@ -554,6 +693,57 @@ SILENT: frozenset[Pair] = frozenset((bucket, backend) for bucket, backend in SIL
 NEVER_REACHED: dict[Pair, str] = {}
 
 EXCLUDED: frozenset[Pair] = frozenset(OWNED_ELSEWHERE) | SILENT | frozenset(NEVER_REACHED)
+
+# Pairs the bare key cannot answer, each with why: the scoped key has to exist.
+OWN_KEY_REQUIRED: dict[tuple[str, str], str] = {
+    ("config_file_not_found", "openocd"): "the bare entry is about the Agentic HIL configuration file, and this is an OpenOCD script the debug server could not find",
+    ("not_supported", "openocd"): "no bare `not_supported` is true for every refusal of that name, and the other backends' keys are about debug sessions",
+    ("audit_broken", "openocd"): "the bare key is the coordination ledger's, which #646 writes; this is the debug session's own evidence",
+    **{("debugger_not_found", backend): "the executable that is missing, and where it comes from, is each backend's own" for backend in BACKENDS},
+    **{("timeout", backend): "a GDB/MI session that stopped answering and a command-line tool that ran out of time are read differently" for backend in BACKENDS},
+}
+
+# Bare keys this area writes. Each is what every producer of the type falls
+# back to when it names no backend: probe discovery in bootstrap.py, a test
+# reactor step result, the result text's advice line. So each is required at
+# its own URI, apart from any scoped key beside it.
+BARE_KEY_REQUIRED: dict[str, str] = {
+    "cleanup_failed": "the debug session's and the runs' alike; #646 adds only `cleanup_failed:test_reactor` beside it",
+    "debugger_error": "a test reactor step passes the backend's type up without the backend",
+    "reset_failed": "a test reactor step passes the backend's type up without the backend",
+    "probe_discovery_failed": "probe discovery in bootstrap.py answers it with no backend and attaches the bare advice",
+    "output_write_failed": "a test reactor step passes the backend's type up without the backend",
+    "debugger_not_found": "probe discovery in bootstrap.py answers it with no backend and attaches the bare advice",
+    "target_exception": "the test reactor publishes a session's target_error_type as its step's error_type",
+    "unexpected_breakpoint": "the test reactor publishes a session's target_error_type as its step's error_type",
+    "symbol_not_found": "a test reactor step passes the backend's type up without the backend",
+    "symbol_resolution_failed": "a test reactor step passes the backend's type up without the backend",
+    "symbol_ambiguous": "a test reactor step passes the backend's type up without the backend",
+    "symbol_source_changed": "a test reactor step passes the backend's type up without the backend",
+    "symbol_source_not_available": "a test reactor step passes the backend's type up without the backend",
+}
+
+# Every key this change writes. A pair written here resolves to one of them.
+WRITTEN_KEYS: frozenset[str] = frozenset(
+    {
+        *(f"{error_type}:{backend}" for error_type in ("timeout", "debugger_not_found") for backend in BACKENDS),
+        "config_file_not_found:openocd",
+        "not_supported:openocd",
+        "audit_broken:openocd",
+        *BARE_KEY_REQUIRED,
+        "adapter_access_denied",
+        "breakpoint_reconciliation_failed",
+        "debug_session_setup_failed",
+        "detach_resume_not_confirmed",
+        "gdb_async_unsupported",
+        "gdb_start_failed",
+        "halt_not_confirmed",
+        "interface_config_not_found",
+        "session_already_active",
+        "stop_reason_not_available",
+        "target_config_not_found",
+    }
+)
 
 # The pairs the catalogue answered nothing for when this was written, or
 # answered with an entry about something else, and which this change writes.
@@ -582,19 +772,6 @@ WRITTEN_HERE: frozenset[Pair] = frozenset(
     }
 )
 
-# Pairs the bare key cannot answer, each with why: the scoped key has to exist.
-OWN_KEY_REQUIRED: dict[tuple[str, str], str] = {
-    ("config_file_not_found", "openocd"): "the bare entry is about the Agentic HIL configuration file, and this is an OpenOCD script the debug server could not find",
-    ("not_supported", "openocd"): "no bare `not_supported` is true for every refusal of that name, and the other backends' keys are about debug sessions",
-    **{("debugger_not_found", backend): "the executable that is missing, and where it comes from, is each backend's own" for backend in BACKENDS},
-    **{("timeout", backend): "a GDB/MI session that stopped answering and a command-line tool that ran out of time are fixed differently" for backend in BACKENDS},
-}
-
-# Bare keys this area owns because other areas scope theirs under them.
-BARE_KEY_REQUIRED: dict[str, str] = {
-    "cleanup_failed": "the debug session's own; #646 adds only `cleanup_failed:test_reactor` beside it",
-}
-
 
 def missing_entries() -> list[str]:
     sites = scanned_debug_pairs()
@@ -622,7 +799,7 @@ def test_every_left_out_pair_is_one_the_debug_paths_answer() -> None:
     assert WRITTEN_HERE <= INVENTORY, sorted(WRITTEN_HERE - INVENTORY, key=str)
     assert frozenset(OWN_KEY_REQUIRED) <= WRITTEN_HERE, sorted(frozenset(OWN_KEY_REQUIRED) - WRITTEN_HERE, key=str)
     assert not (WRITTEN_HERE & EXCLUDED), sorted(WRITTEN_HERE & EXCLUDED, key=str)
-    for bare, _reason in BARE_KEY_REQUIRED.items():
+    for bare in BARE_KEY_REQUIRED:
         assert any(error_type == bare for error_type, _scope in WRITTEN_HERE), bare
 
 
@@ -630,14 +807,84 @@ def test_every_debug_refusal_has_a_catalogue_entry() -> None:
     assert missing_entries() == [], "debug refusals without an ERROR_CATALOGUE entry"
 
 
+def test_every_pair_written_here_resolves_to_a_key_written_here() -> None:
+    assert sorted((pair, catalogue_key(*pair)) for pair in WRITTEN_HERE if catalogue_key(*pair) not in WRITTEN_KEYS) == []
+
+
 @pytest.mark.parametrize(("error_type", "scope"), sorted(OWN_KEY_REQUIRED), ids=[f"{error_type}:{scope}" for error_type, scope in sorted(OWN_KEY_REQUIRED)])
 def test_a_refusal_the_bare_key_cannot_answer_has_its_own(error_type: str, scope: str) -> None:
     assert f"{error_type}:{scope}" in ERROR_CATALOGUE, OWN_KEY_REQUIRED[(error_type, scope)]
 
 
-@pytest.mark.parametrize("error_type", sorted(BARE_KEY_REQUIRED))
-def test_the_bare_entries_this_area_owns_exist(error_type: str) -> None:
-    assert error_type in ERROR_CATALOGUE, BARE_KEY_REQUIRED[error_type]
+# ---------------------------------------------------------------------------
+# The scan reads every shape it claims to, proven on planted source.
+
+
+def planted(module: ModuleType, anchor: str, insertion: str) -> dict[ModuleType, str]:
+    """`module`'s source with `insertion` after the one occurrence of `anchor`."""
+    text = Path(str(module.__file__)).read_text(encoding="utf-8")
+    assert text.count(anchor) == 1, anchor
+    return {module: text.replace(anchor, anchor + insertion)}
+
+
+def appended(module: ModuleType, insertion: str) -> dict[ModuleType, str]:
+    return {module: Path(str(module.__file__)).read_text(encoding="utf-8") + insertion}
+
+
+PLANTED = "planted_refusal"
+
+
+def test_nothing_is_planted_in_the_source() -> None:
+    assert [pair for pair in scanned_debug_pairs() if pair[0] == PLANTED] == []
+
+
+def test_a_refusal_planted_in_the_debug_permission_gate_reaches_the_inventory() -> None:
+    """`_dispatch_tool` returns this helper's answer before anything else is asked (tools.py)."""
+    pairs = scan(
+        planted(
+            tools,
+            "    def _debug_permission_failure(self, name: str, args: JsonObject) -> JsonObject | None:\n",
+            f'        if args.get("planted"):\n            return {{"ok": False, "tool": name, "error_type": "{PLANTED}"}}\n',
+        )
+    )
+
+    assert (PLANTED, None) in pairs
+    assert (PLANTED, None) not in INVENTORY
+
+
+def test_a_tool_service_function_nobody_classified_fails_the_scan() -> None:
+    with pytest.raises(AssertionError, match="planted_helper"):
+        scan(appended(tools, f'\n\ndef planted_helper(tool):\n    return {{"ok": False, "tool": tool, "error_type": "{PLANTED}"}}\n'))
+
+
+def test_an_annotated_subscript_assignment_reaches_the_inventory() -> None:
+    pairs = scan(
+        planted(
+            gdbdebug,
+            '    def start_session(self, artifact: JsonObject, mode: str = "attach", timeout_s: float | None = None) -> JsonObject:\n',
+            f'        planted: JsonObject = {{}}\n        planted["error_type"]: str = "{PLANTED}"\n',
+        )
+    )
+
+    assert (PLANTED, "openocd") in pairs
+
+
+def test_a_setdefault_reaches_the_inventory_under_its_backend() -> None:
+    pairs = scan(appended(stlink, f'\n\ndef planted_helper(result):\n    result.setdefault("error_type", "{PLANTED}")\n    return result\n'))
+
+    assert (PLANTED, "stlink") in pairs
+
+
+def test_a_merge_under_a_scope_of_its_own_is_read_under_that_scope() -> None:
+    pairs = scan(appended(openocd, f'\n\ndef planted_helper(tool):\n    return {{"ok": False, "tool": tool, "error_type": "{PLANTED}", **remediation_fields("{PLANTED}", "planted_scope")}}\n'))
+
+    assert (PLANTED, "planted_scope") in pairs
+    assert (PLANTED, "openocd") not in pairs
+
+
+def test_a_merge_of_another_types_advice_beside_a_refusal_fails_the_scan() -> None:
+    with pytest.raises(AssertionError, match="merges the remediation of"):
+        scan(appended(openocd, f'\n\ndef planted_helper(tool):\n    return {{"ok": False, "tool": tool, "error_type": "{PLANTED}", **remediation_fields("timeout", "planted_scope")}}\n'))
 
 
 # ---------------------------------------------------------------------------
@@ -658,14 +905,13 @@ def test_typed_debug_sessions_are_built_by_the_openocd_backend_alone() -> None:
     assert keywords["classify_server_output"] == "self._classify_output", keywords
 
 
-def backends_reaching(function_name: str, seen: frozenset[str] = frozenset()) -> frozenset[str]:
-    """The backends whose calls reach the module function `function_name` of gdbdebug.py.
+def calls_reaching(function_name: str, seen: frozenset[str] = frozenset()) -> Iterator[tuple[str, ast.Call]]:
+    """Each call that reaches the module function `function_name`, with the backend it is made for.
 
     A call in a backend module is that backend's; a call inside
     `GdbDebugSessions` is OpenOCD's; a call inside another module function of
     gdbdebug.py is whatever reaches that one. A call anywhere else fails.
     """
-    reached: set[str] = set()
     for module in SCANNED_MODULES:
         source = source_of(module)
         for node in ast.walk(source.tree):
@@ -673,24 +919,36 @@ def backends_reaching(function_name: str, seen: frozenset[str] = frozenset()) ->
                 continue
             caller = source.enclosing_function(node)
             if module in BACKEND_MODULES.values():
-                reached.add(module.__name__.rpartition(".")[2])
+                yield module.__name__.rpartition(".")[2], node
             elif module is gdbdebug and source.enclosing_class(node) == GDBDEBUG_SESSION_CLASS:
-                reached.add("openocd")
+                yield "openocd", node
             elif module is gdbdebug and caller is not None and source.enclosing_class(node) is None:
                 if caller.name not in seen:
-                    reached |= backends_reaching(caller.name, seen | {function_name})
+                    yield from ((backend, node) for backend, _call in calls_reaching(caller.name, seen | {function_name}))
             else:
                 raise AssertionError(f"{source.name}:{node.lineno}: {function_name} called where no backend is named")
-    return frozenset(reached)
 
 
-BACKEND_SCOPED_FUNCTIONS = sorted(name for name, scopes in GDBDEBUG_FUNCTION_SCOPES.items() if set(scopes) <= set(BACKENDS))
+def backends_reaching(function_name: str) -> frozenset[str]:
+    return frozenset(backend for backend, _call in calls_reaching(function_name))
 
 
-@pytest.mark.parametrize("function_name", BACKEND_SCOPED_FUNCTIONS)
+@pytest.mark.parametrize("function_name", sorted(GDBDEBUG_FUNCTION_SCOPES))
 def test_a_shared_gdb_function_is_reached_by_the_backends_named_for_it(function_name: str) -> None:
     """Why a refusal built in a module function of gdbdebug.py is looked up under the backends `GDBDEBUG_FUNCTION_SCOPES` names."""
     assert backends_reaching(function_name) == frozenset(GDBDEBUG_FUNCTION_SCOPES[function_name])
+
+
+@pytest.mark.parametrize("function_name", sorted(COMMON_FUNCTION_SCOPES))
+def test_a_shared_refusal_builder_answers_under_the_backend_that_calls_it(function_name: str) -> None:
+    """Why a refusal common.py builds is looked up under the backends `COMMON_FUNCTION_SCOPES` names:
+    those call it, and each hands it its own name, which is the `backend` the result carries."""
+    calls = list(calls_reaching(function_name))
+
+    assert frozenset(backend for backend, _call in calls) == frozenset(COMMON_FUNCTION_SCOPES[function_name])
+    assert sorted({ast.unparse(call.args[0]) for _backend, call in calls}) == ["self.backend_name"]
+    (function,) = source_of(common).functions[function_name]
+    assert _parameters(function)[0].arg == "backend_name"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -714,50 +972,359 @@ def reference(tmp_path_factory: pytest.TempPathFactory) -> Iterator[AgenticHILTo
         closed(service)
 
 
+def read_resource(service: AgenticHILToolService, key: str) -> dict:
+    uri = ERROR_URI_PREFIX + key
+    response = handle_mcp_message({"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": uri}}, service)
+
+    assert isinstance(response, dict), response
+    assert "error" not in response, response
+    contents = response["result"]["contents"]
+    assert [content["uri"] for content in contents] == [uri]
+    return json.loads(contents[0]["text"])
+
+
 RESOLVED = sorted(INVENTORY - EXCLUDED, key=str)
 
 
 @pytest.mark.parametrize(("error_type", "scope"), RESOLVED, ids=[f"{error_type}-{scope}" for error_type, scope in RESOLVED])
 def test_the_reference_resolves_every_debug_refusal(reference: AgenticHILToolService, error_type: str, scope: str | None) -> None:
     key = catalogue_key(error_type, scope)
-    uri = ERROR_URI_PREFIX + key
-    response = handle_mcp_message({"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": uri}}, reference)
+    entry = read_resource(reference, key)
 
-    assert isinstance(response, dict), response
-    assert "error" not in response, response
-    contents = response["result"]["contents"]
-    assert [content["uri"] for content in contents] == [uri]
-    entry = json.loads(contents[0]["text"])
     assert entry == catalogue_entry(key)
     assert entry["error_type"] == error_type
     assert entry["meaning"].strip(), entry
-    assert entry["remediation"], entry
-    # The wrong fix is asked of the entries written here; the older debugger
-    # entries are rewritten by a change of their own and left as they are.
-    if (error_type, scope) in WRITTEN_HERE:
-        assert entry.get("do_not"), entry
+    assert [step for step in entry["remediation"] if step.strip()], entry
+
+
+@pytest.mark.parametrize("error_type", sorted(BARE_KEY_REQUIRED))
+def test_the_bare_entries_this_area_writes_resolve_at_their_own_uri(reference: AgenticHILToolService, error_type: str) -> None:
+    """The exact bare key, not the scoped lookup's fallback: resources/read takes the key as it is given."""
+    assert error_type in ERROR_CATALOGUE, BARE_KEY_REQUIRED[error_type]
+    entry = read_resource(reference, error_type)
+
+    assert entry == catalogue_entry(error_type)
+    assert "scope" not in entry, entry
 
 
 # ---------------------------------------------------------------------------
-# What the entries may not say (#637).
+# What each entry written here says, clause by clause.
 
-NEGATION = re.compile(r"\b(not|cannot|never|no)\b|n't\b", re.IGNORECASE)
-REPETITION = re.compile(r"\b(again|retry|retried|repeat|repeated)\b", re.IGNORECASE)
+NEGATION = re.compile(r"\b(not|cannot|never|no|nothing|without)\b|n't\b", re.IGNORECASE)
+REPETITION = re.compile(r"\b(again|retry|retried|retrying|repeat|repeated|repeating|rerun)\b", re.IGNORECASE)
+CLAUSE_BREAK = re.compile(r"(?<=[.!?;:])\s+|,\s+(?=(?:and|but|then|so|or|not|because|which|while|until)\b)|\s+but\s+", re.IGNORECASE)
+RETRY = REPETITION.pattern
 
 
-def promises_a_retried_stop(step: str) -> bool:
-    """Whether a step offers another `debug_stop_session` as what ends the session."""
-    return any("debug_stop_session" in sentence and REPETITION.search(sentence) and not NEGATION.search(sentence) for sentence in re.split(r"(?<=[.!?])\s+", step))
+def clauses(text: str) -> list[str]:
+    return [clause for clause in CLAUSE_BREAK.split(text) if clause and clause.strip()]
+
+
+def affirmative(clause: str) -> bool:
+    return NEGATION.search(clause) is None
+
+
+def affirmative_clauses(text: str) -> list[str]:
+    return [clause for clause in clauses(text) if affirmative(clause)]
+
+
+def first_affirmative_match(steps: list[str], pattern: str) -> tuple[int, int] | None:
+    """Where `pattern` is first said affirmatively: (step, clause)."""
+    for step_index, step in enumerate(steps):
+        for clause_index, clause in enumerate(clauses(step)):
+            if affirmative(clause) and re.search(pattern, clause, re.IGNORECASE):
+                return step_index, clause_index
+    return None
+
+
+@dataclass(frozen=True)
+class Contract:
+    """What an entry has to say, read off the code that produces its refusals.
+
+    `means`: patterns the meaning matches. `steps`: patterns an affirmative
+    clause of the remediation matches, one each. `order`: patterns whose first
+    affirmative mention comes in this order. `beside`: (a, b) where a step that
+    says `a` affirmatively also names `b`, the condition it holds under.
+    `avoid`: patterns a `do_not` element matches, one each. `never`: patterns
+    no affirmative remediation clause may match.
+    """
+
+    means: tuple[str, ...] = ()
+    steps: tuple[str, ...] = ()
+    order: tuple[str, ...] = ()
+    beside: tuple[tuple[str, str], ...] = ()
+    avoid: tuple[str, ...] = ()
+    never: tuple[str, ...] = ()
+
+
+STATE_FIELDS = r"target_state|side_effect_status|target_contacted|halt_confirmed|cleanup_required|quarantined"
+TIMEOUT_CEILING = r"debuggers\.\S+\.timeout_s"
+# A clause naming debug_stop_session and a word that repeats it, in either order.
+RETRIED_STOP = rf"(?=.*debug_stop_session)(?=.*(?:{RETRY}))"
+
+CONTRACTS: dict[str, Contract] = {
+    # gdbdebug.py 640-649, 696, 1033, 1207, 1241, 1387; openocd.py 499, 982.
+    # Every wait is `min(debuggers.<id>.timeout_s, cap)` and a call's own
+    # timeout_s only shortens it (gdbdebug.py 240, 419-421, 684-686).
+    "timeout:openocd": Contract(means=(r"\bOpenOCD\b", r"\bGDB\b"), steps=(STATE_FIELDS, TIMEOUT_CEILING, r"debug_halt"), order=(STATE_FIELDS, TIMEOUT_CEILING), avoid=(RETRY,)),
+    # pyocd.py 251, 286, 736 and the offline symbol read (gdbdebug.py 1783).
+    "timeout:pyocd": Contract(means=(r"\bpyOCD\b",), steps=(STATE_FIELDS, TIMEOUT_CEILING), order=(STATE_FIELDS, TIMEOUT_CEILING), avoid=(RETRY,)),
+    # stlink.py 282, 308, 642 and the offline symbol read.
+    "timeout:stlink": Contract(means=(r"STM32CubeProgrammer",), steps=(STATE_FIELDS, TIMEOUT_CEILING), order=(STATE_FIELDS, TIMEOUT_CEILING), avoid=(RETRY,)),
+    # openocd.py OPENOCD_NOT_FOUND and the debug server spawn (gdbdebug.py 306).
+    "debugger_not_found:openocd": Contract(means=(r"\bOpenOCD\b",), steps=(r"\bexecutable\b", r"\bPATH\b|install")),
+    "debugger_not_found:pyocd": Contract(means=(r"\bpyOCD\b",), steps=(r"\bexecutable\b", r"\bPATH\b|install")),
+    "debugger_not_found:stlink": Contract(means=(r"STM32CubeProgrammer|STM32_Programmer_CLI",), steps=(r"\bexecutable\b", r"\bPATH\b|install")),
+    # The backends' tables and bootstrap.py 230, 331, 500, 793 (probe discovery).
+    "debugger_not_found": Contract(steps=(r"\bexecutable\b", r"\bPATH\b|install")),
+    # The raw name the session start publishes (decision: no behaviour change).
+    "config_file_not_found:openocd": Contract(means=(r"OpenOCD",), steps=(r"interface_cfg|target_cfg|\.cfg", r"log_path|stderr|output"), never=(r"project_config_create",)),
+    # openocd.py list_probes: an adapter with no USB identity to list.
+    "not_supported:openocd": Contract(means=(r"OpenOCD",), steps=(r"probe_id",)),
+    # gdbdebug.py 232: the session evidence latch; quarantined, refused until resolved.
+    "audit_broken:openocd": Contract(means=(r"audit|evidence",), steps=(r"operator",), avoid=(RETRY,)),
+    # The libusb refusal OpenOCD prints off Windows (openocd.py).
+    "adapter_access_denied": Contract(means=(r"USB|libusb|adapter",), steps=(r"udev|group",), avoid=(r"\bsudo\b|\broot\b|administrator",)),
+    # gdbdebug.py 566/575: cleanup_required, side_effect_status unknown; a
+    # reconciled clear resolves the incident (tools.py, the debug quarantine).
+    "breakpoint_reconciliation_failed": Contract(steps=(r"backend_reconciled",), beside=((r"debug_clear_breakpoints", RETRY),), avoid=(r"debug_continue",)),
+    # gdbdebug.py 325: cleanup_confirmed (with the startup effect fields) or
+    # cleanup_required with cleanup_error.
+    "debug_session_setup_failed": Contract(beside=((r"debug_start_session", r"cleanup_confirmed|retry_safe"),), steps=(r"cleanup_required|cleanup_error",)),
+    "gdb_start_failed": Contract(steps=(r"gdb_executable", r"cleanup_required|cleanup_error"), beside=((r"debug_start_session", r"cleanup_confirmed|retry_safe"),)),
+    # gdbdebug.py 920: GDB refused mi-async before the target was contacted.
+    "gdb_async_unsupported": Contract(means=(r"async",), steps=(r"gdb_executable",), avoid=(RETRY,)),
+    "interface_config_not_found": Contract(steps=(r"interface_cfg",), never=(r"project_config_create",)),
+    "target_config_not_found": Contract(steps=(r"target_cfg",), never=(r"project_config_create",)),
+    # gdbdebug.py 227.
+    "session_already_active": Contract(order=(r"debug_stop_session", r"debug_start_session")),
+    # gdbdebug.py 711.
+    "stop_reason_not_available": Contract(order=(r"debug_continue|debug_halt", r"debug_get_stop_reason")),
+    # suggested_actions_for_stop, exception or fault (gdbdebug.py).
+    "target_exception": Contract(
+        order=(r"frame|exception_type", r"debug_symbol_value|debug_dump_symbol_ihex|memory", r"reset_target|debug_start_session"),
+        avoid=(r"debug_continue",),
+    ),
+    # suggested_actions_for_stop, unexpected_breakpoint.
+    "unexpected_breakpoint": Contract(steps=(r"debug_list_breakpoints|frame", r"debug_clear_breakpoints"), avoid=(r"debug_continue",)),
+    # suggested_actions_for_stop, debugger_error: log_path and classify_last_error.
+    "debugger_error": Contract(steps=(r"log_path|programmer_output", r"classify_last_error"), avoid=(RETRY,)),
+    # The backends' reset classification and pyocd.py 414 (a confirmed flash
+    # whose reset failed).
+    "reset_failed": Contract(steps=(STATE_FIELDS, r"probe_target"), avoid=(r"flash_firmware|reset_target",)),
+    # openocd.py 584, pyocd.py 324/1330-1336, stlink.py 324, bootstrap.py 242/345.
+    "probe_discovery_failed": Contract(steps=(r"programmer_output|backend_error|summary", r"debugger_probes_list"), avoid=(r"probe_id",)),
+    # gdbdebug.py 792, pyocd.py 556, stlink.py 540/560.
+    "output_write_failed": Contract(steps=(r"output_path", r"backend_error", r"target_contacted")),
+    "symbol_not_found": Contract(steps=(r"spell|name", r"ELF|build"), avoid=(r"allowed_symbols",)),
+    "symbol_resolution_failed": Contract(steps=(r"symbol_table_lookup|backend_error|summary", r"debug_symbol_info"), avoid=(RETRY,)),
+    "symbol_ambiguous": Contract(steps=(r"unique|rename|qualif|static",)),
+    # gdbdebug.py 1759/1761: the flashed ELF changed or cannot be read.
+    "symbol_source_changed": Contract(means=(r"digest|rebuilt|changed|replaced",), order=(r"flash_firmware", r"debug_symbol_info|debug_symbol_value|debug_dump_symbol_ihex")),
+    # gdbdebug.py 1727/1733: only an ELF flashed through this service is read.
+    "symbol_source_not_available": Contract(means=(r"ELF",), order=(r"flash_firmware", r"debug_symbol_info|debug_symbol_value|debug_dump_symbol_ihex"), steps=(r"\bELF\b",), avoid=(r"\.hex|\.bin",)),
+    # gdbdebug.py 414-460: a retry repeats only the process cleanup, and only
+    # after a cleanup-only failure (443-450); otherwise the proofs stay false.
+    "cleanup_failed": Contract(steps=(r"cleanup_errors?", r"probe_target"), beside=((r"debug_stop_session", r"halt_not_confirmed"),), avoid=(r"debug_stop_session",)),
+    # gdbdebug.py 465-484 (#637): a retried stop cannot settle these.
+    "halt_not_confirmed": Contract(steps=(r"probe_target",), avoid=(r"debug_stop_session",), never=(RETRIED_STOP,)),
+    "detach_resume_not_confirmed": Contract(steps=(r"probe_target",), avoid=(r"debug_stop_session",), never=(RETRIED_STOP,)),
+}
+
+FORBIDDEN_CHARACTERS = tuple(chr(code) for code in (0x2013, 0x2014, 0x2192))
+
+
+def test_every_key_written_here_has_a_contract() -> None:
+    assert sorted(WRITTEN_KEYS ^ frozenset(CONTRACTS)) == []
+
+
+@pytest.mark.parametrize("key", sorted(CONTRACTS))
+def test_the_entry_says_what_its_producers_make_true(key: str) -> None:
+    contract = CONTRACTS[key]
+    entry = catalogue_entry(key)
+    assert entry is not None, f"no entry under {key}"
+    meaning: str = entry["meaning"]
+    steps: list[str] = entry["remediation"]
+    do_not: list[str] = entry.get("do_not", [])
+
+    assert meaning.strip(), entry
+    assert steps and all(step.strip() for step in steps), entry
+    assert do_not and all(step.strip() for step in do_not), entry
+    for text in (meaning, *steps, *do_not):
+        assert not [character for character in FORBIDDEN_CHARACTERS if character in text], text
+    for pattern in contract.means:
+        assert re.search(pattern, meaning, re.IGNORECASE), (pattern, meaning)
+    for pattern in contract.steps:
+        assert first_affirmative_match(steps, pattern) is not None, (pattern, steps)
+    positions = [first_affirmative_match(steps, pattern) for pattern in contract.order]
+    assert None not in positions, (contract.order, steps)
+    assert positions == sorted(positions), (contract.order, positions, steps)  # type: ignore[type-var]
+    for said, condition in contract.beside:
+        holding = [step for step in steps if any(re.search(said, clause, re.IGNORECASE) for clause in affirmative_clauses(step))]
+        assert holding, (said, steps)
+        assert all(re.search(condition, step, re.IGNORECASE) for step in holding), (said, condition, holding)
+    for pattern in contract.avoid:
+        assert any(re.search(pattern, step, re.IGNORECASE) for step in do_not), (pattern, do_not)
+    for pattern in contract.never:
+        assert first_affirmative_match(steps, pattern) is None, (pattern, steps)
+
+
+# ---------------------------------------------------------------------------
+# What settles a stop that could not confirm the target (#637).
+
+
+def settles(step: str) -> bool:
+    """Whether a step tells the reader, affirmatively, to call probe_target."""
+    return any("probe_target" in clause for clause in affirmative_clauses(step))
+
+
+def offers_a_retried_stop(step: str) -> bool:
+    """Whether a step offers another `debug_stop_session`, affirmatively."""
+    return any("debug_stop_session" in clause and REPETITION.search(clause) for clause in affirmative_clauses(step))
+
+
+@pytest.mark.parametrize(
+    ("step", "expected_settles", "expected_retry"),
+    [
+        ("Do not use probe_target. Retry debug_stop_session; it does not reset the target.", False, True),
+        ("Call probe_target. Do not call debug_stop_session again; it cannot settle this.", True, False),
+        ("Call probe_target; nothing else is needed.", True, False),
+        ("Retry debug_stop_session; no reset is needed.", False, True),
+        ("Never call probe_target.", False, False),
+        ("Call debug_stop_session again, but not before probe_target.", False, True),
+    ],
+)
+def test_the_settle_detector_reads_each_clause_on_its_own(step: str, expected_settles: bool, expected_retry: bool) -> None:
+    assert settles(step) is expected_settles
+    assert offers_a_retried_stop(step) is expected_retry
 
 
 @pytest.mark.parametrize("error_type", ["halt_not_confirmed", "detach_resume_not_confirmed"])
 def test_an_unsettled_stop_names_the_call_that_settles_it(error_type: str) -> None:
-    """#637: a retried `debug_stop_session` cannot settle the session; `probe_target` or `debug_start_session` does."""
+    """#637: a retried `debug_stop_session` forces both proofs false and settles nothing
+    (gdbdebug.py 437-447); the recovery probe_target runs first does."""
     advice = remediation_fields(error_type, "openocd")
 
     assert advice, f"no entry answers {error_type} under openocd"
-    assert any("probe_target" in step or "debug_start_session" in step for step in advice["remediation"]), advice["remediation"]
-    assert not [step for step in advice["remediation"] if promises_a_retried_stop(step)], advice["remediation"]
+    assert any(settles(step) for step in advice["remediation"]), advice["remediation"]
+    assert not [step for step in advice["remediation"] if offers_a_retried_stop(step)], advice["remediation"]
+
+
+# ---------------------------------------------------------------------------
+# The fill where a debugger-backed tool's result leaves the service.
+
+
+def planted_through_the_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, answer: dict) -> dict:
+    """`debugger_info`'s answer when the backend returns `answer`, through the whole service call."""
+    service = AgenticHILToolService(config_for(tmp_path, backend, FAKE_BY_TYPE[backend]))
+    try:
+        monkeypatch.setattr(service.backend, "info", lambda: json.loads(json.dumps(answer)))
+        return service.call("debugger_info")
+    finally:
+        closed(service)
+
+
+PLANTED_ENTRY = ErrorRemedy(meaning="A planted refusal.", remediation=("The planted step.",), do_not=("The planted wrong fix.",))
+PLANTED_PERMISSION_ENTRY = ErrorRemedy(meaning="A planted permission refusal.", remediation=("Ask the operator to open {permission}.",), do_not=("Do not open {permission} yourself.",))
+
+
+def refusal(backend: str | None, error_type: str = PLANTED, **fields: object) -> dict:
+    answer: dict = {"ok": False, "tool": "debugger_info", "error_type": error_type, "summary": "Planted.", **fields}
+    if backend is not None:
+        answer["backend"] = backend
+    return answer
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_a_refusal_without_advice_is_filled_under_its_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    monkeypatch.setitem(ERROR_CATALOGUE, f"{PLANTED}:{backend}", PLANTED_ENTRY)
+
+    result = planted_through_the_service(tmp_path, monkeypatch, backend, refusal(backend))
+
+    assert result.get("remediation") == list(PLANTED_ENTRY.remediation), result
+    assert result.get("do_not") == list(PLANTED_ENTRY.do_not), result
+
+
+def test_the_fill_substitutes_the_permission_the_refusal_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(ERROR_CATALOGUE, f"{PLANTED}:openocd", PLANTED_PERMISSION_ENTRY)
+
+    result = planted_through_the_service(tmp_path, monkeypatch, "openocd", refusal("openocd", permission="debuggers.planted.permissions.allow_flash"))
+
+    assert result.get("remediation") == ["Ask the operator to open debuggers.planted.permissions.allow_flash."], result
+
+
+@pytest.mark.parametrize(("bucket", "backend"), sorted(SILENT), ids=[f"{bucket}-{backend}" for bucket, backend in sorted(SILENT)])
+def test_a_pair_516_keeps_silent_stays_silent_through_the_fill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bucket: str, backend: str) -> None:
+    """The fill looks up the scoped key and falls back to the bare one, and neither exists for these."""
+    result = planted_through_the_service(tmp_path, monkeypatch, backend, refusal(backend, bucket))
+
+    assert result["error_type"] == bucket, result
+    assert "remediation" not in result, result
+    assert "do_not" not in result, result
+
+
+def test_a_refusal_with_advice_of_its_own_keeps_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(ERROR_CATALOGUE, f"{PLANTED}:openocd", PLANTED_ENTRY)
+
+    result = planted_through_the_service(tmp_path, monkeypatch, "openocd", refusal("openocd", remediation=["The producer's own step."]))
+
+    assert result.get("remediation") == ["The producer's own step."], result
+    assert "do_not" not in result, result
+
+
+def test_a_refusal_naming_no_backend_is_not_filled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(ERROR_CATALOGUE, PLANTED, PLANTED_ENTRY)
+
+    result = planted_through_the_service(tmp_path, monkeypatch, "openocd", refusal(None))
+
+    assert "remediation" not in result, result
+
+
+def test_a_nested_refusal_is_not_filled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(ERROR_CATALOGUE, f"{PLANTED}:openocd", PLANTED_ENTRY)
+    answer = {"ok": False, "tool": "debugger_info", "backend": "openocd", "summary": "Planted.", "result": {"ok": False, "backend": "openocd", "error_type": PLANTED}}
+
+    result = planted_through_the_service(tmp_path, monkeypatch, "openocd", answer)
+
+    assert "remediation" not in result, result
+    assert "remediation" not in result["result"], result
+
+
+def test_a_success_that_names_a_target_fault_is_not_filled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(ERROR_CATALOGUE, f"{PLANTED}:openocd", PLANTED_ENTRY)
+    answer = {"ok": True, "tool": "debugger_info", "backend": "openocd", "target_ok": False, "target_error_type": PLANTED, "summary": "Planted."}
+
+    result = planted_through_the_service(tmp_path, monkeypatch, "openocd", answer)
+
+    assert "remediation" not in result, result
+
+
+# ---------------------------------------------------------------------------
+# A session over a faulted target answers ok, and names the fault.
+
+
+@pytest.mark.parametrize("tool", ["debug_start_session", "debug_get_session_status", "debug_get_stop_reason"])
+def test_a_session_over_a_faulted_target_names_the_fault_and_its_entry(tmp_path: Path, tool: str) -> None:
+    """gdbdebug.py 411, 494 and 713: `ok: true`, `target_ok: false` and the fault's
+    type, with the session's own suggested_actions. The bare entry is what a
+    reader of `target_error_type` is pointed to, and the test reactor publishes
+    the same type as its step's error_type; the two have to agree that the
+    target is not to be resumed."""
+    service = session_service(tmp_path, fake_gdb_behavior="stopped_on_attach_hardfault")
+    try:
+        started = service.call(*START)
+        result = started if tool == "debug_start_session" else service.call(tool, {})
+    finally:
+        closed(service)
+
+    assert result["ok"] is True, result
+    assert result["target_ok"] is False, result
+    assert result["target_error_type"] == "target_exception", result
+    assert [step for step in result["suggested_actions"] if step.strip()], result
+    assert any(re.search(r"do not continue", step, re.IGNORECASE) for step in result["suggested_actions"]), result
+    advice = remediation_fields(result["target_error_type"])
+    assert advice, "no bare entry answers target_exception"
+    assert any("debug_continue" in step for step in advice.get("do_not", [])), advice
 
 
 # ---------------------------------------------------------------------------
@@ -847,6 +1414,10 @@ def started_on_a_probe_this_user_may_not_open(tmp_path: Path, monkeypatch: pytes
     return refused_by(server_service(tmp_path, server=FAKE_OPENOCD_ACCESS_DENIED), START)
 
 
+def started_while_raw_commands_are_granted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    return refused_by(session_service(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_raw_debugger_commands": True}), START)
+
+
 # -- debug_stop_session
 
 
@@ -886,6 +1457,10 @@ def continued_into(behavior: str) -> Callable[[Path, pytest.MonkeyPatch], dict]:
         return refused_by(session_service(tmp_path, fake_gdb_behavior=behavior), START, ("debug_set_breakpoint", {"location": {"symbol": "test_done"}}), ("debug_continue", {"timeout_s": 5}))
 
     return provoke
+
+
+def continued_without_the_grant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    return refused_by(session_service(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_debug_execution": False}), START, ("debug_continue", {"timeout_s": 5}))
 
 
 def halted_after_a_fault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
@@ -1049,6 +1624,8 @@ REFUSALS = [
     Refusal("debug_start_session", "adapter_access_denied", "openocd", started_on_a_probe_this_user_may_not_open),
     # Catalogued already; the start's result is built without the merge.
     Refusal("debug_start_session", "adapter_not_found", "openocd", started_on_a_server_with_no_probe),
+    # A granted key that blocks the start: the exclusive scope, carried on the result.
+    Refusal("debug_start_session", "permission_denied", EXCLUSIVE_PERMISSION_SCOPE, started_while_raw_commands_are_granted),
     # debug_stop_session
     Refusal("debug_stop_session", "cleanup_failed", "openocd", stopped_with_a_gdb_that_will_not_close),
     Refusal("debug_stop_session", "halt_not_confirmed", "openocd", stopped_without("_confirm_halted_before_end")),
@@ -1056,6 +1633,7 @@ REFUSALS = [
     # run control and state
     Refusal("debug_continue", "unexpected_breakpoint", "openocd", continued_into("unexpected_breakpoint")),
     Refusal("debug_continue", "target_exception", "openocd", continued_into("hardfault")),
+    Refusal("debug_continue", "permission_denied", "allow_debug_execution", continued_without_the_grant),
     Refusal("debug_halt", "target_exception", "openocd", halted_after_a_fault),
     Refusal("debug_get_stop_reason", "stop_reason_not_available", "openocd", asked_for_a_stop_reason_before_any_stop),
     Refusal("debug_get_session_status", "audit_broken", "openocd", called_after_the_audit_broke("debug_get_session_status", {})),
@@ -1086,7 +1664,8 @@ REFUSALS = [
     *(Refusal("debugger_info", "debugger_not_found", backend, missing_executable(backend)) for backend in BACKENDS),
     *(Refusal("probe_target", "debugger_error", backend, backend_call(backend, FAKE_TRANSCRIPT, "probe_target", stderr=GAVE_UP)) for backend in BACKENDS),
     *(Refusal("reset_target", "reset_failed", backend, backend_call(backend, FAKE_TRANSCRIPT, "reset_target", {"mode": "halt"}, stderr=RESET_REFUSED)) for backend in BACKENDS),
-    # pyOCD's post-flash reset relabels a refusal whose advice was merged for another type (pyocd.py).
+    # pyOCD's post-flash reset relabels a refusal whose advice was merged for
+    # the type its classifier answered (pyocd.py); here both are reset_failed.
     Refusal("flash_firmware", "reset_failed", "pyocd", backend_call("pyocd", FAKE_PYOCD_RESET_REFUSED, "flash_firmware", {"image_path": "build/firmware.elf", "reset_after_flash": True})),
     # Catalogued already, under the backend's own key; the refusal is built without the merge.
     *(Refusal("reset_target", "not_supported", backend, backend_call(backend, FAKE_BY_TYPE[backend], "reset_target", {"mode": "init"})) for backend in ("pyocd", "stlink")),
@@ -1103,7 +1682,8 @@ def test_the_refusal_carries_its_entry(tmp_path: Path, monkeypatch: pytest.Monke
 
     assert result["ok"] is False, result
     assert result["error_type"] == refusal.error_type, result
-    advice = remediation_fields(refusal.error_type, refusal.scope)
+    permission = result.get("permission")
+    advice = remediation_fields(refusal.error_type, refusal.scope, permission=permission if isinstance(permission, str) else None)
     assert advice, f"no catalogue entry answers {refusal.error_type} under {refusal.scope}"
     assert result.get("remediation") == advice["remediation"], result
     assert result.get("do_not") == advice.get("do_not"), result
