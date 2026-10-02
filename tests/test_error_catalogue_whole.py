@@ -1352,6 +1352,17 @@ def test_a_record_fails_on_its_lease_state_only_for_a_state_outside_the_two_the_
 # record fails on, and names a state the check lets through only to exclude it.
 PASSES = re.compile(r"\bpass(?:es|ed)?\b", re.IGNORECASE)
 HOLDS = re.compile(r"\bfail(?:s|ed)?\b|\breasons?\b", re.IGNORECASE)
+VERDICT = re.compile(f"{PASSES.pattern}|{HOLDS.pattern}", re.IGNORECASE)
+
+
+def negated_before(text: str) -> bool:
+    """Whether `text` ends in a negation of what follows it: `does not`, `doesn't`, `is no`, `is not a`, `neither`.
+
+    Only the word right before, or the one before that, so a negation in a
+    condition earlier in the sentence, or a qualifier after the word, such as
+    `without exception`, is not read as turning it.
+    """
+    return re.search(rf"(?:{NEGATION.pattern})\s+(?:\w+\s+)?$", text, re.IGNORECASE) is not None
 
 
 def outside_parentheses(text: str) -> tuple[list[str], list[list[str]]]:
@@ -1366,12 +1377,26 @@ def outside_parentheses(text: str) -> tuple[list[str], list[list[str]]]:
     return pieces, [re.findall(r"\(([^()]*)\)", piece) for piece in pieces]
 
 
-def lets_through(piece: str, state: str) -> bool:
-    """Whether `piece`, which names `state`, says the check lets a record with that state through."""
-    passes, holds = PASSES.search(piece) is not None, HOLDS.search(piece) is not None
-    if passes != holds:
-        return passes != (NEGATION.search(piece) is not None)
-    return re.search(rf"(?:{NEGATION.pattern})\s+{state}", piece, re.IGNORECASE) is not None
+def lets_through(piece: str, state: str) -> list[bool]:
+    """What `piece` says the check does with each mention of `state`: True where it lets the record through.
+
+    A mention belongs to the first verdict after it, its subject coming
+    before its verb, or else to the last one before it (`and so does a null
+    one`). A verdict is turned only by a negation right before its own word, so
+    `a missing one does not fail this check but a null one fails` lets the
+    missing one through and holds the null one. With no verdict at all, the
+    piece is a condition the record fails on, and a mention lets the state
+    through only where it is excluded (`neither `active` nor `released``).
+    """
+    verdicts = [(found.start(), PASSES.fullmatch(found.group()) is not None, negated_before(piece[: found.start()])) for found in VERDICT.finditer(piece)]
+    said = []
+    for mention in re.finditer(state, piece):
+        if not verdicts:
+            said.append(negated_before(piece[: mention.start()]))
+            continue
+        _start, passes, negated = next((verdict for verdict in verdicts if verdict[0] > mention.start()), verdicts[-1])
+        said.append(passes != negated)
+    return said
 
 
 def lease_problems(entry: Mapping) -> list[str]:
@@ -1398,7 +1423,7 @@ def lease_problems(entry: Mapping) -> list[str]:
         for piece, own in naming:
             statements = [re.sub(r"\([^()]*\)", " ", piece), *own]
             for state in passing:
-                said = [lets_through(statement, state) for statement in statements if re.search(state, statement)]
+                said = [verdict for statement in statements for verdict in lets_through(statement, state)]
                 if not said:
                     problems.append(f"the {part} names `lease_state` without {state}, which passes: {piece}")
                 elif not all(said):
@@ -1423,19 +1448,41 @@ LEASE_TURNED: dict[str, tuple[str, str, str]] = {
     "remediation_reason_missing": ("remediation", "(a missing or null one is no reason)", "(a missing or null one is also a reason)"),
     "remediation_reason_active": ("remediation", "is neither `active` nor `released`", "is `active` or `released`"),
     "remediation_leaves_out_missing": ("remediation", " (a missing or null one is no reason)", ""),
+    "meaning_fails_null_only": ("meaning", "(a missing or null one passes this check)", "(a missing one does not fail this check but a null one fails)"),
+    "meaning_fails_missing_only": ("meaning", "(a missing or null one passes this check)", "(a null one does not fail this check but a missing one fails)"),
+    "remediation_reason_null_only": ("remediation", "(a missing or null one is no reason)", "(a missing one is no reason, but a null one is a reason)"),
+    "remediation_reason_missing_only": ("remediation", "(a missing or null one is no reason)", "(a null one is no reason, but a missing one is a reason)"),
 }
+
+# The entry with one statement about a lease state said another true way: (part,
+# as the entry says it, said again).
+LEASE_RESTATED: dict[str, tuple[str, str, str]] = {
+    "meaning_without_exception": ("meaning", "(a missing or null one passes this check)", "(a missing or null one passes this check without exception)"),
+    "meaning_each_does_not_fail": ("meaning", "(a missing or null one passes this check)", "(a missing one does not fail this check, and a null one does not fail it either)"),
+    "meaning_so_does_null": ("meaning", "(a missing or null one passes this check)", "(a missing one passes this check, and so does a null one)"),
+    "remediation_without_exception": ("remediation", "(a missing or null one is no reason)", "(a missing or null one is no reason, without exception)"),
+    "remediation_neither_is_null": ("remediation", "(a missing or null one is no reason)", "(a missing one is no reason, and neither is a null one)"),
+}
+
+
+def unknown_debugger_error_with(part: str, said: str, instead: str) -> dict:
+    """The entry with the one place `part` says `said` saying `instead`."""
+    entry = dict(catalogue_entry("unknown_debugger_error") or {})
+    texts = [entry["meaning"]] if part == "meaning" else list(entry["remediation"])
+    assert sum(text.count(said) for text in texts) == 1, said
+    texts = [text.replace(said, instead) for text in texts]
+    entry[part] = texts[0] if part == "meaning" else texts
+    return entry
 
 
 @pytest.mark.parametrize("turned", sorted(LEASE_TURNED))
 def test_an_entry_that_holds_a_lease_state_against_a_record_the_check_lets_through_fails(turned: str) -> None:
-    part, said, wrong = LEASE_TURNED[turned]
-    entry = dict(catalogue_entry("unknown_debugger_error") or {})
-    texts = [entry["meaning"]] if part == "meaning" else list(entry["remediation"])
-    assert sum(text.count(said) for text in texts) == 1, said
-    texts = [text.replace(said, wrong) for text in texts]
-    entry[part] = texts[0] if part == "meaning" else texts
+    assert lease_problems(unknown_debugger_error_with(*LEASE_TURNED[turned])) != []
 
-    assert lease_problems(entry) != []
+
+@pytest.mark.parametrize("restated", sorted(LEASE_RESTATED))
+def test_an_entry_that_lets_each_passing_lease_state_through_another_way_passes(restated: str) -> None:
+    assert lease_problems(unknown_debugger_error_with(*LEASE_RESTATED[restated])) == []
 
 
 # The fields a refusal written as a dict carries for every type, and the advice
