@@ -77,6 +77,7 @@ from test_tool_definition_debug_sessions import (
     unknown_identifiers,
 )
 from test_tool_definition_debug_symbol_info import NEGATED_NEED, allows_either_policy_key
+from test_tool_definition_uart import NEGATION as PLAIN_NEGATION
 from test_tool_descriptions import DESCRIPTION_LIMIT, PROPERTY_DESCRIPTION_LIMIT
 
 from agentic_hil.backends import gdbdebug
@@ -110,7 +111,7 @@ READS = (STATUS, LIST, STOP_REASON)
 BREAKPOINT_SYMBOL = "test_done"
 CALL_ARGUMENTS: dict[str, dict] = {SET: {"location": {"symbol": BREAKPOINT_SYMBOL}}}
 
-NEGATION = re.compile(r"\b(no|not|never|neither|nor|without|unchanged)\b", re.IGNORECASE)
+NEGATION = re.compile(rf"{PLAIN_NEGATION}|\b(?:neither|nor|unchanged)\b", re.IGNORECASE)
 DENIED_BEFORE = r"\b(not|never|no|instead of|rather than)\s+(an?\s+)?"
 OK_NOT_FALSE = r"\bok\b(?!\W{0,3}false\b)"
 # Where a fragment ends: a full stop that closes a sentence, a semicolon, a
@@ -929,6 +930,8 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
             "If an acknowledged interrupt's stop times out, halt_confirmed is false, target_state is unknown and the bench is quarantined.",
             "If an acknowledged interrupt's stop times out, ok and halt_confirmed are false, target_state is unknown and the bench never quarantined.",
             "If an acknowledged interrupt's stop times out, ok and halt_confirmed are false, target_state is unknown and the bench is not quarantined.",
+            "If an acknowledged interrupt's stop times out, ok and halt_confirmed are false, target_state is unknown and the bench isn't quarantined.",
+            "If an acknowledged interrupt's stop times out, ok and halt_confirmed are false, target_state is unknown and the bench cannot be quarantined.",
             "If unconfirmed, ok and halt_confirmed are false, target_state is unknown and the bench quarantined; a retry can lift it.",
             "Unconfirmed: ok false, halt_confirmed false, target_state unknown, quarantined.",
             "If the interrupt is not acknowledged and no stop follows: ok false, halt_confirmed false, target_state unknown, quarantined.",
@@ -943,6 +946,10 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
         [
             "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; a retry can lift it.",
             "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; a confirmed halt never lifts it.",
+            "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; a confirmed halt cannot lift it.",
+            "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; a confirmed halt can't lift it.",
+            "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; a confirmed halt won't lift it.",
+            "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; a confirmed halt doesn't lift it.",
             "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; an unconfirmed halt can lift it.",
             "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined.",
         ],

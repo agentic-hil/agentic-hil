@@ -321,7 +321,10 @@ NO_LINE_ENDING = re.compile(
     r"|\bnothing\b[^.;]*\b(?:appended|added)\b",
     re.IGNORECASE,
 )
-NEGATION = r"\b(?:no|not|never|nothing|without)\b"
+# A word that denies what follows it. `cannot` and the n't contractions (can't,
+# won't, doesn't, isn't) deny as plainly as `not`; the whole is one group, so it
+# can sit inside a longer pattern without its alternation leaking out.
+NEGATION = r"(?:\b(?:no|not|never|nothing|without|cannot)\b|n't\b)"
 ADDS_LINE_ENDING = r"\b(?:adds?|appends?|added|appended)\b[^.;]*\b(?:line ending|newline|terminator)\b"
 DEFAULT_TRUE = re.compile(r"\bdefaults?\b[^.;]*\btrue\b|\btrue\b[^.;]*\bdefault\b", re.IGNORECASE)
 SECONDS = re.compile(r"\b(\d+(?:\.\d+)?)\s?s\b")

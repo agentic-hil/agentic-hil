@@ -237,8 +237,6 @@ TIMEOUT_RESULT = r"(?<![A-Za-z0-9_])timeout(?![A-Za-z0-9_])"
 # The outer `ok`, not `report.ok`.
 OK_WORD = r"(?<![A-Za-z0-9_.])ok(?![A-Za-z0-9_.])"
 NEGATED_NEED = r"\b(?:needs?|requires?)\s+no\b|\b(?:does\s+not|doesn't|never)\s+(?:need|require)|\bnot\s+(?:needed|required)\b|\boptional\b"
-# A negation inside a matched phrase: "does not clear", "never resets".
-NEGATED_PHRASE = r"\b(?:no|not|never)\b|n't\b"
 BACKENDS = r"(?:OpenOCD|pyOCD|STM32CubeProgrammer)"
 
 
@@ -512,7 +510,7 @@ def says_record_outlives_successes(text: str) -> bool:
     success"), and a negated phrase ("a success does not clear it") is the
     claim itself, not its inversion."""
     stays = one_of(clauses(text), r"\bsuccess|\bsucceed", r"\bstays?\b|\bremains?\b|\bkept\b|\bkeeps?\b|\bpersists?\b|\bsurvives?\b|\buntil\b")
-    cleared = any(not re.search(NEGATED_PHRASE, match.group(0), re.IGNORECASE) for match in re.finditer(CLEARED_BY_SUCCESS, text, re.IGNORECASE))
+    cleared = any(not re.search(NEGATION, match.group(0), re.IGNORECASE) for match in re.finditer(CLEARED_BY_SUCCESS, text, re.IGNORECASE))
     return stays and not cleared
 
 
@@ -543,7 +541,7 @@ def says_damaged_state_answers_config_invalid(clause: str) -> bool:
     damaged one never answers `config_invalid`"."""
     for first, second in ((DAMAGED, r"\bconfig_invalid\b"), (r"\bconfig_invalid\b", DAMAGED)):
         for match in re.finditer(rf"{first}(?P<between>[^.;]*?){second}", clause, re.IGNORECASE):
-            if not re.search(NEGATED_PHRASE, match.group("between"), re.IGNORECASE):
+            if not re.search(NEGATION, match.group("between"), re.IGNORECASE):
                 return True
     return False
 
@@ -814,9 +812,10 @@ def test_the_catalogue_tells_an_unreadable_report_state_from_a_damaged_or_missin
     ("pattern", "replacement"),
     [
         (r"\banswers `config_invalid`", "never answers `config_invalid`"),
+        (r"\banswers `config_invalid`", "cannot answer `config_invalid`"),
         (r"\bis damaged answers `config_invalid` instead", "is damaged answers this as well"),
     ],
-    ids=["negated", "merged"],
+    ids=["negated", "cannot", "merged"],
 )
 def test_the_unreadable_check_refuses_a_served_entry_that_inverts_the_damaged_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pattern: str, replacement: str) -> None:
     """A malformed report state raises `config_invalid` (report.py:666-673); only
@@ -1050,6 +1049,8 @@ PARAPHRASES = [
             "Nothing is stored yet: report_not_found. The state exists and reading it failed, or is damaged: report_not_found or config_invalid.",
             "This project's report state exists and reading it failed. A report state that reads and is damaged never answers `config_invalid`.",
             "The state exists but cannot be read; a malformed one does not answer config_invalid.",
+            "The state exists but cannot be read; a damaged state cannot answer `config_invalid`.",
+            "The state exists but cannot be read; a malformed one can't answer config_invalid.",
             "The state exists but cannot be read; config_invalid is never a damaged one.",
         ),
     ),
