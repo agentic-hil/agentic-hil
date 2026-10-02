@@ -5045,17 +5045,19 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "classify_last_error read back the last failure record and found no error type in it: the record named "
             "neither `error_type` nor `target_error_type` and did not fail its audit, and it still failed one of the "
             "checks every result is held to: `ok` not true, `target_ok` or `cleanup_ok` false, `cleanup_required` or "
-            "`quarantined` true, a `lease_state` other than `active` or `released`, `side_effect_status` `unknown` "
-            "or `partial`, or `hardware_state` `unknown`. This name stands in for the missing type. It is not "
-            "something a debugger reported, unlike the `backend_error_type` of the same name a `debugger_error` "
-            "carries. `source_tool` names the call that wrote the record, and `summary` is that call's own sentence."
+            "`quarantined` true, a `lease_state` that is set and is neither `active` nor `released` (a missing or "
+            "null one passes this check), `side_effect_status` `unknown` or `partial`, or `hardware_state` "
+            "`unknown`. This name stands in for the missing type. It is not something a debugger reported, unlike "
+            "the `backend_error_type` of the same name a `debugger_error` carries. `source_tool` names the call that "
+            "wrote the record, and `summary` is that call's own sentence."
         ),
         remediation=(
             "Read `summary`, `source_tool` and `log_path` on this result: with no error type, they are what says "
             "what happened. While no other call has finished since, `get_last_report` returns the whole record, and "
             "the fields named above say which check it failed.",
-            "If the record has `quarantined` or `cleanup_required` true, or a `lease_state` other than `active` or "
-            "`released`, call `hardware_lease_status` and settle what it holds before the next hardware call.",
+            "If the record has `quarantined` or `cleanup_required` true, or a `lease_state` that is set and is neither "
+            "`active` nor `released` (a missing or null one is no reason), call `hardware_lease_status` and settle "
+            "what it holds before the next hardware call.",
             "If `side_effect_status` is `unknown` or `partial`, or `hardware_state` is `unknown`, treat the board's "
             "state as unknown until a later call confirms it, such as a `probe_target` that succeeds.",
         ),

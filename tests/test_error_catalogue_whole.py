@@ -30,6 +30,7 @@ import ast
 import importlib
 import inspect
 import json
+import re
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from functools import cache
@@ -58,6 +59,7 @@ from test_error_catalogue_ec1_debug import (
 )
 from test_error_catalogue_ec2_artifacts_reports import DYNAMIC_SITES as ARTIFACT_DYNAMIC_SITES
 from test_error_catalogue_ec2_artifacts_reports import EXCLUDED_SITES as ARTIFACT_EXCLUDED_SITES
+from test_error_catalogue_ec2_artifacts_reports import clauses
 from test_error_catalogue_ec3_run_coordination import CONSUMERS
 from test_error_catalogue_ec3_run_coordination import EXCLUDED as RUN_EXCLUDED
 from test_error_catalogue_ec3_run_coordination import PINNED_DYNAMIC as RUN_DYNAMIC_SITES
@@ -67,6 +69,7 @@ from agentic_hil.backends import common, gdbdebug, openocd, pyocd, stlink
 from agentic_hil.config import load_config
 from agentic_hil.knowledge import ERROR_URI_PREFIX, catalogue_entry, lookup_remedy
 from agentic_hil.mcp import MCP_RESOURCE_NOT_FOUND, handle_mcp_message
+from agentic_hil.report import SUCCESS_CHECKS, classify_failure_report, write_report
 from agentic_hil.tools import AgenticHILToolService
 
 PACKAGE = Path(str(agentic_hil.__file__)).parent
@@ -1070,3 +1073,48 @@ def test_a_planted_refusal_fails_the_guard(module: str, text: str, pair: Pair, s
 
     assert site in inventory.sites(pair)
     assert pair in set(unresolved(inventory, reference)) - set(unresolved(scanned(), reference))
+
+
+# ---------------------------------------------------------------------------
+# Entries read against the refusals that carry them.
+
+# A record's lease state, each written as the entry names it: none at all, a
+# null, the two states the success check names, and the state the package
+# writes for a lease it could not hand back.
+LEASE_STATES: dict[str, dict] = {
+    r"\bmissing\b": {},
+    r"\bnull\b": {"lease_state": None},
+    r"`active`": {"lease_state": "active"},
+    r"`released`": {"lease_state": "released"},
+    r"`quarantined`": {"lease_state": "quarantined"},
+}
+
+
+@pytest.mark.parametrize(
+    ("state", "fails"),
+    [(r"\bmissing\b", False), (r"\bnull\b", False), (r"`active`", False), (r"`released`", False), (r"`quarantined`", True)],
+    ids=["missing", "null", "active", "released", "quarantined"],
+)
+def test_a_record_fails_on_its_lease_state_only_for_a_state_outside_the_two_the_check_names(state: str, fails: bool, tmp_path: Path) -> None:
+    """A record that fails nothing else is a failure for its lease state only when one is set to neither of the two."""
+    config = load_config(str(write_config(tmp_path)))
+    write_report(config, {"ok": True, "tool": "probe_target", "summary": "A record that fails no other check.", **LEASE_STATES[state]})
+
+    classified = classify_failure_report(config, lambda _error_type: [])
+
+    assert classified["error_type"] == ("unknown_debugger_error" if fails else "report_not_found"), classified
+
+
+def test_the_unknown_debugger_error_entry_lets_through_every_lease_state_the_check_does() -> None:
+    """Each clause that names `lease_state` among the checks names every state the check lets through."""
+    check = dict(SUCCESS_CHECKS)["lease_state"]
+    passing = [state for state, fields in LEASE_STATES.items() if check(fields)]
+    assert passing and len(passing) < len(LEASE_STATES)
+    entry = catalogue_entry("unknown_debugger_error")
+    assert entry is not None
+    for part, texts in (("meaning", clauses(entry["meaning"])), ("remediation", list(entry["remediation"]))):
+        naming = [text for text in texts if "`lease_state`" in text]
+        assert naming, f"the {part} names no `lease_state`"
+        for text in naming:
+            unnamed = [state for state in passing if not re.search(state, text)]
+            assert not unnamed, f"the {part} names `lease_state` without the states that pass {unnamed}: {text}"
