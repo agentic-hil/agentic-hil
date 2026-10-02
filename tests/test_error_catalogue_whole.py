@@ -10,12 +10,15 @@ nothing.
 This guard reads every module of the package, the debugger backends included,
 with the debug guard's reader, and collects every literal a caller can read as
 an `error_type`: a dict value under the key, an `error_type=` keyword, a
-subscript assignment and `setdefault`, the first argument of an exception
-whose constructor takes the type, and the argument of every helper that writes
-its own parameter into the field, followed to each caller in the package. Each
-type is held together with the scope its advice is looked up under at that
-site, read the way the debug guard reads it; a site whose scope cannot be read
-is held to the bare key, which every lookup falls back to.
+subscript assignment and `setdefault`, a (key, value) pair handed to `dict` or
+`update`, the first argument of an exception whose constructor takes the type,
+and the argument of every helper that writes its own parameter into the field,
+followed to each caller in the package under whatever name the caller imports
+it by. Each type is held together with the scope its advice is looked up under
+at that site, read the way the debug guard reads it; a site whose scope cannot
+be read is held to the bare key, which every lookup falls back to. A type field
+named in any other form, and a followed helper named other than as the function
+a call calls, is a form the scan does not read, and it fails the scan.
 
 Every pair resolves through the real MCP resource read, the scoped key first
 and the bare key after it, exactly as `knowledge.lookup_remedy` does, or sits in
@@ -28,10 +31,11 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.util
 import inspect
 import json
 import re
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -41,6 +45,7 @@ import pytest
 from conftest import write_config
 from test_error_catalogue_can import NOT_RETURNED_BY_A_TOOL
 from test_error_catalogue_ec1_debug import (
+    ERROR_TYPE_FIELDS,
     PINNED_EXPRESSIONS,
     SILENT,
     Reader,
@@ -65,6 +70,7 @@ from test_error_catalogue_ec3_run_coordination import EXCLUDED as RUN_EXCLUDED
 from test_error_catalogue_ec3_run_coordination import PINNED_DYNAMIC as RUN_DYNAMIC_SITES
 
 import agentic_hil
+from agentic_hil import humanize
 from agentic_hil.backends import common, gdbdebug, openocd, pyocd, stlink
 from agentic_hil.config import load_config
 from agentic_hil.knowledge import ERROR_URI_PREFIX, catalogue_entry, lookup_remedy
@@ -300,6 +306,8 @@ class Inventory:
     dynamic: frozenset[DynamicSite]
     followed: frozenset[Followed]
     passed_over: frozenset[type]
+    # Where a type is written in a form the scan does not read.
+    unsupported: frozenset[DynamicSite]
 
     @property
     def types(self) -> frozenset[str]:
@@ -317,7 +325,47 @@ def _is_consumer_keyword(source: Source, node: ast.expr) -> bool:
     return isinstance(call, ast.Call) and _callee(call) in CONSUMERS
 
 
-def _sites(source: Source) -> Iterator[ast.expr]:
+def imported(source: Source) -> Mapping[str, object]:
+    """What each name `source` imports from the package stands for, under the name it is bound to.
+
+    An import inside a function counts for the whole module: a name that means
+    a helper anywhere in it is read as that helper everywhere in it.
+    """
+    bound: dict[str, object] = {}
+    for node in ast.walk(source.tree):
+        if isinstance(node, ast.ImportFrom):
+            base = importlib.util.resolve_name("." * node.level + (node.module or ""), source.module.__package__)
+            if base.split(".")[0] != "agentic_hil":
+                continue
+            module = importlib.import_module(base)
+            for alias in node.names:
+                if alias.name == "*":
+                    bound.update((name, getattr(module, name)) for name in getattr(module, "__all__", [name for name in vars(module) if not name.startswith("_")]))
+                else:
+                    bound[alias.asname or alias.name] = getattr(module, alias.name) if hasattr(module, alias.name) else importlib.import_module(f"{base}.{alias.name}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "agentic_hil":
+                    bound[alias.asname or "agentic_hil"] = importlib.import_module(alias.name if alias.asname else "agentic_hil")
+    return MappingProxyType(bound)
+
+
+def resolved(node: ast.expr, source: Source, bound: Mapping[str, object]) -> object | None:
+    """The object of the package a name, or an attribute of a module, stands for in `source`, under whatever name it was imported."""
+    if isinstance(node, ast.Name):
+        return bound[node.id] if node.id in bound else vars(source.module).get(node.id)
+    if isinstance(node, ast.Attribute):
+        owner = resolved(node.value, source, bound)
+        return getattr(owner, node.attr, None) if isinstance(owner, ModuleType) else None
+    return None
+
+
+# The calls that build a document from (key, value) pairs: a pair keyed by a
+# type field in the list or tuple one of them is handed writes the type.
+PAIR_TAKERS = frozenset({"dict", "update"})
+
+
+def _sites(source: Source, bound: Mapping[str, object]) -> Iterator[ast.expr]:
     """Every expression `source` writes as an error type."""
     producers = producer_classes()
     for node in error_type_expressions(source):
@@ -326,11 +374,90 @@ def _sites(source: Source) -> Iterator[ast.expr]:
     for node in ast.walk(source.tree):
         if not isinstance(node, ast.Call):
             continue
-        callee = _callee(node)
+        constructed = resolved(node.func, source, bound)
+        callee = constructed.__name__ if isinstance(constructed, type) and constructed.__name__ in producers else _callee(node)
         if callee in producers and len(node.args) > producers[callee]:
             yield node.args[producers[callee]]
         elif callee == "__setitem__" and len(node.args) == 2 and isinstance(node.args[0], ast.Constant) and node.args[0].value == "error_type":
             yield node.args[1]
+        elif callee in PAIR_TAKERS and node.args and isinstance(node.args[0], (ast.List, ast.Tuple)):
+            for pair in node.args[0].elts:
+                if isinstance(pair, ast.Tuple) and len(pair.elts) == 2 and isinstance(pair.elts[0], ast.Constant) and pair.elts[0].value in ERROR_TYPE_FIELDS:
+                    yield pair.elts[1]
+
+
+# Where a (field, value) row is printed as a line of text rather than written
+# into a document: a test below holds that it returns lines.
+RENDERERS = (humanize._fields,)
+# The calls that read a field of a document, or an attribute of an error, by its name.
+FIELD_READERS = frozenset({"get", "getattr"})
+
+
+def _written_value(source: Source, name: ast.Constant) -> ast.AST | None:
+    """What a literal type field writes the type from, where it stands to write one.
+
+    That is the value beside it in a dict, an assignment or a `setdefault`, or
+    in a (field, value) pair; the write itself where there is no single value.
+    """
+    parent = source.parents.get(name)
+    if isinstance(parent, ast.Dict) and any(key is name for key in parent.keys):
+        return next(value for key, value in zip(parent.keys, parent.values, strict=True) if key is name)
+    if isinstance(parent, ast.Subscript) and parent.slice is name and isinstance(parent.ctx, ast.Store):
+        statement = source.parents.get(parent)
+        return statement.value if isinstance(statement, (ast.Assign, ast.AnnAssign)) and statement.value is not None else parent
+    if isinstance(parent, ast.Call) and parent.args and parent.args[0] is name and _callee(parent) in {"setdefault", "__setitem__"}:
+        return parent.args[1] if len(parent.args) == 2 else parent
+    if isinstance(parent, ast.Tuple) and len(parent.elts) == 2 and parent.elts[0] is name:
+        return parent.elts[1]
+    return None
+
+
+def _is_rendered(source: Source, bound: Mapping[str, object], pair: ast.AST) -> bool:
+    rows = source.parents.get(pair)
+    call = source.parents.get(rows) if rows is not None else None
+    return (
+        isinstance(rows, (ast.List, ast.Tuple))
+        and isinstance(call, ast.Call)
+        and bool(call.args)
+        and call.args[0] is rows
+        and any(resolved(call.func, source, bound) is renderer for renderer in RENDERERS)
+    )
+
+
+def _is_read(parent: ast.AST | None, name: ast.Constant) -> bool:
+    """Whether a literal type field only reads: a subscript load, a `.get` or `getattr`, a comparison, or a set of names to match."""
+    if isinstance(parent, ast.Subscript):
+        return parent.slice is name and not isinstance(parent.ctx, ast.Store)
+    if isinstance(parent, ast.Call):
+        return _callee(parent) in FIELD_READERS and any(argument is name for argument in parent.args)
+    return isinstance(parent, (ast.Compare, ast.Set))
+
+
+def fields_unread(source: Source, bound: Mapping[str, object], read: Iterable[ast.expr]) -> Iterator[DynamicSite]:
+    """Every place `source` names a type field the scan neither reads the value of nor knows to only read or print it."""
+    values = {id(node) for node in read}
+    for node in ast.walk(source.tree):
+        if not (isinstance(node, ast.Constant) and node.value in ERROR_TYPE_FIELDS):
+            continue
+        parent = source.parents.get(node)
+        value = _written_value(source, node)
+        if (value is not None and (id(value) in values or _is_rendered(source, bound, parent))) or (value is None and _is_read(parent, node)):
+            continue
+        yield short_name(source.module), written_in(source, node), ast.unparse(parent if parent is not None else node)
+
+
+def helper_references_unread(sources: Mapping[str, Source], bound: Mapping[str, Mapping[str, object]], helpers: list[object]) -> Iterator[DynamicSite]:
+    """Every place a helper the scan follows to its callers is named other than as the function a call calls.
+
+    The scan follows a helper through its calls; a helper stored, passed on or
+    renamed is called where no call names it.
+    """
+    for module_name, source in sources.items():
+        for node in ast.walk(source.tree):
+            if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load):
+                parent = source.parents.get(node)
+                if not (isinstance(parent, ast.Call) and parent.func is node) and any(resolved(node, source, bound[module_name]) is helper for helper in helpers):
+                    yield short_name(source.module), written_in(source, node), ast.unparse(parent if parent is not None else node)
 
 
 def function_at(source: Source, line: int) -> ast.FunctionDef:
@@ -338,13 +465,20 @@ def function_at(source: Source, line: int) -> ast.FunctionDef:
     return function
 
 
-def calls_from_other_modules(sources: Mapping[str, Source], home: str, name: str) -> Iterator[tuple[Source, ast.Call]]:
-    """Calls to the module function `name` of `home` from every other module, by its name or through its module."""
+def module_helper(sources: Mapping[str, Source], home: str, line: int) -> object | None:
+    """The module function whose `def` stands at `line` of `home`, or None for a method or a nested function."""
+    function = function_at(sources[home], line)
+    helper = vars(importlib.import_module(home)).get(function.name)
+    return helper if inspect.isfunction(helper) and helper.__qualname__ == function.name and sources[home].enclosing_class(function) is None else None
+
+
+def calls_from_other_modules(sources: Mapping[str, Source], bound: Mapping[str, Mapping[str, object]], home: str, helper: object) -> Iterator[tuple[Source, ast.Call]]:
+    """Calls to the module function `helper` of `home` from every other module, under any name it is imported by."""
     for module_name, source in sources.items():
         if module_name == home:
             continue
         for node in ast.walk(source.tree):
-            if isinstance(node, ast.Call) and ((isinstance(node.func, ast.Name) and node.func.id == name) or (isinstance(node.func, ast.Attribute) and node.func.attr == name and isinstance(node.func.value, ast.Name))):
+            if isinstance(node, ast.Call) and resolved(node.func, source, bound[module_name]) is helper:
                 yield source, node
 
 
@@ -375,8 +509,12 @@ def scan(*, modules: tuple[str, ...] | None = None, planted: Mapping[str, str] =
             for scope in scopes:
                 pairs.setdefault((value, scope), set()).add(site)  # type: ignore[arg-type]
 
-    for source in sources.values():
-        for node in _sites(source):
+    bound = {name: imported(source) for name, source in sources.items()}
+    unsupported: set[DynamicSite] = set()
+    for name, source in sources.items():
+        written = list(_sites(source, bound[name]))
+        unsupported.update(fields_unread(source, bound[name], written))
+        for node in written:
             reader.followed.clear()
             values = read(source, node)
             if values is None:
@@ -387,23 +525,26 @@ def scan(*, modules: tuple[str, ...] | None = None, planted: Mapping[str, str] =
             # other modules too, and each of those calls is a site of its own,
             # looked up the way the function's own site is.
             for home, line, parameter in sorted(reader.followed):
-                function = function_at(sources[home], line)
-                if sources[home].enclosing_class(function) is not None:
+                helper = module_helper(sources, home, line)
+                if helper is None:
                     continue
-                for caller, call in calls_from_other_modules(sources, home, function.name):
-                    argument = _argument(call, function, parameter)
+                for caller, call in calls_from_other_modules(sources, bound, home, helper):
+                    argument = _argument(call, function_at(sources[home], line), parameter)
                     if argument is not None:
                         forwarded = read(caller, argument)
                         if forwarded is not None:
                             add(caller, argument, forwarded, scopes)
             followed |= reader.followed
     dynamic |= reader.unread
+    helpers = [helper for home, line, _parameter in followed if (helper := module_helper(sources, home, line)) is not None]
+    unsupported.update(helper_references_unread(sources, bound, helpers))
     return Inventory(
         tuple(names),
         MappingProxyType({pair: frozenset(sites) for pair, sites in pairs.items()}),
         frozenset(dynamic),
         frozenset(followed),
         frozenset(reader.passed_over),
+        frozenset(unsupported),
     )
 
 
@@ -1051,9 +1192,57 @@ PLANTED: tuple[tuple[str, str, Pair, tuple[str, str]], ...] = (
     ),
     (
         "agentic_hil.runevidence",
+        "from agentic_hil.config import reject_nonfinite_numbers\n\n\n"
         'def planted_forwarded_refusal(document):\n    reject_nonfinite_numbers(document, "planted_forwarded_refusal")\n',
         ("planted_forwarded_refusal", None),
         ("runevidence", "planted_forwarded_refusal"),
+    ),
+    (
+        "agentic_hil.junit",
+        "from agentic_hil.config import reject_nonfinite_numbers as planted_alias\n\n\n"
+        'def planted_aliased_refusal(document):\n    planted_alias(document, "planted_aliased_refusal")\n',
+        ("planted_aliased_refusal", None),
+        ("junit", "planted_aliased_refusal"),
+    ),
+    (
+        "agentic_hil.upgrade",
+        "from agentic_hil.config import ConfigError as PlantedRefusal\n\n\n"
+        'def planted_aliased_exception_refusal():\n    raise PlantedRefusal("planted_aliased_exception_refusal", "planted")\n',
+        ("planted_aliased_exception_refusal", None),
+        ("upgrade", "planted_aliased_exception_refusal"),
+    ),
+    (
+        "agentic_hil.report",
+        'def planted_pairs_refusal():\n    return dict([("ok", False), ("error_type", "planted_pairs_refusal")])\n',
+        ("planted_pairs_refusal", None),
+        ("report", "planted_pairs_refusal"),
+    ),
+    (
+        "agentic_hil.cli",
+        'def planted_update_refusal(result):\n    result.update((("error_type", "planted_update_refusal"),))\n    return result\n',
+        ("planted_update_refusal", None),
+        ("cli", "planted_update_refusal"),
+    ),
+)
+
+# Refusals written in a form the scan does not read, each with where it is
+# recorded and the expression it is recorded under. A type written so reaches
+# no guard, so the form fails the scan instead of passing it unread.
+PLANTED_UNREAD: tuple[tuple[str, str, DynamicSite], ...] = (
+    (
+        "agentic_hil.test_reactor",
+        'def planted_renamed_helper(document):\n    check = reject_nonfinite_numbers\n    check(document, "planted_renamed_helper")\n',
+        ("test_reactor", "planted_renamed_helper", "check = reject_nonfinite_numbers"),
+    ),
+    (
+        "agentic_hil.junit",
+        'def planted_zipped_refusal():\n    return dict(zip(("ok", "error_type"), (False, "planted_zipped_refusal")))\n',
+        ("junit", "planted_zipped_refusal", "('ok', 'error_type')"),
+    ),
+    (
+        "agentic_hil.upgrade",
+        'def planted_listed_refusal(result):\n    pairs = [("error_type", "planted_listed_refusal")]\n    result.update(pairs)\n    return result\n',
+        ("upgrade", "planted_listed_refusal", "('error_type', 'planted_listed_refusal')"),
     ),
 )
 
@@ -1061,7 +1250,7 @@ PLANTED: tuple[tuple[str, str, Pair, tuple[str, str]], ...] = (
 @cache
 def planted_scan() -> Inventory:
     texts: dict[str, str] = {}
-    for module, text, _pair, _site in PLANTED:
+    for module, text in [(module, text) for module, text, _pair, _site in PLANTED] + [(module, text) for module, text, _site in PLANTED_UNREAD]:
         source = texts.get(module) or Path(str(importlib.import_module(module).__file__)).read_text(encoding="utf-8")
         texts[module] = f"{source}\n\n{text}"
     return scan(planted=MappingProxyType(texts))
@@ -1073,6 +1262,24 @@ def test_a_planted_refusal_fails_the_guard(module: str, text: str, pair: Pair, s
 
     assert site in inventory.sites(pair)
     assert pair in set(unresolved(inventory, reference)) - set(unresolved(scanned(), reference))
+
+
+@pytest.mark.parametrize(("module", "text", "site"), PLANTED_UNREAD, ids=[site[1] for _module, _text, site in PLANTED_UNREAD])
+def test_a_planted_refusal_the_scan_cannot_read_fails_it(module: str, text: str, site: DynamicSite) -> None:
+    assert site in planted_scan().unsupported
+
+
+def test_the_package_writes_every_type_in_a_form_the_scan_reads() -> None:
+    unsupported = sorted(scanned().unsupported)
+
+    assert unsupported == [], "write the type as a dict value, a keyword, a subscript or `setdefault`, and call a helper that writes it by a name it is imported under"
+
+
+def test_a_type_handed_to_the_renderer_becomes_a_line_of_text() -> None:
+    """A (field, value) row `humanize._fields` takes is printed, not written into a document, so the scan passes it."""
+    lines = humanize._fields([("error_type", "planted_rendered_refusal")])
+
+    assert lines and all(isinstance(line, str) for line in lines) and "planted_rendered_refusal" in "".join(lines), lines
 
 
 # ---------------------------------------------------------------------------
