@@ -1577,13 +1577,18 @@ def test_each_mcp_command_untrusted_refusal_carries_the_fields_its_trigger_is_he
 HAS = re.compile(r"\b(?:carr(?:y|ies)|adds?|includes?|names?|naming|with)\b", re.IGNORECASE)
 LEAVES_OUT = re.compile(r"\b(?:omits?|lacks?|drops?|leaves? out|without)\b", re.IGNORECASE)
 PRESENCE = re.compile(f"{HAS.pattern}|{LEAVES_OUT.pattern}", re.IGNORECASE)
+# The same said of a field after it, its subject: `is included`, `is never
+# carried`, `isn't added`, `are not set`.
+HAS_AFTER = re.compile(r"(?:\s*(?:,|\band\b|\bor\b)\s*`\w+`)*\s+(?:is|are)(?:n't)?\s+(?:(?:not|never)\s+)?(?P<word>included|carried|added|named|given|set)\b", re.IGNORECASE)
 
 
 def presence(clause: str, fields: frozenset[str]) -> tuple[frozenset[str], frozenset[str]]:
     """The fields among `fields` that `clause` says the refusal has, and those it says it leaves out: (has, leaves out).
 
-    A field belongs to the nearest word before it that says one or the other,
-    or with none before, to the first after it, as a subject does to its verb.
+    A field followed by a passive predicate (`is included`, `is not carried`)
+    belongs to that. Any other belongs to the nearest word before it that says
+    one or the other, or with none before, to the first after it, as a subject
+    does to its verb.
     That word is turned by a negation right before it (`never adds`, `does not
     omit`), and the field by one between that word and the field (`adds no`). A
     negation elsewhere in the clause, as in what sets the refusal off (`is not
@@ -1593,6 +1598,10 @@ def presence(clause: str, fields: frozenset[str]) -> tuple[frozenset[str], froze
     has, leaves_out = set(), set()
     for mention in re.finditer(r"`(\w+)`", clause):
         if mention.group(1) not in fields:
+            continue
+        passive = HAS_AFTER.match(clause, mention.end())
+        if passive:
+            (leaves_out if negated_before(clause[: passive.start("word")]) else has).add(mention.group(1))
             continue
         before = [word for word in words if word[1] <= mention.start()]
         _start, end, says_has, negated = before[-1] if before else next(iter(words), (0, 0, True, False))
@@ -1671,6 +1680,7 @@ MCP_TURNED: dict[str, tuple[str, str]] = {
     "leaves_out_untrusted_because": ("execute bit adds `untrusted_because`", "execute bit leaves out `untrusted_because`"),
     "without_mode_and_uid": ("with its `mode` and `uid`", "without its `mode` and `uid`"),
     "target_refusal_omits_path": ("another symlink adds `target`", "another symlink adds `target` but omits `path`"),
+    "path_is_not_included": ("A refusal of one path carries `path`", "`path` is not included in a refusal of one path"),
 }
 
 
@@ -1694,6 +1704,7 @@ MCP_RESTATED: dict[str, tuple[str, str]] = {
     "never_omits_path": ("A refusal of one path carries `path`", "A refusal of one path never omits `path`"),
     "target_without_exception": ("another symlink adds `target`", "another symlink adds `target` without exception"),
     "walk_without_path": ("names every launcher that was tried and why each failed", "names every launcher that was tried and why each failed, without `path`"),
+    "path_is_included": ("A refusal of one path carries `path`", "`path` is included in a refusal of one path"),
     "symlink_parent_directory": (
         "a launcher whose parent directory belongs to an account other than this one or root adds `directory`, naming that parent directory, with its `mode` and `uid`",
         "a launcher symlink whose parent directory belongs to another account adds `directory`, `mode` and `uid`",
