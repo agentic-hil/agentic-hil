@@ -1529,7 +1529,7 @@ def test_a_read_returns_the_bytes_as_hex_and_as_text_in_the_ports_encoding(bench
 
 
 @pytest.mark.parametrize(
-    ("arguments", "waited_s"),
+    ("arguments", "wait_in_force_s"),
     [
         pytest.param({}, 0.0, id="no-until-returns-at-once-by-default"),
         pytest.param({"wait_timeout_s": 2.5}, 2.5, id="no-until-waits-as-asked"),
@@ -1540,7 +1540,7 @@ def test_a_read_returns_the_bytes_as_hex_and_as_text_in_the_ports_encoding(bench
         pytest.param({"until": "PASS", "wait_timeout_s": 600}, WAIT_CAP_S, id="until-wait-capped-at-60s"),
     ],
 )
-def test_how_long_a_read_waits_on_a_quiet_line(bench: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, arguments: dict, waited_s: float) -> None:
+def test_how_long_a_read_waits_on_a_quiet_line(bench: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, arguments: dict, wait_in_force_s: float) -> None:
     """Nothing arrives, so every read waits out the wait in force: none without
     until unless asked, ten seconds with until unless asked, and a wait asked
     past sixty seconds is cut to sixty rather than refused. The answer is an
@@ -1555,7 +1555,7 @@ def test_how_long_a_read_waits_on_a_quiet_line(bench: SimpleNamespace, monkeypat
 
     assert result["ok"] is True, result
     assert result["bytes_read"] == 0, result
-    assert waited_s <= clock.now <= waited_s + 0.02, clock.now
+    assert wait_in_force_s <= clock.now <= wait_in_force_s + 0.02, clock.now
     if "until" in arguments:
         assert result["until_matched"] is False, result
 
