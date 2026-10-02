@@ -1642,6 +1642,288 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "a guess is a stimulus sent to whatever board took that name.",
         ),
     ),
+    "com_port_not_configured": ErrorRemedy(
+        meaning=(
+            "The `port_id` names no entry under `com_ports` in the authoritative configuration, so there was nothing "
+            "to open. Nothing was opened, contacted or written. `configured_ports` lists the names this configuration "
+            "does declare. A name that is declared but has no `device` yet is answered with `com_port_not_bound` "
+            "instead, so this refusal means the name in the call is not one the project declares."
+        ),
+        remediation=(
+            "Call the tool again with one of the names in `configured_ports`. A name copied from a test plan or an "
+            "older configuration that is not in that list is the mistake to fix.",
+            "If the port really belongs to this project, the authoritative configuration has to declare it under "
+            "`com_ports`, which is the operator's file to change; `agentic-hil com-ports` lists the devices this host "
+            "has to bind it to.",
+        ),
+        do_not=(
+            "Do not pass a device name (`COM7`, `/dev/ttyACM0`) as `port_id`. The tools reach a port only by its "
+            "configured name, which is what ties it to its permissions and its identity check.",
+        ),
+    ),
+    "com_port_open_failed": ErrorRemedy(
+        meaning=(
+            "Opening the configured device failed, so no session was started. `backend_error` is the line the open "
+            "failed with, and `likely_causes` reads it: on a POSIX host a permission refusal (`EACCES`) means this "
+            "user may not open the device node. On Windows a port another program holds is refused here too, because "
+            "that refusal carries no number to tell it apart; on POSIX the same case is `com_port_busy`. No session "
+            "was registered and the port is not held for it. With `retry_safe` true the failed open left no handle "
+            "behind. With `cleanup_error` present, a handle the failed open left standing would not close, and that "
+            "is recorded under `cleanup_reasons`."
+        ),
+        remediation=(
+            "Read `backend_error` and `likely_causes` first: they say whether the device is missing, held by another "
+            "program, or closed to this user.",
+            "On Linux, a permission refusal is fixed by adding the user to the group that owns the device (`dialout` "
+            "on Debian and Ubuntu, `uucp` on Arch and Fedora) and logging in again; `ls -l` on the device shows its "
+            "group.",
+            "A missing device means the adapter is unplugged or the host lists it under another name: plug it in, and "
+            "`agentic-hil com-ports` shows what this host lists right now. On Windows, close the terminal, IDE serial "
+            "monitor or flashing tool that holds the port.",
+            "With `cleanup_error` present, call `com_session_start` again once the cause is fixed: that open is what "
+            "settles the recorded handle, since the operating system refuses it if the handle is really still held.",
+        ),
+        do_not=(
+            "Do not switch the entry to a different device just because that one opens. A device name is an "
+            "enumeration order, so another name that opens is usually another board.",
+        ),
+    ),
+    "serial_backend_not_available": ErrorRemedy(
+        meaning=(
+            "pyserial, the backend Agentic HIL reaches serial ports through, could not be imported in the process that "
+            "answered. `backend_error` is the import's own line with its type: `ModuleNotFoundError` means the package "
+            "is not installed in that environment, any other type means it is installed and failed inside its own "
+            "imports. Nothing was opened or contacted. Under `available_com_ports` or `com_ports` this is only the "
+            "host listing missing; a `com_ports` entry that names hardware (`serial_number`, `vid`, `pid` or "
+            "`resource_id`) is then refused by `com_session_start` as `com_port_identity_unverified` with the identity "
+            "status `backend_unavailable`, not with this type."
+        ),
+        remediation=(
+            "Install Agentic HIL with its runtime dependencies into the environment that answered, the one the MCP "
+            "server or the `agentic-hil` command runs from. pyserial is one of those dependencies, so a complete "
+            "install brings it.",
+            "Restart the MCP server afterwards, so that it runs on the installed package, then call the tool again. "
+            "The `agentic-hil` command needs no restart: run it again.",
+            "If `backend_error` is not `ModuleNotFoundError`, pyserial is present and broken: reinstall it in that same "
+            "environment.",
+        ),
+        do_not=(
+            "Do not install pyserial into a different Python environment than the one that runs the server. The "
+            "server imports only from its own interpreter, so the refusal stays exactly as it is.",
+        ),
+    ),
+    "com_port_discovery_failed": ErrorRemedy(
+        meaning=(
+            "Enumerating the host's serial ports raised an operating system error, so this is a listing that could "
+            "not be taken, not a finding that no port is attached. `backend_error` is that error. Nothing was opened. "
+            "While enumeration fails, a `com_ports` entry that names hardware cannot be checked against what is "
+            "behind its device name, and `com_session_start` refuses it as `com_port_identity_unverified`."
+        ),
+        remediation=(
+            "List again with `com_ports_list` or `agentic-hil com-ports`. `likely_causes` names a USB serial driver "
+            "whose state changed during discovery, and a second listing a moment later shows whether that has passed.",
+            "If every listing fails, look at the host's USB serial driver rather than at the configuration: reconnect "
+            "the adapter, or reinstall its driver.",
+        ),
+        do_not=(
+            "Do not remove `serial_number`, `vid` or `pid` from a `com_ports` entry so that it opens without the "
+            "check. The listing is what proves the device name still leads to the right board, and a failed listing "
+            "proves nothing either way.",
+        ),
+    ),
+    "com_port_identity_unverified": ErrorRemedy(
+        meaning=(
+            "This `com_ports` entry names its hardware, so it is opened only after the host confirms that its device "
+            "name still leads to that hardware, and that check could not run. It is not a mismatch: nothing was found "
+            "to be the wrong board, there was no way to tell. The port was not opened and nothing was written. "
+            "`identity.status` says which way the check had no answer: `backend_unavailable` (the host's serial ports "
+            "could not be listed), `port_not_enumerated` (the listing does not name this device exactly once), "
+            "`serial_unknown` (the port reports no serial number to compare) or `usb_ids_unknown` (the port reports "
+            "no USB vendor and product id while the entry names them). `retry_safe` is true."
+        ),
+        remediation=(
+            "Read `identity.status` and `identity.summary`, and restore the check that status names: install the "
+            "serial backend for `backend_unavailable`; plug the board in, or check that `device` is the name this host "
+            "lists for it, for `port_not_enumerated`; use an adapter and driver that report the missing serial or USB "
+            "ids for `serial_unknown` and `usb_ids_unknown`.",
+            "Then call `com_session_start` again. Nothing was touched, so there is nothing to recover.",
+        ),
+        do_not=(
+            "Do not delete `serial_number`, `vid` or `pid` from the entry to get it opened. Drop them only if the "
+            "entry genuinely names no fixed board; removing them to silence this refusal opens a name that nothing "
+            "checks.",
+        ),
+    ),
+    "com_reader_start_failed": ErrorRemedy(
+        meaning=(
+            "The port was opened, but the background reader that buffers its input could not be started, so the "
+            "session was not kept. The port was closed again and `cleanup_confirmed` is true. Nothing was written to "
+            "the line by this call, although the open applied the entry's `assert_dtr` and `assert_rts` as every "
+            "open does. `backend_error` says why the reader would not start."
+        ),
+        remediation=(
+            "Call `com_session_start` again: the port was closed cleanly, so a new start begins from nothing.",
+            "If it fails the same way again, `backend_error` names what the server process could not do, and "
+            "restarting the MCP server is the repair.",
+        ),
+        do_not=(
+            "Do not read the port with another serial program in the meantime. It would hold the device, and the next "
+            "`com_session_start` could not open it.",
+        ),
+    ),
+    "com_port_close_failed": ErrorRemedy(
+        meaning=(
+            "Closing the port, or stopping its reader, did not confirm, and `backend_error` says which part failed and "
+            "how. The session remains registered so that the close can be retried: until it is, `com_read` and "
+            "`com_write` on this port answer `session_not_active`, and `com_ports_list` shows it with "
+            "`session_active` false. The failure is recorded under `cleanup_reasons`. `quarantined` is true only when "
+            "the audit log broke as well; then no later call can close the session, and the incident stands until an "
+            "operator recovers it."
+        ),
+        remediation=(
+            "Call `com_session_stop` again with the same `port_id`. The close is retried from the registered session, "
+            "and a stop that succeeds releases the port.",
+            "`com_session_start` on the same port retries the close as well, and opens a fresh session once it "
+            "succeeds.",
+            "Read `quarantine_guidance` for what the failed close leaves unconfirmed. If `quarantined` is true, fix "
+            "the audit destination first, then follow that guidance to the operator's signature.",
+        ),
+        do_not=(
+            "Do not sign `agentic-hil recover --confirm-safe-state` for this while `quarantined` is false. Nothing is "
+            "held for a signature: the next stop or start settles the handle, and the operating system refuses that "
+            "open by itself if the handle is really stuck.",
+        ),
+    ),
+    "serial_write_failed": ErrorRemedy(
+        meaning=(
+            "The write raised before it confirmed, so how much of the stimulus reached the line is unknown. Some of it "
+            "may have arrived and been acted on, or none of it. `retry_safe` is false for that reason, and the write "
+            "is recorded under `cleanup_reasons` as `com_write_effect_unconfirmed`. `backend_error` and "
+            "`likely_causes` say what the driver reported."
+        ),
+        remediation=(
+            "Call `com_read` first: what the target answered, or did not, is the best evidence of how much of the "
+            "stimulus it received.",
+            "Bring the target to a known state before the next stimulus that depends on its state, by its own "
+            "protocol or controls, or with `reset_target` where the configuration allows it.",
+            "Read `quarantine_guidance` for what the failed write leaves unconfirmed.",
+        ),
+        do_not=(
+            "Do not send the same stimulus again as if nothing went out. Part of it may already be on the target, and "
+            "a second copy can apply a command twice.",
+        ),
+    ),
+    "serial_write_incomplete": ErrorRemedy(
+        meaning=(
+            "The line took only part of the payload: `bytes_written` of `bytes_requested` reached it, even after a "
+            "bounded retry of the remainder, and `data` shows exactly which bytes. The rest never left the host. This "
+            "is confirmed rather than unknown, so the session stays open and usable, and the short write is recorded "
+            "under `cleanup_reasons` without holding the port. `likely_causes` names the usual reasons: a "
+            "`write_timeout_s` too short for the payload at this baudrate, flow control, or a disconnect partway."
+        ),
+        remediation=(
+            "Call `com_read` to see how the target took the partial command.",
+            "Then send only what is missing, the bytes from offset `bytes_written` on, where the protocol accepts a "
+            "command arriving in two pieces. Otherwise bring the target to a known state and send the command as a "
+            "new one.",
+            "If short writes keep happening, have the operator raise `write_timeout_s` for this port, or check flow "
+            "control and the cable.",
+        ),
+        do_not=(
+            "Do not repeat the whole payload. Its first `bytes_written` bytes are already on the target, and sending "
+            "them again hands it those bytes twice.",
+        ),
+    ),
+    "com_buffer_clear_failed": ErrorRemedy(
+        meaning=(
+            "`clear_buffer` asked for the port's receive buffers to be emptied and clearing them failed, so whether "
+            "old input is still queued is unknown. A session that was already active stays open and usable, and the "
+            "refusal carries no `cleanup_confirmed`. A session this call had just opened was closed again instead, "
+            "and `cleanup_confirmed` is true. Where the clear had already reached the driver, it is recorded under "
+            "`cleanup_reasons` as `com_buffer_clear_unconfirmed`. `backend_error` is the driver's line."
+        ),
+        remediation=(
+            "Read `cleanup_confirmed`: true means the new session was closed again, so call `com_session_start` with "
+            "`clear_buffer` again once the driver accepts the clear.",
+            "Without it, the session that was already active is still open: call `com_read` once and discard what it "
+            "returns, so that input the reader collected before the failed clear is not taken for an answer.",
+        ),
+        do_not=(
+            "Do not take the first reply after this for a fresh answer to the next stimulus. Input queued before the "
+            "failed clear may still arrive with it.",
+        ),
+    ),
+    "session_not_active": ErrorRemedy(
+        meaning=(
+            "The tool needs a session that is not running, so nothing was sent and nothing was read. A COM call names "
+            "its port in `port_id`, a CAN call its bus in `bus_id`, and a debug call refers to the one debug session. "
+            "A COM session is not running when it was never started, when it was stopped, or when its reader failed; "
+            "in that last case `reader_error` carries the reader's own error. A debug session is not running when it "
+            "was stopped, ended in an error, or its GDB process exited."
+        ),
+        remediation=(
+            "For a COM port, call `com_session_start` with the same `port_id`, then repeat the call.",
+            "For a CAN bus, call `can_session_start` with the same `bus_id`, and on a bus with `shares` the same "
+            "`participant`, then repeat the call.",
+            "For a debug session, call `debug_start_session`. A debug session that ended in an error, or whose GDB "
+            "process exited, has to be stopped with `debug_stop_session` before `debug_start_session` accepts a new "
+            "one.",
+            "When a COM refusal carries `reader_error`, read it first: the reader failed, and `com_session_start` with "
+            "the same `port_id` replaces the failed session with a new one.",
+        ),
+        do_not=(
+            "Do not retry the call in a loop hoping the session comes back. Nothing restarts a session but its start "
+            "tool.",
+            "Do not reach the device directly instead, with a serial terminal, a CAN tool or GDB of your own. That "
+            "bypasses the lock, the permissions and the log.",
+        ),
+    ),
+    "serial_read_failed": ErrorRemedy(
+        meaning=(
+            "The background reader of a COM session failed: the driver raised while reading, and `reader_error` "
+            "carries its `backend_error` and `likely_causes`. The session is no longer active. Input the reader had "
+            "already buffered is not lost: the next `com_read` still hands it out, with `reader_error` beside it, and "
+            "only an empty buffer is refused as `session_not_active`. The COM tools carry this type nested under "
+            "`reader_error`. `flash_firmware` with a `capture` answers it as its own `error_type` when the capture's "
+            "reader failed after a good flash: the firmware was flashed and the target reset, the capture session was "
+            "stopped, and `capture` holds what was read before the failure."
+        ),
+        remediation=(
+            "Read `likely_causes` and `backend_error` in `reader_error`. A port that was disconnected is the first of "
+            "them, and the adapter has to be back before a new session can open.",
+            "Call `com_read` to collect what the reader buffered before it failed; those bytes were received from the "
+            "target.",
+            "Then call `com_session_start` with the same `port_id`: it replaces the failed session with a new one.",
+        ),
+        do_not=(
+            "Do not keep calling `com_read` or `com_write` on the failed session in the hope it recovers. A failed "
+            "reader does not restart; only `com_session_start` opens the port again.",
+        ),
+    ),
+    "audit_write_failed": ErrorRemedy(
+        meaning=(
+            "The background reader received bytes it could not append to the session's COM log, so the evidence of "
+            "what the target sent is incomplete. The session stopped, and the project is quarantined with the cleanup "
+            "reason `com_reader_audit_broken`: while that incident stands, hardware calls are refused as "
+            "`resource_quarantined`. This error is shown in `com_ports_list`, under the port's `reader_error`, with "
+            "`backend_error` saying why the log write failed. `flash_firmware` with a `capture` answers it as its own "
+            "`error_type` when this happened to the capture's reader after the flash, and `capture` holds what was "
+            "read. `com_session_stop` cannot close such a session cleanly either: it answers `com_port_close_failed` "
+            "with `quarantined` true. The incident stands until an operator recovers it."
+        ),
+        remediation=(
+            "Fix what `backend_error` names first: free disk space, or restore write permission where `log_path` "
+            "points, since every later record goes to the same place.",
+            "Then an operator reads `quarantine_guidance`, checks the board against it, and runs `agentic-hil recover "
+            "--confirm-safe-state --quarantine-id <quarantine_id>` with the id `agentic-hil lease-status` reports.",
+        ),
+        do_not=(
+            "Do not delete or truncate the log to make room. It holds the record of what the target sent up to the "
+            "failure.",
+            "Do not sign `--confirm-safe-state` before the log is writable again. The next record would fail the "
+            "same way.",
+        ),
+    ),
     "undeclared_device": ErrorRemedy(
         meaning=(
             "A run reached for a device its test description does not name. `declared_devices` lists what it declared, "

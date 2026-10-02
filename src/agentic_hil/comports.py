@@ -76,6 +76,7 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
             "summary": "pyserial is not installed or could not be imported.",
             "backend_error": f"{type(error).__name__}: {error}",
             "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"],
+            **remediation_fields("serial_backend_not_available"),
         }
     try:
         # Read once for the whole enumeration rather than per port: it is a
@@ -91,6 +92,7 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
             "summary": "Available COM ports could not be listed.",
             "backend_error": str(error),
             "likely_causes": ["serial backend reported an OS error", "USB serial driver state changed during discovery"],
+            **remediation_fields("com_port_discovery_failed"),
         }
 
 
@@ -244,6 +246,7 @@ def com_port_unbound(tool: str, port_id: str) -> JsonObject:
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
         "retry_safe": True,
+        **remediation_fields(COM_PORT_NOT_BOUND),
     }
 
 
@@ -423,6 +426,7 @@ def _identity_unverified(tool: str, port_id: str, port: ComPortConfig, expectati
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
         "retry_safe": True,
+        **remediation_fields(COM_PORT_IDENTITY_UNVERIFIED),
     }
 
 
@@ -465,6 +469,7 @@ def _identity_mismatch(
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
         "retry_safe": True,
+        **remediation_fields(COM_PORT_IDENTITY_MISMATCH),
     }
 
 
@@ -1095,7 +1100,7 @@ class ComPortService:
                 if isinstance(close_error, (KeyboardInterrupt, SystemExit)):
                     raise
                 return written
-            failure = {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_reader_start_failed", "summary": "COM port reader could not be started; the port was closed.", "backend_error": str(error), "cleanup_confirmed": True, "side_effect_committed": False}
+            failure = {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_reader_start_failed", "summary": "COM port reader could not be started; the port was closed.", "backend_error": str(error), "cleanup_confirmed": True, "side_effect_committed": False, **remediation_fields("com_reader_start_failed")}
             written = self._write_report(failure)
             if written.get("audit_ok") is False:
                 return written
@@ -1178,6 +1183,9 @@ class ComPortService:
                 session.lease.quarantine("com_write_effect_unconfirmed", error)
                 result.update({"side_effect_status": "unknown", "retry_safe": False, "cleanup_required": True, "quarantined": True})
                 audit_error = session.append_audit({"event": "error", **result}, self.config)
+                # The advice goes to the caller, not into the log entry: the log
+                # records what happened on the line.
+                result.update(remediation_fields("serial_write_failed"))
                 if audit_error is not None:
                     session.audit_broken = True
                     session.lease.quarantine("com_write_audit_broken", audit_error, audit_broken=True)
@@ -1210,6 +1218,7 @@ class ComPortService:
                 "side_effect_status": "committed",
                 "retry_safe": False,
                 "likely_causes": likely_causes("serial_write_incomplete"),
+                **remediation_fields("serial_write_incomplete"),
             }
             session.lease.record_cleanup_event("serial_write_incomplete", RuntimeError(result["summary"]))
             if audit_error is not None:
@@ -1474,10 +1483,10 @@ class ComPortService:
         try:
             import serial
         except ImportError as error:
-            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "backend_error": f"{type(error).__name__}: {error}", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"], "side_effect_committed": False}
+            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "backend_error": f"{type(error).__name__}: {error}", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"], "side_effect_committed": False, **remediation_fields("serial_backend_not_available")}
 
         def open_failure(error: BaseException) -> JsonObject:
-            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": open_failure_causes(error)}
+            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": open_failure_causes(error), **remediation_fields("com_port_open_failed")}
 
         try:
             # Built unopened so the modem lines are decided BEFORE the port is
@@ -1594,7 +1603,7 @@ class ComPortService:
             return {"ok": False, "tool": tool, "error_type": "invalid_argument", "summary": "port_id is required."}
         port_config = self.config.com_ports.get(port_id)
         if port_config is None:
-            return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "com_port_not_configured", "summary": "COM port is not available in the authoritative config.", "configured_ports": sorted(self.config.com_ports.keys())}
+            return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "com_port_not_configured", "summary": "COM port is not available in the authoritative config.", "configured_ports": sorted(self.config.com_ports.keys()), **remediation_fields("com_port_not_configured")}
         if com_port_is_unbound(port_config):
             # Declared and not yet bound to a device. The one gate every COM
             # tool already goes through, so `com_session_start`, `com_write`,
@@ -1615,6 +1624,8 @@ class ComPortService:
             result: JsonObject = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "session_not_active", "summary": "COM port session is not active. Start it with com_session_start first."}
             if session is not None and (self.coordinator.incident_stands or session.audit_broken or session.lease.state != "active"):
                 result.update({"error_type": "resource_quarantined", "summary": "COM port requires cleanup or audit recovery before further actions.", "cleanup_required": True, "quarantined": True})
+            else:
+                result.update(remediation_fields("session_not_active"))
             if session is not None and session.reader_error:
                 result["reader_error"] = session.reader_error
                 result["summary"] = "COM port session failed and is no longer active. Start it again with com_session_start."
@@ -1656,7 +1667,7 @@ class ComPortService:
                     session.buffer.clear()
                     session.overflow_bytes = 0
         except BaseException as error:
-            result: JsonObject = {"ok": False, "tool": "com_session_start", "port_id": session.port_id, "error_type": "com_buffer_clear_failed", "summary": "COM input buffers could not be cleared.", "backend_error": str(error), "side_effect_committed": reset_started, "side_effect_status": "unknown" if reset_started else "not_started", "retry_safe": not reset_started}
+            result: JsonObject = {"ok": False, "tool": "com_session_start", "port_id": session.port_id, "error_type": "com_buffer_clear_failed", "summary": "COM input buffers could not be cleared.", "backend_error": str(error), "side_effect_committed": reset_started, "side_effect_status": "unknown" if reset_started else "not_started", "retry_safe": not reset_started, **remediation_fields("com_buffer_clear_failed")}
             if reset_started:
                 session.lease.quarantine("com_buffer_clear_unconfirmed", error)
                 result.update({"cleanup_required": True, "quarantined": True})
@@ -1730,6 +1741,7 @@ class ComPortService:
             "error_type": "com_port_close_failed",
             "summary": "COM port session could not be closed and remains registered for cleanup retry.",
             "backend_error": str(error),
+            **remediation_fields("com_port_close_failed"),
         }
 
     def _write_report(self, result: JsonObject) -> JsonObject:

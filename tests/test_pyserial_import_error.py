@@ -36,6 +36,7 @@ from agentic_hil.comports import COM_PORT_IDENTITY_UNVERIFIED, ComPortService, l
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import load_config
 from agentic_hil.humanize import render_result
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.report import write_report
 from agentic_hil.tools import AgenticHILToolService
@@ -258,6 +259,7 @@ def test_the_listing_carries_the_import_error(kind: str, tmp_path: Path, monkeyp
         "summary": SUMMARY,
         "likely_causes": LIKELY_CAUSES,
         "backend_error": raised,
+        **remediation_fields("serial_backend_not_available"),
     }
 
 
