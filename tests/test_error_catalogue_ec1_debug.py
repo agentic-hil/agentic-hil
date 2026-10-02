@@ -644,8 +644,9 @@ INVENTORY_BY_TYPE: dict[str, tuple[str | None, ...]] = {
     "interface_config_not_found": ("openocd",),
     "invalid_argument": (None, *BACKENDS),
     "memory_read_failed": BACKENDS,
-    # None: the tool service's refusals for a call no probe can be routed to.
-    "not_supported": (None, "openocd", "openocd_probe_selection", "pyocd", "stlink"),
+    # The tool service merges a scope of its own for a call no probe can be
+    # routed to: no debugger bound, or no probe named among several.
+    "not_supported": ("openocd", "openocd_probe_selection", "pyocd", "stlink", "unbound_debugger", "unnamed_probe"),
     "output_write_failed": BACKENDS,
     # The permission helpers merge the bare entry, or a scope of their own: the
     # execution grant a debug_continue needs, and a granted key that blocks.
@@ -655,7 +656,8 @@ INVENTORY_BY_TYPE: dict[str, tuple[str | None, ...]] = {
     "resource_busy": (None,),
     "resource_quarantined": ("openocd",),
     "session_already_active": ("openocd",),
-    "session_not_active": ("openocd",),
+    # gdbdebug.py merges the bare entry beside it, true for every kind of session.
+    "session_not_active": (None,),
     "stop_reason_not_available": ("openocd",),
     "symbol_ambiguous": ("openocd",),
     "symbol_not_found": BACKENDS,
@@ -675,12 +677,13 @@ INVENTORY = frozenset((error_type, scope) for error_type, scopes in INVENTORY_BY
 
 # Pairs whose entry another change writes. The guard leaves them to it.
 OWNED_ELSEWHERE: dict[Pair, str] = {
-    ("session_not_active", "openocd"): "#635 writes one bare entry, true for the COM, CAN and debug sessions alike",
+    ("session_not_active", None): "#635 writes one bare entry, true for the COM, CAN and debug sessions alike",
     ("resource_busy", None): "#646 writes the coordination refusals; `_coordinated_debug_call` answers with the lease's",
     ("cleanup_required", None): "#645 writes the dispatcher's refusals, and this one is the dispatcher's",
     ("artifact_validation_failed", None): "#645 writes the artifact refusals; `debug_start_session` refuses with the validator's word",
     ("audit_unavailable", "pyocd"): "#645 writes one bare entry for every module that loses its audit trail",
-    ("not_supported", None): "#645 writes the dispatcher's `not_supported` refusals, the unbound debugger and the unnamed probe",
+    ("not_supported", "unbound_debugger"): "#645 writes the scope the tool service merges for a call no debugger is bound to",
+    ("not_supported", "unnamed_probe"): "#645 writes the scope the tool service merges for a call that names no probe among several",
 }
 
 # Pairs #516 decided stay silent until somebody writes that tool's own steps,
