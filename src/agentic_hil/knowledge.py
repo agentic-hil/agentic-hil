@@ -4858,6 +4858,50 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not expect hardware_recover to settle it. A broken audit is the operator's own route.",
         ),
     ),
+    "audit_broken:pyocd": ErrorRemedy(
+        meaning=(
+            "The debug session's own evidence could not be written: the audit record of a GDB command, or the session "
+            "log at `log_path`, failed to persist (`backend_error_type` `audit_write_failed`). The service latches on "
+            "the first such failure. From then on it refuses every new debug session and every GDB command that is "
+            "not containment, debug_halt still runs, and the quarantine stands. A start refusal with this type is that "
+            "latch, set by an earlier failure."
+        ),
+        remediation=(
+            "Hand it to the operator. The audit destination is fixed first: free disk space, and permissions on the "
+            "reports and logs directories under `state_root`.",
+            "The operator then restarts the MCP server, which is what clears the latch, checks the board against the "
+            "last committed report (`get_last_report`), and ends the incident with `agentic-hil recover`.",
+        ),
+        do_not=(
+            "Do not retry the session or its commands to get the evidence written. Every call after the latch is "
+            "refused, and the one that failed left no record of itself.",
+            "Do not delete or edit reports or logs to make room. They are the evidence the operator checks the board "
+            "against.",
+            "Do not expect hardware_recover to settle it. A broken audit is the operator's own route.",
+        ),
+    ),
+    "audit_broken:stlink": ErrorRemedy(
+        meaning=(
+            "The debug session's own evidence could not be written: the audit record of a GDB command, or the session "
+            "log at `log_path`, failed to persist (`backend_error_type` `audit_write_failed`). The service latches on "
+            "the first such failure. From then on it refuses every new debug session and every GDB command that is "
+            "not containment, debug_halt still runs, and the quarantine stands. A start refusal with this type is that "
+            "latch, set by an earlier failure."
+        ),
+        remediation=(
+            "Hand it to the operator. The audit destination is fixed first: free disk space, and permissions on the "
+            "reports and logs directories under `state_root`.",
+            "The operator then restarts the MCP server, which is what clears the latch, checks the board against the "
+            "last committed report (`get_last_report`), and ends the incident with `agentic-hil recover`.",
+        ),
+        do_not=(
+            "Do not retry the session or its commands to get the evidence written. Every call after the latch is "
+            "refused, and the one that failed left no record of itself.",
+            "Do not delete or edit reports or logs to make room. They are the evidence the operator checks the board "
+            "against.",
+            "Do not expect hardware_recover to settle it. A broken audit is the operator's own route.",
+        ),
+    ),
     "adapter_access_denied": ErrorRemedy(
         meaning=(
             "OpenOCD reached the probe on USB and was refused opening it: libusb answered `LIBUSB_ERROR_ACCESS`. The "
