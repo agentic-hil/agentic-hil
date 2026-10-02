@@ -87,7 +87,7 @@ from agentic_hil.backends.gdbdebug import (
 )
 from agentic_hil.config import load_config
 from agentic_hil.contracts import validate_tool_arguments
-from agentic_hil.gdbmi import GdbMiCommandResult
+from agentic_hil.gdbmi import GdbMiCommandResult, GdbMiStopResult
 from agentic_hil.tools import AgenticHILToolService
 
 START = "debug_start_session"
@@ -134,6 +134,22 @@ def produced_stop_reasons() -> set[str]:
 PRODUCED_STOP_REASONS = produced_stop_reasons()
 
 
+def produced_session_statuses() -> set[str]:
+    """Every value `status` can carry, read from the session code: each one a
+    session is set to (gdbdebug.py `self.status`, `session.status`, both arms
+    of a conditional but not what it compares), and `stopped` for no session
+    at all (`get_session_status`)."""
+    source = Path(gdbdebug.__file__).read_text(encoding="utf-8")
+    statuses = {value for line in re.findall(r"\.status\s*=(?!=)\s*([^\n]+)", source) for value in re.findall(r"(?:^|\belse\s+)\"([a-z_]+)\"", line)}
+    return statuses | set(re.findall(r"\bsession\.status if session else \"([a-z_]+)\"", source))
+
+
+PRODUCED_SESSION_STATUSES = produced_session_statuses()
+# The statuses a session holds while it exists between calls; `starting` lasts
+# only inside debug_start_session.
+OPEN_SESSION_STATUSES = {"halted", "running", "error", "cleanup_required"}
+
+
 # ---------------------------------------------------------------------------
 # The meaning checks, each a predicate over the text a host shows.
 
@@ -176,6 +192,30 @@ def backend_support_is_one_phrase(description: str) -> bool:
     )
 
 
+# The two conditions the lifecycle refusals answer: no session
+# (`session_not_active`, gdbdebug.py `_require_session`) and no single bound
+# OpenOCD debugger (`not_supported`, tools.py `unbound_debugger_error` and
+# common.py `debug_session_unsupported`).
+SESSION_CONDITION = re.compile(rf"\b{START}\b|{NO_SESSION.pattern}", re.IGNORECASE)
+DEBUGGER_CONDITION = re.compile(r"\bdebuggers?\b|\bbackends?\b|" + "|".join(rf"\b{re.escape(name)}\b" for name in BACKEND_NAMES), re.IGNORECASE)
+
+
+def answers_its_own_condition(sentence: str, outcome: str, own: re.Pattern[str], other: re.Pattern[str]) -> bool:
+    """Whether every `outcome` in `sentence` is the answer to the condition `own`
+    names rather than the one `other` names: the nearest condition named before
+    it, or, when none precedes it ("session_not_active until debug_start_session
+    opened one"), the nearest after it, is `own`. Exchanging the two outcomes
+    in one sentence binds each to the other's condition and fails."""
+    markers = sorted([(found.start(), True) for found in own.finditer(sentence)] + [(found.start(), False) for found in other.finditer(sentence)])
+    for found in re.finditer(rf"\b{outcome}\b", sentence):
+        before = [is_own for position, is_own in markers if position < found.start()]
+        after = [is_own for position, is_own in markers if position > found.start()]
+        nearest = before[-1] if before else after[0] if after else False
+        if not nearest:
+            return False
+    return True
+
+
 ONE_DEBUGGER = r"\bexactly one\b(?=[^.;]{0,30}\bdebuggers?\b)(?=[^.;]{0,30}\bconfigured\b)|\bconfigured\b[^.;]{0,20}\bexactly one\b[^.;]{0,20}\bdebuggers?\b"
 MANY_DEBUGGERS = r"\b(at least one|one or more|any number of|several|two or more)\b[^.;]{0,20}\bdebuggers?\b"
 
@@ -186,17 +226,25 @@ def names_the_one_bound_debugger(description: str) -> bool:
     these calls answers `not_supported` before any session is looked at
     (tools.py `unbound_debugger_error`)."""
     found = containing(description_sentences(description), ONE_DEBUGGER, re.IGNORECASE)
-    return bool(found) and all("not_supported" in sentence for sentence in found) and not re.search(MANY_DEBUGGERS, description, re.IGNORECASE)
+    return (
+        bool(found)
+        and all("not_supported" in sentence for sentence in found)
+        and not re.search(MANY_DEBUGGERS, description, re.IGNORECASE)
+        and all(answers_its_own_condition(sentence, "not_supported", DEBUGGER_CONDITION, SESSION_CONDITION) for sentence in containing(description_sentences(description), r"\bnot_supported\b"))
+    )
 
 
 def refuses_without_a_session(description: str) -> bool:
     """`session_not_active` is named as what a call meets with nothing open,
-    never denied and never paired with `ok`."""
+    never denied, never paired with `ok`, and bound to the missing session
+    rather than to the debugger (gdbdebug.py `_require_session` against
+    tools.py `unbound_debugger_error`)."""
     found = containing(clauses(description), r"\bsession_not_active\b")
     return bool(found) and all(
         (NO_SESSION.search(clause) or START in clause)
         and not re.search(DENIED_BEFORE + r"session_not_active\b", clause, re.IGNORECASE)
         and not re.search(OK_NOT_FALSE, clause)
+        and answers_its_own_condition(clause, "session_not_active", SESSION_CONDITION, DEBUGGER_CONDITION)
         for clause in found
     )
 
@@ -344,17 +392,33 @@ def states_value(field: str, value: str, sentence: str) -> bool:
     return any(re.search(rf"\b{field}\b", joined.group(0)) for joined in re.finditer(FIELDS_ARE + rf"{value}\b", sentence))
 
 
+ACKNOWLEDGED = r"\backnowledg(?:ed|es|e)\b"
+STOP_NOT_IN_TIME = r"\bstop\b[^.;,]{0,20}\b(?:times?\s+out|timed\s+out|never\s+(?:comes|arrives|follows))\b|\bno\s+stop\s+(?:follows|comes|arrives)\b"
+
+
+def awaits_the_stop_of_an_acknowledged_interrupt(sentence: str) -> bool:
+    """The condition the unconfirmed-halt fields belong to: GDB acknowledged the
+    interrupt and its stop did not arrive in time (gdbdebug.py `halt`, the
+    `wait_for_stop` branch). An interrupt that GDB itself refused or never
+    answered returns `_gdb_failure`, which carries neither `halt_confirmed`
+    nor `target_state`."""
+    return asserted(ACKNOWLEDGED, sentence) and bool(re.search(r"\binterrupt", sentence, re.IGNORECASE)) and bool(re.search(STOP_NOT_IN_TIME, sentence, re.IGNORECASE))
+
+
 def an_unconfirmed_halt_is_held(text: str) -> bool:
-    """A halt whose stop never comes answers `ok` false, `halt_confirmed`
-    false and `target_state` unknown, and the bench is quarantined (gdbdebug.py
-    `halt`; tools.py `_result_requires_quarantine`)."""
+    """An acknowledged interrupt whose stop never comes answers `ok` false,
+    `halt_confirmed` false and `target_state` unknown, and the bench is
+    quarantined (gdbdebug.py `halt`; tools.py `_result_requires_quarantine`).
+    The fields are bound to that condition in their sentence, and the
+    quarantine is stated, not denied."""
     found = containing(description_sentences(text), r"\bhalt_confirmed\b")
     held = [
         sentence
         for sentence in found
-        if states_value("halt_confirmed", "false", sentence)
+        if awaits_the_stop_of_an_acknowledged_interrupt(sentence)
+        and states_value("halt_confirmed", "false", sentence)
         and re.search(r"\bunknown\b", sentence)
-        and re.search(r"quarantin|\bcleanup_required\b", sentence, re.IGNORECASE)
+        and asserted(r"quarantin\w*|\bcleanup_required\b", sentence)
         and states_value("ok", "false", sentence)
     ]
     inverted = [
@@ -363,6 +427,35 @@ def an_unconfirmed_halt_is_held(text: str) -> bool:
         if states_value("halt_confirmed", "true", sentence) or states_value("target_state", "halted", sentence) or states_value("ok", "true", sentence)
     ]
     return bool(held) and not inverted
+
+
+LIFTS = r"\b(?:lifts?|lifted|releases?|released|resolves?|resolved|clears?|cleared)\b"
+CONFIRMED = r"\bconfirm(?:s|ed|ing|ation)?\b"
+
+
+def a_confirmed_halt_lifts_the_hold(text: str) -> bool:
+    """Only a halt that answers `ok` lifts the hold an unconfirmed one left
+    (tools.py `_coordinated_debug_call`: `resolve_retryable_cleanup` on
+    success), and only while every incident on the lease is that one and the
+    audit holds (coordination.py `resolve_retryable_cleanup`). A retry that is again
+    unconfirmed lifts nothing, and one after a `debugger_error` stop answers
+    `session_not_active` (gdbdebug.py `_require_session`). So what lifts the
+    hold is named as a confirmed halt, and the lift is stated, not denied."""
+    lifting = containing(clauses(text), LIFTS, re.IGNORECASE)
+    return bool(lifting) and all(asserted(LIFTS, clause) and re.search(CONFIRMED, clause, re.IGNORECASE) for clause in lifting)
+
+
+BLANKET_REPEAT = r"\brepeats?\b[^.;,]{0,15}\b(?:are|is)\s+safe\b|\bsafe\s+to\s+(?:repeat|retry|call\s+again)\b|\bidempotent\b|\bretr(?:y|ies)\b[^.;,]{0,15}\b(?:are|is)\s+safe\b"
+
+
+def claims_no_blanket_repeat_safety(text: str) -> bool:
+    """A second halt is not the first one again: on a recorded stop it answers
+    that stop and sends nothing, after a stop that never came it sends another
+    interrupt, and after a `debugger_error` stop it answers
+    `session_not_active` (gdbdebug.py `halt`, `_require_session`); the
+    annotations say `idempotentHint` false. What a repeat answers is the
+    recorded-stop claim; a definition does not call every repeat safe."""
+    return not any(asserted(BLANKET_REPEAT, clause) for clause in clauses(text))
 
 
 SHORT_RAISED = re.compile(
@@ -679,8 +772,28 @@ def a_repeated_clear_clears_nothing(description: str) -> bool:
 # debug_get_session_status and debug_get_stop_reason
 
 
+def listed_status_values(description: str) -> set[str]:
+    """The words listed for `status`, after a colon or in parentheses."""
+    return {
+        word
+        for found in re.finditer(r"\bstatus\b\s*(?:\(|:)\s*([^.;)]*)", description)
+        for word in re.findall(r"[a-z_]+", found.group(1))
+        if word not in {"or", "and"}
+    }
+
+
 def status_names_its_fields_and_sibling(description: str) -> bool:
-    return all(re.search(pattern, description) for pattern in (r"\bactive\b", r"\bstatus\b", r"\bsession\b", r"\bcleanup_required\b", rf"\b{STOP_REASON}\b"))
+    """`active`, `status` and the sibling for the stop alone, and the values
+    `status` takes: an open session's own (halted, running, error,
+    cleanup_required), and `stopped` with no session or after
+    debug_stop_session (gdbdebug.py `get_session_status`). Every value listed
+    is one the code assigns, none an open session holds is missing, and
+    `stopped` is listed or stated as the answer with no session."""
+    if not all(re.search(pattern, description) for pattern in (r"\bactive\b", r"\bstatus\b", r"\bsession\b", r"\bcleanup_required\b", rf"\b{STOP_REASON}\b")):
+        return False
+    listed = listed_status_values(description)
+    stopped = "stopped" in listed or any(states_value("status", "stopped", sentence) for sentence in description_sentences(description) if NO_SESSION.search(sentence))
+    return OPEN_SESSION_STATUSES <= listed <= PRODUCED_SESSION_STATUSES and stopped
 
 
 def stop_reason_names_its_fields_and_sibling(text: str) -> bool:
@@ -712,18 +825,19 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
     ),
     (
         names_the_one_bound_debugger,
-        ["OpenOCD only, exactly one debugger configured; else not_supported.", "Needs exactly one configured debugger, else not_supported."],
+        ["OpenOCD only, exactly one debugger configured; else not_supported.", "Needs exactly one configured debugger, else not_supported.", "It needs debug_start_session (else session_not_active) on OpenOCD with exactly one debugger configured, else not_supported."],
         [
             "OpenOCD only, at least one debugger configured; else not_supported.",
             "OpenOCD only, exactly one debugger configured.",
             "OpenOCD only; else not_supported.",
             "Exactly one debugger configured; else not_supported. Works with several debuggers too.",
+            "It needs debug_start_session (else not_supported) on OpenOCD with exactly one debugger configured, else session_not_active.",
         ],
     ),
     (
         refuses_without_a_session,
-        ["No session: session_not_active.", "Answers session_not_active until debug_start_session opened one."],
-        ["No session: ok, not session_not_active.", "No session: ok, session_not_active.", "Answers session_not_active after a halt."],
+        ["No session: session_not_active.", "Answers session_not_active until debug_start_session opened one.", "It needs debug_start_session (else session_not_active) on OpenOCD with exactly one debugger configured, else not_supported."],
+        ["No session: ok, not session_not_active.", "No session: ok, session_not_active.", "Answers session_not_active after a halt.", "It needs debug_start_session (else not_supported) on OpenOCD with exactly one debugger configured, else session_not_active."],
     ),
     (
         answers_ok_and_inactive_without_a_session,
@@ -802,18 +916,45 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
     (
         an_unconfirmed_halt_is_held,
         [
-            "Unconfirmed: ok false, halt_confirmed false, target_state unknown, quarantined.",
-            "If no stop follows: ok false, halt_confirmed false, state unknown, cleanup_required.",
-            "If unconfirmed, ok and halt_confirmed are false, target_state is unknown and the bench is quarantined.",
-            "If unconfirmed, ok is false, halt_confirmed is false, the state is unknown and the bench is quarantined.",
+            "If an acknowledged interrupt's stop times out, ok and halt_confirmed are false, target_state unknown, the bench quarantined.",
+            "If GDB acknowledges the interrupt but no stop follows in time: ok false, halt_confirmed false, state unknown, cleanup_required.",
+            "When the interrupt is acknowledged and its stop times out, ok is false, halt_confirmed is false, the state is unknown and the bench is quarantined.",
         ],
         [
-            "Unconfirmed: ok true, halt_confirmed false, target_state unknown, quarantined.",
-            "Unconfirmed: ok false, halt_confirmed true, target_state halted.",
-            "Unconfirmed: ok false, halt_confirmed false, target_state unknown.",
-            "If unconfirmed, ok and halt_confirmed are true, target_state is unknown and the bench is quarantined.",
-            "If unconfirmed, ok is true and halt_confirmed is false, the state is unknown and the bench is quarantined.",
-            "If unconfirmed, halt_confirmed is false, target_state is unknown and the bench is quarantined.",
+            "If an acknowledged interrupt's stop times out: ok true, halt_confirmed false, target_state unknown, quarantined.",
+            "If an acknowledged interrupt's stop times out: ok false, halt_confirmed true, target_state halted.",
+            "If an acknowledged interrupt's stop times out: ok false, halt_confirmed false, target_state unknown.",
+            "If an acknowledged interrupt's stop times out, ok and halt_confirmed are true, target_state is unknown and the bench is quarantined.",
+            "If an acknowledged interrupt's stop times out, ok is true and halt_confirmed is false, the state is unknown and the bench is quarantined.",
+            "If an acknowledged interrupt's stop times out, halt_confirmed is false, target_state is unknown and the bench is quarantined.",
+            "If an acknowledged interrupt's stop times out, ok and halt_confirmed are false, target_state is unknown and the bench never quarantined.",
+            "If an acknowledged interrupt's stop times out, ok and halt_confirmed are false, target_state is unknown and the bench is not quarantined.",
+            "If unconfirmed, ok and halt_confirmed are false, target_state is unknown and the bench quarantined; a retry can lift it.",
+            "Unconfirmed: ok false, halt_confirmed false, target_state unknown, quarantined.",
+            "If the interrupt is not acknowledged and no stop follows: ok false, halt_confirmed false, target_state unknown, quarantined.",
+        ],
+    ),
+    (
+        a_confirmed_halt_lifts_the_hold,
+        [
+            "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; a confirmed halt can lift it.",
+            "Once a later halt is confirmed, the hold is lifted.",
+        ],
+        [
+            "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; a retry can lift it.",
+            "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; a confirmed halt never lifts it.",
+            "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined; an unconfirmed halt can lift it.",
+            "If an acknowledged interrupt's stop times out, ok is false and the bench quarantined.",
+        ],
+    ),
+    (
+        claims_no_blanket_repeat_safety,
+        ["Returns stop_reason halted or a stopped core's recorded stop.", "Repeats on a stopped core answer its recorded stop; repeats are not always safe."],
+        [
+            "Returns stop_reason halted, or a stopped core's recorded stop, so repeats are safe.",
+            "Halts the core; safe to repeat.",
+            "Halts the core; it is idempotent.",
+            "A retry is safe whatever happened.",
         ],
     ),
     (
@@ -993,8 +1134,15 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
     ),
     (
         status_names_its_fields_and_sibling,
-        ["Returns active, status (halted, running, cleanup_required), session. For the stop alone use debug_get_stop_reason."],
-        ["Returns active and status (halted, running), session. For the stop alone use debug_get_stop_reason.", "Returns active, status (cleanup_required), session."],
+        ["Returns active, status (halted, running, error, cleanup_required), session. No session: ok, active false, status stopped. For the stop alone use debug_get_stop_reason."],
+        [
+            "Returns active and status (halted, running), session. For the stop alone use debug_get_stop_reason.",
+            "Returns active, status (cleanup_required), session.",
+            "Returns active, status (halted, dancing, flying, cleanup_required), session. No session: ok, active false, status stopped. For the stop alone use debug_get_stop_reason.",
+            "Returns active, status (halted, running, error, cleanup_required), session. No session: ok, active false. For the stop alone use debug_get_stop_reason.",
+            "Returns active, status (halted, running, error, cleanup_required), session. No session: ok, active false, status running. For the stop alone use debug_get_stop_reason.",
+            "Returns active, status (halted, running, cleanup_required), session. No session: ok, active false, status stopped. For the stop alone use debug_get_stop_reason.",
+        ],
     ),
     (
         stop_reason_names_its_fields_and_sibling,
@@ -1123,6 +1271,8 @@ def test_halt_names_what_an_unconfirmed_halt_answers(listed: dict[str, dict]) ->
     text = definition_text(listed[HALT])
 
     assert an_unconfirmed_halt_is_held(text), text
+    assert a_confirmed_halt_lifts_the_hold(text), text
+    assert claims_no_blanket_repeat_safety(text), text
 
 
 def test_halt_timeout_names_its_unit_default_ceiling_floor_and_that_it_bounds_each_step(listed: dict[str, dict]) -> None:
@@ -1435,6 +1585,37 @@ def test_the_halt_timeout_bounds_the_interrupt_and_the_wait_each_at_ten_seconds_
     assert halted["ok"] is True, halted
     assert halted["stop_reason"] == "halted", halted
     assert (interrupts, waits) == ([expected], [expected])
+
+
+def test_a_halt_whose_stop_did_not_come_in_time_is_lifted_by_the_halt_that_confirms_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the definition promises for an unconfirmed halt, on the bench: GDB
+    acknowledges the interrupt, the wait for its stop expires (the shape
+    `wait_for_stop` answers at its deadline), and the halt answers ok false,
+    halt_confirmed false, target_state unknown with the bench held. The halt
+    after it is confirmed, and that lifts the hold (tools.py `_coordinated_debug_call`).
+    The first interrupt, the resume's own containment, is lost, so the target
+    runs when the halts come and the hold it left carries the same reason."""
+    monkeypatch.setattr(gdbdebug, "CONTINUE_COMMAND_TIMEOUT_CAP_S", TIMEOUT_TEST_CAP_S)
+    service = debug_service(tmp_path, fake_gdb_behavior=f"{BENCH_RUN_STATE}+{INTERRUPT_LOST_ONCE}")
+    debug = service.backend._debug
+    with settled_afterwards(service):
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        running = service.call(CONTINUE, {"timeout_s": UNREACHABLE_STOP_TIMEOUT_S})
+        assert running["session"]["status"] == "running", running
+        assert debug.session is not None
+        with monkeypatch.context() as expired:
+            expired.setattr(debug.session.gdb, "wait_for_stop", lambda timeout_s: GdbMiStopResult(line="", reason="timeout", timed_out=True))
+            unconfirmed = service.call(HALT, {"timeout_s": 1.0})
+        held = service.coordinator.blocked
+        confirmed = service.call(HALT, {"timeout_s": 1.0})
+        lifted = not service.coordinator.blocked
+        assert service.call(STOP)["ok"] is True
+
+    assert (unconfirmed["ok"], unconfirmed["error_type"]) == (False, "timeout"), unconfirmed
+    assert (unconfirmed["halt_command_acknowledged"], unconfirmed["halt_confirmed"], unconfirmed["target_state"]) == (True, False, "unknown"), unconfirmed
+    assert held is True
+    assert (confirmed["ok"], confirmed["stop_reason"]) == (True, "halted"), confirmed
+    assert lifted is True
 
 
 def test_a_repeated_set_adds_a_second_breakpoint_and_a_repeated_clear_clears_nothing(tmp_path: Path) -> None:
