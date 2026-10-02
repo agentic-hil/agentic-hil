@@ -336,8 +336,11 @@ PREDICATE_START = r"\b(?:and|but|then)\b"
 # A phrase opened by a negated subject denies all it says: "No damaged report
 # state answers `config_invalid`".
 NEGATED_SUBJECT = r"\s*(?:no|none|nothing|neither|never)\b"
+# A comparative or time qualifier bounds a predicate and denies nothing:
+# "resumed no later than one second after the call" resumes it.
+QUALIFIER = r"\bno\s+(?:later|more|sooner|longer|less)\s+than\b|\bnot\s+(?:before|after)\b"
 # An object that denies the predicate before it: "lifts nothing", "lifts no hold".
-NEGATED_OBJECT = r"\s+(?:nothing|none|no)\b"
+NEGATED_OBJECT = rf"\s+(?!{QUALIFIER})(?:nothing|none|no)\b"
 
 
 def denies(found: re.Match[str], negation: str = NEGATION) -> bool:

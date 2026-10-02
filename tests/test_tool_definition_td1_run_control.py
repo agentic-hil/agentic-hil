@@ -999,8 +999,18 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
     ),
     (
         continue_leaves_an_exception_stop_alone,
-        ["A core stopped in an exception or debugger_error is not resumed.", "Never continues past an exception stop."],
-        ["A core stopped in an exception is resumed past it.", "Continues from an exception stop.", "An exception stop is resumed, not left alone.", "A core stopped in an exception doesn't get a new stop and is resumed."],
+        [
+            "A core stopped in an exception or debugger_error is not resumed.",
+            "Never continues past an exception stop.",
+            "A core stopped in an exception is answered no later than one second after the call and is not resumed.",
+        ],
+        [
+            "A core stopped in an exception is resumed past it.",
+            "Continues from an exception stop.",
+            "An exception stop is resumed, not left alone.",
+            "A core stopped in an exception doesn't get a new stop and is resumed.",
+            "A core stopped in an exception is resumed no later than one second after the call.",
+        ],
     ),
     (
         continue_tells_good_stops_from_bad,
