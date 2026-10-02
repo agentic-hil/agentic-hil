@@ -991,9 +991,10 @@ def test_com_write_takes_exactly_one_of_text_or_hex(bench: SimpleNamespace, payl
 
 @pytest.mark.parametrize(("accepted_per_write", "sent"), [pytest.param(2, 8, id="two-bytes-per-attempt"), pytest.param(0, 0, id="nothing-taken")])
 def test_a_short_write_reports_the_bytes_that_reached_the_line(bench: SimpleNamespace, accepted_per_write: int, sent: int) -> None:
-    """bytes_written is what the driver took, after a bounded retry of the
-    remainder, not what was asked for; a write that stays short is
-    serial_write_incomplete."""
+    """bytes_written is what the driver took, not what was asked for, and a
+    write that stays short is serial_write_incomplete. This fake line is no
+    Linux tty, so the write here is pyserial's own, retried against its
+    remainder a bounded number of times before it answers short."""
     service, line = bench.service, bench.line
     started(service)
     line.accepts_per_write[DEVICES[PORT_ID]] = accepted_per_write

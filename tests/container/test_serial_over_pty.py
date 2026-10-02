@@ -831,14 +831,19 @@ def test_a_device_that_vanishes_under_a_session_ends_the_reader_as_a_failed_read
     assert [entry["error_type"] for entry in errors] == ["serial_read_failed"], entries
 
 
-def test_a_line_that_stops_draining_fails_the_write_that_no_longer_fits_and_carries_the_rest_once_it_drains(pty_pair: PtyPair, tmp_path: Path) -> None:
-    """`serial_write_failed` under back pressure, and the write after the line drains.
+def test_a_line_that_stops_draining_takes_what_fits_and_the_peer_gets_exactly_the_counted_bytes_once_it_drains(pty_pair: PtyPair, tmp_path: Path) -> None:
+    """`serial_write_incomplete` under back pressure, with the count that went in, and the write after the line drains.
 
     socat is stopped, so nothing leaves the slave's output queue; writes are
-    accepted until the queue is full and the next one runs out its
-    `write_timeout_s` and fails. With socat continued, the queued bytes reach
-    the peer in the order they were written and a further write succeeds, so
-    the session is usable again without being restarted.
+    accepted until the queue is full. The next one hands over what still fits,
+    waits out its `write_timeout_s` for more room, and answers in the product's
+    own words, "COM port write was short: N of M byte(s) reached the line",
+    committed, with `bytes_written` and `data` the N bytes that went in, and
+    nothing quarantined. A write while the line is still stopped is short by
+    all of it. With socat continued, the peer receives exactly what the
+    answers counted, in the order it was written, and a further write
+    succeeds and its answer is read back, so the session is usable again
+    without being restarted.
     """
     project, config, _state = a_project(tmp_path, pty_pair)
     responder = start_responder(pty_pair, tmp_path, PING_PONG)
@@ -850,6 +855,7 @@ def test_a_line_that_stops_draining_fails_the_write_that_no_longer_fits_and_carr
             try:
                 accepted: list[bytes] = []
                 failed: dict | None = None
+                block = b""
                 for index in range(8):
                     block = bytes([ord("0") + index]) * 4096
                     written = server.call("com_write", {"port_id": PORT, "text": block.decode("ascii")})
@@ -857,23 +863,30 @@ def test_a_line_that_stops_draining_fails_the_write_that_no_longer_fits_and_carr
                         failed = written
                         break
                     accepted.append(block)
-                assert failed is not None, f"eight writes of 4 KiB were all accepted against a line that cannot drain: {accepted!r}"
+                assert failed is not None, f"eight writes of 4 KiB were all accepted against a line that cannot drain: {len(accepted)} block(s)"
                 assert len(accepted) >= 1, failed
-                assert failed["error_type"] == "serial_write_failed", failed
-                assert "timeout" in failed["backend_error"].lower(), failed
-                assert failed["side_effect_status"] == "unknown", failed
-                assert failed["retry_safe"] is False, failed
+                assert failed["error_type"] == "serial_write_incomplete", failed
+                went_in = failed["bytes_written"]
+                assert isinstance(went_in, int) and 0 <= went_in < len(block), failed
+                assert failed["bytes_requested"] == len(block), failed
+                assert failed["summary"].startswith(f"COM port write was short: {went_in} of {len(block)} byte(s) reached the line"), failed
+                assert failed["data"]["text"] == block[:went_in].decode("ascii"), failed
+                assert (failed["side_effect_status"], failed["retry_safe"]) == ("committed", False), failed
+                assert failed.get("quarantined") is not True, failed
 
                 again = server.call("com_write", {"port_id": PORT, "text": "PING\r\n"})
-                assert again["ok"] is False and again["error_type"] == "serial_write_failed", again
+                assert again["ok"] is False and again["error_type"] == "serial_write_incomplete", again
+                assert again["bytes_written"] == 0, again
             finally:
                 os.kill(pty_pair.socat.pid, signal.SIGCONT)
 
-            after = server.call("com_write", {"port_id": PORT, "text": "PING\r\n"})
+            # Led by a line ending, which finishes the blocks' one unterminated
+            # line, so the peer reads PING as a line of its own and answers it.
+            after = server.call("com_write", {"port_id": PORT, "text": "\r\nPING\r\n"})
             assert after["ok"] is True, after
-            received = responder.wait_for(b"PING\r\n")
-            assert received.startswith(b"".join(accepted)), received[:64]
-            assert received.endswith(b"PING\r\n"), received[-64:]
+            received = responder.wait_for(b"\r\nPING\r\n")
+            expected = b"".join(accepted) + block[:went_in] + b"\r\nPING\r\n"
+            assert received == expected, (len(received), len(expected), received[-64:])
             answer, _reads = read_until(server, b"PONG\r\n")
             assert answer.endswith(b"PONG\r\n"), answer
     finally:

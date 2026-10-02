@@ -2334,8 +2334,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "serial_write_incomplete": ErrorRemedy(
         meaning=(
-            "The line took only part of the payload: `bytes_written` of `bytes_requested` reached it, even after a "
-            "bounded retry of the remainder, and `data` shows exactly which bytes. The rest never left the host. This "
+            "The line took only part of the payload: `bytes_written` of `bytes_requested` reached it, and `data` shows "
+            "exactly which bytes. The rest never left the host. On Linux, with `write_timeout_s` above 0, a write hands "
+            "the line only what it carries in that time at its baudrate and framing and does not send the rest; "
+            "otherwise the remainder was retried a bounded number of times first. This "
             "is confirmed rather than unknown, so the session stays open and usable, and the short write is recorded "
             "under `cleanup_reasons` without holding the port. `likely_causes` names the usual reasons: a "
             "`write_timeout_s` too short for the payload at this baudrate, flow control, or a disconnect partway."

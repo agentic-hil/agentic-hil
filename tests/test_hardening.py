@@ -21,6 +21,7 @@ import yaml
 from conftest import FAKE_OPENOCD, write_authoritative_config, write_config
 from support import scaled_time_bound
 
+from agentic_hil import comports
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends.common import spawn_command
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
@@ -758,6 +759,256 @@ def test_com_write_that_stays_short_after_retry_records_event_without_quarantine
         assert session.lease.cleanup_reasons() == []
         assert session.lease.reported_cleanup_reasons() == ["serial_write_incomplete"]
         assert service.coordinator.blocked is False
+    finally:
+        service.coordinator.close()
+
+
+# A write on Linux is paced by the line's own rate. pyserial's POSIX write
+# hands everything to the tty and then waits for room with a select bounded by
+# write_timeout; when the select runs out it raises "Write timeout", although
+# the tty may already hold every byte, and the count is lost. Over a
+# pseudo-terminal whose far end had stopped reading, a 4096-byte write raised
+# after one second and all of it reached the far end once it read again.
+
+
+class TtyOutputQueue:
+    """A tty's output queue as a paced write meets it.
+
+    It takes what it has room for at once and makes room only as the line
+    drains, ``drained`` bytes per wait; a queue whose line never drains answers
+    every wait as a select that ran out. ``clock`` is advanced by what each wait
+    is allowed, as a select that ran its time would.
+    """
+
+    def __init__(self, room: int, drained: int = 0, clock: FakeMonotonic | None = None) -> None:
+        self.room = room
+        self.drained = drained
+        self.clock = clock
+        self.queued = bytearray()
+        self.offers: list[int] = []
+        self.waits: list[float] = []
+
+    def write_some(self, data: bytes) -> int:
+        self.offers.append(len(data))
+        taken = bytes(data[: self.room])
+        self.room -= len(taken)
+        self.queued += taken
+        return len(taken)
+
+    def wait_writable(self, timeout_s: float) -> bool:
+        self.waits.append(timeout_s)
+        if self.drained <= 0:
+            if self.clock is not None:
+                self.clock.now += timeout_s
+            return False
+        self.room += self.drained
+        return True
+
+
+class FakeMonotonic:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.mark.parametrize(
+    ("baudrate", "bytesize", "parity", "stopbits", "timeout_s", "allowance"),
+    [
+        pytest.param(9600, 8, "N", 1, 1.0, 960, id="9600-8N1"),
+        pytest.param(1200, 8, "N", 1, 1.0, 120, id="1200-8N1"),
+        pytest.param(115200, 8, "N", 1, 1.0, 4096, id="115200-8N1-whole-payload"),
+        pytest.param(9600, 8, "E", 2, 1.0, 800, id="9600-8E2"),
+        pytest.param(9600, 7, "O", 1, 0.5, 480, id="9600-7O1-half-second"),
+    ],
+)
+def test_the_line_is_handed_what_it_carries_within_write_timeout_s_at_its_framing(
+    baudrate: int, bytesize: int, parity: str, stopbits: float, timeout_s: float, allowance: int
+) -> None:
+    """A character is a start bit, its data bits, a parity bit unless parity
+    is none, and its stop bits, so a line at ``baudrate`` carries
+    ``baudrate / frame`` characters a second, and a write hands it no more than
+    ``write_timeout_s`` worth of them, nor more than the payload."""
+    handle = SimpleNamespace(baudrate=baudrate, bytesize=bytesize, parity=parity, stopbits=stopbits)
+
+    assert comports._line_allowance(handle, 4096, timeout_s) == allowance
+
+
+def test_a_handle_that_names_no_framing_is_paced_as_eight_n_one() -> None:
+    """The product never sets the framing, so pyserial's 8N1 is what every entry runs at."""
+    assert comports._line_allowance(SimpleNamespace(baudrate=9600), 4096, 1.0) == 960
+
+
+def test_the_paced_write_hands_over_the_allowance_and_not_one_byte_more() -> None:
+    """A queue with room for the whole payload still gets only the allowance:
+    the rest would not reach the line within write_timeout_s, so it is not
+    handed to the kernel at all, and the count returned is exactly what was."""
+    data = bytes(range(256)) * 16
+    queue = TtyOutputQueue(room=4096)
+
+    sent = comports._paced_write(queue, data, 1.0, 960)
+
+    assert sent == 960
+    assert bytes(queue.queued) == data[:960]
+    assert queue.offers == [960]
+    assert queue.waits == []
+
+
+def test_the_paced_write_keeps_handing_over_as_the_queue_makes_room() -> None:
+    """A queue smaller than the allowance is filled, waited on and filled again
+    until the allowance is in, each offer exactly the part not yet taken."""
+    data = b"".join(f"{number:06d} {'.' * 55}\r\n".encode("ascii") for number in range(64))
+    queue = TtyOutputQueue(room=100, drained=300)
+
+    sent = comports._paced_write(queue, data, 1.0, 960)
+
+    assert sent == 960
+    assert bytes(queue.queued) == data[:960]
+    assert queue.offers == [960, 860, 560, 260]
+    assert len(queue.waits) == 3
+
+
+def test_the_paced_write_on_a_line_that_stops_draining_returns_what_went_in_at_the_deadline() -> None:
+    """A line that never drains (a peer that stopped reading, flow control held)
+    takes what its queue had room for; the wait for more room runs the rest of
+    write_timeout_s out, and what went in is the count, exact."""
+    clock = FakeMonotonic()
+    data = b"7" * 4096
+    queue = TtyOutputQueue(room=300, clock=clock)
+
+    sent = comports._paced_write(queue, data, 1.0, 4096, clock=clock)
+
+    assert sent == 300
+    assert bytes(queue.queued) == data[:300]
+    assert queue.waits == [1.0]
+
+
+def test_the_paced_write_ends_at_the_deadline_whatever_the_wait_answers() -> None:
+    """A queue that answers every wait as writable and then takes nothing does
+    not hold the write past write_timeout_s."""
+    clock = FakeMonotonic()
+
+    class WritableButFull(TtyOutputQueue):
+        def wait_writable(self, timeout_s: float) -> bool:
+            self.waits.append(timeout_s)
+            clock.now += 0.25
+            return True
+
+    queue = WritableButFull(room=0)
+
+    sent = comports._paced_write(queue, b"PING\r\n", 1.0, 6, clock=clock)
+
+    assert sent == 0
+    assert queue.waits == [1.0, 0.75, 0.5, 0.25]
+
+
+def test_a_handle_that_is_not_a_posix_serial_port_is_not_paced() -> None:
+    assert comports._posix_line(SimpleNamespace(fd=3, baudrate=9600)) is None
+    assert comports._posix_line(ChronicallyShortSerialHandle()) is None
+
+
+class PacedSerialHandle:
+    """A pyserial handle on a Linux tty, as far as the write path reads it.
+
+    ``write`` is recorded so a test can see it is not what carried the bytes:
+    the paced write puts them on the descriptor itself. ``flush`` is recorded
+    because it is what waits until the bytes handed over have left the line.
+    """
+
+    is_open = True
+    in_waiting = 0
+    bytesize = 8
+    parity = "N"
+    stopbits = 1
+
+    def __init__(self, baudrate: int) -> None:
+        self.baudrate = baudrate
+        self.writes: list[bytes] = []
+        self.flushes = 0
+
+    def write(self, data: bytes) -> int:
+        self.writes.append(bytes(data))
+        return len(data)
+
+    def flush(self) -> None:
+        self.flushes += 1
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def paced_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, baudrate: int, queue: TtyOutputQueue, write_timeout_s: float = 1.0) -> tuple[ComPortService, ComPortSession, PacedSerialHandle]:
+    config = load_test_config(tmp_path, com_ports_yaml=f'com_ports:\n  dut:\n    device: "/dev/ttyAGENTIC_HILTEST"\n    baudrate: {baudrate}\n    write_timeout_s: {write_timeout_s}\n')
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-paced.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = PacedSerialHandle(baudrate)
+    monkeypatch.setattr(comports, "_posix_line", lambda serial_handle: queue if serial_handle is handle else None)
+    lease = service.coordinator.acquire(uart_device(config, "dut"))
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), lease, start_reader=False)
+    service.sessions["dut"] = session
+    return service, session, handle
+
+
+def test_a_write_longer_than_the_line_carries_in_write_timeout_s_is_short_by_exactly_what_was_not_sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The answer for a payload the line cannot carry in time, in the product's
+    own words: "COM port write was short: N of M byte(s) reached the line", with
+    the first likely cause "configured write_timeout_s is too short for this
+    payload size and baudrate". At 9600 baud and the default one second that is
+    960 of 4096 bytes: those are handed over and drained, the rest is never sent,
+    and because the count is confirmed the lease is recorded, not quarantined."""
+    queue = TtyOutputQueue(room=4096)
+    service, session, handle = paced_session(tmp_path, monkeypatch, 9600, queue)
+    data = b"".join(f"{number:06d} {'.' * 55}\r\n".encode("ascii") for number in range(64))
+    try:
+        result = service.write_bytes("dut", data)
+
+        assert result["ok"] is False, result
+        assert result["error_type"] == "serial_write_incomplete"
+        assert result["summary"].startswith("COM port write was short: 960 of 4096 byte(s) reached the line")
+        assert result["likely_causes"][0] == "configured write_timeout_s is too short for this payload size and baudrate"
+        assert (result["bytes_written"], result["bytes_requested"]) == (960, 4096)
+        assert result["data"]["text"] == data[:960].decode("ascii")
+        assert (result["side_effect_committed"], result["side_effect_status"], result["retry_safe"]) == (True, "committed", False)
+        assert result.get("quarantined") is not True
+        assert bytes(queue.queued) == data[:960]
+        assert handle.writes == []
+        assert handle.flushes == 1
+        assert session.lease.state == "active"
+        assert session.lease.cleanup_reasons() == []
+        assert session.lease.reported_cleanup_reasons() == ["serial_write_incomplete"]
+        assert service.coordinator.blocked is False
+    finally:
+        service.coordinator.close()
+
+
+def test_a_write_the_line_carries_in_time_is_written_whole_by_the_paced_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    queue = TtyOutputQueue(room=4096)
+    service, _session, handle = paced_session(tmp_path, monkeypatch, 9600, queue)
+    try:
+        result = service.write_bytes("dut", b"PING\r\n")
+
+        assert result["ok"] is True, result
+        assert result["bytes_written"] == 6
+        assert bytes(queue.queued) == b"PING\r\n"
+        assert handle.writes == []
+        assert handle.flushes == 1
+    finally:
+        service.coordinator.close()
+
+
+def test_a_write_timeout_of_zero_is_left_to_the_driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """write_timeout_s 0 means "hand over what the driver takes at once", which
+    pyserial's own write already answers with its count, so nothing is paced."""
+    queue = TtyOutputQueue(room=4096)
+    service, _session, handle = paced_session(tmp_path, monkeypatch, 9600, queue, write_timeout_s=0)
+    try:
+        result = service.write_bytes("dut", b"PING\r\n")
+
+        assert result["ok"] is True, result
+        assert handle.writes == [b"PING\r\n"]
+        assert bytes(queue.queued) == b""
     finally:
         service.coordinator.close()
 

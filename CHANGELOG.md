@@ -80,6 +80,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - Every error type the package can answer with now has an entry in `agentic-hil://reference/errors`, with what it means, the ordered fix and the wrong fix, and the setup, install, schema and uninstall refusals of the command line carry that advice in their result.
 
+- On Linux a `com_write` the line cannot carry within `write_timeout_s` answers `serial_write_incomplete` with the count that reached the line, where it answered `serial_write_failed` with `side_effect_status: unknown`. pyserial's POSIX write hands the whole payload to the tty and raises `Write timeout` when its wait for room runs out, even after the tty took every byte, so the count was lost and the run's recovery reset the board into halt under the default policy: on an FT232R at 9600 baud a 4096-byte write, more than four seconds of line, failed after one second and left the core halted in its reset handler, and over a pseudo-terminal the far end received all 4096 bytes of a write answered that way. A write now hands the line only what it carries in that time at its baudrate and framing, so the call lasts about `write_timeout_s`, `bytes_written` and `data` are exactly what reached the line, and the rest is not sent. Windows and macOS keep pyserial's own write. The error catalogue's `serial_write_incomplete` entry says so too, where it claimed a bounded retry of the remainder for every short write.
+
 ## [0.22.0] - 2026-09-30
 
 ### Added

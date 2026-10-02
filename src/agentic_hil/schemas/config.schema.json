@@ -451,7 +451,8 @@
           "write_timeout_s": {
             "type": "number",
             "minimum": 0,
-            "default": 1.0
+            "default": 1.0,
+            "description": "How long one com_write may take to reach the line, in seconds. On Linux a write hands the line only what it carries within this time at the port's baudrate and framing: a longer payload answers serial_write_incomplete with bytes_written and data exactly what went out, and the rest is not sent. On Windows and macOS it is pyserial's write timeout. 0 leaves the write to the driver unpaced."
           },
           "encoding": {
             "type": "string",

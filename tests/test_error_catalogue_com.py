@@ -677,6 +677,11 @@ CLAIMS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
         ("meaning", (r"`bytes_written`", r"`bytes_requested`")),
         ("meaning", (r"\b(rest|remainder)\b", r"\bnever\b")),
         ("meaning", (r"\bsession\b", r"\b(open|usable)\b")),
+        # Two writes end short, and their summaries say which: on Linux the
+        # line is handed what it carries within `write_timeout_s` and the rest
+        # is not sent, and only the other write retries the remainder first.
+        ("meaning", (r"\bLinux\b", r"`write_timeout_s`", r"\b(not|never)\b[^.;]*\bsen[dt]\b")),
+        ("meaning", (r"\bretr(y|ied)\b", r"\b(otherwise|elsewhere)\b")),
         ("first", (r"`com_read`",)),
         ("steps", (r"`bytes_written`", r"\b(missing|rest|remainder|from)\b")),
         ("do_not", (r"\b(repeat|resend|replay|send)\b", r"\b(whole|entire|full|same)\b")),
@@ -778,6 +783,20 @@ def test_the_incomplete_write_entry_never_advises_sending_the_whole_payload_agai
     steps = entry_of("serial_write_incomplete")["remediation"]
 
     assert not says(steps, r"\b(resend|replay|repeat|retry)\w*", r"\b(whole|entire|full|same|all)\b"), steps
+
+
+def test_the_incomplete_write_entry_names_the_retry_only_with_the_write_that_makes_it() -> None:
+    """A Linux write paced to `write_timeout_s` ends short with no retry at all:
+    its summary ends "within write_timeout_s (N s); the rest was not sent." The
+    entry is read for both writes, so a sentence that names the retry says which
+    write makes it, where "reached it, even after a bounded retry of the
+    remainder" claimed one for every short write."""
+    meaning = entry_of("serial_write_incomplete")["meaning"]
+    retrying = [sentence for sentence in sentences(meaning) if re.search(r"\bretr(y|ied|ies)\b", sentence, re.IGNORECASE)]
+
+    assert retrying, meaning
+    unconditioned = [sentence for sentence in retrying if not re.search(r"\b(otherwise|elsewhere|Windows|macOS)\b", sentence, re.IGNORECASE)]
+    assert unconditioned == [], unconditioned
 
 
 # Which kind of session each word or start tool belongs to. Case matters: the
