@@ -14,9 +14,12 @@ The metadata tests check meaning, not wording. A claim is checked as a
 relation inside one sentence or clause (the refusal and the permission that
 produces it, the default and its value, the record and what it outlives), and
 the inverted claim an agent could act on wrongly is rejected outright. The
-relation checks are themselves run against paraphrases they must accept and
-inversions they must reject. Every identifier a definition names is one the
-server lists, configures or can answer with.
+relation checks are run twice more: against paraphrases they must accept and
+inversions they must reject, and against the listed definitions with one
+meaning flipped (true and false, needed and optional, and and or, an effect
+and its negation), which each check must then refuse. Every identifier a
+definition names, at any depth of its schema, is one the server lists,
+configures or can answer with.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import pathlib
 import re
 import time
 from pathlib import Path
@@ -34,6 +38,7 @@ from conftest import (
     FAKE_OPENOCD,
     FAKE_OPENOCD_ERASE_REFUSED,
     FAKE_OPENOCD_NO_TARGET,
+    FAKE_PYOCD,
     write_config,
 )
 from test_debug_sessions import START_TIMEOUT_S, debug_service
@@ -44,7 +49,6 @@ from test_tool_definition_uart import (
     QUOTED,
     SNAKE_CASE,
     answer_vocabulary,
-    call,
     claims,
     clauses,
     definition_text,
@@ -55,8 +59,12 @@ from test_tool_definition_uart import (
 )
 
 import agentic_hil
+import agentic_hil.report as report_module
+from agentic_hil.bench import BenchMutex
 from agentic_hil.config import load_config
+from agentic_hil.devices import debugger_device
 from agentic_hil.mcp import handle_mcp_message
+from agentic_hil.report import overall_success, report_state_path
 from agentic_hil.tools import AgenticHILToolService
 
 FLASH = "flash_firmware"
@@ -78,10 +86,27 @@ DEFAULT_ALLOWED_ROOT = "build"
 DEFAULT_EXTENSIONS = (".elf", ".hex", ".bin")
 # What `write_config` grants a test configuration: one MiB.
 TEST_MAX_UPLOAD_BYTES = 1024 * 1024
+# The capture's text limits and its wait (src/agentic_hil/readuntil.py).
+UNTIL_MAX_ENTRIES = 8
+UNTIL_MAX_CHARACTERS = 256
+CAPTURE_DEFAULT_WAIT_S = 10
+CAPTURE_MAX_WAIT_S = 60
 
 # The smallest image the validator accepts as an ELF: the magic, then padding.
 ELF = b"\x7fELF" + b"\x00" * 60
 IMAGE = "build/app.elf"
+BINARY = "build/app.bin"
+UNKNOWN_ID = "0" * 64 + ".elf"
+
+# A pyOCD whose flash succeeds and whose post-flash reset fails (#506).
+FAKE_PYOCD_RESET_REFUSED = Path(__file__).resolve().parent / "fixtures" / "fake_pyocd_reset_refused.py"
+# fake_pyocd.py behind a delay on each command that drives the target, so a
+# flash with a reset runs two slow commands in one call.
+SLOW_PYOCD = """import runpy, sys, time
+if sys.argv[1:2] in (["flash"], ["commander"]):
+    time.sleep({delay_s})
+runpy.run_path({fake!r}, run_name="__main__")
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -89,10 +114,11 @@ IMAGE = "build/app.elf"
 
 
 def new_service(workspace: Path, **kwargs: object) -> AgenticHILToolService:
-    """A server on the fake OpenOCD, with `build/app.elf` in its workspace."""
+    """A server on the fake OpenOCD, with `build/app.elf` and `build/app.bin` in its workspace."""
     path = write_config(workspace, **kwargs)
     (workspace / "build").mkdir(parents=True, exist_ok=True)
     (workspace / IMAGE).write_bytes(ELF)
+    (workspace / BINARY).write_bytes(b"\x01" * 64)
     return AgenticHILToolService(load_config(str(path)), frontend="mcp")
 
 
@@ -119,6 +145,20 @@ def without_uploads(text: str) -> str:
 
 def b64(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
+
+
+def call(service: AgenticHILToolService, name: str, arguments: dict) -> dict:
+    """One `tools/call`, answered with the structured result an agent acts on.
+
+    The envelope's `isError` is the server's whole verdict, `overall_success`
+    (src/agentic_hil/mcp.py), not `ok` alone: a flash whose report could not be
+    written answers `ok: true` and is still an error."""
+    response = handle_mcp_message({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}, service)
+    assert isinstance(response, dict) and "result" in response, response
+    answer = response["result"]
+    structured = answer["structuredContent"]
+    assert answer["isError"] is (not overall_success(structured)), answer
+    return structured
 
 
 def flash(service: AgenticHILToolService, **arguments: object) -> dict:
@@ -156,67 +196,215 @@ def text_of(listed: dict[str, dict], name: str) -> str:
     return definition_text(listed[name])
 
 
+def described_schemas(schema: dict, path: tuple[str, ...] = ()):
+    """Every property schema at any depth of `schema`, with the path to it:
+    nested objects, array items and each branch of oneOf, anyOf and allOf."""
+    for key, child in (schema.get("properties") or {}).items():
+        yield (*path, key), child
+        yield from described_schemas(child, (*path, key))
+    items = schema.get("items")
+    if isinstance(items, dict):
+        yield from described_schemas(items, (*path, "items"))
+    for keyword in ("oneOf", "anyOf", "allOf"):
+        for index, branch in enumerate(schema.get(keyword) or []):
+            if isinstance(branch, dict):
+                yield from described_schemas(branch, (*path, f"{keyword}[{index}]"))
+
+
+def nested_text(tool: dict, *path: str) -> str:
+    node = tool["inputSchema"]
+    for key in path:
+        node = node["properties"][key]
+    return str(node.get("description") or "")
+
+
+def every_description(tool: dict) -> str:
+    """The description and every property description at any depth."""
+    return " ".join([str(tool.get("description") or ""), *(str(child.get("description") or "") for _, child in described_schemas(tool["inputSchema"]))])
+
+
 # The relations, each a predicate over a definition's text, so the paraphrase
-# test at the end of this section can run them on sentences of its own.
+# and mutation tests at the end of this section can run them on texts of their
+# own.
 
 DEFAULT_FALSE = r"\bdefaults?\b[^.;]*\bfalse\b|\bfalse\b[^.;]*\bdefault\b"
 DEFAULT_TRUE = r"\bdefaults?\b[^.;]*\btrue\b|\btrue\b[^.;]*\bdefault\b"
 # The result named `timeout`, not the configuration key `timeout_s`.
 TIMEOUT_RESULT = r"(?<![A-Za-z0-9_])timeout(?![A-Za-z0-9_])"
+# The outer `ok`, not `report.ok`.
+OK_WORD = r"(?<![A-Za-z0-9_.])ok(?![A-Za-z0-9_.])"
 NEGATED_NEED = r"\b(?:needs?|requires?)\s+no\b|\b(?:does\s+not|doesn't|never)\s+(?:need|require)|\bnot\s+(?:needed|required)\b|\boptional\b"
+# A negation inside a matched phrase: "does not clear", "never resets".
+NEGATED_PHRASE = r"\b(?:no|not|never)\b|n't\b"
+BACKENDS = r"(?:OpenOCD|pyOCD|STM32CubeProgrammer)"
 
 
 def needs_with_refusal(text: str, key: str, refusal: str = "permission_denied") -> bool:
-    """`key` is needed, and its absence answers `refusal`, in one clause; never "needs no `key`"."""
-    needed = one_of(clauses(text), rf"\b{key}\b", rf"\b{refusal}\b")
+    """`key` is needed and its absence answers `refusal`, as one relation in one
+    clause; never "needs no `key`", and never `refusal` for `key` granted."""
+    named = rf"(?:[\w<>]+\.)*{key}\b"
+    relation = (
+        rf"\b(?:needs?|requires?)\s+{named}[^.;]*\b(?:else|otherwise)\b[^.;]*\b{refusal}\b"
+        rf"|\bwithout\s+{named}[^.;]*\b{refusal}\b"
+        rf"|\b{key}\s+(?:off|false|unset|missing|not granted)\b[^.;]*\b{refusal}\b"
+        rf"|\b{refusal}\b[^.;]*\b(?:unless|until)\b[^.;]*\b{key}\b"
+    )
+    granted = rf"\b{key}\s+(?:is\s+)?(?:true|on|granted|set|given)\b[^.;]*\b{refusal}\b"
     waived = any(re.search(rf"\b{key}\b", part) and re.search(NEGATED_NEED, part, re.IGNORECASE) for part in clauses(text))
-    return needed and not waived
+    related = any(re.search(relation, part, re.IGNORECASE) for part in clauses(text))
+    return related and not waived and not claims(text, granted)
 
 
 def says_debug_session_makes_flash_busy(text: str) -> bool:
     """A debug session on the probe answers resource_busy until debug_stop_session; the flash never ends it itself."""
-    busy = one_of(sentences(text), r"\bresource_busy\b", r"\bdebug_stop_session\b", r"(?<![A-Za-z0-9_])session\b")
+    busy = one_of(clauses(text), r"\bresource_busy\b", r"\bdebug_stop_session\b|\bdebug session\b")
     takes_over = claims(text, r"\b(?:ends|stops|closes|replaces|takes over)\s+(?:the|a|any)\s+(?:active\s+|running\s+)?debug session")
     return busy and not takes_over
 
 
 def says_reset_default_is_false(text: str) -> bool:
-    """reset_after_flash defaults to false and false does not reset; never a true default."""
+    """reset_after_flash defaults to false and false does not reset; never a true default, never "true does not reset"."""
     default = one_of(clauses(text), DEFAULT_FALSE)
     unreset = one_of(clauses(text), r"\bfalse\b|\bdefault\b", rf"{NEGATION}[^.;]*\breset\b|\breset\b[^.;]*{NEGATION}|\bunreset\b")
-    return default and unreset and not claims(text, DEFAULT_TRUE)
+    true_unreset = claims(text, rf"\btrue\b[^.;]*{NEGATION}[^.;]*\breset")
+    return default and unreset and not claims(text, DEFAULT_TRUE) and not true_unreset
 
 
-def says_failed_flash_ends_in_a_recovery_reset(text: str) -> bool:
-    """A failed flash is followed by the recovery's reset into halt, under the
-    recovery.auto_recover policy that decides it; never "a failed flash leaves
-    the board untouched"."""
-    followed = one_of(sentences(text), r"\bfail", r"\brecover", r"\breset\b", r"\bhalt", r"\bauto_recover\b")
+def says_true_resets(text: str) -> bool:
+    """reset_after_flash resets the board once the flash is done: an affirmative clause, not a negated one."""
+    affirmed = any(
+        re.search(r"\breset", part, re.IGNORECASE)
+        and re.search(r"\bflash", part, re.IGNORECASE)
+        and re.search(r"\bafter\b|\bthen\b|\bonce\b", part, re.IGNORECASE)
+        and not re.search(NEGATION, part, re.IGNORECASE)
+        and not re.search(r"\bfail", part, re.IGNORECASE)
+        for part in clauses(text)
+    )
+    inverted = claims(text, rf"\btrue\b[^.;]*{NEGATION}[^.;]*\breset|\btrue\b[^.;]*\b(?:stays|left|leaves)\s+(?:halted|unreset)\b")
+    return affirmed and not inverted
+
+
+def says_recovery_is_attempted_not_promised(text: str) -> bool:
+    """When a failed flash leaves an incident, recovery.auto_recover may try a
+    reset into halt: a condition and an attempt, never a guarantee, and never
+    "a failed flash leaves the board untouched"."""
+    attempted = one_of(
+        sentences(text),
+        r"\bif\b|\bwhen\b|\bafter\b|\bunless\b",
+        r"\bfail",
+        r"\bauto_recover\b",
+        r"\b(?:tries|try|attempts?|may|can)\b",
+        r"\breset\b",
+        r"\bhalt",
+    )
+    promised = claims(
+        text,
+        r"\b(?:always|guarantee[sd]?|every failed|each failed|ensures?)\b[^.;]*\b(?:recover\w*|reset\w*)\b"
+        r"|\b(?:recover\w*|reset)\b[^.;]*\b(?:always|guaranteed)\b",
+    )
     untouched = claims(text, r"\bfail\w*\b[^.;]*\b(?:untouched|unchanged|as it was|not reset)\b")
-    return followed and not untouched
+    return attempted and not promised and not untouched
 
 
 def says_timeout_bound(text: str) -> bool:
-    """timeout_s bounds the call, 60 by default, and running out answers `timeout`; 60 is no ceiling."""
-    bounded = one_of(clauses(text), r"\btimeout_s\b", TIMEOUT_RESULT)
-    default = one_of(clauses(text), r"\btimeout_s\b", rf"\b{DEFAULT_DEBUGGER_TIMEOUT_S}\b", r"\bdefault")
+    """timeout_s, in seconds, 60 by default, caps each debugger command and
+    running out answers `timeout`; never a bound on the whole call, never a
+    unit other than seconds, and 60 is no ceiling."""
+    per_command = one_of(clauses(text), r"\btimeout_s\b", r"\b(?:each|every|per)\b[^.;]*\bcommand\b", TIMEOUT_RESULT)
+    unit = one_of(clauses(text), r"\btimeout_s\b", r"\bseconds?\b")
+    default = one_of(clauses(text), r"\btimeout_s\b", rf"\b{DEFAULT_DEBUGGER_TIMEOUT_S}\b", r"\bdefault|\bunless set\b|\bif unset\b|\bwhen unset\b")
+    wrong_unit = claims(text, r"\btimeout_s\b[^.;]*\b(?:ms|milliseconds?|minutes?)\b|\b\d+\s*(?:ms|milliseconds?)\b")
+    whole_call = claims(
+        text,
+        r"\b(?:whole|entire|total|overall)\s+(?:call|flash|operation|run)\b"
+        r"|\b(?:the|each|every)\s+call\b[^.;]*\btimeout_s\b|\btimeout_s\b[^.;]*\b(?:the|each|every)\s+call\b",
+    )
     ceiling = claims(text, rf"\b(?:at most|up to|maximum(?: of)?|no more than)\s+{DEFAULT_DEBUGGER_TIMEOUT_S}\b")
-    return bounded and default and not ceiling
+    return per_command and unit and default and not wrong_unit and not whole_call and not ceiling
 
 
 def says_one_image_input(text: str) -> bool:
     """image_path or artifact_id, exactly one; never both together."""
-    either = one_of(clauses(text), r"\bimage_path\b", r"\bartifact_id\b", r"\bnot both\b|\bexactly one\b|\bone of\b|\beither\b|\binstead\b")
+    either = one_of(clauses(text), r"\bimage_path\b", r"\bartifact_id\b", r"\bnot both\b|\bexactly one\b|\bone of\b|\beither\b|\binstead\b|\bnot with\b")
     both = claims(text, r"\bboth\b[^.;]*\b(?:required|needed|must)\b|\b(?:requires?|needs?)\s+both\b")
     return either and not both
 
 
+def says_every_call_flashes_again(text: str) -> bool:
+    """A repeated call programs the board again; never "a repeated call is skipped"."""
+    again = one_of(clauses(text), r"\b(?:every|each|a repeated|another)\s+(?:call|flash)\b", r"\b(?:again|anew|rewrites?|reprograms?|re-?flash\w*)\b")
+    skipped = claims(text, r"\b(?:skips?|skipped|no-op|unchanged image|only if (?:it )?changed|already (?:flashed|there))\b")
+    return again and not skipped
+
+
+def says_bin_needs_flash_address(text: str) -> bool:
+    """A .bin needs flash_address on pyOCD and STM32CubeProgrammer; OpenOCD is not named as needing it."""
+    needed = one_of(clauses(text), r"\.bin\b", r"\bflash_address\b", r"\bpyOCD\b", r"\bSTM32CubeProgrammer\b")
+    on_openocd = any(re.search(r"\.bin\b", part) and re.search(r"\bflash_address\b", part) and re.search(r"\bOpenOCD\b", part, re.IGNORECASE) for part in clauses(text))
+    everywhere = claims(text, r"\b(?:every|any|all)\s+(?:backends?|debuggers?)\b[^.;]*\bflash_address\b|\bflash_address\b[^.;]*\b(?:every|any|all)\s+backends?\b")
+    return needed and not on_openocd and not everywhere
+
+
+def says_pyocd_does_not_verify(text: str) -> bool:
+    """pyOCD runs no verify step; never OpenOCD or STM32CubeProgrammer named as the one that does not."""
+    unverified = one_of(clauses(text), r"\bpyOCD\b", rf"{NEGATION}[^.;]*\bverif|\bverify false\b|\bunverified\b")
+    wrong = claims(
+        text,
+        r"\b(?:OpenOCD|STM32CubeProgrammer)\s+(?:does\s+not|doesn't|never|cannot)\s+verif"
+        r"|\bpyOCD\s+(?:also\s+)?verifies\b|\b(?:every|all)\s+backends?\s+verif",
+    )
+    return unverified and not wrong
+
+
+def says_capture_failure_keeps_the_image(text: str) -> bool:
+    """A read that fails after a good flash makes the call ok false with the image written; never "nothing written"."""
+    kept = one_of(
+        clauses(text),
+        r"\b(?:read|capture)\b",
+        r"\bfail",
+        r"\bafter\b",
+        r"\bflash",
+        rf"{OK_WORD}[^.;]*\bfalse\b",
+        r"\b(?:written|flashed|kept|stays|on the board|committed)\b",
+    )
+    undone = claims(text, r"\b(?:read|capture)\b[^.;]*\bfail\w*[^.;]*\b(?:nothing (?:is )?written|not (?:written|flashed)|rolled back|undone|erased)\b")
+    return kept and not undone
+
+
+def names_no_backend_restriction(text: str) -> bool:
+    """Every configured backend flashes: no "OpenOCD only", no "only through pyOCD"."""
+    return not claims(text, rf"\b{BACKENDS}(?:\s+backend)?\s+only\b|\bonly\s+(?:on|with|through|via|for)?\s*(?:the\s+)?{BACKENDS}\b")
+
+
+def says_what_it_writes_and_through_what(text: str) -> bool:
+    """It writes firmware to the board or target, through the debugger, programmer or probe."""
+    return (
+        claims(text, r"\b(?:flash(?:es)?|programs?|writes?)\b")
+        and claims(text, r"\bboard\b|\btarget\b")
+        and claims(text, r"\bdebugger\b|\bprogrammer\b|\bprobe\b")
+        and names_no_backend_restriction(text)
+    )
+
+
 def says_content_addressed(text: str) -> bool:
-    """The id is the sha256 of the bytes plus the extension, so the same bytes give the same id; never random."""
+    """The id is the sha256 of the bytes plus the lowercased extension, so the
+    same bytes and the same extension give the same id; never random, and never
+    the same id for the same bytes whatever the extension."""
     digest = one_of(clauses(text), r"\bsha-?256\b", r"\bextension\b|\bsuffix\b")
-    stable = one_of(clauses(text), r"\bsame\b|\bidentical\b|\bequal\b", r"\bbytes\b|\bcontents?\b", r"\bid\b|\bartifact_id\b")
+    lowered = one_of(clauses(text), r"\blower", r"\bextension\b|\bsuffix\b")
+    stable = one_of(
+        clauses(text),
+        r"\bsame\b|\bidentical\b|\bequal\b",
+        r"\bbytes\b[^.;]*\band\b[^.;]*\b(?:extension|suffix)\b|\b(?:extension|suffix)\b[^.;]*\band\b[^.;]*\bbytes\b",
+        r"\bid\b|\bartifact_id\b",
+    )
+    either = claims(
+        text,
+        r"\bbytes\s+or\s+(?:the\s+)?(?:same\s+)?(?:extension|suffix)\b|\b(?:extension|suffix)\s+or\s+(?:the\s+)?(?:same\s+)?bytes\b"
+        r"|\bsame bytes,\s+same id\b|\bwhatever (?:the )?(?:extension|name)\b",
+    )
     random = claims(text, r"\brandom\b|\buuid\b|\bnew id (?:each|every)\b|\bunique (?:per|for each) upload\b")
-    return digest and stable and not random
+    return digest and lowered and stable and not either and not random
 
 
 def says_whitespace_ignored(text: str) -> bool:
@@ -226,11 +414,26 @@ def says_whitespace_ignored(text: str) -> bool:
 
 
 def says_size_limit(text: str) -> bool:
-    """max_upload_size_mb, 64 by default, over it artifact_too_large; 64 is no fixed ceiling."""
-    limit = one_of(clauses(text), r"\bmax_upload_size_mb\b", rf"\b{DEFAULT_MAX_UPLOAD_SIZE_MB}\b", r"\bdefault")
-    refusal = one_of(clauses(text), r"\bmax_upload_size_mb\b", r"\bartifact_too_large\b")
+    """The decoded image, at most max_upload_size_mb MiB (64 by default), and
+    over it artifact_too_large; never the encoded size, never another unit, never
+    "below it", and 64 is no fixed ceiling."""
+    limit = one_of(
+        clauses(text),
+        r"\bmax_upload_size_mb\b",
+        r"\bMiB\b|\bmebibytes?\b|\b1024\s*[x*]\s*1024\b",
+        r"\bdecod",
+        r"\bartifact_too_large\b",
+        r"\bat most\b|\bover\b|\babove\b|\bexceed|\bmore than\b|\belse\b|\bbeyond\b|\blarger\b",
+    )
+    default = one_of(clauses(text), r"\bmax_upload_size_mb\b", rf"\b{DEFAULT_MAX_UPLOAD_SIZE_MB}\b", r"\bdefault")
+    inverted = claims(text, r"\b(?:below|under|less than|smaller than|beneath)\b[^.;]*\bartifact_too_large\b|\bartifact_too_large\b[^.;]*\b(?:below|under|less than|smaller than)\b")
+    encoded = any(
+        re.search(r"\bmax_upload_size_mb\b", part) and re.search(r"\bencoded\b|\bbase64 (?:text|string|length|size)\b|\bbefore decoding\b", part, re.IGNORECASE)
+        for part in clauses(text)
+    )
+    wrong_unit = claims(text, rf"\bmax_upload_size_mb\s+(?:bytes|KiB|KB|kilobytes?)\b|\b{DEFAULT_MAX_UPLOAD_SIZE_MB}\s*(?:bytes|KiB|KB|kilobytes?)\b")
     ceiling = claims(text, rf"\b(?:at most|up to|maximum(?: of)?|no more than)\s+{DEFAULT_MAX_UPLOAD_SIZE_MB}\b")
-    return limit and refusal and not ceiling
+    return limit and default and not inverted and not encoded and not wrong_unit and not ceiling
 
 
 def says_bare_filename(text: str) -> bool:
@@ -247,28 +450,66 @@ def says_touches_no_board(text: str) -> bool:
     return untouched and not needs
 
 
+def says_stored_in_upload_directory(text: str) -> bool:
+    """The image is stored in artifacts.upload_directory; never "kept in memory" or "not stored"."""
+    stored = one_of(clauses(text), r"\bupload_directory\b", r"\b(?:stores?|stored|saves?|saved|keeps?|kept|writes?|written|copies|copied)\b")
+    elsewhere = claims(text, r"\b(?:memory only|in memory|not (?:stored|saved|kept)|nothing is (?:stored|saved|kept)|temporar)")
+    return stored and not elsewhere
+
+
 def says_outer_ok_even_for_a_failed_report(text: str) -> bool:
     """get_last_report answers ok true even when the stored report failed; the stored verdict is report.ok."""
-    true_anyway = one_of(clauses(text), r"(?<![A-Za-z0-9_.])ok(?![A-Za-z0-9_.])", r"\btrue\b", r"\bfail")
-    inverted = one_of(clauses(text), r"(?<![A-Za-z0-9_.])ok(?![A-Za-z0-9_.])[^.;]*\bfalse\b", r"\bfail")
-    return true_anyway and claims(text, r"\breport\.(?:ok|error_type)\b") and not inverted
+    true_anyway = one_of(clauses(text), OK_WORD, r"\btrue\b", r"\bfail")
+    inverted = one_of(clauses(text), rf"{OK_WORD}[^.;]*\bfalse\b", r"\bfail") or claims(text, rf"{OK_WORD}[^.;]*\b(?:never|not|isn't)\b[^.;]*\btrue\b")
+    return true_anyway and claims(text, r"\breport\.ok\b") and not inverted
+
+
+def says_how_to_judge_the_stored_verdict(text: str) -> bool:
+    """report.ok is read together with report.audit_ok and report.cleanup_required
+    (or report.quarantined): a report can say ok and still have failed."""
+    together = one_of(clauses(text), r"\breport\.ok\b", r"\breport\.audit_ok\b", r"\breport\.(?:cleanup_required|quarantined)\b")
+    alone = claims(text, r"\breport\.ok\s+alone\b|\bonly\s+report\.ok\b|\breport\.audit_ok\b[^.;]*\b(?:does not|doesn't|do not|don't|never)\s+matter")
+    return together and not alone
 
 
 def says_newest_report_may_be_the_recovery(text: str) -> bool:
     """After a failed call the newest report can be the recovery's reset_target or probe_target."""
-    return one_of(sentences(text), r"\brecover", r"\breset_target\b|\bprobe_target\b") and claims(text, r"\breport\.tool\b")
+    may = any(
+        re.search(r"\brecover", sentence, re.IGNORECASE) and re.search(r"\breset_target\b|\bprobe_target\b", sentence) and not re.search(NEGATION, sentence, re.IGNORECASE)
+        for sentence in sentences(text)
+    )
+    own = claims(text, r"\balways\b[^.;]*\b(?:your|the caller's|the last call you made|own)\b")
+    return may and claims(text, r"\breport\.tool\b") and not own
+
+
+def says_reading_changes_nothing(text: str) -> bool:
+    """Reading the report consumes nothing, so a repeated read answers the same; never "reading clears it"."""
+    unchanged = one_of(
+        clauses(text),
+        r"\bread",
+        r"\bchanges nothing\b|\bconsumes nothing\b|\bnothing (?:is )?(?:changed|consumed|cleared)\b|\b(?:does not|doesn't|never)\s+(?:change|consume|clear)\b|\brepeat",
+    )
+    consumed = any(
+        re.search(r"\bread", part, re.IGNORECASE) and re.search(r"\b(?:clears?|consumes?|removes?|deletes?|resets?)\b", part, re.IGNORECASE) and not re.search(NEGATION, part, re.IGNORECASE)
+        for part in clauses(text)
+    )
+    return unchanged and not consumed
+
+
+CLEARED_BY_SUCCESS = (
+    r"\b(?:clear|clears|cleared|reset|resets|erase|erases|erased|forgotten|replaced|overwritten)\b[^.;:,]*\bsuccess"
+    r"|\bsuccess\w*\b[^.;:,]*\b(?:clears?|cleared|resets?|erases?|erased|replaces?|overwrites?)\b"
+)
 
 
 def says_record_outlives_successes(text: str) -> bool:
-    """The failure record stays until a newer failure: a success does not clear it."""
+    """The failure record stays until a newer failure: a success does not clear it.
+
+    Clearing is checked within one phrase ("a success clears it", "cleared by a
+    success"), and a negated phrase ("a success does not clear it") is the
+    claim itself, not its inversion."""
     stays = one_of(clauses(text), r"\bsuccess|\bsucceed", r"\bstays?\b|\bremains?\b|\bkept\b|\bkeeps?\b|\bpersists?\b|\bsurvives?\b|\buntil\b")
-    # Within one phrase: "a success clears it", "cleared by a success", not a
-    # later phrase of the same sentence that names the recovery reset.
-    cleared = claims(
-        text,
-        r"\b(?:clear|clears|cleared|reset|resets|erase|erases|erased|forgotten|replaced|overwritten)\b[^.;:,]*\bsuccess"
-        r"|\bsuccess\w*\b[^.;:,]*\b(?:clears?|cleared|resets?|erases?|erased|replaces?|overwrites?)\b",
-    )
+    cleared = any(not re.search(NEGATED_PHRASE, match.group(0), re.IGNORECASE) for match in re.finditer(CLEARED_BY_SUCCESS, text, re.IGNORECASE))
     return stays and not cleared
 
 
@@ -280,11 +521,53 @@ def says_some_refusals_record_none(text: str) -> bool:
 
 
 def says_when_nothing_is_stored(text: str) -> bool:
-    return one_of(clauses(text), r"\breport_not_found\b", r"\bbefore\b|\bno\b|\bnot yet\b|\bnone\b|\bnothing\b|\byet\b")
+    """report_not_found means nothing is stored yet; never a damaged or unreadable record."""
+    absent = one_of(clauses(text), r"\breport_not_found\b", r"\bbefore\b|\bno\b|\bnot yet\b|\bnone\b|\bnothing\b|\byet\b")
+    misread = any(
+        re.search(r"\breport_not_found\b", part) and re.search(r"\b(?:damaged|corrupt\w*|unreadable|malformed|invalid|broken)\b", part, re.IGNORECASE)
+        for part in clauses(text)
+    )
+    return absent and not misread
+
+
+def says_read_failures_apart(text: str) -> bool:
+    """An unreadable record is report_unreadable and a malformed one config_invalid, each apart from report_not_found."""
+    unreadable = one_of(clauses(text), r"\breport_unreadable\b", r"\bunreadable\b|\bcannot be read\b|\bcould not be read\b|\bpermission\b")
+    malformed = one_of(clauses(text), r"\bconfig_invalid\b", r"\bmalformed\b|\binvalid\b|\bdamaged\b|\bcorrupt|\bunsupported\b|\bnot valid\b|\bbad\b")
+    merged = any(re.search(r"\breport_not_found\b", part) and re.search(r"\breport_unreadable\b|\bconfig_invalid\b", part) for part in clauses(text))
+    return unreadable and malformed and not merged and says_when_nothing_is_stored(text)
 
 
 def says_source_may_be_the_recovery_reset(text: str) -> bool:
-    return one_of(sentences(text), r"\bsource_tool\b", r"\breset_target\b", r"\bflash_firmware\b|\brecover")
+    return any(
+        re.search(r"\bsource_tool\b", sentence)
+        and re.search(r"\breset_target\b", sentence)
+        and re.search(r"\bflash_firmware\b|\brecover", sentence, re.IGNORECASE)
+        and not re.search(NEGATION, sentence, re.IGNORECASE)
+        for sentence in sentences(text)
+    )
+
+
+def says_until_limits(text: str) -> bool:
+    """Up to 8 texts, each at most 256 characters; characters, not bytes."""
+    limits = one_of(clauses(text), rf"\b{UNTIL_MAX_ENTRIES}\b", rf"\b{UNTIL_MAX_CHARACTERS}\b[^.;]*\bcharacters?\b|\bcharacters?\b[^.;]*\b{UNTIL_MAX_CHARACTERS}\b")
+    return limits and not claims(text, rf"\b{UNTIL_MAX_CHARACTERS}\s+bytes\b")
+
+
+def says_max_bytes_default(text: str) -> bool:
+    """Without max_bytes the capture returns up to the port's max_buffer_bytes."""
+    return one_of(clauses(text), r"\bmax_buffer_bytes\b", r"\bdefault|\bunless set\b|\bif unset\b|\bwhen unset\b")
+
+
+def says_wait_bounds(text: str) -> bool:
+    """Seconds after the flash ends, 10 by default and 60 at most; never milliseconds."""
+    bounded = one_of(
+        sentences(text),
+        r"\bseconds?\b",
+        rf"\b{CAPTURE_DEFAULT_WAIT_S}\b[^.;]*\bdefault|\bdefault[^.;]*\b{CAPTURE_DEFAULT_WAIT_S}\b",
+        rf"\b{CAPTURE_MAX_WAIT_S}\b[^.;]*\bat most\b|\bat most\b[^.;]*\b{CAPTURE_MAX_WAIT_S}\b|\bup to\s+{CAPTURE_MAX_WAIT_S}\b",
+    )
+    return bounded and not claims(text, r"\b(?:ms|milliseconds?)\b")
 
 
 def test_the_four_tools_are_listed_with_a_description_within_the_budget(listed: dict[str, dict]) -> None:
@@ -296,12 +579,19 @@ def test_the_four_tools_are_listed_with_a_description_within_the_budget(listed: 
 
 
 @pytest.mark.parametrize("name", TOOLS)
-def test_every_input_property_describes_itself(listed: dict[str, dict], name: str) -> None:
-    properties = listed[name]["inputSchema"]["properties"]
-    undescribed = sorted(key for key in properties if not property_text(listed[name], key).strip())
+def test_every_input_property_describes_itself_at_any_depth(listed: dict[str, dict], name: str) -> None:
+    """Top-level properties, the capture object's own and anything inside a
+    oneOf, anyOf, allOf or array, each within the property budget."""
+    found = list(described_schemas(listed[name]["inputSchema"]))
+    undescribed = sorted(".".join(path) for path, child in found if not str(child.get("description") or "").strip())
     assert not undescribed, f"{name}: input properties without a description: {undescribed}"
-    oversized = sorted(key for key in properties if len(property_text(listed[name], key)) > PROPERTY_DESCRIPTION_LIMIT)
+    oversized = sorted(".".join(path) for path, child in found if len(str(child.get("description") or "")) > PROPERTY_DESCRIPTION_LIMIT)
     assert not oversized, f"{name}: property descriptions over {PROPERTY_DESCRIPTION_LIMIT} characters: {oversized}"
+
+
+def test_the_walk_reaches_the_nested_capture_inputs(listed: dict[str, dict]) -> None:
+    paths = {path for path, _ in described_schemas(listed[FLASH]["inputSchema"])}
+    assert {("capture", "port_id"), ("capture", "until"), ("capture", "wait_timeout_s"), ("capture", "max_bytes")} <= paths, sorted(paths)
 
 
 def test_the_report_tools_take_no_input(listed: dict[str, dict]) -> None:
@@ -311,18 +601,25 @@ def test_the_report_tools_take_no_input(listed: dict[str, dict]) -> None:
 
 @pytest.mark.parametrize("name", TOOLS)
 def test_the_definitions_use_the_public_words_for_the_hardware(listed: dict[str, dict], name: str) -> None:
-    """The unit is the in-circuit debugger or programmer and the target is a board."""
-    text = text_of(listed, name)
+    """The unit is the in-circuit debugger or programmer and the target is a
+    board. Backends go by their tool names (OpenOCD, pyOCD,
+    STM32CubeProgrammer), never by the probe's."""
+    text = every_description(listed[name])
     assert not claims(text, r"\bST-?Link\b"), text
     assert not re.search(r"\bSTM32\b(?!CubeProgrammer)", text), text
 
 
 def test_flash_firmware_says_what_it_writes_to_and_through_what(listed: dict[str, dict]) -> None:
-    """The first sentence: the board's flash, through the in-circuit debugger or programmer."""
-    first = sentences(str(listed[FLASH]["description"]))[0]
-    assert claims(first, r"\bflash(?:es)?\b|\bprograms?\b|\bwrites?\b"), first
-    assert claims(first, r"\bboard\b"), first
-    assert claims(first, r"\bdebugger\b") and claims(first, r"\bprogrammer\b"), first
+    """Firmware onto the board through the in-circuit debugger or programmer,
+    with no backend restriction: every configured backend flashes."""
+    description = str(listed[FLASH]["description"])
+    assert says_what_it_writes_and_through_what(description), description
+    assert names_no_backend_restriction(every_description(listed[FLASH])), every_description(listed[FLASH])
+
+
+def test_flash_firmware_says_every_call_flashes_again(listed: dict[str, dict]) -> None:
+    text = text_of(listed, FLASH)
+    assert says_every_call_flashes_again(text), text
 
 
 def test_flash_firmware_names_allow_flash_and_its_refusal(listed: dict[str, dict]) -> None:
@@ -335,20 +632,26 @@ def test_flash_firmware_says_a_debug_session_on_the_probe_makes_it_busy(listed: 
     assert says_debug_session_makes_flash_busy(text), text
 
 
-def test_reset_after_flash_names_its_default_and_its_permission(listed: dict[str, dict]) -> None:
+def test_flash_firmware_names_another_owner_holding_the_probe(listed: dict[str, dict]) -> None:
+    text = text_of(listed, FLASH)
+    assert not names(text, "device_busy"), text
+
+
+def test_reset_after_flash_names_its_default_its_effect_and_its_permission(listed: dict[str, dict]) -> None:
     schema = listed[FLASH]["inputSchema"]["properties"]["reset_after_flash"]
     described = property_text(listed[FLASH], "reset_after_flash")
     assert schema.get("default") is False, schema
     assert says_reset_default_is_false(described), described
+    assert says_true_resets(described), described
     assert needs_with_refusal(described, "allow_reset"), described
 
 
-def test_flash_firmware_says_a_failed_flash_ends_in_a_recovery_reset(listed: dict[str, dict]) -> None:
+def test_flash_firmware_says_recovery_is_attempted_not_promised(listed: dict[str, dict]) -> None:
     text = text_of(listed, FLASH)
-    assert says_failed_flash_ends_in_a_recovery_reset(text), text
+    assert says_recovery_is_attempted_not_promised(text), text
 
 
-def test_flash_firmware_names_what_bounds_its_time(listed: dict[str, dict]) -> None:
+def test_flash_firmware_names_what_bounds_each_debugger_command(listed: dict[str, dict]) -> None:
     text = text_of(listed, FLASH)
     assert says_timeout_bound(text), text
 
@@ -365,6 +668,13 @@ def test_flash_firmware_takes_one_image_from_a_permitted_place(listed: dict[str,
     assert one_of(clauses(image_path), rf"\b{DEFAULT_ALLOWED_ROOT}\b", r"\bunset\b|\bomitted\b|\bdefault\b|\bnot set\b|\bleft out\b"), image_path
     assert claims(image_path, r"\bworkspace\b"), image_path
     assert not names(artifact_id, "artifact_upload", "allow_upload"), artifact_id
+    assert needs_with_refusal(artifact_id, "allow_upload"), artifact_id
+
+
+def test_image_path_says_which_backends_need_flash_address_and_which_does_not_verify(listed: dict[str, dict]) -> None:
+    described = property_text(listed[FLASH], "image_path")
+    assert says_bin_needs_flash_address(described), described
+    assert says_pyocd_does_not_verify(described), described
 
 
 def test_flash_firmware_names_the_image_refusals(listed: dict[str, dict]) -> None:
@@ -374,18 +684,34 @@ def test_flash_firmware_names_the_image_refusals(listed: dict[str, dict]) -> Non
     assert one_of(clauses(text), r"\bartifact_too_large\b", r"\bmax_upload_size_mb\b"), text
 
 
-def test_artifact_upload_says_what_it_stores_and_who_uses_the_id(listed: dict[str, dict]) -> None:
+def test_capture_says_a_read_that_fails_after_a_good_flash_leaves_the_image_written(listed: dict[str, dict]) -> None:
+    described = property_text(listed[FLASH], "capture")
+    assert says_capture_failure_keeps_the_image(described), described
+
+
+def test_the_capture_inputs_name_their_limits_and_defaults(listed: dict[str, dict]) -> None:
+    tool = listed[FLASH]
+    until = nested_text(tool, "capture", "until")
+    max_bytes = nested_text(tool, "capture", "max_bytes")
+    wait = nested_text(tool, "capture", "wait_timeout_s")
+    assert says_until_limits(until), until
+    assert says_max_bytes_default(max_bytes), max_bytes
+    assert says_wait_bounds(wait), wait
+
+
+def test_artifact_upload_says_what_it_stores_where_and_who_uses_the_id(listed: dict[str, dict]) -> None:
     description = str(listed[UPLOAD]["description"])
-    missing = names(description, "artifact_id", FLASH, "debug_start_session")
+    missing = names(description, "artifact_id", FLASH, "debug_start_session", "upload_directory")
     assert not missing, (missing, description)
     assert one_of(sentences(description), r"\bartifact_id\b", r"\bflash_firmware\b", r"\bdebug_start_session\b"), description
+    assert says_stored_in_upload_directory(description), description
     assert says_touches_no_board(text_of(listed, UPLOAD)), text_of(listed, UPLOAD)
 
 
 def test_artifact_upload_names_its_permission_and_its_refusals(listed: dict[str, dict]) -> None:
     text = text_of(listed, UPLOAD)
     assert needs_with_refusal(text, "allow_upload"), text
-    missing = names(text, "artifact_validation_failed", "artifact_too_large")
+    missing = names(text, "artifact_validation_failed", "artifact_too_large", "artifact_not_found", "invalid_argument", "unsafe_configured_path")
     assert not missing, (missing, text)
 
 
@@ -426,13 +752,20 @@ def test_get_last_report_says_what_it_returns_and_how_to_read_it(listed: dict[st
     missing = names(text, "report_not_found", CLASSIFY)
     assert not missing, (missing, text)
     assert says_outer_ok_even_for_a_failed_report(text), text
-    assert says_when_nothing_is_stored(text), text
+    assert says_how_to_judge_the_stored_verdict(text), text
+    assert says_reading_changes_nothing(text), text
     assert one_of(sentences(text), r"\bclassify_last_error\b", r"\bfail"), text
 
 
 def test_get_last_report_says_the_newest_report_can_be_the_recovery(listed: dict[str, dict]) -> None:
     text = text_of(listed, LAST_REPORT)
     assert says_newest_report_may_be_the_recovery(text), text
+
+
+@pytest.mark.parametrize("name", REPORT_TOOLS)
+def test_the_report_tools_tell_a_missing_record_from_an_unreadable_or_malformed_one(listed: dict[str, dict], name: str) -> None:
+    text = text_of(listed, name)
+    assert says_read_failures_apart(text), text
 
 
 def test_classify_last_error_names_its_result_fields(listed: dict[str, dict]) -> None:
@@ -465,7 +798,8 @@ def test_the_report_tools_say_they_need_no_board_or_debugger(listed: dict[str, d
 
 def test_the_annotations_agree_with_what_the_definitions_describe(listed: dict[str, dict]) -> None:
     """A flash erases what was there and repeats its effect; an upload adds a
-    content-addressed file; the report tools only read."""
+    content-addressed file; the report tools only read. The text that says so
+    is checked above; these hints only have to agree with it."""
     flash_hints = listed[FLASH]["annotations"]
     assert (flash_hints["readOnlyHint"], flash_hints["destructiveHint"], flash_hints["idempotentHint"]) == (False, True, False)
     upload_hints = listed[UPLOAD]["annotations"]
@@ -479,62 +813,187 @@ def test_the_annotations_agree_with_what_the_definitions_describe(listed: dict[s
 # What each relation accepts and what it rejects, so a check that passes for the
 # wrong reason fails here instead.
 PARAPHRASES = [
-    (needs_with_refusal, ("Needs allow_flash, else permission_denied.",), ("Needs no allow_flash; permission_denied comes from elsewhere.", "allow_flash is optional.")),
     (
-        says_debug_session_makes_flash_busy,
-        ("While a debug session holds the probe it answers resource_busy until debug_stop_session.",),
-        ("It stops the debug session first, then flashes; resource_busy is gone after debug_stop_session.", "resource_busy means another server."),
-    ),
-    (says_reset_default_is_false, ("Default false: the board is not reset.",), ("Defaults to true, so the board is reset.", "False by default.")),
-    (
-        says_failed_flash_ends_in_a_recovery_reset,
-        ("A failed flash is followed by a recovery reset into halt (recovery.auto_recover).",),
+        needs_with_refusal,
+        ("Needs allow_flash, else permission_denied.", "Without allow_flash: permission_denied.", "permission_denied unless allow_flash is granted."),
         (
-            "A failed flash leaves the board untouched.",
-            "A failed flash is followed by a recovery reset into halt (recovery.auto_recover); a failed flash leaves the board unchanged.",
-            "A failed flash is followed by a recovery reset into halt.",
+            "Needs no allow_flash; permission_denied comes from elsewhere.",
+            "allow_flash is optional.",
+            "allow_flash true: permission_denied.",
+            "Needs allow_flash, else permission_denied; allow_flash true also answers permission_denied.",
+            "allow_flash and permission_denied.",
         ),
     ),
-    (says_timeout_bound, ("Bounded by timeout_s (default 60), else timeout.",), ("Bounded by timeout_s, at most 60, else timeout.", "timeout_s defaults to 60.")),
-    (says_one_image_input, ("Give image_path or artifact_id, not both.",), ("Both image_path and artifact_id are required.", "Give image_path.")),
+    (
+        says_debug_session_makes_flash_busy,
+        ("While a debug session holds the probe it answers resource_busy until debug_stop_session.", "resource_busy: debug_stop_session first."),
+        ("It stops the debug session first, then flashes; resource_busy is gone after debug_stop_session.", "resource_busy means another server."),
+    ),
+    (
+        says_reset_default_is_false,
+        ("Default false: the board is not reset.",),
+        ("Defaults to true, so the board is reset.", "False by default.", "Default false: not reset; true never resets either."),
+    ),
+    (
+        says_true_resets,
+        ("Reset the board after flashing.", "True: the board is reset once flashed."),
+        ("True never resets the board after flashing.", "True: the board is not reset after flashing.", "Resets the board."),
+    ),
+    (
+        says_recovery_is_attempted_not_promised,
+        ("If a failed flash leaves an incident, recovery.auto_recover may try a reset into halt.", "When a flash fails, recovery.auto_recover attempts a reset into halt."),
+        (
+            "A failed flash leaves the board untouched.",
+            "A failed flash is always followed by a recovery reset into halt (recovery.auto_recover).",
+            "If a flash fails, recovery.auto_recover resets the board into halt.",
+            "If a failed flash leaves an incident, recovery.auto_recover may try a reset into halt; a failed flash leaves the board unchanged.",
+        ),
+    ),
+    (
+        says_timeout_bound,
+        ("The debugger entry's timeout_s (seconds, default 60) caps each debugger command, else timeout.", "Each command may take timeout_s seconds (60 unless set), else timeout."),
+        (
+            "Bounded by timeout_s (default 60), else timeout.",
+            "timeout_s (default 60 ms) caps each debugger command, else timeout.",
+            "timeout_s (seconds, default 60) caps the whole call, else timeout.",
+            "timeout_s (seconds, at most 60) caps each debugger command, else timeout.",
+            "timeout_s defaults to 60 seconds.",
+        ),
+    ),
+    (
+        says_one_image_input,
+        ("Give image_path or artifact_id, not both.", "An artifact_id, not with image_path."),
+        ("Both image_path and artifact_id are required.", "Give image_path."),
+    ),
+    (
+        says_every_call_flashes_again,
+        ("Every call writes it again.", "A repeated call reprograms the board."),
+        ("Every call writes it again, but an unchanged image is skipped.", "Writes the board."),
+    ),
+    (
+        says_bin_needs_flash_address,
+        ("A .bin needs flash_address on pyOCD and STM32CubeProgrammer.",),
+        ("A .bin needs flash_address on OpenOCD, pyOCD and STM32CubeProgrammer.", "A .bin needs flash_address on every backend; pyOCD and STM32CubeProgrammer check it.", "A .bin needs flash_address."),
+    ),
+    (
+        says_pyocd_does_not_verify,
+        ("pyOCD does not verify (verify false).", "OpenOCD and STM32CubeProgrammer verify; pyOCD does not verify."),
+        ("OpenOCD does not verify; pyOCD does not either.", "pyOCD verifies.", "Every backend verifies."),
+    ),
+    (
+        says_capture_failure_keeps_the_image,
+        ("A read failing after a good flash is ok false, image written.", "If the capture fails after the flash, ok is false and the firmware stays on the board."),
+        ("A read failing after a good flash is ok false, nothing written.", "A read failing after a good flash is ok true.", "A failed read is ok false."),
+    ),
+    (
+        names_no_backend_restriction,
+        ("Write firmware through the configured backend: OpenOCD, pyOCD or STM32CubeProgrammer.",),
+        ("OpenOCD backend only; others answer not_supported.", "Flashes only through pyOCD."),
+    ),
+    (
+        says_what_it_writes_and_through_what,
+        ("Write firmware to the board via the in-circuit debugger or programmer.", "Programs the target through the probe."),
+        ("Write firmware to the board via the in-circuit debugger or programmer, OpenOCD only.", "Write firmware via the debugger."),
+    ),
     (
         says_content_addressed,
-        ("The id is the sha256 of the bytes plus the extension: same bytes, same id.",),
-        ("The id is a random uuid; the sha256 plus extension is in the result and the same bytes give the same id.", "The id is the sha256 of the bytes."),
+        ("The id is the sha256 of the bytes plus the lowercased extension: same bytes and extension, same id.",),
+        (
+            "The id is a random uuid; the sha256 plus lowercased extension is in the result and the same bytes and extension give the same id.",
+            "The id is the sha256 of the bytes.",
+            "The id is the sha256 of the bytes plus the lowercased extension: same bytes or extension, same id.",
+            "The id is the sha256 of the bytes plus the lowercased extension: same bytes, same id.",
+            "The id is the sha256 of the bytes plus the extension: same bytes and extension, same id.",
+        ),
     ),
     (says_whitespace_ignored, ("Padded base64; whitespace is ignored.",), ("Padded base64; whitespace is rejected.", "Padded base64.")),
     (
         says_size_limit,
-        ("At most artifacts.max_upload_size_mb after decoding (default 64), else artifact_too_large.",),
-        ("At most 64 MB (max_upload_size_mb, default 64), else artifact_too_large.", "max_upload_size_mb applies, default 64."),
+        ("Decoded, at most artifacts.max_upload_size_mb MiB (default 64), else artifact_too_large.", "Over max_upload_size_mb MiB once decoded (64 by default): artifact_too_large."),
+        (
+            "At most 64 MiB once decoded (max_upload_size_mb, default 64), else artifact_too_large.",
+            "max_upload_size_mb applies, default 64.",
+            "Decoded, at most max_upload_size_mb bytes (default 64), else artifact_too_large.",
+            "Encoded, at most max_upload_size_mb MiB (default 64), else artifact_too_large.",
+            "Decoded, max_upload_size_mb MiB (default 64); below it artifact_too_large.",
+            "max_upload_size_mb defaults to 64 bytes, below it artifact_too_large.",
+        ),
     ),
     (says_bare_filename, ("Bare name, no path; its extension ends the artifact_id.",), ("A path to the file; its extension ends the artifact_id.", "Bare name, no path.")),
     (says_touches_no_board, ("Reads files only, no board or debugger needed.",), ("Needs a configured debugger.", "Reads the report files.")),
     (
+        says_stored_in_upload_directory,
+        ("Store a firmware image in artifacts.upload_directory.",),
+        ("Keep a firmware image in memory only; artifacts.upload_directory is not used.", "Store a firmware image."),
+    ),
+    (
         says_outer_ok_even_for_a_failed_report,
         ("ok is true even when that report failed; read report.ok and report.error_type.",),
-        ("ok is false when that report failed; read report.ok.", "ok is true even when that report failed."),
+        ("ok is false when that report failed; read report.ok.", "ok is true even when that report failed.", "ok is never true when the report failed; read report.ok."),
+    ),
+    (
+        says_how_to_judge_the_stored_verdict,
+        ("Judge report.ok, report.audit_ok and report.cleanup_required.", "report.ok with report.audit_ok and report.quarantined."),
+        ("Judge report.ok alone; report.audit_ok and report.cleanup_required do not matter.", "Judge report.ok."),
     ),
     (
         says_newest_report_may_be_the_recovery,
         ("After a failed call it can be the recovery's reset_target or probe_target: check report.tool.",),
-        ("It is always the report of the last call you made.", "After a failed call it can be the recovery's reset_target."),
+        (
+            "It is always the report of the last call you made.",
+            "After a failed call it can be the recovery's reset_target.",
+            "After a failed call it is never the recovery's reset_target or probe_target: check report.tool.",
+        ),
+    ),
+    (
+        says_reading_changes_nothing,
+        ("Return the newest stored report; reading changes nothing.", "A repeated read answers the same report."),
+        ("Return the newest stored report; reading clears it.", "Return the newest stored report."),
     ),
     (
         says_record_outlives_successes,
-        ("It stays until a newer failure, across successes and restarts.", "It stays across successes, so a failed recovery reset names reset_target."),
-        ("A success clears it.", "It stays until the next success clears it.", "It stays, but is cleared by a success."),
+        (
+            "It stays until a newer failure, across successes and restarts.",
+            "It stays across successes, so a failed recovery reset names reset_target.",
+            "It stays across successes; a success does not clear it.",
+            "Successes and restarts keep it until a newer failure.",
+        ),
+        ("A success clears it.", "It stays until the next success clears it.", "It stays, but is cleared by a success.", "Successes and restarts clear it until a newer failure."),
     ),
     (
         says_some_refusals_record_none,
         ("Some refusals (allow_flash off, bad arguments) record none.",),
-        ("Every refusal is recorded, allow_flash off included.", "Some refusals record none."),
+        ("Every refusal is recorded, allow_flash off included.", "Some refusals record none.", "All refusals (allow_flash off, bad arguments) are recorded."),
     ),
-    (says_when_nothing_is_stored, ("No failure yet: report_not_found.",), ("report_not_found means the report file is damaged.",)),
+    (
+        says_when_nothing_is_stored,
+        ("No failure yet: report_not_found.", "None yet: report_not_found; unreadable: report_unreadable."),
+        ("report_not_found means the report file is damaged.", "None yet or unreadable: report_not_found."),
+    ),
+    (
+        says_read_failures_apart,
+        ("None yet: report_not_found; unreadable: report_unreadable; malformed: config_invalid.",),
+        (
+            "None yet: report_not_found; unreadable: report_not_found; malformed: config_invalid.",
+            "None yet, unreadable or malformed: report_not_found, report_unreadable or config_invalid.",
+            "None yet: report_not_found.",
+        ),
+    ),
     (
         says_source_may_be_the_recovery_reset,
         ("A failed flash_firmware whose recovery reset failed names reset_target as source_tool.",),
-        ("source_tool names the tool that failed.",),
+        ("source_tool names the tool that failed.", "source_tool is never reset_target for a failed flash_firmware."),
+    ),
+    (
+        says_until_limits,
+        ("Text to wait for, or up to 8 texts of at most 256 characters each.",),
+        ("Text to wait for, or up to 8 texts of at most 256 bytes each.", "Text to wait for, or up to 8 texts."),
+    ),
+    (says_max_bytes_default, ("Most bytes to return; the port's max_buffer_bytes by default.",), ("Most bytes to return.", "At most max_buffer_bytes.")),
+    (
+        says_wait_bounds,
+        ("Seconds to wait once the flash ends; 10 by default, 60 at most.",),
+        ("Milliseconds to wait once the flash ends; 10 by default, 60 at most.", "Seconds to wait once the flash ends.", "Seconds to wait, 60 by default."),
     ),
 ]
 
@@ -546,6 +1005,88 @@ def test_each_relation_accepts_its_paraphrases_and_rejects_their_inversions(chec
         assert check(text, *arguments), text
     for text in rejected:
         assert not check(text, *arguments), text
+
+
+# One meaning flipped in the listed definition: the whole tool, every
+# description in it, with the scope the check reads. None is the description
+# and the top-level property descriptions; a tuple is one (nested) property.
+MUTATIONS = [
+    pytest.param(FLASH, ("reset_after_flash",), says_reset_default_is_false, (), r"\bdefault false\b", "Default true", id="true-false:reset-default"),
+    pytest.param(FLASH, ("reset_after_flash",), says_true_resets, (), r"\breset the board after flashing\b", "True never resets the board after flashing", id="true-false:reset-effect"),
+    pytest.param(LAST_REPORT, None, says_outer_ok_even_for_a_failed_report, (), r"\bok is true\b", "ok is false", id="true-false:outer-ok"),
+    pytest.param(FLASH, None, needs_with_refusal, ("allow_flash",), r"\bneeds allow_flash, else\b", "allow_flash true:", id="required-optional:allow_flash-granted"),
+    pytest.param(FLASH, None, needs_with_refusal, ("allow_flash",), r"\bneeds allow_flash\b", "Needs no allow_flash", id="required-optional:allow_flash-waived"),
+    pytest.param(UPLOAD, None, needs_with_refusal, ("allow_upload",), r"\bneeds (?:artifacts\.)?allow_upload\b", "allow_upload is optional", id="required-optional:allow_upload"),
+    pytest.param(FLASH, ("reset_after_flash",), needs_with_refusal, ("allow_reset",), r"\bneeds allow_reset\b", "needs no allow_reset", id="required-optional:allow_reset"),
+    pytest.param(UPLOAD, None, says_content_addressed, (), r"\bbytes and extension\b", "bytes or extension", id="and-or:content-address"),
+    pytest.param(FLASH, None, says_one_image_input, (), r"\bnot with image_path\b", "with image_path, both required", id="and-or:image-input"),
+    pytest.param(LAST_REPORT, None, says_how_to_judge_the_stored_verdict, (), r"\bjudge report\.ok\b[^.]*", "judge report.ok alone", id="and-or:stored-verdict"),
+    pytest.param(CLASSIFY, None, says_record_outlives_successes, (), r"\bkeep it\b", "clear it", id="negated-effect:record-cleared"),
+    pytest.param(LAST_REPORT, None, says_touches_no_board, (), r"\bno board needed\b", "Needs a board", id="negated-effect:report-needs-board"),
+    pytest.param(UPLOAD, None, says_touches_no_board, (), r"\bno board needed\b", "needs a board", id="negated-effect:upload-needs-board"),
+    pytest.param(FLASH, None, says_recovery_is_attempted_not_promised, (), r"\bmay try\b", "always does", id="negated-effect:recovery-promised"),
+    pytest.param(FLASH, ("capture",), says_capture_failure_keeps_the_image, (), r"\bimage written\b", "nothing written", id="negated-effect:capture-image"),
+    pytest.param(LAST_REPORT, None, says_reading_changes_nothing, (), r"\bchanges nothing\b", "clears it", id="negated-effect:report-read"),
+    pytest.param(FLASH, None, says_every_call_flashes_again, (), r"\bevery call writes it again\b", "a repeated call skips an unchanged image", id="negated-effect:flash-again"),
+    pytest.param(LAST_REPORT, None, says_newest_report_may_be_the_recovery, (), r"\bit can be\b", "it is never", id="negated-effect:recovery-report"),
+    pytest.param(CLASSIFY, None, says_some_refusals_record_none, (), r"\bsome refusals (\([^)]*\)) record none\b", r"All refusals \1 are recorded", id="negated-effect:refusals-recorded"),
+    pytest.param(FLASH, None, says_debug_session_makes_flash_busy, (), r"\bresource_busy: debug_stop_session first\b", "It stops any debug session itself", id="negated-effect:debug-session"),
+    pytest.param(UPLOAD, ("data_base64",), says_size_limit, (), r"\bdecoded\b", "Encoded", id="size:encoded"),
+    pytest.param(UPLOAD, ("data_base64",), says_size_limit, (), r"\bMiB\b", "bytes", id="size:unit"),
+    pytest.param(UPLOAD, ("data_base64",), says_size_limit, (), r", else artifact_too_large", ", below it artifact_too_large", id="size:direction"),
+    pytest.param(FLASH, None, says_timeout_bound, (), r"\beach debugger command\b", "the whole call", id="timeout:whole-call"),
+    pytest.param(FLASH, None, says_timeout_bound, (), r"\bseconds\b", "ms", id="timeout:unit"),
+    pytest.param(FLASH, ("image_path",), says_bin_needs_flash_address, (), r"\bpyOCD and STM32CubeProgrammer\b", "OpenOCD", id="backend:bin-address"),
+    pytest.param(FLASH, ("image_path",), says_pyocd_does_not_verify, (), r"\bpyOCD does not verify\b", "OpenOCD does not verify", id="backend:verify"),
+    pytest.param(FLASH, None, says_what_it_writes_and_through_what, (), r"\bnot st-flash\b", "OpenOCD only, not st-flash", id="backend:restriction"),
+    pytest.param(LAST_REPORT, None, says_read_failures_apart, (), r"\bunreadable: report_unreadable\b", "unreadable: report_not_found", id="read-failure:merged"),
+    pytest.param(FLASH, ("capture", "until"), says_until_limits, (), r"\b256 characters\b", "256 bytes", id="capture:until-unit"),
+    pytest.param(FLASH, ("capture", "wait_timeout_s"), says_wait_bounds, (), r"\bseconds\b", "Milliseconds", id="capture:wait-unit"),
+]
+
+
+def mutated(tool: dict, pattern: str, replacement: str) -> tuple[dict, int]:
+    """`tool` with `pattern` replaced in every description it carries, and how many replacements were made."""
+    count = 0
+
+    def walk(node: object) -> object:
+        nonlocal count
+        if isinstance(node, dict):
+            copied = {}
+            for key, value in node.items():
+                if key == "description" and isinstance(value, str):
+                    value, replaced = re.subn(pattern, replacement, value, flags=re.IGNORECASE)
+                    count += replaced
+                    copied[key] = value
+                else:
+                    copied[key] = walk(value)
+            return copied
+        if isinstance(node, list):
+            return [walk(value) for value in node]
+        return node
+
+    return walk(tool), count
+
+
+def scoped(tool: dict, scope: tuple[str, ...] | None) -> str:
+    if scope is None:
+        return definition_text(tool)
+    if scope == ("description",):
+        return str(tool["description"])
+    return nested_text(tool, *scope)
+
+
+@pytest.mark.parametrize(("name", "scope", "check", "arguments", "pattern", "replacement"), MUTATIONS)
+def test_each_check_refuses_the_listed_definition_with_its_meaning_flipped(listed: dict[str, dict], name: str, scope, check, arguments: tuple, pattern: str, replacement: str) -> None:
+    """The check holds for the definition as listed, and the same definition
+    with one meaning flipped fails it: a check that only looks for words would
+    pass both."""
+    original = scoped(listed[name], scope)
+    assert check(original, *arguments), original
+    flipped, count = mutated(listed[name], pattern, replacement)
+    assert count >= 1, (pattern, original)
+    text = scoped(flipped, scope)
+    assert not check(text, *arguments), text
 
 
 # ---------------------------------------------------------------------------
@@ -573,15 +1114,16 @@ def config_vocabulary() -> set[str]:
 
 
 def test_every_identifier_the_definitions_name_is_real(listed: dict[str, dict]) -> None:
-    """A snake_case word in any of the four definitions is a listed tool, an
-    input property of a listed tool, a configuration key, or a string the server
-    answers with. Quoted literals are example data and are not read."""
-    properties = {key for tool in listed.values() for key in tool["inputSchema"]["properties"]}
+    """A snake_case word in any of the four definitions, at any depth, is a
+    listed tool, an input property of a listed tool at any depth, a
+    configuration key, or a string the server answers with. Quoted literals are
+    example data and are not read."""
+    properties = {path[-1] for tool in listed.values() for path, _ in described_schemas(tool["inputSchema"])}
     vocabulary = set(listed) | properties | config_vocabulary() | answer_vocabulary()
-    assert {"max_upload_size_mb", "allow_upload", "allowed_roots", "source_tool", "likely_causes"} <= vocabulary, "the vocabulary is read whole"
+    assert {"max_upload_size_mb", "allow_upload", "allowed_roots", "source_tool", "likely_causes", "max_buffer_bytes"} <= vocabulary, "the vocabulary is read whole"
     assert "artifact_unknown" not in vocabulary, "a near miss is still refused"
 
-    unknown = {name: sorted(set(SNAKE_CASE.findall(re.sub(QUOTED, " ", text_of(listed, name)))) - vocabulary) for name in TOOLS}
+    unknown = {name: sorted(set(SNAKE_CASE.findall(re.sub(QUOTED, " ", every_description(listed[name])))) - vocabulary) for name in TOOLS}
     assert not any(unknown.values()), unknown
 
 
@@ -606,6 +1148,22 @@ def test_a_flash_runs_in_its_own_run_and_leaves_the_board_unreset_by_default(tmp
         close(service)
 
 
+def test_every_flash_call_programs_the_board_again(tmp_path: Path) -> None:
+    """The same image twice is two writes, each committed and each logged."""
+    workspace = tmp_path / "ws"
+    service = new_service(workspace)
+    try:
+        first = flash(service)
+        second = flash(service)
+    finally:
+        close(service)
+    for flashed in (first, second):
+        assert flashed["ok"] is True, flashed
+        assert flashed["side_effect_status"] == "committed", flashed
+        assert "program" in (workspace / flashed["log_path"]).read_text(encoding="utf-8"), flashed
+    assert first["log_path"] != second["log_path"], (first, second)
+
+
 @pytest.mark.parametrize(
     ("grant", "arguments"),
     [
@@ -623,12 +1181,36 @@ def test_a_flash_without_its_grant_is_refused_naming_the_permission(tmp_path: Pa
         close(service)
 
 
+@pytest.mark.parametrize("interlock", ["allow_raw_debugger_commands", "allow_mass_erase"])
+@pytest.mark.parametrize("debugger_type", ["openocd", "stlink", "pyocd"])
+def test_a_flash_is_refused_while_an_exclusive_grant_is_on(tmp_path: Path, debugger_type: str, interlock: str) -> None:
+    """Every backend refuses to flash while raw commands or a mass erase are
+    allowed, and the refusal names that grant, not allow_flash."""
+    service = new_service(tmp_path / "ws", debugger_type=debugger_type, permissions={**DEFAULT_TEST_PERMISSIONS, interlock: True})
+    try:
+        refused = flash(service)
+    finally:
+        close(service)
+    assert refused["error_type"] == "permission_denied", refused
+    assert refused["permission"].endswith(f".permissions.{interlock}"), refused
+    assert "recovery" not in refused, refused
+
+
 def test_allow_reset_is_needed_only_for_reset_after_flash(tmp_path: Path) -> None:
     service = new_service(tmp_path / "ws", permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": False})
     try:
         assert flash(service)["ok"] is True
     finally:
         close(service)
+
+
+def test_a_flash_with_no_debugger_bound_is_not_supported(tmp_path: Path) -> None:
+    service = edited_service(tmp_path / "ws", without_debuggers)
+    try:
+        refused = flash(service)
+    finally:
+        close(service)
+    assert refused["error_type"] == "not_supported", refused
 
 
 def test_a_debug_session_on_the_probe_makes_a_flash_busy_until_it_stops(tmp_path: Path) -> None:
@@ -647,6 +1229,49 @@ def test_a_debug_session_on_the_probe_makes_a_flash_busy_until_it_stops(tmp_path
         close(service)
 
 
+def test_a_probe_held_by_another_owner_answers_device_busy(tmp_path: Path) -> None:
+    service = new_service(tmp_path / "ws")
+    stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+    stranger.acquire(list(debugger_device(service.config).lock_keys))
+    try:
+        busy = flash(service)
+    finally:
+        stranger.release_all()
+        close(service)
+    assert busy["error_type"] == "device_busy", busy["error_type"]
+    assert busy["holder"]["label"] == "other-bench-session", busy["holder"]
+    assert busy["retry_safe"] is True
+    assert busy["side_effect_committed"] is False
+
+
+def test_a_flash_needs_no_declared_run_but_a_declared_run_must_name_the_debugger(tmp_path: Path) -> None:
+    """Standalone, the flash opens its own run. Inside a run that declared only
+    some other board, the debugger is undeclared and the flash is refused."""
+    service = new_service(tmp_path / "ws")
+    try:
+        standalone = flash(service)
+        assert standalone["ok"] is True, standalone
+        assert standalone["run"]["implicit"] is True, standalone
+
+        service.coordinator.begin_run(["physical:unrelated-board"], label="unrelated-plan")
+        try:
+            refused = flash(service)
+        finally:
+            service.coordinator.end_run()
+        assert refused["error_type"] == "undeclared_device", refused
+        assert refused["side_effect_committed"] is False, refused
+
+        assert call(service, "bench_run_start", {"devices": [{"kind": "debugger"}]})["ok"] is True
+        try:
+            declared = flash(service)
+        finally:
+            call(service, "bench_run_stop", {})
+        assert declared["ok"] is True, declared
+        assert "run" not in declared, declared
+    finally:
+        close(service)
+
+
 @pytest.mark.parametrize(
     ("arguments", "error_type"),
     [
@@ -655,8 +1280,8 @@ def test_a_debug_session_on_the_probe_makes_a_flash_busy_until_it_stops(tmp_path
         pytest.param({"image_path": "build/bad.elf"}, "artifact_validation_failed", id="not-an-elf"),
         pytest.param({"image_path": "build/none.elf"}, "artifact_not_found", id="missing-file"),
         pytest.param({"image_path": "build/big.bin"}, "artifact_too_large", id="over-max_upload_size_mb"),
-        pytest.param({"artifact_id": "0" * 64 + ".elf"}, "artifact_not_found", id="unknown-artifact_id"),
-        pytest.param({"image_path": IMAGE, "artifact_id": "0" * 64 + ".elf"}, "invalid_argument", id="both-inputs"),
+        pytest.param({"artifact_id": UNKNOWN_ID}, "artifact_not_found", id="unknown-artifact_id"),
+        pytest.param({"image_path": IMAGE, "artifact_id": UNKNOWN_ID}, "invalid_argument", id="both-inputs"),
         pytest.param({"reset_after_flash": False}, "invalid_argument", id="neither-input"),
     ],
 )
@@ -675,6 +1300,40 @@ def test_an_image_the_server_may_not_flash_is_refused_by_name(tmp_path: Path, ar
             assert refused["max_bytes"] == TEST_MAX_UPLOAD_BYTES, refused
     finally:
         close(service)
+
+
+@pytest.mark.parametrize(
+    ("debugger_type", "verified", "bin_needs_flash_address"),
+    [
+        pytest.param("openocd", True, False, id="openocd"),
+        pytest.param("stlink", True, True, id="stm32cubeprogrammer"),
+        pytest.param("pyocd", False, True, id="pyocd"),
+    ],
+)
+def test_each_backend_verifies_and_takes_a_bin_as_the_definition_says(tmp_path: Path, debugger_type: str, verified: bool, bin_needs_flash_address: bool) -> None:
+    """OpenOCD and STM32CubeProgrammer verify what they wrote, pyOCD does not;
+    a .bin without flash_address is refused before anything is sent on pyOCD and
+    STM32CubeProgrammer, and taken as it is on OpenOCD."""
+    service = new_service(tmp_path / "ws", debugger_type=debugger_type)
+    try:
+        flashed = flash(service)
+        assert flashed["ok"] is True, flashed
+        assert flashed["verify"] is verified, flashed
+        binary = flash(service, image_path=BINARY)
+    finally:
+        close(service)
+    if bin_needs_flash_address:
+        assert binary["error_type"] == "invalid_argument", binary
+        assert "flash_address" in binary["summary"], binary
+        assert binary.get("side_effect_status", "not_started") == "not_started", binary
+    else:
+        assert binary["ok"] is True, binary
+
+    addressed = new_service(tmp_path / "addressed", debugger_type=debugger_type, flash_address="0x08000000")
+    try:
+        assert flash(addressed, image_path=BINARY)["ok"] is True
+    finally:
+        close(addressed)
 
 
 def test_the_allowed_roots_are_build_when_the_key_is_unset(tmp_path: Path) -> None:
@@ -720,6 +1379,26 @@ def test_a_flash_is_bounded_by_the_debugger_timeout(tmp_path: Path) -> None:
     assert time.monotonic() - started < CALL_CEILING_S
 
 
+def test_the_debugger_timeout_bounds_each_command_not_the_whole_call(tmp_path: Path) -> None:
+    """pyOCD flashes and then resets in two commands. Each takes 2 s against a
+    3.5 s timeout_s: the call succeeds although it runs longer than timeout_s,
+    because the bound applies to each command on its own."""
+    timeout_s = 3.5
+    delay_s = 2.0
+    fake = tmp_path / "slow_pyocd.py"
+    fake.write_text(SLOW_PYOCD.format(delay_s=delay_s, fake=str(FAKE_PYOCD)), encoding="utf-8")
+    service = new_service(tmp_path / "ws", debugger_type="pyocd", debugger_executable=fake, timeout_s=timeout_s)
+    started = time.monotonic()
+    try:
+        flashed = flash(service, image_path=IMAGE, reset_after_flash=True)
+    finally:
+        close(service)
+    elapsed = time.monotonic() - started
+    assert flashed["ok"] is True, flashed
+    assert flashed["reset_after_flash"] is True, flashed
+    assert elapsed > timeout_s, elapsed
+
+
 def test_a_failed_flash_is_followed_by_a_recovery_reset_into_halt(tmp_path: Path) -> None:
     service = new_service(tmp_path / "ws", debugger_executable=FAKE_OPENOCD_ERASE_REFUSED)
     try:
@@ -728,17 +1407,20 @@ def test_a_failed_flash_is_followed_by_a_recovery_reset_into_halt(tmp_path: Path
         close(service)
     assert failed["ok"] is False, failed
     assert failed["run"]["aborted"] is True, failed
+    assert failed["recovery"]["attempted"] is True, failed
     assert "reset_halt" in failed["recovery"]["actions"], failed
+    assert failed["recovery"]["outcome"] == "recovered", failed
 
 
 @pytest.mark.parametrize(
-    "kwargs",
+    ("kwargs", "reason"),
     [
-        pytest.param({"auto_recover": "readonly"}, id="auto_recover-readonly"),
-        pytest.param({"permissions": {**DEFAULT_TEST_PERMISSIONS, "allow_reset": False}}, id="allow_reset-off"),
+        pytest.param({"auto_recover": "off"}, "auto_recover_policy_off", id="auto_recover-off"),
+        pytest.param({"auto_recover": "readonly"}, None, id="auto_recover-readonly"),
+        pytest.param({"permissions": {**DEFAULT_TEST_PERMISSIONS, "allow_reset": False}}, None, id="allow_reset-off"),
     ],
 )
-def test_the_recovery_reset_follows_the_policy_and_the_reset_grant(tmp_path: Path, kwargs: dict) -> None:
+def test_the_recovery_reset_follows_the_policy_and_the_reset_grant(tmp_path: Path, kwargs: dict, reason: str | None) -> None:
     service = new_service(tmp_path / "ws", debugger_executable=FAKE_OPENOCD_ERASE_REFUSED, **kwargs)
     try:
         failed = flash(service)
@@ -746,12 +1428,77 @@ def test_the_recovery_reset_follows_the_policy_and_the_reset_grant(tmp_path: Pat
         close(service)
     assert failed["ok"] is False, failed
     assert "reset_halt" not in (failed.get("recovery") or {}).get("actions", []), failed
+    if reason is not None:
+        assert failed["recovery"]["attempted"] is False, failed
+        assert failed["recovery"]["reason_not_attempted"] == reason, failed
+
+
+def test_a_refused_flash_starts_no_recovery(tmp_path: Path) -> None:
+    service = new_service(tmp_path / "ws", permissions={**DEFAULT_TEST_PERMISSIONS, "allow_flash": False})
+    try:
+        refused = flash(service)
+    finally:
+        close(service)
+    assert refused["error_type"] == "permission_denied", refused
+    assert "recovery" not in refused, refused
+    assert refused.get("side_effect_status", "not_started") == "not_started", refused
+
+
+def test_a_recovery_reset_can_fail_too(tmp_path: Path) -> None:
+    service = new_service(tmp_path / "ws", debugger_executable=FAKE_OPENOCD_NO_TARGET)
+    try:
+        failed = flash(service)
+    finally:
+        close(service)
+    assert failed["recovery"]["attempted"] is True, failed
+    assert failed["recovery"]["outcome"] == "failed", failed
+    assert failed["recovery"]["failed_action"] == "reset_halt", failed
+
+
+def test_inside_a_declared_run_the_recovery_waits_for_bench_run_stop(tmp_path: Path) -> None:
+    service = new_service(tmp_path / "ws", debugger_executable=FAKE_OPENOCD_ERASE_REFUSED)
+    try:
+        assert call(service, "bench_run_start", {"devices": [{"kind": "debugger"}]})["ok"] is True
+        failed = flash(service)
+        stopped = call(service, "bench_run_stop", {})
+    finally:
+        close(service)
+    assert failed["ok"] is False, failed
+    assert "recovery" not in failed, failed
+    assert stopped["recovery"]["attempted"] is True, stopped
+    assert "reset_halt" in stopped["recovery"]["actions"], stopped
+
+
+def test_a_failure_after_contact_is_not_a_refusal(tmp_path: Path) -> None:
+    """An erase the target refused happened on the board: the effect is not
+    known to be absent, so it is no retry-safe refusal."""
+    service = new_service(tmp_path / "ws", debugger_executable=FAKE_OPENOCD_ERASE_REFUSED, auto_recover="off")
+    try:
+        failed = flash(service)
+    finally:
+        close(service)
+    assert failed["ok"] is False, failed
+    assert failed["error_type"] == "flash_erase_failed", failed
+    assert failed.get("side_effect_status", "not_started") != "not_started", failed
+    assert failed["retry_safe"] is False, failed
+
+
+def test_a_reset_that_fails_after_a_good_flash_is_a_partial_effect(tmp_path: Path) -> None:
+    service = new_service(tmp_path / "ws", debugger_type="pyocd", debugger_executable=FAKE_PYOCD_RESET_REFUSED)
+    try:
+        failed = flash(service, image_path=IMAGE, reset_after_flash=True)
+    finally:
+        close(service)
+    assert failed["ok"] is False, failed
+    assert failed["error_type"] == "reset_failed", failed
+    assert failed["side_effect_committed"] is True, failed
+    assert failed["side_effect_status"] == "partial", failed
 
 
 def test_flashing_an_uploaded_artifact_needs_uploads_allowed(tmp_path: Path) -> None:
     service = edited_service(tmp_path / "ws", without_uploads)
     try:
-        refused = flash(service, artifact_id="0" * 64 + ".elf")
+        refused = flash(service, artifact_id=UNKNOWN_ID)
         assert refused["error_type"] == "permission_denied", refused
         assert refused["permission"] == "artifacts.allow_upload", refused
     finally:
@@ -781,6 +1528,33 @@ def test_an_upload_is_named_by_its_sha256_and_lowercased_extension(tmp_path: Pat
         close(service)
 
 
+def test_the_same_bytes_under_another_extension_are_another_artifact(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    service = new_service(workspace)
+    digest = hashlib.sha256(ELF).hexdigest()
+    try:
+        as_elf = upload(service, filename="fw.elf", data_base64=b64(ELF))
+        as_bin = upload(service, filename="fw.bin", data_base64=b64(ELF))
+    finally:
+        close(service)
+    assert (as_elf["artifact_id"], as_bin["artifact_id"]) == (f"{digest}.elf", f"{digest}.bin"), (as_elf, as_bin)
+    for artifact_id in (as_elf["artifact_id"], as_bin["artifact_id"]):
+        assert (workspace / ".agentic-hil" / "artifacts" / artifact_id).read_bytes() == ELF
+
+
+def test_a_repeated_upload_answers_the_same_id_and_keeps_one_file(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    service = new_service(workspace)
+    try:
+        first = upload(service, image_path=IMAGE)
+        second = upload(service, image_path=IMAGE)
+    finally:
+        close(service)
+    assert first["ok"] is True and second["ok"] is True, (first, second)
+    assert first["artifact_id"] == second["artifact_id"], (first, second)
+    assert [path.name for path in (workspace / ".agentic-hil" / "artifacts").iterdir()] == [first["artifact_id"]]
+
+
 @pytest.mark.parametrize(
     ("arguments", "error_type"),
     [
@@ -791,6 +1565,7 @@ def test_an_upload_is_named_by_its_sha256_and_lowercased_extension(tmp_path: Pat
         pytest.param({"filename": "fw.elf", "data_base64": b64(b"not an elf")}, "artifact_validation_failed", id="not-an-elf"),
         pytest.param({"filename": "fw.bin", "data_base64": b64(b"\x01" * (TEST_MAX_UPLOAD_BYTES + 1))}, "artifact_too_large", id="over-max_upload_size_mb"),
         pytest.param({"image_path": "other/app.elf"}, "artifact_validation_failed", id="outside-the-allowed-roots"),
+        pytest.param({"image_path": "build/none.elf"}, "artifact_not_found", id="missing-file"),
     ],
 )
 def test_an_upload_the_server_may_not_store_is_refused_by_name(tmp_path: Path, arguments: dict, error_type: str) -> None:
@@ -803,6 +1578,23 @@ def test_an_upload_the_server_may_not_store_is_refused_by_name(tmp_path: Path, a
         assert refused["error_type"] == error_type, refused
     finally:
         close(service)
+
+
+def test_an_upload_onto_a_symlinked_destination_is_unsafe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stored file is never written through a link. Creating a symlink
+    needs a privilege a Windows runner may lack, so the destination is made to
+    read as one."""
+    workspace = tmp_path / "ws"
+    service = new_service(workspace)
+    destination = workspace / ".agentic-hil" / "artifacts" / (hashlib.sha256(ELF).hexdigest() + ".elf")
+    real_is_symlink = pathlib.Path.is_symlink
+    monkeypatch.setattr(pathlib.Path, "is_symlink", lambda path: path == destination or real_is_symlink(path))
+    try:
+        refused = upload(service, filename="fw.elf", data_base64=b64(ELF))
+    finally:
+        close(service)
+    assert refused["error_type"] == "unsafe_configured_path", refused
+    assert not destination.exists()
 
 
 def test_an_upload_needs_allow_upload(tmp_path: Path) -> None:
@@ -852,7 +1644,7 @@ def test_before_any_report_both_answer_report_not_found(tmp_path: Path) -> None:
         close(service)
 
 
-def test_get_last_report_returns_the_flash_report_under_report(tmp_path: Path) -> None:
+def test_get_last_report_returns_the_flash_report_under_report_and_reading_changes_nothing(tmp_path: Path) -> None:
     service = new_service(tmp_path / "ws")
     try:
         flash(service)
@@ -860,6 +1652,7 @@ def test_get_last_report_returns_the_flash_report_under_report(tmp_path: Path) -
         assert answer["ok"] is True, answer
         assert answer["report"]["tool"] == FLASH, answer
         assert answer["report"]["ok"] is True, answer
+        assert last_report(service) == answer
     finally:
         close(service)
 
@@ -874,6 +1667,40 @@ def test_get_last_report_answers_ok_for_a_stored_failure(tmp_path: Path) -> None
         assert answer["report"]["error_type"], answer
     finally:
         close(service)
+
+
+def test_a_report_that_says_ok_can_still_have_failed_its_audit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flash itself succeeded and its workspace report could not be
+    written: the call answers ok true and is an error all the same, and the
+    stored report says ok true beside audit_ok false and cleanup_required true.
+    report.ok alone would read it as a success; classify_last_error does not.
+    With recovery off, no recovery report replaces it."""
+    service = new_service(tmp_path / "ws", auto_recover="off")
+    real_write = report_module.safe_write_text
+
+    def refuse_the_flash_report(config, path, document, *args, **kwargs):
+        if '"tool": "flash_firmware"' in document:
+            raise OSError(28, "No space left on device")
+        return real_write(config, path, document, *args, **kwargs)
+
+    try:
+        monkeypatch.setattr(report_module, "safe_write_text", refuse_the_flash_report)
+        flashed = flash(service)
+        monkeypatch.setattr(report_module, "safe_write_text", real_write)
+        stored = last_report(service)
+        classified = classify(service)
+    finally:
+        close(service)
+    assert flashed["ok"] is True, flashed
+    assert flashed["audit_ok"] is False, flashed
+    assert overall_success(flashed) is False, flashed
+    assert stored["ok"] is True, stored
+    assert stored["report"]["tool"] == FLASH, stored
+    assert stored["report"]["ok"] is True, stored
+    assert stored["report"]["audit_ok"] is False, stored
+    assert stored["report"]["cleanup_required"] is True, stored
+    assert classified["error_type"] == "audit_failed", classified
+    assert classified["source_tool"] == FLASH, classified
 
 
 def test_after_a_recovered_flash_the_newest_report_is_the_recovery_and_classify_names_the_flash(tmp_path: Path) -> None:
@@ -938,7 +1765,7 @@ def test_the_failure_record_outlives_a_later_success_and_a_restart(tmp_path: Pat
     ("permissions", "arguments"),
     [
         pytest.param({**DEFAULT_TEST_PERMISSIONS, "allow_flash": False}, {"image_path": IMAGE}, id="allow_flash-off"),
-        pytest.param(None, {"image_path": IMAGE, "artifact_id": "0" * 64 + ".elf"}, id="arguments-the-schema-refuses"),
+        pytest.param(None, {"image_path": IMAGE, "artifact_id": UNKNOWN_ID}, id="arguments-the-schema-refuses"),
     ],
 )
 def test_some_refusals_record_no_report(tmp_path: Path, permissions: dict | None, arguments: dict) -> None:
@@ -950,6 +1777,37 @@ def test_some_refusals_record_no_report(tmp_path: Path, permissions: dict | None
         assert classify(service)["error_type"] == "report_not_found"
     finally:
         close(service)
+
+
+@pytest.mark.parametrize("tool", REPORT_TOOLS)
+def test_a_malformed_report_state_answers_config_invalid(tmp_path: Path, tool: str) -> None:
+    service = new_service(tmp_path / "ws", debugger_executable=FAKE_OPENOCD_NO_TARGET)
+    try:
+        flash(service)
+        Path(report_state_path(service.config)).write_text("{not json", encoding="utf-8")
+        answer = call(service, tool, {})
+    finally:
+        close(service)
+    assert answer["ok"] is False, answer
+    assert answer["error_type"] == "config_invalid", answer
+
+
+@pytest.mark.parametrize("tool", REPORT_TOOLS)
+def test_an_unreadable_report_state_answers_report_unreadable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str) -> None:
+    service = new_service(tmp_path / "ws", debugger_executable=FAKE_OPENOCD_NO_TARGET)
+
+    def unreadable(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    try:
+        flash(service)
+        monkeypatch.setattr(report_module, "safe_read_text", unreadable)
+        answer = call(service, tool, {})
+        monkeypatch.undo()
+    finally:
+        close(service)
+    assert answer["ok"] is False, answer
+    assert answer["error_type"] == "report_unreadable", answer
 
 
 def test_the_report_tools_need_no_debugger(tmp_path: Path) -> None:
