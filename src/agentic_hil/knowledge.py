@@ -5269,8 +5269,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning=(
             "A cleanup could not finish. In debug_stop_session it is the session's processes: GDB or the debug server "
             "could not be stopped (`cleanup_error`), the session stays `cleanup_required` with `hardware_state` "
-            "unknown, and `halt_not_confirmed` and `detach_resume_guard_confirmed` say whether the target was proven "
-            "halted and kept from resuming before that. In a test reactor run it is the run's teardown: "
+            "unknown, and `halt_not_confirmed`, `breakpoints_removed_confirmed` and `detach_resume_guard_confirmed` "
+            "say whether the target was proven halted, rid of the session's breakpoints and kept from resuming before "
+            "that. In a test reactor run it is the run's teardown: "
             "`cleanup_errors` lists each device and action that failed, and `step_error_type` keeps the failure that "
             "came before it."
         ),
@@ -5280,15 +5281,16 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Where it is the debug session, call probe_target. The automatic recovery the bench's "
             "`recovery.auto_recover` allows runs first: it reaps leftover debugger processes and reads the target "
             "back, and a confirmed read ends the incident and the session with it.",
-            "When `halt_not_confirmed` is false and `detach_resume_guard_confirmed` is true, debug_stop_session called "
-            "once more repeats only the process cleanup and can finish it.",
+            "When `halt_not_confirmed` is false and `breakpoints_removed_confirmed` and `detach_resume_guard_confirmed` "
+            "are true, debug_stop_session called once more repeats only the process cleanup and can finish it.",
             "An entry for a COM port or a CAN bus is that session's own teardown, which a probe read cannot speak for: "
             "the quarantine guidance on the result names what settles it. Where `recovery.auto_recover` is `off`, the "
             "incident is the operator's to end with `agentic-hil recover`.",
         ),
         do_not=(
-            "Do not call debug_stop_session again while `halt_not_confirmed` is true or `detach_resume_guard_confirmed` "
-            "is false. Over an unconfirmed target state a repeated stop forces both proofs false and settles nothing.",
+            "Do not call debug_stop_session again while `halt_not_confirmed` is true or `breakpoints_removed_confirmed` "
+            "or `detach_resume_guard_confirmed` is false. Over an unconfirmed target state a repeated stop forces every "
+            "proof false and settles nothing.",
             "Do not start a new debug session over it. debug_start_session is refused as `session_already_active` "
             "until this one ends.",
         ),
@@ -5308,8 +5310,34 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not call debug_stop_session again for this. A stop after an unconfirmed halt brings no new evidence: "
-            "both proofs are forced false and the incident stays where it is.",
+            "every proof is forced false and the incident stays where it is.",
             "Do not start a new debug session to get a fresh halt. debug_start_session is refused as "
+            "`session_already_active` until this one ends.",
+        ),
+    ),
+    "breakpoints_not_removed": ErrorRemedy(
+        meaning=(
+            "debug_stop_session confirmed the halt and cleaned up the session's processes, and could not confirm that "
+            "this session's breakpoints were taken off the target before the session ended "
+            "(`breakpoints_removed_confirmed` false). pyOCD and ST-LINK_gdbserver are ended before GDB detaches, so "
+            "GDB's detach cannot carry the removal there: the stop deletes the breakpoints and reads the backend's "
+            "list back first, and that delete or read failed, or the list still held some. The session stays "
+            "`cleanup_required` with `hardware_state` unknown: a breakpoint left on the target is a hardware "
+            "comparator the next opener of the probe can meet."
+        ),
+        remediation=(
+            "Read the session log at `log_path`: `breakpoint_removal` names the stage the removal stopped at, and "
+            "`remaining_backend_breakpoints` the numbers GDB still listed.",
+            "Call probe_target. The automatic recovery the bench's `recovery.auto_recover` allows runs first: it reaps "
+            "any leftover debugger process and reads the target back through the probe, and a confirmed read ends the "
+            "incident and the session with it; debug_get_session_status then reports it stopped.",
+            "Where `recovery.auto_recover` is `off`, or the probe's `allow_probe` is closed, the incident is the "
+            "operator's to end with `agentic-hil recover` after checking the board.",
+        ),
+        do_not=(
+            "Do not call debug_stop_session again for this. A stop after an unconfirmed removal brings no new evidence: "
+            "every proof is forced false and the incident stays where it is.",
+            "Do not start a new debug session to clear them. debug_start_session is refused as "
             "`session_already_active` until this one ends.",
         ),
     ),
@@ -5329,7 +5357,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not call debug_stop_session again for this. A stop after an unconfirmed detach brings no new evidence: "
-            "both proofs are forced false and the incident stays where it is.",
+            "every proof is forced false and the incident stays where it is.",
             "Do not start a new debug session to get a fresh halt. debug_start_session is refused as "
             "`session_already_active` until this one ends.",
         ),
