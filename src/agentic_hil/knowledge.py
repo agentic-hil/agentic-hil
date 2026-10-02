@@ -4874,6 +4874,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not retry the session or its commands to get the evidence written. Every call after the latch is "
             "refused, and the one that failed left no record of itself.",
+            "Do not start `openocd` and a GDB by hand to go on debugging. The latch refuses sessions so that no GDB "
+            "command reaches the board unrecorded, and a server this service did not start is one its coordination "
+            "cannot see, stop or account for.",
             "Do not delete or edit reports or logs to make room. They are the evidence the operator checks the board "
             "against.",
             "Do not expect hardware_recover to settle it. A broken audit is the operator's own route.",
@@ -4896,6 +4899,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not retry the session or its commands to get the evidence written. Every call after the latch is "
             "refused, and the one that failed left no record of itself.",
+            "Do not start `pyocd gdbserver` and a GDB by hand to go on debugging. The latch refuses sessions so that no GDB "
+            "command reaches the board unrecorded, and a server this service did not start is one its coordination "
+            "cannot see, stop or account for.",
             "Do not delete or edit reports or logs to make room. They are the evidence the operator checks the board "
             "against.",
             "Do not expect hardware_recover to settle it. A broken audit is the operator's own route.",
@@ -4918,6 +4924,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not retry the session or its commands to get the evidence written. Every call after the latch is "
             "refused, and the one that failed left no record of itself.",
+            "Do not start ST-LINK_gdbserver and a GDB by hand to go on debugging. The latch refuses sessions so that no GDB "
+            "command reaches the board unrecorded, and a server this service did not start is one its coordination "
+            "cannot see, stop or account for.",
             "Do not delete or edit reports or logs to make room. They are the evidence the operator checks the board "
             "against.",
             "Do not expect hardware_recover to settle it. A broken audit is the operator's own route.",
