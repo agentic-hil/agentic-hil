@@ -1542,7 +1542,9 @@ MCP_REFUSALS: tuple[tuple[str, str, frozenset[str]], ...] = (
     ("must not come from the workspace or a temporary/cache directory", r"\b(?:project|workspace|temporary|cache)\b", PATH_ONLY),
     ("has a parent directory that is", r"\bparent directory\b[^.;]*\b(?:belongs? to|owned by)\b", frozenset({"path", "directory", "mode", "uid"})),
     ("must be trusted, executable, and writable by nobody but its owner", r"^(?=.*\bowner\b)(?=.*\bwrit(?:e|able)\b)(?=.*\bexecute bit\b)", frozenset({"path", "mode", "uid", "gid", "untrusted_because"})),
-    ("symlink must have a trusted owner and one link", r"\bsymlink\b[^.;]*\b(?:owner|owned by|belongs? to|links?)\b", PATH_ONLY),
+    # The symlink's own owner or link count: not that of its parent directory
+    # or its target, which `trusted_parent_chain` and the file checks refuse.
+    ("symlink must have a trusted owner and one link", r"\bsymlink\b(?:(?!\b(?:parent|directory|target)\b)[^.;])*\b(?:owner|owned by|belongs? to|links?)\b", PATH_ONLY),
     ("changed during validation", r"\bchange[sd]?\b", PATH_ONLY),
     ("symlink target does not exist", r"\btarget\b[^.;]*\b(?:does not exist|missing)\b", PATH_ONLY),
     ("must not contain another symlink", r"\banother symlink\b", frozenset({"path", "target"})),
@@ -1683,6 +1685,10 @@ MCP_RESTATED: dict[str, tuple[str, str]] = {
     "never_omits_path": ("A refusal of one path carries `path`", "A refusal of one path never omits `path`"),
     "target_without_exception": ("another symlink adds `target`", "another symlink adds `target` without exception"),
     "walk_without_path": ("names every launcher that was tried and why each failed", "names every launcher that was tried and why each failed, without `path`"),
+    "symlink_parent_directory": (
+        "a launcher whose parent directory belongs to an account other than this one or root adds `directory`, naming that parent directory, with its `mode` and `uid`",
+        "a launcher symlink whose parent directory belongs to another account adds `directory`, `mode` and `uid`",
+    ),
 }
 
 
