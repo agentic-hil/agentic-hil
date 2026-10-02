@@ -1430,7 +1430,9 @@ def test_a_version_2_plan_waits_for_a_pattern_the_line_says_on_its_own(bench: Be
     expect = result["steps"][1]["result"]
     assert expect["ok"] is True, expect
     assert expect["expected_pattern"] == "(?m)^v(\\d+)\\.\\d+\\.\\d+", expect
-    assert expect["bytes_received"] >= len(b"v1.2.3\r\n"), expect
+    # The pattern matches once the version has arrived; the line end can come
+    # in a later read, so only the version itself is certain to be counted.
+    assert expect["bytes_received"] >= len(b"v1.2.3"), expect
     assert expect["summary"] == "Expected pattern matched the COM port output.", expect
 
     assert peer.received() == Tally.of(b"")
