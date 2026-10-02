@@ -1562,39 +1562,68 @@ def test_each_mcp_command_untrusted_refusal_carries_the_fields_its_trigger_is_he
     assert told == {row[0] for row in MCP_REFUSALS}
 
 
+# Words that say a refusal has a field, and words that say it leaves one out.
+HAS = re.compile(r"\b(?:carr(?:y|ies)|adds?|includes?|names?|naming|with)\b", re.IGNORECASE)
+LEAVES_OUT = re.compile(r"\b(?:omits?|lacks?|drops?|leaves? out|without)\b", re.IGNORECASE)
+PRESENCE = re.compile(f"{HAS.pattern}|{LEAVES_OUT.pattern}", re.IGNORECASE)
+
+
+def presence(clause: str, fields: frozenset[str]) -> tuple[frozenset[str], frozenset[str]]:
+    """The fields among `fields` that `clause` says the refusal has, and those it says it leaves out: (has, leaves out).
+
+    A field belongs to the nearest word before it that says one or the other,
+    or with none before, to the first after it, as a subject does to its verb.
+    That word is turned by a negation right before it (`never adds`, `does not
+    omit`), and the field by one between that word and the field (`adds no`). A
+    negation elsewhere in the clause, as in what sets the refusal off (`is not
+    owned by`), turns neither.
+    """
+    words = [(found.start(), found.end(), HAS.fullmatch(found.group()) is not None, negated_before(clause[: found.start()])) for found in PRESENCE.finditer(clause)]
+    has, leaves_out = set(), set()
+    for mention in re.finditer(r"`(\w+)`", clause):
+        if mention.group(1) not in fields:
+            continue
+        before = [word for word in words if word[1] <= mention.start()]
+        _start, end, says_has, negated = before[-1] if before else next(iter(words), (0, 0, True, False))
+        between = clause[end if before else 0 : mention.start()]
+        (has if (says_has != negated) != negated_before(between) else leaves_out).add(mention.group(1))
+    return frozenset(has), frozenset(leaves_out)
+
+
 def mcp_field_problems(meaning: str) -> list[str]:
     """Every refusal of the type, the one the candidate walk ends in and each one of a single path, read where it is raised.
 
     `path` stands in nearly every one of them, so a clause may name it once for
-    all. Every other field a refusal carries is named in one clause with the
-    rest of that refusal's fields and with what sets that refusal off, and no
-    clause names together fields that no one refusal carries, such as a file's
-    `gid` beside a parent's `directory`. A clause that says what sets a refusal
-    off names no field that refusal does not carry, and a clause that names a
-    field says it is there: no negation.
+    all. Every other field a refusal carries is said to be there in one clause
+    with the rest of that refusal's fields and with what sets that refusal off,
+    and no clause says together fields are there that no one refusal carries,
+    such as a file's `gid` beside a parent's `directory`. A clause that says
+    what sets a refusal off says no field is there that the refusal does not
+    carry, and leaves out none that it does.
     """
     shapes = refusal_shapes("mcp_command_untrusted")
     fields = frozenset().union(*shapes)
     assert {"rejected_candidates", "directory", "gid"} <= fields
     said = clauses(meaning)
-    named = [frozenset(re.findall(r"`(\w+)`", clause)) & fields for clause in said]
+    read = [presence(clause, fields) for clause in said]
+    named = [has for has, _leaves_out in read]
     problems = []
     if not fields <= frozenset().union(*named):
-        problems.append(f"names no {sorted(fields - frozenset().union(*named))}")
+        problems.append(f"says no refusal has {sorted(fields - frozenset().union(*named))}")
     for shape in shapes:
         if not any(shape - {"path"} <= clause for clause in named):
-            problems.append(f"no clause names {sorted(shape - {'path'})} together")
-    for clause, carried in zip(said, named, strict=True):
-        if not any(carried <= shape for shape in shapes):
-            problems.append(f"names together {sorted(carried)}, which no one refusal carries: {clause}")
-        if carried and NEGATION.search(clause):
-            problems.append(f"names {sorted(carried)} in a negation: {clause}")
+            problems.append(f"no clause says {sorted(shape - {'path'})} are there together")
+    for clause, (has, leaves_out) in zip(said, read, strict=True):
+        if not any(has <= shape for shape in shapes):
+            problems.append(f"says together {sorted(has)} are there, which no one refusal carries: {clause}")
         for raised, sets_off, carries in MCP_REFUSALS:
-            if re.search(sets_off, clause, re.IGNORECASE) and not carried <= carries:
-                problems.append(f"gives the refusal raised as {raised!r} {sorted(carried - carries)}, which it does not carry: {clause}")
+            if re.search(sets_off, clause, re.IGNORECASE) and not has <= carries:
+                problems.append(f"gives the refusal raised as {raised!r} {sorted(has - carries)}, which it does not carry: {clause}")
+            if re.search(sets_off, clause, re.IGNORECASE) and leaves_out & carries:
+                problems.append(f"leaves {sorted(leaves_out & carries)} out of the refusal raised as {raised!r}, which carries them: {clause}")
     for raised, sets_off, carries in MCP_REFUSALS:
         own = carries - {"path"}
-        if own and not any(re.search(sets_off, clause, re.IGNORECASE) and own <= carried and not NEGATION.search(clause) for clause, carried in zip(said, named, strict=True)):
+        if own and not any(re.search(sets_off, clause, re.IGNORECASE) and own <= has for clause, has in zip(said, named, strict=True)):
             problems.append(f"no clause says what sets off the refusal raised as {raised!r} and that it adds {sorted(own)}")
     return problems
 
@@ -1625,6 +1654,12 @@ MCP_TURNED: dict[str, tuple[str, str]] = {
     "parent_directory_adds_file_fields": ("an executable refused for its owner, its write access or a missing execute bit adds", "a launcher whose parent directory belongs to another account adds"),
     "directory_fields_without_their_trigger": ("a launcher whose parent directory belongs to an account other than this one or root adds", "a launcher refused for its directory adds"),
     "file_fields_for_the_owner_only": ("an executable refused for its owner, its write access or a missing execute bit adds", "an executable refused for its owner adds"),
+    "omits_path": ("A refusal of one path carries `path`", "A refusal of one path omits `path`"),
+    "lacks_directory": ("or root adds `directory`", "or root lacks `directory`"),
+    "drops_target": ("another symlink adds `target`", "another symlink drops `target`"),
+    "leaves_out_untrusted_because": ("execute bit adds `untrusted_because`", "execute bit leaves out `untrusted_because`"),
+    "without_mode_and_uid": ("with its `mode` and `uid`", "without its `mode` and `uid`"),
+    "target_refusal_omits_path": ("another symlink adds `target`", "another symlink adds `target` but omits `path`"),
 }
 
 
@@ -1635,3 +1670,26 @@ def test_a_meaning_that_says_a_refusal_carries_fields_it_does_not_fails(turned: 
     assert meaning.count(said) == 1, said
 
     assert mcp_field_problems(meaning.replace(said, wrong)) != []
+
+
+# The meaning with what sets one refusal off, or the fields it carries, said
+# another true way: (as the meaning says it, said again).
+MCP_RESTATED: dict[str, tuple[str, str]] = {
+    "parent_directory_not_owned": ("whose parent directory belongs to an account other than this one or root adds", "whose parent directory is not owned by this account or root adds"),
+    "file_refused_in_negations": (
+        "an executable refused for its owner, its write access or a missing execute bit adds",
+        "an executable whose owner is not this account or root, which another account can write, or which has no execute bit adds",
+    ),
+    "never_omits_path": ("A refusal of one path carries `path`", "A refusal of one path never omits `path`"),
+    "target_without_exception": ("another symlink adds `target`", "another symlink adds `target` without exception"),
+    "walk_without_path": ("names every launcher that was tried and why each failed", "names every launcher that was tried and why each failed, without `path`"),
+}
+
+
+@pytest.mark.parametrize("restated", sorted(MCP_RESTATED))
+def test_a_meaning_that_says_each_refusal_carries_its_fields_another_way_passes(restated: str) -> None:
+    said, again = MCP_RESTATED[restated]
+    meaning = (catalogue_entry("mcp_command_untrusted") or {})["meaning"]
+    assert meaning.count(said) == 1, said
+
+    assert mcp_field_problems(meaning.replace(said, again)) == []
