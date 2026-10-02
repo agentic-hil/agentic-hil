@@ -72,8 +72,9 @@ MODEM = re.compile(
     r"@peer ok modem level=(?P<level>low|high) falls=(?P<falls>\d+) rises=(?P<rises>\d+)"
     r" shortest=(?P<shortest>\d+|none) longest=(?P<longest>\d+|none)"
 )
-# How many sessions the released line is opened, used and closed for.
-DTR_CYCLES = 5
+# How many sessions the released line is opened, used and closed for: enough
+# opens for the spread of what each one does to the line to show.
+DTR_CYCLES = 20
 
 # The framing every entry opens with: pyserial's eight data bits, no parity and
 # one stop bit, which the product never changes, and the peer's own.
@@ -230,6 +231,27 @@ def numbered_lines(size: int) -> bytes:
     return lines[:size]
 
 
+def stats_within(server: Server, port: str, timeout_s: float) -> tuple[re.Match[str] | None, bytes, list[str]]:
+    """The peer's statistics answer as `com_read` brings it in within ``timeout_s``, on an open session.
+
+    Never raises, so a test can keep what it saw before it fails: the answer
+    or None, everything the line said, and every read that was refused.
+    """
+    said = b""
+    refused: list[str] = []
+    deadline = time.monotonic() + timeout_s
+    while True:
+        found = STATS.search(said.decode("latin-1"))
+        remaining = deadline - time.monotonic()
+        if found is not None or remaining <= 0:
+            return found, said, refused
+        read = server.tool("com_read", port_id=port, wait_timeout_s=round(remaining, 3))
+        if read.get("ok") is not True:
+            refused.append(f"{read.get('error_type')}: {read.get('summary')}")
+            return None, said, refused
+        said += bytes.fromhex(read["data"]["hex"])
+
+
 # ---------------------------------------------------------------------------
 # The listing.
 
@@ -322,7 +344,7 @@ def test_with_assert_dtr_true_dtr_is_asserted_for_as_long_as_the_session_is_open
 
 
 def test_with_assert_dtr_false_no_session_moves_dtr(servers: Servers, peer: Peer, probe: Peer, port: str, record_property: RecordProperty) -> None:
-    """Five sessions with DTR left alone, and PB12 never moves.
+    """Twenty sessions with DTR left alone, and PB12 never moves.
 
     The schema's `assert_dtr`: "Set false to observe a target provably
     undisturbed". The knowledge text: "`com_ports.<name>.assert_dtr: false` /
@@ -330,9 +352,10 @@ def test_with_assert_dtr_false_no_session_moves_dtr(servers: Servers, peer: Peer
     `docs/safety-model.md`: "a DTR/RTS-free port open remain the way to observe
     a target provably undisturbed." So with `assert_dtr: false` there is no
     edge on PB12 across the open, a stimulus, the read of its answer and the
-    stop, five times over, and the line reads released (PB12 high) every time.
-    Every reading is kept: the edges counted, and the shortest and longest low
-    pulse the peer timed.
+    stop, twenty times over, and the line reads released (PB12 high) every
+    time. The monitor is cleared before each open, so every reading is one
+    session's own, and every reading is kept: the edges counted, and the
+    shortest and longest low pulse the peer timed.
     """
     peer.start_responder(PING_PONG)
     server = servers(servers.variant("dtr-released", assert_dtr=False))
@@ -350,6 +373,7 @@ def test_with_assert_dtr_false_no_session_moves_dtr(servers: Servers, peer: Peer
 
     read("before the first open")
     for cycle in range(DTR_CYCLES):
+        cleared(probe, server)
         started = server.tool("com_session_start", port_id=port)
         assert started["ok"] is True, started
         read("after the open", cycle)
@@ -372,7 +396,7 @@ def test_with_assert_dtr_false_no_session_moves_dtr(servers: Servers, peer: Peer
 
 @pytest.mark.parametrize(("rate", "cap"), BACKPRESSURE)
 def test_a_write_the_line_cannot_carry_in_time_is_short_by_exactly_what_never_reached_the_peer(
-    bench: Bench, servers: Servers, peer: Peer, port: str, rate: int, cap: int | None, record_property: RecordProperty
+    bench: Bench, servers: Servers, peer: Peer, probe: Peer, port: str, rate: int, cap: int | None, record_property: RecordProperty
 ) -> None:
     """`serial_write_incomplete`, with the count the peer received, and the session still usable.
 
@@ -415,27 +439,7 @@ def test_a_write_the_line_cannot_carry_in_time_is_short_by_exactly_what_never_re
     written = server.tool("com_write", port_id=port, text=payload.decode("ascii"))
     took_s = time.monotonic() - began
     active_after = server.tool("com_ports_list")["ports"][port].get("session_active")
-
-    # What reached the peer, asked over the same session. A session the write
-    # left unusable is asked again from a new server once it has been cleared,
-    # so the evidence says what reached the line either way.
-    on_the_session: str | None = None
-    refused: str | None = None
-    try:
-        on_the_session = peer.exchange([(STATS_LINE, "stats")], server=server, answer_timeout_s=drained_s)[0]
-    except AssertionError as error:
-        refused = str(error).splitlines()[0][:600] if str(error) else type(error).__name__
-    server.close()
-    left = quarantine_left(bench, variant)
-    afterwards = servers(variant)
-    stats = on_the_session or peer.exchange([(STATS_LINE, "stats")], server=afterwards, answer_timeout_s=drained_s)[0]
-    with suppress(AssertionError):
-        peer.reset(server=afterwards)
-    counted = STATS.fullmatch(stats)
-    assert counted is not None, stats
-    received = Tally(int(counted["bytes"]), counted["crc32"])
-
-    evidence = json.dumps({
+    evidence: dict[str, object] = {
         "baudrate": rate,
         "write_timeout_s": timeout_s,
         "max_write_bytes": limit,
@@ -447,23 +451,56 @@ def test_a_write_the_line_cannot_carry_in_time_is_short_by_exactly_what_never_re
             for key in ("ok", "error_type", "summary", "bytes_written", "bytes_requested", "backend_error", "side_effect_status", "retry_safe", "quarantined")
         },
         "session_active_after_the_write": active_after,
-        "asked_over_the_same_session": on_the_session is not None,
-        "refused_over_the_same_session": refused,
-        "peer_received": {"bytes": received.count, "crc32": received.crc32, "lost": int(counted["lost"])},
-        "all_of_it_would_be": {"bytes": len(payload) + 2, "crc32": Tally.of(payload + b"\r\n").crc32},
-        "left": left,
-    })
-    record_property("short_write", evidence)
-    assert written.get("error_type") == "serial_write_incomplete", evidence
+    }
+    # Kept at once, so a run that fails further down still says what the write answered.
+    record_property("short_write_answer", json.dumps(evidence))
+
+    # What reached the peer, asked over the same session: the request written
+    # after the payload, and its answer read back once the line has drained.
+    asked = server.tool("com_write", port_id=port, text=STATS_LINE)
+    counted, said, refused = stats_within(server, port, drained_s) if asked.get("ok") is True else (None, b"", [])
+    stopped = server.tool("com_session_stop", port_id=port)
+    evidence["over_the_same_session"] = {
+        "request": {key: asked.get(key) for key in ("ok", "error_type", "summary")},
+        "answer": counted.group(0) if counted is not None else None,
+        "line_said": None if counted is not None else said[-200:].decode("latin-1"),
+        "reads_refused": refused,
+        "stop": {key: stopped.get(key) for key in ("ok", "error_type", "summary")},
+    }
+    if counted is None:
+        # Whether the peer still answers on the probe's own line, at its own rate.
+        try:
+            evidence["probe_line"] = probe.control("stats", server=server)[0]
+        except AssertionError as error:
+            evidence["probe_line"] = str(error).splitlines()[0][:300] if str(error) else type(error).__name__
+    server.close()
+    left = quarantine_left(bench, variant)
+    evidence["left"] = left
+    afterwards = servers(variant)
+    if counted is None:
+        # What reached the peer, asked from a new server once the bench is clear.
+        try:
+            evidence["from_a_new_server"] = peer.exchange([(STATS_LINE, "stats")], server=afterwards, answer_timeout_s=drained_s)[0]
+        except AssertionError as error:
+            evidence["from_a_new_server"] = str(error).splitlines()[0][:300] if str(error) else type(error).__name__
+    with suppress(AssertionError):
+        peer.reset(server=afterwards)
+    evidence["all_of_it_would_be"] = {"bytes": len(payload) + 2, "crc32": Tally.of(payload + b"\r\n").crc32}
+    report = json.dumps(evidence)
+    record_property("short_write", report)
+
+    assert written.get("error_type") == "serial_write_incomplete", report
     sent = written["bytes_written"]
-    assert isinstance(sent, int) and 0 < sent < len(payload), evidence
-    assert written["bytes_requested"] == len(payload), evidence
-    assert written["summary"].startswith(f"COM port write was short: {sent} of {len(payload)} byte(s) reached the line"), evidence
-    assert written["likely_causes"][0] == "configured write_timeout_s is too short for this payload size and baudrate", evidence
-    assert bytes.fromhex(written["data"]["hex"]) == payload[:sent], evidence
-    assert (written["side_effect_committed"], written["side_effect_status"]) == (True, "committed"), evidence
-    assert written.get("quarantined") is not True, evidence
-    assert active_after is True and on_the_session is not None, evidence
-    assert received == Tally.of(payload[:sent] + b"\r\n"), evidence
-    assert int(counted["lost"]) == 0, evidence
-    assert left is None, evidence
+    assert isinstance(sent, int) and 0 < sent < len(payload), report
+    assert written["bytes_requested"] == len(payload), report
+    assert written["summary"].startswith(f"COM port write was short: {sent} of {len(payload)} byte(s) reached the line"), report
+    assert written["likely_causes"][0] == "configured write_timeout_s is too short for this payload size and baudrate", report
+    assert bytes.fromhex(written["data"]["hex"]) == payload[:sent], report
+    assert (written["side_effect_committed"], written["side_effect_status"]) == (True, "committed"), report
+    assert written.get("quarantined") is not True, report
+    assert active_after is True and asked.get("ok") is True, report
+    assert counted is not None, report
+    assert Tally(int(counted["bytes"]), counted["crc32"]) == Tally.of(payload[:sent] + b"\r\n"), report
+    assert int(counted["lost"]) == 0, report
+    assert stopped.get("ok") is True, report
+    assert left is None, report
