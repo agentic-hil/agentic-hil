@@ -198,6 +198,22 @@ def other_participants_stay(text: str) -> bool:
     return stated(text, r"\bdetach", r"\bothers?\b", r"\b(stay|stays|remain|remains|keep|keeps)\b", unless=r"\b(all|every)\b")
 
 
+def adapter_closes_after_the_last_participant(text: str) -> bool:
+    """canbroker.py:962-975: a participant stop closes the shared adapter only when the
+    last participant detaches; while another stays attached the broker keeps it open.
+    The close has to carry that condition in its own clause, and a clause that says
+    the close happens anyway (`even when`, `regardless`) or not at all is refused."""
+    closes_after_the_last = stated(
+        text,
+        r"\badapter\b",
+        r"\b(closes|closed|shuts?)\b",
+        r"\bunless\b[^.;,]*\bother\b|\b(once|after|when|until|only)\b[^.;,]*\blast\b|\bno other\b",
+        unless=r"\beven\b|\bregardless\b|\balways\b|\bwhatever\b|\bnever\b|\bnot\b|n't\b",
+    )
+    stays_open_for_the_others = stated(text, r"\badapter\b", r"\b(stays|remains|kept|keeps)\b[^.;,]*\bopen\b", r"\bother\b", unless=r"\bnever\b|\bnot\b|n't\b")
+    return closes_after_the_last or stays_open_for_the_others
+
+
 def lease_is_released(text: str) -> bool:
     """can.py:712-715: the stop releases the session's lease."""
     return stated(text, r"\breleas", r"\b(lease|lock)\b", unless=r"\bnot released\b|\bstays held\b")
@@ -224,6 +240,9 @@ RELATIONS: list[tuple[Callable[[str], bool], str, str]] = [
     (bridge_close_is_bounded, "A bridge silent for 1 s answers `can_adapter_close_failed`.", "A bridge may take as long as it needs, never `can_adapter_close_failed`."),
     (failed_close_keeps_the_session, "It answers `can_adapter_close_failed` and keeps the session for a retry.", "It answers `can_adapter_close_failed` and drops the session."),
     (other_participants_stay, "The participant detaches while others stay attached.", "The participant detaches and every other participant is detached too."),
+    (adapter_closes_after_the_last_participant, "Its adapter closes unless other participants share the bus.", "Its adapter closes even when other participants share the bus."),
+    (adapter_closes_after_the_last_participant, "The adapter closes once the last participant detaches.", "The adapter closes when any participant detaches."),
+    (adapter_closes_after_the_last_participant, "The adapter stays open while other participants are attached.", "The adapter never stays open while other participants are attached."),
     (lease_is_released, "The session lease is released.", "The session lease is not released."),
     (a_declared_run_keeps_the_bus, "A declared run keeps the bus.", "A declared run releases the bus as well."),
 ]
@@ -459,7 +478,7 @@ def test_stop_says_what_it_closes_and_what_stays_held(listed: dict[str, dict]) -
     text = listed[STOP]["description"]
 
     assert START in text, text
-    assert stated(text, r"\badapter\b", r"\b(leaves|closes|closed|shut)\b"), text
+    assert adapter_closes_after_the_last_participant(text), text
     participant = property_text(listed[STOP], "participant")
     assert other_participants_stay(participant), participant
     assert lease_is_released(text), text
