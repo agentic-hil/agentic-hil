@@ -5634,6 +5634,26 @@ def test_a_session_step_on_a_backend_that_opens_none_is_refused_by_name(tmp_path
     assert service.calls == []
 
 
+def test_the_plan_format_says_which_debuggers_a_debug_start_runs_on() -> None:
+    # #624: a plan's `debug_start` is the `debug_start_session` tool, which opens
+    # its session on OpenOCD, on pyOCD and on stlink through ST-LINK_gdbserver.
+    # The refusal before the run is the one above, for a debugger whose backend
+    # opens none. A format that still gave the sessions to OpenOCD alone would
+    # send the author on a pyOCD or ST-LINK_gdbserver bench away from a plan
+    # that runs there.
+    from importlib import resources
+
+    schema = json.loads(resources.files("agentic_hil").joinpath("schemas/testconfig.schema.json").read_text(encoding="utf-8"))
+    description = schema["$defs"]["debugStart"]["description"]
+
+    for server in ("OpenOCD", "pyOCD", "ST-LINK_gdbserver"):
+        assert server in description, server
+    assert not re.search(r"\bsessions are OpenOCD's\b|\bother backends\b", description), description
+    refused = [sentence for sentence in re.split(r"(?<=\.)\s+", description) if "refused before the run" in sentence]
+    assert refused, description
+    assert all("opens none" in sentence for sentence in refused), refused
+
+
 def test_the_in_session_openocd_path_is_unchanged_by_the_sessionless_route(tmp_path: Path) -> None:
     # The pin: on the backend that has a session, both reads still run inside the
     # one the plan opened, in the order the plan wrote them, on that session's
