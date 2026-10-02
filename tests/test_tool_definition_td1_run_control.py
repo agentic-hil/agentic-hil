@@ -1680,7 +1680,7 @@ def test_a_clear_that_cannot_read_gdbs_list_holds_the_bench_until_a_clear_reconc
     try:
         assert start_debug_session(service, mode="attach")["ok"] is True
         assert service.call(SET, CALL_ARGUMENTS[SET])["ok"] is True
-        monkeypatch.setattr(debug, "_backend_breakpoint_numbers", lambda session: None)
+        monkeypatch.setattr(debug, "_backend_breakpoint_numbers", lambda *_args, **_kwargs: None)
         failed = service.call(CLEAR)
         held = service.coordinator.blocked
         monkeypatch.undo()
