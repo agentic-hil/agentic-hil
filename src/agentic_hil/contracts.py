@@ -385,9 +385,9 @@ MCP_TOOLS: list[JsonObject] = [
     {
         "name": "project_config_adopt_hardware",
         "description": (
-            "Fill the configuration keys that still hold placeholders with what hardware discovery finds for the "
-            "attached probe. Call it once a board is attached, so nobody has to retype its serial; project_config_set sets "
-            "values you choose. It writes only when apply is true and never flashes or erases. A read that leaves the "
+            "Fill the configuration keys that still hold placeholders from the attached probe. Call it once a board is "
+            "attached, so nobody retypes its serial. It may also rename a COM device to its stable name and correct a "
+            "stale identity_source. It writes only when apply is true, never flashes or erases. A read that leaves the "
             "board state unknown may get it reset into halt by recovery (resource_quarantined)."
         ),
         "inputSchema": object_schema(

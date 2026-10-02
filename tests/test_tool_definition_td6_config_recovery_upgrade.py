@@ -448,18 +448,52 @@ def unknown_state_may_reset_into_halt(text: str) -> bool:
     )
 
 
+# What a fill clause may not add to the placeholders: keys or values somebody
+# chose, joined on with `as well as`, `and set`, `or set`.
+WIDENED_FILL = r"\bas\s+well\s+as\b|\b(?:chosen|set|configured|existing|current)\s+(?:\w+\s+)?(?:values?|keys?)\b|\b(?:and|or)\s+set\b"
+
+
 def fills_only_placeholders_from_what_is_attached(text: str) -> bool:
     """What adoption fills is the keys still holding a placeholder, with what the
-    attached hardware answers; never every key."""
+    attached hardware answers; never every key, and never keys somebody set
+    alongside them (the two set values it does rewrite are a separate claim,
+    `names_the_two_set_values_it_rewrites`)."""
     return any(
         has(unit, r"\bfill(?:s|ed|ing)?\b")
         and has(unit, r"\bplaceholders?\b")
         and has(prose(unit), r"\battached\b")
         and not has(unit, r"\b(?:every|all|any)\s+(?:\w+\s+)?keys?\b")
+        and not has(prose(unit), WIDENED_FILL)
         and not has(prose(unit), NEGATION)
         and not has(prose(unit), HOLD_NEGATION)
         for unit in clauses(text)
     )
+
+
+SET_VALUES_STAY = r"\b(?:set|chosen|configured|existing)\s+(?:\w+\s+)?values?\b[^.;]*\b(?:stays?|kept|keeps?|left|remains?)\b"
+EXCEPTION = r"\b(?:except|but|other\s+than|save\s+that)\b"
+STALE = r"\b(?:stale|outdated|wrong|disagree\w*|mismatch\w*|no\s+longer\s+match\w*)\b"
+
+
+def names_the_two_set_values_it_rewrites(text: str) -> bool:
+    """Besides the placeholders, adoption writes over two values somebody set: a
+    COM device spelling the host can reassign takes the stable name of the same
+    port (adopt.py:238-252, 656-670), and an `identity_source` that no longer
+    agrees with the entry's keys is corrected (adopt.py:724-745). Both in one
+    sentence that frames them as beyond the placeholders (set values stay except
+    these, or it also does these), bound to the same port and to a stale
+    declaration, and neither negated nor pointed at another device."""
+    for sentence in sentences(text):
+        words = prose(sentence)
+        framed = (has(words, SET_VALUES_STAY) and has(words, EXCEPTION)) or has(words, r"\balso\b")
+        if not framed or has(words, NEGATION):
+            continue
+        device = has(words, r"\bdevice\b") and has(words, r"\bstable\s+name\b") and has(words, r"\bsame\s+port\b|\bits\s+(?:own\s+)?(?:port(?:'s)?\b|stable\s+name\b)")
+        elsewhere = has(words, r"\b(?:another|other|different)\s+(?:\w+\s+)?(?:port|device)\b")
+        declaration = mentions(sentence, "identity_source") and has(words, STALE) and has(words, r"\b(?:correct\w*|rewritten|rewrites?|fix\w*|updated?s?)\b")
+        if device and declaration and not elsewhere:
+            return True
+    return False
 
 
 WITHOUT_APPLY = r"\bwrites?\s+nothing\b[^.;]*\b(?:unless|without|until)\b[^.;]*\bapply\b|\bwrites?\s+only\s+(?:with|when|if)\b[^.;]*\bapply\b"
@@ -858,6 +892,21 @@ CONTROLS: list[tuple[Callable[[str], bool], str, bool]] = [
     (fills_only_placeholders_from_what_is_attached, "Fill every configuration key, placeholder or set, with what the attached probe reports.", False),
     (fills_only_placeholders_from_what_is_attached, "Fill the placeholders with values you type, never from the attached probe.", False),
     (fills_only_placeholders_from_what_is_attached, "Overwrite the keys somebody set with what the attached probe reports.", False),
+    (fills_only_placeholders_from_what_is_attached, "Fill the configuration keys with chosen values as well as placeholders with what hardware discovery finds for the attached probe.", False),
+    (fills_only_placeholders_from_what_is_attached, "Fill placeholder and set keys from what the attached probe reports.", False),
+    (fills_only_placeholders_from_what_is_attached, "Fills unset or placeholder configuration keys from what discovery reads on the attached probe.", True),
+    (names_the_two_set_values_it_rewrites, "Set values stay, except that a COM device takes the same port's stable name and a stale identity_source is corrected.", True),
+    (names_the_two_set_values_it_rewrites, "Set values stay.", False),
+    (names_the_two_set_values_it_rewrites, "Set values never stay: a COM device takes the same port's stable name and a stale identity_source is corrected.", False),
+    (names_the_two_set_values_it_rewrites, "Set values stay, except that a COM device takes another port's stable name and a stale identity_source is corrected.", False),
+    (names_the_two_set_values_it_rewrites, "Set values stay, except that a COM device takes the same port's stable name and identity_source is always corrected.", False),
+    (names_the_two_set_values_it_rewrites, "Set values stay, except that a COM device takes the same port's stable name; a stale identity_source is not corrected.", False),
+    (names_the_two_set_values_it_rewrites, "It also gives a COM device its port's stable name and fixes a stale identity_source.", True),
+    (names_the_two_set_values_it_rewrites, "It also gives a COM device another port's stable name and fixes a stale identity_source.", False),
+    (names_the_two_set_values_it_rewrites, "It also gives a COM device its stable name and fixes a stale identity_source.", True),
+    (names_the_two_set_values_it_rewrites, "It may also rename a COM device to its stable name and correct a stale identity_source.", True),
+    (names_the_two_set_values_it_rewrites, "It may also rename a COM device to another port's stable name and correct a stale identity_source.", False),
+    (names_the_two_set_values_it_rewrites, "It never gives a COM device its port's stable name nor fixes a stale identity_source.", False),
     (writes_nothing_without_apply, "Writes nothing unless apply is true.", True),
     (writes_nothing_without_apply, "Fills placeholders; writes only with apply: true.", True),
     (writes_nothing_without_apply, "Writes nothing unless apply is false.", False),
@@ -1181,6 +1230,7 @@ def test_project_config_adopt_hardware_says_what_it_reads_fills_keeps_and_refuse
     assert unmet(
         text,
         fills_only_placeholders_from_what_is_attached,
+        names_the_two_set_values_it_rewrites,
         no_flash_or_erase_and_no_reset_claim,
         writes_nothing_without_apply,
         unknown_state_may_reset_into_halt,
