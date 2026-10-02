@@ -116,6 +116,15 @@ def wanted(tree: tarfile.TarFile, found: set[str]) -> Iterator[tarfile.TarInfo]:
             yield member
 
 
+def require_extraction_filters() -> None:
+    """The `data` filter is what keeps every member inside the destination; a Python without it extracts nothing."""
+    if not hasattr(tarfile, "data_filter"):
+        raise ExtractionRefused(
+            f"Python {sys.version.split()[0]} has no tarfile extraction filters (3.10.12, 3.11.4 and 3.12 have them), "
+            "and nothing is extracted without the data filter"
+        )
+
+
 def extract_stlink_server(installer: bytes, destination: Path) -> None:
     """stlink-server out of its own makeself installer, into DESTINATION/stlink-server/, without running the installer."""
     import io
@@ -165,6 +174,7 @@ def extract(archive: Path, destination: Path, expected_sha256: str = EXPECTED_SH
                     inner = payload.extractfile(entry)
                     if inner is None:
                         raise ExtractionRefused(f"{entry.name} is not a file")
+                    require_extraction_filters()
                     partial.mkdir(parents=True)
                     with tarfile.open(fileobj=inner, mode="r|gz") as tree:
                         tree.extractall(partial, members=wanted(tree, found), filter="data")
