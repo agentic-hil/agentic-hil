@@ -640,6 +640,8 @@ class AgenticHILToolService:
             # operator checks on the physical board before signing
             # `--confirm-safe-state`. One catalogue (knowledge.py), one attach
             # point, so every tool's quarantine reads the same way.
+            if name in debugger_tools():
+                result = attach_debugger_remediation(result)
             result = attach_quarantine_guidance(result)
             if "config_status" in result:
                 return result
@@ -2987,6 +2989,39 @@ def unnamed_probe_error(tool: str, config: AgenticHILConfig) -> JsonObject:
         "retry_safe": False,
         **remediation_fields("not_supported", UNNAMED_PROBE_SCOPE),
     }
+
+
+def attach_debugger_remediation(result: JsonObject) -> JsonObject:
+    """A debugger-backed refusal with the catalogue's advice for its backend (#644).
+
+    The backends and the debug session answer most of their refusals without the
+    remediation fields, and the advice for those depends on which debugger said
+    it: an OpenOCD timeout and a pyOCD timeout are different waits with different
+    reads. So the one place a debugger tool's result leaves the service fills it
+    here, under the rule below and nowhere else:
+
+    - only a top-level refusal (`ok` false) with an `error_type` is filled; a
+      success that names a target fault (`target_error_type`) is the session's
+      own report and carries its own `suggested_actions`, and a refusal nested
+      inside another object belongs to whatever produced that object;
+    - a refusal that already carries `remediation` keeps it: the producer that
+      wrote advice for its own case knows more than the catalogue does;
+    - a refusal that names no `backend` is left alone, because the scoped entry
+      is chosen by it and a bare fallback without it would be a guess;
+    - the lookup is the catalogue's own, scoped first and bare second, so a
+      pair #516 deliberately keeps silent stays silent: neither key exists.
+    """
+    if result.get("ok") is not False or "remediation" in result:
+        return result
+    error_type = result.get("error_type")
+    backend = result.get("backend")
+    if not isinstance(error_type, str) or not error_type or not isinstance(backend, str) or not backend:
+        return result
+    permission = result.get("permission")
+    advice = remediation_fields(error_type, backend, permission=permission if isinstance(permission, str) and permission else None)
+    if not advice:
+        return result
+    return {**result, **advice}
 
 
 def debugger_tools() -> set[str]:

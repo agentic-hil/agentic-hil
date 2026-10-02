@@ -3544,6 +3544,676 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "unconfirmed target state.",
         ),
     ),
+    # -- The debugger backends and the debug session, in their own words (#644) --
+    "timeout:openocd": ErrorRemedy(
+        meaning=(
+            "OpenOCD, or the GDB a debug session drives through it, did not answer before its deadline. The wait that "
+            "ran out is one of these: OpenOCD's version check, an OpenOCD run for probe_target, flash_firmware or "
+            "reset_target, the debug server's ready line at a session start (`backend_error_type` "
+            "`gdb_server_not_ready`), or one GDB/MI command inside a session, a symbol lookup included. A process that "
+            "runs out of time is stopped at the deadline, so the result knows about the board only what its state "
+            "fields say."
+        ),
+        remediation=(
+            "Read `target_state`, `side_effect_status`, `target_contacted` and `cleanup_required` first, where the "
+            "result carries them. A version check reaches nothing, and a flash, a reset or a session command can have "
+            "stopped partway.",
+            "When `target_state` is `unknown` inside a debug session, call debug_halt: a confirmed halt settles the "
+            "unconfirmed state, and the session goes on from the halted core.",
+            "`gdb_server_not_ready` means OpenOCD did not print `Listening on port ... for gdb connections` in time. "
+            "That line needs OpenOCD 0.11.0 or newer, so an older OpenOCD, or one configured to log elsewhere, times "
+            "out here every time; the server output in the log at `log_path` says which.",
+            "Every wait is bounded by `debuggers.<name>.timeout_s`, and a call's own `timeout_s`, where a tool takes "
+            "one, only shortens it. A slow bench that needs a longer ceiling is the operator's edit of the "
+            "authoritative file: project_config_set does not write that key.",
+        ),
+        do_not=(
+            "Do not repeat an effectful call (flash_firmware, reset_target, debug_continue) before the state fields say "
+            "where the one that timed out left the board. A second run over an unknown state adds a second unknown.",
+            "Do not raise `timeout_s` in the call to wait longer. It can only shorten the configured ceiling.",
+        ),
+    ),
+    "timeout:pyocd": ErrorRemedy(
+        meaning=(
+            "pyOCD, or the GDB this backend reads symbols out of the flashed ELF with, did not finish before its "
+            "deadline: the version check, the probe listing, a run for probe_target, flash_firmware, reset_target or a "
+            "memory read, or a symbol lookup. A process that runs out of time is stopped at the deadline, so the result "
+            "knows about the board only what its state fields say. The probe listing and the symbol lookup never "
+            "contact the target."
+        ),
+        remediation=(
+            "Read `side_effect_status`, `target_contacted` and `target_state` first, where the result carries them. A "
+            "flash or a reset that timed out can have stopped partway, and the log at `log_path` holds what pyOCD "
+            "printed before it was stopped.",
+            "The deadline comes from `debuggers.<name>.timeout_s`, and a slow bench that needs more is the operator's "
+            "edit of the authoritative file: project_config_set does not write that key. The probe listing already "
+            "waits at least 30 seconds whatever the key says.",
+        ),
+        do_not=(
+            "Do not repeat a flash, a reset or a memory read before the state fields say where the one that timed out "
+            "left the board. A second run over an unknown state adds a second unknown.",
+            "Do not run `pyocd` by hand to see whether it is faster. The bench's coordination does not see that run, "
+            "and the board it drives is the one this incident is about.",
+        ),
+    ),
+    "timeout:stlink": ErrorRemedy(
+        meaning=(
+            "STM32CubeProgrammer (STM32_Programmer_CLI), or the GDB this backend reads symbols out of the flashed ELF "
+            "with, did not finish before its deadline: the version check, the probe listing, a run for probe_target, "
+            "flash_firmware, reset_target or a memory read, or a symbol lookup. A process that runs out of time is "
+            "stopped at the deadline, so the result knows about the board only what its state fields say. The probe "
+            "listing and the symbol lookup never contact the target."
+        ),
+        remediation=(
+            "Read `side_effect_status`, `target_contacted` and `target_state` first, where the result carries them. A "
+            "flash or a reset that timed out can have stopped partway, and the log at `log_path` holds what "
+            "STM32CubeProgrammer printed before it was stopped.",
+            "The deadline comes from `debuggers.<name>.timeout_s`, and a slow bench that needs more is the operator's "
+            "edit of the authoritative file: project_config_set does not write that key.",
+        ),
+        do_not=(
+            "Do not repeat a flash, a reset or a memory read before the state fields say where the one that timed out "
+            "left the board. A second run over an unknown state adds a second unknown.",
+            "Do not run `STM32_Programmer_CLI` by hand to see whether it is faster. The bench's coordination does not "
+            "see that run, and the board it drives is the one this incident is about.",
+        ),
+    ),
+    "debugger_not_found:openocd": ErrorRemedy(
+        meaning=(
+            "The OpenOCD this entry needs could not be run: `debuggers.<name>.executable` names nothing that exists, "
+            "or, left unset, no `openocd` is on PATH. A debug session start reports the same when the operating system "
+            "refused to spawn its debug server, with the reason in `backend_error`. Nothing was started, so the target "
+            "was not contacted and the board is as the last call that reached it left it."
+        ),
+        remediation=(
+            "Read `backend_error` where the result carries it, and `likely_causes`: they say whether the binary is "
+            "missing or the spawn was refused.",
+            "Install OpenOCD (0.11.0 or newer for debug sessions) and put it on PATH, or name its binary by absolute "
+            "path in `debuggers.<name>.executable`. That key is written with project_config_set behind "
+            "`allow_config_description_write`, and which toolchain a bench runs is the operator's, so get their word.",
+            "Run `agentic-hil doctor` afterwards: it repeats the lookup and reports the version once OpenOCD runs.",
+        ),
+        do_not=(
+            "Do not copy an OpenOCD binary into the workspace and point the configuration at it. A configured "
+            "executable inside the workspace is repository-controlled code running as the debugger.",
+            "Do not run `openocd` by hand to get past it. A server this service did not start is one its coordination "
+            "cannot see, stop or account for.",
+        ),
+    ),
+    "debugger_not_found:pyocd": ErrorRemedy(
+        meaning=(
+            "The pyOCD this entry needs could not be run: `debuggers.<name>.executable` names nothing that exists, or, "
+            "left unset, no `pyocd` is on PATH. Nothing was started, so the target was not contacted and the board is "
+            "as the last call that reached it left it."
+        ),
+        remediation=(
+            "Install pyOCD into the environment the server runs from (`pip install agentic-hil[pyocd]` or "
+            "`pip install pyocd`) so `pyocd` is on PATH, or name its binary by absolute path in "
+            "`debuggers.<name>.executable`. That key is written with project_config_set behind "
+            "`allow_config_description_write`, and which toolchain a bench runs is the operator's, so get their word.",
+            "Run `agentic-hil doctor` afterwards: it repeats the lookup and reports the version once pyOCD runs.",
+        ),
+        do_not=(
+            "Do not install pyOCD into the workspace and point the configuration at it. A configured executable inside "
+            "the workspace is repository-controlled code running as the debugger.",
+            "Do not run `pyocd` by hand to get past it. A run this service did not start is one its coordination "
+            "cannot see or account for.",
+        ),
+    ),
+    "debugger_not_found:stlink": ErrorRemedy(
+        meaning=(
+            "The STM32CubeProgrammer command-line tool this entry needs, STM32_Programmer_CLI, could not be run: "
+            "`debuggers.<name>.executable` names nothing that exists, or, left unset, it is neither on PATH nor in the "
+            "standard STM32CubeProgrammer and STM32CubeIDE install locations. Nothing was started, so the target was "
+            "not contacted and the board is as the last call that reached it left it."
+        ),
+        remediation=(
+            "Install STM32CubeProgrammer, which brings STM32_Programmer_CLI, or put the directory that holds it on "
+            "PATH.",
+            "Where it lives somewhere else, name the binary by absolute path in `debuggers.<name>.executable`. That key "
+            "is written with project_config_set behind `allow_config_description_write`, and which toolchain a bench "
+            "runs is the operator's, so get their word.",
+            "Run `agentic-hil doctor` afterwards: it repeats the lookup and reports the version once the tool runs.",
+        ),
+        do_not=(
+            "Do not copy STM32_Programmer_CLI into the workspace and point the configuration at it. A configured "
+            "executable inside the workspace is repository-controlled code running as the debugger.",
+            "Do not run STM32_Programmer_CLI by hand to get past it. A run this service did not start is one its "
+            "coordination cannot see or account for.",
+        ),
+    ),
+    "debugger_not_found": ErrorRemedy(
+        meaning=(
+            "The debugger program a call needed could not be run: it is not where the configuration points, not on "
+            "PATH, or it was found and disappeared before it could be started. Probe discovery says so when neither "
+            "STM32CubeProgrammer's command-line tool nor OpenOCD is installed. Nothing was started, so the target was "
+            "not contacted."
+        ),
+        remediation=(
+            "Read `summary`, and `executable` or `tools_searched` where present: they name the program that was looked "
+            "for and where.",
+            "Install the toolchain the summary names and put it on PATH, or, for a configured entry, name the binary by "
+            "absolute path in `debuggers.<name>.executable` with the operator's word.",
+            "Run `agentic-hil doctor` afterwards: it repeats the lookup and reports what it finds.",
+        ),
+        do_not=(
+            "Do not copy a toolchain binary into the workspace and point the configuration at it. A configured "
+            "executable inside the workspace is repository-controlled code running as the debugger.",
+            "Do not drive the probe by hand with whatever debugger happens to be installed. The bench's coordination "
+            "does not see that run.",
+        ),
+    ),
+    "config_file_not_found:openocd": ErrorRemedy(
+        meaning=(
+            "OpenOCD, started as a debug session's server, exited because it could not find a file it was told to "
+            "read, and that file is neither of the two scripts the entry names: most often a script `interface_cfg` or "
+            "`target_cfg` pulls in with `source [find ...]`, missing from this OpenOCD's script tree. This is "
+            "OpenOCD's script, not the Agentic HIL configuration file. The server stopped before the target was "
+            "reached."
+        ),
+        remediation=(
+            "Read the server output in the log at `log_path` (`server_stderr_tail`): OpenOCD names the file it could "
+            "not find.",
+            "Check that the OpenOCD this entry runs has a complete script tree. The file has to resolve wherever "
+            "`interface_cfg` and `target_cfg` resolve, and `agentic-hil doctor` says of each whether it is a search "
+            "name or a path, and for a path whether the file is there.",
+            "Install the missing scripts or a complete OpenOCD, or point `OPENOCD_SCRIPTS` at the tree that has them, "
+            "then start the session again with debug_start_session.",
+        ),
+        do_not=(
+            "Do not copy OpenOCD scripts into the repository to supply the missing file. A script inside the "
+            "workspace is repository-controlled Tcl running in the debugger.",
+            "Do not run `openocd` directly to get past it.",
+        ),
+    ),
+    "not_supported:openocd": ErrorRemedy(
+        meaning=(
+            "debugger_probes_list has no enumeration for this entry's adapter. OpenOCD has no command that lists "
+            "connected probes, and this host lists a probe from its USB serial inventory only for adapters whose USB "
+            "identity it can read there; `interface_cfg` names another one. Nothing was contacted."
+        ),
+        remediation=(
+            "Read the probe's serial off its label, or off the adapter vendor's own listing tool, and record it as "
+            "`debuggers.<name>.probe_id` with project_config_set behind `allow_config_description_write`, with the "
+            "operator's word.",
+            "The calls that act on the probe, probe_target, flash_firmware, reset_target and the debug session, select "
+            "it by that `probe_id` and are unaffected by this refusal.",
+        ),
+        do_not=(
+            "Do not guess a `probe_id` from a vendor id or a port name. A selector that matches the wrong probe is the "
+            "wrong-board risk the id exists to rule out.",
+        ),
+    ),
+    "audit_broken:openocd": ErrorRemedy(
+        meaning=(
+            "The debug session's own evidence could not be written: the audit record of a GDB command, or the session "
+            "log at `log_path`, failed to persist (`backend_error_type` `audit_write_failed`). The service latches on "
+            "the first such failure. From then on it refuses every new debug session and every GDB command that is "
+            "not containment, debug_halt still runs, and the quarantine stands. A start refusal with this type is that "
+            "latch, set by an earlier failure."
+        ),
+        remediation=(
+            "Hand it to the operator. The audit destination is fixed first: free disk space, and permissions on the "
+            "reports and logs directories under `state_root`.",
+            "The operator then restarts the MCP server, which is what clears the latch, checks the board against the "
+            "last committed report (`get_last_report`), and ends the incident with `agentic-hil recover`.",
+        ),
+        do_not=(
+            "Do not retry the session or its commands to get the evidence written. Every call after the latch is "
+            "refused, and the one that failed left no record of itself.",
+            "Do not delete or edit reports or logs to make room. They are the evidence the operator checks the board "
+            "against.",
+            "Do not expect hardware_recover to settle it. A broken audit is the operator's own route.",
+        ),
+    ),
+    "adapter_access_denied": ErrorRemedy(
+        meaning=(
+            "OpenOCD reached the probe on USB and was refused opening it: libusb answered `LIBUSB_ERROR_ACCESS`. The "
+            "probe is attached, and this user may not open its USB device. The debug session start reports it under "
+            "this name; probe_target, flash_firmware and reset_target report it as `adapter_not_found` with this "
+            "`backend_error_type`. It is read only off Windows: there the same libusb error can also mean that another "
+            "program holds the device. "
+            "The target was not reached."
+        ),
+        remediation=(
+            "Have the operator give this user access to the probe's USB device: install the udev rule for the probe "
+            "(OpenOCD ships one as `60-openocd.rules`) and add this user to the group the rule gives the device to, "
+            "plugdev on Debian and Ubuntu, then log in again so the new group applies.",
+            "`ls -l /dev/bus/usb/<bus>/<device>`, with the bus and device numbers lsusb prints for the probe, shows the "
+            "owner, group and mode the device node has.",
+            "Start the session again with debug_start_session once the user is in that group.",
+        ),
+        do_not=(
+            "Do not run the server or OpenOCD as root, or through sudo, to get past it. The debugger would then run "
+            "with every right on the host, and the next start as this user fails the same way.",
+        ),
+    ),
+    "breakpoint_reconciliation_failed": ErrorRemedy(
+        meaning=(
+            "debug_clear_breakpoints could not prove that the backend holds no breakpoints: GDB's breakpoint list "
+            "could not be read, or it still listed breakpoints after the deletes (`remaining_backend_breakpoints`). The "
+            "cleanup is unconfirmed: `cleanup_required` is true and `side_effect_status` is `unknown`."
+        ),
+        remediation=(
+            "Read `remaining_backend_breakpoints` and the log at `log_path`: the numbers GDB still lists, or why its "
+            "list could not be read.",
+            "Call debug_clear_breakpoints again. A retry reads GDB's own list first and deletes only what GDB reports, "
+            "so it is safe to repeat.",
+            "A result with `backend_reconciled` true settles the unconfirmed cleanup, and the session goes on from "
+            "there.",
+        ),
+        do_not=(
+            "Do not call debug_continue while the clear is unconfirmed. A breakpoint GDB still holds can stop the "
+            "target where the test does not expect it.",
+        ),
+    ),
+    "debug_session_setup_failed": ErrorRemedy(
+        meaning=(
+            "debug_start_session spawned the debug server and could not start the threads that read its output, so "
+            "the start was abandoned before GDB ran. `backend_error` holds the host's reason, usually a host out of "
+            "threads or memory. The server was then stopped: `cleanup_confirmed` says it was, and `cleanup_required` "
+            "with `cleanup_error` says it could not be."
+        ),
+        remediation=(
+            "Read `backend_error`, and `cleanup_required` and `cleanup_error` for what is left: a cleanup that failed "
+            "leaves a debug server the session still owns.",
+            "When `cleanup_confirmed` and `retry_safe` are both true, the server is gone and nothing reached the "
+            "target: call debug_start_session again once the host has the resources back.",
+            "When `cleanup_required` is true, the probe is held under an incident, and the quarantine guidance on the "
+            "result names what settles it.",
+        ),
+        do_not=(
+            "Do not kill the leftover debug server by hand. The session still owns it, and the recovery that reaps it "
+            "records that it did.",
+        ),
+    ),
+    "gdb_start_failed": ErrorRemedy(
+        meaning=(
+            "debug_start_session started the debug server, and the GDB `debug.gdb_executable` names could not be "
+            "started for GDB/MI. `backend_error` holds the reason. The debug server was then stopped: "
+            "`cleanup_confirmed` says it was, and `cleanup_required` with `cleanup_error` says it could not be."
+        ),
+        remediation=(
+            "Read `backend_error`, and the configured `debug.gdb_executable`, which project_config_describe reports. A "
+            "GDB built for another machine, or against a Python or a shared library this host lacks, exits at once.",
+            "Point `debug.gdb_executable` at a GDB that runs on this host and knows this target's architecture "
+            "(`arm-none-eabi-gdb` or `gdb-multiarch` for an Arm Cortex-M part) with project_config_set, with the "
+            "operator's word, and "
+            "restart the MCP server, which reads `debug` only at startup.",
+            "Read `cleanup_required` and `cleanup_error` as well: a server the cleanup could not stop still holds the "
+            "probe under an incident, and the quarantine guidance on the result names what settles it.",
+            "When `cleanup_confirmed` and `retry_safe` are both true, call debug_start_session again once GDB runs.",
+        ),
+        do_not=(
+            "Do not drive the board with a GDB started by hand to get past it. A session outside the service has no "
+            "evidence, no breakpoint ledger and no containment.",
+        ),
+    ),
+    "gdb_async_unsupported": ErrorRemedy(
+        meaning=(
+            "The GDB this bench names refused `-gdb-set mi-async on`. A debug session needs asynchronous GDB/MI to "
+            "interrupt a running target when a wait times out, so this GDB cannot run one. The refusal comes before "
+            "the target is connected: `target_contacted` is false and the board did not change."
+        ),
+        remediation=(
+            "Read `backend_error` for GDB's own words.",
+            "Point `debug.gdb_executable` at a GDB release that accepts asynchronous MI; GDB 7.8 and newer have the "
+            "setting. The change is project_config_set behind `allow_config_description_write`, with the operator's "
+            "word, and the MCP server restarts to use it, because it reads `debug` only at startup.",
+        ),
+        do_not=(
+            "Do not repeat debug_start_session with the same GDB. It refuses the setting the same way every time.",
+            "Do not run a session in synchronous MI by hand. A timeout in it cannot interrupt the target, and the "
+            "board keeps running with nobody watching it.",
+        ),
+    ),
+    "interface_config_not_found": ErrorRemedy(
+        meaning=(
+            "OpenOCD, started as a debug session's server, exited because it could not find the script "
+            "`debuggers.<name>.interface_cfg` names. The debug session start reports it under this name; probe_target, "
+            "flash_firmware and reset_target report the same failure as `debugger_config_not_found`. The server stopped "
+            "before the target was reached."
+        ),
+        remediation=(
+            "Read the server output in the log at `log_path`: OpenOCD names what it looked for.",
+            "Check `debuggers.<name>.interface_cfg` with project_config_describe or `agentic-hil doctor`. A search "
+            "name such as `interface/stlink.cfg` has to resolve in this OpenOCD's script tree, and a path has to be "
+            "absolute, exist and lie outside the workspace.",
+            "Correct it with project_config_set behind `allow_config_description_write`, with the operator's word, or "
+            "install the OpenOCD scripts the search name expects, then start the session again with "
+            "debug_start_session.",
+        ),
+        do_not=(
+            "Do not copy OpenOCD scripts into the repository and point the configuration at them. A script inside the "
+            "workspace is repository-controlled Tcl running in the debugger.",
+            "Do not run `openocd` directly to get past it.",
+        ),
+    ),
+    "target_config_not_found": ErrorRemedy(
+        meaning=(
+            "OpenOCD, started as a debug session's server, exited because it could not find the script "
+            "`debuggers.<name>.target_cfg` names. The debug session start reports it under this name; probe_target, "
+            "flash_firmware and reset_target report the same failure as `debugger_config_not_found`. The server stopped "
+            "before the target was reached."
+        ),
+        remediation=(
+            "Read the server output in the log at `log_path`: OpenOCD names what it looked for.",
+            "Check `debuggers.<name>.target_cfg` with project_config_describe or `agentic-hil doctor`. It has to match "
+            "the MCU family; a search name such as `target/stm32f4x.cfg` has to resolve in this OpenOCD's script tree, "
+            "and a path has to be absolute, exist and lie outside the workspace.",
+            "Correct it with project_config_set behind `allow_config_description_write`, with the operator's word, or "
+            "install the OpenOCD scripts the search name expects, then start the session again with "
+            "debug_start_session.",
+        ),
+        do_not=(
+            "Do not copy OpenOCD scripts into the repository and point the configuration at them. A script inside the "
+            "workspace is repository-controlled Tcl running in the debugger.",
+            "Do not run `openocd` directly to get past it.",
+        ),
+    ),
+    "session_already_active": ErrorRemedy(
+        meaning=(
+            "debug_start_session was refused because this server still has a debug session that has not ended: a "
+            "running one, or one left in `cleanup_required` by a stop or a start that could not finish. `session` in "
+            "the refusal describes it. Nothing was started."
+        ),
+        remediation=(
+            "Read `session` in the refusal: its status says whether it is running or waiting on a cleanup.",
+            "End a running one with debug_stop_session, then call debug_start_session for the new one.",
+            "One in `cleanup_required` is held under the incident its last result named. Read that result's own entry "
+            "first, because a stop repeated over an unconfirmed halt settles nothing.",
+        ),
+        do_not=(
+            "Do not kill the debug server or GDB by hand to free the probe. The session record still names them, and "
+            "the next start is refused the same way.",
+        ),
+    ),
+    "stop_reason_not_available": ErrorRemedy(
+        meaning=(
+            "debug_get_stop_reason had no stop to report: this session has recorded no stop yet. The session is "
+            "active, and nothing changed on the target."
+        ),
+        remediation=(
+            "Run the target with debug_continue to a breakpoint, or stop it where it is with debug_halt; then call "
+            "debug_get_stop_reason.",
+        ),
+        do_not=(
+            "Do not read this refusal as a target that is running, or as one that stopped cleanly. It says only that "
+            "no stop has been recorded.",
+        ),
+    ),
+    "target_exception": ErrorRemedy(
+        meaning=(
+            "The target stopped in an exception or a fault: a debug session found the core halted in its handler "
+            "(`stop_reason` `exception` or `fault`) on a continue, a halt or right at the attach. A session reports "
+            "it with `ok` true, `target_ok` false and `target_error_type` `target_exception`, and a test reactor step "
+            "publishes the same type as its own `error_type`. The core is halted, and the stop record says why."
+        ),
+        remediation=(
+            "Read the stop record first: `frame` (function, address, file, line), `exception_type`, `fault_type` and "
+            "`signal` say where the core stopped and what it took.",
+            "Collect the evidence the diagnosis needs while the core is still halted: debug_symbol_value for the "
+            "variables that matter, debug_dump_symbol_ihex for a buffer or a fault log in memory, and the firmware's "
+            "own log.",
+            "Once the evidence is in hand, end the session with debug_stop_session and bring the target back from reset "
+            "with reset_target, or start a fresh session with debug_start_session, before the test runs again.",
+        ),
+        do_not=(
+            "Do not call debug_continue to get past it. The core goes back into the handler or takes the same fault "
+            "again, and the stop record that says where it happened is replaced.",
+        ),
+    ),
+    "unexpected_breakpoint": ErrorRemedy(
+        meaning=(
+            "The target stopped at a breakpoint the session did not expect: one GDB holds that this session did not "
+            "set or set and forgot, or a `BKPT` instruction or an assert in the firmware itself. A session reports it "
+            "with `ok` true, `target_ok` false and `target_error_type` `unexpected_breakpoint`, and a test reactor "
+            "step publishes the same type as its own `error_type`. The core is halted there."
+        ),
+        remediation=(
+            "Read `frame` and `backend_breakpoint_id` in the stop record, and compare them with what "
+            "debug_list_breakpoints reports.",
+            "For a stale breakpoint, call debug_clear_breakpoints and set only the expected ones again with "
+            "debug_set_breakpoint.",
+            "For a `BKPT` or an assert in the firmware, collect the log and the memory evidence, then reset the target "
+            "or restart the debug session.",
+        ),
+        do_not=(
+            "Do not call debug_continue blindly. The target is halted where nobody planned it to stop, and resuming "
+            "runs on from a state the test did not set up.",
+        ),
+    ),
+    "debugger_error": ErrorRemedy(
+        meaning=(
+            "The debugger failed, and its output matched none of the failures this server classifies. The backend's "
+            "own name for it travels in `backend_error_type`: `unknown_debugger_error` for a probe, flash or reset run, "
+            "`gdb_error` for a GDB/MI command in a debug session. A debug session can also stop with `stop_reason` "
+            "`debugger_error`, and a test reactor step publishes the same type as its own `error_type`."
+        ),
+        remediation=(
+            "Read what the debugger printed: the log at `log_path`, and `programmer_output` where the result carries "
+            "it, end with the debugger's own words for what went wrong.",
+            "Call classify_last_error: it reads the last failure report back and names its classification and likely "
+            "causes.",
+            "Read `side_effect_status` and `target_state` before the next call that drives the board. A failure after "
+            "the target was contacted leaves it where the debugger stopped.",
+        ),
+        do_not=(
+            "Do not repeat the call unchanged before the output is read. An unclassified failure names no cause, and a "
+            "repeat over a contacted target can add a second unknown effect to the first.",
+        ),
+    ),
+    "reset_failed": ErrorRemedy(
+        meaning=(
+            "A reset the debugger was asked for did not complete: the backend reported a reset failure, or the reset "
+            "never printed its success marker. It is reset_target's own failure, or the reset after a flash: a "
+            "flash_firmware result with `side_effect_status` `partial` wrote the image, and only the reset after it "
+            "failed. A test reactor step publishes the same type as its own `error_type`."
+        ),
+        remediation=(
+            "Read `side_effect_status`, `target_state` and `quarantined` first: they say whether the reset was "
+            "attempted and whether the board is now held under an incident.",
+            "Call probe_target to read the target back. Where the bench's `recovery.auto_recover` is `reset_halt` and "
+            "the probe grants `allow_reset`, the automatic recovery runs first, drives the target into a defined "
+            "halted state and reads it back, which ends the incident; elsewhere the incident is the operator's.",
+            "Check what `likely_causes` names before the next reset: the reset line between the in-circuit debugger or "
+            "programmer and the target, the target's power, and for OpenOCD the `reset_config` in `target_cfg`.",
+        ),
+        do_not=(
+            "Do not repeat reset_target or flash_firmware to get past it before the state fields and probe_target "
+            "have said where the target is. A second reset over an unconfirmed one adds a second unknown, and a "
+            "reflash over a partial one writes the board blind.",
+        ),
+    ),
+    "probe_discovery_failed": ErrorRemedy(
+        meaning=(
+            "Probe discovery could not run, so it says nothing about which probes are attached: the debugger's listing "
+            "command failed or answered something that is not a probe listing, or the USB serial inventory a listing "
+            "reads could not be read. Nothing was contacted."
+        ),
+        remediation=(
+            "Read `summary` first, and `backend_error` or `programmer_output` where present: `discovered_by` says "
+            "which listing ran, and these say what it answered.",
+            "Fix what they name, the debugger install, the serial backend or a probe that USB does not see, and call "
+            "debugger_probes_list again.",
+        ),
+        do_not=(
+            "Do not set, change or remove `probe_id` on the strength of this result. The listing did not run, so an "
+            "empty or partial answer is no evidence about the bench.",
+        ),
+    ),
+    "output_write_failed": ErrorRemedy(
+        meaning=(
+            "debug_dump_symbol_ihex could not leave the Intel HEX file at `output_path`: its directory could not be "
+            "prepared, the file could not be written, or the programmer confirmed the read and left no parseable Intel "
+            "HEX behind. The failure is the file's. A test reactor step publishes the same type as its own "
+            "`error_type`."
+        ),
+        remediation=(
+            "Read `backend_error` where present: the file system's own reason, such as a missing or read-only "
+            "directory, a path outside the workspace, or a full disk.",
+            "Call debug_dump_symbol_ihex again with an `output_path` inside the workspace that this user can write.",
+            "Read `target_contacted`: true means the bytes left the target and only the file is missing, and a debug "
+            "session's dump read the target before writing too.",
+        ),
+        do_not=(
+            "Do not reset or reflash the target over this. The read leaves the target as it found it, and the failure "
+            "is the output file's.",
+        ),
+    ),
+    "symbol_not_found": ErrorRemedy(
+        meaning=(
+            "The symbol passed `debug.allowed_symbols` and is absent from the symbol table of the ELF that describes "
+            "the target: misspelled, removed by the compiler or the linker, or never part of this build. A test "
+            "reactor step publishes the same type as its own `error_type`."
+        ),
+        remediation=(
+            "Check the name against the firmware source and the linker map: it is matched as the linked identifier.",
+            "If it is defined and missing from the ELF, the build dropped it: an unused object is removed by the "
+            "linker's garbage collection and a static one can be folded away. Mark it `volatile` or "
+            "`__attribute__((used))`, rebuild, and flash the new ELF with flash_firmware.",
+        ),
+        do_not=(
+            "Do not add names to `debug.allowed_symbols` to get past this. The allowlist was passed, and widening it "
+            "changes what may be read, not what is in the image.",
+        ),
+    ),
+    "symbol_resolution_failed": ErrorRemedy(
+        meaning=(
+            "GDB found no usable address or size for the symbol: it answered something this server could not parse, "
+            "or the ELF's symbol table has the name without a size, more than once, or could not be read at all. A "
+            "test reactor step publishes the same type as its own `error_type`."
+        ),
+        remediation=(
+            "Read `symbol_table_lookup` where present, and `summary`. `no_size` is a symbol the ELF lists without a "
+            "size, which an assembly label without a `.size` directive is; `ambiguous` is a name defined more than "
+            "once; `unreadable` is an ELF the server could not parse.",
+            "Give the object a size and a single definition the toolchain records (a C object, or `.size` on an "
+            "assembly label), rebuild, flash it with flash_firmware, and confirm it with debug_symbol_info before "
+            "reading it.",
+        ),
+        do_not=(
+            "Do not repeat the same read unchanged. The ELF and the GDB that answered are the same, so the answer is "
+            "too.",
+        ),
+    ),
+    "symbol_ambiguous": ErrorRemedy(
+        meaning=(
+            "The name matches more than one symbol in the ELF, typically a `static` object defined in several "
+            "translation units, and GDB will not pick one. A test reactor step publishes the same type as its own "
+            "`error_type`."
+        ),
+        remediation=(
+            "Give the object a name that is unique in the image, then rebuild and flash it with flash_firmware.",
+        ),
+        do_not=(
+            "Do not read an address by hand in place of the symbol. The value tools read only a name that resolves to "
+            "one object, so the guess would bypass the check that makes the read mean something.",
+        ),
+    ),
+    "symbol_source_changed": ErrorRemedy(
+        meaning=(
+            "The ELF flashed through this service has changed on disk since it was flashed (its digest no longer "
+            "matches, because it was rebuilt or replaced), or it can no longer be read, so its symbol table is not "
+            "proven to describe the image on the target. Nothing was contacted. A test reactor step publishes the "
+            "same type as its own `error_type`."
+        ),
+        remediation=(
+            "Flash the current build with flash_firmware, so the image on the target and the ELF on disk are the same "
+            "file again.",
+            "Then call debug_symbol_info, debug_symbol_value or debug_dump_symbol_ihex again.",
+        ),
+        do_not=(
+            "Do not read symbols out of the rebuilt ELF by hand with GDB. Its addresses describe a build that is not "
+            "on the target.",
+        ),
+    ),
+    "symbol_source_not_available": ErrorRemedy(
+        meaning=(
+            "No ELF has been flashed through this service, so no symbol table is known to describe the image on the "
+            "target. The pyOCD and STM32CubeProgrammer backends answer symbol reads out of the ELF the last "
+            "successful flash_firmware wrote, and there is none: no flash has succeeded in this session, the image was "
+            "a .hex or a .bin, or the firmware was flashed outside Agentic HIL. Nothing was contacted. A test reactor "
+            "step publishes the same type as its own `error_type`."
+        ),
+        remediation=(
+            "Flash the ELF itself with flash_firmware: the `.elf` the build produced carries the symbols, and the "
+            "flash records it.",
+            "Then call debug_symbol_info, debug_symbol_value or debug_dump_symbol_ihex again.",
+        ),
+        do_not=(
+            "Do not flash a .hex or a .bin to get symbols. Neither carries a symbol table, and the reads stay refused.",
+        ),
+    ),
+    "cleanup_failed": ErrorRemedy(
+        meaning=(
+            "A cleanup could not finish. In debug_stop_session it is the session's processes: GDB or the debug server "
+            "could not be stopped (`cleanup_error`), the session stays `cleanup_required` with `hardware_state` "
+            "unknown, and `halt_not_confirmed` and `detach_resume_guard_confirmed` say whether the target was proven "
+            "halted and kept from resuming before that. In a test reactor run it is the run's teardown: "
+            "`cleanup_errors` lists each device and action that failed, and `step_error_type` keeps the failure that "
+            "came before it."
+        ),
+        remediation=(
+            "Read `cleanup_error`, or each entry of `cleanup_errors`, with the log at `log_path`: they name what could "
+            "not be stopped or closed.",
+            "Where it is the debug session, call probe_target. The automatic recovery the bench's "
+            "`recovery.auto_recover` allows runs first: it reaps leftover debugger processes and reads the target "
+            "back, and a confirmed read ends the incident and the session with it.",
+            "When `halt_not_confirmed` is false and `detach_resume_guard_confirmed` is true, debug_stop_session called "
+            "once more repeats only the process cleanup and can finish it.",
+            "An entry for a COM port or a CAN bus is that session's own teardown, which a probe read cannot speak for: "
+            "the quarantine guidance on the result names what settles it. Where `recovery.auto_recover` is `off`, the "
+            "incident is the operator's to end with `agentic-hil recover`.",
+        ),
+        do_not=(
+            "Do not call debug_stop_session again while `halt_not_confirmed` is true or `detach_resume_guard_confirmed` "
+            "is false. Over an unconfirmed target state a repeated stop forces both proofs false and settles nothing.",
+            "Do not start a new debug session over it. debug_start_session is refused as `session_already_active` "
+            "until this one ends.",
+        ),
+    ),
+    "halt_not_confirmed": ErrorRemedy(
+        meaning=(
+            "debug_stop_session cleaned up the session's processes and could not confirm that the target was halted "
+            "before the session ended (`halt_not_confirmed` true). The session stays `cleanup_required` with "
+            "`hardware_state` unknown: the core may be running whatever it ran when the connection went away."
+        ),
+        remediation=(
+            "Call probe_target. The automatic recovery the bench's `recovery.auto_recover` allows runs first: it reaps "
+            "any leftover debugger process and reads the target back through the probe, and a confirmed read ends the "
+            "incident and the session with it; debug_get_session_status then reports it stopped.",
+            "Where `recovery.auto_recover` is `off`, or the probe's `allow_probe` is closed, the incident is the "
+            "operator's to end with `agentic-hil recover` after checking the board.",
+        ),
+        do_not=(
+            "Do not call debug_stop_session again for this. A stop after an unconfirmed halt brings no new evidence: "
+            "both proofs are forced false and the incident stays where it is.",
+            "Do not start a new debug session to get a fresh halt. debug_start_session is refused as "
+            "`session_already_active` until this one ends.",
+        ),
+    ),
+    "detach_resume_not_confirmed": ErrorRemedy(
+        meaning=(
+            "debug_stop_session confirmed the halt and cleaned up the session's processes, and could not confirm the "
+            "guard that keeps the backend from resuming the target when GDB detaches "
+            "(`detach_resume_guard_confirmed` false). The session stays `cleanup_required` with `hardware_state` "
+            "unknown: the target may have been resumed as the connection closed."
+        ),
+        remediation=(
+            "Call probe_target. The automatic recovery the bench's `recovery.auto_recover` allows runs first: it reaps "
+            "any leftover debugger process and reads the target back through the probe, and a confirmed read ends the "
+            "incident and the session with it; debug_get_session_status then reports it stopped.",
+            "Where `recovery.auto_recover` is `off`, or the probe's `allow_probe` is closed, the incident is the "
+            "operator's to end with `agentic-hil recover` after checking the board.",
+        ),
+        do_not=(
+            "Do not call debug_stop_session again for this. A stop after an unconfirmed detach brings no new evidence: "
+            "both proofs are forced false and the incident stays where it is.",
+            "Do not start a new debug session to get a fresh halt. debug_start_session is refused as "
+            "`session_already_active` until this one ends.",
+        ),
+    ),
     # -- The debugger that is not a probe, in the two states it goes missing in --
     "gdb_not_found": ErrorRemedy(
         meaning=(
