@@ -324,6 +324,26 @@ def halt_names_its_stop(text: str) -> bool:
     return bool(re.search(r"\bstop_reason\b", text) and re.search(r"\bhalted\b", text))
 
 
+def a_stopped_core_answers_its_recorded_stop(text: str) -> bool:
+    """A core already stopped is answered with the stop the session recorded,
+    not with a new one (gdbdebug.py `halt`, `_stopped_result`)."""
+    return any(asserted(r"\brecorded stop\b", sentence) and re.search(r"\b(already|stopped)\b", sentence, re.IGNORECASE) for sentence in description_sentences(text))
+
+
+# Fields joined into one statement of their value: "ok and halt_confirmed are
+# false", "ok, halt_confirmed and active are false".
+FIELDS_ARE = r"`?\b\w+\b`?(?:\s*,\s*`?\w+`?)*\s+and\s+`?\w+`?\s+are\s+"
+
+
+def states_value(field: str, value: str, sentence: str) -> bool:
+    """Whether `sentence` gives `field` the value `value`: as a pair ("ok
+    false", "ok: false"), as a sentence ("ok is false"), or inside a joined
+    statement ("ok and halt_confirmed are false")."""
+    if re.search(rf"\b{field}\b`?(?:\W{{0,3}}|\s+is\s+){value}\b", sentence):
+        return True
+    return any(re.search(rf"\b{field}\b", joined.group(0)) for joined in re.finditer(FIELDS_ARE + rf"{value}\b", sentence))
+
+
 def an_unconfirmed_halt_is_held(text: str) -> bool:
     """A halt whose stop never comes answers `ok` false, `halt_confirmed`
     false and `target_state` unknown, and the bench is quarantined (gdbdebug.py
@@ -332,12 +352,16 @@ def an_unconfirmed_halt_is_held(text: str) -> bool:
     held = [
         sentence
         for sentence in found
-        if re.search(r"\bhalt_confirmed\W{0,3}false\b", sentence)
+        if states_value("halt_confirmed", "false", sentence)
         and re.search(r"\bunknown\b", sentence)
         and re.search(r"quarantin|\bcleanup_required\b", sentence, re.IGNORECASE)
-        and re.search(r"\bok\W{0,3}false\b", sentence)
+        and states_value("ok", "false", sentence)
     ]
-    inverted = [sentence for sentence in found if re.search(r"\bhalt_confirmed\W{0,3}true\b|\btarget_state\W{0,3}halted\b|\bok\W{0,3}true\b", sentence)]
+    inverted = [
+        sentence
+        for sentence in found
+        if states_value("halt_confirmed", "true", sentence) or states_value("target_state", "halted", sentence) or states_value("ok", "true", sentence)
+    ]
     return bool(held) and not inverted
 
 
@@ -771,9 +795,26 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
         ["A stopped core is interrupted again.", "A halted core gets another interrupt."],
     ),
     (
+        a_stopped_core_answers_its_recorded_stop,
+        ["Returns stop_reason halted, or a stopped core's recorded stop.", "A core already stopped gets no interrupt: its recorded stop is answered."],
+        ["Returns stop_reason halted.", "A stopped core gets no recorded stop.", "Returns stop_reason halted, never a stopped core's recorded stop.", "Returns the recorded stop."],
+    ),
+    (
         an_unconfirmed_halt_is_held,
-        ["Unconfirmed: ok false, halt_confirmed false, target_state unknown, quarantined.", "If no stop follows: ok false, halt_confirmed false, state unknown, cleanup_required."],
-        ["Unconfirmed: ok true, halt_confirmed false, target_state unknown, quarantined.", "Unconfirmed: ok false, halt_confirmed true, target_state halted.", "Unconfirmed: ok false, halt_confirmed false, target_state unknown."],
+        [
+            "Unconfirmed: ok false, halt_confirmed false, target_state unknown, quarantined.",
+            "If no stop follows: ok false, halt_confirmed false, state unknown, cleanup_required.",
+            "If unconfirmed, ok and halt_confirmed are false, target_state is unknown and the bench is quarantined.",
+            "If unconfirmed, ok is false, halt_confirmed is false, the state is unknown and the bench is quarantined.",
+        ],
+        [
+            "Unconfirmed: ok true, halt_confirmed false, target_state unknown, quarantined.",
+            "Unconfirmed: ok false, halt_confirmed true, target_state halted.",
+            "Unconfirmed: ok false, halt_confirmed false, target_state unknown.",
+            "If unconfirmed, ok and halt_confirmed are true, target_state is unknown and the bench is quarantined.",
+            "If unconfirmed, ok is true and halt_confirmed is false, the state is unknown and the bench is quarantined.",
+            "If unconfirmed, halt_confirmed is false, target_state is unknown and the bench is quarantined.",
+        ],
     ),
     (
         raises_a_short_timeout_before_the_ceiling,
@@ -1075,6 +1116,7 @@ def test_halt_says_a_stopped_core_is_answered_as_it_stands(listed: dict[str, dic
 
     assert a_stopped_core_gets_no_interrupt(text), text
     assert halt_names_its_stop(text), text
+    assert a_stopped_core_answers_its_recorded_stop(text), text
 
 
 def test_halt_names_what_an_unconfirmed_halt_answers(listed: dict[str, dict]) -> None:
