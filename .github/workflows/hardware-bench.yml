@@ -281,10 +281,13 @@ jobs:
       # puts the demo back on the board. After a red distribution the next still
       # runs; after a cancel, none. Each report goes into a directory of its own,
       # since the runner clears the one it is given of an earlier report.
+      # `--require-usb-uart` for the gate's reason: the board has a USB-UART
+      # adapter wired to it, and a run that lost it must not pass with the
+      # adapter's tests deselected.
       - name: Run the bench tier on Ubuntu 22.04
         if: ${{ !cancelled() }}
         timeout-minutes: 40
-        run: exec python3 tools/bench_in_container.py --distribution ubuntu-22.04 --output bench-results/ubuntu-22.04
+        run: exec python3 tools/bench_in_container.py --distribution ubuntu-22.04 --require-usb-uart --output bench-results/ubuntu-22.04
 
       # Right after its run and whatever it did, so a later distribution's limit
       # cannot cost an earlier one its report. The report and the log have the
@@ -301,7 +304,7 @@ jobs:
       - name: Run the bench tier on Ubuntu 24.04
         if: ${{ !cancelled() }}
         timeout-minutes: 40
-        run: exec python3 tools/bench_in_container.py --distribution ubuntu-24.04 --output bench-results/ubuntu-24.04
+        run: exec python3 tools/bench_in_container.py --distribution ubuntu-24.04 --require-usb-uart --output bench-results/ubuntu-24.04
 
       - name: Upload the Ubuntu 24.04 tier's report and log
         if: always()
@@ -315,7 +318,7 @@ jobs:
       - name: Run the bench tier on Debian 12
         if: ${{ !cancelled() }}
         timeout-minutes: 40
-        run: exec python3 tools/bench_in_container.py --distribution debian-12 --output bench-results/debian-12
+        run: exec python3 tools/bench_in_container.py --distribution debian-12 --require-usb-uart --output bench-results/debian-12
 
       - name: Upload the Debian 12 tier's report and log
         if: always()
@@ -329,7 +332,7 @@ jobs:
       - name: Run the bench tier on Fedora 44
         if: ${{ !cancelled() }}
         timeout-minutes: 40
-        run: exec python3 tools/bench_in_container.py --distribution fedora-44 --output bench-results/fedora-44
+        run: exec python3 tools/bench_in_container.py --distribution fedora-44 --require-usb-uart --output bench-results/fedora-44
 
       - name: Upload the Fedora 44 tier's report and log
         if: always()

@@ -7,13 +7,22 @@
  * out of a table, and reports what arrived, the way the container tier's
  * scripted peer (tests/container/pty_responder.py) does over a pseudo-terminal.
  *
- * The line. USART2 on PA2 (TX) and PA3 (RX), which the NUCLEO-F446RE wires to
- * the ST-LINK virtual COM port. 8 data bits, no parity, one stop bit, 115200
- * baud from boot, on the demo's clock (HSI, 16 MHz on every bus). It keeps the
- * demo's `uptime_ms` SysTick witness, and LD2 blinks twice a second.
+ * The lines. Two serial lines, each an instance of the peer below of its own:
+ * its own rules, settings, rings and statistics, and the same control
+ * protocol. The first is USART2 on PA2 (TX) and PA3 (RX), which the
+ * NUCLEO-F446RE wires to the ST-LINK virtual COM port. The second is USART1 on
+ * PA9 (TX) and PA10 (RX), alternate function 7, for a USB serial adapter wired
+ * to those pins, with PA12 as USART1_RTS (alternate function 7) under hardware
+ * RTS: the pin is low while USART1 can take a byte, and high from a received
+ * byte until its interrupt has read it. Both run 8 data bits, no parity, one
+ * stop bit, 115200 baud from boot, on the demo's clock (HSI, 16 MHz on every
+ * bus). It keeps the demo's `uptime_ms` SysTick witness, and LD2 blinks twice
+ * a second.
  *
- * It prints one line at boot, `@peer ready`, and after that speaks only when
- * a rule, a setting or a control line below says so.
+ * Each line prints one line at boot, `@peer ready`, and after that speaks only
+ * when a rule, a setting or a control line below says so. Everything below is
+ * per line unless it says otherwise: a control line changes the line it came
+ * in on and is answered there.
  *
  * Lines. A line is every byte received up to a LF (0x0A). The CRs (0x0D) at
  * its end are removed, and what remains is the line: exactly the container
@@ -58,6 +67,10 @@
  *                                statistics zeroed, anything not yet sent
  *                                discarded; answered at the old rate, then
  *                                115200 again
+ *   @peer modem                  the modem line monitor, below:
+ *                                `@peer ok modem level=low|high falls=N
+ *                                rises=N shortest=N|none longest=N|none`
+ *   @peer modem clear            zero the monitor's counts and pulse widths
  *
  * Changing the rules, the temperature request or the delay drops the answers
  * still waiting, as do silence and reset. Errors name a reason: `syntax` (the line does not parse),
@@ -94,10 +107,26 @@
  * the nearest tenth. A conversion that does not finish is answered
  * `TEMP=unavailable\r\n`.
  *
- * Bounded everywhere: the receive ring holds 4096 bytes and the transmit ring
- * 2048, both served by the USART2 interrupt; a byte that cannot be queued for
- * half a second is dropped rather than waited for, and no wait in here is
- * without a limit.
+ * The modem line monitor. PB12 is an input with the pull-up, so it reads high
+ * with nothing driving it, and EXTI12 interrupts on both of its edges. Wired to
+ * a USB serial adapter's DTR# output it shows that adapter's DTR, low while DTR
+ * is asserted. TIM2 counts microseconds from boot (the 16 MHz APB1 timer clock
+ * divided by 16, 32 bits, so a pulse longer than about 71 minutes is not timed
+ * right). `@peer modem` reports the pin's level as it is now, the falling and
+ * rising edges counted, and the shortest and longest low pulse in
+ * microseconds, `none` before a first one ended. A low pulse runs from a
+ * falling edge to the next rising edge; one that is on at a clear is timed from
+ * the clear. Edges too close together for the interrupt to see apart, a few
+ * microseconds, are counted as a pair: a short high inside a low pulse ends it
+ * and starts the next one, and a low pulse that short counts as 0. The monitor
+ * belongs to neither line: both can read and clear it, and a reset leaves it.
+ *
+ * Bounded everywhere: on each line the receive ring holds 4096 bytes and the
+ * transmit ring 2048, both served by that line's USART interrupt; a byte that
+ * cannot be queued for half a second is dropped rather than waited for, and no
+ * wait in here is without a limit. main() serves the lines in turn, so a
+ * wait on one (a baud switch waits up to 2.1 s for its line to drain) holds
+ * back the other's answers, never its receiving.
  *
  * CAN. bxCAN CAN1 on PB8 (RX) and PB9 (TX), alternate function 9, with the
  * pull-up on PB8, so that with nothing on the pin it reads recessive. 500
@@ -129,9 +158,11 @@
  * loopback adds: the peer hears its own answers, so an answer that is itself
  * a frame some rule names is answered in turn.
  *
- * CAN control lines are answered like the others, `@peer ok can <command>...`
- * or `@peer error can <command> <reason>`, and `@peer error can syntax` when
- * the command is none of these:
+ * CAN is the first line's. CAN control lines are taken on it alone, and only
+ * its reset resets the controller; on the second line `@peer can` is an
+ * unknown command. They are answered like the others, `@peer ok can
+ * <command>...` or `@peer error can <command> <reason>`, and `@peer error can
+ * syntax` when the command is none of these:
  *
  *   @peer can mode loopback|normal   switch the controller to that mode
  *   @peer can rule ID/DATA=ID/DATA   answer that frame (8 rules at most)
@@ -202,13 +233,19 @@
 #define RCC_APB2ENR (*(volatile uint32_t *)0x40023844U)
 #define GPIOA_MODER (*(volatile uint32_t *)0x40020000U)
 #define GPIOA_AFRL (*(volatile uint32_t *)0x40020020U)
+#define GPIOA_AFRH (*(volatile uint32_t *)0x40020024U)
 #define GPIOA_ODR (*(volatile uint32_t *)0x40020014U)
-#define USART2_SR (*(volatile uint32_t *)0x40004400U)
-#define USART2_DR (*(volatile uint32_t *)0x40004404U)
-#define USART2_BRR (*(volatile uint32_t *)0x40004408U)
-#define USART2_CR1 (*(volatile uint32_t *)0x4000440CU)
-#define USART2_CR2 (*(volatile uint32_t *)0x40004410U)
-#define USART2_CR3 (*(volatile uint32_t *)0x40004414U)
+#define GPIOB_IDR (*(volatile uint32_t *)0x40020410U)
+#define SYSCFG_EXTICR4 (*(volatile uint32_t *)0x40013814U)
+#define EXTI_IMR (*(volatile uint32_t *)0x40013C00U)
+#define EXTI_RTSR (*(volatile uint32_t *)0x40013C08U)
+#define EXTI_FTSR (*(volatile uint32_t *)0x40013C0CU)
+#define EXTI_PR (*(volatile uint32_t *)0x40013C14U)
+#define TIM2_CR1 (*(volatile uint32_t *)0x40000000U)
+#define TIM2_EGR (*(volatile uint32_t *)0x40000014U)
+#define TIM2_CNT (*(volatile uint32_t *)0x40000024U)
+#define TIM2_PSC (*(volatile uint32_t *)0x40000028U)
+#define TIM2_ARR (*(volatile uint32_t *)0x4000002CU)
 #define ADC1_SR (*(volatile uint32_t *)0x40012000U)
 #define ADC1_CR1 (*(volatile uint32_t *)0x40012004U)
 #define ADC1_CR2 (*(volatile uint32_t *)0x40012008U)
@@ -271,7 +308,25 @@
 #define USART_CR1_RXNEIE (1U << 5)
 #define USART_CR1_TXEIE (1U << 7)
 #define USART_CR1_UE (1U << 13)
+#define USART_CR3_RTSE (1U << 8)
 #define USART2_IRQ_BIT (1U << (38U - 32U))
+#define USART1EN (1U << 4)
+#define USART1_TX_PIN 9U
+#define USART1_RX_PIN 10U
+#define USART1_RTS_PIN 12U
+#define GPIO_AFRH_AF7(pin) (7U << (((pin) - 8U) * 4U))
+#define USART1_IRQ_BIT (1U << (37U - 32U))
+#define SYSCFGEN (1U << 14)
+#define TIM2EN (1U << 0)
+#define TIM_CR1_CEN (1U << 0)
+#define TIM_EGR_UG (1U << 0)
+/* TIM2 counts microseconds: its clock is APB1's, 16 MHz, divided by 16. */
+#define TIM2_PRESCALER_1MHZ (16U - 1U)
+#define MONITOR_PIN 12U
+#define MONITOR_BIT (1U << MONITOR_PIN)
+#define EXTICR4_MASK(pin) (0xFU << (((pin) - 12U) * 4U))
+#define EXTICR4_PORT_B(pin) (1U << (((pin) - 12U) * 4U))
+#define EXTI15_10_IRQ_BIT (1U << (40U - 32U))
 #define ADC_SR_EOC (1U << 1)
 #define ADC_CR2_ADON (1U << 0)
 #define ADC_CR2_SWSTART (1U << 30)
@@ -379,14 +434,19 @@ static const uint8_t prefix[PREFIX_LEN] = {'@', 'p', 'e', 'e', 'r', ' '};
 /* A millisecond uptime counter in RAM, the same witness the demo keeps. */
 volatile uint32_t uptime_ms = 0U;
 
-static volatile uint8_t rx_ring[RX_RING];
-static volatile uint32_t rx_head;
-static volatile uint32_t rx_tail;
-static volatile uint32_t rx_lost;
-static volatile uint8_t tx_ring[TX_RING];
-static volatile uint32_t tx_head;
-static volatile uint32_t tx_tail;
-static uint8_t tx_stuck;
+/* A USART's registers, laid over its base address. */
+struct usart {
+    volatile uint32_t sr;
+    volatile uint32_t dr;
+    volatile uint32_t brr;
+    volatile uint32_t cr1;
+    volatile uint32_t cr2;
+    volatile uint32_t cr3;
+    volatile uint32_t gtpr;
+};
+
+#define USART1_REGISTERS ((struct usart *)0x40011000U)
+#define USART2_REGISTERS ((struct usart *)0x40004400U)
 
 struct rule {
     uint8_t used;
@@ -401,40 +461,64 @@ struct pending {
     uint32_t due_ms;
 };
 
-static struct rule rules[RULES];
-static struct pending pending[PENDING_MAX];
-static uint32_t pending_first;
-static uint32_t pending_count;
-static uint32_t last_due_ms;
-static uint32_t delay_ms;
-static uint8_t echo_on;
-static uint8_t silent;
-static uint8_t announce_on;
-static uint32_t announce_every_ms;
-static uint32_t announce_next_ms;
-static uint32_t announce_len;
-static uint8_t announce_text[RESPONSE_MAX];
-static uint8_t flood_forever;
-static uint32_t flood_remaining;
-static uint32_t flood_position;
-static uint8_t temperature_bound;
-static uint32_t temperature_request_len;
-static uint8_t temperature_request[REQUEST_MAX];
-static uint32_t baud = BOOT_BAUD;
+/* Everything one line of the peer keeps: its USART, its rings, its rules and
+ * settings, its statistics and the line it is reading. */
+struct serial_peer {
+    struct usart *usart;
+    /* Whether this line's control lines reach the CAN controller. */
+    uint8_t drives_can;
 
-static uint32_t stat_bytes;
-static uint32_t stat_crc = 0xFFFFFFFFU;
-static uint32_t stat_lines;
-static uint32_t stat_overlong;
+    volatile uint8_t rx_ring[RX_RING];
+    volatile uint32_t rx_head;
+    volatile uint32_t rx_tail;
+    volatile uint32_t rx_lost;
+    volatile uint8_t tx_ring[TX_RING];
+    volatile uint32_t tx_head;
+    volatile uint32_t tx_tail;
+    uint8_t tx_stuck;
 
-static uint8_t line[LINE_MAX];
-static uint32_t line_len;
-static uint8_t line_overlong;
-static uint8_t line_started;
-static uint32_t prefix_seen;
-static uint8_t line_kind;
-static uint32_t snapshot_bytes;
-static uint32_t snapshot_crc;
+    struct rule rules[RULES];
+    struct pending pending[PENDING_MAX];
+    uint32_t pending_first;
+    uint32_t pending_count;
+    uint32_t last_due_ms;
+    uint32_t delay_ms;
+    uint8_t echo_on;
+    uint8_t silent;
+    uint8_t announce_on;
+    uint32_t announce_every_ms;
+    uint32_t announce_next_ms;
+    uint32_t announce_len;
+    uint8_t announce_text[RESPONSE_MAX];
+    uint8_t flood_forever;
+    uint32_t flood_remaining;
+    uint32_t flood_position;
+    uint8_t temperature_bound;
+    uint32_t temperature_request_len;
+    uint8_t temperature_request[REQUEST_MAX];
+    uint32_t baud;
+
+    uint32_t stat_bytes;
+    uint32_t stat_crc;
+    uint32_t stat_lines;
+    uint32_t stat_overlong;
+
+    uint8_t line[LINE_MAX];
+    uint32_t line_len;
+    uint8_t line_overlong;
+    uint8_t line_started;
+    uint32_t prefix_seen;
+    uint8_t line_kind;
+    uint32_t snapshot_bytes;
+    uint32_t snapshot_crc;
+};
+
+/* USART2, the ST-LINK virtual COM port, and USART1, the adapter's line. */
+static struct serial_peer first_line;
+static struct serial_peer second_line;
+/* The line being served: everything below that reads, answers or writes acts
+ * on this one. Only main() sets it; the interrupts name their own. */
+static struct serial_peer *here = &first_line;
 
 static uint8_t scratch_request[REQUEST_MAX];
 static uint8_t scratch_response[RESPONSE_MAX];
@@ -458,36 +542,49 @@ void SysTick_Handler(void)
     uptime_ms++;
 }
 
-void USART2_IRQHandler(void)
+/* One line's USART interrupt: a received byte into its receive ring, the next
+ * byte of its transmit ring out. */
+static void serve_usart(struct serial_peer *peer)
 {
-    uint32_t status = USART2_SR;
+    struct usart *usart = peer->usart;
+    uint32_t status = usart->sr;
 
     if ((status & (USART_SR_RXNE | USART_SR_ORE)) != 0U) {
         /* Reading DR after SR clears both RXNE and an overrun. */
-        uint8_t byte = (uint8_t)USART2_DR;
-        uint32_t head = rx_head;
+        uint8_t byte = (uint8_t)usart->dr;
+        uint32_t head = peer->rx_head;
 
         if ((status & USART_SR_ORE) != 0U) {
-            rx_lost++;
+            peer->rx_lost++;
         }
-        if (head - rx_tail < RX_RING) {
-            rx_ring[head % RX_RING] = byte;
-            rx_head = head + 1U;
+        if (head - peer->rx_tail < RX_RING) {
+            peer->rx_ring[head % RX_RING] = byte;
+            peer->rx_head = head + 1U;
         } else {
-            rx_lost++;
+            peer->rx_lost++;
         }
     }
 
-    if ((USART2_CR1 & USART_CR1_TXEIE) != 0U && (status & USART_SR_TXE) != 0U) {
-        uint32_t tail = tx_tail;
+    if ((usart->cr1 & USART_CR1_TXEIE) != 0U && (status & USART_SR_TXE) != 0U) {
+        uint32_t tail = peer->tx_tail;
 
-        if (tail != tx_head) {
-            USART2_DR = tx_ring[tail % TX_RING];
-            tx_tail = tail + 1U;
+        if (tail != peer->tx_head) {
+            usart->dr = peer->tx_ring[tail % TX_RING];
+            peer->tx_tail = tail + 1U;
         } else {
-            USART2_CR1 &= ~USART_CR1_TXEIE;
+            usart->cr1 &= ~USART_CR1_TXEIE;
         }
     }
+}
+
+void USART2_IRQHandler(void)
+{
+    serve_usart(&first_line);
+}
+
+void USART1_IRQHandler(void)
+{
+    serve_usart(&second_line);
 }
 
 void SystemInit(void)
@@ -516,6 +613,22 @@ static uint32_t divisor_for(uint32_t rate)
     return (PCLK1_HZ + rate / 2U) / rate;
 }
 
+/* A line at 115200 8N1 from boot, receiving through its interrupt; `cr3`
+ * carries what the line adds, hardware RTS on the second. */
+static void line_start(struct serial_peer *peer, struct usart *usart, uint8_t drives_can, uint32_t cr3)
+{
+    peer->usart = usart;
+    peer->drives_can = drives_can;
+    peer->baud = BOOT_BAUD;
+    peer->stat_crc = 0xFFFFFFFFU;
+
+    usart->cr1 = 0U;
+    usart->cr2 = 0U;
+    usart->cr3 = cr3;
+    usart->brr = divisor_for(BOOT_BAUD);
+    usart->cr1 = USART_CR1_RE | USART_CR1_TE | USART_CR1_RXNEIE | USART_CR1_UE;
+}
+
 static void usart2_init(void)
 {
     RCC_AHB1ENR |= GPIOAEN;
@@ -530,12 +643,30 @@ static void usart2_init(void)
                  GPIO_AFRL_AF7(USART2_TX_PIN) |
                  GPIO_AFRL_AF7(USART2_RX_PIN);
 
-    USART2_CR1 = 0U;
-    USART2_CR2 = 0U;
-    USART2_CR3 = 0U;
-    USART2_BRR = divisor_for(BOOT_BAUD);
-    USART2_CR1 = USART_CR1_RE | USART_CR1_TE | USART_CR1_RXNEIE | USART_CR1_UE;
+    line_start(&first_line, USART2_REGISTERS, 1U, 0U);
     NVIC_ISER1 = USART2_IRQ_BIT;
+}
+
+static void usart1_init(void)
+{
+    RCC_AHB1ENR |= GPIOAEN;
+    RCC_APB2ENR |= USART1EN;
+
+    GPIOA_MODER = (GPIOA_MODER & ~(GPIO_MODER_MASK(USART1_TX_PIN) |
+                                    GPIO_MODER_MASK(USART1_RX_PIN) |
+                                    GPIO_MODER_MASK(USART1_RTS_PIN))) |
+                   GPIO_MODER_AF(USART1_TX_PIN) |
+                   GPIO_MODER_AF(USART1_RX_PIN) |
+                   GPIO_MODER_AF(USART1_RTS_PIN);
+    GPIOA_AFRH = (GPIOA_AFRH & ~(GPIO_AFRH_MASK(USART1_TX_PIN) |
+                                  GPIO_AFRH_MASK(USART1_RX_PIN) |
+                                  GPIO_AFRH_MASK(USART1_RTS_PIN))) |
+                 GPIO_AFRH_AF7(USART1_TX_PIN) |
+                 GPIO_AFRH_AF7(USART1_RX_PIN) |
+                 GPIO_AFRH_AF7(USART1_RTS_PIN);
+
+    line_start(&second_line, USART1_REGISTERS, 0U, USART_CR3_RTSE);
+    NVIC_ISER1 = USART1_IRQ_BIT;
 }
 
 static void adc_init(void)
@@ -555,13 +686,13 @@ static void adc_init(void)
 
 static uint32_t tx_space(void)
 {
-    return TX_RING - (tx_head - tx_tail);
+    return TX_RING - (here->tx_head - here->tx_tail);
 }
 
 static void tx_kick(void)
 {
     interrupts_off();
-    USART2_CR1 |= USART_CR1_TXEIE;
+    here->usart->cr1 |= USART_CR1_TXEIE;
     interrupts_on();
 }
 
@@ -573,22 +704,22 @@ static void tx_put(uint8_t byte)
     uint32_t started = uptime_ms;
 
     while (tx_space() == 0U) {
-        if (tx_stuck || uptime_ms - started > TX_WAIT_MS) {
-            tx_stuck = 1U;
+        if (here->tx_stuck || uptime_ms - started > TX_WAIT_MS) {
+            here->tx_stuck = 1U;
             return;
         }
     }
-    tx_stuck = 0U;
-    tx_ring[tx_head % TX_RING] = byte;
-    tx_head = tx_head + 1U;
+    here->tx_stuck = 0U;
+    here->tx_ring[here->tx_head % TX_RING] = byte;
+    here->tx_head = here->tx_head + 1U;
     tx_kick();
 }
 
 static void tx_discard(void)
 {
     interrupts_off();
-    USART2_CR1 &= ~USART_CR1_TXEIE;
-    tx_tail = tx_head;
+    here->usart->cr1 &= ~USART_CR1_TXEIE;
+    here->tx_tail = here->tx_head;
     interrupts_on();
 }
 
@@ -637,17 +768,17 @@ static void set_baud(uint32_t rate)
 {
     uint32_t started = uptime_ms;
 
-    while (tx_head != tx_tail && uptime_ms - started < 2000U) {
+    while (here->tx_head != here->tx_tail && uptime_ms - started < 2000U) {
     }
     started = uptime_ms;
-    while ((USART2_SR & USART_SR_TC) == 0U && uptime_ms - started < 100U) {
+    while ((here->usart->sr & USART_SR_TC) == 0U && uptime_ms - started < 100U) {
     }
     interrupts_off();
-    USART2_CR1 &= ~USART_CR1_UE;
-    USART2_BRR = divisor_for(rate);
-    USART2_CR1 |= USART_CR1_UE;
+    here->usart->cr1 &= ~USART_CR1_UE;
+    here->usart->brr = divisor_for(rate);
+    here->usart->cr1 |= USART_CR1_UE;
     interrupts_on();
-    baud = rate;
+    here->baud = rate;
 }
 
 static uint32_t crc32_step(uint32_t crc, uint8_t byte)
@@ -840,9 +971,9 @@ static void reply_error(const char *command, const char *reason)
 
 static void drop_pending(void)
 {
-    pending_first = 0U;
-    pending_count = 0U;
-    last_due_ms = uptime_ms;
+    here->pending_first = 0U;
+    here->pending_count = 0U;
+    here->last_due_ms = uptime_ms;
 }
 
 /* The mean of TEMPERATURE_SAMPLES conversions of the sensor; 0 when one did not finish. */
@@ -908,8 +1039,8 @@ static void write_answer(uint8_t answer)
         answer_temperature();
         return;
     }
-    if (answer < RULES && rules[answer].used) {
-        put_bytes(rules[answer].response, rules[answer].response_len);
+    if (answer < RULES && here->rules[answer].used) {
+        put_bytes(here->rules[answer].response, here->rules[answer].response_len);
     }
 }
 
@@ -918,31 +1049,31 @@ static void schedule(uint8_t answer)
     uint32_t now = uptime_ms;
     uint32_t start;
 
-    if (delay_ms == 0U && pending_count == 0U) {
+    if (here->delay_ms == 0U && here->pending_count == 0U) {
         write_answer(answer);
         return;
     }
-    if (pending_count == PENDING_MAX) {
+    if (here->pending_count == PENDING_MAX) {
         return;
     }
-    start = ((int32_t)(last_due_ms - now) > 0) ? last_due_ms : now;
-    last_due_ms = start + delay_ms;
-    pending[(pending_first + pending_count) % PENDING_MAX].answer = answer;
-    pending[(pending_first + pending_count) % PENDING_MAX].due_ms = last_due_ms;
-    pending_count++;
+    start = ((int32_t)(here->last_due_ms - now) > 0) ? here->last_due_ms : now;
+    here->last_due_ms = start + here->delay_ms;
+    here->pending[(here->pending_first + here->pending_count) % PENDING_MAX].answer = answer;
+    here->pending[(here->pending_first + here->pending_count) % PENDING_MAX].due_ms = here->last_due_ms;
+    here->pending_count++;
 }
 
 static void answer_line(const uint8_t *text, uint32_t len)
 {
-    if (silent) {
+    if (here->silent) {
         return;
     }
-    if (temperature_bound && same_bytes(text, len, temperature_request, temperature_request_len)) {
+    if (here->temperature_bound && same_bytes(text, len, here->temperature_request, here->temperature_request_len)) {
         schedule(ANSWER_TEMPERATURE);
         return;
     }
     for (uint32_t index = 0U; index < RULES; index++) {
-        if (rules[index].used && same_bytes(text, len, rules[index].request, rules[index].request_len)) {
+        if (here->rules[index].used && same_bytes(text, len, here->rules[index].request, here->rules[index].request_len)) {
             schedule((uint8_t)index);
             return;
         }
@@ -974,14 +1105,14 @@ static void command_rule(const uint8_t *arguments, uint32_t len)
         return;
     }
     for (uint32_t index = 0U; index < RULES; index++) {
-        if (rules[index].used && same_bytes(rules[index].request, rules[index].request_len, scratch_request, (uint32_t)request_len)) {
+        if (here->rules[index].used && same_bytes(here->rules[index].request, here->rules[index].request_len, scratch_request, (uint32_t)request_len)) {
             slot = index;
             break;
         }
     }
     if (slot == RULES) {
         for (uint32_t index = 0U; index < RULES; index++) {
-            if (!rules[index].used) {
+            if (!here->rules[index].used) {
                 slot = index;
                 break;
             }
@@ -992,14 +1123,14 @@ static void command_rule(const uint8_t *arguments, uint32_t len)
         return;
     }
     for (int32_t index = 0; index < request_len; index++) {
-        rules[slot].request[index] = scratch_request[index];
+        here->rules[slot].request[index] = scratch_request[index];
     }
     for (int32_t index = 0; index < response_len; index++) {
-        rules[slot].response[index] = scratch_response[index];
+        here->rules[slot].response[index] = scratch_response[index];
     }
-    rules[slot].request_len = (uint8_t)request_len;
-    rules[slot].response_len = (uint16_t)response_len;
-    rules[slot].used = 1U;
+    here->rules[slot].request_len = (uint8_t)request_len;
+    here->rules[slot].response_len = (uint16_t)response_len;
+    here->rules[slot].used = 1U;
     drop_pending();
     reply_ok("rule");
     reply_end();
@@ -1018,8 +1149,8 @@ static void command_unrule(const uint8_t *arguments, uint32_t len)
         return;
     }
     for (uint32_t index = 0U; index < RULES; index++) {
-        if (rules[index].used && same_bytes(rules[index].request, rules[index].request_len, scratch_request, (uint32_t)request_len)) {
-            rules[index].used = 0U;
+        if (here->rules[index].used && same_bytes(here->rules[index].request, here->rules[index].request_len, scratch_request, (uint32_t)request_len)) {
+            here->rules[index].used = 0U;
             drop_pending();
             reply_ok("unrule");
             reply_end();
@@ -1032,7 +1163,7 @@ static void command_unrule(const uint8_t *arguments, uint32_t len)
 static void clear_rules(void)
 {
     for (uint32_t index = 0U; index < RULES; index++) {
-        rules[index].used = 0U;
+        here->rules[index].used = 0U;
     }
 }
 
@@ -1048,7 +1179,7 @@ static void command_delay(const uint8_t *arguments, uint32_t len)
         reply_error("delay", "range");
         return;
     }
-    delay_ms = value;
+    here->delay_ms = value;
     drop_pending();
     reply_ok("delay ");
     put_decimal(value);
@@ -1062,7 +1193,7 @@ static void command_announce(const uint8_t *arguments, uint32_t len)
     int32_t text_len;
 
     if (is_word(arguments, len, "off")) {
-        announce_on = 0U;
+        here->announce_on = 0U;
         reply_ok("announce off");
         reply_end();
         return;
@@ -1092,17 +1223,17 @@ static void command_announce(const uint8_t *arguments, uint32_t len)
         return;
     }
     for (int32_t index = 0; index < text_len; index++) {
-        announce_text[index] = scratch_response[index];
+        here->announce_text[index] = scratch_response[index];
     }
-    announce_len = (uint32_t)text_len;
-    announce_every_ms = period;
-    announce_on = 1U;
+    here->announce_len = (uint32_t)text_len;
+    here->announce_every_ms = period;
+    here->announce_on = 1U;
     reply_ok("announce ");
     put_decimal(period);
     reply_end();
     /* The first one right after this answer, as the container peer writes its
      * first announcement the moment its end is open. */
-    announce_next_ms = uptime_ms;
+    here->announce_next_ms = uptime_ms;
 }
 
 static int switch_argument(const uint8_t *arguments, uint32_t len, uint8_t *value)
@@ -1126,7 +1257,7 @@ static void command_echo(const uint8_t *arguments, uint32_t len)
         reply_error("echo", "syntax");
         return;
     }
-    echo_on = value;
+    here->echo_on = value;
     reply_ok(value ? "echo on" : "echo off");
     reply_end();
 }
@@ -1137,9 +1268,9 @@ static void command_flood(const uint8_t *arguments, uint32_t len)
     uint32_t count;
 
     if (switch_argument(arguments, len, &forever)) {
-        flood_forever = forever;
-        flood_remaining = 0U;
-        flood_position = 0U;
+        here->flood_forever = forever;
+        here->flood_remaining = 0U;
+        here->flood_position = 0U;
         reply_ok(forever ? "flood on" : "flood off");
         reply_end();
         return;
@@ -1155,9 +1286,9 @@ static void command_flood(const uint8_t *arguments, uint32_t len)
     reply_ok("flood ");
     put_decimal(count);
     reply_end();
-    flood_forever = 0U;
-    flood_remaining = count;
-    flood_position = 0U;
+    here->flood_forever = 0U;
+    here->flood_remaining = count;
+    here->flood_position = 0U;
 }
 
 static void command_baud(const uint8_t *arguments, uint32_t len)
@@ -1186,11 +1317,11 @@ static void command_silence(const uint8_t *arguments, uint32_t len)
         reply_error("silence", "syntax");
         return;
     }
-    silent = value;
-    if (silent) {
+    here->silent = value;
+    if (here->silent) {
         drop_pending();
-        flood_forever = 0U;
-        flood_remaining = 0U;
+        here->flood_forever = 0U;
+        here->flood_remaining = 0U;
     }
     reply_ok(value ? "silence on" : "silence off");
     reply_end();
@@ -1201,7 +1332,7 @@ static void command_temp(const uint8_t *arguments, uint32_t len, int has_argumen
     int32_t request_len;
 
     if (!has_arguments) {
-        temperature_bound = 0U;
+        here->temperature_bound = 0U;
         drop_pending();
         reply_ok("temp off");
         reply_end();
@@ -1217,10 +1348,10 @@ static void command_temp(const uint8_t *arguments, uint32_t len, int has_argumen
         return;
     }
     for (int32_t index = 0; index < request_len; index++) {
-        temperature_request[index] = scratch_request[index];
+        here->temperature_request[index] = scratch_request[index];
     }
-    temperature_request_len = (uint32_t)request_len;
-    temperature_bound = 1U;
+    here->temperature_request_len = (uint32_t)request_len;
+    here->temperature_bound = 1U;
     drop_pending();
     reply_ok("temp");
     reply_end();
@@ -2125,18 +2256,172 @@ static void command_can(const uint8_t *text, uint32_t len)
     }
 }
 
+/* The modem line monitor on PB12. `level` is the level the counts have
+ * reached, which the interrupt compares the pin with; `low_since` is TIM2 at
+ * the start of the low pulse that is on, if one is. */
+struct modem_monitor {
+    uint32_t level;
+    uint32_t falls;
+    uint32_t rises;
+    uint32_t low_since;
+    uint32_t shortest;
+    uint32_t longest;
+};
+
+static volatile struct modem_monitor monitor;
+
+static uint32_t monitor_pin(void)
+{
+    return (GPIOB_IDR & MONITOR_BIT) != 0U ? 1U : 0U;
+}
+
+/* A low pulse ended at `now`. */
+static void monitor_rose(uint32_t now)
+{
+    uint32_t width = now - monitor.low_since;
+
+    monitor.rises++;
+    if (width < monitor.shortest) {
+        monitor.shortest = width;
+    }
+    if (width > monitor.longest) {
+        monitor.longest = width;
+    }
+}
+
+static void monitor_fell(uint32_t now)
+{
+    monitor.falls++;
+    monitor.low_since = now;
+}
+
+void EXTI15_10_IRQHandler(void)
+{
+    uint32_t now = TIM2_CNT;
+    uint32_t level;
+
+    if ((EXTI_PR & MONITOR_BIT) == 0U) {
+        /* An edge a clear already took into account. */
+        return;
+    }
+    EXTI_PR = MONITOR_BIT;
+    level = monitor_pin();
+    if (level != monitor.level) {
+        if (level == 0U) {
+            monitor_fell(now);
+        } else {
+            monitor_rose(now);
+        }
+    } else if (level == 0U) {
+        /* Low again before the rise could be seen: the pulse that was on
+         * ended, and the next one began. */
+        monitor_rose(now);
+        monitor_fell(now);
+    } else {
+        /* High again before the fall could be seen: a low pulse too short to
+         * time, counted as 0 us. */
+        monitor_fell(now);
+        monitor_rose(now);
+    }
+    monitor.level = level;
+}
+
+/* Zero the counts and widths; a low that is on now is timed from here. */
+static void monitor_clear(void)
+{
+    interrupts_off();
+    EXTI_PR = MONITOR_BIT;
+    monitor.level = monitor_pin();
+    monitor.falls = 0U;
+    monitor.rises = 0U;
+    monitor.low_since = TIM2_CNT;
+    monitor.shortest = 0xFFFFFFFFU;
+    monitor.longest = 0U;
+    interrupts_on();
+}
+
+static void monitor_init(void)
+{
+    RCC_AHB1ENR |= GPIOBEN;
+    RCC_APB1ENR |= TIM2EN;
+    RCC_APB2ENR |= SYSCFGEN;
+
+    GPIOB_MODER &= ~GPIO_MODER_MASK(MONITOR_PIN);
+    GPIOB_PUPDR = (GPIOB_PUPDR & ~GPIO_PUPDR_MASK(MONITOR_PIN)) | GPIO_PUPDR_UP(MONITOR_PIN);
+
+    /* Free running at 1 MHz over all 32 bits; the update event loads the
+     * prescaler now rather than at the first overflow. */
+    TIM2_CR1 = 0U;
+    TIM2_PSC = TIM2_PRESCALER_1MHZ;
+    TIM2_ARR = 0xFFFFFFFFU;
+    TIM2_EGR = TIM_EGR_UG;
+    TIM2_CR1 = TIM_CR1_CEN;
+
+    SYSCFG_EXTICR4 = (SYSCFG_EXTICR4 & ~EXTICR4_MASK(MONITOR_PIN)) | EXTICR4_PORT_B(MONITOR_PIN);
+    EXTI_RTSR |= MONITOR_BIT;
+    EXTI_FTSR |= MONITOR_BIT;
+    monitor_clear();
+    EXTI_IMR |= MONITOR_BIT;
+    NVIC_ISER1 = EXTI15_10_IRQ_BIT;
+}
+
+static void command_modem(const uint8_t *arguments, uint32_t len, int has_arguments)
+{
+    uint32_t level;
+    uint32_t falls;
+    uint32_t rises;
+    uint32_t shortest;
+    uint32_t longest;
+
+    if (has_arguments) {
+        if (!is_word(arguments, len, "clear")) {
+            reply_error("modem", "syntax");
+            return;
+        }
+        monitor_clear();
+        reply_ok("modem clear");
+        reply_end();
+        return;
+    }
+    interrupts_off();
+    level = monitor_pin();
+    falls = monitor.falls;
+    rises = monitor.rises;
+    shortest = monitor.shortest;
+    longest = monitor.longest;
+    interrupts_on();
+    reply_ok(level != 0U ? "modem level=high" : "modem level=low");
+    put_text(" falls=");
+    put_decimal(falls);
+    put_text(" rises=");
+    put_decimal(rises);
+    put_text(" shortest=");
+    if (rises == 0U) {
+        put_text("none");
+    } else {
+        put_decimal(shortest);
+    }
+    put_text(" longest=");
+    if (rises == 0U) {
+        put_text("none");
+    } else {
+        put_decimal(longest);
+    }
+    reply_end();
+}
+
 static void command_stats(void)
 {
     reply_ok("stats bytes=");
-    put_decimal(stat_bytes);
+    put_decimal(here->stat_bytes);
     put_text(" crc32=");
-    put_hex32(~stat_crc);
+    put_hex32(~here->stat_crc);
     put_text(" lines=");
-    put_decimal(stat_lines);
+    put_decimal(here->stat_lines);
     put_text(" overlong=");
-    put_decimal(stat_overlong);
+    put_decimal(here->stat_overlong);
     put_text(" lost=");
-    put_decimal(rx_lost);
+    put_decimal(here->rx_lost);
     reply_end();
 }
 
@@ -2145,23 +2430,25 @@ static void command_reset(void)
     tx_discard();
     clear_rules();
     drop_pending();
-    delay_ms = 0U;
-    echo_on = 0U;
-    silent = 0U;
-    announce_on = 0U;
-    flood_forever = 0U;
-    flood_remaining = 0U;
-    flood_position = 0U;
-    temperature_bound = 0U;
-    stat_bytes = 0U;
-    stat_crc = 0xFFFFFFFFU;
-    stat_lines = 0U;
-    stat_overlong = 0U;
-    rx_lost = 0U;
-    can_reset();
+    here->delay_ms = 0U;
+    here->echo_on = 0U;
+    here->silent = 0U;
+    here->announce_on = 0U;
+    here->flood_forever = 0U;
+    here->flood_remaining = 0U;
+    here->flood_position = 0U;
+    here->temperature_bound = 0U;
+    here->stat_bytes = 0U;
+    here->stat_crc = 0xFFFFFFFFU;
+    here->stat_lines = 0U;
+    here->stat_overlong = 0U;
+    here->rx_lost = 0U;
+    if (here->drives_can) {
+        can_reset();
+    }
     reply_ok("reset");
     reply_end();
-    if (baud != BOOT_BAUD) {
+    if (here->baud != BOOT_BAUD) {
         set_baud(BOOT_BAUD);
     }
 }
@@ -2209,7 +2496,9 @@ static void control(const uint8_t *text, uint32_t len)
         command_stats();
     } else if (is_word(text, word, "reset") && !has_arguments) {
         command_reset();
-    } else if (is_word(text, word, "can")) {
+    } else if (is_word(text, word, "modem")) {
+        command_modem(arguments, arguments_len, has_arguments);
+    } else if (is_word(text, word, "can") && here->drives_can) {
         if (has_arguments) {
             command_can(arguments, arguments_len);
         } else {
@@ -2235,67 +2524,67 @@ static void control(const uint8_t *text, uint32_t len)
 
 static void echo_bytes(const uint8_t *bytes, uint32_t count)
 {
-    if (echo_on && !silent) {
+    if (here->echo_on && !here->silent) {
         put_bytes(bytes, count);
     }
 }
 
 static void finish_line(void)
 {
-    uint32_t len = line_len;
+    uint32_t len = here->line_len;
 
-    while (len > 0U && line[len - 1U] == '\r') {
+    while (len > 0U && here->line[len - 1U] == '\r') {
         len--;
     }
-    if (line_kind == LINE_CONTROL) {
+    if (here->line_kind == LINE_CONTROL) {
         /* Not payload: the statistics go back to where this line began. */
-        stat_bytes = snapshot_bytes;
-        stat_crc = snapshot_crc;
-        if (line_overlong) {
+        here->stat_bytes = here->snapshot_bytes;
+        here->stat_crc = here->snapshot_crc;
+        if (here->line_overlong) {
             put_text("@peer error overlong");
             reply_end();
         } else {
-            control(line + PREFIX_LEN, len - PREFIX_LEN);
+            control(here->line + PREFIX_LEN, len - PREFIX_LEN);
         }
     } else {
-        stat_lines++;
-        if (line_overlong) {
-            stat_overlong++;
+        here->stat_lines++;
+        if (here->line_overlong) {
+            here->stat_overlong++;
         } else {
-            answer_line(line, len);
+            answer_line(here->line, len);
         }
     }
-    line_started = 0U;
+    here->line_started = 0U;
 }
 
 static void take_byte(uint8_t byte)
 {
-    if (!line_started) {
-        line_started = 1U;
-        line_len = 0U;
-        line_overlong = 0U;
-        prefix_seen = 0U;
-        line_kind = LINE_UNDECIDED;
-        snapshot_bytes = stat_bytes;
-        snapshot_crc = stat_crc;
+    if (!here->line_started) {
+        here->line_started = 1U;
+        here->line_len = 0U;
+        here->line_overlong = 0U;
+        here->prefix_seen = 0U;
+        here->line_kind = LINE_UNDECIDED;
+        here->snapshot_bytes = here->stat_bytes;
+        here->snapshot_crc = here->stat_crc;
     }
-    stat_bytes++;
-    stat_crc = crc32_step(stat_crc, byte);
+    here->stat_bytes++;
+    here->stat_crc = crc32_step(here->stat_crc, byte);
 
     /* Whether a line is control or payload is known after its first six
      * bytes, so an echo holds those back until it is. */
-    if (line_kind == LINE_UNDECIDED) {
-        if (byte == prefix[prefix_seen]) {
-            prefix_seen++;
-            if (prefix_seen == PREFIX_LEN) {
-                line_kind = LINE_CONTROL;
+    if (here->line_kind == LINE_UNDECIDED) {
+        if (byte == prefix[here->prefix_seen]) {
+            here->prefix_seen++;
+            if (here->prefix_seen == PREFIX_LEN) {
+                here->line_kind = LINE_CONTROL;
             }
         } else {
-            line_kind = LINE_PAYLOAD;
-            echo_bytes(prefix, prefix_seen);
+            here->line_kind = LINE_PAYLOAD;
+            echo_bytes(prefix, here->prefix_seen);
             echo_bytes(&byte, 1U);
         }
-    } else if (line_kind == LINE_PAYLOAD) {
+    } else if (here->line_kind == LINE_PAYLOAD) {
         echo_bytes(&byte, 1U);
     }
 
@@ -2303,32 +2592,32 @@ static void take_byte(uint8_t byte)
         finish_line();
         return;
     }
-    if (line_len < LINE_MAX) {
-        line[line_len] = byte;
-        line_len++;
+    if (here->line_len < LINE_MAX) {
+        here->line[here->line_len] = byte;
+        here->line_len++;
     } else {
-        line_overlong = 1U;
+        here->line_overlong = 1U;
     }
 }
 
 static void serve_pending(void)
 {
-    while (pending_count > 0U && (int32_t)(uptime_ms - pending[pending_first].due_ms) >= 0) {
-        uint8_t answer = pending[pending_first].answer;
+    while (here->pending_count > 0U && (int32_t)(uptime_ms - here->pending[here->pending_first].due_ms) >= 0) {
+        uint8_t answer = here->pending[here->pending_first].answer;
 
-        pending_first = (pending_first + 1U) % PENDING_MAX;
-        pending_count--;
+        here->pending_first = (here->pending_first + 1U) % PENDING_MAX;
+        here->pending_count--;
         write_answer(answer);
     }
 }
 
 static void serve_announcement(void)
 {
-    if (!announce_on || silent || (int32_t)(uptime_ms - announce_next_ms) < 0) {
+    if (!here->announce_on || here->silent || (int32_t)(uptime_ms - here->announce_next_ms) < 0) {
         return;
     }
-    put_bytes(announce_text, announce_len);
-    announce_next_ms = uptime_ms + announce_every_ms;
+    put_bytes(here->announce_text, here->announce_len);
+    here->announce_next_ms = uptime_ms + here->announce_every_ms;
 }
 
 static void serve_flood(void)
@@ -2336,21 +2625,36 @@ static void serve_flood(void)
     static const uint8_t digits[10] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9'};
     uint32_t queued = 0U;
 
-    if (silent) {
+    if (here->silent) {
         return;
     }
-    while ((flood_forever || flood_remaining > 0U) && tx_space() > 0U) {
-        tx_ring[tx_head % TX_RING] = digits[flood_position];
-        tx_head = tx_head + 1U;
-        flood_position = (flood_position + 1U) % 10U;
-        if (!flood_forever) {
-            flood_remaining--;
+    while ((here->flood_forever || here->flood_remaining > 0U) && tx_space() > 0U) {
+        here->tx_ring[here->tx_head % TX_RING] = digits[here->flood_position];
+        here->tx_head = here->tx_head + 1U;
+        here->flood_position = (here->flood_position + 1U) % 10U;
+        if (!here->flood_forever) {
+            here->flood_remaining--;
         }
         queued++;
     }
     if (queued > 0U) {
         tx_kick();
     }
+}
+
+/* One turn of a line: what arrived, then what is due. */
+static void serve_line(struct serial_peer *peer)
+{
+    here = peer;
+    while (here->rx_tail != here->rx_head) {
+        uint8_t byte = here->rx_ring[here->rx_tail % RX_RING];
+
+        here->rx_tail = here->rx_tail + 1U;
+        take_byte(byte);
+    }
+    serve_pending();
+    serve_announcement();
+    serve_flood();
 }
 
 int main(void)
@@ -2360,9 +2664,15 @@ int main(void)
     systick_init();
     led_init();
     usart2_init();
+    usart1_init();
     adc_init();
     can_init();
+    monitor_init();
 
+    here = &first_line;
+    put_text("@peer ready");
+    reply_end();
+    here = &second_line;
     put_text("@peer ready");
     reply_end();
 
@@ -2371,15 +2681,8 @@ int main(void)
             blinked = uptime_ms;
             GPIOA_ODR ^= (1U << LD2_PIN);
         }
-        while (rx_tail != rx_head) {
-            uint8_t byte = rx_ring[rx_tail % RX_RING];
-
-            rx_tail = rx_tail + 1U;
-            take_byte(byte);
-        }
-        serve_pending();
-        serve_announcement();
-        serve_flood();
+        serve_line(&first_line);
+        serve_line(&second_line);
         can_serve();
     }
 }

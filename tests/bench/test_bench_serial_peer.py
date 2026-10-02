@@ -15,6 +15,13 @@ container's tests build their project, their configuration and their peer
 inside the body, around a pseudo-terminal pair, and one body for both would
 mean restructuring that tier; its assertions stay exactly as they are.
 
+Every body runs over two lines, served by two different USB serial drivers on
+the host: the probe's own virtual COM port, and a USB-UART adapter wired to the
+board's second USART (`OVER_BOTH_LINES` in the conftest). The peer image
+answers on both, each line with its own rules, settings and statistics, so the
+bodies are the same and only the entry they drive differs. The adapter's half
+carries the adapter's mark, and a bench without one deselects it.
+
 The vocabulary is the container's. `peer.start_responder(*replies, delay_s=...,
 announce=..., announce_every_s=...)` sets the answer table, spelled the way the
 container's responder reads it, and `peer.received()` says what reached the
@@ -86,9 +93,25 @@ import pytest
 import yaml
 from support import scaled_time_bound
 
-from .conftest import BENCH_ONLY, COMMAND_TIMEOUT_S, Bench, BoardImages, child_command, isolated_environment
+from .conftest import (
+    BENCH_ONLY,
+    COMMAND_TIMEOUT_S,
+    OVER_BOTH_LINES,
+    Bench,
+    BoardImages,
+    bench_over,
+    child_command,
+    isolated_environment,
+)
 
 pytestmark = [pytest.mark.bench, BENCH_ONLY]
+
+
+@pytest.fixture(scope="module", params=OVER_BOTH_LINES)
+def bench(request: pytest.FixtureRequest, configured_bench: Bench) -> Bench:
+    """Every test here twice: over the probe's own port, and over the USB-UART adapter's line."""
+    return bench_over(request, configured_bench)
+
 
 # The answer tables, spelled the way both peers read them: the escapes are
 # Python's, so `\\r\\n` here is the two bytes on the wire. The same strings the
@@ -478,8 +501,8 @@ class Peer:
             self._control.close()
             self._control = None
 
-    def exchange(self, pairs: list[tuple[str, str]], server: Server | None = None) -> list[str]:
-        """Each ``(wire, command)`` written in one session, and the answer line each got."""
+    def exchange(self, pairs: list[tuple[str, str]], server: Server | None = None, answer_timeout_s: float = ANSWER_TIMEOUT_S) -> list[str]:
+        """Each ``(wire, command)`` written in one session, and the answer line each got within ``answer_timeout_s``."""
         server = server or self._server()
         opened = server.tool("com_session_start", port_id=self.port, clear_buffer=True)
         assert opened["ok"] is True, opened
@@ -489,7 +512,7 @@ class Peer:
             for wire, command in pairs:
                 written = server.tool("com_write", port_id=self.port, text=wire)
                 assert written["ok"] is True, written
-                answer, pending = self._answer(server, command, pending)
+                answer, pending = self._answer(server, command, pending, answer_timeout_s)
                 answers.append(answer)
         except BaseException:
             with suppress(Exception):
@@ -499,7 +522,7 @@ class Peer:
         assert stopped["ok"] is True, stopped
         return answers
 
-    def _answer(self, server: Server, command: str, pending: bytes) -> tuple[str, bytes]:
+    def _answer(self, server: Server, command: str, pending: bytes, timeout_s: float) -> tuple[str, bytes]:
         """The one line that answers ``command``, and what the line said after it.
 
         Searched for rather than expected first: a line that was quiet while
@@ -508,14 +531,14 @@ class Peer:
         maps every byte to one character, so a match's offsets are byte offsets.
         """
         pattern = re.compile(rf"@peer (?:ok|error) {re.escape(command)}(?: [^\r\n]*)?\r\n|@peer error (?:unknown|overlong)\r\n")
-        deadline = time.monotonic() + ANSWER_TIMEOUT_S
+        deadline = time.monotonic() + timeout_s
         while True:
             found = pattern.search(pending.decode("latin-1"))
             if found is not None:
                 return found.group(0).rstrip("\r\n"), pending[found.end() :]
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise PeerSilent(f"the peer did not answer `@peer {command}` within {ANSWER_TIMEOUT_S}s; the line said {pending[-400:]!r}")
+                raise PeerSilent(f"the peer did not answer `@peer {command}` within {timeout_s}s; the line said {pending[-400:]!r}")
             read = server.tool("com_read", port_id=self.port, wait_timeout_s=round(remaining, 3))
             assert read["ok"] is True, read
             pending += bytes.fromhex(read["data"]["hex"])

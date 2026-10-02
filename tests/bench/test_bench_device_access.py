@@ -3,7 +3,8 @@
 The stage without the device group holds the refusal; this is the other half,
 on the tier's ordinary run: the check finds the probe's USB node through sysfs
 and the serial port's real node behind the configured path, and passes both.
-It asks the kernel and opens nothing, and so does every assertion here.
+It asks the kernel and opens nothing, and so does every assertion here. The
+port is the probe's own, and then the USB-UART adapter's beside it.
 """
 
 from __future__ import annotations
@@ -12,9 +13,15 @@ import os
 
 import pytest
 
-from .conftest import BENCH_ONLY, Bench
+from .conftest import BENCH_ONLY, OVER_BOTH_LINES, Bench, bench_over
 
 pytestmark = [pytest.mark.bench, BENCH_ONLY]
+
+
+@pytest.fixture(scope="module", params=OVER_BOTH_LINES)
+def bench(request: pytest.FixtureRequest, configured_bench: Bench) -> Bench:
+    """The check once with the probe's own port, and once with the USB-UART adapter's."""
+    return bench_over(request, configured_bench)
 
 
 def test_doctor_passes_the_device_access_check_for_the_probe_and_the_port(bench: Bench) -> None:

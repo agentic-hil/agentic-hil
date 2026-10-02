@@ -96,7 +96,10 @@ com_ports:
     # when it publishes nothing at all.
     serial_number: "0669FF303435"
     baudrate: 115200
-    assert_dtr: false        # opening the port must not reset this board
+    assert_dtr: false        # this board wires DTR to reset: keep it released
+                             # for the session. On Linux the open itself was
+                             # measured to pulse it once, for 239 to 943
+                             # microseconds on an FT232R.
     assert_rts: false
     permissions:
       allow_write: true

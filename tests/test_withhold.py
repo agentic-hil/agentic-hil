@@ -134,6 +134,21 @@ def test_the_serial_of_every_attached_probe_is_withheld(sysfs: Path, capfd: pyte
     assert capfd.readouterr().out.splitlines() == ["[withheld] and [withheld]"]
 
 
+def test_the_serial_of_an_attached_usb_uart_adapter_is_withheld(sysfs: Path, capfd: pytest.CaptureFixture) -> None:
+    """The product's port inventory lists every serial port of the machine with
+    its serial number, so the adapter wired to the board beside the probe is
+    withheld like the probe, found by the runner's own discovery."""
+    adapter = sysfs / "bus" / "usb" / "devices" / "1-3"
+    adapter.mkdir(parents=True)
+    for attribute, value in (("idVendor", "0403"), ("idProduct", "6001"), ("busnum", "1"), ("devnum", "4"), ("serial", "ADAPTERSERIAL01")):
+        (adapter / attribute).write_text(f"{value}\n", encoding="utf-8")
+
+    command = a_command("print('/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_ADAPTERSERIAL01-if00-port0')")
+    assert withhold.main(["run", "--", *command]) == 0
+
+    assert capfd.readouterr().out.splitlines() == ["/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_[withheld]-if00-port0"]
+
+
 def test_a_report_the_next_step_reads_is_written_as_the_command_wrote_it(
     sysfs: Path, tmp_path: Path, capfd: pytest.CaptureFixture
 ) -> None:

@@ -393,7 +393,7 @@
     },
     "com_ports": {
       "type": "object",
-      "description": "Named serial/COM ports that Agentic HIL may open for stimuli and feedback. Reading needs no permission; assert_dtr and assert_rts decide whether opening the port touches the target.",
+      "description": "Named serial/COM ports that Agentic HIL may open for stimuli and feedback. Reading needs no permission; assert_dtr and assert_rts decide whether a session holds DTR and RTS asserted, and on Linux the open itself was measured to pulse DTR once when assert_dtr is false (see assert_dtr).",
       "propertyNames": {
         "pattern": "^[A-Za-z0-9_.-]+$"
       },
@@ -451,7 +451,8 @@
           "write_timeout_s": {
             "type": "number",
             "minimum": 0,
-            "default": 1.0
+            "default": 1.0,
+            "description": "How long one com_write may take to reach the line, in seconds. On Linux a write hands the line only what it carries within this time at the port's baudrate and framing: a longer payload answers serial_write_incomplete with bytes_written and data exactly what went out, and the rest is not sent. On Windows and macOS it is pyserial's write timeout. 0 leaves the write to the driver unpaced."
           },
           "encoding": {
             "type": "string",
@@ -460,12 +461,12 @@
           "assert_dtr": {
             "type": "boolean",
             "default": true,
-            "description": "Whether DTR is asserted when the port is opened. pyserial asserts it by default, and on boards that wire DTR to reset that restarts the target on every open. Set false to observe a target provably undisturbed; leave true when the peer needs DTR to talk."
+            "description": "Whether DTR is asserted while the port is open. pyserial asserts it by default, and on boards that wire DTR to reset that restarts the target on every open. Set false to keep DTR released for the session; leave true when the peer needs DTR to talk. False is not a proof that the open left DTR alone: on Linux, measured with an FT232R over 65 opens, the open itself asserted DTR once for 239 to 943 microseconds before it was released for the rest of the session and at close, so a board that wires DTR to reset sees that pulse."
           },
           "assert_rts": {
             "type": "boolean",
             "default": true,
-            "description": "Whether RTS is asserted when the port is opened. Same reasoning as assert_dtr; some boards wire RTS to reset or boot mode."
+            "description": "Whether RTS is asserted while the port is open. Same reasoning as assert_dtr; some boards wire RTS to reset or boot mode. What the open itself does to RTS when this is false has not been measured."
           },
           "max_buffer_bytes": {
             "type": "integer",

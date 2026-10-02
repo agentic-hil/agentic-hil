@@ -153,10 +153,14 @@ jobs:
         working-directory: under-test
         run: exec python3 ../harness/tools/bench_in_container.py --runtime podman --live-device-tree --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS/recovery-check" -- tests/bench/recovery_check.py
 
+      # `--require-usb-uart` states that this bench's board has a USB-UART
+      # adapter wired to it beside the probe. Without it, a bench whose adapter
+      # went missing would deselect the tests that drive the board over it and
+      # still be green; with it, that run is refused before anything is built.
       - name: Run the bench tier in its container
         if: ${{ success() && !inputs.diagnose_only }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS"
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --require-usb-uart --output "$BENCH_RESULTS"
 
       # The one stage the tier cannot hold: the probe attached and this user not
       # allowed to open it, as on a Linux account that has not joined the group
@@ -170,7 +174,7 @@ jobs:
       - name: Run the stage without the probe's device group
         if: ${{ !cancelled() && !inputs.diagnose_only && (!inputs.run_recovery_check || steps.recovery_check.outcome == 'success') }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --without-device-group --output "$BENCH_RESULTS/without-device-group"
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --without-device-group --require-usb-uart --output "$BENCH_RESULTS/without-device-group"
 
       # Kept separate from the standard tier so the extra pyOCD hardware
       # recordings cannot change either hard gate. It uses the normal bench

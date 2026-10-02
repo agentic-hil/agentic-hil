@@ -56,6 +56,11 @@ How a run reaches the bench:
   --without-device-group`` does. Such a run carries one stage alone, the module
   marked ``without_device_group``, and every other run on a bench leaves that
   module out; both are deselections, never skips.
+* ``AGENTIC_HIL_BENCH_USB_UART=<node>`` says a USB-UART adapter is wired to the
+  board beside the probe's own port, and names the adapter's node, which
+  ``tools/bench_in_container.py`` sets when it hands one in. The tests marked
+  ``usb_uart`` drive the board over it; a bench run without it deselects them,
+  with one line saying so, like the tests the package index leaves out.
 * HOME is deliberately *not* redirected for the commands this tier runs. The
   machine-wide device locks live under it, and they are what keeps this run off
   a board another run is holding. A tier that isolated HOME would be a tier that
@@ -73,7 +78,7 @@ import sys
 import tempfile
 from collections import Counter
 from collections.abc import Generator, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -117,6 +122,28 @@ ASK_ABOUT_A_USER_INSTALL = (
     "print(json.dumps({'python': sys.executable, 'pip': importlib.util.find_spec('pip') is not None, 'managed': marker if managed else ''}))"
 )
 INDEX_LEFT_OUT = pytest.StashKey[str]()
+
+# What names the USB-UART adapter wired to the board beside the probe's own
+# port, and the mark of the tests that drive the board over it. Set by
+# `tools/bench_in_container.py` when it hands an adapter in, which copies the
+# name; a test keeps the copies one. The adapter's entry is declared under the
+# mark's name, at the rate the peer image boots at on both of its lines.
+USB_UART_ENV = "AGENTIC_HIL_BENCH_USB_UART"
+# The public USB identity the runner hands an adapter in by, copied the same way:
+# FTDI's vendor id and the product ids of its FT232R, FT2232, FT4232, FT232H and
+# FT-X parts.
+USB_UART_VENDOR_ID = 0x0403
+USB_UART_PRODUCT_IDS = frozenset({0x6001, 0x6010, 0x6011, 0x6014, 0x6015})
+USB_UART = "usb_uart"
+USB_UART_BAUDRATE = 115200
+USB_UART_LEFT_OUT = pytest.StashKey[str]()
+# The two lines a module that redefines `bench` over both drives the board on:
+# the probe's own port, and the adapter, whose tests carry the adapter's mark.
+PROBE_PORT = "probe_port"
+OVER_BOTH_LINES = [
+    pytest.param(PROBE_PORT, id=PROBE_PORT),
+    pytest.param(USB_UART, id=USB_UART, marks=getattr(pytest.mark, USB_UART)),
+]
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CHECKOUT_SOURCES = REPOSITORY_ROOT / "src"
@@ -306,6 +333,8 @@ class Bench:
     config: Path
     config_root: Path
     state_root: Path
+    # The configured port the tests drive, where it is not the first one.
+    serial_port: str | None = None
 
     def environment(self, **overrides: str) -> dict[str, str]:
         """The environment a command gets: the operator's home, this project's configuration."""
@@ -333,6 +362,8 @@ class Bench:
         return sorted(self.configuration()["debuggers"])[0]
 
     def com_port_name(self) -> str:
+        if self.serial_port is not None:
+            return self.serial_port
         ports = sorted(self.configuration().get("com_ports") or {})
         if not ports:
             pytest.skip("this bench's configuration declares no serial port, and these plans read the board's banner over one")
@@ -345,7 +376,7 @@ class Bench:
 
 
 @pytest.fixture(scope="session")
-def bench(tmp_path_factory: pytest.TempPathFactory) -> Bench:
+def configured_bench(tmp_path_factory: pytest.TempPathFactory) -> Bench:
     """The demo, copied, configured against the attached hardware, once per session.
 
     ``agentic-hil init`` is what binds it: it reads the bench, writes the probe
@@ -397,6 +428,69 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> Bench:
     if verdict.returncode != 0 and not refused_for_the_withheld_groups_alone(prepared):
         refuse(f"this bench is not bound to hardware, so no plan can run against it:\n{verdict.stdout}")
     return prepared
+
+
+@pytest.fixture(scope="session")
+def bench(configured_bench: Bench) -> Bench:
+    """The bench a test drives: the configured one, unless its module says which line.
+
+    A fixture of its own beside `configured_bench` so that a module can redefine
+    it, over both serial lines for instance, while the session's fixtures that
+    build and flash the board keep depending on the one configuration.
+    """
+    return configured_bench
+
+
+@pytest.fixture(scope="session")
+def usb_uart_bench(configured_bench: Bench) -> Bench:
+    """The configured bench with the USB-UART adapter declared beside the probe's port, and driving it.
+
+    `init` binds the probe's own port alone, so the adapter's entry is written
+    the way an operator writes one for an adapter `init` does not bind: the
+    device by the stable name the product's inventory gives it, the serial
+    number and the vendor and product ids the inventory reports, the peer's
+    boot rate and the write permission. The copy lives beside the session's
+    configuration, outside the workspace, and the entry `init` wrote stays in
+    it. Whatever cannot be set up fails the session as `configured_bench` does:
+    an adapter the run was not handed, one the inventory does not show at the
+    node it was handed in at, and a `doctor` that is red for any reason but the
+    access the stage without the device group withholds.
+    """
+    node = os.environ.get(USB_UART_ENV)
+    if not node:
+        refuse(f"this run was handed no USB-UART adapter ({USB_UART_ENV} is not set), and a test asked for one")
+    code, inventory = configured_bench.document("com-ports")
+    found = [port for port in inventory.get("ports") or [] if isinstance(port, dict) and port.get("device") == node]
+    if code != 0 or len(found) != 1:
+        # By node and USB ids alone: the rest of an entry carries serial numbers.
+        shown = [{key: listed.get(key) for key in ("device", "vid", "pid")} for listed in inventory.get("ports") or [] if isinstance(listed, dict)]
+        said = inventory.get("summary") if code != 0 else json.dumps(shown)
+        refuse(f"the product's inventory shows {len(found)} port(s) at {node}, where the adapter was handed in: {said}")
+    port = found[0]
+    entry: dict[str, object] = {"device": port.get("stable_device") or node, "baudrate": USB_UART_BAUDRATE}
+    if port.get("serial_number"):
+        entry["serial_number"] = port["serial_number"]
+    entry.update({key: port[key] for key in ("vid", "pid") if isinstance(port.get(key), int) and not isinstance(port.get(key), bool)})
+    entry["permissions"] = {"allow_write": True}
+    import yaml
+
+    document = configured_bench.configuration()
+    document.setdefault("com_ports", {})[USB_UART] = entry
+    written = configured_bench.config_root / USB_UART / configured_bench.config.name
+    written.parent.mkdir(parents=True, exist_ok=True)
+    written.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    declared = replace(configured_bench, config=written, serial_port=USB_UART)
+    verdict = declared.run("doctor")
+    if verdict.returncode != 0 and not refused_for_the_withheld_groups_alone(declared):
+        refuse(f"the bench with the USB-UART adapter declared is not bound to hardware:\n{verdict.stdout}")
+    return declared
+
+
+def bench_over(request: pytest.FixtureRequest, configured_bench: Bench) -> Bench:
+    """The bench for one of `OVER_BOTH_LINES`: the probe's own port, or the adapter."""
+    if request.param == USB_UART:
+        return request.getfixturevalue("usb_uart_bench")
+    return configured_bench
 
 
 # `doctor`'s finding for a probe or a serial port this account may not open.
@@ -463,14 +557,14 @@ def missing_gdb(bench: Bench) -> str | None:
 
 
 @pytest.fixture(scope="session")
-def gdb(bench: Bench) -> None:
+def gdb(configured_bench: Bench) -> None:
     """The debugger the debug half drives, checked once, before any test of that half reaches the probe.
 
     The debug half's counterpart of the build tools ``firmware`` looks for, and
     asked for ahead of it: a bench without a debugger skips every test that asks
     for this with the one sentence ``missing_gdb`` gives, and runs the rest.
     """
-    why = missing_gdb(bench)
+    why = missing_gdb(configured_bench)
     if why is not None:
         raise MissingHostTool(why)
 
@@ -517,7 +611,7 @@ def put_on_board(bench: Bench, image: Path) -> dict:
 
 
 @pytest.fixture(scope="session")
-def firmware(bench: Bench) -> Path:
+def firmware(configured_bench: Bench) -> Path:
     """The demo's ELF, built here, because a plan that flashes needs one.
 
     Built rather than expected: this tier is run on a bench by an operator or by
@@ -528,10 +622,10 @@ def firmware(bench: Bench) -> Path:
     for tool in ("cmake", "arm-none-eabi-gcc"):
         if shutil.which(tool) is None:
             raise MissingHostTool(f"{tool} is not on PATH, so the demo firmware cannot be built here")
-    failure = built_where_it_stands(bench.project)
+    failure = built_where_it_stands(configured_bench.project)
     if failure is not None:
         pytest.skip(f"the demo firmware did not build here: {failure}")
-    image = bench.project / DEMO_IMAGE
+    image = configured_bench.project / DEMO_IMAGE
     assert image.is_file(), f"the build left no ELF at {image}"
     # Put that firmware on the board, once per session, through the product's
     # own plan runner. Every debug session below opens this ELF for its symbols
@@ -539,7 +633,7 @@ def firmware(bench: Bench) -> Path:
     # build; a board carrying some other firmware runs straight past it and the
     # resume times out. The flash tests used to be the only thing that made the
     # two agree, which made every debug test depend on running after them.
-    report = put_on_board(bench, image)
+    report = put_on_board(configured_bench, image)
     if report.get("ok") is not True:
         pytest.fail(f"the demo firmware could not be put on the board before this session: {report.get('summary')}", pytrace=False)
     return image
@@ -599,9 +693,9 @@ class BoardImages:
 
 
 @pytest.fixture(scope="session")
-def board_image_builds(bench: Bench, firmware: Path, tmp_path_factory: pytest.TempPathFactory) -> BoardImages:
+def board_image_builds(configured_bench: Bench, firmware: Path, tmp_path_factory: pytest.TempPathFactory) -> BoardImages:
     """The session's builds of the bench's own images, shared by every test that puts one on the board."""
-    return BoardImages(bench=bench, demo=firmware, build_root=tmp_path_factory.mktemp("bench-images"))
+    return BoardImages(bench=configured_bench, demo=firmware, build_root=tmp_path_factory.mktemp("bench-images"))
 
 
 @pytest.fixture
@@ -778,29 +872,42 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     items, so it goes by the mark and never by the directory. A test that
     installs the product from the bench image's package index is deselected the
     same way where `why_the_index_tests_are_left_out` gives a reason, and the
-    reason is reported after collection.
+    reason is reported after collection. So is a test with the USB-UART
+    adapter's mark on a run that was handed no adapter.
     """
     if os.environ.get(BENCH_ENV) != "1":
         return
     withheld = os.environ.get(DEVICE_GROUPS_ENV) == DEVICE_GROUPS_WITHHELD
+    wired = bool(os.environ.get(USB_UART_ENV))
     indexing = not withheld and any(item.get_closest_marker(NEEDS_THE_WHEELHOUSE) is not None for item in items)
     left_out = why_the_index_tests_are_left_out() if indexing else None
     kept: list[pytest.Item] = []
     deselected: list[pytest.Item] = []
+    unwired = 0
     for item in items:
         in_the_stage = item.get_closest_marker(WITHOUT_DEVICE_GROUP) is not None
         installable = left_out is None or item.get_closest_marker(NEEDS_THE_WHEELHOUSE) is None
-        (kept if in_the_stage == withheld and installable else deselected).append(item)
+        reachable = wired or item.get_closest_marker(USB_UART) is None
+        if in_the_stage == withheld and installable and not reachable:
+            unwired += 1
+        (kept if in_the_stage == withheld and installable and reachable else deselected).append(item)
     if left_out is not None:
         config.stash[INDEX_LEFT_OUT] = f"tests marked {NEEDS_THE_WHEELHOUSE}: {left_out}"
+    if unwired:
+        config.stash[USB_UART_LEFT_OUT] = (
+            f"tests marked {USB_UART}: deselected, this run was handed no USB-UART adapter ({USB_UART_ENV} is not set)"
+        )
     if deselected:
         config.hook.pytest_deselected(items=deselected)
         items[:] = kept
 
 
-def pytest_report_collectionfinish(config: pytest.Config) -> str | None:
-    """The one line that says why the tests with the index's mark were deselected, where they were."""
-    return config.stash.get(INDEX_LEFT_OUT, None)
+def pytest_report_collectionfinish(config: pytest.Config) -> str | list[str] | None:
+    """One line for each kind of test deselected for what this run lacks: the package index, the USB-UART adapter."""
+    lines = [line for key in (INDEX_LEFT_OUT, USB_UART_LEFT_OUT) if (line := config.stash.get(key, None)) is not None]
+    if not lines:
+        return None
+    return lines[0] if len(lines) == 1 else lines
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:

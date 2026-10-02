@@ -10,8 +10,8 @@ only the board, the probe and the right to open them.
 A run, in order:
 
 * checks `--expected-commit` against the selected checkout before any runtime
-  or hardware discovery, then finds the probe and refuses what it cannot run
-  against;
+  or hardware discovery, then finds the probe, and the USB-UART adapter where
+  one is wired to the board, and refuses what it cannot run against;
 * takes this machine's run lock, and stops a container an earlier run of this
   tool left behind;
 * builds the image from the selected source checkout's committed tree, never
@@ -20,8 +20,9 @@ A run, in order:
   the source is this tool's checkout; `--source` selects another checkout and
   `--expected-commit` can bind it to a full SHA before any hardware check or
   build. Uncommitted changes are named, and are not what runs;
-* runs the tier in a container that normally gets the probe's device nodes,
-  the machine's device locks and a directory of the run's own for its report.
+* runs the tier in a container that normally gets the probe's device nodes and
+  the adapter's, the machine's device locks and a directory of the run's own for
+  its report.
   The opt-in `--live-device-tree` mode instead bind mounts host `/dev` read only
   for USB re-enumeration and pyOCD discovery-reset stages; neither mode gives the container network,
   capabilities or the host process table;
@@ -79,6 +80,23 @@ container can be a different device lock from the one the host's runs take on
 it. This tool never opens a device: it reads sysfs, looks at the nodes and hands
 their paths to the runtime.
 
+The USB-UART adapter. A board can have a USB-UART adapter wired to a second
+UART of its own beside the probe's serial port, and the tier then drives the
+board over both. The adapter is found the way the probe is, and never by a
+serial number either: FTDI's vendor id and the product ids of its FT232R,
+FT2232, FT4232, FT232H and FT-X parts, and the tty the kernel's usb-serial
+layout puts under the interface, `<interface>/<name>/tty/<name>`. Its node is
+handed in beside the probe's, its links under /dev/serial/by-id come along with
+the probe's, and AGENTIC_HIL_BENCH_USB_UART tells the tier its node, which is
+what lets the tier's tests marked usb_uart run. A machine without an adapter
+runs the tier without those tests, which the tier deselects in one line. Two
+adapters are not chosen between, because that would be choosing the wiring, and
+an adapter with other than one port or one this user cannot open is not handed
+in either; each is said in one line. `--require-usb-uart` states that the
+adapter is there, and turns each of those, and a machine without one, into a
+refusal, before the queue and again after it, so a bench whose adapter went
+missing cannot pass with its tests deselected.
+
 Serialisation. Two runs must never drive the board at once. The backstop is the
 device locks the product takes under ~/.agentic-hil/device-locks: the machine's
 lock directory is mounted at the same place under the container's home, and a
@@ -107,8 +125,9 @@ nothing but the place the machine's lock directory is mounted.
 What is withheld. The gate's log and its artifact can be read by anyone who can
 read the repository, and the tier prints the probe's serial number and paths of
 this machine. Every line this tool prints or logs, and the JUnit report, has
-the probe's serial numbers, this machine's host name, its home directory and
-its user name replaced with [withheld], line by line. No line is removed.
+the probe's serial numbers, those of every USB-UART adapter it finds, this
+machine's host name, its home directory and its user name replaced with
+[withheld], line by line. No line is removed.
 
 The verdict is pytest's summary line or nothing. A run without one, without the
 marker the image writes, with a skip, or with nothing passed is not green,
@@ -130,6 +149,7 @@ Usage, from a checkout on the machine the board is attached to:
     python3 tools/bench_in_container.py --runtime docker
     python3 tools/bench_in_container.py --source ../candidate --expected-commit <full-sha>
     python3 tools/bench_in_container.py --without-device-group
+    python3 tools/bench_in_container.py --require-usb-uart   # the adapter must be there
     python3 tools/bench_in_container.py --distribution ubuntu-22.04
     python3 tools/bench_in_container.py --build-only         # the image alone, anywhere
 
@@ -140,8 +160,9 @@ tools/bench/README.md.
 
 Exit status: pytest's own when it reported; 2 when this machine cannot run the
 tier; 3 when the image did not build; 4 when there is no result; 5 when
-`--no-wait` met a held machine; 6 when no probe could be handed in; 7 when a
-container was left behind; 130 when interrupted.
+`--no-wait` met a held machine; 6 when no probe could be handed in, or no
+adapter where `--require-usb-uart` says there is one; 7 when a container was
+left behind; 130 when interrupted.
 """
 
 from __future__ import annotations
@@ -165,7 +186,7 @@ import threading
 import time
 from collections.abc import Iterable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TextIO
 
@@ -284,6 +305,14 @@ DEVICE_GROUPS_WITHHELD = "withheld"
 # a checkout that need not be installed; a test keeps the two copies one list.
 PROBE_VENDOR_ID = 0x0483
 PROBE_PRODUCT_IDS = frozenset({0x3744, 0x3748, 0x374B, 0x374D, 0x374E, 0x374F, 0x3752, 0x3753, 0x3754})
+# The USB-UART adapters a run hands in beside the probe, by their public USB
+# identity: FTDI's vendor id and the product ids of its FT232R, FT2232, FT4232,
+# FT232H and FT-X parts. What tells the tier the adapter's node is copied in
+# tests/bench/conftest.py with the identity, because the conftest does not
+# import this script; a test keeps the copies one.
+USB_UART_ENV = "AGENTIC_HIL_BENCH_USB_UART"
+USB_UART_VENDOR_ID = 0x0403
+USB_UART_PRODUCT_IDS = frozenset({0x6001, 0x6010, 0x6011, 0x6014, 0x6015})
 SYSFS = Path("/sys")
 SERIAL_BY_ID = Path("/dev/serial/by-id")
 TTY_NAME = re.compile(r"^tty[A-Za-z0-9_]+$")
@@ -519,8 +548,11 @@ def read_number(path: Path, base: int) -> int | None:
 
 
 def serial_ports_of(device: Path) -> list[str]:
-    """The ttys of a USB device's interfaces: `<interface>/tty/<name>`, a CDC ACM port.
+    """The ttys of a USB device's interfaces, in both of the kernel's layouts.
 
+    A CDC ACM port, which is what the probes present, is `<interface>/tty/<name>`.
+    A usb-serial port, which is what FTDI's adapters present, has a port device
+    of its own between the interface and the tty: `<interface>/<name>/tty/<name>`.
     Only the device's own subdirectories are looked in. Its links lead to the
     driver, the subsystem and the hub port, and following them would find
     other devices' ports.
@@ -533,23 +565,41 @@ def serial_ports_of(device: Path) -> list[str]:
     for child in children:
         if child.is_symlink() or not child.is_dir():
             continue
-        try:
-            names = sorted(entry.name for entry in (child / "tty").iterdir())
-        except OSError:
-            continue
-        ports += [f"/dev/{name}" for name in names if TTY_NAME.match(name)]
+        names: list[str] = []
+        with suppress(OSError):
+            names += [entry.name for entry in (child / "tty").iterdir()]
+        with suppress(OSError):
+            names += [
+                entry.name
+                for entry in child.iterdir()
+                if TTY_NAME.match(entry.name) and not entry.is_symlink() and (entry / "tty" / entry.name).is_dir()
+            ]
+        ports += [f"/dev/{name}" for name in sorted(names) if TTY_NAME.match(name)]
     return ports
+
+
+def usb_devices(sysfs: Path | None = None) -> list[Path]:
+    """The entries of /sys/bus/usb/devices: devices, root hubs and interfaces alike."""
+    devices = (SYSFS if sysfs is None else sysfs) / "bus" / "usb" / "devices"
+    try:
+        return sorted(devices.iterdir(), key=lambda entry: entry.name)
+    except OSError:
+        return []
+
+
+def where_it_sits(device: Path) -> str | None:
+    """A device's bus and number, which is enough to pick it out and names nothing that travels with it."""
+    bus = read_number(device / "busnum", 10)
+    number = read_number(device / "devnum", 10)
+    if bus is None or number is None:
+        return None
+    return f"bus {bus} device {number} (sysfs {device.name})"
 
 
 def discover_probes(sysfs: Path | None = None) -> list[Probe]:
     """Every attached in-circuit debugger or programmer the product recognises."""
-    devices = (SYSFS if sysfs is None else sysfs) / "bus" / "usb" / "devices"
-    try:
-        entries = sorted(devices.iterdir(), key=lambda entry: entry.name)
-    except OSError:
-        return []
     probes: list[Probe] = []
-    for device in entries:
+    for device in usb_devices(sysfs):
         if read_number(device / "idVendor", 16) != PROBE_VENDOR_ID:
             continue
         if read_number(device / "idProduct", 16) not in PROBE_PRODUCT_IDS:
@@ -568,6 +618,33 @@ def discover_probes(sysfs: Path | None = None) -> list[Probe]:
             )
         )
     return probes
+
+
+@dataclass(frozen=True)
+class UsbUart:
+    """One USB-UART adapter as sysfs shows it."""
+
+    where: str
+    serial_ports: tuple[str, ...]
+    serial_numbers: tuple[str, ...]
+
+
+def discover_usb_uarts(sysfs: Path | None = None) -> list[UsbUart]:
+    """Every attached USB-UART adapter of the kinds a run hands in, by vendor and product id alone."""
+    adapters: list[UsbUart] = []
+    for device in usb_devices(sysfs):
+        if read_number(device / "idVendor", 16) != USB_UART_VENDOR_ID:
+            continue
+        if read_number(device / "idProduct", 16) not in USB_UART_PRODUCT_IDS:
+            continue
+        where = where_it_sits(device)
+        if where is None:
+            continue
+        serial = read_attribute(device / "serial")
+        adapters.append(
+            UsbUart(where=where, serial_ports=tuple(serial_ports_of(device)), serial_numbers=(serial,) if serial else ())
+        )
+    return adapters
 
 
 def serial_number_behind(rdev: int) -> str | None:
@@ -604,15 +681,21 @@ def checked_node(path: str) -> str:
 
 @dataclass(frozen=True)
 class Devices:
-    """What the container gets of the probe, and the serials it is withheld by."""
+    """What the container gets of the probe and of the adapter, and the probe's serials it is withheld by."""
 
     usb_nodes: tuple[str, ...]
     serial_ports: tuple[str, ...]
     serial_numbers: tuple[str, ...]
+    usb_uart: str | None = None
+
+    @property
+    def ttys(self) -> tuple[str, ...]:
+        """Every serial port handed in: the probe's, then the adapter's."""
+        return (*self.serial_ports, *((self.usb_uart,) if self.usb_uart is not None else ()))
 
     @property
     def nodes(self) -> tuple[str, ...]:
-        return (*self.usb_nodes, *self.serial_ports)
+        return (*self.usb_nodes, *self.ttys)
 
 
 def the_devices(usb_devices: list[str], serial_devices: list[str]) -> Devices:
@@ -679,30 +762,75 @@ def docker_groups(devices: Devices) -> list[int]:
     return sorted(group for group in wanted if group not in (0, gid) and group in groups)
 
 
-def check_access(runtime: str, devices: Devices) -> None:
+def why_not_openable(runtime: str, node: str) -> str | None:
+    """Why the tier could not open the node for reading and writing under this runtime, or None where it can."""
     if runtime == "podman":
-        for node in devices.nodes:
-            if not host_can_open(node):
-                raise Refused(
-                    EXIT_NO_PROBE,
-                    f"this user cannot open {node} for reading and writing, and under rootless Podman the tier opens it "
-                    "with exactly this user's rights. tools/bench/README.md says what the machine provides once; a "
-                    "group joined after this session started reaches it only from a new session",
-                )
-        return
+        if host_can_open(node):
+            return None
+        return (
+            f"this user cannot open {node} for reading and writing, and under rootless Podman the tier opens it "
+            "with exactly this user's rights. tools/bench/README.md says what the machine provides once; a "
+            "group joined after this session started reaches it only from a new session"
+        )
     uid, gid = user_ids()
-    groups = user_groups()
+    status = device_status(node)
+    if docker_opens(status, uid, gid, user_groups()):
+        return None
+    return (
+        f"{node} belongs to user {status.st_uid} and group {status.st_gid} with mode "
+        f"{stat.S_IMODE(status.st_mode):04o}, and none of that lets this user read and write it. Docker "
+        "recreates the node in the container with that owner, group and mode and without an ACL, so a right "
+        "this user holds through an ACL does not reach the tier. Give the node a group this user belongs to "
+        "(tools/bench/README.md), or run under rootless Podman, which keeps the host's rights"
+    )
+
+
+def check_access(runtime: str, devices: Devices) -> None:
     for node in devices.nodes:
-        status = device_status(node)
-        if not docker_opens(status, uid, gid, groups):
-            raise Refused(
-                EXIT_NO_PROBE,
-                f"{node} belongs to user {status.st_uid} and group {status.st_gid} with mode "
-                f"{stat.S_IMODE(status.st_mode):04o}, and none of that lets this user read and write it. Docker "
-                "recreates the node in the container with that owner, group and mode and without an ACL, so a right "
-                "this user holds through an ACL does not reach the tier. Give the node a group this user belongs to "
-                "(tools/bench/README.md), or run under rootless Podman, which keeps the host's rights",
-            )
+        reason = why_not_openable(runtime, node)
+        if reason is not None:
+            raise Refused(EXIT_NO_PROBE, reason)
+
+
+def the_usb_uart(runtime: str, required: bool, voice: Voice) -> str | None:
+    """The node of the one USB-UART adapter this run hands in, or None where there is none to hand in.
+
+    Every adapter's serial numbers are withheld before anything about one is
+    said. Without `required` a run goes on without an adapter, and the tier
+    deselects the tests that need one; why one that is attached is not handed
+    in is said in one line. With it, every reason there is none is a refusal.
+    """
+    adapters = discover_usb_uarts()
+    voice.withhold(serial for adapter in adapters for serial in adapter.serial_numbers)
+    node: str | None = None
+    reason: str | None
+    if not adapters:
+        reason = "no USB-UART adapter of the kinds this runner hands in is attached to this machine's USB"
+    elif len(adapters) > 1:
+        reason = (
+            f"{len(adapters)} USB-UART adapters are attached ({'; '.join(adapter.where for adapter in adapters)}), "
+            "and choosing between them would be choosing the wiring"
+        )
+    elif len(adapters[0].serial_ports) != 1:
+        shown = len(adapters[0].serial_ports)
+        reason = (
+            f"the USB-UART adapter at {adapters[0].where} shows {shown or 'no'} serial port{'' if shown == 1 else 's'}, "
+            "and the tier drives the board over exactly one"
+        )
+    else:
+        try:
+            node = checked_node(adapters[0].serial_ports[0])
+        except Refused as refusal:
+            reason = str(refusal)
+        else:
+            reason = why_not_openable(runtime, node)
+    if reason is None:
+        return node
+    if required:
+        raise Refused(EXIT_NO_PROBE, f"{reason}; --require-usb-uart says this run hands one in, so nothing was run")
+    if adapters:
+        voice(f"{reason}; no adapter is handed in, and the tier deselects its tests marked usb_uart")
+    return None
 
 
 # This machine.
@@ -790,7 +918,7 @@ def stage_stable_names(serial_ports: tuple[str, ...], destination: Path) -> Path
 
     Each points at the node's own path, which is where the runtime puts the node
     in the container. Links to any other device are left out, and no name is
-    printed: a name carries the probe's serial number.
+    printed: a name carries the serial number of the probe or the adapter.
     """
     try:
         entries = sorted(SERIAL_BY_ID.iterdir(), key=lambda entry: entry.name)
@@ -1118,6 +1246,8 @@ def tier_command(
     command += ["-e", f"AGENTIC_HIL_BENCH_COMMIT={source_commit}", "-e", f"AGENTIC_HIL_BENCH_RUN_ID={run_id}"]
     if withhold_groups:
         command += ["-e", f"{DEVICE_GROUPS_ENV}={DEVICE_GROUPS_WITHHELD}"]
+    if devices.usb_uart is not None:
+        command += ["-e", f"{USB_UART_ENV}={devices.usb_uart}"]
     return [*command, image_id, "sh", "-c", CONTAINER_SCRIPT, SCRIPT_ARGV0, *FIXED_PYTEST_ARGS, *pytest_args]
 
 
@@ -1385,6 +1515,11 @@ def parse_options(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="For USB re-enumeration or pyOCD rediscovery: bind host /dev read-only (rootless Podman only).",
     )
+    parser.add_argument(
+        "--require-usb-uart",
+        action="store_true",
+        help="State that a USB-UART adapter is wired to the board, and refuse the run unless exactly one is handed in.",
+    )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER, help="After --: handed to pytest, replacing tests/bench -v.")
     return parser.parse_args(argv)
 
@@ -1439,6 +1574,10 @@ def main(argv: list[str] | None = None) -> int:
             devices = the_devices(options.usb_device, options.serial_device)
             voice.withhold(devices.serial_numbers)
             check_access(runtime, devices)
+            if options.require_usb_uart:
+                # Only a run that states the adapter is there is refused here:
+                # one that does not is told about the adapter once, below.
+                the_usb_uart(runtime, True, voice)
             locks = device_lock_directory()
     except Refused as refusal:
         voice(str(refusal))
@@ -1500,7 +1639,8 @@ def main(argv: list[str] | None = None) -> int:
         devices = the_devices(options.usb_device, options.serial_device)
         voice.withhold(devices.serial_numbers)
         check_access(runtime, devices)
-        stable_names = None if options.live_device_tree else stage_stable_names(devices.serial_ports, workdir / "by-id")
+        devices = replace(devices, usb_uart=the_usb_uart(runtime, options.require_usb_uart, voice))
+        stable_names = None if options.live_device_tree else stage_stable_names(devices.ttys, workdir / "by-id")
         # The one directory the tier writes to, and it is the run's own: the
         # output directory, which a gate uploads, is never mounted.
         results = workdir / "results"

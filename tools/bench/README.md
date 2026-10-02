@@ -54,6 +54,8 @@ configures anything on the machine.
 - A restart of the runner's service, or a new login, after a group change. A
   process keeps the groups it was started with, and so does everything it
   starts.
+- Where the board has one wired to it, the USB-UART adapter, with the same right
+  to open its serial port; see "The USB-UART adapter" below.
 
 `python3 tools/bench_in_container.py --build-only`, run as that user, is the
 check that the runtime builds. A run of the tier from a terminal, and then the
@@ -79,6 +81,7 @@ python3 tools/bench_in_container.py                      # the whole tier
 python3 tools/bench_in_container.py -- tests/bench/test_bench_serial.py -x
 python3 tools/bench_in_container.py --runtime docker
 python3 tools/bench_in_container.py --without-device-group
+python3 tools/bench_in_container.py --require-usb-uart       # the adapter must be there
 python3 tools/bench_in_container.py --runtime podman --live-device-tree -- tests/bench/usb_reset_reenumeration.py
 python3 tools/bench_in_container.py --distribution debian-12
 python3 tools/bench_in_container.py --build-only         # the image alone, anywhere
@@ -174,15 +177,73 @@ apply.
   naming the group, and `init` binds both and warns in the same words. It
   relies on the nodes being opened through a group, as above; a node the
   container could still open fails the stage by name. Every other run leaves
-  the stage out, as deselected rather than skipped.
+  the stage out, as deselected rather than skipped. A USB-UART adapter handed
+  in goes through the stage the same way, and `doctor` has to name its node too.
+- `--require-usb-uart` states that a USB-UART adapter is wired to the board; see
+  "The USB-UART adapter" below.
 
-In ordinary stages, the container gets only the probe's device nodes, the
-machine's device-lock directory, the serial port's `/dev/serial/by-id` links
-read only, and the directory the report is written to. The USB live-device-tree
+In ordinary stages, the container gets only the probe's device nodes and the
+adapter's, the machine's device-lock directory, the serial ports'
+`/dev/serial/by-id` links read only, and the directory the report is written to. The USB live-device-tree
 stage instead gets the host `/dev` directory read only, as described above. The
 container has no network or capabilities, and has a process table and host name
 of its own. A run as root is refused, because root's device locks are not the
 ones the board's user takes.
+
+## The USB-UART adapter
+
+A board can have a USB-UART adapter wired to a second UART of its own, beside
+the probe's serial port. The adapter reaches the host through another USB serial
+driver than the probe's port, ftdi_sio rather than cdc_acm, and its DTR output
+is wired to a pin the board watches, so the tier drives the board over both
+lines. The tests that need the adapter are marked `usb_uart`: the serial peer
+suite and the device access check run once over each line, and
+`tests/bench/test_bench_usb_uart.py` holds the adapter's listing, DTR and a
+write the line cannot carry in time.
+
+A run finds the adapter the way it finds the probe, through sysfs and by its
+USB identity alone, never by a serial number: FTDI's vendor id 0x0403 and the
+product id of an FT232R, FT2232, FT4232, FT232H or FT-X part (0x6001, 0x6010,
+0x6011, 0x6014, 0x6015). A usb-serial driver such as ftdi_sio puts a port device
+between the interface and the tty, `<interface>/ttyUSB0/tty/ttyUSB0`, where a CDC
+ACM port has `<interface>/tty/ttyACM0`, and the runner reads both layouts. It
+hands the adapter's node in beside the probe's, with its `/dev/serial/by-id`
+link, and tells the tier the node in `AGENTIC_HIL_BENCH_USB_UART`. The tier then
+declares the adapter as a second COM port, by that link and with the serial
+number and USB ids the product's own inventory reports for it. Every attached
+adapter's serial number is withheld, as the probe's is.
+
+- A machine without an adapter runs the tier without the tests marked
+  `usb_uart`, as deselected rather than skipped, and the run says so in one
+  line.
+- Two adapters, an adapter with other than one serial port, and an adapter this
+  user cannot open are not handed in. The run says why in one line, naming
+  where the adapter sits and never its serial number, and goes on without it.
+- `--require-usb-uart` states that the adapter is there. A run with it is
+  refused unless exactly one adapter can be handed in, before it queues and
+  again after the wait, with exit status 6. The gate passes it to the tier and
+  to the stage without the device group, and the nightly to every
+  distribution, so a bench whose adapter went missing is refused rather than
+  green with fewer tests.
+
+The wiring on the bench this project's gate runs on, an FT232R adapter and a
+NUCLEO-F446RE, from the adapter's pins to the board's:
+
+| Adapter | Board |
+| --- | --- |
+| GND | GND, CN10 pin 20 |
+| TXD | PA10, USART1_RX, CN10 pin 33 |
+| RXD | PA9, USART1_TX, CN10 pin 21 |
+| DTR# | PB12, CN10 pin 16 |
+| CTS# | PA12, USART1_RTS, CN10 pin 12 |
+| RTS# | not connected |
+| VCC | not connected |
+
+The peer image, `tests/bench/firmware/peer.c`, answers on USART1 exactly as on
+USART2, the probe's line, each line with its own rules, rate and statistics. It
+watches PB12 with a pull-up, so the pin reads high while DTR is released and
+low while it is asserted, and `@peer modem` reports the level, the edges and the
+shortest and longest low pulse since `@peer modem clear`.
 
 ## Interrupting a run
 
@@ -220,7 +281,8 @@ The exit status is pytest's own when pytest reported, and otherwise one of these
 - 3: the image did not build;
 - 4: no result;
 - 5: `--no-wait` met a held machine;
-- 6: no probe could be handed in;
+- 6: no probe could be handed in, or no USB-UART adapter where
+  `--require-usb-uart` states there is one;
 - 7: a container was left behind;
 - 130: interrupted.
 
@@ -229,8 +291,9 @@ The exit status is pytest's own when pytest reported, and otherwise one of these
 The tier prints the probe's serial number and paths of the machine it runs on,
 and the gate's log and artifact can be read by anyone who can read the
 repository. Every line the runner prints or logs, and the JUnit report, has the
-probe's serial numbers, the machine's host name, the user's home directory and
-the user name replaced with `[withheld]`, line by line. No line is removed, so a
+serial numbers of the probe and of every USB-UART adapter attached, the
+machine's host name, the user's home directory and the user name replaced with
+`[withheld]`, line by line. No line is removed, so a
 failure still shows the line it failed on.
 
 ## The gate
@@ -292,7 +355,8 @@ probe are that commit's to drive, which is the decision a dispatch makes.
 
 The gate runs the tier, and then `--without-device-group` on the image the
 tier's run built: after a red tier too, because what the stage proves does not
-depend on what the tier found, and never after a cancelled run. The opt-in
+depend on what the tier found, and never after a cancelled run. Both pass
+`--require-usb-uart`, because the bench's board has its adapter wired. The opt-in
 pyOCD, CubeProgrammer and USB reset recordings each get their own invocation
 and output directory after the standard stages; they run only when the earlier
 gates succeeded. No hardware result for an opt-in stage is implied by the
@@ -318,7 +382,8 @@ place before it is uploaded, so the job's log and its artifact name the probe's
 serial number and the machine's names as `[withheld]`, as this tool's do.
 
 Its second job runs this tool once for every distribution `--distribution`
-offers, one after another, after the first job whatever it found: each run
+offers, with `--require-usb-uart` as the gate passes it, one after another,
+after the first job whatever it found: each run
 queues on the lock itself, as the gate's does, and each distribution's report
 and log are uploaded as `bench-tier-<distribution>`, whatever the run did, and
 kept for fourteen days.

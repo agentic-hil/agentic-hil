@@ -2334,8 +2334,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "serial_write_incomplete": ErrorRemedy(
         meaning=(
-            "The line took only part of the payload: `bytes_written` of `bytes_requested` reached it, even after a "
-            "bounded retry of the remainder, and `data` shows exactly which bytes. The rest never left the host. This "
+            "The line took only part of the payload: `bytes_written` of `bytes_requested` reached it, and `data` shows "
+            "exactly which bytes. The rest never left the host. On Linux, with `write_timeout_s` above 0, a write hands "
+            "the line only what it carries in that time at its baudrate and framing and does not send the rest; "
+            "otherwise the remainder was retried a bounded number of times first. This "
             "is confirmed rather than unknown, so the session stays open and usable, and the short write is recorded "
             "under `cleanup_reasons` without holding the port. `likely_causes` names the usual reasons: a "
             "`write_timeout_s` too short for the payload at this baudrate, flow control, or a disconnect partway."
@@ -7285,8 +7287,8 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # `resource_id` renames the lock a run takes and can hand one probe's
     # exclusivity to another entry, `timeout_s` decides when a call is abandoned
     # mid-operation, and the COM buffer limits and DTR/RTS lines decide how much
-    # of a line is read and whether opening a port restarts the target. None of
-    # those is what an attached probe hands you either.
+    # of a line is read and what a session holds the target's modem lines at.
+    # None of those is what an attached probe hands you either.
     ConfigKeyRule("target", named=False, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
     # `type` used to be on that locked list, and the reason given for it was the
     # same sentence: it changes what a call does to the board. That reason does
@@ -7555,7 +7557,7 @@ _SECTION_PURPOSE: dict[str, str] = {
         f"`{CONFIG_DESCRIPTION_RIGHT}`; `allow_all_symbols` is a grant and belongs to the other right."
     ),
     "artifacts": "Which firmware files may be flashed, from where, and how large.",
-    "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is. Name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. `vid`/`pid` name which kind of adapter it is, which is what makes a serial mean a unit at all and is the only identity an adapter that publishes no serial can have. From `version: 3` on an entry must say which of them identifies it: a `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device name, or else an explicit `identity_source` (`vid_pid` for an adapter publishing USB ids but no serial, `device` for one publishing neither). Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
+    "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is. Name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. `vid`/`pid` name which kind of adapter it is, which is what makes a serial mean a unit at all and is the only identity an adapter that publishes no serial can have. From `version: 3` on an entry must say which of them identifies it: a `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device name, or else an explicit `identity_source` (`vid_pid` for an adapter publishing USB ids but no serial, `device` for one publishing neither). Reading needs no permission; `assert_dtr`/`assert_rts` decide whether a session holds DTR and RTS asserted. On Linux the open itself was measured to pulse DTR once with `assert_dtr: false` (an FT232R: 239 to 943 microseconds per open), so a board that wires DTR to reset can still see the open.",
     "can_buses": (
         "The CAN buses. `listen_only: true` is how a bus is observed without sending ACK bits, and it is enforced per "
         "adapter rather than assumed: `peak` sets the mode and reads it back from the driver, `socketcan` reads the "
@@ -7999,7 +8001,7 @@ One serial device written down two ways is one port as well. An entry that names
 
 The one identity that is *not* hardware-derived: a debugger entry with neither `resource_id` nor `probe_id` falls back to the backend toolchain. Two boards driven by the same backend would then share one lock, and one board reached through two backends would take two. `bench_run_start` returns a `warnings` entry when a declared device is in that state; the fix is a `probe_id`, or a `resource_id` shared by every entry naming that unit.
 
-Reading can still perturb a target: an SWD attach halts the core, a CAN controller outside `listen_only` sends dominant ACK bits, opening a serial port raises DTR on boards that wire it to reset. That is why the passive modes stay available: `can_buses.<name>.listen_only: true` and `com_ports.<name>.assert_dtr: false` / `assert_rts: false` are how a target is observed provably undisturbed. They are no longer a precondition for access; they are the way to prove a reading did not touch anything.
+Reading can still perturb a target: an SWD attach halts the core, a CAN controller outside `listen_only` sends dominant ACK bits, opening a serial port raises DTR on boards that wire it to reset. That is why the passive modes stay available: `can_buses.<name>.listen_only: true` is how a target is observed provably undisturbed, and `com_ports.<name>.assert_dtr: false` / `assert_rts: false` keep both lines released for the session. They are no longer a precondition for access. For CAN that is the way to prove a reading did not touch anything; a serial open is not proved untouched by them: on Linux, measured with an FT232R over 65 opens, the open itself asserted DTR once for 239 to 943 microseconds with `assert_dtr: false` before releasing it for the rest of the session and at close, so a board that wires DTR to reset sees that pulse.
 
 What `listen_only: true` is worth is what the adapter can be held to, and that differs by adapter, so it is enforced rather than assumed.
 

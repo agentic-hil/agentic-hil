@@ -68,13 +68,14 @@ BUILD_TESTS = ["test_build_firmware_flashes", "test_build_firmware_answers_after
 DEBUG_TESTS = ["test_debug_session_stops_at_main", "test_debug_breakpoint_is_hit", "test_debug_symbol_is_read"]
 ALL_TESTS = HARDWARE_TESTS + BUILD_TESTS + DEBUG_TESTS
 
-# A module in the tier's shape. Its `bench` stands in for the tier's own, with a
-# probe that answers or with none, its `firmware` for a build and a flash that
-# need no toolchain and no board, or for a build that failed, where the run asks
-# for that, and its `probe` for the first thing a real test does with the
-# hardware: the log it writes is how the test outside sees which tests got that
-# far. `gdb` is not defined here. It comes from the tier's conftest, loaded as a
-# plugin, as in the real tier.
+# A module in the tier's shape. Its `configured_bench` stands in for the tier's
+# own, which the tier's `bench` and `gdb` are built on, with a probe that
+# answers or with none, its `firmware` for a build and a flash that need no
+# toolchain and no board, or for a build that failed, where the run asks for
+# that, and its `probe` for the first thing a real test does with the hardware:
+# the log it writes is how the test outside sees which tests got that far.
+# `bench` and `gdb` are not defined here. They come from the tier's conftest,
+# loaded as a plugin, as in the real tier.
 TINY_TIER = '''
 """The bench tier's shape, with the hardware replaced by fakes."""
 
@@ -91,7 +92,7 @@ SETTINGS = json.loads(Path(__file__).with_name("tiny_bench.json").read_text(enco
 
 
 @pytest.fixture(scope="session")
-def bench():
+def configured_bench():
     if not SETTINGS["probe_attached"]:
         refuse("this bench is not bound to hardware, so no plan can run against it: no probe answered")
     return Bench(
@@ -105,10 +106,10 @@ def bench():
 if SETTINGS["fake_firmware"]:
 
     @pytest.fixture(scope="session")
-    def firmware(bench):
+    def firmware(configured_bench):
         if SETTINGS["build_failure"] is not None:
             pytest.skip(SETTINGS["build_failure"])
-        return bench.project / "build" / "Debug" / "nucleo-f446re_demo.elf"
+        return configured_bench.project / "build" / "Debug" / "nucleo-f446re_demo.elf"
 
 
 @pytest.fixture

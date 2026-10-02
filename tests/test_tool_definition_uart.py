@@ -685,7 +685,9 @@ def test_com_session_start_opens_the_named_port_buffers_for_com_read_and_holds_i
 @pytest.mark.parametrize(("port_id", "asserted"), [(PORT_ID, True), (QUIET_PORT_ID, False)])
 def test_com_session_start_drives_dtr_and_rts_as_configured(bench: SimpleNamespace, port_id: str, asserted: bool) -> None:
     """Asserted by default, so a board that wires DTR or RTS to reset restarts
-    on the open; `assert_dtr: false` and `assert_rts: false` leave both low."""
+    on the open; `assert_dtr: false` and `assert_rts: false` hold both released
+    for the session. On Linux the open itself still pulses DTR once, which a
+    fake line does not show."""
     started(bench.service, port_id)
 
     handle = bench.line.handle(port_id)
@@ -991,9 +993,10 @@ def test_com_write_takes_exactly_one_of_text_or_hex(bench: SimpleNamespace, payl
 
 @pytest.mark.parametrize(("accepted_per_write", "sent"), [pytest.param(2, 8, id="two-bytes-per-attempt"), pytest.param(0, 0, id="nothing-taken")])
 def test_a_short_write_reports_the_bytes_that_reached_the_line(bench: SimpleNamespace, accepted_per_write: int, sent: int) -> None:
-    """bytes_written is what the driver took, after a bounded retry of the
-    remainder, not what was asked for; a write that stays short is
-    serial_write_incomplete."""
+    """bytes_written is what the driver took, not what was asked for, and a
+    write that stays short is serial_write_incomplete. This fake line is no
+    Linux tty, so the write here is pyserial's own, retried against its
+    remainder a bounded number of times before it answers short."""
     service, line = bench.service, bench.line
     started(service)
     line.accepts_per_write[DEVICES[PORT_ID]] = accepted_per_write

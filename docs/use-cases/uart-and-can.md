@@ -129,9 +129,12 @@ reported the same failure the same way, in text and in hex.
   another board, after a replug or with a second adapter attached, is refused
   as `com_port_identity_mismatch`, with nothing opened and nothing written to
   either board.
-- An entry can leave DTR and RTS unasserted on open (`assert_dtr: false`,
-  `assert_rts: false`), so opening the port does not reset a board that wires
-  them to its reset line.
+- An entry can keep DTR and RTS released for the session (`assert_dtr: false`,
+  `assert_rts: false`), so a session does not hold a board that wires them to
+  its reset line in reset. The open itself is not proved untouched by that: on
+  Linux, measured with an FT232R over 65 opens, it asserted DTR once for 239 to
+  943 microseconds before DTR was released for the rest of the session and at
+  close.
 - Writing needs `allow_write` on the port. Reading needs no permission, because
   exclusivity carries that load: a run holds the port for its whole duration,
   so no second reader consumes the answer a claim was waiting for.

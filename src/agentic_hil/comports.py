@@ -5,8 +5,11 @@ import errno
 import math
 import os
 import re
+import select
+import sys
 import threading
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -925,6 +928,82 @@ def _write_with_bounded_retry(serial_handle: object, data: bytes) -> int:
             return sent
 
 
+# On Linux a write with a write_timeout_s is paced by the line itself. pyserial's
+# POSIX write hands the whole payload to the tty, then waits for room with a
+# select bounded by write_timeout and raises "Write timeout" when that runs out,
+# even after the tty took every byte, so the count is lost. Over a pseudo-terminal
+# whose far end had stopped reading, a 4096-byte write raised after one second
+# and all 4096 bytes reached the far end once it read again; on an FT232R at
+# 9600 baud, where 4096 bytes are more than four seconds of line, the same write
+# raised after one second. So the line is handed no more than it carries within
+# write_timeout_s at its own rate and framing, and the bytes beyond that are not
+# sent at all, which is what makes the count exact and the call last about
+# write_timeout_s. Windows and macOS keep pyserial's own write.
+class _PosixLine:
+    """The descriptor under a pyserial POSIX port, written without pyserial's write timeout."""
+
+    def __init__(self, fd: int) -> None:
+        self.fd = fd
+
+    def write_some(self, data: bytes) -> int:
+        """Hand ``data`` to the tty: the count it took now, 0 while its queue is full."""
+        try:
+            return os.write(self.fd, data)
+        except BlockingIOError:
+            return 0
+
+    def wait_writable(self, timeout_s: float) -> bool:
+        """Whether the tty's queue made room within ``timeout_s``."""
+        _readable, ready, _failed = select.select([], [self.fd], [], max(0.0, timeout_s))
+        return bool(ready)
+
+
+def _posix_line(serial_handle: object) -> _PosixLine | None:
+    """The line a write to ``serial_handle`` is paced on, or None where pyserial's own write stays."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        from serial import serialposix
+    except ImportError:
+        return None
+    if not isinstance(serial_handle, serialposix.Serial):
+        return None
+    fd = getattr(serial_handle, "fd", None)
+    return _PosixLine(fd) if isinstance(fd, int) and fd >= 0 else None
+
+
+def _line_allowance(serial_handle: object, size: int, timeout_s: float) -> int:
+    """How many of ``size`` bytes the line carries within ``timeout_s``.
+
+    A character is a start bit, its data bits, a parity bit unless parity is
+    none, and its stop bits. The product never sets the framing, so a handle
+    that names none runs at pyserial's 8N1.
+    """
+    bytesize = getattr(serial_handle, "bytesize", 8)
+    parity = getattr(serial_handle, "parity", "N")
+    stopbits = getattr(serial_handle, "stopbits", 1)
+    frame_bits = 1 + bytesize + (0 if parity == "N" else 1) + stopbits
+    return max(0, min(size, int(timeout_s * serial_handle.baudrate / frame_bits)))
+
+
+def _paced_write(line: _PosixLine, data: bytes, timeout_s: float, allowance: int, clock: Callable[[], float] = time.monotonic) -> int:
+    """Hand the line the first ``allowance`` bytes of ``data`` within ``timeout_s``, and return how many it took.
+
+    Each offer is exactly the part of the allowance not yet taken, and a full
+    queue is waited on for no longer than what is left of ``timeout_s``.
+    """
+    deadline = clock() + timeout_s
+    sent = 0
+    while sent < allowance:
+        sent += max(0, min(int(line.write_some(data[sent:allowance])), allowance - sent))
+        if sent >= allowance:
+            break
+        remaining = deadline - clock()
+        if remaining <= 0 or not line.wait_writable(remaining):
+            break
+    return sent
+
+
 class ComPortService:
     def __init__(self, config: AgenticHILConfig, coordinator: HardwareCoordinator | None = None):
         self.config = config
@@ -1174,7 +1253,12 @@ class ComPortService:
             if not session.log_received():
                 return self._active_session(port_id, tool)
             try:
-                sent = _write_with_bounded_retry(session.serial_handle, data)
+                timeout_s = session.port_config.write_timeout_s
+                line = _posix_line(session.serial_handle) if timeout_s > 0 else None
+                if line is None:
+                    sent = _write_with_bounded_retry(session.serial_handle, data)
+                else:
+                    sent = _paced_write(line, data, timeout_s, _line_allowance(session.serial_handle, len(data), timeout_s))
                 flush = getattr(session.serial_handle, "flush", None)
                 if callable(flush):
                     flush()
@@ -1197,19 +1281,25 @@ class ComPortService:
             audit_error = session.append_audit({"direction": "tx", "bytes": len(sent_data), "hex": sent_data.hex(), "text": decode_bytes(sent_data, session.port_config.encoding)}, self.config)
         if sent < len(data):
             # Confirmed short, not unknown: every attempt returned normally,
-            # nothing raised, and pyserial's own return values, read this
-            # time instead of discarded, say fewer bytes reached the line
-            # than were asked for even after `_write_with_bounded_retry`'s
-            # own retry of the remainder. There is no missing proof here for
+            # nothing raised, and the counts, pyserial's own return values or
+            # the paced write's, say fewer bytes reached the line than were
+            # asked for, even after `_write_with_bounded_retry`'s own retry of
+            # the remainder, or within write_timeout_s on a paced line, where
+            # the rest was never handed over. There is no missing proof here for
             # a later call to supply, so this does not hold the lease the
             # way an exception mid-write does: it records what happened,
             # by its own reason, and leaves the session usable.
+            shortfall = (
+                ", even after a bounded retry of the remainder."
+                if line is None
+                else f" within write_timeout_s ({timeout_s:g} s); the rest was not sent."
+            )
             result = {
                 "ok": False,
                 "tool": tool,
                 "port_id": port_id,
                 "error_type": "serial_write_incomplete",
-                "summary": f"COM port write was short: {sent} of {len(data)} byte(s) reached the line, even after a bounded retry of the remainder.",
+                "summary": f"COM port write was short: {sent} of {len(data)} byte(s) reached the line{shortfall}",
                 "bytes_written": sent,
                 "bytes_requested": len(data),
                 "data": data_result(sent_data, session.port_config.encoding),
@@ -1493,10 +1583,13 @@ class ComPortService:
             # opened. Passing the device to the constructor opens it immediately
             # with pyserial's own defaults, which raise DTR and RTS, and on a
             # board that wires DTR to reset, listening to a target restarts it.
-            # pyserial applies the requested states as part of open(); a driver
-            # that pulses a line during the open itself is beyond what any host
-            # can suppress, which is why listen_only and this pair are described
-            # as evidence of intent, not as a hardware guarantee.
+            # pyserial applies the requested states as part of open(), and the
+            # open itself can still move a line: on Linux an FT232R opened with
+            # DTR requested released asserted it once during the open, for 239
+            # to 943 microseconds per open over 65 opens, and kept it released
+            # from then on and at close. This code does not suppress that pulse,
+            # which is why this pair is described as what a session holds the
+            # lines at, not as a guarantee that the open moved nothing.
             serial_handle = serial.Serial()
             serial_handle.port = port_config.device
             serial_handle.baudrate = port_config.baudrate
@@ -1633,9 +1726,9 @@ class ComPortService:
         return {"ok": True, "session": session}
 
     def _port_status(self, port_id: str, port_config: ComPortConfig, session: ComPortSession | None) -> JsonObject:
-        # assert_dtr/assert_rts are reported because they decide whether merely
-        # opening this port touches the target; a reader judging whether an
-        # observation was passive needs to see them without opening the config.
+        # assert_dtr/assert_rts are reported because they decide what a session
+        # on this port holds the target's modem lines at; a reader judging how
+        # passive an observation was needs to see them without opening the config.
         result: JsonObject = {"device": port_config.device, "baudrate": port_config.baudrate, "encoding": port_config.encoding, "max_buffer_bytes": port_config.max_buffer_bytes, "max_write_bytes": port_config.max_write_bytes, "assert_dtr": port_config.assert_dtr, "assert_rts": port_config.assert_rts, "session_active": False}
         # Which hardware this entry names, next to the name it is reached by. A
         # reader deciding whether a port is safely addressed needs both.

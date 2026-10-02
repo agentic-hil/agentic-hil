@@ -17,6 +17,9 @@ Four things are held:
   the report, and never the host's process table or a privileged container;
 * finding the probe, and every refusal on the way to it: no runtime, no probe,
   two probes, a node this user cannot open, a machine that is not Linux, root;
+  and the USB-UART adapter beside it, handed in where there is exactly one this
+  user can open, said so where there is not, and refused for that only where
+  the run states one must be there;
 * the verdict, which is pytest's summary line or nothing: a run with no summary,
   without the image's marker, with a skip or with nothing passed is not green;
 * the queue and the teardown: the machine's run lock held for the whole run, a
@@ -75,6 +78,14 @@ SERIAL_GROUP, USB_GROUP = 20, 46
 USB_NODE = "/dev/bus/usb/001/005"
 TTY_NODE = "/dev/ttyACM0"
 
+# A USB-UART adapter's serial and node, made up like the probe's, and the group
+# its node is given, which this user belongs to.
+ADAPTER_SERIAL = "ADAPTERSERIAL01"
+SECOND_ADAPTER_SERIAL = "ADAPTERSERIAL02"
+ADAPTER_NODE = "/dev/ttyUSB0"
+ADAPTER_GROUP = 25
+ADAPTER_BY_ID = f"usb-FTDI_FT232R_USB_UART_{ADAPTER_SERIAL}-if00-port0"
+
 MARKED = f"{bench_in_container.MARKER_TEXT}\n"
 PASSING_TIER = (
     MARKED
@@ -130,6 +141,48 @@ def a_usb_device(
     (interface / "bInterfaceNumber").write_text("02\n", encoding="utf-8")
     for tty in ttys:
         (interface / "tty" / tty).mkdir(parents=True)
+    return directory
+
+
+def a_usb_uart(
+    sysfs: Path,
+    name: str,
+    *,
+    product: str = "6001",
+    bus: int = 1,
+    device: int = 4,
+    serial: str | None = ADAPTER_SERIAL,
+    ttys: tuple[str, ...] = ("ttyUSB0",),
+) -> Path:
+    """One FTDI USB-UART adapter the way /sys/bus/usb/devices shows it.
+
+    Laid out after a recording of an FT232R on the bench, kernel 6.8 with the
+    ftdi_sio driver: the usb-serial layout, in which the interface carries a
+    port device named like its tty, with the tty under it,
+    `<interface>/<name>/tty/<name>`, beside the endpoints and the GPIO chip the
+    driver adds. One interface per tty. The interface's colon is an underscore,
+    as in `a_usb_device`.
+    """
+    directory = sysfs / "bus" / "usb" / "devices" / name
+    directory.mkdir(parents=True)
+    attributes = (("idVendor", "0403"), ("idProduct", product), ("bcdDevice", "0600"), ("busnum", str(bus)), ("devnum", str(device)), ("speed", "12"))
+    for attribute, value in attributes:
+        (directory / attribute).write_text(f"{value}\n", encoding="utf-8")
+    if serial is not None:
+        (directory / "serial").write_text(f"{serial}\n", encoding="utf-8")
+    for subdirectory in ("ep_00", "power"):
+        (directory / subdirectory).mkdir()
+    for number, tty in enumerate(ttys):
+        interface = directory / f"{name}_1.{number}"
+        interface.mkdir()
+        (interface / "bInterfaceNumber").write_text(f"{number:02d}\n", encoding="utf-8")
+        for subdirectory in ("ep_02", "ep_81", "gpio", "gpiochip0", "power"):
+            (interface / subdirectory).mkdir()
+        port = interface / tty
+        (port / "tty" / tty).mkdir(parents=True)
+        (port / "power").mkdir()
+        (port / "latency_timer").write_text("16\n", encoding="utf-8")
+        (port / "port_number").write_text("0\n", encoding="utf-8")
     return directory
 
 
@@ -775,7 +828,7 @@ def test_a_probe_is_found_by_its_public_usb_identity(tmp_path: Path) -> None:
     sysfs = tmp_path / "sys"
     a_usb_device(sysfs, "3-2", product="374b", bus=3, device=17)
     a_usb_device(sysfs, "usb3", vendor="1d6b", product="0002", bus=3, device=1, serial="0000:00:14.0", ttys=())
-    a_usb_device(sysfs, "3-4", vendor="0403", product="6001", bus=3, device=18, serial="ADAPTER01", ttys=("ttyUSB0",))
+    a_usb_uart(sysfs, "3-4", bus=3, device=18)
     (sysfs / "bus" / "usb" / "devices" / "3-2_1.0").mkdir()
 
     probes = bench_in_container.discover_probes(sysfs)
@@ -898,6 +951,256 @@ def test_a_named_node_is_traced_back_to_its_probe_for_the_serial_to_withhold(
     out = capsys.readouterr().out
     assert SECOND_SERIAL not in out
     assert f"probe {bench_in_container.WITHHELD} answered" in out
+
+
+# The USB-UART adapter.
+
+
+@pytest.fixture
+def adapter(machine: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """The machine with one USB-UART adapter attached beside the probe, its node in a group this user has."""
+    a_usb_uart(machine.sysfs, "1-3")
+    machine.statuses[ADAPTER_NODE] = a_node(gid=ADAPTER_GROUP)
+    machine.openable.add(ADAPTER_NODE)
+    monkeypatch.setattr(bench_in_container, "user_groups", lambda: {GID, SERIAL_GROUP, USB_GROUP, ADAPTER_GROUP})
+    return machine
+
+
+def handed_in(command: list[str]) -> list[str]:
+    """What the tier is told about the adapter: the values of its variable."""
+    prefix = f"{bench_in_container.USB_UART_ENV}="
+    return [value[len(prefix) :] for value in option_values(command, "-e") if value.startswith(prefix)]
+
+
+def test_an_adapter_is_found_by_its_public_usb_identity_in_the_usb_serial_layout(tmp_path: Path) -> None:
+    """FTDI's vendor id and the product ids of the parts the runner hands in,
+    and the tty under the interface's port device, which is where the kernel
+    puts a usb-serial port. Another vendor's usb-serial port, an FTDI part of
+    another kind, the probe and the hubs are passed over, and where it sits
+    names it, never its serial."""
+    sysfs = tmp_path / "sys"
+    a_usb_device(sysfs, "1-1")
+    a_usb_device(sysfs, "usb1", vendor="1d6b", product="0002", bus=1, device=1, serial="0000:00:07.0", ttys=())
+    a_usb_uart(sysfs, "1-3")
+    a_usb_uart(sysfs, "1-4", product="6017", device=6, serial=SECOND_ADAPTER_SERIAL, ttys=("ttyUSB1",))
+    other = a_usb_uart(sysfs, "1-5", device=7, serial="OTHERVENDOR1", ttys=("ttyUSB2",))
+    (other / "idVendor").write_text("067b\n", encoding="utf-8")
+    (sysfs / "bus" / "usb" / "devices" / "1-3_1.0").mkdir()
+
+    adapters = bench_in_container.discover_usb_uarts(sysfs)
+
+    assert adapters == [
+        bench_in_container.UsbUart(where="bus 1 device 4 (sysfs 1-3)", serial_ports=(ADAPTER_NODE,), serial_numbers=(ADAPTER_SERIAL,))
+    ]
+    assert [probe.serial_ports for probe in bench_in_container.discover_probes(sysfs)] == [(TTY_NODE,)]
+
+
+@pytest.mark.parametrize("product", ["6001", "6010", "6011", "6014", "6015"])
+def test_every_ftdi_part_the_runner_names_is_found(tmp_path: Path, product: str) -> None:
+    sysfs = tmp_path / "sys"
+    a_usb_uart(sysfs, "2-1", product=product)
+
+    assert [adapter.serial_ports for adapter in bench_in_container.discover_usb_uarts(sysfs)] == [(ADAPTER_NODE,)]
+
+
+def test_the_adapter_is_named_in_the_words_and_by_the_identity_the_tier_reads() -> None:
+    """Copies of one name and one identity, because the runner is a stdlib
+    script and the tier's conftest does not import it. This keeps them one."""
+    from tests.bench.conftest import USB_UART_ENV, USB_UART_PRODUCT_IDS, USB_UART_VENDOR_ID
+
+    assert bench_in_container.USB_UART_ENV == USB_UART_ENV
+    assert bench_in_container.USB_UART_VENDOR_ID == USB_UART_VENDOR_ID
+    assert bench_in_container.USB_UART_PRODUCT_IDS == USB_UART_PRODUCT_IDS
+
+
+@pytest.mark.parametrize("runtime", ["podman", "docker"])
+def test_the_adapter_goes_in_beside_the_probe_and_the_tier_is_told_its_node(adapter: SimpleNamespace, runtime: str) -> None:
+    """Its node with the probe's, and under Docker its node's group with theirs;
+    the variable is what lets the tier's tests marked usb_uart run."""
+    assert run(adapter, "--runtime", runtime) == 0
+
+    command = adapter.runtime.tier
+    assert option_values(command, "--device") == [USB_NODE, TTY_NODE, ADAPTER_NODE]
+    assert handed_in(command) == [ADAPTER_NODE]
+    if runtime == "docker":
+        assert option_values(command, "--group-add") == [str(SERIAL_GROUP), str(ADAPTER_GROUP), str(USB_GROUP)]
+
+
+def test_a_machine_without_an_adapter_tells_the_tier_nothing_and_says_nothing(
+    machine: SimpleNamespace, capsys: pytest.CaptureFixture
+) -> None:
+    """The tier deselects the adapter's tests in a line of its own, so this
+    adds none: a bench without an adapter is an ordinary bench."""
+    assert run(machine) == 0
+
+    assert handed_in(machine.runtime.tier) == []
+    assert "USB-UART" not in capsys.readouterr().err
+
+
+def test_without_the_device_group_the_adapter_goes_in_with_the_probe(adapter: SimpleNamespace) -> None:
+    """That stage holds `doctor` to naming the adapter's node too, so it gets
+    the node and the tier's word for it, and none of the groups."""
+    assert run(adapter, "--without-device-group") == 0
+
+    command = adapter.runtime.tier
+    assert option_values(command, "--device") == [USB_NODE, TTY_NODE, ADAPTER_NODE]
+    assert handed_in(command) == [ADAPTER_NODE]
+    assert "--group-add" not in command
+
+
+def test_with_the_live_device_tree_the_tier_is_still_told_the_adapters_node(adapter: SimpleNamespace) -> None:
+    assert run(adapter, "--live-device-tree") == 0
+
+    command = adapter.runtime.tier
+    assert option_values(command, "--device") == []
+    assert handed_in(command) == [ADAPTER_NODE]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the links under /dev/serial/by-id are symbolic links, a POSIX layout")
+def test_the_adapters_stable_name_comes_along_with_the_probes(adapter: SimpleNamespace) -> None:
+    """The tier declares the adapter by its link, as the product names a port."""
+    ours = f"usb-Vendor_Probe_{PROBE_SERIAL}-if02"
+    (adapter.by_id / ours).symlink_to(TTY_NODE)
+    (adapter.by_id / ADAPTER_BY_ID).symlink_to(ADAPTER_NODE)
+    (adapter.by_id / "usb-Other_Adapter_OTHERSERIAL-if00-port0").symlink_to("/dev/ttyUSB7")
+    staged: dict[str, str] = {}
+
+    def look(command: list[str]) -> None:
+        directory = Path(mounted_at(command, "/dev/serial/by-id"))
+        staged.update({entry.name: os.readlink(entry) for entry in directory.iterdir()})
+
+    adapter.runtime.during_run = look
+
+    assert run(adapter) == 0
+
+    assert staged == {ours: TTY_NODE, ADAPTER_BY_ID: ADAPTER_NODE}
+
+
+def test_require_usb_uart_refuses_a_machine_without_one_before_anything_is_built(
+    machine: SimpleNamespace, capsys: pytest.CaptureFixture
+) -> None:
+    """A run that states the adapter is there is refused without one, rather
+    than passing with the adapter's tests deselected."""
+    assert run(machine, "--require-usb-uart") == bench_in_container.EXIT_NO_PROBE
+
+    assert machine.runtime.commands == []
+    err = capsys.readouterr().err
+    assert "no USB-UART adapter" in err
+    assert "--require-usb-uart" in err
+
+
+def test_require_usb_uart_runs_with_the_one_adapter_there_is(adapter: SimpleNamespace) -> None:
+    assert run(adapter, "--require-usb-uart") == 0
+
+    assert handed_in(adapter.runtime.tier) == [ADAPTER_NODE]
+
+
+def test_an_adapter_gone_while_the_run_waited_is_refused_where_one_is_required(
+    adapter: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wait for the machine and the build can be long, so the adapter is
+    looked for again after them, as the probe is, and nothing runs without it."""
+    built = bench_in_container.build_image
+
+    def build_and_unplug(*args: object, **kwargs: object) -> str:
+        image = built(*args, **kwargs)
+        shutil.rmtree(adapter.sysfs / "bus" / "usb" / "devices" / "1-3")
+        return image
+
+    monkeypatch.setattr(bench_in_container, "build_image", build_and_unplug)
+
+    assert run(adapter, "--require-usb-uart") == bench_in_container.EXIT_NO_PROBE
+
+    assert len(adapter.runtime.issued("build")) == 1
+    assert adapter.runtime.issued("run") == []
+
+
+@pytest.mark.parametrize("required", [False, True], ids=["optional", "required"])
+def test_two_adapters_are_not_chosen_between(adapter: SimpleNamespace, capsys: pytest.CaptureFixture, required: bool) -> None:
+    """Choosing would be choosing the wiring. Each is named by where it sits,
+    never by its serial, and only a run that requires one is refused."""
+    a_usb_uart(adapter.sysfs, "1-4", device=6, serial=SECOND_ADAPTER_SERIAL, ttys=("ttyUSB1",))
+
+    status = run(adapter, *(["--require-usb-uart"] if required else []))
+
+    err = capsys.readouterr().err
+    assert "bus 1 device 4" in err and "bus 1 device 6" in err
+    assert ADAPTER_SERIAL not in err and SECOND_ADAPTER_SERIAL not in err
+    if required:
+        assert status == bench_in_container.EXIT_NO_PROBE
+        assert adapter.runtime.commands == []
+    else:
+        assert status == 0
+        assert handed_in(adapter.runtime.tier) == []
+        assert option_values(adapter.runtime.tier, "--device") == [USB_NODE, TTY_NODE]
+        assert "usb_uart" in err
+
+
+@pytest.mark.parametrize("ttys", [(), ("ttyUSB0", "ttyUSB1")], ids=["no-port", "two-ports"])
+def test_an_adapter_with_other_than_one_port_is_not_handed_in(
+    machine: SimpleNamespace, capsys: pytest.CaptureFixture, ttys: tuple[str, ...]
+) -> None:
+    a_usb_uart(machine.sysfs, "1-3", product="6010", ttys=ttys)
+
+    assert run(machine) == 0
+
+    assert handed_in(machine.runtime.tier) == []
+    assert "bus 1 device 4" in capsys.readouterr().err
+    assert run(machine, "--require-usb-uart") == bench_in_container.EXIT_NO_PROBE
+
+
+@pytest.mark.parametrize("runtime", ["podman", "docker"])
+def test_an_adapter_this_user_cannot_open_is_said_so_and_not_handed_in(
+    adapter: SimpleNamespace, capsys: pytest.CaptureFixture, runtime: str
+) -> None:
+    """The probe is what the tier cannot run without; the adapter is not, so a
+    run that does not require it goes on without it and says why."""
+    adapter.openable.discard(ADAPTER_NODE)
+    adapter.statuses[ADAPTER_NODE] = a_node(gid=0)
+
+    assert run(adapter, "--runtime", runtime) == 0
+
+    assert handed_in(adapter.runtime.tier) == []
+    assert ADAPTER_NODE not in option_values(adapter.runtime.tier, "--device")
+    assert ADAPTER_NODE in capsys.readouterr().err
+    assert run(adapter, "--runtime", runtime, "--require-usb-uart") == bench_in_container.EXIT_NO_PROBE
+
+
+@pytest.mark.parametrize("second", [False, True], ids=["one-adapter", "two-adapters"])
+def test_every_adapters_serial_is_withheld_from_the_output_the_log_and_the_report(
+    adapter: SimpleNamespace, capsys: pytest.CaptureFixture, second: bool
+) -> None:
+    """The product's port inventory lists every serial port of the machine with
+    its serial number, and its link under /dev/serial/by-id carries the number
+    too, so every adapter's is withheld, handed in or not."""
+    serials = [ADAPTER_SERIAL]
+    if second:
+        a_usb_uart(adapter.sysfs, "1-4", device=6, serial=SECOND_ADAPTER_SERIAL, ttys=("ttyUSB1",))
+        serials.append(SECOND_ADAPTER_SERIAL)
+    adapter.runtime.tier_output = (
+        MARKED
+        + f"com-ports: {ADAPTER_NODE} at /dev/serial/by-id/{ADAPTER_BY_ID}\n"
+        + "".join(f'"serial_number": "{serial}"\n' for serial in serials)
+        + "== 114 passed in 243.10s ==\n"
+    )
+
+    def report(command: list[str]) -> None:
+        results = Path(mounted_at(command, bench_in_container.RESULTS))
+        (results / bench_in_container.REPORT_NAME).write_text(
+            f'<testsuites><testcase name="t"><failure message="{" ".join(serials)}"/></testcase></testsuites>', encoding="utf-8"
+        )
+
+    adapter.runtime.during_run = report
+
+    assert run(adapter) == 0
+
+    printed = capsys.readouterr()
+    log = (adapter.output / bench_in_container.LOG_NAME).read_text(encoding="utf-8")
+    junit = (adapter.output / bench_in_container.REPORT_NAME).read_text(encoding="utf-8")
+    for text in (printed.out, printed.err, log, junit):
+        for serial in serials:
+            assert serial not in text
+    assert f"usb-FTDI_FT232R_USB_UART_{bench_in_container.WITHHELD}-if00-port0" in printed.out
 
 
 # Refusals about this machine.
