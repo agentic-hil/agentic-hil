@@ -193,11 +193,6 @@ class Monitor:
     def asserted(self) -> bool:
         return self.level == "low"
 
-    @property
-    def moved(self) -> bool:
-        """Whether the line was asserted now, or moved at all, since the monitor was cleared."""
-        return self.asserted or self.falls > 0 or self.rises > 0
-
     def evidence(self) -> dict[str, object]:
         return {"level": self.level, "falls": self.falls, "rises": self.rises, "shortest_us": self.shortest_us, "longest_us": self.longest_us}
 
@@ -307,9 +302,9 @@ def test_with_assert_dtr_true_dtr_is_asserted_for_as_long_as_the_session_is_open
 ) -> None:
     """DTR asserted by the open and held through the session's writes and reads.
 
-    The schema's `assert_dtr`: "Whether DTR is asserted when the port is
-    opened." Its default is true, which the adapter's entry leaves in place,
-    for when "the peer needs DTR to talk". So from `com_session_start` to
+    The schema's `assert_dtr`: "Whether DTR is asserted while the port is
+    open." Its default is true, which the adapter's entry leaves in place, for
+    when "the peer needs DTR to talk". So from `com_session_start` to
     `com_session_stop` PB12 is low and has no edge, across a stimulus and the
     read of its answer. What DTR does before the open and after the stop the
     product does not say, and those readings are kept as evidence only.
@@ -343,17 +338,21 @@ def test_with_assert_dtr_true_dtr_is_asserted_for_as_long_as_the_session_is_open
     assert peer.received(server=server) == Tally.of(b"PING\r\n")
 
 
-def test_with_assert_dtr_false_no_session_moves_dtr(servers: Servers, peer: Peer, probe: Peer, port: str, record_property: RecordProperty) -> None:
-    """Twenty sessions with DTR left alone, and PB12 never moves.
+def test_with_assert_dtr_false_the_open_pulses_dtr_at_most_once_and_the_session_leaves_it_released(
+    servers: Servers, peer: Peer, probe: Peer, port: str, record_property: RecordProperty
+) -> None:
+    """Twenty sessions with DTR released: at most one pulse, during the open, and none after it.
 
-    The schema's `assert_dtr`: "Set false to observe a target provably
-    undisturbed". The knowledge text: "`com_ports.<name>.assert_dtr: false` /
-    `assert_rts: false` are how a target is observed provably undisturbed."
-    `docs/safety-model.md`: "a DTR/RTS-free port open remain the way to observe
-    a target provably undisturbed." So with `assert_dtr: false` there is no
-    edge on PB12 across the open, a stimulus, the read of its answer and the
-    stop, twenty times over, and the line reads released (PB12 high) every
-    time. The monitor is cleared before each open, so every reading is one
+    The schema's `assert_dtr`: "Set false to keep DTR released for the
+    session", and "False is not a proof that the open left DTR alone: on
+    Linux, measured with an FT232R over 65 opens, the open itself asserted DTR
+    once for 239 to 943 microseconds before it was released for the rest of
+    the session and at close". So with `assert_dtr: false` each open moves
+    PB12 at most once, a fall and its rise, and the line reads released (PB12
+    high) once the open has answered; a stimulus, the read of its answer and
+    the stop move it no further, twenty times over. The schema states no bound
+    on the pulse's width beyond what it measured, so the width is kept and not
+    asserted. The monitor is cleared before each open, so every reading is one
     session's own, and every reading is kept: the edges counted, and the
     shortest and longest low pulse the peer timed.
     """
@@ -363,30 +362,36 @@ def test_with_assert_dtr_false_no_session_moves_dtr(servers: Servers, peer: Peer
     cleared(probe, server)
 
     readings: list[dict[str, object]] = []
-    moved: list[dict[str, object]] = []
+    broken: list[dict[str, object]] = []
 
-    def read(at: str, cycle: int | None = None) -> None:
+    def read(at: str, cycle: int | None, opened: Monitor | None = None) -> Monitor:
         reading = monitor(probe, server)
         readings.append({"at": at, "cycle": cycle, **reading.evidence()})
-        if reading.moved:
-            moved.append(readings[-1])
+        if cycle is None:
+            return reading
+        # After the open: one pulse at most, and released. Later in the same
+        # session: what the open left, so nothing moved since.
+        held = (reading.falls == reading.rises <= 1 and not reading.asserted) if opened is None else reading == opened
+        if not held:
+            broken.append(readings[-1])
+        return reading
 
-    read("before the first open")
+    read("before the first open", None)
     for cycle in range(DTR_CYCLES):
         cleared(probe, server)
         started = server.tool("com_session_start", port_id=port)
         assert started["ok"] is True, started
-        read("after the open", cycle)
+        opened = read("after the open", cycle)
         assert server.tool("com_write", port_id=port, text="PING\r\n")["ok"] is True
         answered, reads = read_bytes_until(server, port, b"PONG\r\n")
         assert answered == b"PONG\r\n", (answered, reads)
-        read("after a stimulus and its answer", cycle)
+        read("after a stimulus and its answer", cycle, opened)
         stopped = server.tool("com_session_stop", port_id=port)
         assert stopped["ok"] is True, stopped
-        read("after the stop", cycle)
+        read("after the stop", cycle, opened)
 
     record_property("dtr_released", json.dumps({"cycles": DTR_CYCLES, "readings": readings}))
-    assert not moved, json.dumps({"cycles": DTR_CYCLES, "first_moved": moved[0], "last": readings[-1]})
+    assert not broken, json.dumps({"cycles": DTR_CYCLES, "first_broken": broken[0], "last": readings[-1]})
     assert peer.received(server=server) == Tally.of(b"PING\r\n" * DTR_CYCLES)
 
 

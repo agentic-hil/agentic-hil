@@ -607,10 +607,12 @@ TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     # Destructive on two counts, both of them in the code. The open sets the
     # modem lines, and `assert_dtr`/`assert_rts` default to true: on a board
     # that wires DTR to reset, opening the port to listen restarts the target,
-    # which comports.py says in as many words. And `clear_buffer` defaults to
-    # true, so a call against an already-open session purges the driver's input
-    # buffer and the session's own: received bytes that no read returned are
-    # gone. That purge is also why it is not idempotent.
+    # which comports.py says in as many words, and on Linux the open was
+    # measured to pulse DTR once even with `assert_dtr` false. And
+    # `clear_buffer` defaults to true, so a call against an already-open
+    # session purges the driver's input buffer and the session's own: received
+    # bytes that no read returned are gone. That purge is also why it is not
+    # idempotent.
     "com_session_start": {"title": "Open a COM session", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     # Containment. Closing with no session open answers `ok` with
     # `was_active: false`.

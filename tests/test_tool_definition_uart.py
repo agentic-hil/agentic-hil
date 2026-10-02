@@ -685,7 +685,9 @@ def test_com_session_start_opens_the_named_port_buffers_for_com_read_and_holds_i
 @pytest.mark.parametrize(("port_id", "asserted"), [(PORT_ID, True), (QUIET_PORT_ID, False)])
 def test_com_session_start_drives_dtr_and_rts_as_configured(bench: SimpleNamespace, port_id: str, asserted: bool) -> None:
     """Asserted by default, so a board that wires DTR or RTS to reset restarts
-    on the open; `assert_dtr: false` and `assert_rts: false` leave both low."""
+    on the open; `assert_dtr: false` and `assert_rts: false` hold both released
+    for the session. On Linux the open itself still pulses DTR once, which a
+    fake line does not show."""
     started(bench.service, port_id)
 
     handle = bench.line.handle(port_id)

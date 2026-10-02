@@ -319,7 +319,10 @@ class ComPortConfig:
     # pyserial raises DTR and RTS on open, and a board that wires either to
     # reset is restarted by the act of listening to it. Both default to what
     # pyserial has always done, so no existing bench changes behaviour; setting
-    # them false is how a target is observed provably undisturbed.
+    # them false keeps both released for the session. It is not a proof that
+    # the open left them alone: on Linux the open itself asserted DTR once with
+    # `assert_dtr` false, 239 to 943 microseconds per open over 65 opens of an
+    # FT232R, before it was released.
     assert_dtr: bool = True
     assert_rts: bool = True
     # The USB serial number of the adapter behind this port: for a Nucleo, the

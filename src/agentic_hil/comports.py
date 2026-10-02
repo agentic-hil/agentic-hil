@@ -1583,10 +1583,13 @@ class ComPortService:
             # opened. Passing the device to the constructor opens it immediately
             # with pyserial's own defaults, which raise DTR and RTS, and on a
             # board that wires DTR to reset, listening to a target restarts it.
-            # pyserial applies the requested states as part of open(); a driver
-            # that pulses a line during the open itself is beyond what any host
-            # can suppress, which is why listen_only and this pair are described
-            # as evidence of intent, not as a hardware guarantee.
+            # pyserial applies the requested states as part of open(), and the
+            # open itself can still move a line: on Linux an FT232R opened with
+            # DTR requested released asserted it once during the open, for 239
+            # to 943 microseconds per open over 65 opens, and kept it released
+            # from then on and at close. This code does not suppress that pulse,
+            # which is why this pair is described as what a session holds the
+            # lines at, not as a guarantee that the open moved nothing.
             serial_handle = serial.Serial()
             serial_handle.port = port_config.device
             serial_handle.baudrate = port_config.baudrate
@@ -1723,9 +1726,9 @@ class ComPortService:
         return {"ok": True, "session": session}
 
     def _port_status(self, port_id: str, port_config: ComPortConfig, session: ComPortSession | None) -> JsonObject:
-        # assert_dtr/assert_rts are reported because they decide whether merely
-        # opening this port touches the target; a reader judging whether an
-        # observation was passive needs to see them without opening the config.
+        # assert_dtr/assert_rts are reported because they decide what a session
+        # on this port holds the target's modem lines at; a reader judging how
+        # passive an observation was needs to see them without opening the config.
         result: JsonObject = {"device": port_config.device, "baudrate": port_config.baudrate, "encoding": port_config.encoding, "max_buffer_bytes": port_config.max_buffer_bytes, "max_write_bytes": port_config.max_write_bytes, "assert_dtr": port_config.assert_dtr, "assert_rts": port_config.assert_rts, "session_active": False}
         # Which hardware this entry names, next to the name it is reached by. A
         # reader deciding whether a port is safely addressed needs both.
