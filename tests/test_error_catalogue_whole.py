@@ -66,7 +66,7 @@ from test_error_catalogue_ec1_debug import (
 from test_error_catalogue_ec2_artifacts_reports import DYNAMIC_SITES as ARTIFACT_DYNAMIC_SITES
 from test_error_catalogue_ec2_artifacts_reports import EXCLUDED_SITES as ARTIFACT_EXCLUDED_SITES
 from test_error_catalogue_ec2_artifacts_reports import Facts, clauses, fact_problems
-from test_error_catalogue_ec3_run_coordination import CONSUMERS
+from test_error_catalogue_ec3_run_coordination import CONSUMERS, NEGATION
 from test_error_catalogue_ec3_run_coordination import EXCLUDED as RUN_EXCLUDED
 from test_error_catalogue_ec3_run_coordination import PINNED_DYNAMIC as RUN_DYNAMIC_SITES
 
@@ -1346,19 +1346,96 @@ def test_a_record_fails_on_its_lease_state_only_for_a_state_outside_the_two_the_
     assert classified["error_type"] == ("unknown_debugger_error" if fails else "report_not_found"), classified
 
 
-def test_the_unknown_debugger_error_entry_lets_through_every_lease_state_the_check_does() -> None:
-    """Each clause that names `lease_state` among the checks names every state the check lets through."""
+# What a piece of an entry says the check does with a lease state it names:
+# lets it through (it passes, it is no reason) or holds it against the record
+# (it fails, it is a reason). A piece that says neither is a condition the
+# record fails on, and names a state the check lets through only to exclude it.
+PASSES = re.compile(r"\bpass(?:es|ed)?\b", re.IGNORECASE)
+HOLDS = re.compile(r"\bfail(?:s|ed)?\b|\breasons?\b", re.IGNORECASE)
+
+
+def outside_parentheses(text: str) -> tuple[list[str], list[list[str]]]:
+    """`text` cut at each comma outside parentheses, and each piece's asides: (pieces, asides by piece)."""
+    pieces, depth, start = [], 0, 0
+    for index, character in enumerate(text):
+        depth += {"(": 1, ")": -1}.get(character, 0)
+        if character == "," and depth == 0:
+            pieces.append(text[start:index])
+            start = index + 1
+    pieces.append(text[start:])
+    return pieces, [re.findall(r"\(([^()]*)\)", piece) for piece in pieces]
+
+
+def lets_through(piece: str, state: str) -> bool:
+    """Whether `piece`, which names `state`, says the check lets a record with that state through."""
+    passes, holds = PASSES.search(piece) is not None, HOLDS.search(piece) is not None
+    if passes != holds:
+        return passes != (NEGATION.search(piece) is not None)
+    return re.search(rf"(?:{NEGATION.pattern})\s+{state}", piece, re.IGNORECASE) is not None
+
+
+def lease_problems(entry: Mapping) -> list[str]:
+    """Each statement that names `lease_state` among the checks lets through every state the check does.
+
+    The statement is the comma-separated piece of a clause that names it: in
+    the meaning, among the checks the record failed; in the remediation, among
+    the conditions that send the caller to `hardware_lease_status`. Its asides
+    in parentheses are read on their own, so `(a missing or null one passes
+    this check)` lets those through and `(a missing or null one is also a
+    reason)` holds them against the record.
+    """
     check = dict(SUCCESS_CHECKS)["lease_state"]
     passing = [state for state, fields in LEASE_STATES.items() if check(fields)]
     assert passing and len(passing) < len(LEASE_STATES)
+    problems = []
+    for part, texts in (("meaning", [entry["meaning"]]), ("remediation", list(entry["remediation"]))):
+        naming = []
+        for clause in (clause for text in texts for clause in clauses(text)):
+            pieces, asides = outside_parentheses(clause)
+            naming.extend((piece, own) for piece, own in zip(pieces, asides, strict=True) if "`lease_state`" in piece)
+        if not naming:
+            problems.append(f"the {part} names no `lease_state`")
+        for piece, own in naming:
+            statements = [re.sub(r"\([^()]*\)", " ", piece), *own]
+            for state in passing:
+                said = [lets_through(statement, state) for statement in statements if re.search(state, statement)]
+                if not said:
+                    problems.append(f"the {part} names `lease_state` without {state}, which passes: {piece}")
+                elif not all(said):
+                    problems.append(f"the {part} holds {state} against the record, which the check lets through: {piece}")
+    return problems
+
+
+def test_the_unknown_debugger_error_entry_lets_through_every_lease_state_the_check_does() -> None:
     entry = catalogue_entry("unknown_debugger_error")
     assert entry is not None
-    for part, texts in (("meaning", clauses(entry["meaning"])), ("remediation", list(entry["remediation"]))):
-        naming = [text for text in texts if "`lease_state`" in text]
-        assert naming, f"the {part} names no `lease_state`"
-        for text in naming:
-            unnamed = [state for state in passing if not re.search(state, text)]
-            assert not unnamed, f"the {part} names `lease_state` without the states that pass {unnamed}: {text}"
+
+    assert lease_problems(entry) == []
+
+
+# The entry with one statement about a lease state turned around: (part, as the
+# entry says it, turned around).
+LEASE_TURNED: dict[str, tuple[str, str, str]] = {
+    "meaning_fails_missing": ("meaning", "(a missing or null one passes this check)", "(a missing or null one fails this check)"),
+    "meaning_does_not_pass_missing": ("meaning", "(a missing or null one passes this check)", "(a missing or null one does not pass this check)"),
+    "meaning_fails_active": ("meaning", "is neither `active` nor `released`", "is `active` or `released`"),
+    "meaning_leaves_out_missing": ("meaning", " (a missing or null one passes this check)", ""),
+    "remediation_reason_missing": ("remediation", "(a missing or null one is no reason)", "(a missing or null one is also a reason)"),
+    "remediation_reason_active": ("remediation", "is neither `active` nor `released`", "is `active` or `released`"),
+    "remediation_leaves_out_missing": ("remediation", " (a missing or null one is no reason)", ""),
+}
+
+
+@pytest.mark.parametrize("turned", sorted(LEASE_TURNED))
+def test_an_entry_that_holds_a_lease_state_against_a_record_the_check_lets_through_fails(turned: str) -> None:
+    part, said, wrong = LEASE_TURNED[turned]
+    entry = dict(catalogue_entry("unknown_debugger_error") or {})
+    texts = [entry["meaning"]] if part == "meaning" else list(entry["remediation"])
+    assert sum(text.count(said) for text in texts) == 1, said
+    texts = [text.replace(said, wrong) for text in texts]
+    entry[part] = texts[0] if part == "meaning" else texts
+
+    assert lease_problems(entry) != []
 
 
 # The fields a refusal written as a dict carries for every type, and the advice
