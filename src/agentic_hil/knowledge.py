@@ -3967,6 +3967,669 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "wire.",
         ),
     ),
+    "bridge_process_reap_failed": ErrorRemedy(
+        meaning=(
+            "Found under `cleanup_error` of a `can_session_start` refusal, never on its own. A CAN process bridge "
+            "failed its open, this server ended the bridge's process tree, and it could not confirm that the process "
+            "was gone: ending it raised, or the threads reading its output were still alive afterwards. A bridge that "
+            "may still be running may still hold the adapter's channel, so the session stays registered with "
+            "`cleanup_required: true` and keeps the bus."
+        ),
+        remediation=(
+            "Read `backend_error` inside `cleanup_error`: it is the error ending the process raised, or the note that "
+            "its output threads outlived it. A `close_response` beside it means the bridge did not confirm a safe "
+            "state either.",
+            "Look on this machine for the process the refusal's `command` started. While it runs it may still have "
+            "the channel open, and the bus is not free until it has gone.",
+            "The next `can_session_start` on this bus tears the registered session down first and retries the "
+            "cleanup, and answers `can_adapter_close_failed` if that teardown fails too. When this refusal reports "
+            "`quarantined: true`, that teardown fails on the lease whatever the bridge does, and the way out is the "
+            "sign-off described under `resource_quarantined`.",
+        ),
+        do_not=(
+            "Do not end processes by name to clear this. `command` names the bridge this session started, and a "
+            "loose match may be another session's bridge or another program.",
+            "Do not open the channel from another program while this session is registered: the bridge may still be "
+            "driving it.",
+        ),
+    ),
+    "bridge_safe_state_unconfirmed": ErrorRemedy(
+        meaning=(
+            "Found under `cleanup_error` of a `can_session_start` refusal, and in words as the `backend_error` of "
+            "`can_adapter_close_failed`. A CAN process bridge was asked to put its controller in a safe state and "
+            "close, never confirmed that it had, and this server then ended its process anyway. Only the bridge can "
+            "confirm a safe state, so once its process has ended there is nothing left to confirm it with, and the "
+            "bus stays held."
+        ),
+        remediation=(
+            "Read `close_response`, the bridge's answer to the close: `can_adapter_timeout` means it did not answer "
+            "in time, `can_adapter_process_exited` that it was already gone, `can_adapter_close_interrupted` that "
+            "sending the close raised, and an answer without `safe_state_confirmed: true` that it replied without "
+            "confirming.",
+            "`safe_state_confirmed` stays false from here on. Every later `can_session_stop` and `can_session_start` "
+            "on this bus finds the process ended and answers `can_adapter_close_failed`, for as long as this server "
+            "runs.",
+            "Check the bench by hand (the controller off the bus, the target in a known state), then restart the MCP "
+            "server. The new server may find the bus `resource_quarantined`, and that entry names the sign-off.",
+        ),
+        do_not=(
+            "Do not make a bridge answer `safe_state_confirmed: true` without having put its controller in a safe "
+            "state. That field is the only evidence this server has about the bus.",
+            "Do not call `can_session_stop` in a loop waiting for this to clear. Nothing over MCP can confirm a safe "
+            "state for a process that has ended.",
+        ),
+    ),
+    "can_adapter_close_failed": ErrorRemedy(
+        meaning=(
+            "A CAN session could not be closed. `can_session_stop` was closing it, or `can_session_start` was "
+            "replacing a session still registered on the bus or closing the one a failed receive-queue clear left. "
+            "Either the adapter's close raised and the session stays registered on this server for a cleanup retry, "
+            "or the adapter closed and the lease on the bus would not release."
+        ),
+        remediation=(
+            "Read `backend_error`. Present, it is what the adapter's close raised; absent, the adapter closed and the "
+            "lease would not release, which `cleanup_reasons` and `quarantine_id` explain.",
+            "On a direct adapter (`socketcan`, `peak`) whose close raised, `can_session_stop` called again runs the "
+            "driver's shutdown again, and a shutdown that completes ends the session and frees the bus.",
+            "A process bridge that ended without confirming a safe state cannot confirm it afterwards: every "
+            "`can_session_stop` and `can_session_start` on this bus answers this refusal again, with the same "
+            "`backend_error`, for as long as this server runs.",
+            "In that case, and whenever the lease is quarantined, check the bench by hand and restart the MCP "
+            "server. The new server may find the bus `resource_quarantined`, and that entry names the sign-off.",
+            "`can_buses_list` shows the session still registered on the bus, with its `adapter_status`.",
+        ),
+        do_not=(
+            "Do not call `can_session_stop` or `can_session_start` over and over on a process bus. Once the bridge "
+            "has ended unconfirmed, every call answers the same, and nothing over MCP changes that.",
+            "Do not open the adapter or its channel from another program while the session is registered: an adapter "
+            "whose close failed may still have the channel open.",
+        ),
+    ),
+    "can_adapter_close_interrupted": ErrorRemedy(
+        meaning=(
+            "Found as the `close_response` under a `cleanup_error`, never on its own. Sending the close request to a "
+            "CAN process bridge raised or was interrupted before the bridge answered, so whether the bridge put its "
+            "controller in a safe state is unknown, and this server went on to end its process."
+        ),
+        remediation=(
+            "Read the `cleanup_error` this sits in. Its type, `bridge_safe_state_unconfirmed` or "
+            "`bridge_process_reap_failed`, says what became of the process, and that entry says what to do next.",
+            "`stderr_tail`, when present, is the bridge's last output before the interrupt and may show what it was "
+            "doing with the controller.",
+        ),
+        do_not=(
+            "Do not take an interrupted close for a close that never started. The request may have reached the "
+            "bridge, and the bridge may have acted on part of it.",
+        ),
+    ),
+    "can_adapter_invalid_request": ErrorRemedy(
+        meaning=(
+            "A request to the CAN process bridge (`open`, `send`, `read` or `close`) could not be serialized or "
+            "written to the bridge's stdin. A value that cannot be written as JSON stops it before the write; a write "
+            "or flush that fails on the pipe can stop it partway, so the bridge may have received part of the "
+            "request."
+        ),
+        remediation=(
+            "Read `stderr_tail`: a bridge that crashed or closed its input usually says why in its last lines, and "
+            "that is the cause to fix.",
+            "The refusal carries `side_effect_status: unknown` because the write may have stopped partway, and on a "
+            "send part of the frame request may have reached the bridge. On a send or read the lease is then "
+            "quarantined, so the next call on this bus answers `resource_quarantined`.",
+            "`can_session_stop` then answers `can_adapter_close_failed`, because a quarantined lease does not "
+            "release; check the bench and follow the sign-off under `resource_quarantined`.",
+        ),
+        do_not=(
+            "Do not resend on the assumption that the bridge received none of it. Part of the request may have "
+            "reached it.",
+        ),
+    ),
+    "can_adapter_not_found": ErrorRemedy(
+        meaning=(
+            "The CAN bus is configured `adapter: process`, and the bridge it names is not a file at the resolved "
+            "path: nothing is there, or the path is a directory or a dangling link. No process was started."
+        ),
+        remediation=(
+            "Check `can_buses.<id>.executable`. A relative path is resolved against the workspace root "
+            "(`workspace_root`), not against the directory the server was started from.",
+            "Fix the path, or put the bridge where it points, then call `can_session_start` again.",
+        ),
+        do_not=(
+            "Do not point `executable` at a program without checking that it is the bridge for this adapter: "
+            "whatever it names is started and spoken to as one.",
+        ),
+    ),
+    "can_adapter_open_failed": ErrorRemedy(
+        meaning=(
+            "The CAN adapter would not open. For a direct adapter the python-can bus constructor raised; for a "
+            "process bridge, the bridge answered its `open` with this refusal."
+        ),
+        remediation=(
+            "Read `backend_error`, the driver's or the bridge's own reason: a missing device, a busy channel, a bus "
+            "parameter the adapter rejected.",
+            "Match it against `likely_causes`. If another program holds the adapter (a vendor tool, another server, a "
+            "script), close that program first; most drivers hand out one handle per channel.",
+            "Once the cause is fixed, call `can_session_start` again. When the refusal also carries `cleanup_error`, "
+            "the bridge would not close either and stays registered, and the entry for that type comes first.",
+        ),
+        do_not=(
+            "Do not open the channel from a python-can script to see whether it works while a start is pending. The "
+            "next start then fails on the handle that script holds.",
+        ),
+    ),
+    "can_adapter_process_exited": ErrorRemedy(
+        meaning=(
+            "The CAN process bridge was not running when this server came to write a request to it, so that request "
+            "was not written: the bridge exited or was killed, during its own `open` or after it, or this session "
+            "had already ended it. What it last did on the bus before it went is unknown."
+        ),
+        remediation=(
+            "Read `stderr_tail`: the bridge's last output usually says why it exited, an exception, a driver error or "
+            "a device that went away.",
+            "A bridge that has exited cannot confirm a safe state any more, so from here `can_session_stop` answers "
+            "`can_adapter_close_failed` every time it is called, for as long as this server runs.",
+            "Fix what made it exit, check the bench by hand, then restart the MCP server; the new server may answer "
+            "`resource_quarantined` for this bus first, and that entry names the sign-off.",
+        ),
+        do_not=(
+            "Do not start the bridge by hand to take the bus back. This server still holds the bus for the session "
+            "it lost, and a second bridge on the channel is outside every record.",
+        ),
+    ),
+    "can_adapter_process_start_failed": ErrorRemedy(
+        meaning=(
+            "The CAN process bridge configured for this bus is a file, and the operating system would not start it. "
+            "Nothing ran, so the bus was not touched."
+        ),
+        remediation=(
+            "Read `backend_error`: a permission error means the file may not be executed, an exec-format error that "
+            "the system does not know how to run it, and a missing file usually means its interpreter is missing.",
+            "A `.py` bridge is run with this server's own Python interpreter and needs no executable bit. Any other "
+            "file is run directly, and needs the executable bit and, for a script, an interpreter line.",
+            "It is started in its own directory, the one holding `can_buses.<id>.executable`; check that the "
+            "directory still exists and this account may enter it.",
+        ),
+        do_not=(
+            "Do not wrap the bridge in a shell command line to get it started. `executable` is one file path, and "
+            "nothing in it is handed to a shell.",
+        ),
+    ),
+    "can_adapter_timeout": ErrorRemedy(
+        meaning=(
+            "The CAN process bridge did not answer a request in the time it was given. The request had been written, "
+            "so whether the bridge acted on it is unknown, and on a send whether the frame reached the bus is unknown "
+            "too."
+        ),
+        remediation=(
+            "Read `side_effect_status`: `unknown` means the bridge had the request and did not say what it did, so on "
+            "a send the frame may be on the bus.",
+            "`stderr_tail` holds the bridge's last output, often where it is blocked: its driver, a full transmit "
+            "queue, a controller in bus-off.",
+            "On a send or read the lease is quarantined, so the next call on this bus answers `resource_quarantined`; "
+            "check the bus from the target's side and follow that entry.",
+            "If the bridge is only slow to open or to send, raise `can_buses.<id>.timeout_s`, the time those requests "
+            "are given; a read is given the shorter of its own wait and that time, plus a second, and a close one second.",
+        ),
+        do_not=(
+            "Do not send the frame again to find out whether the first one went out. A duplicate stimulus on a live "
+            "bus is the outcome the unknown status exists to prevent.",
+        ),
+    ),
+    "can_backend_not_available": ErrorRemedy(
+        meaning=(
+            "python-can could not be imported by the interpreter running this server, so a direct adapter "
+            "(`socketcan` or `peak`) cannot be opened. A `process` bridge is a separate program that imports what it "
+            "needs itself, so this server needs python-can only for a direct adapter."
+        ),
+        remediation=(
+            "Read `backend_error`: `ModuleNotFoundError` means python-can is not installed there, and any other "
+            "import error means it is installed and fails while loading, often on a vendor library.",
+            "Install `agentic-hil[can]` into the environment the MCP server runs from, with that environment's own "
+            "Python, then call `can_session_start` again; restart the server if the import still fails.",
+        ),
+        do_not=(
+            "Do not install python-can into a different Python than the one the MCP client starts. The install looks "
+            "done and the server keeps failing the same way.",
+        ),
+    ),
+    "can_broker_authentication_failed": ErrorRemedy(
+        meaning=(
+            "The broker for this shared CAN bus refused this client's authentication key. The broker writes its key "
+            "beside its descriptor in the lock directory and every participant reads it from there, so a refusal "
+            "means the key this client read is not the one the broker holds: the broker was replaced between the "
+            "two reads, or the file changed after the broker wrote it."
+        ),
+        remediation=(
+            "Read `backend_error`, the connection library's own reason. `retry_safe` is false, so the attach was not "
+            "retried.",
+            "Call `can_session_start` once more: it reads the descriptor and the key afresh, which settles a broker "
+            "that was replaced between the two reads.",
+            "If it repeats, stop every participant on the bus with `can_session_stop` so the broker exits; the next "
+            "start begins a broker with a new key.",
+        ),
+        do_not=(
+            "Do not copy, edit or replace the key file to make the two agree. The key is how the broker tells its "
+            "participants from any other local process.",
+        ),
+    ),
+    "can_broker_counter_mismatch": ErrorRemedy(
+        meaning=(
+            "The broker's connection counter had moved on since this client read the broker descriptor: another "
+            "participant attached in between. The client retries this a fixed number of times and then until its "
+            "start deadline, so reaching the caller means it was already retried until the deadline with attaches "
+            "landing all along."
+        ),
+        remediation=(
+            "Compare `broker_counter` with `client_counter`: a gap means attaches landed between this client's read "
+            "of the descriptor and its own attach.",
+            "`retry_safe` is true, and the attach was already retried until the deadline; call `can_session_start` "
+            "again once the other participants' starts have settled.",
+        ),
+        do_not=(
+            "Do not start participants on this bus in a tight loop from several runs at once. Every attach moves the "
+            "counter the others are waiting on.",
+        ),
+    ),
+    "can_broker_invalid_message": ErrorRemedy(
+        meaning=(
+            "The broker for this shared CAN bus and this client could not read each other: the broker received a "
+            "message it cannot parse, or it answered the attach with something that is not an answer. Both ends are "
+            "code from this package, so this is a fault in the broker connection rather than on the bus."
+        ),
+        remediation=(
+            "Read `summary`: it says which end could not read the other.",
+            "The broker keeps running while any participant is attached, so it is replaced only after every "
+            "participant has detached and it exits; stop the others with `can_session_stop`, then call "
+            "`can_session_start` again.",
+        ),
+        do_not=(
+            "Do not end the broker process by hand while participants are attached. Each of them loses its run with "
+            "no incident on record.",
+        ),
+    ),
+    "can_broker_not_bus_owner": ErrorRemedy(
+        meaning=(
+            "The broker named by the descriptor for this shared CAN bus does not hold the bus lock it claims to own, "
+            "so the client would not talk to it. Either the lock is free and the descriptor is left over from a "
+            "broker that ended without cleaning up, or the lock is held with no holder record, or it is held by a "
+            "different owner than the descriptor names."
+        ),
+        remediation=(
+            "Read `bus_lock_held`: false means the bus lock is free and the descriptor is stale, which a start that "
+            "may launch a broker clears away by itself; true means a process holds the lock.",
+            "`bus_lock_holder`, when present, names the owner, process and host holding the lock, and "
+            "`claimed_broker_pid` the process the descriptor names. The bus lock is the same one a single-owner "
+            "`can_session_start` takes, so the holder may be a session opened without a participant, or another "
+            "server.",
+            "Stop that holder's session with `can_session_stop` where it runs, then call `can_session_start` again. "
+            "With the lock held and no holder named, `retry_safe` was true and the attach was already retried until "
+            "its deadline, so the holder never identified itself.",
+        ),
+        do_not=(
+            "Do not delete the descriptor, the lock or the holder record by hand. A held lock belongs to a live "
+            "process, and taking its files away lets a second owner onto the same bus.",
+        ),
+    ),
+    "can_broker_protocol_mismatch": ErrorRemedy(
+        meaning=(
+            "The broker running for this shared CAN bus and this client speak a different version of the broker "
+            "protocol, so they cannot be attached. Usually one server was upgraded while a broker started by an "
+            "older one still serves its participants."
+        ),
+        remediation=(
+            "Compare `broker_protocol_digest` with `client_protocol_digest` and the protocol versions beside them: "
+            "the client's are this server's, and the broker was started by a server on another release.",
+            "Let the old broker exit: stop the participants attached to it with `can_session_stop` in the servers "
+            "that started them, or restart those servers, then call `can_session_start` again so a broker of this "
+            "release starts.",
+        ),
+        do_not=(
+            "Do not downgrade this server to match the old broker. The next fresh broker would mismatch the other "
+            "way, and both servers would be on a release nobody chose.",
+        ),
+    ),
+    "can_broker_stopping": ErrorRemedy(
+        meaning=(
+            "The broker for this shared CAN bus was shutting down when the attach reached it, because its last "
+            "participant had just detached, and it accepts no new participant. The client retries until its start "
+            "deadline, expecting to find the old broker gone and a fresh broker started, so reaching the caller "
+            "means the old broker's shutdown outlasted that deadline."
+        ),
+        remediation=(
+            "`retry_safe` is true and the attach was retried until the start deadline: the old broker was still "
+            "shutting down for that whole time.",
+            "Call `can_session_start` again; once the old broker has exited, a fresh broker is started for the bus.",
+        ),
+        do_not=(
+            "Do not end the stopping broker by hand. It is closing the adapter, and cutting that short leaves the "
+            "bus in whatever state the close had reached.",
+        ),
+    ),
+    "can_broker_unavailable": ErrorRemedy(
+        meaning=(
+            "No broker for this shared CAN bus could be reached or started in time. The client retries every outcome "
+            "that is safe to retry until its start deadline, so this refusal has already been retried until that "
+            "deadline."
+        ),
+        remediation=(
+            "Read `summary`: it says which step failed (an endpoint that could not be reached, no key beside the "
+            "descriptor, a handshake that did not finish, or a started broker that never published), and "
+            "`backend_error` carries the connection's own error when there was one.",
+            "`broker_log`, when the refusal names it, holds every broker ever started for this bus, so only lines "
+            "written after this start can belong to this attempt, and there may be none.",
+            "When `broker_start_timeout_s` is shorter than `bus_timeout_s`, the broker may still have been opening "
+            "its adapter when the client gave up and ended it; a slow adapter open is the usual cause.",
+            "Call `can_session_start` again only after something changed; the same attempt already ran to its "
+            "deadline.",
+        ),
+        do_not=(
+            "Do not delete the descriptor or the bus lock to force a new broker. A client clears a stale descriptor "
+            "itself when the lock behind it is free, and a held lock belongs to a live process.",
+        ),
+    ),
+    "can_broker_wrong_bus": ErrorRemedy(
+        meaning=(
+            "The broker endpoint this client reached owns a different bus than the one it asked for. A bus is "
+            "identified by its adapter and channel, so the descriptor this client read led to a broker for another "
+            "bus: the configuration of this bus changed after one side loaded it, or the descriptor is not that "
+            "broker's own."
+        ),
+        remediation=(
+            "Compare `broker_bus_key` with `client_bus_key`: the first is the bus the broker serves, the second the "
+            "one this server derived from its configuration.",
+            "`retry_safe` is false and the attach was not retried. Check that the configuration this server loaded "
+            "still names the adapter and channel the bench uses, then call `can_session_start` once more.",
+        ),
+        do_not=(
+            "Do not edit `channel` on an entry only to make the two keys agree. The key follows the physical bus, "
+            "and a channel spelled to match is a claim on a medium the entry does not describe.",
+        ),
+    ),
+    "can_bus_gated": ErrorRemedy(
+        meaning=(
+            "The broker for this shared CAN bus refused the attach because an earlier bus-scoped incident gated the "
+            "bus. The gate lasts as long as this broker: it accepts no new participant until every participant has "
+            "detached and it exits, and a fresh broker starts ungated."
+        ),
+        remediation=(
+            "Read `incident`: its `reason` and `detail` say what failed on the adapter when the bus was gated.",
+            "Check the bench for that cause, then stop every participant still attached to this bus with "
+            "`can_session_stop`, in the servers that hold them.",
+            "Once the last one has detached the broker exits, and `can_session_start` then starts a fresh broker that "
+            "is not gated.",
+        ),
+        do_not=(
+            "Do not keep calling `can_session_start` while participants stay attached. The gate holds for the life of "
+            "the broker, and every attach is answered the same.",
+        ),
+    ),
+    "can_bus_incident": ErrorRemedy(
+        meaning=(
+            "A fault on this shared CAN bus aborted the run of every participant attached to it, and the broker gated "
+            "the bus: it accepts no new participant and answers each later call of an aborted participant with this "
+            "refusal. The fault was the adapter's send or read raising or failing, or one a participant reported."
+        ),
+        remediation=(
+            "Read `abort`: its `reason` (`can_adapter_send_raised`, `can_adapter_send_failed`, "
+            "`can_adapter_read_raised`, `can_adapter_read_failed`, `can_adapter_invalid_response`, or one a "
+            "participant reported) and `detail` say what failed on the adapter.",
+            "`aborted_participants` lists every run aborted with this one, and `bus_gated` is true: the bus is not "
+            "running for anyone until the broker exits.",
+            "This server quarantined its lease on the bus, so its next call answers `resource_quarantined` and "
+            "`can_session_stop` answers `can_adapter_close_failed` while the quarantine stands. Check the bench, "
+            "then follow the sign-off under `resource_quarantined`.",
+        ),
+        do_not=(
+            "Do not start a new participant on this bus to carry on the test. The broker refuses it with "
+            "`can_bus_gated` for as long as it runs.",
+        ),
+    ),
+    "can_bus_not_configured": ErrorRemedy(
+        meaning=(
+            "The `bus_id` is not a key of `can_buses` in the authoritative configuration this server loaded, so "
+            "nothing was opened or sent."
+        ),
+        remediation=(
+            "Pick an id from `configured_buses` beside this refusal: those are exactly the buses this server knows.",
+            "`can_buses_list` shows each of them with its adapter, channel and shares. A bus that should exist has "
+            "to be declared under `can_buses` in the authoritative configuration.",
+        ),
+        do_not=(
+            "Do not pass the adapter's channel name (`can0`, `PCAN_USBBUS1`) as the id. The id is the configuration's "
+            "key, and the channel is a field inside it.",
+        ),
+    ),
+    "can_bus_not_shared": ErrorRemedy(
+        meaning=(
+            "A participant session was asked for on a CAN bus that declares no `shares:`, which makes it a "
+            "single-owner bus without participants. When `can_session_start` named a participant this server did "
+            "find configured, the refusal comes from the broker, which loads the configuration itself when it "
+            "starts: the file was edited after this server loaded it, and the broker read the bus without shares."
+        ),
+        remediation=(
+            "Check the bus in `can_buses_list`: a bus without `shares` is opened by one session, so call "
+            "`can_session_start` without `participant`.",
+            "If the bus should be shared, compare the configuration file with what `can_buses_list` shows: an entry "
+            "changed since the server loaded it is not the one this call was checked against, and restarting the "
+            "server brings the two together again.",
+        ),
+        do_not=(
+            "Do not add a `shares:` block only to get past this. Sharing decides who may transmit on the bus, and "
+            "is declared for that reason.",
+        ),
+    ),
+    "can_listen_only_conflict": ErrorRemedy(
+        meaning=(
+            "The broker refused the attach because listen-only belongs to the whole bus: a participant that requires "
+            "a silent bus and one that may transmit cannot be attached together, and a participant that may "
+            "transmit cannot attach to a bus configured `listen_only: true`."
+        ),
+        remediation=(
+            "Read `conflicting_participants`: empty means the bus itself is `listen_only` and this participant may "
+            "transmit; otherwise it lists the attached participants this one conflicts with.",
+            "Run the two kinds one after the other: stop the conflicting ones with `can_session_stop` first. A "
+            "share's `requires_listen_only` and its `permissions.allow_write` decide which kind it is.",
+            "A participant that never transmits does not need `permissions.allow_write`; without it, it attaches "
+            "beside participants that require a silent bus.",
+        ),
+        do_not=(
+            "Do not turn off the bus's `listen_only` to let a participant that transmits onto it. A bus configured "
+            "silent is a claim about the medium that the bench and the other runs rely on.",
+        ),
+    ),
+    "can_participant_busy": ErrorRemedy(
+        meaning=(
+            "The broker for this shared CAN bus already has a participant of this name attached, and it seats one "
+            "attach per name. The client retried until its start deadline, and the name stayed attached for that "
+            "whole time."
+        ),
+        remediation=(
+            "`can_buses_list` shows this server's `active_participants` on the bus; if the name is there, end that "
+            "session with `can_session_stop` first.",
+            "Otherwise the attach belongs to a session outside this server, or to one that ended without detaching. "
+            "`retry_safe` is true and the attach was already retried until the deadline, so call "
+            "`can_session_start` again once the broker has let the name go, and check `agentic-hil lease-status` "
+            "for who holds the participant if it does not.",
+        ),
+        do_not=(
+            "Do not use one participant name from two runs. A name is one view with one frame budget, and a second "
+            "attach is refused for that reason.",
+        ),
+    ),
+    "can_participant_filter_violation": ErrorRemedy(
+        meaning=(
+            "The frame's identifier is outside this participant's view of the shared CAN bus, so the broker would not "
+            "transmit it: it was not sent. A view matches the identifier and its format together, so an extended "
+            "identifier falls outside a filter written for the standard identifier with the same number."
+        ),
+        remediation=(
+            "Compare `frame` with `view`: `view` holds the participant's filter, frame budget and permissions, and "
+            "`frame` the identifier and format that fell outside it.",
+            "Check `extended` on the frame; a filter term matches only frames of its own format.",
+            "If the participant should send it, widen the filter in `can_buses.<id>.shares`. A running broker keeps "
+            "the configuration it started with, so the change applies to the next broker.",
+        ),
+        do_not=(
+            "Do not send the frame through another participant whose view happens to allow it. The view is what "
+            "this test is permitted to put on the bus.",
+        ),
+    ),
+    "can_participant_frame_budget_exhausted": ErrorRemedy(
+        meaning=(
+            "This participant used the whole frame budget of its share on the shared CAN bus, so the broker aborted "
+            "its run. Only this participant is affected: the bus keeps running for the others."
+        ),
+        remediation=(
+            "Compare `max_frames` with `frames_used`; from here every call of this participant answers "
+            "`can_participant_incident`.",
+            "Stop the participant with `can_session_stop` and attach it again with `can_session_start`: a fresh "
+            "attach counts its frames from zero.",
+            "If the test needs more frames, raise `max_frames` on the share in `can_buses.<id>.shares`; a broker "
+            "reads it when it starts.",
+        ),
+        do_not=(
+            "Do not split one test across several participant names to get more frames. The budget is how much one "
+            "test may put on the bus.",
+        ),
+    ),
+    "can_participant_incident": ErrorRemedy(
+        meaning=(
+            "This participant's run on the shared CAN bus was aborted by an incident scoped to it alone: it used up "
+            "its frame budget, its receive queue overflowed, or it reported an incident of its own. Only this "
+            "participant was aborted; the bus was not gated and the other participants were not touched."
+        ),
+        remediation=(
+            "Read `abort`: its `reason` is `can_participant_frame_budget_exhausted`, "
+            "`can_participant_receive_overflow` or one the participant reported, and `detail` holds the limits it ran "
+            "into or what the participant reported.",
+            "Stop this participant with `can_session_stop` and attach it again with `can_session_start`; the abort "
+            "belongs to this attach, and a fresh one starts clean.",
+            "For an overflow, read more often with `can_read`, or narrow the share's `filter` so fewer frames queue "
+            "for it.",
+        ),
+        do_not=(
+            "Do not stop the other participants on the bus over this. Their runs were not aborted, and the bus is "
+            "still carrying their traffic.",
+        ),
+    ),
+    "can_participant_lock_required": ErrorRemedy(
+        meaning=(
+            "This server took the lease for a participant and, attaching it, found that its bench mutex does not "
+            "hold that participant's lock. The lease and the lock are taken together, so this is the server's own "
+            "bookkeeping disagreeing with itself, not another run holding the name."
+        ),
+        remediation=(
+            "`participant_lock` names the lock that was expected and not held. `retry_safe` is true: call "
+            "`can_session_start` again, which takes the lease and the lock afresh.",
+            "If it repeats, check `agentic-hil lease-status` and restart the MCP server: its bench mutex and its "
+            "leases no longer agree, and a fresh server takes both anew.",
+        ),
+        do_not=(
+            "Do not take the participant lock by hand or from a second process to satisfy the check. The lock is "
+            "what keeps two runs off one participant name.",
+        ),
+    ),
+    "can_participant_not_configured": ErrorRemedy(
+        meaning=(
+            "The participant named is not a share of this CAN bus. From this server it means the authoritative "
+            "configuration declares no such share; from the broker, that the configuration the broker loaded when it "
+            "started declares none, which differs from this server's after an edit."
+        ),
+        remediation=(
+            "Pick a name from `configured_participants`, the shares declared on this bus.",
+            "If the name should exist, declare it under `can_buses.<id>.shares`. A running broker keeps the "
+            "configuration it started with, so a new share is seen once every participant has detached and a fresh "
+            "broker starts.",
+        ),
+        do_not=(
+            "Do not borrow another participant's name because it is configured. Its view, budget and permissions "
+            "belong to that participant, and two runs cannot share one.",
+        ),
+    ),
+    "can_participant_required": ErrorRemedy(
+        meaning=(
+            "This CAN bus declares `shares:`, so it is shared through a broker and every call on it has to name the "
+            "participant it acts as. The call named none and was refused before anything was opened or sent."
+        ),
+        remediation=(
+            "Pick one of `configured_participants` and pass it as `participant` to `can_session_start`, `can_send`, "
+            "`can_read` and `can_session_stop` alike.",
+            "`can_buses_list` shows each share's view (its `filter`, `max_frames` and permissions), which tells the "
+            "one this test should use.",
+        ),
+        do_not=(
+            "Do not remove `shares:` from the bus to use it without a participant. Other runs sharing the bus would "
+            "lose the views that keep their traffic apart.",
+        ),
+    ),
+    "can_queue_clear_failed": ErrorRemedy(
+        meaning=(
+            "`can_session_start` was clearing the receive queue (`clear_rx_queue: true`, the default) and a read "
+            "during the drain failed, answered in a shape that is not a drain, or could not be audited. A session "
+            "this call had just opened was closed again; one that was already running stays open."
+        ),
+        remediation=(
+            "Read `backend_result`, the adapter's own answer to the failed read, and `frames_drained`: the frames "
+            "already read off the queue were discarded and cannot be read again.",
+            "`retry_safe` is true only when nothing was drained; then call `can_session_start` again.",
+            "If the drain keeps failing, start with `clear_rx_queue: false` and read what is queued with `can_read`, "
+            "which reports a failing read as its own refusal.",
+        ),
+        do_not=(
+            "Do not assume the queue is empty after this refusal. It was not cleared, and frames from before the "
+            "start may still be read as if they were new.",
+        ),
+    ),
+    "can_queue_clear_limit": ErrorRemedy(
+        meaning=(
+            "The receive queue did not become empty within the bounded drain `can_session_start` runs before it "
+            "reports a session, a fixed number of reads within about a second: frames arrived as fast as they were "
+            "read. The bus is busy, which is a fact about the bus and not a fault."
+        ),
+        remediation=(
+            "`frames_drained` is how many frames were read and discarded before the limit. A session this call had "
+            "just opened was closed again.",
+            "On a bus that never falls silent, start with `clear_rx_queue: false`, then read with `can_read` and "
+            "`until_id` to stop at the frame the test waits for.",
+        ),
+        do_not=(
+            "Do not call `can_session_start` again and again waiting for a quiet moment. A bus with continuous "
+            "traffic gives none, and every attempt discards another batch of frames.",
+        ),
+    ),
+    "can_read_failed": ErrorRemedy(
+        meaning=(
+            "The direct CAN adapter's receive raised during `can_read`. A receive transmits nothing, so nothing was "
+            "sent and the read may be repeated; what failed is the adapter or its link."
+        ),
+        remediation=(
+            "Read `backend_error`, the driver's own error: a link that went down, an adapter unplugged or reset, a "
+            "controller in bus-off.",
+            "When `retry_safe` is true, call `can_read` again once the link is back. A link that stays down fails "
+            "every read the same way; `can_session_stop` and then `can_session_start` reopens the adapter.",
+        ),
+        do_not=(
+            "Do not take this refusal as a silent bus. A failed read says nothing about the traffic on it.",
+        ),
+    ),
+    "can_send_failed": ErrorRemedy(
+        meaning=(
+            "The CAN adapter did not report the frame as sent. Whether it reached the bus depends on where the send "
+            "failed, and `side_effect_status` says what is known: the adapter may have handed it to the controller "
+            "before failing."
+        ),
+        remediation=(
+            "Read `side_effect_status`. Only when it is `not_started` did nothing reach the bus, and only then is it "
+            "safe to send the frame again.",
+            "When it is `unknown`, the frame may be on the wire: check the bus from the target before sending "
+            "anything else, and expect the lease to be quarantined, so the next call answers `resource_quarantined`.",
+            "`backend_error` is the driver's own reason: a link that went down, no other node acknowledging the "
+            "frame, a controller in bus-off.",
+        ),
+        do_not=(
+            "Do not resend on the assumption that a failed send transmitted nothing. With `unknown`, a duplicate "
+            "stimulus on a live bus is the risk.",
+        ),
+    ),
     "can_adapter_protocol_unsupported": ErrorRemedy(
         meaning=(
             "A CAN process bridge answered its `open` request with something this protocol does not accept: a "
