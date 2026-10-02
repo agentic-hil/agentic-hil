@@ -44,6 +44,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -2148,6 +2149,12 @@ def a_cubeclt_installer(
     return archive, marker
 
 
+# The tarfile `data` filter came with 3.10.12, 3.11.4 and 3.12; the Python 3.10
+# that Windows and macOS installers ship stops at 3.10.11.
+needs_extraction_filters = pytest.mark.skipif(not hasattr(tarfile, "data_filter"), reason="this Python's tarfile has no extraction filters")
+
+
+@needs_extraction_filters
 @pytest.mark.parametrize("stlink_server_installer", ["after the tree", "before the tree"])
 def test_cubeclt_extraction_takes_the_two_parts_and_stlink_server_out_of_the_installer_without_running_it(tmp_path: Path, stlink_server_installer: str) -> None:
     """The two directories out of the tree, and stlink-server out of its own installer wherever the payload carries it.
@@ -2180,6 +2187,7 @@ def test_cubeclt_extraction_takes_the_two_parts_and_stlink_server_out_of_the_ins
         assert os.access(destination / "stlink-server" / "stlink-server", os.X_OK)
 
 
+@needs_extraction_filters
 def test_cubeclt_extraction_refuses_a_payload_without_stlink_servers_installer(tmp_path: Path) -> None:
     from tools.bench import extract_cubeclt
 
@@ -2193,6 +2201,7 @@ def test_cubeclt_extraction_refuses_a_payload_without_stlink_servers_installer(t
     assert not destination.with_name(destination.name + ".partial").exists()
 
 
+@needs_extraction_filters
 def test_cubeclt_extraction_refuses_an_stlink_server_installer_it_would_have_to_run_something_to_unpack(tmp_path: Path) -> None:
     from tools.bench import extract_cubeclt
 
@@ -2204,6 +2213,22 @@ def test_cubeclt_extraction_refuses_an_stlink_server_installer_it_would_have_to_
 
     assert not destination.exists()
     assert not destination.with_name(destination.name + ".partial").exists()
+
+
+def test_cubeclt_extraction_refuses_a_python_without_the_extraction_filters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The `data` filter is what keeps every member inside the destination, so a Python without it extracts nothing."""
+    from tools.bench import extract_cubeclt
+
+    archive, marker = a_cubeclt_installer(tmp_path)
+    destination = tmp_path / "opt" / "stm32cubeclt_1.22.0"
+    monkeypatch.delattr(tarfile, "data_filter", raising=False)
+
+    with pytest.raises(extract_cubeclt.ExtractionRefused, match="extraction filters"):
+        extract_cubeclt.extract(archive, destination, hashlib.sha256(archive.read_bytes()).hexdigest())
+
+    assert not destination.exists()
+    assert not destination.with_name(destination.name + ".partial").exists()
+    assert not marker.exists()
 
 
 def test_cubeclt_extraction_refuses_an_archive_with_another_digest(tmp_path: Path) -> None:
