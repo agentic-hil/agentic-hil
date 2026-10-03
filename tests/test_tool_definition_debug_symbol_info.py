@@ -23,12 +23,14 @@ from pathlib import Path
 import pytest
 from test_debug_backend_refusals import OK_HEX
 from test_debug_sessions import (
+    BOOT_COUNTER_SYMBOL_TABLE,
     debug_service,
     flash_symbol_source,
     pyocd_read_service,
     start_debug_session,
     stlink_dump_service,
 )
+from test_gdbserver_sessions import pyocd_session_service, st_link_session_service
 from test_mcp_envelope import TOOLS_LIST, real_service, tools_call
 
 from agentic_hil.backends.gdbdebug import DEBUG_SYMBOL_PATTERN
@@ -169,12 +171,44 @@ def states_allow_all_default_false(text: str) -> bool:
     return false_default and not true_default
 
 
-def openocd_needs_a_session(text: str) -> bool:
+# A session said to be missing ("without one", "with no session"), and one said
+# to be there ("while a session is open"), as the condition of a claim (#698).
+NO_SESSION = r"\b(?:without|with\s+no|when\s+no|if\s+no|no)\s+(?:(?:an?|open|active|debug)\s+)*(?:session|debug_start_session|one)\b"
+SESSION_PRESENT = r"\b(?:with|while|when|if|in|inside|during)\s+(?:an?\s+|the\s+)?(?:open\s+|active\s+)?(?:debug\s+)?session\b(?!_)|\bsession\s+(?:is\s+)?(?:open|active)\b|\beven\b"
+
+
+def _comma_parts(clause: str) -> list[str]:
+    return [part.strip() for part in clause.split(",") if part.strip()]
+
+
+def openocd_needs_debug_start_session(text: str) -> bool:
     candidates = clauses_with(text, r"\bOpenOCD\b", r"\bdebug_start_session\b")
     return any(
         re.search(r"\b(?:needs?|requires?|must|first|active|only)\b", clause, re.IGNORECASE) and not re.search(NEGATED_NEED, clause, re.IGNORECASE)
         for clause in candidates
     )
+
+
+def openocd_needs_a_session(text: str) -> bool:
+    """OpenOCD needs debug_start_session, or, in the words of #698, refuses with
+    session_not_active when no session is open.
+
+    The second form binds the refusal to OpenOCD in one comma-separated part and
+    takes its condition from that part or one before it in the same clause, so
+    "without one, OpenOCD refuses (session_not_active)" is the claim and "with
+    an open session OpenOCD refuses" is its inversion.
+    """
+    needed = openocd_needs_debug_start_session(text)
+    for clause in clauses_with(text, r"\bOpenOCD\b", r"\bsession_not_active\b"):
+        found = _comma_parts(clause)
+        for index, part in enumerate(found):
+            if not (re.search(r"\bOpenOCD\b", part) and names(part, "session_not_active")):
+                continue
+            condition = any(re.search(NO_SESSION, earlier, re.IGNORECASE) for earlier in found[: index + 1])
+            inverted = re.search(SESSION_PRESENT, part, re.IGNORECASE) or re.search(r"\b(?:never|not|doesn't|does\s+not|no\s+longer)\b", part, re.IGNORECASE)
+            if condition and not inverted:
+                needed = True
+    return needed
 
 
 def sessionless_backends_need_this_servers_flashed_elf(text: str) -> bool:
@@ -184,6 +218,83 @@ def sessionless_backends_need_this_servers_flashed_elf(text: str) -> bool:
         and not re.search(NEGATED_NEED, clause, re.IGNORECASE)
         for clause in candidates
     )
+
+
+EVERY_BACKEND = r"\b(?:every|each|any|all)\s+(?:three\s+)?backends?\b|\ball\s+three\b"
+SESSION_OPEN = r"\b(?:open|active)\s+(?:debug\s+)?(?:debug_start_session|session)\b|\b(?:debug_start_session|session)\b(?!_)[^,;]{0,20}\b(?:is\s+)?(?:open|active)\b"
+SESSION_ANSWERS = r"\b(?:answers?|serves?|reads?|resolves?|is\s+used|goes\s+through|runs?)\b"
+LIMITED = r"\bonly\b|\bno\s+backend\b|\bnot\s+(?:on\s+)?(?:every|each|all|any)\b|\bnever\b|\bexcept\b|\bignor\w*"
+
+
+# The same claim backend by backend: OpenOCD needs the session and the other two
+# use it while it is open ("pyOCD and STM32CubeProgrammer use the session if
+# open, else the ELF flash_firmware last wrote", or "use an open session, else").
+IF_OPEN = r"\b(?:if|when|while)\s+(?:it\s+is\s+|one\s+is\s+|the\s+session\s+is\s+)?(?:open|active)\b"
+USES_THE_SESSION = r"\b(?:use|uses|read|reads|answer|answers|resolve|resolves)\s+(?:through\s+|from\s+|via\s+)?(?:it|one|the\s+session|a\s+session|debug_start_session)\b"
+USES_AN_OPEN_SESSION = r"\b(?:use|uses|read|reads|answer|answers|resolve|resolves)\s+(?:through\s+|from\s+|via\s+)?(?:an|the)\s+(?:open|active)\s+(?:debug\s+)?(?:session|debug_start_session)\b"
+SESSION_UNUSED = r"\b(?:never|not|don't|doesn't|ignores?|ignored)\b"
+
+
+def sessionless_backends_use_an_open_session(part: str) -> bool:
+    """One comma-separated part: pyOCD and STM32CubeProgrammer read through the session while it is open."""
+    uses_it_while_open = (
+        re.search(USES_THE_SESSION, part, re.IGNORECASE) is not None and re.search(IF_OPEN, part, re.IGNORECASE) is not None
+    ) or re.search(USES_AN_OPEN_SESSION, part, re.IGNORECASE) is not None
+    return (
+        all(re.search(name, part) for name in (r"\bpyOCD\b", r"\bSTM32CubeProgrammer\b"))
+        and uses_it_while_open
+        and re.search(SESSION_UNUSED, part, re.IGNORECASE) is None
+    )
+
+
+def an_open_session_answers_on_every_backend(text: str) -> bool:
+    """While a session is open it answers, on every backend (#698), never on some only.
+
+    Said at once ("an open debug_start_session answers on every backend") or
+    backend by backend: OpenOCD needs debug_start_session and pyOCD and
+    STM32CubeProgrammer use the session while it is open.
+    """
+    at_once = any(
+        re.search(SESSION_OPEN, clause, re.IGNORECASE)
+        and re.search(SESSION_ANSWERS, clause, re.IGNORECASE)
+        and re.search(EVERY_BACKEND, clause, re.IGNORECASE)
+        and not re.search(LIMITED, clause, re.IGNORECASE)
+        for clause in clauses(text)
+    )
+    by_backend = openocd_needs_debug_start_session(text) and any(
+        sessionless_backends_use_an_open_session(part) for clause in clauses(text) for part in _comma_parts(clause)
+    )
+    return at_once or by_backend
+
+
+def flashed_elf_only_without_a_session(text: str) -> bool:
+    """pyOCD and STM32CubeProgrammer take the ELF flash_firmware last wrote when no
+    session is open (#698), never in spite of one.
+
+    The condition belongs to the part that names the two backends, or to a part
+    before it in the same clause ("without one, OpenOCD refuses, pyOCD and
+    STM32CubeProgrammer use the ELF"), so the unconditional claim fails. The
+    ELF may also be the "else" of the two backends using an open session
+    ("use the session if open, else the ELF flash_firmware last wrote").
+    """
+    for clause in clauses(text):
+        found = _comma_parts(clause)
+        for index, part in enumerate(found):
+            if (
+                index > 0
+                and re.match(r"(?:else|otherwise)\b", part, re.IGNORECASE)
+                and re.search(r"\bflash_firmware\b", part)
+                and not re.search(r"\balways\b", part, re.IGNORECASE)
+                and sessionless_backends_use_an_open_session(found[index - 1])
+            ):
+                return True
+            if not all(re.search(term, part) for term in (r"\bpyOCD\b", r"\bSTM32CubeProgrammer\b", r"\bflash_firmware\b")):
+                continue
+            condition = any(re.search(NO_SESSION, earlier, re.IGNORECASE) for earlier in found[: index + 1])
+            inverted = any(re.search(SESSION_PRESENT, earlier, re.IGNORECASE) or re.search(r"\balways\b", earlier, re.IGNORECASE) for earlier in found[: index + 1])
+            if condition and not inverted:
+                return True
+    return False
 
 
 def names_result_fields_and_units(text: str) -> bool:
@@ -296,6 +407,49 @@ def explains(text: str, error_type: str) -> bool:
         (openocd_needs_a_session, "OpenOCD does not need debug_start_session first.", False),
         (openocd_needs_a_session, "debug_start_session is optional on OpenOCD, which is fine first.", False),
         (openocd_needs_a_session, "pyOCD needs debug_start_session first.", False),
+        (openocd_needs_a_session, "An open session answers on every backend; without one, OpenOCD refuses with session_not_active.", True),
+        (openocd_needs_a_session, "With no session OpenOCD refuses (session_not_active).", True),
+        (openocd_needs_a_session, "With an open session OpenOCD refuses (session_not_active).", False),
+        (openocd_needs_a_session, "Without one, OpenOCD never refuses with session_not_active.", False),
+        (openocd_needs_a_session, "Without one, pyOCD refuses (session_not_active).", False),
+        (openocd_needs_a_session, "OpenOCD refuses with session_not_active.", False),
+        (an_open_session_answers_on_every_backend, "An open debug_start_session answers on every backend.", True),
+        (an_open_session_answers_on_every_backend, "While a session is open, all three backends read through it.", True),
+        (an_open_session_answers_on_every_backend, "On any backend an active session answers.", True),
+        (an_open_session_answers_on_every_backend, "An open debug_start_session answers on OpenOCD only.", False),
+        (an_open_session_answers_on_every_backend, "An open session answers on no backend.", False),
+        (an_open_session_answers_on_every_backend, "Not every backend answers from an open session.", False),
+        (an_open_session_answers_on_every_backend, "Every backend answers without a session.", False),
+        (an_open_session_answers_on_every_backend, "An open session is ignored on every backend.", False),
+        (
+            an_open_session_answers_on_every_backend,
+            "OpenOCD needs debug_start_session (else session_not_active); pyOCD and STM32CubeProgrammer use it if open, else the ELF flash_firmware last wrote.",
+            True,
+        ),
+        (an_open_session_answers_on_every_backend, "OpenOCD needs debug_start_session; pyOCD and STM32CubeProgrammer read through the session while it is open.", True),
+        (an_open_session_answers_on_every_backend, "OpenOCD needs debug_start_session; pyOCD and STM32CubeProgrammer ignore it if open.", False),
+        (an_open_session_answers_on_every_backend, "OpenOCD needs debug_start_session; pyOCD and STM32CubeProgrammer never use it, even if open.", False),
+        (an_open_session_answers_on_every_backend, "OpenOCD needs debug_start_session; pyOCD uses it if open.", False),
+        (an_open_session_answers_on_every_backend, "OpenOCD needs debug_start_session; pyOCD and STM32CubeProgrammer use the session if closed.", False),
+        (an_open_session_answers_on_every_backend, "OpenOCD does not need debug_start_session; pyOCD and STM32CubeProgrammer use it if open.", False),
+        (an_open_session_answers_on_every_backend, "pyOCD and STM32CubeProgrammer use the session if open.", False),
+        (
+            flashed_elf_only_without_a_session,
+            "An open session answers on every backend; without one, OpenOCD refuses (session_not_active), pyOCD and STM32CubeProgrammer use the ELF flash_firmware last wrote.",
+            True,
+        ),
+        (flashed_elf_only_without_a_session, "With no session pyOCD and STM32CubeProgrammer use the ELF flash_firmware last wrote.", True),
+        (flashed_elf_only_without_a_session, "pyOCD and STM32CubeProgrammer use the ELF flash_firmware last wrote.", False),
+        (flashed_elf_only_without_a_session, "pyOCD and STM32CubeProgrammer use the ELF this server last flashed via flash_firmware (else symbol_source_not_available).", False),
+        (flashed_elf_only_without_a_session, "Without a session or with one, pyOCD and STM32CubeProgrammer always use the ELF flash_firmware last wrote.", False),
+        (flashed_elf_only_without_a_session, "Without one, OpenOCD refuses; with an open session, pyOCD and STM32CubeProgrammer use the ELF flash_firmware last wrote.", False),
+        (flashed_elf_only_without_a_session, "pyOCD and STM32CubeProgrammer use the session if open, else the ELF flash_firmware last wrote.", True),
+        (flashed_elf_only_without_a_session, "pyOCD and STM32CubeProgrammer use it while it is open, otherwise the ELF flash_firmware last wrote.", True),
+        (flashed_elf_only_without_a_session, "pyOCD and STM32CubeProgrammer use the session if closed, else the ELF flash_firmware last wrote.", False),
+        (flashed_elf_only_without_a_session, "pyOCD and STM32CubeProgrammer use the ELF flash_firmware last wrote, else the session if open.", False),
+        (flashed_elf_only_without_a_session, "pyOCD and STM32CubeProgrammer use the session if open, and the ELF flash_firmware last wrote.", False),
+        (flashed_elf_only_without_a_session, "pyOCD and STM32CubeProgrammer never use the session if open, else the ELF flash_firmware last wrote.", False),
+        (flashed_elf_only_without_a_session, "pyOCD uses the session if open, else the ELF flash_firmware last wrote.", False),
         (sessionless_backends_need_this_servers_flashed_elf, "pyOCD and STM32CubeProgrammer use the ELF this server last flashed via flash_firmware.", True),
         (sessionless_backends_need_this_servers_flashed_elf, "On STM32CubeProgrammer or pyOCD it reads the ELF most recently flashed with flash_firmware.", True),
         (sessionless_backends_need_this_servers_flashed_elf, "pyOCD and STM32CubeProgrammer use any ELF; flash_firmware is optional.", False),
@@ -427,6 +581,17 @@ def test_the_definition_ties_each_prerequisite_to_its_backend(listed: dict[str, 
         assert tool in listed, tool
 
 
+def test_the_definition_says_an_open_session_answers_on_every_backend(listed: dict[str, dict]) -> None:
+    """#698: an open session answers on every backend; without one, OpenOCD
+    refuses with session_not_active while pyOCD and STM32CubeProgrammer resolve
+    against the ELF flash_firmware last wrote. The session is still named by
+    the tool that opens it."""
+    text = tool_text(listed)
+    assert an_open_session_answers_on_every_backend(text), text
+    assert names(text, "debug_start_session"), text
+    assert flashed_elf_only_without_a_session(text), text
+
+
 # --- what it answers ----------------------------------------------------------
 
 
@@ -489,6 +654,51 @@ def test_the_definition_tells_it_apart_from_the_tools_that_read_memory(listed: d
     assert tells_it_apart_from_the_memory_reads(text), text
     for sibling in SIBLING_MEANINGS:
         assert sibling in listed, sibling
+
+
+SESSION_BACKENDS = ("openocd", "pyocd", "stlink")
+# What each backend answers once the session is gone and this server flashed nothing.
+WITHOUT_A_SESSION = {"openocd": "session_not_active", "pyocd": "symbol_source_not_available", "stlink": "symbol_source_not_available"}
+
+
+def session_on(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[AgenticHILToolService, dict]:
+    """A session opened with `attach` on `backend`, with nothing flashed by this server."""
+    if backend == "openocd":
+        service = debug_service(tmp_path)
+    elif backend == "pyocd":
+        service, _ = pyocd_session_service(tmp_path, monkeypatch, elf_symbols=BOOT_COUNTER_SYMBOL_TABLE)
+    else:
+        service, _ = st_link_session_service(tmp_path, monkeypatch, elf_symbols=BOOT_COUNTER_SYMBOL_TABLE)
+    started = start_debug_session(service, mode="attach")
+    assert started["ok"] is True, started
+    return service, started
+
+
+@pytest.mark.parametrize("backend", SESSION_BACKENDS)
+def test_an_open_session_answers_on_every_backend_and_without_one_each_backend_falls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    """The behaviour the definition states (#698), through `tools/call`.
+
+    With a session open and no flash_firmware call in this server, every
+    backend answers from the session, so pyOCD and STM32CubeProgrammer do not
+    ask for a flashed ELF. Once the session ends, OpenOCD refuses with
+    session_not_active and the other two look for the ELF flash_firmware last
+    wrote, of which there is none.
+    """
+    service, started = session_on(backend, tmp_path, monkeypatch)
+    try:
+        during = call(service, "boot_counter")
+        assert service.call("debug_stop_session")["ok"] is True
+        after = call(service, "boot_counter")
+    finally:
+        service.close()
+
+    answer = during["structuredContent"]
+    assert during["isError"] is False, answer
+    assert answer["session"]["session_id"] == started["session"]["session_id"], answer
+    assert "symbol_source" not in answer, answer
+    refused = after["structuredContent"]
+    assert after["isError"] is True, refused
+    assert refused["error_type"] == WITHOUT_A_SESSION[backend], refused
 
 
 @pytest.mark.parametrize("prepare", [stlink_flashed, pyocd_flashed], ids=["stlink-flashed-elf", "pyocd-flashed-elf"])
