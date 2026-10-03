@@ -2499,6 +2499,53 @@ def test_a_pyocd_read_of_a_running_core_leaves_it_running(tmp_path: Path, monkey
     assert second["value_unsigned"] > first["value_unsigned"], (first["value_unsigned"], second["value_unsigned"])
 
 
+def test_a_pyocd_probe_of_a_core_reset_into_halt_leaves_it_halted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`probe_target` on a halted core leaves the halt for the reads after it.
+
+    The probe is a look at the target, and on the board it was the call that let
+    the halted core run: its commander connects the way the read did before the
+    read was fixed, and runs the same DebugCoreStart sequence. A probe must say
+    the core is halted, and two reads after it must return the same counter.
+    """
+    service = pyocd_core_state_service(tmp_path, monkeypatch)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        halted = service.call("reset_target", {"mode": "halt"})
+        probed = service.call("probe_target", {})
+        first = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+        second = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert halted["ok"] is True, halted
+    assert probed["ok"] is True, probed
+    assert probed["target_detected"] is True, probed
+    assert first["ok"] is True, first
+    assert second["ok"] is True, second
+    assert second["value_unsigned"] == first["value_unsigned"], (first["value_unsigned"], second["value_unsigned"])
+    assert "Halted" in logged_output(tmp_path, probed), probed
+
+
+def test_a_pyocd_probe_of_a_running_core_leaves_it_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half: a probe neither halts a running core nor stops its counter."""
+    service = pyocd_core_state_service(tmp_path, monkeypatch)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        running = service.call("reset_target", {"mode": "run"})
+        probed = service.call("probe_target", {})
+        first = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+        second = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert running["ok"] is True, running
+    assert probed["ok"] is True, probed
+    assert "Running" in logged_output(tmp_path, probed), probed
+    assert first["ok"] is True, first
+    assert second["ok"] is True, second
+    assert second["value_unsigned"] > first["value_unsigned"], (first["value_unsigned"], second["value_unsigned"])
+
+
 def test_pyocd_dump_writes_the_intel_hex_pyocd_itself_cannot(tmp_path: Path) -> None:
     """The same read, ending in a file, and the ending is this backend's own.
 
@@ -3274,6 +3321,11 @@ def stlink_symbol_value(service: AgenticHILToolService, symbol: str = "boot_coun
 
 def logged_command(tmp_path: Path, result: dict) -> str:
     return json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+
+
+def logged_output(tmp_path: Path, result: dict) -> str:
+    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))
+    return f"{logged.get('stdout') or ''}{logged.get('stderr') or ''}"
 
 
 def test_stlink_symbol_value_returns_the_bytes_the_openocd_path_would(tmp_path: Path) -> None:

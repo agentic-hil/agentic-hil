@@ -6,9 +6,10 @@ process, so whether a halt holds is a question about what each process leaves
 behind for the next one. `fake_pyocd.py` keeps no state between processes and
 cannot answer it. This one keeps the core's state in the JSON file named by
 `AGENTIC_HIL_FAKE_PYOCD_CORE_STATE` and moves it the way pyOCD 0.45.1 moved the
-reference board's core in `pyocd_0_45_1_halt_recordings.json` beside it. Every
-line it prints and every number it moves the counter by is taken from that
-recording:
+reference board's core in `pyocd_0_45_1_halt_recordings.json` and
+`pyocd_0_45_1_probe_target_halt_recordings.json` beside it. Every line it
+prints and every number it moves the counter by is taken from those
+recordings:
 
 * `reset halt` halts the core at its reset vector and leaves RAM, so the
   counter keeps the value it had (OpenOCD read the same frozen counter twice,
@@ -22,6 +23,10 @@ recording:
   first, so the first read after it returns the recorded connect window, and a
   core that runs between two processes moves the counter by what the recorded
   product reads moved it.
+* `status`, the command `probe_target` runs, prints the core's state as it is
+  once the connect has run: the recorded `Running` line after a connect that
+  let a halted core run, and the recorded `Halted` line on a core that stayed
+  halted.
 * The commander disconnects without resuming, so the state a process leaves is
   the state its connect and its commands made.
 
@@ -39,6 +44,7 @@ import sys
 from pathlib import Path
 
 RECORDING = Path(__file__).with_name("pyocd_0_45_1_halt_recordings.json")
+PROBE_TARGET_RECORDING = Path(__file__).with_name("pyocd_0_45_1_probe_target_halt_recordings.json")
 STATE_VARIABLE = "AGENTIC_HIL_FAKE_PYOCD_CORE_STATE"
 OPTION_FLAGS = ("-O", "--option")
 DISABLED_SEQUENCES_OPTION = "pack.debug_sequences.disabled_sequences"
@@ -50,6 +56,14 @@ WRITE32 = re.compile(r"Write32\(\s*0xE000EDF0\s*,\s*(0x[0-9A-Fa-f]+)\s*\)")
 
 def recording() -> dict:
     return json.loads(RECORDING.read_text(encoding="utf-8"))
+
+
+def status_line(halted: bool) -> str:
+    """The line pyOCD's `status` printed for a core in this state, as recorded."""
+    scenarios = json.loads(PROBE_TARGET_RECORDING.read_text(encoding="utf-8"))["scenarios"]
+    if halted:
+        return scenarios["pyocd_probe_target_connect_without_debug_core_start_on_a_halted_core"]["pyocd"]["output"][0]
+    return scenarios["product_probe_target_on_a_halted_core"]["probe_target"]["output"][0]
 
 
 def debug_core_start_lets_a_halted_core_run(recorded: dict) -> bool:
@@ -146,6 +160,8 @@ def commander(args: list[str]) -> int:
             print("\n".join(recorded_output(recorded, "pyocd_attach_without_debug_core_start_on_a_running_core", "reset_run")))
         elif words and words[0] == "savemem":
             save_memory(command, state["counter"])
+        elif words == ["status"]:
+            print(status_line(state["halted"]))
         else:
             print(f"command {command!r} is not one this recording holds", file=sys.stderr)
             save_state(state_path, state)
