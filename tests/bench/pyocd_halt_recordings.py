@@ -33,6 +33,8 @@ Selected explicitly, like the other recorders: the file is not named `test_*`.
 With `AGENTIC_HIL_RECORDING_OUT` set to a directory, the recording is written
 there as `pyocd-halt-recording.json`; it is attached to the test report as a
 property as well.
+The recording of pyOCD 0.45.1 the unit tests are built from is committed as
+`tests/fixtures/pyocd_0_45_1_halt_recordings.json`.
 """
 
 from __future__ import annotations
