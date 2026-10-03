@@ -58,6 +58,7 @@ from agentic_hil.knowledge import TEST_CONFIG_SCHEMA_RESOURCE as TEST_CONFIG_SCH
 from agentic_hil.report import audit_errors, overall_success
 from agentic_hil.tools import (
     AgenticHILToolService,
+    configured_opens_debug_sessions,
     configured_sessionless_debug_reads,
     sessionless_capable_debug_tools,
 )
@@ -2546,7 +2547,7 @@ class DebuggerRunner(StepDevice):
         # session behind it. Asked before the gate below, because it is what
         # decides whether there is anything for the gate to be about.
         without_session = cls._runs_without_a_session(config, step, state, debugger_id)
-        if step.action in cls.debug_session_actions and not without_session and debugger.type != "openocd":
+        if step.action in cls.debug_session_actions and not without_session and not configured_opens_debug_sessions(config, debugger_id):
             return cls._backend_debug_refusal(location, step, debugger, debugger_id, config)
         if step.action == "debug_start":
             if state.debug_session is not None:

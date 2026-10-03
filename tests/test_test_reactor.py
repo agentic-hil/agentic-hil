@@ -1879,15 +1879,16 @@ def test_reactor_requires_factory_for_an_unbound_debugger(tmp_path: Path) -> Non
 
 
 def test_preflight_gates_debug_actions_on_the_named_debuggers_type(tmp_path: Path) -> None:
-    # probe_b is pyocd while the other configured probe is openocd: typed debug
-    # steps must be judged by the debugger the STEP names.
+    # probe_b is stlink, which opens no debug session, while the other
+    # configured probe is openocd: typed debug steps must be judged by the
+    # debugger the STEP names.
     from agentic_hil.test_reactor import TestReactor
 
     config = load_config(
         str(
             write_config(
                 tmp_path,
-                debuggers_yaml="debuggers:\n  probe_b:\n    type: pyocd\n    resource_id: rb\n",
+                debuggers_yaml="debuggers:\n  probe_b:\n    type: stlink\n    resource_id: rb\n",
             )
         )
     )
@@ -1915,7 +1916,57 @@ steps:
 
     assert result["ok"] is False
     assert result["error_type"] == "test_config_invalid"
-    assert result["validation_error"]["debugger_type"] == "pyocd"
+    assert result["validation_error"]["debugger_type"] == "stlink"
+
+
+def test_debug_session_steps_on_a_pyocd_probe_pass_preflight_and_run_on_its_service(tmp_path: Path) -> None:
+    # pyOCD opens typed debug sessions through its own GDB server (#624), so a
+    # plan that names a pyOCD probe for a session is no longer refused: the
+    # steps run on that probe's own service, as they do on an OpenOCD probe.
+    from agentic_hil.test_reactor import TestReactor
+
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debugger_type="stlink",
+                debuggers_yaml="debuggers:\n  probe_b:\n    type: pyocd\n    resource_id: rb\n    target_type: stm32f446retx\n",
+            )
+        )
+    )
+    elf_path = tmp_path / "build" / "app.elf"
+    elf_path.parent.mkdir(parents=True, exist_ok=True)
+    elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 2
+steps:
+  - {debugger: probe_b, action: debug_start, image_path: build/app.elf, mode: reset_halt}
+  - {debugger: probe_b, action: debug_stop}
+""",
+    )
+
+    class ClosableService(RecordingService):
+        def close(self) -> None:
+            pass
+
+    base = RecordingService()
+    built: list[ClosableService] = []
+
+    def factory(bound_config) -> ClosableService:
+        svc = ClosableService()
+        built.append(svc)
+        return svc
+
+    reactor = TestReactor(config, base, service_factory=factory)  # type: ignore[arg-type]
+    try:
+        result = reactor.run(load_test_config(str(plan_path), str(tmp_path)))
+    finally:
+        reactor.close()
+
+    assert result["ok"] is True, result
+    assert base.calls == []
+    assert [name for name, _ in built[0].calls] == ["debug_start_session", "debug_stop_session"]
 
 
 def test_debug_steps_execute_on_the_named_debugger_service(tmp_path: Path) -> None:
@@ -5523,15 +5574,17 @@ def test_a_read_step_on_a_backend_that_serves_it_neither_way_is_refused_by_name(
     # backend, the step and its number, says which reads it does serve
     # standalone (none), and ends at the configuration change that would run
     # it. Every shipped backend now serves the reads one way or the other, so
-    # the shape is pinned through a pyocd stripped of the ability, which is
-    # also what a future partial backend looks like.
-    from agentic_hil.backends.pyocd import PyOCDBackend
+    # the shape is pinned through an stlink stripped of the ability, which is
+    # also what a future partial backend looks like. Not pyocd any more: it
+    # opens a session (#624), and a read it served neither way would be one a
+    # session it opens could serve.
+    from agentic_hil.backends.stlink import STLinkBackend
 
-    monkeypatch.setattr(PyOCDBackend, "sessionless_debug_tools", lambda self: frozenset())
+    monkeypatch.setattr(STLinkBackend, "sessionless_debug_tools", lambda self: frozenset())
     path = write_test_config(tmp_path, SESSIONLESS_READ_PLAN)
     service = SessionlessReadService((42).to_bytes(4, "little"))
 
-    result = run_symbol_plan(tmp_path, path, service, debugger_type="pyocd")
+    result = run_symbol_plan(tmp_path, path, service, debugger_type="stlink")
 
     assert result["ok"] is False
     assert result["error_type"] == "test_config_invalid"
@@ -5540,13 +5593,14 @@ def test_a_read_step_on_a_backend_that_serves_it_neither_way_is_refused_by_name(
     assert refusal["field"] == "steps[0].action"
     assert refusal["action"] == "read_symbol"
     assert refusal["debugger"] == "dut"
-    assert refusal["debugger_type"] == "pyocd"
+    assert refusal["debugger_type"] == "stlink"
     assert refusal["sessionless_debug_reads"] == []
     assert refusal["summary"] == (
-        "Step 1's 'read_symbol' reads target memory, and the 'pyocd' backend on debugger 'dut' serves that read "
-        "neither without a debug session nor inside one. To run it on this bench, the same probe runs under "
-        "`type: openocd` with the `interface_cfg` for it (`interface/stlink.cfg` for an ST-Link, "
-        "`interface/cmsis-dap.cfg` for a CMSIS-DAP probe) and the `target_cfg` for this part."
+        "Step 1's 'read_symbol' reads target memory, and the 'stlink' backend on debugger 'dut' serves that read "
+        "neither without a debug session nor inside one. To run it on this bench, name the ST-LINK_gdbserver that "
+        "STM32CubeCLT installs as `debuggers.<name>.gdb_server_executable` (it is found by itself beside the "
+        "configured STM32_Programmer_CLI of the same STM32CubeCLT), or run the same in-circuit debugger under "
+        "`type: openocd` with `interface_cfg: interface/stlink.cfg` and the `target_cfg` for this part."
     )
     assert service.calls == []
 
@@ -5578,6 +5632,26 @@ def test_a_session_step_on_a_backend_that_opens_none_is_refused_by_name(tmp_path
         "which opens none."
     )
     assert service.calls == []
+
+
+def test_the_plan_format_says_which_debuggers_a_debug_start_runs_on() -> None:
+    # #624: a plan's `debug_start` is the `debug_start_session` tool, which opens
+    # its session on OpenOCD, on pyOCD and on stlink through ST-LINK_gdbserver.
+    # The refusal before the run is the one above, for a debugger whose backend
+    # opens none. A format that still gave the sessions to OpenOCD alone would
+    # send the author on a pyOCD or ST-LINK_gdbserver bench away from a plan
+    # that runs there.
+    from importlib import resources
+
+    schema = json.loads(resources.files("agentic_hil").joinpath("schemas/testconfig.schema.json").read_text(encoding="utf-8"))
+    description = schema["$defs"]["debugStart"]["description"]
+
+    for server in ("OpenOCD", "pyOCD", "ST-LINK_gdbserver"):
+        assert server in description, server
+    assert not re.search(r"\bsessions are OpenOCD's\b|\bother backends\b", description), description
+    refused = [sentence for sentence in re.split(r"(?<=\.)\s+", description) if "refused before the run" in sentence]
+    assert refused, description
+    assert all("opens none" in sentence for sentence in refused), refused
 
 
 def test_the_in_session_openocd_path_is_unchanged_by_the_sessionless_route(tmp_path: Path) -> None:

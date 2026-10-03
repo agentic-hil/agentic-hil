@@ -1,0 +1,2046 @@
+{
+  "cmsis_pack": {
+    "debug_core_start_dhcsr_writes": [
+      "Write32(0xE000EDF0, 0xA05F0001);                                        // Enable Core Debug via DHCSR"
+    ],
+    "id": "Keil.STM32F4xx_DFP",
+    "target_type": "stm32f446retx",
+    "version": "3.1.1"
+  },
+  "gdb_version": "GNU gdb (xPack GNU Arm Embedded GCC x86_64) 14.2.90.20240526-git",
+  "image": "the demo firmware the tier builds",
+  "probe": "the bench's in-circuit debugger, its unique ID redacted",
+  "pyocd_version": "0.45.1",
+  "recorded_on": "2026-10-01",
+  "scenarios": {
+    "halted_by_interrupt": {
+      "argv_tail": [
+        "gdbserver",
+        "--port",
+        "51023",
+        "-O",
+        "semihost_console_type=off",
+        "--uid",
+        "[redacted]",
+        "--target",
+        "stm32f446retx",
+        "-W"
+      ],
+      "connect": [
+        {
+          "command": "-gdb-set pagination off",
+          "error": null,
+          "line": "1^done",
+          "records": [
+            "=thread-group-added,id=\"i1\"",
+            "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+            "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+            "(gdb) ",
+            "1^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-gdb-set confirm off",
+          "error": null,
+          "line": "2^done",
+          "records": [
+            "2^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-gdb-set mi-async on",
+          "error": null,
+          "line": "3^done",
+          "records": [
+            "3^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+          "error": null,
+          "line": "4^done",
+          "records": [
+            "4^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-target-select extended-remote localhost:51023",
+          "error": null,
+          "line": "5^connected",
+          "records": [
+            "=thread-group-started,id=\"i1\",pid=\"42000\"",
+            "=thread-created,id=\"1\",group-id=\"i1\"",
+            "~\"delay () at [redacted]/Src/main.c:114\\n\"",
+            "~\"114\\t        __asm volatile (\\\"nop\\\");\\n\"",
+            "*stopped,frame={addr=\"0x08002080\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"114\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+            "5^connected"
+          ],
+          "result_class": "connected",
+          "timed_out": false
+        },
+        {
+          "stop_after_connect": {
+            "error": null,
+            "line": "*stopped,frame={addr=\"0x08002080\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"114\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+            "reason": "unknown",
+            "timed_out": false
+          }
+        }
+      ],
+      "gdb_exit": {
+        "closed": true,
+        "commands": [
+          {
+            "command": "-gdb-exit",
+            "result_class": "exit",
+            "timed_out": false
+          }
+        ]
+      },
+      "halted": {
+        "pc": "0x8002084 <delay+16>",
+        "steps": [
+          {
+            "command": "-exec-continue",
+            "error": null,
+            "line": "6^running",
+            "records": [
+              "6^running"
+            ],
+            "result_class": "running",
+            "timed_out": false
+          },
+          {
+            "command": "-exec-interrupt --all",
+            "error": null,
+            "line": "7^done",
+            "records": [
+              "7^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-data-evaluate-expression uptime_ms",
+            "error": null,
+            "line": "8^done,value=\"3615\"",
+            "records": [
+              "8^done,value=\"3615\""
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-data-evaluate-expression $pc",
+            "error": null,
+            "line": "9^done,value=\"0x8002084 <delay+16>\"",
+            "records": [
+              "9^done,value=\"0x8002084 <delay+16>\""
+            ],
+            "result_class": "done",
+            "timed_out": false
+          }
+        ],
+        "stop": {
+          "error": null,
+          "line": "*stopped,reason=\"signal-received\",signal-name=\"SIGINT\",signal-meaning=\"Interrupt\",frame={addr=\"0x08002084\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+          "reason": "signal-received",
+          "timed_out": false
+        },
+        "uptime_ms": "3615"
+      },
+      "next_connects": [
+        {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "6^done,value=\"3641\"",
+              "records": [
+                "6^done,value=\"3641\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "7^done,value=\"0x800208c <delay+24>\"",
+              "records": [
+                "7^done,value=\"0x800208c <delay+24>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "connect": [
+            {
+              "command": "-gdb-set pagination off",
+              "error": null,
+              "line": "1^done",
+              "records": [
+                "=thread-group-added,id=\"i1\"",
+                "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+                "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+                "(gdb) ",
+                "1^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set confirm off",
+              "error": null,
+              "line": "2^done",
+              "records": [
+                "2^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set mi-async on",
+              "error": null,
+              "line": "3^done",
+              "records": [
+                "3^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+              "error": null,
+              "line": "4^done",
+              "records": [
+                "4^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-target-select extended-remote localhost:46907",
+              "error": null,
+              "line": "5^connected",
+              "records": [
+                "=thread-group-started,id=\"i1\",pid=\"42000\"",
+                "=thread-created,id=\"1\",group-id=\"i1\"",
+                "~\"0x0800208c in delay () at [redacted]/Src/main.c:113\\n\"",
+                "~\"113\\t    for (volatile uint32_t i = 0; i < 1000000U; ++i) {\\n\"",
+                "*stopped,frame={addr=\"0x0800208c\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+                "5^connected"
+              ],
+              "result_class": "connected",
+              "timed_out": false
+            },
+            {
+              "stop_after_connect": {
+                "error": null,
+                "line": "*stopped,frame={addr=\"0x0800208c\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+                "reason": "unknown",
+                "timed_out": false
+              }
+            }
+          ],
+          "gdb_closed": {
+            "closed": true,
+            "commands": [
+              {
+                "command": "-gdb-exit",
+                "result_class": "exit",
+                "timed_out": false
+              }
+            ]
+          },
+          "output": [
+            {
+              "at_s": 0.98,
+              "line": "0000937 I Target type is stm32f446retx [board]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.14,
+              "line": "0001091 I DP IDR = 0x2ba01477 (v1 rev2) [dap]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.14,
+              "line": "0001093 I debugvar 'DbgMCU_APB1_Fz' = 0x7e019ff (132127231) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.14,
+              "line": "0001093 I debugvar 'DbgMCU_APB2_Fz' = 0x70003 (458755) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.14,
+              "line": "0001093 I debugvar 'DbgMCU_CR' = 0x7 (7) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.14,
+              "line": "0001093 I debugvar 'TraceClk_Pin' = 0x40002 (262146) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.14,
+              "line": "0001093 I debugvar 'TraceD0_Pin' = 0x40003 (262147) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.14,
+              "line": "0001093 I debugvar 'TraceD1_Pin' = 0x40004 (262148) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.14,
+              "line": "0001093 I debugvar 'TraceD2_Pin' = 0x40005 (262149) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.14,
+              "line": "0001093 I debugvar 'TraceD3_Pin' = 0x40006 (262150) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.15,
+              "line": "0001105 I AHB-AP#0 IDR = 0x24770011 (AHB-AP var1 rev2) [discovery]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.15,
+              "line": "0001109 I AHB-AP#0 Class 0x1 ROM table #0 @ 0xe00ff000 (designer=020:ST part=411) [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.16,
+              "line": "0001112 I [0]<e000e000:SCS v7-M class=14 designer=43b:Arm part=00c> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.16,
+              "line": "0001114 I [1]<e0001000:DWT v7-M class=14 designer=43b:Arm part=002> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.16,
+              "line": "0001115 I [2]<e0002000:FPB v7-M class=14 designer=43b:Arm part=003> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.16,
+              "line": "0001117 I [3]<e0000000:ITM v7-M class=14 designer=43b:Arm part=001> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.17,
+              "line": "0001120 I [4]<e0040000:TPIU M4 class=9 designer=43b:Arm part=9a1 devtype=11 archid=0000 devid=ca1:0:0> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.17,
+              "line": "0001123 I [5]<e0041000:ETM M4 class=9 designer=43b:Arm part=925 devtype=13 archid=0000 devid=0:0:0> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.18,
+              "line": "0001132 I CPU core #0: Cortex-M4 r0p1, v7.0-M architecture [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.18,
+              "line": "0001132 I   Extensions: [DSP, FPU, FPU_V4, MPU] [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.18,
+              "line": "0001132 I   FPU present: FPv4-SP-D16-M [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.18,
+              "line": "0001135 I 4 hardware watchpoints [dwt]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.18,
+              "line": "0001140 I 6 hardware breakpoints, 4 literal comparators [fpb]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.22,
+              "line": "0001180 I GDB server listening on port 46907 (core 0) [gdbserver]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 1.33,
+              "line": "0001287 I Client 1 connected on port 46907 from remote address localhost:54464 [gdbserver]",
+              "stream": "stderr"
+            }
+          ],
+          "pc": "0x800208c <delay+24>",
+          "ready_line": {
+            "at_s": 1.22,
+            "line": "0001180 I GDB server listening on port 46907 (core 0) [gdbserver]",
+            "stream": "stderr"
+          },
+          "server_terminated_first": {
+            "returncode": -15,
+            "was_running": true
+          },
+          "uptime_ms": "3641"
+        },
+        {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "6^done,value=\"3666\"",
+              "records": [
+                "6^done,value=\"3666\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "7^done,value=\"0x800208e <delay+26>\"",
+              "records": [
+                "7^done,value=\"0x800208e <delay+26>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "connect": [
+            {
+              "command": "-gdb-set pagination off",
+              "error": null,
+              "line": "1^done",
+              "records": [
+                "=thread-group-added,id=\"i1\"",
+                "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+                "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+                "(gdb) ",
+                "1^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set confirm off",
+              "error": null,
+              "line": "2^done",
+              "records": [
+                "2^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set mi-async on",
+              "error": null,
+              "line": "3^done",
+              "records": [
+                "3^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+              "error": null,
+              "line": "4^done",
+              "records": [
+                "4^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-target-select extended-remote localhost:46367",
+              "error": null,
+              "line": "5^connected",
+              "records": [
+                "=thread-group-started,id=\"i1\",pid=\"42000\"",
+                "=thread-created,id=\"1\",group-id=\"i1\"",
+                "~\"0x0800208e in delay () at [redacted]/Src/main.c:113\\n\"",
+                "~\"113\\t    for (volatile uint32_t i = 0; i < 1000000U; ++i) {\\n\"",
+                "*stopped,frame={addr=\"0x0800208e\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+                "5^connected"
+              ],
+              "result_class": "connected",
+              "timed_out": false
+            },
+            {
+              "stop_after_connect": {
+                "error": null,
+                "line": "*stopped,frame={addr=\"0x0800208e\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+                "reason": "unknown",
+                "timed_out": false
+              }
+            }
+          ],
+          "gdb_closed": {
+            "closed": true,
+            "commands": [
+              {
+                "command": "-gdb-exit",
+                "result_class": "exit",
+                "timed_out": false
+              }
+            ]
+          },
+          "output": [
+            {
+              "at_s": 0.61,
+              "line": "0000577 I Target type is stm32f446retx [board]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.75,
+              "line": "0000717 I DP IDR = 0x2ba01477 (v1 rev2) [dap]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.76,
+              "line": "0000728 I debugvar 'DbgMCU_APB1_Fz' = 0x7e019ff (132127231) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.76,
+              "line": "0000728 I debugvar 'DbgMCU_APB2_Fz' = 0x70003 (458755) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.76,
+              "line": "0000728 I debugvar 'DbgMCU_CR' = 0x7 (7) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.76,
+              "line": "0000728 I debugvar 'TraceClk_Pin' = 0x40002 (262146) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.76,
+              "line": "0000728 I debugvar 'TraceD0_Pin' = 0x40003 (262147) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.76,
+              "line": "0000728 I debugvar 'TraceD1_Pin' = 0x40004 (262148) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.76,
+              "line": "0000728 I debugvar 'TraceD2_Pin' = 0x40005 (262149) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.76,
+              "line": "0000728 I debugvar 'TraceD3_Pin' = 0x40006 (262150) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000740 I AHB-AP#0 IDR = 0x24770011 (AHB-AP var1 rev2) [discovery]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000744 I AHB-AP#0 Class 0x1 ROM table #0 @ 0xe00ff000 (designer=020:ST part=411) [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000747 I [0]<e000e000:SCS v7-M class=14 designer=43b:Arm part=00c> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000749 I [1]<e0001000:DWT v7-M class=14 designer=43b:Arm part=002> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000751 I [2]<e0002000:FPB v7-M class=14 designer=43b:Arm part=003> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000753 I [3]<e0000000:ITM v7-M class=14 designer=43b:Arm part=001> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000756 I [4]<e0040000:TPIU M4 class=9 designer=43b:Arm part=9a1 devtype=11 archid=0000 devid=ca1:0:0> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000759 I [5]<e0041000:ETM M4 class=9 designer=43b:Arm part=925 devtype=13 archid=0000 devid=0:0:0> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.8,
+              "line": "0000768 I CPU core #0: Cortex-M4 r0p1, v7.0-M architecture [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.8,
+              "line": "0000768 I   Extensions: [DSP, FPU, FPU_V4, MPU] [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.8,
+              "line": "0000768 I   FPU present: FPv4-SP-D16-M [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.81,
+              "line": "0000770 I 4 hardware watchpoints [dwt]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.81,
+              "line": "0000775 I 6 hardware breakpoints, 4 literal comparators [fpb]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.85,
+              "line": "0000819 I GDB server listening on port 46367 (core 0) [gdbserver]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.96,
+              "line": "0000928 I Client 1 connected on port 46367 from remote address localhost:43030 [gdbserver]",
+              "stream": "stderr"
+            }
+          ],
+          "pc": "0x800208e <delay+26>",
+          "ready_line": {
+            "at_s": 0.85,
+            "line": "0000819 I GDB server listening on port 46367 (core 0) [gdbserver]",
+            "stream": "stderr"
+          },
+          "server_terminated_first": {
+            "returncode": -15,
+            "was_running": true
+          },
+          "uptime_ms": "3666"
+        },
+        {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "6^done,value=\"3691\"",
+              "records": [
+                "6^done,value=\"3691\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "7^done,value=\"0x800208c <delay+24>\"",
+              "records": [
+                "7^done,value=\"0x800208c <delay+24>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "connect": [
+            {
+              "command": "-gdb-set pagination off",
+              "error": null,
+              "line": "1^done",
+              "records": [
+                "=thread-group-added,id=\"i1\"",
+                "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+                "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+                "(gdb) ",
+                "1^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set confirm off",
+              "error": null,
+              "line": "2^done",
+              "records": [
+                "2^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set mi-async on",
+              "error": null,
+              "line": "3^done",
+              "records": [
+                "3^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+              "error": null,
+              "line": "4^done",
+              "records": [
+                "4^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-target-select extended-remote localhost:48931",
+              "error": null,
+              "line": "5^connected",
+              "records": [
+                "=thread-group-started,id=\"i1\",pid=\"42000\"",
+                "=thread-created,id=\"1\",group-id=\"i1\"",
+                "~\"0x0800208c in delay () at [redacted]/Src/main.c:113\\n\"",
+                "~\"113\\t    for (volatile uint32_t i = 0; i < 1000000U; ++i) {\\n\"",
+                "*stopped,frame={addr=\"0x0800208c\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+                "5^connected"
+              ],
+              "result_class": "connected",
+              "timed_out": false
+            },
+            {
+              "stop_after_connect": {
+                "error": null,
+                "line": "*stopped,frame={addr=\"0x0800208c\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+                "reason": "unknown",
+                "timed_out": false
+              }
+            }
+          ],
+          "gdb_closed": {
+            "closed": true,
+            "commands": [
+              {
+                "command": "-gdb-exit",
+                "result_class": "exit",
+                "timed_out": false
+              }
+            ]
+          },
+          "output": [
+            {
+              "at_s": 0.61,
+              "line": "0000570 I Target type is stm32f446retx [board]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.73,
+              "line": "0000689 I DP IDR = 0x2ba01477 (v1 rev2) [dap]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.74,
+              "line": "0000701 I debugvar 'DbgMCU_APB1_Fz' = 0x7e019ff (132127231) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.74,
+              "line": "0000701 I debugvar 'DbgMCU_APB2_Fz' = 0x70003 (458755) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.74,
+              "line": "0000701 I debugvar 'DbgMCU_CR' = 0x7 (7) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.74,
+              "line": "0000701 I debugvar 'TraceClk_Pin' = 0x40002 (262146) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.74,
+              "line": "0000701 I debugvar 'TraceD0_Pin' = 0x40003 (262147) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.74,
+              "line": "0000701 I debugvar 'TraceD1_Pin' = 0x40004 (262148) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.74,
+              "line": "0000701 I debugvar 'TraceD2_Pin' = 0x40005 (262149) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.74,
+              "line": "0000701 I debugvar 'TraceD3_Pin' = 0x40006 (262150) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.75,
+              "line": "0000718 I AHB-AP#0 IDR = 0x24770011 (AHB-AP var1 rev2) [discovery]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.76,
+              "line": "0000722 I AHB-AP#0 Class 0x1 ROM table #0 @ 0xe00ff000 (designer=020:ST part=411) [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.76,
+              "line": "0000725 I [0]<e000e000:SCS v7-M class=14 designer=43b:Arm part=00c> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.76,
+              "line": "0000727 I [1]<e0001000:DWT v7-M class=14 designer=43b:Arm part=002> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.76,
+              "line": "0000728 I [2]<e0002000:FPB v7-M class=14 designer=43b:Arm part=003> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.77,
+              "line": "0000730 I [3]<e0000000:ITM v7-M class=14 designer=43b:Arm part=001> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.77,
+              "line": "0000734 I [4]<e0040000:TPIU M4 class=9 designer=43b:Arm part=9a1 devtype=11 archid=0000 devid=ca1:0:0> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.77,
+              "line": "0000736 I [5]<e0041000:ETM M4 class=9 designer=43b:Arm part=925 devtype=13 archid=0000 devid=0:0:0> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000746 I CPU core #0: Cortex-M4 r0p1, v7.0-M architecture [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000746 I   Extensions: [DSP, FPU, FPU_V4, MPU] [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000746 I   FPU present: FPv4-SP-D16-M [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000748 I 4 hardware watchpoints [dwt]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000753 I 6 hardware breakpoints, 4 literal comparators [fpb]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.83,
+              "line": "0000793 I GDB server listening on port 48931 (core 0) [gdbserver]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.94,
+              "line": "0000901 I Client 1 connected on port 48931 from remote address localhost:34726 [gdbserver]",
+              "stream": "stderr"
+            }
+          ],
+          "pc": "0x800208c <delay+24>",
+          "ready_line": {
+            "at_s": 0.83,
+            "line": "0000793 I GDB server listening on port 48931 (core 0) [gdbserver]",
+            "stream": "stderr"
+          },
+          "server_terminated_first": {
+            "returncode": -15,
+            "was_running": true
+          },
+          "uptime_ms": "3691"
+        }
+      ],
+      "ready_line": {
+        "at_s": 0.79,
+        "line": "0000774 I GDB server listening on port 51023 (core 0) [gdbserver]",
+        "stream": "stderr"
+      },
+      "scenario": "halted_by_interrupt",
+      "server_output": [
+        {
+          "at_s": 0.58,
+          "line": "0000558 I Target type is stm32f446retx [board]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.7,
+          "line": "0000681 I DP IDR = 0x2ba01477 (v1 rev2) [dap]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.71,
+          "line": "0000692 I debugvar 'DbgMCU_APB1_Fz' = 0x7e019ff (132127231) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.71,
+          "line": "0000692 I debugvar 'DbgMCU_APB2_Fz' = 0x70003 (458755) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.71,
+          "line": "0000692 I debugvar 'DbgMCU_CR' = 0x7 (7) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.71,
+          "line": "0000692 I debugvar 'TraceClk_Pin' = 0x40002 (262146) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.71,
+          "line": "0000693 I debugvar 'TraceD0_Pin' = 0x40003 (262147) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.71,
+          "line": "0000693 I debugvar 'TraceD1_Pin' = 0x40004 (262148) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.71,
+          "line": "0000693 I debugvar 'TraceD2_Pin' = 0x40005 (262149) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.71,
+          "line": "0000693 I debugvar 'TraceD3_Pin' = 0x40006 (262150) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.73,
+          "line": "0000708 I AHB-AP#0 IDR = 0x24770011 (AHB-AP var1 rev2) [discovery]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.73,
+          "line": "0000711 I AHB-AP#0 Class 0x1 ROM table #0 @ 0xe00ff000 (designer=020:ST part=411) [rom_table]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.73,
+          "line": "0000714 I [0]<e000e000:SCS v7-M class=14 designer=43b:Arm part=00c> [rom_table]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.74,
+          "line": "0000715 I [1]<e0001000:DWT v7-M class=14 designer=43b:Arm part=002> [rom_table]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.74,
+          "line": "0000717 I [2]<e0002000:FPB v7-M class=14 designer=43b:Arm part=003> [rom_table]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.74,
+          "line": "0000718 I [3]<e0000000:ITM v7-M class=14 designer=43b:Arm part=001> [rom_table]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.74,
+          "line": "0000721 I [4]<e0040000:TPIU M4 class=9 designer=43b:Arm part=9a1 devtype=11 archid=0000 devid=ca1:0:0> [rom_table]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.74,
+          "line": "0000723 I [5]<e0041000:ETM M4 class=9 designer=43b:Arm part=925 devtype=13 archid=0000 devid=0:0:0> [rom_table]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.75,
+          "line": "0000731 I CPU core #0: Cortex-M4 r0p1, v7.0-M architecture [cortex_m]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.75,
+          "line": "0000731 I   Extensions: [DSP, FPU, FPU_V4, MPU] [cortex_m]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.75,
+          "line": "0000731 I   FPU present: FPv4-SP-D16-M [cortex_m]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.75,
+          "line": "0000733 I 4 hardware watchpoints [dwt]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.76,
+          "line": "0000736 I 6 hardware breakpoints, 4 literal comparators [fpb]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.79,
+          "line": "0000774 I GDB server listening on port 51023 (core 0) [gdbserver]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.9,
+          "line": "0000881 I Client 1 connected on port 51023 from remote address localhost:43866 [gdbserver]",
+          "stream": "stderr"
+        }
+      ],
+      "server_terminated": {
+        "returncode": -15,
+        "was_running": true
+      },
+      "settle_s": 2.0
+    },
+    "halted_on_a_deleted_breakpoint": {
+      "argv_tail": [
+        "gdbserver",
+        "--port",
+        "35453",
+        "-O",
+        "semihost_console_type=off",
+        "--uid",
+        "[redacted]",
+        "--target",
+        "stm32f446retx",
+        "-W"
+      ],
+      "connect": [
+        {
+          "command": "-gdb-set pagination off",
+          "error": null,
+          "line": "1^done",
+          "records": [
+            "=thread-group-added,id=\"i1\"",
+            "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+            "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+            "(gdb) ",
+            "1^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-gdb-set confirm off",
+          "error": null,
+          "line": "2^done",
+          "records": [
+            "2^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-gdb-set mi-async on",
+          "error": null,
+          "line": "3^done",
+          "records": [
+            "3^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+          "error": null,
+          "line": "4^done",
+          "records": [
+            "4^done"
+          ],
+          "result_class": "done",
+          "timed_out": false
+        },
+        {
+          "command": "-target-select extended-remote localhost:35453",
+          "error": null,
+          "line": "5^connected",
+          "records": [
+            "=thread-group-started,id=\"i1\",pid=\"42000\"",
+            "=thread-created,id=\"1\",group-id=\"i1\"",
+            "~\"delay () at [redacted]/Src/main.c:114\\n\"",
+            "~\"114\\t        __asm volatile (\\\"nop\\\");\\n\"",
+            "*stopped,frame={addr=\"0x08002080\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"114\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+            "5^connected"
+          ],
+          "result_class": "connected",
+          "timed_out": false
+        },
+        {
+          "stop_after_connect": {
+            "error": null,
+            "line": "*stopped,frame={addr=\"0x08002080\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"114\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+            "reason": "unknown",
+            "timed_out": false
+          }
+        }
+      ],
+      "gdb_exit": {
+        "closed": true,
+        "commands": [
+          {
+            "command": "-gdb-exit",
+            "result_class": "exit",
+            "timed_out": false
+          }
+        ]
+      },
+      "halted": {
+        "pc": "0x8001f60 <SysTick_Handler+4>",
+        "steps": [
+          {
+            "command": "-break-insert SysTick_Handler",
+            "error": null,
+            "line": "6^done,bkpt={number=\"1\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}",
+            "records": [
+              "~\"Note: automatically using hardware breakpoints for read-only addresses.\\n\"",
+              "6^done,bkpt={number=\"1\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x08001f60\",func=\"SysTick_Handler\",file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",thread-groups=[\"i1\"],times=\"0\",original-location=\"SysTick_Handler\"}"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-exec-continue",
+            "error": null,
+            "line": "7^running",
+            "records": [
+              "7^running"
+            ],
+            "result_class": "running",
+            "timed_out": false
+          },
+          {
+            "command": "-break-delete",
+            "error": null,
+            "line": "8^done",
+            "records": [
+              "8^done"
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-data-evaluate-expression uptime_ms",
+            "error": null,
+            "line": "9^done,value=\"3717\"",
+            "records": [
+              "9^done,value=\"3717\""
+            ],
+            "result_class": "done",
+            "timed_out": false
+          },
+          {
+            "command": "-data-evaluate-expression $pc",
+            "error": null,
+            "line": "10^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+            "records": [
+              "10^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+            ],
+            "result_class": "done",
+            "timed_out": false
+          }
+        ],
+        "stop": {
+          "error": null,
+          "line": "*stopped,reason=\"breakpoint-hit\",disp=\"keep\",bkptno=\"1\",frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+          "reason": "breakpoint-hit",
+          "timed_out": false
+        },
+        "uptime_ms": "3717"
+      },
+      "next_connects": [
+        {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "6^done,value=\"3717\"",
+              "records": [
+                "6^done,value=\"3717\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "7^done,value=\"0x8001f60 <SysTick_Handler+4>\"",
+              "records": [
+                "7^done,value=\"0x8001f60 <SysTick_Handler+4>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "connect": [
+            {
+              "command": "-gdb-set pagination off",
+              "error": null,
+              "line": "1^done",
+              "records": [
+                "=thread-group-added,id=\"i1\"",
+                "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+                "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+                "(gdb) ",
+                "1^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set confirm off",
+              "error": null,
+              "line": "2^done",
+              "records": [
+                "2^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set mi-async on",
+              "error": null,
+              "line": "3^done",
+              "records": [
+                "3^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+              "error": null,
+              "line": "4^done",
+              "records": [
+                "4^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-target-select extended-remote localhost:33019",
+              "error": null,
+              "line": "5^connected",
+              "records": [
+                "=thread-group-started,id=\"i1\",pid=\"42000\"",
+                "=thread-created,id=\"1\",group-id=\"i1\"",
+                "~\"SysTick_Handler () at [redacted]/Src/main.c:66\\n\"",
+                "~\"66\\t    uptime_ms++;\\n\"",
+                "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+                "5^connected"
+              ],
+              "result_class": "connected",
+              "timed_out": false
+            },
+            {
+              "stop_after_connect": {
+                "error": null,
+                "line": "*stopped,frame={addr=\"0x08001f60\",func=\"SysTick_Handler\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"66\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+                "reason": "unknown",
+                "timed_out": false
+              }
+            }
+          ],
+          "gdb_closed": {
+            "closed": true,
+            "commands": [
+              {
+                "command": "-gdb-exit",
+                "result_class": "exit",
+                "timed_out": false
+              }
+            ]
+          },
+          "output": [
+            {
+              "at_s": 0.64,
+              "line": "0000599 I Target type is stm32f446retx [board]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.76,
+              "line": "0000720 I DP IDR = 0x2ba01477 (v1 rev2) [dap]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000733 I debugvar 'DbgMCU_APB1_Fz' = 0x7e019ff (132127231) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000733 I debugvar 'DbgMCU_APB2_Fz' = 0x70003 (458755) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000733 I debugvar 'DbgMCU_CR' = 0x7 (7) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000733 I debugvar 'TraceClk_Pin' = 0x40002 (262146) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000733 I debugvar 'TraceD0_Pin' = 0x40003 (262147) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000733 I debugvar 'TraceD1_Pin' = 0x40004 (262148) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000734 I debugvar 'TraceD2_Pin' = 0x40005 (262149) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000734 I debugvar 'TraceD3_Pin' = 0x40006 (262150) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000743 I AHB-AP#0 IDR = 0x24770011 (AHB-AP var1 rev2) [discovery]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000746 I AHB-AP#0 Class 0x1 ROM table #0 @ 0xe00ff000 (designer=020:ST part=411) [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000749 I [0]<e000e000:SCS v7-M class=14 designer=43b:Arm part=00c> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000750 I [1]<e0001000:DWT v7-M class=14 designer=43b:Arm part=002> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000752 I [2]<e0002000:FPB v7-M class=14 designer=43b:Arm part=003> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000753 I [3]<e0000000:ITM v7-M class=14 designer=43b:Arm part=001> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.8,
+              "line": "0000755 I [4]<e0040000:TPIU M4 class=9 designer=43b:Arm part=9a1 devtype=11 archid=0000 devid=ca1:0:0> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.8,
+              "line": "0000757 I [5]<e0041000:ETM M4 class=9 designer=43b:Arm part=925 devtype=13 archid=0000 devid=0:0:0> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.81,
+              "line": "0000764 I CPU core #0: Cortex-M4 r0p1, v7.0-M architecture [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.81,
+              "line": "0000764 I   Extensions: [DSP, FPU, FPU_V4, MPU] [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.81,
+              "line": "0000764 I   FPU present: FPv4-SP-D16-M [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.81,
+              "line": "0000766 I 4 hardware watchpoints [dwt]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.81,
+              "line": "0000770 I 6 hardware breakpoints, 4 literal comparators [fpb]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.85,
+              "line": "0000806 I GDB server listening on port 33019 (core 0) [gdbserver]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.96,
+              "line": "0000914 I Client 1 connected on port 33019 from remote address localhost:53102 [gdbserver]",
+              "stream": "stderr"
+            }
+          ],
+          "pc": "0x8001f60 <SysTick_Handler+4>",
+          "ready_line": {
+            "at_s": 0.85,
+            "line": "0000806 I GDB server listening on port 33019 (core 0) [gdbserver]",
+            "stream": "stderr"
+          },
+          "server_terminated_first": {
+            "returncode": -15,
+            "was_running": true
+          },
+          "uptime_ms": "3717"
+        },
+        {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "6^done,value=\"3738\"",
+              "records": [
+                "6^done,value=\"3738\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "7^done,value=\"0x8002088 <delay+20>\"",
+              "records": [
+                "7^done,value=\"0x8002088 <delay+20>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "connect": [
+            {
+              "command": "-gdb-set pagination off",
+              "error": null,
+              "line": "1^done",
+              "records": [
+                "=thread-group-added,id=\"i1\"",
+                "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+                "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+                "(gdb) ",
+                "1^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set confirm off",
+              "error": null,
+              "line": "2^done",
+              "records": [
+                "2^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set mi-async on",
+              "error": null,
+              "line": "3^done",
+              "records": [
+                "3^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+              "error": null,
+              "line": "4^done",
+              "records": [
+                "4^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-target-select extended-remote localhost:45549",
+              "error": null,
+              "line": "5^connected",
+              "records": [
+                "=thread-group-started,id=\"i1\",pid=\"42000\"",
+                "=thread-created,id=\"1\",group-id=\"i1\"",
+                "~\"0x08002088 in delay () at [redacted]/Src/main.c:113\\n\"",
+                "~\"113\\t    for (volatile uint32_t i = 0; i < 1000000U; ++i) {\\n\"",
+                "*stopped,frame={addr=\"0x08002088\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+                "5^connected"
+              ],
+              "result_class": "connected",
+              "timed_out": false
+            },
+            {
+              "stop_after_connect": {
+                "error": null,
+                "line": "*stopped,frame={addr=\"0x08002088\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+                "reason": "unknown",
+                "timed_out": false
+              }
+            }
+          ],
+          "gdb_closed": {
+            "closed": true,
+            "commands": [
+              {
+                "command": "-gdb-exit",
+                "result_class": "exit",
+                "timed_out": false
+              }
+            ]
+          },
+          "output": [
+            {
+              "at_s": 0.64,
+              "line": "0000610 I Target type is stm32f446retx [board]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.77,
+              "line": "0000734 I DP IDR = 0x2ba01477 (v1 rev2) [dap]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000747 I debugvar 'DbgMCU_APB1_Fz' = 0x7e019ff (132127231) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000747 I debugvar 'DbgMCU_APB2_Fz' = 0x70003 (458755) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000747 I debugvar 'DbgMCU_CR' = 0x7 (7) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000747 I debugvar 'TraceClk_Pin' = 0x40002 (262146) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000747 I debugvar 'TraceD0_Pin' = 0x40003 (262147) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000747 I debugvar 'TraceD1_Pin' = 0x40004 (262148) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000747 I debugvar 'TraceD2_Pin' = 0x40005 (262149) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000747 I debugvar 'TraceD3_Pin' = 0x40006 (262150) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000756 I AHB-AP#0 IDR = 0x24770011 (AHB-AP var1 rev2) [discovery]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000759 I AHB-AP#0 Class 0x1 ROM table #0 @ 0xe00ff000 (designer=020:ST part=411) [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000762 I [0]<e000e000:SCS v7-M class=14 designer=43b:Arm part=00c> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.8,
+              "line": "0000763 I [1]<e0001000:DWT v7-M class=14 designer=43b:Arm part=002> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.8,
+              "line": "0000765 I [2]<e0002000:FPB v7-M class=14 designer=43b:Arm part=003> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.8,
+              "line": "0000766 I [3]<e0000000:ITM v7-M class=14 designer=43b:Arm part=001> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.8,
+              "line": "0000769 I [4]<e0040000:TPIU M4 class=9 designer=43b:Arm part=9a1 devtype=11 archid=0000 devid=ca1:0:0> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.8,
+              "line": "0000772 I [5]<e0041000:ETM M4 class=9 designer=43b:Arm part=925 devtype=13 archid=0000 devid=0:0:0> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.81,
+              "line": "0000780 I CPU core #0: Cortex-M4 r0p1, v7.0-M architecture [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.81,
+              "line": "0000780 I   Extensions: [DSP, FPU, FPU_V4, MPU] [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.81,
+              "line": "0000780 I   FPU present: FPv4-SP-D16-M [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.81,
+              "line": "0000782 I 4 hardware watchpoints [dwt]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.82,
+              "line": "0000785 I 6 hardware breakpoints, 4 literal comparators [fpb]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.86,
+              "line": "0000822 I GDB server listening on port 45549 (core 0) [gdbserver]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.96,
+              "line": "0000930 I Client 1 connected on port 45549 from remote address localhost:55746 [gdbserver]",
+              "stream": "stderr"
+            }
+          ],
+          "pc": "0x8002088 <delay+20>",
+          "ready_line": {
+            "at_s": 0.86,
+            "line": "0000822 I GDB server listening on port 45549 (core 0) [gdbserver]",
+            "stream": "stderr"
+          },
+          "server_terminated_first": {
+            "returncode": -15,
+            "was_running": true
+          },
+          "uptime_ms": "3738"
+        },
+        {
+          "answers": [
+            {
+              "command": "-data-evaluate-expression uptime_ms",
+              "error": null,
+              "line": "6^done,value=\"3765\"",
+              "records": [
+                "6^done,value=\"3765\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-data-evaluate-expression $pc",
+              "error": null,
+              "line": "7^done,value=\"0x8002084 <delay+16>\"",
+              "records": [
+                "7^done,value=\"0x8002084 <delay+16>\""
+              ],
+              "result_class": "done",
+              "timed_out": false
+            }
+          ],
+          "connect": [
+            {
+              "command": "-gdb-set pagination off",
+              "error": null,
+              "line": "1^done",
+              "records": [
+                "=thread-group-added,id=\"i1\"",
+                "=cmd-param-changed,param=\"auto-load gdb-scripts\",value=\"off\"",
+                "=cmd-param-changed,param=\"auto-load local-gdbinit\",value=\"off\"",
+                "(gdb) ",
+                "1^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set confirm off",
+              "error": null,
+              "line": "2^done",
+              "records": [
+                "2^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-gdb-set mi-async on",
+              "error": null,
+              "line": "3^done",
+              "records": [
+                "3^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-file-exec-and-symbols \"[redacted]/nucleo-f446re_demo.elf\"",
+              "error": null,
+              "line": "4^done",
+              "records": [
+                "4^done"
+              ],
+              "result_class": "done",
+              "timed_out": false
+            },
+            {
+              "command": "-target-select extended-remote localhost:59565",
+              "error": null,
+              "line": "5^connected",
+              "records": [
+                "=thread-group-started,id=\"i1\",pid=\"42000\"",
+                "=thread-created,id=\"1\",group-id=\"i1\"",
+                "~\"0x08002084 in delay () at [redacted]/Src/main.c:113\\n\"",
+                "~\"113\\t    for (volatile uint32_t i = 0; i < 1000000U; ++i) {\\n\"",
+                "*stopped,frame={addr=\"0x08002084\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+                "5^connected"
+              ],
+              "result_class": "connected",
+              "timed_out": false
+            },
+            {
+              "stop_after_connect": {
+                "error": null,
+                "line": "*stopped,frame={addr=\"0x08002084\",func=\"delay\",args=[],file=\"[redacted]/Src/main.c\",fullname=\"[redacted]/Src/main.c\",line=\"113\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+                "reason": "unknown",
+                "timed_out": false
+              }
+            }
+          ],
+          "gdb_closed": {
+            "closed": true,
+            "commands": [
+              {
+                "command": "-gdb-exit",
+                "result_class": "exit",
+                "timed_out": false
+              }
+            ]
+          },
+          "output": [
+            {
+              "at_s": 0.62,
+              "line": "0000575 I Target type is stm32f446retx [board]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.77,
+              "line": "0000724 I DP IDR = 0x2ba01477 (v1 rev2) [dap]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.77,
+              "line": "0000729 I debugvar 'DbgMCU_APB1_Fz' = 0x7e019ff (132127231) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.77,
+              "line": "0000729 I debugvar 'DbgMCU_APB2_Fz' = 0x70003 (458755) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.77,
+              "line": "0000729 I debugvar 'DbgMCU_CR' = 0x7 (7) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.77,
+              "line": "0000729 I debugvar 'TraceClk_Pin' = 0x40002 (262146) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.77,
+              "line": "0000729 I debugvar 'TraceD0_Pin' = 0x40003 (262147) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.77,
+              "line": "0000729 I debugvar 'TraceD1_Pin' = 0x40004 (262148) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.77,
+              "line": "0000729 I debugvar 'TraceD2_Pin' = 0x40005 (262149) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.77,
+              "line": "0000729 I debugvar 'TraceD3_Pin' = 0x40006 (262150) [pack_target]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.78,
+              "line": "0000743 I AHB-AP#0 IDR = 0x24770011 (AHB-AP var1 rev2) [discovery]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000747 I AHB-AP#0 Class 0x1 ROM table #0 @ 0xe00ff000 (designer=020:ST part=411) [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000750 I [0]<e000e000:SCS v7-M class=14 designer=43b:Arm part=00c> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.79,
+              "line": "0000752 I [1]<e0001000:DWT v7-M class=14 designer=43b:Arm part=002> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.8,
+              "line": "0000754 I [2]<e0002000:FPB v7-M class=14 designer=43b:Arm part=003> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.8,
+              "line": "0000756 I [3]<e0000000:ITM v7-M class=14 designer=43b:Arm part=001> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.8,
+              "line": "0000759 I [4]<e0040000:TPIU M4 class=9 designer=43b:Arm part=9a1 devtype=11 archid=0000 devid=ca1:0:0> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.8,
+              "line": "0000762 I [5]<e0041000:ETM M4 class=9 designer=43b:Arm part=925 devtype=13 archid=0000 devid=0:0:0> [rom_table]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.81,
+              "line": "0000771 I CPU core #0: Cortex-M4 r0p1, v7.0-M architecture [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.81,
+              "line": "0000771 I   Extensions: [DSP, FPU, FPU_V4, MPU] [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.81,
+              "line": "0000771 I   FPU present: FPv4-SP-D16-M [cortex_m]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.82,
+              "line": "0000774 I 4 hardware watchpoints [dwt]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.82,
+              "line": "0000779 I 6 hardware breakpoints, 4 literal comparators [fpb]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.86,
+              "line": "0000822 I GDB server listening on port 59565 (core 0) [gdbserver]",
+              "stream": "stderr"
+            },
+            {
+              "at_s": 0.97,
+              "line": "0000929 I Client 1 connected on port 59565 from remote address localhost:54682 [gdbserver]",
+              "stream": "stderr"
+            }
+          ],
+          "pc": "0x8002084 <delay+16>",
+          "ready_line": {
+            "at_s": 0.86,
+            "line": "0000822 I GDB server listening on port 59565 (core 0) [gdbserver]",
+            "stream": "stderr"
+          },
+          "server_terminated_first": {
+            "returncode": -15,
+            "was_running": true
+          },
+          "uptime_ms": "3765"
+        }
+      ],
+      "ready_line": {
+        "at_s": 0.85,
+        "line": "0000825 I GDB server listening on port 35453 (core 0) [gdbserver]",
+        "stream": "stderr"
+      },
+      "scenario": "halted_on_a_deleted_breakpoint",
+      "server_output": [
+        {
+          "at_s": 0.61,
+          "line": "0000582 I Target type is stm32f446retx [board]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.74,
+          "line": "0000717 I DP IDR = 0x2ba01477 (v1 rev2) [dap]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.75,
+          "line": "0000726 I debugvar 'DbgMCU_APB1_Fz' = 0x7e019ff (132127231) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.75,
+          "line": "0000727 I debugvar 'DbgMCU_APB2_Fz' = 0x70003 (458755) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.75,
+          "line": "0000727 I debugvar 'DbgMCU_CR' = 0x7 (7) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.75,
+          "line": "0000727 I debugvar 'TraceClk_Pin' = 0x40002 (262146) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.75,
+          "line": "0000727 I debugvar 'TraceD0_Pin' = 0x40003 (262147) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.75,
+          "line": "0000727 I debugvar 'TraceD1_Pin' = 0x40004 (262148) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.75,
+          "line": "0000727 I debugvar 'TraceD2_Pin' = 0x40005 (262149) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.75,
+          "line": "0000727 I debugvar 'TraceD3_Pin' = 0x40006 (262150) [pack_target]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.76,
+          "line": "0000739 I AHB-AP#0 IDR = 0x24770011 (AHB-AP var1 rev2) [discovery]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.77,
+          "line": "0000742 I AHB-AP#0 Class 0x1 ROM table #0 @ 0xe00ff000 (designer=020:ST part=411) [rom_table]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.77,
+          "line": "0000745 I [0]<e000e000:SCS v7-M class=14 designer=43b:Arm part=00c> [rom_table]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.77,
+          "line": "0000747 I [1]<e0001000:DWT v7-M class=14 designer=43b:Arm part=002> [rom_table]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.77,
+          "line": "0000749 I [2]<e0002000:FPB v7-M class=14 designer=43b:Arm part=003> [rom_table]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.78,
+          "line": "0000750 I [3]<e0000000:ITM v7-M class=14 designer=43b:Arm part=001> [rom_table]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.78,
+          "line": "0000753 I [4]<e0040000:TPIU M4 class=9 designer=43b:Arm part=9a1 devtype=11 archid=0000 devid=ca1:0:0> [rom_table]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.78,
+          "line": "0000756 I [5]<e0041000:ETM M4 class=9 designer=43b:Arm part=925 devtype=13 archid=0000 devid=0:0:0> [rom_table]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.79,
+          "line": "0000765 I CPU core #0: Cortex-M4 r0p1, v7.0-M architecture [cortex_m]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.79,
+          "line": "0000765 I   Extensions: [DSP, FPU, FPU_V4, MPU] [cortex_m]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.79,
+          "line": "0000765 I   FPU present: FPv4-SP-D16-M [cortex_m]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.79,
+          "line": "0000768 I 4 hardware watchpoints [dwt]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.8,
+          "line": "0000772 I 6 hardware breakpoints, 4 literal comparators [fpb]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.85,
+          "line": "0000825 I GDB server listening on port 35453 (core 0) [gdbserver]",
+          "stream": "stderr"
+        },
+        {
+          "at_s": 0.96,
+          "line": "0000934 I Client 1 connected on port 35453 from remote address localhost:58376 [gdbserver]",
+          "stream": "stderr"
+        }
+      ],
+      "server_terminated": {
+        "returncode": -15,
+        "was_running": true
+      },
+      "settle_s": 2.0
+    }
+  },
+  "schema": "agentic-hil.pyocd-gdbserver-next-connect-recording/v1",
+  "source_commit": "c5ef7d33622f0805269394e177a9d06b3fe55cda"
+}

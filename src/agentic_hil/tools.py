@@ -2777,6 +2777,22 @@ def configured_sessionless_debug_reads(config: AgenticHILConfig, debugger_id: st
         backend.close()
 
 
+def configured_opens_debug_sessions(config: AgenticHILConfig, debugger_id: str | None = None) -> bool:
+    """Whether a configured probe's backend opens typed debug sessions.
+
+    Built and dropped the way `configured_sessionless_debug_reads` builds and
+    drops one, for the same caller and the same reason: the test reactor's
+    preflight decides whether a plan's session steps can run on this probe at
+    all, holds no backend and must not acquire one. Answered by the backend
+    (`DebuggerBackend.opens_debug_sessions`), not by its type name."""
+    bound = config if debugger_id is None or debugger_id == config.debugger_id else bind_debugger(config, debugger_id)
+    backend = create_debugger_backend(bound)
+    try:
+        return backend.opens_debug_sessions() is True
+    finally:
+        backend.close()
+
+
 def implicit_run_tools() -> set[str]:
     """Effect tools that a bare call wraps in a run it declares for itself.
 

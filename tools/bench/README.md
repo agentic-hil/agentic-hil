@@ -86,6 +86,7 @@ python3 tools/bench_in_container.py --runtime podman --live-device-tree -- tests
 python3 tools/bench_in_container.py --distribution debian-12
 python3 tools/bench_in_container.py --build-only         # the image alone, anywhere
 python3 tools/bench_in_container.py --cubeprogrammer-archive ~/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip --build-only
+python3 tools/bench_in_container.py --cubeclt-archive /path/to/stm32cubeclt_1.22.0-Lin-x86_64.sh.zip
 ```
 
 The licensed STM32CubeProgrammer layer is opt-in. Its archive stays outside the
@@ -112,6 +113,29 @@ anything is built, naming the head's own reason: Fedora 44 has no `apt-get` for
 the stage's package install, Ubuntu 22.04 and Debian 12 have no
 `libglib2.0-0t64` under that name, and Ubuntu 24.04, which does carry it, has
 had no build of the stage measured on it.
+
+The licensed STM32CubeCLT layer is opt-in the same way, and it is what the
+tier's typed debug sessions on the STM32CubeProgrammer backend run on.
+`--cubeclt-archive` takes ST's STM32CubeCLT 1.22.0 for Linux archive as it is
+downloaded (`stm32cubeclt_1.22.0-Lin-x86_64.sh.zip`), kept outside the
+checkout; the helper checks it against SHA-256
+`8bebfb8811e28dcc26977c058a6109cdea4bcc930b2c4cf833d8309036b93b0d` before
+copying it into the temporary build context, and the build selects the separate
+`bench-tier-cubeclt` stage. That stage does not run the installer inside the
+archive: `tools/bench/extract_cubeclt.py` reads its makeself header for where
+the payload starts, refuses a payload that is not a plain tar, and takes
+`STM32CubeProgrammer` and `STLink-gdb-server` out of the tree into
+`/opt/st/stm32cubeclt_1.22.0`, so no device rule, service or system location
+outside that directory changes. The image names that tree in
+`AGENTIC_HIL_BENCH_CUBECLT`, and the build checks that the extracted
+ST-LINK_gdbserver answers `--version` and `-h` as it did on the bench and that
+the product finds it beside the CLI. The tier's tests marked `cubeclt`
+(`tests/bench/test_bench_stlink_sessions.py`) run only where
+`AGENTIC_HIL_BENCH_CUBECLT` names a tree: in this image, or in a direct run
+against an extracted one. Everywhere else they are deselected, and the
+collection says why. The option is refused with `--distribution` for the
+reasons above, and together with `--cubeprogrammer-archive`, because each is
+an image target of its own and this tree carries its own CLI.
 
 A run finds the probe through sysfs by its USB vendor and product ids, never by
 a serial number; takes this machine's run lock; builds the image; runs the tier

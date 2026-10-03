@@ -45,6 +45,14 @@ class DebuggerBackend(Protocol):
 
     def sessionless_debug_tools(self) -> frozenset[str]: ...
 
+    def opens_debug_sessions(self) -> bool:
+        """Whether this backend runs typed debug sessions through a GDB server.
+
+        Asked of the backend rather than read off its type name, so the test
+        reactor admits a plan's session steps on exactly the backends that open
+        sessions, with nothing else to change when another one does."""
+        ...
+
     def target_support(self) -> JsonObject: ...
 
     def classify_last_error(self) -> JsonObject: ...
@@ -76,6 +84,10 @@ class UnboundDebuggerBackend:
         one-shot classification reads the same empty answer it reads from a bound
         session backend."""
         return frozenset()
+
+    def opens_debug_sessions(self) -> bool:
+        """No probe is bound, so no session can be opened on one."""
+        return False
 
     def target_support(self) -> JsonObject:
         """Undetermined rather than refused: with no probe bound there is no

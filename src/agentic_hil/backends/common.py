@@ -34,6 +34,22 @@ NOT_CONTACTED: JsonObject = {
     "retry_safe": True,
 }
 
+# The markers a failure carries when it cannot place where it stopped: nothing
+# about the bench is settled, nothing may be retried on its word, and what it
+# held stays held until something settles it. Not the opposite claim to
+# NOT_CONTACTED but the absence of one, said out loud: a reading that can prove
+# neither reaches for these, so that a layer above, which knows less about the
+# server than the reading did, cannot fill the silence with the safe answer.
+# Carries no `target_contacted` and no `side_effect_committed`, because an
+# unproven contact is not a denied one.
+CONTACT_UNPROVEN: JsonObject = {
+    "side_effect_status": "unknown",
+    "retry_safe": False,
+    "target_state": "unknown",
+    "hardware_state": "unknown",
+    "cleanup_required": True,
+}
+
 # The tools whose command drives nothing of its own: whatever addressed the
 # target did so while the backend was still opening its session. A backend may
 # therefore read "no target answered" as a proven abort point for these, and may
@@ -41,19 +57,18 @@ NOT_CONTACTED: JsonObject = {
 # the same words after it has.
 READ_ONLY_TOOLS = frozenset({"probe_target", "debugger_probes_list"})
 
-# What each backend without typed debug sessions would have to become to serve
-# one, in the words its own configuration uses. Both entries end in the same
-# place, because both probes are probes OpenOCD drives: the way out of this
-# refusal is a `debuggers.<name>.type` change and the two scripts that come with
-# it, not a different probe and not a different bench.
+# What a backend that opens no typed debug session here would need to open one,
+# in the words its own configuration uses. On `type: stlink` that is a GDB server
+# beside the CLI, which has none: ST-LINK_gdbserver, named or found (#624). Or the
+# same in-circuit debugger under OpenOCD, which is its own GDB server: a
+# `debuggers.<name>.type` change and the two scripts that come with it. Neither
+# is a different probe or a different bench. pyOCD has no entry: it always opens
+# sessions, through `pyocd gdbserver`.
 DEBUG_SESSION_WAY_OUT: dict[str, str] = {
     "stlink": (
-        "the same ST-Link runs under `type: openocd` with `interface_cfg: interface/stlink.cfg` and the "
-        "`target_cfg` for this part"
-    ),
-    "pyocd": (
-        "the same probe runs under `type: openocd` with the `interface_cfg` for it ("
-        "`interface/stlink.cfg` for an ST-Link, `interface/cmsis-dap.cfg` for a CMSIS-DAP probe) and the `target_cfg` "
+        "name the ST-LINK_gdbserver that STM32CubeCLT installs as `debuggers.<name>.gdb_server_executable` (it is "
+        "found by itself beside the configured STM32_Programmer_CLI of the same STM32CubeCLT), or run the same "
+        "in-circuit debugger under `type: openocd` with `interface_cfg: interface/stlink.cfg` and the `target_cfg` "
         "for this part"
     ),
 }
@@ -63,19 +78,20 @@ def debug_session_unsupported(backend_name: str, tool: str) -> JsonObject:
     """Refuse a typed-debug session tool, and say what to change to get one.
 
     Breakpoints, continue, halt-with-stop-reason and the session lifecycle are
-    GDB operations, and neither STM32CubeProgrammer's CLI nor pyOCD's commander
-    is a GDB server this project drives as one. That much was always true; what
-    was wrong with the refusal is that it named the backend the bench does not
-    run and stopped there (#342). A caller reading it learned that the capability
-    exists somewhere and nothing about how to reach it, so the reasonable next
-    move looked like buying a different probe, when the probe already plugged in
-    is one OpenOCD drives.
+    GDB operations, and STM32CubeProgrammer's CLI is not a GDB server. Sessions
+    on that backend run ST-LINK_gdbserver (#624), so this refusal is reached only
+    when the debugger entry has none, configured or found. An earlier refusal
+    named the backend the bench does not run and stopped there (#342): a caller
+    reading it learned that the capability exists somewhere and nothing about
+    how to reach it, so the reasonable next move looked like buying a different
+    probe, when the probe already plugged in serves sessions either way.
 
-    So the refusal names the configuration change instead: the same physical
-    probe under `type: openocd`, with the interface and target scripts that
-    backend reaches a target through. The catalogue entry behind
-    `not_supported:<backend>` carries the rest, including what the change costs,
-    because a way out that hides its price is a different kind of dead end.
+    So the refusal names the configuration changes instead: the GDB server
+    beside the CLI, or the same physical probe under `type: openocd` with the
+    interface and target scripts that backend reaches a target through. The
+    catalogue entry behind `not_supported:<backend>` carries the rest, including
+    what each change costs, because a way out that hides its price is a
+    different kind of dead end.
 
     `error_type` stays `not_supported`. It is the project's word for a capability
     this configuration does not have, the service layer reads it as a refusal
@@ -91,8 +107,9 @@ def debug_session_unsupported(backend_name: str, tool: str) -> JsonObject:
         "backend": backend_name,
         "error_type": "not_supported",
         "summary": (
-            f"Typed debug sessions require the OpenOCD backend; the {backend_name} backend has no debug session to "
-            f"set breakpoints, continue, halt or report a stop reason through.{reach}"
+            f"Typed debug sessions on the {backend_name} backend run on a GDB server, and this debugger has none "
+            f"configured or found, so there is no debug session to set breakpoints, continue, halt or report a stop "
+            f"reason through.{reach}"
         ),
         **remediation_fields("not_supported", backend_name),
         **NOT_CONTACTED,
@@ -115,9 +132,8 @@ def reset_init_unsupported(backend_name: str, missing: str) -> JsonObject:
     machine depending on which debugger the project happened to configure;
     nothing shipped said so.
 
-    Refusing is the answer these two backends already give for typed debug
-    sessions: the capability is OpenOCD's, and a caller that needs it needs an
-    OpenOCD debugger rather than a quieter approximation of one. The refusal is
+    The capability is OpenOCD's, and a caller that needs it needs an OpenOCD
+    debugger rather than a quieter approximation of one. The refusal is
     also cheaper than what it replaces - it returns before the CLI is spawned,
     so it carries NOT_CONTACTED and leaves the board where the last call that
     did reach it left it. `run` and `halt` are unaffected: those two do agree
@@ -453,3 +469,46 @@ def cube_clt_programmer_paths(root: Path) -> list[str]:
         return []
     candidates = [item / "STM32CubeProgrammer" / "bin" / "STM32_Programmer_CLI.exe" for item in installations]
     return [str(candidate) for candidate in sorted(candidates, reverse=True) if candidate.is_file()]
+
+
+# STM32_Programmer_CLI has no GDB server; typed debug sessions on the stlink
+# backend run ST-LINK_gdbserver, which STM32CubeCLT installs beside the CLI:
+# `<tree>/STM32CubeProgrammer/bin/STM32_Programmer_CLI` and
+# `<tree>/STLink-gdb-server/bin/ST-LINK_gdbserver`. The server is started with
+# the CLI's directory as `-cp`, so the one from the same tree is preferred over
+# any other on the host (#624).
+def st_link_gdb_server_beside(cli: str | None) -> str | None:
+    if not cli:
+        return None
+    given = Path(cli)
+    for programmer in dict.fromkeys([given, given.resolve()]):
+        if programmer.parent.name != "bin" or programmer.parent.parent.name != "STM32CubeProgrammer":
+            continue
+        suffix = ".exe" if programmer.suffix.lower() == ".exe" else ""
+        server = programmer.parent.parent.parent / "STLink-gdb-server" / "bin" / f"ST-LINK_gdbserver{suffix}"
+        if server.is_file():
+            return str(server)
+    return None
+
+
+def cube_clt_gdb_server_paths(root: Path) -> list[str]:
+    try:
+        installations = [item for item in root.iterdir() if item.name.startswith("STM32CubeCLT_")]
+    except OSError:
+        return []
+    candidates = [item / "STLink-gdb-server" / "bin" / "ST-LINK_gdbserver.exe" for item in installations]
+    return [str(candidate) for candidate in sorted(candidates, reverse=True) if candidate.is_file()]
+
+
+def host_st_link_gdb_server() -> str | None:
+    """ST-LINK_gdbserver anywhere on this host: PATH first, then the STM32CubeCLT installations."""
+    for candidate in ["ST-LINK_gdbserver", "ST-LINK_gdbserver.exe"]:
+        found = which(candidate)
+        if found:
+            return found
+    installed = cube_clt_gdb_server_paths(Path("C:/ST"))
+    return installed[0] if installed else None
+
+
+def find_st_link_gdb_server(cli: str | None) -> str | None:
+    return st_link_gdb_server_beside(cli) or host_st_link_gdb_server()

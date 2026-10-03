@@ -1,0 +1,94 @@
+{
+  "provenance": {
+    "tool": "ST-LINK_gdbserver",
+    "version": "7.14.0",
+    "bundle": "STM32CubeCLT 1.22.0 for Windows, installed at its default location",
+    "recorded_on": "2026-10-01",
+    "environment": "Windows 11 with no in-circuit debugger or programmer attached, so no run reached a probe or a board.",
+    "capture": "Each argv run once from an empty temporary working directory, with a 30 s bound and stdout and stderr captured apart. `<cubeprogrammer-bin>` stands for the bundle's own STM32CubeProgrammer/bin directory, the one `-cp` names. `files_left_in_cwd` is what each run left in its working directory. The ports are free ones picked for the run."
+  },
+  "recordings": {
+    "version": {
+      "argv": [
+        "--version"
+      ],
+      "returncode": 0,
+      "timed_out": false,
+      "elapsed_s": 0.16,
+      "stdout": "\nC:\\ST\\STM32CubeCLT_1.22.0\\STLink-gdb-server\\bin\\ST-LINK_gdbserver.exe  version: 7.14.0\n\n",
+      "stderr": "",
+      "files_left_in_cwd": []
+    },
+    "help": {
+      "argv": [
+        "-h"
+      ],
+      "returncode": 0,
+      "timed_out": false,
+      "elapsed_s": 0.01,
+      "stdout": "\nUSAGE: \n\n   C:\\ST\\STM32CubeCLT_1.22.0\\STLink-gdb-server\\bin\\ST-LINK_gdbserver.exe \n                                        [--semihost-console-port <port\n                                        number>] [--semihosting <semihost\n                                        level>] [--external-init]\n                                        [--pend-halt-timeout <Pending halt\n                                        timeout>] [--halt] [-c <config\n                                        file>] [-e] [-f <log file>] [-l\n                                        <log level>] [-p <port number>]\n                                        [-v] [-r <refresh delay>]\n                                        [--target-sel <SWD multidrop target\n                                        sel>] [--pcm-pm-force]\n                                        [--incremental] [-s] [-d] [-z <port\n                                        number>] [-a <cpu clock>] [-b <SWO\n                                        CLOCKDIV>] [-k] [-q] [-i <ST-LINK\n                                        S/N>] [-m <apID>] [-g] [-t]\n                                        [--erase-all] [--memory-map <device\n                                        id>] [--ext-memory-loaders] [-ei\n                                        <file_path>] ...  [-el <file_path>]\n                                        ...  [-cp <path>] [--temp-path\n                                        <path>] [--preserve-temps]\n                                        [--frequency <max freq kHz>]\n                                        [--licenses] [--] [--version] [-h]\n\n\nWhere: \n\n   --semihost-console-port <port number>\n     Port number for semihost console clients\n\n   --semihosting <semihost level>\n     Select semihosting mode\n\n   --external-init\n     Run Init() from external loader after reset\n\n   --pend-halt-timeout <Pending halt timeout>\n     Maximum time to wait for core to halt\n\n   --halt\n     Halt all cores during reset\n\n   -c <config file>,  --config-file <config file>\n     Read the config params from config file\n\n   -e,  --persistent\n     Enable persistent mode\n\n   -f <log file>,  --log-file <log file>\n     Path to log file\n\n   -l <log level>,  --log-level <log level>\n     Logging level between 0 to 31\n\n   -p <port number>,  --port-number <port number>\n     TCP port number for GDB client\n\n   -v,  --verbose\n     Turn ON verbose mode\n\n   -r <refresh delay>,  --refresh-delay <refresh delay>\n     Minimum delay in seconds for hardware status refresh\n\n   --target-sel <SWD multidrop target sel>\n     Enable SWD multidrop mode with target selection\n\n   --pcm-pm-force\n     Force flash programming if PCM PM bit set\n\n   --incremental\n     Turn ON incremental flash programming\n\n   -s,  --verify\n     Turn ON flash download verify\n\n   -d,  --swd\n     Enable SWD debug mode\t[use for SWV]\n\n   -z <port number>,  --swo-port <port number>\n     SWO output port number\t[use for SWV]\n\n   -a <cpu clock>,  --cpu-clock <cpu clock>\n     CPU clock speed in Hz\t[use for SWV]\n\n   -b <SWO CLOCKDIV>,  --swo-clock-div <SWO CLOCKDIV>\n     Divide CPU clock by SWO CLOCKDIV\n\n   -k,  --initialize-reset\n     Initialize the device under reset condition\n\n   -q,  --debuggers\n     List serial number for connected ST-LINK devices\n\n   -i <ST-LINK S/N>,  --serial-number <ST-LINK S/N>\n     ST-LINK serial number\n\n   -m <apID>,  --apid <apID>\n     Select core on multi-core devices\n\n   -g,  --attach\n     Attach to running target\n\n   -t,  --shared\n     Shareable ST-LINK\t[using ST-LINK server]\n\n   --erase-all\n     Erase all memories\n\n   --memory-map <device id>\n     Show memory map for device id\n\n   --ext-memory-loaders\n     List of available external memory-loaders\n\n   -ei <file_path>,  --extload_init <file_path>  (accepted multiple times)\n     Custom external memory-loader with initialization after reset\n\n   -el <file_path>,  --extload <file_path>  (accepted multiple times)\n     Custom external memory-loader\n\n   -cp <path>,  --stm32cubeprogrammer-path <path>\n     Path to STM32CubeProgrammer installation\n\n   --temp-path <path>\n     Temporary files for starting a debug session are stored in the\n     provided path\n\n   --preserve-temps\n     Will not remove used temporary files\n\n   --frequency <max freq kHz>\n     Select com frequency in kHz\n\n   --licenses\n     List of used tools and licenses\n\n   --,  --ignore-rest\n     Ignores the rest of the labeled arguments following this flag\n\n   --version\n     Displays version information and exits\n\n   -h,  --help\n     Displays usage information and exits\n\n\n   ST-LINK GDB server\n\n",
+      "stderr": "",
+      "files_left_in_cwd": []
+    },
+    "start_no_probe": {
+      "argv": [
+        "-p",
+        "60611",
+        "-d",
+        "-cp",
+        "<cubeprogrammer-bin>"
+      ],
+      "returncode": 20,
+      "timed_out": false,
+      "elapsed_s": 0.05,
+      "stdout": "\n\nSTMicroelectronics ST-LINK GDB server. Version 7.14.0\nCopyright (c) 2026, STMicroelectronics. All rights reserved.\n\nStarting server with the following options:\n        Persistent Mode            : Disabled\n        Logging Level              : 1\n        Listen Port Number         : 60611\n        Status Refresh Delay       : 15s\n        Verbose Mode               : Disabled\n        SWD Debug                  : Enabled\n\n\nError in initializing ST-LINK device.\nReason: No ST-LINK found. Please check ST-LINK USB cable.\n",
+      "stderr": "",
+      "files_left_in_cwd": []
+    },
+    "start_no_probe_without_cp": {
+      "argv": [
+        "-p",
+        "60612",
+        "-d"
+      ],
+      "returncode": 2147811325,
+      "timed_out": false,
+      "elapsed_s": 0.01,
+      "stdout": "ERROR: Couldn't locate STM32CubeProgrammer in '..\\STM32CubeProgrammer\\bin\\', use -cp <path>  \n",
+      "stderr": "",
+      "files_left_in_cwd": []
+    },
+    "start_no_probe_cp_missing": {
+      "argv": [
+        "-p",
+        "60613",
+        "-d",
+        "-cp",
+        "C:\\ST\\STM32CubeCLT_1.22.0\\no-such-directory"
+      ],
+      "returncode": 2147811325,
+      "timed_out": false,
+      "elapsed_s": 0.01,
+      "stdout": "ERROR: Couldn't locate STM32CubeProgrammer in 'C:\\ST\\STM32CubeCLT_1.22.0\\no-such-directory', use -cp <path>  \n",
+      "stderr": "",
+      "files_left_in_cwd": []
+    },
+    "start_no_probe_serial": {
+      "argv": [
+        "-p",
+        "60614",
+        "-d",
+        "-i",
+        "AGENTICHILNOSUCHPROBE0",
+        "-cp",
+        "<cubeprogrammer-bin>"
+      ],
+      "returncode": 20,
+      "timed_out": false,
+      "elapsed_s": 0.02,
+      "stdout": "\n\nSTMicroelectronics ST-LINK GDB server. Version 7.14.0\nCopyright (c) 2026, STMicroelectronics. All rights reserved.\n\nStarting server with the following options:\n        Persistent Mode            : Disabled\n        Logging Level              : 1\n        Listen Port Number         : 60614\n        Status Refresh Delay       : 15s\n        Verbose Mode               : Disabled\n        SWD Debug                  : Enabled\n\n\nError in initializing ST-LINK device.\nReason: No ST-LINK found. Please check ST-LINK USB cable.\n",
+      "stderr": "",
+      "files_left_in_cwd": []
+    }
+  }
+}

@@ -54,6 +54,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -436,6 +437,43 @@ def test_a_group_whose_remaining_members_are_zombies_reads_as_emptied(tmp_path: 
     assert elapsed < scaled_time_bound(EMPTIED_GROUP_CEILING_S), f"the reap waited {elapsed:.1f} s on a group that held nothing but a zombie"
     assert child.poll() is not None
     assert not Path(f"/proc/{grandchild}").exists(), "the orphan the reap left behind was never collected"
+
+
+# ---------------------------------------------------------------------------
+# A process that must not be asked to stop.
+
+
+@pytest.mark.skipif(WINDOWS, reason="Windows ends a tree through its Job Object, which runs no handler either way")
+@pytest.mark.parametrize("graceful", [True, False])
+def test_a_tree_ended_without_grace_never_runs_its_termination_handler(tmp_path: Path, graceful: bool) -> None:
+    """What ST-LINK_gdbserver needs from its teardown (#624).
+
+    Asked to stop, the server shuts down cleanly, and its clean shutdown
+    resumes the core; killed, it leaves the core halted where it was (tests/
+    fixtures/st_link_gdbserver_7_14_0_linux_teardown_recordings.json). So a
+    session on it ends the server with SIGKILL alone: the SIGTERM every other
+    teardown starts with is the one signal that must never reach it. The
+    default stays the clean stop first."""
+    from agentic_hil.process import spawn_managed_process, terminate_process_tree
+
+    marker = tmp_path / "terminated"
+    script = f'trap "echo handled > {marker.as_posix()}; exit 0" TERM; echo ready; while :; do sleep 0.05; done'
+    child = spawn_managed_process(["sh", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "ready"
+        terminate_process_tree(child, 5.0, graceful=graceful)
+    finally:
+        if child.stdout is not None:
+            child.stdout.close()
+
+    assert child.poll() is not None
+    if graceful:
+        assert marker.read_text(encoding="utf-8").strip() == "handled"
+        assert child.returncode == 0
+    else:
+        assert not marker.exists(), "the handler ran, so the process was asked to stop before it was killed"
+        assert child.returncode == -signal.SIGKILL
 
 
 # ---------------------------------------------------------------------------

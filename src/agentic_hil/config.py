@@ -875,6 +875,8 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
         debugger,
         executable=configured_executable(config, configured, f"{field_prefix}.executable", candidates=candidates),
     )
+    if debugger.type == "stlink":
+        pinned = replace(pinned, gdb_server_executable=pinned_st_link_gdb_server(config, pinned, field_prefix))
     # And whether the scripts are validated is decided by the same predicate
     # `doctor` uses, so the set that is checked and the set that was validated
     # stay one set. Not by the mutation grants: under version 2 reading needs no
@@ -884,6 +886,27 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
     # directories. "Nothing can drive this entry" has to mean nothing, reads
     # included, before validation may be skipped.
     return pinned_debugger_scripts(config, pinned, field_prefix)
+
+
+def pinned_st_link_gdb_server(config: AgenticHILConfig, debugger: DebuggerConfig, field_prefix: str) -> str | None:
+    """The GDB server typed debug sessions on this stlink entry run, held to the rules `executable` is.
+
+    A value somebody wrote is pinned or refused at load, naming the field. An
+    unset one is looked for beside the pinned CLI, then on this host; what is
+    found is held to the same rules, and nothing found is None: flashing,
+    probing and reading need no GDB server, so the entry stays usable for them
+    and only a session is refused. A disabled CLI finds nothing, because the
+    server is started with the CLI's directory as `-cp`.
+    """
+    field = f"{field_prefix}.gdb_server_executable"
+    if debugger.gdb_server_executable is not None:
+        return configured_executable(config, debugger.gdb_server_executable, field)
+    if debugger.executable is None or executable_is_disabled(debugger.executable):
+        return None
+    from agentic_hil.backends.common import find_st_link_gdb_server
+
+    found = find_st_link_gdb_server(debugger.executable)
+    return None if found is None else configured_executable(config, found, field)
 
 
 def pinned_debugger_scripts(config: AgenticHILConfig, debugger: DebuggerConfig, field_prefix: str) -> DebuggerConfig:
@@ -3366,6 +3389,7 @@ def debugger_config(raw: JsonObject, debugger_type: str, field: str = "debugger"
         connect_mode=debugger_connect_mode(raw.get("connect_mode"), debugger_type, f"{field}.connect_mode"),  # type: ignore[arg-type]
         permissions=debugger_permissions(mapping(raw.get("permissions"), f"{field}.permissions")),
         target=target,
+        gdb_server_executable=optional_string(raw.get("gdb_server_executable")) if debugger_type == "stlink" else None,
     )
 
 

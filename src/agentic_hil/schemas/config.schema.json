@@ -98,7 +98,7 @@
         "allow_config_description_write": {
           "type": "boolean",
           "default": false,
-          "description": "Whether an agent may change this bench's description field-wise through project_config_set: target.*, debuggers.<name>.type/probe_id/executable/interface_cfg/target_cfg/connect_mode, com_ports.<name>.device/baudrate, and every can_buses.<name> field except its permissions. It never reaches a permission key (no permissions: block, and neither artifacts.allow_upload nor debug.allow_all_symbols), so it decides nothing about what may be done to the hardware. This is the grant for the common case: a board was attached after init and its identity has to be entered."
+          "description": "Whether an agent may change this bench's description field-wise through project_config_set: target.*, debuggers.<name>.type/probe_id/executable/gdb_server_executable/interface_cfg/target_cfg/connect_mode, com_ports.<name>.device/baudrate, and every can_buses.<name> field except its permissions. It never reaches a permission key (no permissions: block, and neither artifacts.allow_upload nor debug.allow_all_symbols), so it decides nothing about what may be done to the hardware. This is the grant for the common case: a board was attached after init and its identity has to be entered."
         },
         "allow_config_permissions_write": {
           "type": "boolean",
@@ -214,6 +214,14 @@
             ],
             "default": null
           },
+          "gdb_server_executable": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null,
+            "description": "The GDB server typed debug sessions run on under type stlink: ST-LINK_gdbserver, which STM32CubeCLT installs beside STM32_Programmer_CLI, because the CLI has no GDB server of its own. Unset, it is looked for in the same STM32CubeCLT tree as the configured CLI (STLink-gdb-server/bin beside STM32CubeProgrammer/bin), then on PATH and in the STM32CubeCLT installations of this host. Held to the rules executable is held to: outside the workspace, an existing single-link regular file. Without one, flashing, probing and reading work as before and debug_start_session is refused naming this key. Ignored by openocd and pyocd, which run their sessions on executable."
+          },
           "probe_id": {
             "type": [
               "string",
@@ -328,7 +336,7 @@
             "null"
           ],
           "default": null,
-          "description": "Which GDB reads this bench's images: the typed debug session's server, and the offline symbol resolution the stlink and pyocd memory reads run against the flashed ELF. It is part of the bench description and is settable behind allow_config_description_write, beside debuggers.<name>.executable, and it is held to the same rule as every other configured executable: an absolute path (or a bare name this host resolves on PATH) to an existing single-link file stored outside workspace_root. Null is not a gap: every caller that needs GDB then autodetects one on the server's PATH, trying arm-none-eabi-gdb, gdb-multiarch and gdb in that order, and adopt-hardware writes the first of those it finds into this key. Name it here when the GDB that speaks this target is not on the PATH the server was started with, or when several are installed and which one reads these images matters."
+          "description": "Which GDB reads this bench's images: the one every typed debug session connects to the backend's GDB server with, on openocd and pyocd alike, and the offline symbol resolution the stlink and pyocd memory reads run against the flashed ELF. It is part of the bench description and is settable behind allow_config_description_write, beside debuggers.<name>.executable, and it is held to the same rule as every other configured executable: an absolute path (or a bare name this host resolves on PATH) to an existing single-link file stored outside workspace_root. Null is not a gap: every caller that needs GDB then autodetects one on the server's PATH, trying arm-none-eabi-gdb, gdb-multiarch and gdb in that order, and adopt-hardware writes the first of those it finds into this key. Name it here when the GDB that speaks this target is not on the PATH the server was started with, or when several are installed and which one reads these images matters."
         },
         "allowed_symbols": {
           "type": "array",

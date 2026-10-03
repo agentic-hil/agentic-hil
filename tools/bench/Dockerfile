@@ -185,6 +185,29 @@ COPY tools/bench/cubeprogrammer-auto-install.xml /tmp/cubeprogrammer-auto-instal
 RUN --network=none sh /tmp/install_cubeprogrammer.sh /tmp/cubeprogrammer.zip /tmp/cubeprogrammer-auto-install.xml
 RUN --network=none python -m pytest -q -s tests/container/cubeprogrammer_without_a_probe.py
 
+# Optional layer for typed debug sessions on the STM32CubeProgrammer backend:
+# STM32_Programmer_CLI and ST-LINK_gdbserver out of the licensed STM32CubeCLT for
+# Linux archive, which the runner stages digest-pinned only when this target is
+# requested. The installer inside it is never run, so nothing goes into system
+# locations, no service is installed and no device rule changes: the extraction
+# reads its header for where the payload starts and takes the two directories
+# out of the tree, and stlink-server out of its own installer's plain tar. The
+# variable names the tree to the bench tier, whose session tests are deselected
+# wherever none is named; stlink-server goes on PATH, where a session on the
+# stlink backend looks for it to reach the probe through. The libraries are the ones `ldd`
+# lists for the two programs beyond the C runtime and the tree's own; most come
+# with this base already, and they are named so the layer does not lean on that.
+FROM bench-tier AS bench-tier-cubeclt
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes libglib2.0-0t64 libusb-1.0-0 libudev1 libcap2 \
+    && rm -rf /var/lib/apt/lists/*
+COPY build-inputs/cubeclt.zip /tmp/cubeclt.zip
+COPY tools/bench/extract_cubeclt.py /tmp/extract_cubeclt.py
+RUN --network=none python /tmp/extract_cubeclt.py /tmp/cubeclt.zip /opt/st/stm32cubeclt_1.22.0
+ENV AGENTIC_HIL_BENCH_CUBECLT=/opt/st/stm32cubeclt_1.22.0
+ENV PATH=/opt/st/stm32cubeclt_1.22.0/stlink-server:$PATH
+RUN --network=none python -m pytest -q -s tests/container/st_link_gdbserver_in_the_image.py
+
 # Keep the standard bench image the implicit last stage. An ordinary build
 # never needs the licensed payload or evaluates the optional COPY above.
 FROM bench-tier AS bench-tier-default

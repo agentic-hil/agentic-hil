@@ -24,12 +24,14 @@
 !build-inputs
 build-inputs/*
 !build-inputs/cubeprogrammer.zip
+!build-inputs/cubeclt.zip
 !tools
 tools/*
 !tools/bench
 tools/bench/*
 !tools/bench/install_cubeprogrammer.sh
 !tools/bench/cubeprogrammer-auto-install.xml
+!tools/bench/extract_cubeclt.py
 # The tier copies, builds and flashes this demo, and builds its own images out
 # of it.
 !examples/nucleo-f446re_demo

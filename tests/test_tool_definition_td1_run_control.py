@@ -16,9 +16,10 @@ kept or ended, needed or not, `true` or `false`) is checked as a relation inside
 one sentence, clause or piece: a verb counts only where no negation stands
 before it in its own fragment, and a boolean only next to the field it belongs
 to. Every check is run against its own inverted statement as well, which it
-must refuse. Which backends run sessions, and that the server binds a debugger
-only when exactly one is configured, is kept to one phrase in each description,
-so a change to that support edits one phrase.
+must refuse. That these calls need the GDB server a session runs on, and that
+the server binds a debugger only when exactly one is configured, is kept to one
+phrase in each description; which servers those are is named only in the two
+lifecycle definitions, so a change to that support edits those two.
 
 The second half holds the behaviour those definitions describe, through the
 fake debugger, where no existing test already holds it. The rest is held
@@ -54,14 +55,15 @@ from test_debug_session_run_state import (
     settled_afterwards,
 )
 from test_debug_sessions import TIMEOUT_TEST_CAP_S, debug_service, start_debug_session, stlink_dump_service
+from test_gdbserver_sessions import pyocd_session_service, st_link_session_service
 from test_tool_definition_debug_sessions import (
-    BACKEND_NAMES,
     CEILING,
     CONFIGURED_DEBUGGER_TIMEOUT_DEFAULT,
     ENDS,
     FLOOR,
     NO_SESSION,
     SECONDS,
+    SESSION_NAMES,
     TIMEOUT_FLOOR,
     WHOLE_CALL,
     clauses,
@@ -69,9 +71,9 @@ from test_tool_definition_debug_sessions import (
     definition_text,
     description_sentences,
     listed_tools,
+    names_a_server,
     pieces,
     property_texts,
-    pyocd_service,
     recording,
     source_literals,
     unknown_identifiers,
@@ -165,34 +167,12 @@ def asserted(pattern: str, text: str, flags: int = re.IGNORECASE) -> bool:
     return stated(pattern, text, NEGATION.pattern, flags)
 
 
-def backend_support_is_one_phrase(description: str) -> bool:
-    """The rule the lifecycle tools follow: one sentence names a backend,
-    OpenOCD as the one that runs sessions, the others as the ones that answer
-    `not_supported`. Kept to one sentence on purpose (the brief's "one short
-    phrase per description", and the lifecycle tools' own test), so a change
-    to the support edits one place; within it any wording that keeps the two
-    sides apart passes."""
-    naming = [sentence for sentence in description_sentences(description) if any(backend in sentence for backend in BACKEND_NAMES)]
-    if len(naming) != 1:
-        return False
-    parts = re.split(r"[;,:]", naming[0])
-    supported = [part for part in parts if "OpenOCD" in part]
-    refusing = [part for part in parts if "not_supported" in part]
-    return (
-        bool(supported)
-        and all(re.search(r"\b(only|required|needs?|requires?|runs?|supports?|exists?|under)\b", part) for part in supported)
-        and not any("not_supported" in part for part in supported)
-        and bool(refusing)
-        and all(re.search(r"\b(others?|other backends?|pyOCD|STM32CubeProgrammer|elsewhere|any other|else|otherwise)\b", part) for part in refusing)
-    )
-
-
 # The two conditions the lifecycle refusals answer: no session
 # (`session_not_active`, gdbdebug.py `_require_session`) and no single bound
-# OpenOCD debugger (`not_supported`, tools.py `unbound_debugger_error` and
-# common.py `debug_session_unsupported`).
+# debugger that opens sessions (`not_supported`, tools.py
+# `unbound_debugger_error` and common.py `debug_session_unsupported`).
 SESSION_CONDITION = re.compile(rf"\b{START}\b|{NO_SESSION.pattern}", re.IGNORECASE)
-DEBUGGER_CONDITION = re.compile(r"\bdebuggers?\b|\bbackends?\b|" + "|".join(rf"\b{re.escape(name)}\b" for name in BACKEND_NAMES), re.IGNORECASE)
+DEBUGGER_CONDITION = re.compile(r"\bdebuggers?\b|\bbackends?\b|" + "|".join(rf"(?<![\w-]){re.escape(name)}(?![\w-])" for name in SESSION_NAMES), re.IGNORECASE)
 
 
 def answers_its_own_condition(sentence: str, outcome: str, own: re.Pattern[str], other: re.Pattern[str]) -> bool:
@@ -226,6 +206,35 @@ def names_the_one_bound_debugger(description: str) -> bool:
         and all("not_supported" in sentence for sentence in found)
         and not re.search(MANY_DEBUGGERS, description, re.IGNORECASE)
         and all(answers_its_own_condition(sentence, "not_supported", DEBUGGER_CONDITION, SESSION_CONDITION) for sentence in containing(description_sentences(description), r"\bnot_supported\b"))
+    )
+
+
+GDB_SERVER = re.compile(r"\bGDB servers?\b")
+GDB_SERVER_DENIED = re.compile(r"\b(without|no|not|never|none)\b", re.IGNORECASE)
+
+
+def needs_the_session_gdb_server(description: str) -> bool:
+    """One sentence says these calls need the GDB server a session runs on,
+    with `not_supported` for the rest: an entry with none, configured or
+    found, refuses every one of them before any session is looked at
+    (stlink.py `_serves_session_tools`, common.py `debug_session_unsupported`).
+    Which servers those are is named in the two lifecycle definitions alone
+    (test_tool_definition_debug_sessions.py), so no backend and no server is
+    named here, and a change to that support edits those two."""
+    if any(names_a_server(name, description) for name in SESSION_NAMES):
+        return False
+    naming = [sentence for sentence in description_sentences(description) if GDB_SERVER.search(sentence)]
+    if len(naming) != 1:
+        return False
+    parts = re.split(r"[;,:]", naming[0])
+    refusing = [index for index, part in enumerate(parts) if "not_supported" in part]
+    if not refusing:
+        return False
+    running, rest = parts[: refusing[0]], parts[refusing[0]:]
+    return (
+        any(GDB_SERVER.search(part) and not GDB_SERVER_DENIED.search(part) for part in running)
+        and not any(GDB_SERVER.search(part) for part in rest)
+        and all(re.search(r"\b(else|otherwise)\b", part) for part in rest if "not_supported" in part)
     )
 
 
@@ -288,10 +297,11 @@ def lists_the_session_record_without_asking_gdb(description: str) -> bool:
     """`list_breakpoints` answers from the session's own list and sends GDB
     nothing; only `debug_clear_breakpoints` reads GDB's list (gdbdebug.py
     `list_breakpoints`, `_backend_breakpoint_numbers`). Every mention of GDB is
-    the one the list does without, or the one the clear checks."""
+    the one the list does without, or the one the clear checks; the GDB server
+    a session runs on is another process (`needs_the_session_gdb_server`)."""
     record = [clause for clause in clauses(description) if re.search(r"\b(own (record|list)|session's (record|list)|local|cached?)\b", clause, re.IGNORECASE)]
     without_gdb = any(re.search(r"\b(without|not|never)\s+(asking|querying|reading|consulting)\s+GDB\b", clause) for clause in record)
-    gdb_pieces = containing(pieces(description), r"\bGDB\b")
+    gdb_pieces = containing(pieces(description), r"\bGDB\b(?!\s+servers?\b)")
     return without_gdb and all(re.search(r"\b(without|not|never)\s+(asking|querying|reading|consulting)\s+GDB\b", piece) or CLEAR in piece for piece in gdb_pieces)
 
 
@@ -815,30 +825,56 @@ def nothing_stopped_yet_is_its_own_outcome(text: str) -> bool:
 
 SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
     (
-        backend_support_is_one_phrase,
+        needs_the_session_gdb_server,
         [
-            "Halts the core. OpenOCD backend only; others answer not_supported.",
-            "Halts the core. Runs on OpenOCD only, pyOCD and STM32CubeProgrammer answer not_supported.",
-            "Halts the core. Sessions exist only under OpenOCD; other backends answer not_supported.",
-            "Halts the core. OpenOCD only, exactly one debugger configured; else not_supported.",
+            "Halts the core. GDB server only, exactly one debugger configured; else not_supported.",
+            "Halts the core. Exactly one debugger configured, with a GDB server; else not_supported.",
+            "Halts the core. Needs debug_start_session (else session_not_active) on a GDB server, exactly one debugger configured, else not_supported.",
+            "Halts the core. Runs on the session's GDB server; otherwise not_supported.",
         ],
-        ["Halts the core. OpenOCD answers not_supported.", "Halts the core. OpenOCD only. pyOCD answers not_supported.", "Halts the core.", "Halts the core. OpenOCD only; OpenOCD answers not_supported."],
+        [
+            "Halts the core. OpenOCD only, exactly one debugger configured; else not_supported.",
+            "Halts the core. OpenOCD backend only; others answer not_supported.",
+            "Halts the core. OpenOCD, pyOCD or ST-LINK_gdbserver, exactly one debugger configured; else not_supported.",
+            "Halts the core. GDB server only, OpenOCD's; else not_supported.",
+            "Halts the core. Exactly one debugger configured; else not_supported.",
+            "Halts the core. Without a GDB server, exactly one debugger configured; else not_supported.",
+            "Halts the core. Exactly one debugger configured; a GDB server answers not_supported.",
+            "Halts the core. GDB server only; not_supported.",
+            "Halts the core. GDB server only, exactly one debugger configured.",
+            "Halts the core. GDB server only. Else not_supported.",
+            "Halts the core. GDB server only, exactly one debugger configured; else not_supported. A second GDB server is not needed.",
+            "Halts the core.",
+        ],
     ),
     (
         names_the_one_bound_debugger,
-        ["OpenOCD only, exactly one debugger configured; else not_supported.", "Needs exactly one configured debugger, else not_supported.", "It needs debug_start_session (else session_not_active) on OpenOCD with exactly one debugger configured, else not_supported."],
         [
-            "OpenOCD only, at least one debugger configured; else not_supported.",
-            "OpenOCD only, exactly one debugger configured.",
-            "OpenOCD only; else not_supported.",
+            "GDB server only, exactly one debugger configured; else not_supported.",
+            "Needs exactly one configured debugger, else not_supported.",
+            "Needs debug_start_session (else session_not_active) on a GDB server, exactly one debugger configured, else not_supported.",
+        ],
+        [
+            "GDB server only, at least one debugger configured; else not_supported.",
+            "GDB server only, exactly one debugger configured.",
+            "GDB server only; else not_supported.",
             "Exactly one debugger configured; else not_supported. Works with several debuggers too.",
-            "It needs debug_start_session (else not_supported) on OpenOCD with exactly one debugger configured, else session_not_active.",
+            "Needs debug_start_session (else not_supported) on a GDB server, exactly one debugger configured, else session_not_active.",
         ],
     ),
     (
         refuses_without_a_session,
-        ["No session: session_not_active.", "Answers session_not_active until debug_start_session opened one.", "It needs debug_start_session (else session_not_active) on OpenOCD with exactly one debugger configured, else not_supported."],
-        ["No session: ok, not session_not_active.", "No session: ok, session_not_active.", "Answers session_not_active after a halt.", "It needs debug_start_session (else not_supported) on OpenOCD with exactly one debugger configured, else session_not_active."],
+        [
+            "No session: session_not_active.",
+            "Answers session_not_active until debug_start_session opened one.",
+            "Needs debug_start_session (else session_not_active) on a GDB server, exactly one debugger configured, else not_supported.",
+        ],
+        [
+            "No session: ok, not session_not_active.",
+            "No session: ok, session_not_active.",
+            "Answers session_not_active after a halt.",
+            "Needs debug_start_session (else not_supported) on a GDB server, exactly one debugger configured, else session_not_active.",
+        ],
     ),
     (
         answers_ok_and_inactive_without_a_session,
@@ -860,8 +896,14 @@ SELF_TESTS: list[tuple[Callable[[str], bool], list[str], list[str]]] = [
         [
             "Lists them from the session's own record without asking GDB. debug_clear_breakpoints removes them and checks GDB.",
             "Answers from the local list, not querying GDB.",
+            "Lists them from the session's own record without asking GDB. GDB server only, exactly one debugger configured; else not_supported.",
         ],
-        ["Lists the breakpoints GDB reports.", "Lists the session's own record, then asks GDB.", "Lists the breakpoints from the session's own record."],
+        [
+            "Lists the breakpoints GDB reports.",
+            "Lists the session's own record, then asks GDB.",
+            "Lists the breakpoints from the session's own record.",
+            "Lists them from the session's own record without asking GDB, then asks GDB and the GDB server.",
+        ],
     ),
     (
         an_abnormal_stop_is_a_good_read,
@@ -1217,14 +1259,16 @@ def test_each_definition_keeps_to_the_length_limits(listed: dict[str, dict], nam
 
 
 @pytest.mark.parametrize("name", TOOLS)
-def test_backend_support_is_one_phrase_saying_openocd_runs_sessions_and_the_others_refuse(listed: dict[str, dict], name: str) -> None:
-    """Typed sessions exist only under OpenOCD on this code; pyOCD and
-    STM32CubeProgrammer answer every one of these calls with `not_supported`
-    (common.py `debug_session_unsupported`; knowledge.py `not_supported:stlink`
-    and `not_supported:pyocd`)."""
+def test_backend_support_is_one_phrase_naming_the_gdb_server_the_session_runs_on(listed: dict[str, dict], name: str) -> None:
+    """Typed sessions run on a GDB server: OpenOCD, pyOCD's `pyocd
+    gdbserver`, or STM32CubeProgrammer's ST-LINK_gdbserver (#624), which the
+    two lifecycle definitions name. STM32CubeProgrammer with no server answers
+    every one of these calls with `not_supported` (stlink.py
+    `_serves_session_tools`, common.py `debug_session_unsupported`;
+    knowledge.py `not_supported:stlink`)."""
     tool = listed[name]
-    assert backend_support_is_one_phrase(str(tool["description"])), tool["description"]
-    in_properties = {prop: text for prop, text in property_texts(tool).items() if any(backend in text for backend in BACKEND_NAMES)}
+    assert needs_the_session_gdb_server(str(tool["description"])), tool["description"]
+    in_properties = {prop: text for prop, text in property_texts(tool).items() if any(names_a_server(backend, text) for backend in SESSION_NAMES)}
     assert in_properties == {}, in_properties
 
 
@@ -1674,7 +1718,7 @@ def test_a_clear_that_cannot_read_gdbs_list_holds_the_bench_until_a_clear_reconc
     try:
         assert start_debug_session(service, mode="attach")["ok"] is True
         assert service.call(SET, CALL_ARGUMENTS[SET])["ok"] is True
-        monkeypatch.setattr(debug, "_backend_breakpoint_numbers", lambda session: None)
+        monkeypatch.setattr(debug, "_backend_breakpoint_numbers", lambda *_args, **_kwargs: None)
         failed = service.call(CLEAR)
         held = service.coordinator.blocked
         monkeypatch.undo()
@@ -1734,19 +1778,45 @@ def test_status_after_a_stop_that_could_not_confirm_the_halt_reports_cleanup_req
     assert status["quarantined"] is True, status
 
 
-@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
-def test_every_run_control_call_answers_not_supported_where_sessions_do_not_exist(tmp_path: Path, backend: str) -> None:
-    service = stlink_dump_service(tmp_path) if backend == "stlink" else pyocd_service(tmp_path)
+@pytest.mark.parametrize("backend", ["pyocd", "stlink"])
+def test_every_run_control_call_is_served_on_every_server_the_descriptions_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    """pyOCD, and STM32CubeProgrammer with ST-LINK_gdbserver, serve each of
+    these calls: with no session open they answer what OpenOCD answers
+    (`test_without_a_session_the_two_reads_answer_inactive_and_the_rest_refuse`)."""
+    session_service = pyocd_session_service if backend == "pyocd" else st_link_session_service
+    service, _ = session_service(tmp_path, monkeypatch)
     try:
         answers = {name: service.call(name, CALL_ARGUMENTS.get(name, {})) for name in TOOLS}
     finally:
         service.close()
 
+    for name in ANSWER_WITHOUT_SESSION:
+        assert answers[name]["ok"] is True, (backend, answers[name])
+        assert answers[name]["active"] is False, (backend, answers[name])
+    assert answers[LIST]["breakpoints"] == [], (backend, answers[LIST])
+    for name in REFUSE_WITHOUT_SESSION:
+        assert answers[name]["ok"] is False, (backend, answers[name])
+        assert answers[name]["error_type"] == "session_not_active", (backend, answers[name])
+        assert START in answers[name]["summary"], (backend, answers[name])
+
+
+def test_every_run_control_call_on_stlink_without_a_gdb_server_answers_not_supported_naming_the_ways_out(tmp_path: Path) -> None:
+    """STM32CubeProgrammer with no ST-LINK_gdbserver configured or found
+    refuses each of these calls before anything is spawned, and names both
+    ways to a session (common.py `debug_session_unsupported`)."""
+    service = stlink_dump_service(tmp_path)
+    try:
+        assert service.config.debugger.gdb_server_executable is None
+        answers = {name: service.call(name, CALL_ARGUMENTS.get(name, {})) for name in TOOLS}
+    finally:
+        service.close()
+
     for name, result in answers.items():
-        assert result["ok"] is False, (backend, name, result)
-        assert result["error_type"] == "not_supported", (backend, name, result)
-        assert "OpenOCD" in result["summary"], (backend, name, result)
-        assert result["target_contacted"] is False, (backend, name, result)
+        assert result["ok"] is False, (name, result)
+        assert result["error_type"] == "not_supported", (name, result)
+        assert "gdb_server_executable" in result["summary"], (name, result)
+        assert "type: openocd" in result["summary"], (name, result)
+        assert result["target_contacted"] is False, (name, result)
 
 
 SECOND_DEBUGGER = "probe_b"

@@ -261,6 +261,76 @@ def test_the_index_mark_is_declared_where_strict_markers_look(pytestconfig: pyte
     assert [line for line in declared if line.startswith(f"{NEEDS_THE_WHEELHOUSE}:")], declared
 
 
+# -- the tests that drive the board through an STM32CubeCLT tree ------------
+
+
+def test_what_runs_through_an_stm32cubeclt_tree_runs_only_where_one_is_named(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Deselected, not skipped, with no tree named or a name that is no directory; kept beside the rest where one is.
+
+    The bench image built without `--cubeclt-archive` carries no tree, and a
+    skip is what fails the tier, so a run there must leave these tests out
+    rather than report them skipped. The reason is the line the run prints."""
+    from tests.bench import conftest
+
+    monkeypatch.setenv(conftest.BENCH_ENV, "1")
+    monkeypatch.delenv(conftest.DEVICE_GROUPS_ENV, raising=False)
+    session = "tests/bench/test_bench_stlink_sessions.py::test_a_session"
+    stage = "tests/bench/test_bench_without_device_group.py::test_probe"
+    rest = ["tests/bench/test_bench_serial.py::test_echo", "tests/test_config.py::test_load"]
+    tree = tmp_path / "stm32cubeclt_1.22.0"
+    outcomes = []
+    for named in (None, str(tree), "made"):
+        if named is None:
+            monkeypatch.delenv(conftest.CUBECLT_ENV, raising=False)
+        elif named == "made":
+            tree.mkdir()
+            monkeypatch.setenv(conftest.CUBECLT_ENV, str(tree))
+        else:
+            monkeypatch.setenv(conftest.CUBECLT_ENV, named)
+        items, config = [*the_items(), AnItem(session, "bench", conftest.CUBECLT)], AConfig()
+        conftest.pytest_collection_modifyitems(config, items)
+        outcomes.append(([item.nodeid for item in items], [item.nodeid for item in config.deselected], conftest.pytest_report_collectionfinish(config)))
+
+    assert outcomes[0][:2] == (rest, [stage, session])
+    assert outcomes[0][2] == f"tests marked cubeclt: deselected, {conftest.CUBECLT_ENV} names no STM32CubeCLT tree for this run"
+    assert outcomes[1][:2] == (rest, [stage, session])
+    assert outcomes[1][2] == f"tests marked cubeclt: deselected, {conftest.CUBECLT_ENV} names {tree}, which is no directory here"
+    assert outcomes[2] == ([*rest, session], [stage], None)
+
+
+def test_the_stage_that_withholds_the_groups_leaves_the_stm32cubeclt_tests_out_without_a_reason_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """That stage runs one module alone, so the tree's absence is not what left these out, and the run does not say it was."""
+    from tests.bench import conftest
+
+    monkeypatch.setenv(conftest.BENCH_ENV, "1")
+    monkeypatch.setenv(conftest.DEVICE_GROUPS_ENV, conftest.DEVICE_GROUPS_WITHHELD)
+    monkeypatch.delenv(conftest.CUBECLT_ENV, raising=False)
+    session = "tests/bench/test_bench_stlink_sessions.py::test_a_session"
+    items, config = [*the_items(), AnItem(session, "bench", conftest.CUBECLT)], AConfig()
+
+    conftest.pytest_collection_modifyitems(config, items)
+
+    assert [item.nodeid for item in items] == ["tests/bench/test_bench_without_device_group.py::test_probe"]
+    assert session in [item.nodeid for item in config.deselected]
+    assert conftest.pytest_report_collectionfinish(config) is None
+
+
+def test_the_stm32cubeclt_mark_is_declared_where_strict_markers_look(pytestconfig: pytest.Config) -> None:
+    from tests.bench.conftest import CUBECLT
+
+    declared = pytestconfig.getini("markers")
+
+    assert [line for line in declared if line.startswith(f"{CUBECLT}:")], declared
+
+
+def test_the_stlink_sessions_module_carries_the_stm32cubeclt_mark() -> None:
+    """The module that needs the tree is the one the mark leaves out, by its own `pytestmark`."""
+    from tests.bench import test_bench_stlink_sessions
+    from tests.bench.conftest import CUBECLT
+
+    assert CUBECLT in [mark.name for mark in test_bench_stlink_sessions.pytestmark]
+
+
 # -- the account those tests install into, and the images it cannot install on --
 
 STAGE = "tests/bench/test_bench_without_device_group.py::test_probe"
