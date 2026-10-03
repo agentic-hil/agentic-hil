@@ -4576,7 +4576,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "This bench runs `type: pyocd`. The typed-debug family is served here: the session tools run through "
             "`pyocd gdbserver` with the GDB `debug.gdb_executable` names (#624), and `debug_symbol_value` and "
             "`debug_dump_symbol_ihex` also read the target with no session open, through pyOCD's own `savemem` on "
-            "`--connect attach`, the one of pyOCD's connect modes that neither halts nor resets the core.\n\n"
+            "`--connect attach`, the one of pyOCD's connect modes that neither halts nor resets the core, with the target "
+            "pack's DebugCoreStart sequence disabled so that the connect does not let a halted core run either.\n\n"
             "What pyOCD refuses is `reset_target` with mode `init`. On OpenOCD that mode halts the core and then runs "
             "the target's reset-init event script, which is where a board's clock tree, wait states and watchdog are "
             "set up; pyOCD's commander has no equivalent, and sending its plain `reset halt` under that name would "
@@ -7115,7 +7116,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "interface": {"status": "ignored"},
         "interface_cfg": {"status": "ignored"},
         "target_cfg": {"status": "ignored"},
-        "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "Nothing this key could say reaches pyOCD, so `under_reset` is refused at load rather than accepted and ignored. A bench that needs the flash to connect under reset runs it on `type: stlink`. The one connect option this server does pass to pyOCD is not this key's: the typed-debug memory reads with no session open send `--connect attach`, fixed, because it is the only mode pyOCD documents as reaching a running core without halting or resetting it. A typed debug session does not read this key either: whether it resets or attaches is the `mode` of `debug_start_session`, carried out by GDB against `pyocd gdbserver`."},
+        "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "Nothing this key could say reaches pyOCD, so `under_reset` is refused at load rather than accepted and ignored. A bench that needs the flash to connect under reset runs it on `type: stlink`. The one connect option this server does pass to pyOCD is not this key's: the typed-debug memory reads with no session open send `--connect attach`, fixed, because it is the only mode pyOCD documents as reaching a running core without halting or resetting it, together with the target pack's DebugCoreStart sequence disabled, because that sequence lets a halted core run at the connect. A typed debug session does not read this key either: whether it resets or attaches is the `mode` of `debug_start_session`, carried out by GDB against `pyocd gdbserver`."},
         "flash_address": {"status": "conditional", "note": "Required to flash a .bin, which carries no load address; passed as `--base-address`. Not read for .elf or .hex."},
     },
 }

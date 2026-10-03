@@ -2384,7 +2384,10 @@ def test_pyocd_read_connects_with_attach_and_nothing_that_disturbs_the_core(tmp_
     it guards against is silent. A read that quietly went back to halting would
     still return bytes, and they would be a halted board's bytes. So none of
     pyOCD's other three connect modes may appear, `--halt` may not, a
-    `connect_mode` session option may not, and no reset may ride along.
+    `connect_mode` session option may not, and no reset may ride along. The one
+    session option the read does send is the one that keeps a halted core
+    halted through the connect (#631): the target pack's DebugCoreStart
+    sequence, disabled.
     """
     service = pyocd_read_service(tmp_path)
     try:
@@ -2399,7 +2402,9 @@ def test_pyocd_read_connects_with_attach_and_nothing_that_disturbs_the_core(tmp_
         logged = logged_command(tmp_path, result)
         assert "--connect attach" in logged, result
         assert f"savemem {hex(BOOT_COUNTER_ADDRESS)} {BOOT_COUNTER_SIZE} " in logged, result
-        for forbidden in ("--halt", "-H", "pre-reset", "under-reset", "connect_mode", "-O", "reset"):
+        assert "-O pack.debug_sequences.disabled_sequences=DebugCoreStart" in logged, result
+        assert logged.count("-O ") == 1, result
+        for forbidden in ("--halt", "-H", "pre-reset", "under-reset", "connect_mode", "reset"):
             assert forbidden not in logged, (forbidden, result)
 
 

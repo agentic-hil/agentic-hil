@@ -193,8 +193,42 @@ PYOCD_FLASH_FORMATS = {".axf": "elf", ".bin": "bin", ".elf": "elf", ".hex": "hex
 # this connect, a reset control the counter detected, and a halted-session
 # control in which the same counter froze, which is what makes it a witness.
 # Ten read logs carry this argv with --connect attach and nothing that halts.
+#
+# Attach alone does not leave a halted core halted, though (#631). Every
+# commander connect starts core debug, and where the target's CMSIS pack
+# defines a DebugCoreStart sequence pyOCD runs it in place of its own write
+# (`pyocd/coresight/cortex_m.py`, 0.45.1, lines 394-396 and 436-441):
+#
+#     # Enable debug, preserving any current debug state.
+#     if not self.start_debug_core_hook():
+#         self.write32(self.DHCSR, (self.read32(self.DHCSR) & 0xffff) | self.DBGKEY | self.C_DEBUGEN)
+#
+# pyOCD's own write keeps C_HALT. The reference board's pack (Keil.STM32F4xx_DFP
+# 3.1.1) carries the CMSIS default sequence, `Write32(0xE000EDF0, 0xA05F0001)`,
+# which sets C_DEBUGEN without C_HALT and so lets a halted core run. A
+# `reset_target` into halt therefore held until the next read connected: the
+# reads after it returned 39 and then 2827, and the read's own process already
+# read DHCSR 0x01010001 right after its connect, while OpenOCD, an observer
+# shown to neither halt nor resume, read the core halted after the reset and
+# running after the read (tests/fixtures/pyocd_0_45_1_halt_recordings.json).
+#
+# So the read names that sequence in `pack.debug_sequences.disabled_sequences`
+# (`pyocd/core/options.py:107`; the command line splits the value on commas,
+# `pyocd/utility/cmdline.py:133-150`). `run_sequence` returns without running a
+# sequence named there (`pyocd/target/pack/pack_target.py:287-289`), the hook
+# still answers that it started the core (line 441 above), and the connect
+# writes nothing to DHCSR at all: in the same recording a halted core stayed
+# halted through it and a running core kept running. The read needs nothing
+# the sequence does, because `savemem` goes through the memory access port,
+# which reads with core debug off. On a target without the sequence, builtin
+# or from a pack, the option names nothing and pyOCD's own write already keeps
+# the halt. The disconnect resumes nothing either: the commander sets
+# `resume_on_disconnect` to false (`pyocd/commands/commander.py:220`), which the
+# board hands to the core's disconnect (`pyocd/board/board.py:163`,
+# `pyocd/coresight/cortex_m.py:424`).
 PYOCD_READ_CONNECT_MODE = "attach"
-PYOCD_READ_CONNECT_ARGS = ["--connect", PYOCD_READ_CONNECT_MODE]
+PYOCD_READ_KEEPS_THE_RUN_STATE = ["-O", "pack.debug_sequences.disabled_sequences=DebugCoreStart"]
+PYOCD_READ_CONNECT_ARGS = ["--connect", PYOCD_READ_CONNECT_MODE, *PYOCD_READ_KEEPS_THE_RUN_STATE]
 # The typed-debug reads this backend answers with no session behind them, and so
 # the ones the coordination layer must lease as one-shots rather than run on a
 # session lease that does not exist here. `debug_symbol_info` is deliberately not
@@ -572,7 +606,9 @@ class PyOCDBackend:
         reading: pyOCD's own documentation of it is "Save a range of memory to a
         binary file", it is served with no gdbserver in the picture, and it
         connects with `--connect attach`, the one mode pyOCD documents as
-        leaving a running core alone. The file it writes is this call's own
+        leaving a running core alone, and with the target pack's DebugCoreStart
+        sequence disabled, whose DHCSR write would let a halted core run (#631).
+        The file it writes is this call's own
         business, created in a private directory, read back and deleted before
         the result is built, and named nowhere in it.
 
