@@ -29,12 +29,18 @@ OpenOCD processes read memory and DHCSR and nothing else, apart from the reset
 a `reset halt` is; none of them writes flash. The demo is put back on the board
 and started at the end.
 
+A second recording asks the same of `probe_target`, which runs `pyocd
+commander --command status` without a session and connects the way pyOCD's
+commander does by default: whether a probe of a core `reset_target` halted
+leaves it halted.
+
 Selected explicitly, like the other recorders: the file is not named `test_*`.
-With `AGENTIC_HIL_RECORDING_OUT` set to a directory, the recording is written
-there as `pyocd-halt-recording.json`; it is attached to the test report as a
-property as well.
-The recording of pyOCD 0.45.1 the unit tests are built from is committed as
-`tests/fixtures/pyocd_0_45_1_halt_recordings.json`.
+With `AGENTIC_HIL_RECORDING_OUT` set to a directory, the recordings are written
+there as `pyocd-halt-recording.json` and `pyocd-probe-target-halt-recording.json`;
+each is attached to the test report as a property as well.
+The recordings of pyOCD 0.45.1 the unit tests are built from are committed as
+`tests/fixtures/pyocd_0_45_1_halt_recordings.json` and
+`tests/fixtures/pyocd_0_45_1_probe_target_halt_recordings.json`.
 """
 
 from __future__ import annotations
@@ -45,6 +51,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -64,6 +72,7 @@ pytestmark = [pytest.mark.bench, BENCH_ONLY]
 
 RECORDING_SCHEMA = "agentic-hil.pyocd-halt-recording/v1"
 OUTPUT_NAME = "pyocd-halt-recording.json"
+PROBE_TARGET_OUTPUT_NAME = "pyocd-probe-target-halt-recording.json"
 COUNTER = "uptime_ms"
 DHCSR = 0xE000EDF0
 S_HALT = 1 << 17
@@ -80,6 +89,10 @@ PROCESS_TIMEOUT_S = 60.0
 # The read's connect with the pack's DebugCoreStart sequence left out, which is
 # the sequence whose DHCSR write is under suspicion.
 WITHOUT_DEBUG_CORE_START = ["-O", "pack.debug_sequences.disabled_sequences=DebugCoreStart"]
+# How the read connects, and how `probe_target` runs its commander: pyOCD's
+# default connect, `status`, and this option.
+READ_CONNECT = ["--connect", "attach"]
+PROBE_TARGET_OPTIONS = ["-O", "debug.traceback=true"]
 # A word as both observers print it: `e000edf0:  01030003` from pyOCD's
 # `read32`, `0xe000edf0: 01030003` from OpenOCD's `mdw`.
 WORD = re.compile(r"^\s*(?:0x)?([0-9a-fA-F]{8}):\s+([0-9a-fA-F]{8})\b")
@@ -164,11 +177,11 @@ class Observers:
             "output": completed.stdout.splitlines(),
         }
 
-    def pyocd_look(self, before: list[str], extra: list[str] | None = None) -> dict:
-        """A pyOCD commander that connects the way the read does, runs `before`, then looks, in one process."""
+    def pyocd_look(self, before: list[str], extra: list[str] | None = None, connect: tuple[str, ...] = tuple(READ_CONNECT)) -> dict:
+        """A pyOCD commander that connects the way the read does (or as `connect` says), runs `before`, then looks, in one process."""
         counter = hex(self.counter_address)
         commands = [*before, f"read32 {hex(DHCSR)}", f"read32 {counter}", f"sleep {LOOK_PAUSE_MS}", f"read32 {counter}", f"read32 {hex(DHCSR)}"]
-        argv = [self.pyocd_executable, "commander", "--connect", "attach", *(extra or [])]
+        argv = [self.pyocd_executable, "commander", *connect, *(extra or [])]
         for command in commands:
             argv += ["--command", command]
         argv += ["--uid", self.uid, "--target", TARGET_TYPE, "-W"]
@@ -193,7 +206,7 @@ def product_call(server: McpServer, bench: Bench, tool: str, arguments: dict, pr
     answer = server.tool(tool, arguments)
     record = {
         key: answer.get(key)
-        for key in ("ok", "error_type", "summary", "mode", "value_unsigned", "hex", "side_effect_status", "safe_state_confirmed", "hardware_state", "target_contacted")
+        for key in ("ok", "error_type", "summary", "mode", "value_unsigned", "hex", "target_detected", "side_effect_status", "safe_state_confirmed", "hardware_state", "target_contacted")
         if key in answer
     }
     try:
@@ -239,7 +252,13 @@ def openocd_head(debugger: dict) -> list[str]:
     ]
 
 
-def test_record_which_pyocd_call_lets_a_halted_core_run(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
+@contextmanager
+def halt_recording(bench: Bench, firmware: Path, tmp_path: Path, record_property, output_name: str, property_name: str) -> Iterator[tuple[dict, Observers, Callable[[str, dict], dict]]]:
+    """The tier's probe on `type: pyocd` behind `agentic-hil mcp-stdio`, both observers, and the recording they fill.
+
+    The demo is flashed and the running-core control recorded before the
+    scenarios run. On the way out the server is shut down, the recording
+    written and the demo put back on the board, whatever the scenarios got to."""
     environment = pyocd_bench_environment(bench)
     executable, pyocd_version, pack_version = pyocd_provenance(environment)
     document = bench.configuration()
@@ -289,8 +308,6 @@ def test_record_which_pyocd_call_lets_a_halted_core_run(bench: Bench, firmware: 
         "controls": {},
         "scenarios": {},
     }
-    controls = recording["controls"]
-    scenarios = recording["scenarios"]
     server = None
     try:
         server = McpServer(on_pyocd)
@@ -304,9 +321,24 @@ def test_record_which_pyocd_call_lets_a_halted_core_run(bench: Bench, firmware: 
 
         # Controls. OpenOCD's look on a core the product just started, twice:
         # both must read it running, or OpenOCD halts what it looks at.
+        controls = recording["controls"]
         controls["running_core"] = {"reset_run": call("reset_target", {"mode": "run"})}
         time.sleep(SETTLE_S)
         controls["running_core"]["openocd_looks"] = [observers.openocd_look(), observers.openocd_look()]
+
+        yield recording, observers, call
+    finally:
+        if server is not None:
+            recording["server_exit"] = server.shut_down(stop_session=False)
+        variant.unlink(missing_ok=True)
+        write_recording(recording, private_values, output_name, property_name, record_property)
+        restored = put_on_board(bench, firmware)
+        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+
+
+def test_record_which_pyocd_call_lets_a_halted_core_run(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
+    with halt_recording(bench, firmware, tmp_path, record_property, OUTPUT_NAME, "pyocd_halt_recording_v1") as (recording, observers, call):
+        scenarios = recording["scenarios"]
 
         # The product's reset into halt, then OpenOCD twice with a pause between:
         # the state the reset's disconnect left, and whether OpenOCD's own look
@@ -345,10 +377,45 @@ def test_record_which_pyocd_call_lets_a_halted_core_run(bench: Bench, firmware: 
         time.sleep(SETTLE_S)
         running["pyocd"] = observers.pyocd_look([], WITHOUT_DEBUG_CORE_START)
         running["openocd_look"] = observers.openocd_look()
-    finally:
-        if server is not None:
-            recording["server_exit"] = server.shut_down(stop_session=False)
-        variant.unlink(missing_ok=True)
-        write_recording(recording, private_values, OUTPUT_NAME, "pyocd_halt_recording_v1", record_property)
-        restored = put_on_board(bench, firmware)
-        assert restored.get("ok") is True, f"the demo could not be put back on the board: {restored.get('summary')}"
+
+
+def test_record_whether_probe_target_lets_a_halted_core_run(bench: Bench, firmware: Path, gdb: None, tmp_path: Path, record_property) -> None:
+    with halt_recording(bench, firmware, tmp_path, record_property, PROBE_TARGET_OUTPUT_NAME, "pyocd_probe_target_halt_recording_v1") as (recording, observers, call):
+        scenarios = recording["scenarios"]
+
+        # The product's reset into halt, then OpenOCD twice with a pause
+        # between: the halt the probe starts from, and OpenOCD leaving it so.
+        scenarios["product_reset_halt"] = {"reset_halt": call("reset_target", {"mode": "halt"})}
+        scenarios["product_reset_halt"]["openocd_look"] = observers.openocd_look()
+        time.sleep(SETTLE_S)
+        scenarios["product_reset_halt"]["openocd_look_again"] = observers.openocd_look()
+
+        # The product's probe of that halted core, then OpenOCD after it, then
+        # one product read, which keeps a halted core halted.
+        probe = scenarios["product_probe_target_on_a_halted_core"] = {"probe_target": call("probe_target", {})}
+        probe["openocd_look"] = observers.openocd_look()
+        time.sleep(SETTLE_S)
+        probe["read"] = call("debug_symbol_value", {"symbol": COUNTER})
+
+        # Inside one pyOCD process connected and run exactly as the probe is:
+        # its `status`, then a look before it disconnects, then OpenOCD after.
+        inside = scenarios["pyocd_probe_target_connect_on_a_halted_core"] = {"reset_halt": call("reset_target", {"mode": "halt"})}
+        inside["before"] = observers.openocd_look()
+        inside["pyocd"] = observers.pyocd_look(["status"], PROBE_TARGET_OPTIONS, connect=())
+        inside["openocd_look"] = observers.openocd_look()
+
+        # The same without the pack's DebugCoreStart, on a core the product
+        # halted again.
+        held = scenarios["pyocd_probe_target_connect_without_debug_core_start_on_a_halted_core"] = {"reset_halt": call("reset_target", {"mode": "halt"})}
+        held["before"] = observers.openocd_look()
+        held["pyocd"] = observers.pyocd_look(["status"], [*PROBE_TARGET_OPTIONS, *WITHOUT_DEBUG_CORE_START], connect=())
+        held["openocd_look"] = observers.openocd_look()
+
+        # And on a running core, where a probe must not stop it: the product's
+        # own probe, then the same connect without DebugCoreStart.
+        running = scenarios["product_probe_target_on_a_running_core"] = {"reset_run": call("reset_target", {"mode": "run"})}
+        time.sleep(SETTLE_S)
+        running["probe_target"] = call("probe_target", {})
+        running["openocd_look"] = observers.openocd_look()
+        without = scenarios["pyocd_probe_target_connect_without_debug_core_start_on_a_running_core"] = {"pyocd": observers.pyocd_look(["status"], [*PROBE_TARGET_OPTIONS, *WITHOUT_DEBUG_CORE_START], connect=())}
+        without["openocd_look"] = observers.openocd_look()
