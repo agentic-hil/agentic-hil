@@ -41,6 +41,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -203,6 +204,16 @@ def product_call(server: McpServer, bench: Bench, tool: str, arguments: dict, pr
     return record
 
 
+def operator_home() -> str:
+    """The home directory of the account the bench runs as, which the test's own HOME no longer names."""
+    try:
+        import pwd
+
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError, AttributeError):
+        return ""
+
+
 def openocd_head(debugger: dict) -> list[str]:
     """The tier's OpenOCD, its interface and target scripts and its probe selector, with every server port off."""
     named = str(debugger.get("executable") or "openocd")
@@ -247,7 +258,20 @@ def test_record_which_pyocd_call_lets_a_halted_core_run(bench: Bench, firmware: 
     variant.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     on_pyocd = PyocdBench(project=bench.project, config=variant, config_root=bench.config_root, state_root=bench.state_root)
 
-    private_values = (uid, str(bench.project), str(bench.config_root), str(bench.state_root), str(tmp_path), str(Path.home()), str(firmware.parent))
+    # The test's HOME is a sandbox, so the operator's own home, where the tools
+    # are installed, and the sandbox's temporary root are named here as well.
+    private_values = (
+        uid,
+        str(bench.project),
+        str(bench.config_root),
+        str(bench.state_root),
+        str(tmp_path),
+        tempfile.gettempdir(),
+        str(Path.home()),
+        operator_home(),
+        str(Path(executable).parent),
+        str(firmware.parent),
+    )
     recording: dict = {
         "schema": RECORDING_SCHEMA,
         "recorded_on": time.strftime("%Y-%m-%d", time.gmtime()),
