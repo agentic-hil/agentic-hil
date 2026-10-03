@@ -1,0 +1,1235 @@
+{
+  "cmsis_pack": {
+    "debug_core_start_dhcsr_writes": [
+      "Write32(0xE000EDF0, 0xA05F0001);                                        // Enable Core Debug via DHCSR"
+    ],
+    "id": "Keil.STM32F4xx_DFP",
+    "target_type": "stm32f446retx",
+    "version": "3.1.1"
+  },
+  "controls": {
+    "running_core": {
+      "openocd_looks": [
+        {
+          "argv_tail": [
+            "-f",
+            "interface/stlink.cfg",
+            "-c",
+            "adapter serial [redacted]",
+            "-f",
+            "target/stm32f4x.cfg",
+            "-c",
+            "gdb_port disabled",
+            "-c",
+            "tcl_port disabled",
+            "-c",
+            "telnet_port disabled",
+            "-c",
+            "init",
+            "-c",
+            "mdw 0xe000edf0",
+            "-c",
+            "mdw 0x2000086c",
+            "-c",
+            "sleep 300",
+            "-c",
+            "mdw 0x2000086c",
+            "-c",
+            "mdw 0xe000edf0",
+            "-c",
+            "shutdown"
+          ],
+          "elapsed_s": 0.46,
+          "look": {
+            "counter": [
+              1427,
+              1731
+            ],
+            "counter_moved": 304,
+            "dhcsr": [
+              {
+                "c_debugen": true,
+                "c_halt": false,
+                "s_halt": false,
+                "s_reset_st": false,
+                "s_retire_st": true,
+                "value": "0x01010001"
+              },
+              {
+                "c_debugen": true,
+                "c_halt": false,
+                "s_halt": false,
+                "s_reset_st": false,
+                "s_retire_st": true,
+                "value": "0x01010001"
+              }
+            ],
+            "state": "running"
+          },
+          "output": [
+            "Open On-Chip Debugger 0.12.0",
+            "Licensed under GNU GPL v2",
+            "For bug reports, read",
+            "\thttp://openocd.org/doc/doxygen/bugs.html",
+            "Info : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.",
+            "Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD",
+            "Info : clock speed 2000 kHz",
+            "Info : STLINK V2J30M19 (API v2) VID:PID 0483:374B",
+            "Info : Target voltage: 3.268556",
+            "Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected",
+            "Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints",
+            "Info : gdb port disabled",
+            "0xe000edf0: 01010001 ",
+            "",
+            "0x2000086c: 00000593 ",
+            "",
+            "0x2000086c: 000006c3 ",
+            "",
+            "0xe000edf0: 01010001 ",
+            "",
+            "shutdown command invoked"
+          ],
+          "returncode": 0
+        },
+        {
+          "argv_tail": [
+            "-f",
+            "interface/stlink.cfg",
+            "-c",
+            "adapter serial [redacted]",
+            "-f",
+            "target/stm32f4x.cfg",
+            "-c",
+            "gdb_port disabled",
+            "-c",
+            "tcl_port disabled",
+            "-c",
+            "telnet_port disabled",
+            "-c",
+            "init",
+            "-c",
+            "mdw 0xe000edf0",
+            "-c",
+            "mdw 0x2000086c",
+            "-c",
+            "sleep 300",
+            "-c",
+            "mdw 0x2000086c",
+            "-c",
+            "mdw 0xe000edf0",
+            "-c",
+            "shutdown"
+          ],
+          "elapsed_s": 0.44,
+          "look": {
+            "counter": [
+              1875,
+              2177
+            ],
+            "counter_moved": 302,
+            "dhcsr": [
+              {
+                "c_debugen": true,
+                "c_halt": false,
+                "s_halt": false,
+                "s_reset_st": false,
+                "s_retire_st": true,
+                "value": "0x01010001"
+              },
+              {
+                "c_debugen": true,
+                "c_halt": false,
+                "s_halt": false,
+                "s_reset_st": false,
+                "s_retire_st": true,
+                "value": "0x01010001"
+              }
+            ],
+            "state": "running"
+          },
+          "output": [
+            "Open On-Chip Debugger 0.12.0",
+            "Licensed under GNU GPL v2",
+            "For bug reports, read",
+            "\thttp://openocd.org/doc/doxygen/bugs.html",
+            "Info : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.",
+            "Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD",
+            "Info : clock speed 2000 kHz",
+            "Info : STLINK V2J30M19 (API v2) VID:PID 0483:374B",
+            "Info : Target voltage: 3.265392",
+            "Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected",
+            "Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints",
+            "Info : gdb port disabled",
+            "0xe000edf0: 01010001 ",
+            "",
+            "0x2000086c: 00000753 ",
+            "",
+            "0x2000086c: 00000881 ",
+            "",
+            "0xe000edf0: 01010001 ",
+            "",
+            "shutdown command invoked"
+          ],
+          "returncode": 0
+        }
+      ],
+      "reset_run": {
+        "command": "[redacted]/pyocd commander --command reset --uid [redacted] --target stm32f446retx -W",
+        "mode": "run",
+        "ok": true,
+        "output": [
+          "Resetting target"
+        ],
+        "safe_state_confirmed": true,
+        "side_effect_status": "committed",
+        "summary": "Target reset with mode 'run'."
+      }
+    }
+  },
+  "counter": {
+    "address": "0x2000086c",
+    "size_bytes": 4,
+    "symbol": "uptime_ms"
+  },
+  "flash": {
+    "command": "[redacted]/pyocd flash --no-reset --uid [redacted] --target stm32f446retx -W --format elf [redacted]/agentic-hil-artifacts-qb_1rvl0/stage-6tgmsggz/nucleo-f446re_demo.elf",
+    "ok": true,
+    "output": [
+      "[---|---|---|---|---|---|---|---|---|----]",
+      "[========================================]",
+      "[---|---|---|---|---|---|---|---|---|----]",
+      "[========================================]",
+      "0001206 I Loading [redacted]/agentic-hil-artifacts-qb_1rvl0/stage-6tgmsggz/nucleo-f446re_demo.elf [load_cmd]",
+      "0001208 I Erasing... [loader]",
+      "0001513 I Programming... [loader]",
+      "0001549 I Erased 0 bytes (0 sectors), programmed 0 bytes (0 pages), identical 11264 bytes (11 pages) at 32.32 kB/s [loader]"
+    ],
+    "safe_state_confirmed": true,
+    "side_effect_status": "committed",
+    "summary": "Firmware flashed and target reset."
+  },
+  "image": "the demo firmware the tier builds",
+  "look_pause_ms": 300,
+  "openocd_version": [
+    "Open On-Chip Debugger 0.12.0"
+  ],
+  "probe": "the bench's in-circuit debugger, its unique ID redacted",
+  "pyocd_version": "0.45.1",
+  "recorded_on": "2026-10-03",
+  "scenarios": {
+    "product_probe_target_on_a_halted_core": {
+      "openocd_look": {
+        "argv_tail": [
+          "-f",
+          "interface/stlink.cfg",
+          "-c",
+          "adapter serial [redacted]",
+          "-f",
+          "target/stm32f4x.cfg",
+          "-c",
+          "gdb_port disabled",
+          "-c",
+          "tcl_port disabled",
+          "-c",
+          "telnet_port disabled",
+          "-c",
+          "init",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "sleep 300",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "shutdown"
+        ],
+        "elapsed_s": 0.45,
+        "look": {
+          "counter": [
+            315,
+            618
+          ],
+          "counter_moved": 303,
+          "dhcsr": [
+            {
+              "c_debugen": true,
+              "c_halt": false,
+              "s_halt": false,
+              "s_reset_st": false,
+              "s_retire_st": true,
+              "value": "0x01010001"
+            },
+            {
+              "c_debugen": true,
+              "c_halt": false,
+              "s_halt": false,
+              "s_reset_st": false,
+              "s_retire_st": true,
+              "value": "0x01010001"
+            }
+          ],
+          "state": "running"
+        },
+        "output": [
+          "Open On-Chip Debugger 0.12.0",
+          "Licensed under GNU GPL v2",
+          "For bug reports, read",
+          "\thttp://openocd.org/doc/doxygen/bugs.html",
+          "Info : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.",
+          "Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD",
+          "Info : clock speed 2000 kHz",
+          "Info : STLINK V2J30M19 (API v2) VID:PID 0483:374B",
+          "Info : Target voltage: 3.268556",
+          "Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected",
+          "Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints",
+          "Info : gdb port disabled",
+          "0xe000edf0: 01010001 ",
+          "",
+          "0x2000086c: 0000013b ",
+          "",
+          "0x2000086c: 0000026a ",
+          "",
+          "0xe000edf0: 01010001 ",
+          "",
+          "shutdown command invoked"
+        ],
+        "returncode": 0
+      },
+      "probe_target": {
+        "command": "[redacted]/pyocd commander --command status -O debug.traceback=true --uid [redacted] --target stm32f446retx -W",
+        "ok": true,
+        "output": [
+          "Core 0 (Cortex-M4):  Running"
+        ],
+        "safe_state_confirmed": true,
+        "summary": "Target detected through pyOCD.",
+        "target_detected": true
+      },
+      "read": {
+        "command": "[redacted]/pyocd commander --connect attach -O pack.debug_sequences.disabled_sequences=DebugCoreStart --command \"savemem 0x2000086c 4 '[redacted]/agentic-hil-pyocd-read-9s9p8xq9/symbol-memory.bin'\" --uid [redacted] --target stm32f446retx -W",
+        "hex": "470a0000",
+        "ok": true,
+        "output": [
+          "Saved 4 bytes to [redacted]/agentic-hil-pyocd-read-9s9p8xq9/symbol-memory.bin"
+        ],
+        "safe_state_confirmed": true,
+        "summary": "Symbol value read from target memory.",
+        "value_unsigned": 2631
+      }
+    },
+    "product_probe_target_on_a_running_core": {
+      "openocd_look": {
+        "argv_tail": [
+          "-f",
+          "interface/stlink.cfg",
+          "-c",
+          "adapter serial [redacted]",
+          "-f",
+          "target/stm32f4x.cfg",
+          "-c",
+          "gdb_port disabled",
+          "-c",
+          "tcl_port disabled",
+          "-c",
+          "telnet_port disabled",
+          "-c",
+          "init",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "sleep 300",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "shutdown"
+        ],
+        "elapsed_s": 0.45,
+        "look": {
+          "counter": [
+            2522,
+            2824
+          ],
+          "counter_moved": 302,
+          "dhcsr": [
+            {
+              "c_debugen": true,
+              "c_halt": false,
+              "s_halt": false,
+              "s_reset_st": false,
+              "s_retire_st": true,
+              "value": "0x01010001"
+            },
+            {
+              "c_debugen": true,
+              "c_halt": false,
+              "s_halt": false,
+              "s_reset_st": false,
+              "s_retire_st": true,
+              "value": "0x01010001"
+            }
+          ],
+          "state": "running"
+        },
+        "output": [
+          "Open On-Chip Debugger 0.12.0",
+          "Licensed under GNU GPL v2",
+          "For bug reports, read",
+          "\thttp://openocd.org/doc/doxygen/bugs.html",
+          "Info : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.",
+          "Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD",
+          "Info : clock speed 2000 kHz",
+          "Info : STLINK V2J30M19 (API v2) VID:PID 0483:374B",
+          "Info : Target voltage: 3.262228",
+          "Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected",
+          "Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints",
+          "Info : gdb port disabled",
+          "0xe000edf0: 01010001 ",
+          "",
+          "0x2000086c: 000009da ",
+          "",
+          "0x2000086c: 00000b08 ",
+          "",
+          "0xe000edf0: 01010001 ",
+          "",
+          "shutdown command invoked"
+        ],
+        "returncode": 0
+      },
+      "probe_target": {
+        "command": "[redacted]/pyocd commander --command status -O debug.traceback=true --uid [redacted] --target stm32f446retx -W",
+        "ok": true,
+        "output": [
+          "Core 0 (Cortex-M4):  Running"
+        ],
+        "safe_state_confirmed": true,
+        "summary": "Target detected through pyOCD.",
+        "target_detected": true
+      },
+      "reset_run": {
+        "command": "[redacted]/pyocd commander --command reset --uid [redacted] --target stm32f446retx -W",
+        "mode": "run",
+        "ok": true,
+        "output": [
+          "Resetting target"
+        ],
+        "safe_state_confirmed": true,
+        "side_effect_status": "committed",
+        "summary": "Target reset with mode 'run'."
+      }
+    },
+    "product_reset_halt": {
+      "openocd_look": {
+        "argv_tail": [
+          "-f",
+          "interface/stlink.cfg",
+          "-c",
+          "adapter serial [redacted]",
+          "-f",
+          "target/stm32f4x.cfg",
+          "-c",
+          "gdb_port disabled",
+          "-c",
+          "tcl_port disabled",
+          "-c",
+          "telnet_port disabled",
+          "-c",
+          "init",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "sleep 300",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "shutdown"
+        ],
+        "elapsed_s": 0.48,
+        "look": {
+          "counter": [
+            3119,
+            3119
+          ],
+          "counter_moved": 0,
+          "dhcsr": [
+            {
+              "c_debugen": true,
+              "c_halt": true,
+              "s_halt": true,
+              "s_reset_st": false,
+              "s_retire_st": false,
+              "value": "0x00030003"
+            },
+            {
+              "c_debugen": true,
+              "c_halt": true,
+              "s_halt": true,
+              "s_reset_st": false,
+              "s_retire_st": false,
+              "value": "0x00030003"
+            }
+          ],
+          "state": "halted"
+        },
+        "output": [
+          "Open On-Chip Debugger 0.12.0",
+          "Licensed under GNU GPL v2",
+          "For bug reports, read",
+          "\thttp://openocd.org/doc/doxygen/bugs.html",
+          "Info : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.",
+          "Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD",
+          "Info : clock speed 2000 kHz",
+          "Info : STLINK V2J30M19 (API v2) VID:PID 0483:374B",
+          "Info : Target voltage: 3.262228",
+          "Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected",
+          "Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints",
+          "Info : gdb port disabled",
+          "[stm32f4x.cpu] halted due to breakpoint, current mode: Thread ",
+          "xPSR: 0x01000000 pc: 0x08002240 msp: 0x20020000",
+          "0xe000edf0: 00030003 ",
+          "",
+          "0x2000086c: 00000c2f ",
+          "",
+          "0x2000086c: 00000c2f ",
+          "",
+          "0xe000edf0: 00030003 ",
+          "",
+          "shutdown command invoked"
+        ],
+        "returncode": 0
+      },
+      "openocd_look_again": {
+        "argv_tail": [
+          "-f",
+          "interface/stlink.cfg",
+          "-c",
+          "adapter serial [redacted]",
+          "-f",
+          "target/stm32f4x.cfg",
+          "-c",
+          "gdb_port disabled",
+          "-c",
+          "tcl_port disabled",
+          "-c",
+          "telnet_port disabled",
+          "-c",
+          "init",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "sleep 300",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "shutdown"
+        ],
+        "elapsed_s": 0.49,
+        "look": {
+          "counter": [
+            3119,
+            3119
+          ],
+          "counter_moved": 0,
+          "dhcsr": [
+            {
+              "c_debugen": true,
+              "c_halt": true,
+              "s_halt": true,
+              "s_reset_st": false,
+              "s_retire_st": false,
+              "value": "0x00030003"
+            },
+            {
+              "c_debugen": true,
+              "c_halt": true,
+              "s_halt": true,
+              "s_reset_st": false,
+              "s_retire_st": false,
+              "value": "0x00030003"
+            }
+          ],
+          "state": "halted"
+        },
+        "output": [
+          "Open On-Chip Debugger 0.12.0",
+          "Licensed under GNU GPL v2",
+          "For bug reports, read",
+          "\thttp://openocd.org/doc/doxygen/bugs.html",
+          "Info : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.",
+          "Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD",
+          "Info : clock speed 2000 kHz",
+          "Info : STLINK V2J30M19 (API v2) VID:PID 0483:374B",
+          "Info : Target voltage: 3.265392",
+          "Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected",
+          "Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints",
+          "Info : gdb port disabled",
+          "[stm32f4x.cpu] halted due to breakpoint, current mode: Thread ",
+          "xPSR: 0x01000000 pc: 0x08002240 msp: 0x20020000",
+          "0xe000edf0: 00030003 ",
+          "",
+          "0x2000086c: 00000c2f ",
+          "",
+          "0x2000086c: 00000c2f ",
+          "",
+          "0xe000edf0: 00030003 ",
+          "",
+          "shutdown command invoked"
+        ],
+        "returncode": 0
+      },
+      "reset_halt": {
+        "command": "[redacted]/pyocd commander --command \"reset halt\" --uid [redacted] --target stm32f446retx -W",
+        "mode": "halt",
+        "ok": true,
+        "output": [
+          "Resetting target with halt",
+          "Successfully halted device on reset"
+        ],
+        "safe_state_confirmed": true,
+        "side_effect_status": "committed",
+        "summary": "Target reset with mode 'halt'."
+      }
+    },
+    "pyocd_probe_target_connect_on_a_halted_core": {
+      "before": {
+        "argv_tail": [
+          "-f",
+          "interface/stlink.cfg",
+          "-c",
+          "adapter serial [redacted]",
+          "-f",
+          "target/stm32f4x.cfg",
+          "-c",
+          "gdb_port disabled",
+          "-c",
+          "tcl_port disabled",
+          "-c",
+          "telnet_port disabled",
+          "-c",
+          "init",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "sleep 300",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "shutdown"
+        ],
+        "elapsed_s": 0.48,
+        "look": {
+          "counter": [
+            3703,
+            3703
+          ],
+          "counter_moved": 0,
+          "dhcsr": [
+            {
+              "c_debugen": true,
+              "c_halt": true,
+              "s_halt": true,
+              "s_reset_st": false,
+              "s_retire_st": false,
+              "value": "0x00030003"
+            },
+            {
+              "c_debugen": true,
+              "c_halt": true,
+              "s_halt": true,
+              "s_reset_st": false,
+              "s_retire_st": false,
+              "value": "0x00030003"
+            }
+          ],
+          "state": "halted"
+        },
+        "output": [
+          "Open On-Chip Debugger 0.12.0",
+          "Licensed under GNU GPL v2",
+          "For bug reports, read",
+          "\thttp://openocd.org/doc/doxygen/bugs.html",
+          "Info : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.",
+          "Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD",
+          "Info : clock speed 2000 kHz",
+          "Info : STLINK V2J30M19 (API v2) VID:PID 0483:374B",
+          "Info : Target voltage: 3.265392",
+          "Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected",
+          "Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints",
+          "Info : gdb port disabled",
+          "[stm32f4x.cpu] halted due to breakpoint, current mode: Thread ",
+          "xPSR: 0x01000000 pc: 0x08002240 msp: 0x20020000",
+          "0xe000edf0: 00030003 ",
+          "",
+          "0x2000086c: 00000e77 ",
+          "",
+          "0x2000086c: 00000e77 ",
+          "",
+          "0xe000edf0: 00030003 ",
+          "",
+          "shutdown command invoked"
+        ],
+        "returncode": 0
+      },
+      "openocd_look": {
+        "argv_tail": [
+          "-f",
+          "interface/stlink.cfg",
+          "-c",
+          "adapter serial [redacted]",
+          "-f",
+          "target/stm32f4x.cfg",
+          "-c",
+          "gdb_port disabled",
+          "-c",
+          "tcl_port disabled",
+          "-c",
+          "telnet_port disabled",
+          "-c",
+          "init",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "sleep 300",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "shutdown"
+        ],
+        "elapsed_s": 0.43,
+        "look": {
+          "counter": [
+            638,
+            940
+          ],
+          "counter_moved": 302,
+          "dhcsr": [
+            {
+              "c_debugen": true,
+              "c_halt": false,
+              "s_halt": false,
+              "s_reset_st": false,
+              "s_retire_st": true,
+              "value": "0x01010001"
+            },
+            {
+              "c_debugen": true,
+              "c_halt": false,
+              "s_halt": false,
+              "s_reset_st": false,
+              "s_retire_st": true,
+              "value": "0x01010001"
+            }
+          ],
+          "state": "running"
+        },
+        "output": [
+          "Open On-Chip Debugger 0.12.0",
+          "Licensed under GNU GPL v2",
+          "For bug reports, read",
+          "\thttp://openocd.org/doc/doxygen/bugs.html",
+          "Info : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.",
+          "Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD",
+          "Info : clock speed 2000 kHz",
+          "Info : STLINK V2J30M19 (API v2) VID:PID 0483:374B",
+          "Info : Target voltage: 3.263810",
+          "Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected",
+          "Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints",
+          "Info : gdb port disabled",
+          "0xe000edf0: 01010001 ",
+          "",
+          "0x2000086c: 0000027e ",
+          "",
+          "0x2000086c: 000003ac ",
+          "",
+          "0xe000edf0: 01010001 ",
+          "",
+          "shutdown command invoked"
+        ],
+        "returncode": 0
+      },
+      "pyocd": {
+        "argv_tail": [
+          "commander",
+          "-O",
+          "debug.traceback=true",
+          "--command",
+          "status",
+          "--command",
+          "read32 0xe000edf0",
+          "--command",
+          "read32 0x2000086c",
+          "--command",
+          "sleep 300",
+          "--command",
+          "read32 0x2000086c",
+          "--command",
+          "read32 0xe000edf0",
+          "--uid",
+          "[redacted]",
+          "--target",
+          "stm32f446retx",
+          "-W"
+        ],
+        "elapsed_s": 1.81,
+        "look": {
+          "counter": [
+            24,
+            326
+          ],
+          "counter_moved": 302,
+          "dhcsr": [
+            {
+              "c_debugen": true,
+              "c_halt": false,
+              "s_halt": false,
+              "s_reset_st": false,
+              "s_retire_st": true,
+              "value": "0x01010001"
+            },
+            {
+              "c_debugen": true,
+              "c_halt": false,
+              "s_halt": false,
+              "s_reset_st": false,
+              "s_retire_st": true,
+              "value": "0x01010001"
+            }
+          ],
+          "state": "running"
+        },
+        "output": [
+          "Core 0 (Cortex-M4):  Running",
+          "e000edf0:  01010001                               |....|",
+          "2000086c:  00000018                               |....|",
+          "2000086c:  00000146                               |...F|",
+          "e000edf0:  01010001                               |....|"
+        ],
+        "returncode": 0
+      },
+      "reset_halt": {
+        "command": "[redacted]/pyocd commander --command \"reset halt\" --uid [redacted] --target stm32f446retx -W",
+        "mode": "halt",
+        "ok": true,
+        "output": [
+          "Resetting target with halt",
+          "Successfully halted device on reset"
+        ],
+        "safe_state_confirmed": true,
+        "side_effect_status": "committed",
+        "summary": "Target reset with mode 'halt'."
+      }
+    },
+    "pyocd_probe_target_connect_without_debug_core_start_on_a_halted_core": {
+      "before": {
+        "argv_tail": [
+          "-f",
+          "interface/stlink.cfg",
+          "-c",
+          "adapter serial [redacted]",
+          "-f",
+          "target/stm32f4x.cfg",
+          "-c",
+          "gdb_port disabled",
+          "-c",
+          "tcl_port disabled",
+          "-c",
+          "telnet_port disabled",
+          "-c",
+          "init",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "sleep 300",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "shutdown"
+        ],
+        "elapsed_s": 0.48,
+        "look": {
+          "counter": [
+            1960,
+            1960
+          ],
+          "counter_moved": 0,
+          "dhcsr": [
+            {
+              "c_debugen": true,
+              "c_halt": true,
+              "s_halt": true,
+              "s_reset_st": false,
+              "s_retire_st": false,
+              "value": "0x00030003"
+            },
+            {
+              "c_debugen": true,
+              "c_halt": true,
+              "s_halt": true,
+              "s_reset_st": false,
+              "s_retire_st": false,
+              "value": "0x00030003"
+            }
+          ],
+          "state": "halted"
+        },
+        "output": [
+          "Open On-Chip Debugger 0.12.0",
+          "Licensed under GNU GPL v2",
+          "For bug reports, read",
+          "\thttp://openocd.org/doc/doxygen/bugs.html",
+          "Info : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.",
+          "Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD",
+          "Info : clock speed 2000 kHz",
+          "Info : STLINK V2J30M19 (API v2) VID:PID 0483:374B",
+          "Info : Target voltage: 3.263810",
+          "Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected",
+          "Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints",
+          "Info : gdb port disabled",
+          "[stm32f4x.cpu] halted due to breakpoint, current mode: Thread ",
+          "xPSR: 0x01000000 pc: 0x08002240 msp: 0x20020000",
+          "0xe000edf0: 00030003 ",
+          "",
+          "0x2000086c: 000007a8 ",
+          "",
+          "0x2000086c: 000007a8 ",
+          "",
+          "0xe000edf0: 00030003 ",
+          "",
+          "shutdown command invoked"
+        ],
+        "returncode": 0
+      },
+      "openocd_look": {
+        "argv_tail": [
+          "-f",
+          "interface/stlink.cfg",
+          "-c",
+          "adapter serial [redacted]",
+          "-f",
+          "target/stm32f4x.cfg",
+          "-c",
+          "gdb_port disabled",
+          "-c",
+          "tcl_port disabled",
+          "-c",
+          "telnet_port disabled",
+          "-c",
+          "init",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "sleep 300",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "shutdown"
+        ],
+        "elapsed_s": 0.47,
+        "look": {
+          "counter": [
+            1960,
+            1960
+          ],
+          "counter_moved": 0,
+          "dhcsr": [
+            {
+              "c_debugen": true,
+              "c_halt": true,
+              "s_halt": true,
+              "s_reset_st": false,
+              "s_retire_st": false,
+              "value": "0x00030003"
+            },
+            {
+              "c_debugen": true,
+              "c_halt": true,
+              "s_halt": true,
+              "s_reset_st": false,
+              "s_retire_st": false,
+              "value": "0x00030003"
+            }
+          ],
+          "state": "halted"
+        },
+        "output": [
+          "Open On-Chip Debugger 0.12.0",
+          "Licensed under GNU GPL v2",
+          "For bug reports, read",
+          "\thttp://openocd.org/doc/doxygen/bugs.html",
+          "Info : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.",
+          "Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD",
+          "Info : clock speed 2000 kHz",
+          "Info : STLINK V2J30M19 (API v2) VID:PID 0483:374B",
+          "Info : Target voltage: 3.262228",
+          "Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected",
+          "Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints",
+          "Info : gdb port disabled",
+          "[stm32f4x.cpu] halted due to breakpoint, current mode: Thread ",
+          "xPSR: 0x01000000 pc: 0x08002240 msp: 0x20020000",
+          "0xe000edf0: 00030003 ",
+          "",
+          "0x2000086c: 000007a8 ",
+          "",
+          "0x2000086c: 000007a8 ",
+          "",
+          "0xe000edf0: 00030003 ",
+          "",
+          "shutdown command invoked"
+        ],
+        "returncode": 0
+      },
+      "pyocd": {
+        "argv_tail": [
+          "commander",
+          "-O",
+          "debug.traceback=true",
+          "-O",
+          "pack.debug_sequences.disabled_sequences=DebugCoreStart",
+          "--command",
+          "status",
+          "--command",
+          "read32 0xe000edf0",
+          "--command",
+          "read32 0x2000086c",
+          "--command",
+          "sleep 300",
+          "--command",
+          "read32 0x2000086c",
+          "--command",
+          "read32 0xe000edf0",
+          "--uid",
+          "[redacted]",
+          "--target",
+          "stm32f446retx",
+          "-W"
+        ],
+        "elapsed_s": 1.32,
+        "look": {
+          "counter": [
+            1960,
+            1960
+          ],
+          "counter_moved": 0,
+          "dhcsr": [
+            {
+              "c_debugen": true,
+              "c_halt": true,
+              "s_halt": true,
+              "s_reset_st": false,
+              "s_retire_st": false,
+              "value": "0x00030003"
+            },
+            {
+              "c_debugen": true,
+              "c_halt": true,
+              "s_halt": true,
+              "s_reset_st": false,
+              "s_retire_st": false,
+              "value": "0x00030003"
+            }
+          ],
+          "state": "halted"
+        },
+        "output": [
+          "Core 0 (Cortex-M4):  Halted",
+          "e000edf0:  00030003                               |....|",
+          "2000086c:  000007a8                               |....|",
+          "2000086c:  000007a8                               |....|",
+          "e000edf0:  00030003                               |....|"
+        ],
+        "returncode": 0
+      },
+      "reset_halt": {
+        "command": "[redacted]/pyocd commander --command \"reset halt\" --uid [redacted] --target stm32f446retx -W",
+        "mode": "halt",
+        "ok": true,
+        "output": [
+          "Resetting target with halt",
+          "Successfully halted device on reset"
+        ],
+        "safe_state_confirmed": true,
+        "side_effect_status": "committed",
+        "summary": "Target reset with mode 'halt'."
+      }
+    },
+    "pyocd_probe_target_connect_without_debug_core_start_on_a_running_core": {
+      "openocd_look": {
+        "argv_tail": [
+          "-f",
+          "interface/stlink.cfg",
+          "-c",
+          "adapter serial [redacted]",
+          "-f",
+          "target/stm32f4x.cfg",
+          "-c",
+          "gdb_port disabled",
+          "-c",
+          "tcl_port disabled",
+          "-c",
+          "telnet_port disabled",
+          "-c",
+          "init",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "sleep 300",
+          "-c",
+          "mdw 0x2000086c",
+          "-c",
+          "mdw 0xe000edf0",
+          "-c",
+          "shutdown"
+        ],
+        "elapsed_s": 0.44,
+        "look": {
+          "counter": [
+            4226,
+            4529
+          ],
+          "counter_moved": 303,
+          "dhcsr": [
+            {
+              "c_debugen": true,
+              "c_halt": false,
+              "s_halt": false,
+              "s_reset_st": false,
+              "s_retire_st": true,
+              "value": "0x01010001"
+            },
+            {
+              "c_debugen": true,
+              "c_halt": false,
+              "s_halt": false,
+              "s_reset_st": false,
+              "s_retire_st": true,
+              "value": "0x01010001"
+            }
+          ],
+          "state": "running"
+        },
+        "output": [
+          "Open On-Chip Debugger 0.12.0",
+          "Licensed under GNU GPL v2",
+          "For bug reports, read",
+          "\thttp://openocd.org/doc/doxygen/bugs.html",
+          "Info : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.",
+          "Info : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD",
+          "Info : clock speed 2000 kHz",
+          "Info : STLINK V2J30M19 (API v2) VID:PID 0483:374B",
+          "Info : Target voltage: 3.262228",
+          "Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected",
+          "Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints",
+          "Info : gdb port disabled",
+          "0xe000edf0: 01010001 ",
+          "",
+          "0x2000086c: 00001082 ",
+          "",
+          "0x2000086c: 000011b1 ",
+          "",
+          "0xe000edf0: 01010001 ",
+          "",
+          "shutdown command invoked"
+        ],
+        "returncode": 0
+      },
+      "pyocd": {
+        "argv_tail": [
+          "commander",
+          "-O",
+          "debug.traceback=true",
+          "-O",
+          "pack.debug_sequences.disabled_sequences=DebugCoreStart",
+          "--command",
+          "status",
+          "--command",
+          "read32 0xe000edf0",
+          "--command",
+          "read32 0x2000086c",
+          "--command",
+          "sleep 300",
+          "--command",
+          "read32 0x2000086c",
+          "--command",
+          "read32 0xe000edf0",
+          "--uid",
+          "[redacted]",
+          "--target",
+          "stm32f446retx",
+          "-W"
+        ],
+        "elapsed_s": 1.26,
+        "look": {
+          "counter": [
+            3674,
+            3977
+          ],
+          "counter_moved": 303,
+          "dhcsr": [
+            {
+              "c_debugen": true,
+              "c_halt": false,
+              "s_halt": false,
+              "s_reset_st": false,
+              "s_retire_st": true,
+              "value": "0x01010001"
+            },
+            {
+              "c_debugen": true,
+              "c_halt": false,
+              "s_halt": false,
+              "s_reset_st": false,
+              "s_retire_st": true,
+              "value": "0x01010001"
+            }
+          ],
+          "state": "running"
+        },
+        "output": [
+          "Core 0 (Cortex-M4):  Running",
+          "e000edf0:  01010001                               |....|",
+          "2000086c:  00000e5a                               |...Z|",
+          "2000086c:  00000f89                               |....|",
+          "e000edf0:  01010001                               |....|"
+        ],
+        "returncode": 0
+      }
+    }
+  },
+  "schema": "agentic-hil.pyocd-halt-recording/v1",
+  "server_exit": 0,
+  "settle_s": 1.0,
+  "source_commit": "7be0fdf"
+}
