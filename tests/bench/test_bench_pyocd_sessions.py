@@ -361,3 +361,30 @@ def test_a_reset_into_halt_without_a_session_holds_across_the_reads_after_it(
     assert second["ok"] is True, second
 
     assert second["value_unsigned"] == first["value_unsigned"], (first["value_unsigned"], second["value_unsigned"], READS_APART_S)
+
+
+def test_a_probe_of_a_core_reset_into_halt_without_a_session_leaves_it_halted(
+    pyocd_servers, pyocd_bench: PyocdBench, gdb: None, firmware: Path
+) -> None:
+    """`reset_target` with mode `halt`, `probe_target`, then two reads of the demo's counter, with no session open.
+
+    The probe is its own pyOCD process too, and the one call here that only
+    looks. Two reads a pause apart after it that return the same value are a
+    core the probe left where the reset halted it."""
+    server = pyocd_servers()
+    flashed = server.tool("flash_firmware", {"image_path": workspace_image(pyocd_bench, firmware), "reset_after_flash": True})
+    assert flashed["ok"] is True, flashed
+
+    halted = server.tool("reset_target", {"mode": "halt"})
+    assert halted["ok"] is True, halted
+    probed = server.tool("probe_target")
+    assert probed["ok"] is True, probed
+    assert probed["backend"] == "pyocd", probed
+
+    first = server.tool("debug_symbol_value", {"symbol": COUNTER})
+    assert first["ok"] is True, first
+    time.sleep(READS_APART_S)
+    second = server.tool("debug_symbol_value", {"symbol": COUNTER})
+    assert second["ok"] is True, second
+
+    assert second["value_unsigned"] == first["value_unsigned"], (first["value_unsigned"], second["value_unsigned"], READS_APART_S)
