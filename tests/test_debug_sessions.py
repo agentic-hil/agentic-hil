@@ -11,6 +11,7 @@ import pytest
 from conftest import (
     FAKE_GDB,
     FAKE_PYOCD,
+    FAKE_PYOCD_HALT_RECORDED,
     FAKE_PYOCD_NO_TARGET,
     FAKE_PYOCD_SILENT_READ,
     FAKE_STLINK,
@@ -2426,6 +2427,71 @@ def test_pyocd_read_stays_attach_when_the_configuration_names_a_connect_mode(tmp
     with pytest.raises(ConfigError) as refused:
         load_config(str(write_config(tmp_path / "under-reset", debugger_type="pyocd", debugger_executable=FAKE_PYOCD, target_type="stm32f446re", connect_mode="under_reset")))
     assert refused.value.error_type == "config_invalid"
+
+
+# --- pyOCD: a reset into halt that the reads after it leave halted (#631) -----
+#
+# Without a session every call is its own `pyocd commander` process, so a halt
+# holds only if the process after the reset leaves it alone. On the reference
+# board it did not: the reset's halt held until the next read connected, and
+# the target pack's DebugCoreStart sequence, which that connect runs, wrote
+# DHCSR with C_DEBUGEN and without C_HALT and let the core run. The fake below
+# carries the core's state from process to process the way the recording
+# beside it says the board did.
+
+PYOCD_CORE_STATE_VARIABLE = "AGENTIC_HIL_FAKE_PYOCD_CORE_STATE"
+
+
+def pyocd_core_state_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AgenticHILToolService:
+    monkeypatch.setenv(PYOCD_CORE_STATE_VARIABLE, str(tmp_path / "core-state.json"))
+    return pyocd_read_service(tmp_path, debugger_executable=FAKE_PYOCD_HALT_RECORDED)
+
+
+def test_a_pyocd_reset_into_halt_holds_across_the_reads_after_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two reads of a counter after a reset into halt return the same value.
+
+    The reset reports the halt confirmed, and on the board it was: an observer
+    that does not resume read the counter frozen afterwards. What let the core
+    run was the read that came next, so a read must leave a halted core halted.
+    A counter that moves between two reads is a core the reads let run, while
+    the result of the reset still says it is halted.
+    """
+    service = pyocd_core_state_service(tmp_path, monkeypatch)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        halted = service.call("reset_target", {"mode": "halt"})
+        first = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+        second = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert halted["ok"] is True, halted
+    assert halted["safe_state_confirmed"] is True, halted
+    assert first["ok"] is True, first
+    assert second["ok"] is True, second
+    assert second["value_unsigned"] == first["value_unsigned"], (first["value_unsigned"], second["value_unsigned"])
+
+
+def test_a_pyocd_read_of_a_running_core_leaves_it_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half: a read neither halts a running core nor stops its counter.
+
+    Whatever keeps a halted core halted must not turn the read into a halt,
+    because a read that halted would return a halted board's bytes and leave
+    the board stopped for every caller after it.
+    """
+    service = pyocd_core_state_service(tmp_path, monkeypatch)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        running = service.call("reset_target", {"mode": "run"})
+        first = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+        second = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert running["ok"] is True, running
+    assert first["ok"] is True, first
+    assert second["ok"] is True, second
+    assert second["value_unsigned"] > first["value_unsigned"], (first["value_unsigned"], second["value_unsigned"])
 
 
 def test_pyocd_dump_writes_the_intel_hex_pyocd_itself_cannot(tmp_path: Path) -> None:

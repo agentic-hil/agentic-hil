@@ -243,6 +243,7 @@ FAKE_PYOCD_NO_TARGET = ROOT / "tests" / "fixtures" / "fake_pyocd_no_target.py"
 FAKE_PYOCD_SILENT_READ = ROOT / "tests" / "fixtures" / "fake_pyocd_silent_read.py"
 FAKE_PYOCD_UNKNOWN_TARGET = ROOT / "tests" / "fixtures" / "fake_pyocd_unknown_target.py"
 FAKE_PYOCD_ERASE_REFUSED = ROOT / "tests" / "fixtures" / "fake_pyocd_erase_refused.py"
+FAKE_PYOCD_HALT_RECORDED = ROOT / "tests" / "fixtures" / "fake_pyocd_halt_recorded.py"
 FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"
 
 

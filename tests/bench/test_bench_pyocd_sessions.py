@@ -21,6 +21,9 @@ What only the board can say about a session on this backend:
   moved by no more than the next connect itself moves it.
 * whether a server that ends with a session open gives the probe back, so the
   next server can open one.
+* whether a reset into halt without a session holds across the reads after it.
+  Each of those calls is a pyOCD process of its own, and the counter read twice
+  with a pause between is what says whether any of them let the core run.
 
 The module ends with the demo put back on the board and running, through the
 tier's own plan runner, because a session ends with the core held halted and the
@@ -74,6 +77,9 @@ NEXT_CONNECT_RUN_BOUND_MS = 500
 # How the product records the end of a pyOCD session: the server is ended under
 # a connected GDB, because pyOCD resumes the core when GDB leaves.
 SERVER_ENDED_BEFORE_DETACH = "server_terminated_before_gdb_detach"
+# How long the core is left alone between two reads after a reset into halt.
+# A core that runs moves the demo's counter by about a thousand a second.
+READS_APART_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -325,3 +331,33 @@ def test_a_server_that_ends_with_a_pyocd_session_open_hands_the_board_to_the_nex
     assert reopened["session"]["session_id"] != first_session_id, reopened["session"]
 
     assert_ended_with_the_core_held(successor.tool("debug_stop_session"), pyocd_bench)
+
+
+def test_a_reset_into_halt_without_a_session_holds_across_the_reads_after_it(
+    pyocd_servers, pyocd_bench: PyocdBench, gdb: None, firmware: Path
+) -> None:
+    """`reset_target` with mode `halt`, then two reads of the demo's counter, with no session open (#631).
+
+    Without a session the reset and each read are pyOCD processes of their own,
+    each connecting to the probe and leaving it. The demo's SysTick moves the
+    counter every millisecond once the core runs, so two reads a pause apart
+    that return the same value are a core that stayed where the reset halted
+    it. A core that any of those connects or disconnects let run reads about a
+    thousand further on the second time. The image is flashed first because a
+    read without a session resolves its symbol against the image this server
+    flashed, and it is the demo the board already runs."""
+    server = pyocd_servers()
+    flashed = server.tool("flash_firmware", {"image_path": workspace_image(pyocd_bench, firmware), "reset_after_flash": True})
+    assert flashed["ok"] is True, flashed
+
+    halted = server.tool("reset_target", {"mode": "halt"})
+    assert halted["ok"] is True, halted
+    assert halted["backend"] == "pyocd", halted
+
+    first = server.tool("debug_symbol_value", {"symbol": COUNTER})
+    assert first["ok"] is True, first
+    time.sleep(READS_APART_S)
+    second = server.tool("debug_symbol_value", {"symbol": COUNTER})
+    assert second["ok"] is True, second
+
+    assert second["value_unsigned"] == first["value_unsigned"], (first["value_unsigned"], second["value_unsigned"], READS_APART_S)
