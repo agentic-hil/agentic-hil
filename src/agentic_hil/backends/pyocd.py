@@ -226,6 +226,16 @@ PYOCD_FLASH_FORMATS = {".axf": "elf", ".bin": "bin", ".elf": "elf", ".hex": "hex
 # `resume_on_disconnect` to false (`pyocd/commands/commander.py:220`), which the
 # board hands to the core's disconnect (`pyocd/board/board.py:163`,
 # `pyocd/coresight/cortex_m.py:424`).
+#
+# `probe_target` passes the same option. Its `status` runs behind the
+# commander's default connect, which is attach (`pyocd/commands/commander.py`,
+# 0.45.1, lines 184-192) and so runs the same sequence: on the reference board
+# a probe of a core `reset_target` had halted let it run from its reset vector
+# and printed `Running`, and with the sequence disabled the same connect and
+# `status` left a halted core halted and a running core running
+# (tests/fixtures/pyocd_0_45_1_probe_target_halt_recordings.json). `status`
+# reads the core's state through the access port and needs nothing the
+# sequence does either.
 PYOCD_READ_CONNECT_MODE = "attach"
 PYOCD_READ_KEEPS_THE_RUN_STATE = ["-O", "pack.debug_sequences.disabled_sequences=DebugCoreStart"]
 PYOCD_READ_CONNECT_ARGS = ["--connect", PYOCD_READ_CONNECT_MODE, *PYOCD_READ_KEEPS_THE_RUN_STATE]
@@ -450,7 +460,8 @@ class PyOCDBackend:
         selected = self._resolve_probe_selector("probe_target")
         if not overall_success(selected):
             return selected
-        result = self._run_pyocd("probe_target", ["commander", "--command", "status", "-O", "debug.traceback=true", *self._connection_args()])
+        # The probe only looks, so its connect leaves the run state as the reads' does (#631).
+        result = self._run_pyocd("probe_target", ["commander", "--command", "status", "-O", "debug.traceback=true", *PYOCD_READ_KEEPS_THE_RUN_STATE, *self._connection_args()])
         if result.get("ok"):
             result["target_detected"] = True
             result["summary"] = "Target detected through pyOCD."

@@ -45,8 +45,8 @@ def test_probe_target_enables_tracebacks_without_retrying_or_changing_generic_us
     command, timeout = commander_calls[0]
     commander = command.index("commander")
     assert command[commander + 1 : commander + 3] == ["--command", "status"]
-    assert [command[index + 1] for index, value in enumerate(command[:-1]) if value == "-O"] == ["debug.traceback=true"]
-    assert command.count("-O") == 1
+    assert [command[index + 1] for index, value in enumerate(command[:-1]) if value == "-O"] == ["debug.traceback=true", "pack.debug_sequences.disabled_sequences=DebugCoreStart"]
+    assert command.count("-O") == 2
     assert command.count("--command") == 1
     assert command.count("-W") == 1
     assert "--connect" not in command and "-M" not in command
