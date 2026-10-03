@@ -647,8 +647,8 @@ function Install-UvInsteadOfPip {
 # loosening it, which is the intended failure mode. Refreshing them is a release
 # chore, written down in docs/release-strategy.md, not something an install
 # decides on the operator's machine.
-$UvInstallerVersion = '0.12.21'
-$UvInstallerSha256 = '47385decce28406617801b01da9e8dd05b278fcd6d6f4adeec0c007b8312bad3'
+$UvInstallerVersion = '0.12.23'
+$UvInstallerSha256 = '536e6ebe00d41efc96b0ab1121bf6f969b0e9cbd88d1e19cfd09e63722e96160'
 
 function Get-Sha256Hex {
     param([byte[]]$Bytes)
@@ -677,7 +677,7 @@ function Install-Uv {
     # here than on the POSIX side. This pin vouches for the installer, not for the
     # uv binaries it goes on to fetch. Astral's POSIX installer carries a SHA-256
     # per release artifact and verifies the archive it downloaded against it;
-    # their PowerShell installer, as of the pinned 0.12.21, downloads the archive
+    # their PowerShell installer, as of the pinned 0.12.23, downloads the archive
     # and unpacks it with no checksum step at all. So on Windows this pin is not a
     # belt beside their braces, it is the only integrity check between astral.sh
     # and an executed script, which is the strongest reason of all to keep it.

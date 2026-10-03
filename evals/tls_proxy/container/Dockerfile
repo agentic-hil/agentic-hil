@@ -75,8 +75,8 @@ WORKDIR /home/bench
 # docs/release-strategy.md names this file, and a static test in
 # tests/test_install_scripts.py refuses a tree where it has fallen behind, which
 # is how it aged two releases while the comment went on claiming otherwise.
-ARG UV_INSTALLER_VERSION=0.12.21
-ARG UV_INSTALLER_SHA256=0722d6c438395e39e1c27a86a79054d3b2820dd9399c7f8b0f6f84cd27ce36c3
+ARG UV_INSTALLER_VERSION=0.12.23
+ARG UV_INSTALLER_SHA256=b8e6c43099ee9f9a550984d3ad56948457c689e7a99c090b35377234ac241491
 RUN curl -LsSf "https://astral.sh/uv/${UV_INSTALLER_VERSION}/install.sh" -o /tmp/uv-installer.sh \
     && echo "${UV_INSTALLER_SHA256}  /tmp/uv-installer.sh" | sha256sum -c - \
     && sh /tmp/uv-installer.sh \
