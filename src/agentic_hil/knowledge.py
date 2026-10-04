@@ -6892,7 +6892,7 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
         attempted="debug_continue or debug_halt lost confirmation of whether the target is running or halted.",
         confirmed="The session is still owned; the command sequence up to the failure is in the session log.",
         unknown="Whether the target is currently running or halted.",
-        physical_check="A successful debug_halt clears this without an operator; otherwise observe the board (heartbeat LED, console output) to see whether firmware runs, reset it by its own controls, then sign.",
+        physical_check="A successful debug_halt clears this without an operator only while the session status is not error; if the session is in error, stop it with debug_stop_session before starting another session. Otherwise observe the board (heartbeat LED, console output) to see whether firmware runs, reset it by its own controls, then sign.",
     ),
     "debug_session_cleanup_unconfirmed": QuarantineReasonGuide(
         attempted="debug_stop_session could not confirm the debug server and GDB were torn down.",

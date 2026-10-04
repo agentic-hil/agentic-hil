@@ -31,6 +31,7 @@ from agentic_hil.config import (
 )
 from agentic_hil.elfsymbols import read_elf_byte_order, read_elf_symbol
 from agentic_hil.gdbmi import (
+    RESULT_RECORD_PATTERN,
     STOP_RECORD_PREFIX,
     GdbMiClient,
     GdbMiStopResult,
@@ -750,7 +751,10 @@ class GdbDebugSessions:
     def list_breakpoints(self) -> JsonObject:
         session = self.session
         active = session is not None and session.status != "stopped"
-        return self._status_report({"ok": True, "tool": "debug_list_breakpoints", "backend": self.backend_name, "active": active, "breakpoints": list(session.breakpoints) if session else []})
+        result: JsonObject = {"ok": True, "tool": "debug_list_breakpoints", "backend": self.backend_name, "active": active, "status": session.status if session else "stopped", "breakpoints": list(session.breakpoints) if session else []}
+        if session is not None and session.status == "cleanup_required":
+            result.update({"cleanup_required": True, "quarantined": True, "hardware_state": "unknown"})
+        return self._status_report(result)
 
     def clear_breakpoints(self) -> JsonObject:
         tool = "debug_clear_breakpoints"
@@ -758,9 +762,9 @@ class GdbDebugSessions:
         if not session_result["ok"]:
             return self._report(session_result)
         session = session_result["session"]
-        # Preserve the target's stop reason: a tolerated "No breakpoint number N"
-        # delete makes _gdb_command clobber stop_reason to debugger_error, which
-        # would spuriously short-circuit the next debug_continue. Clearing
+        # Preserve the target's stop reason: a delete that never gets an answer
+        # may make _gdb_command mark the debugger as failed, which must not turn
+        # a confirmed target stop into a debugger_error stop. Clearing
         # breakpoints does not change target execution state.
         prior_stop_reason = session.stop_reason
         removal = self._remove_backend_breakpoints(session)
@@ -849,7 +853,6 @@ class GdbDebugSessions:
             return self._report(self._stopped_result(tool, session, "Target is already stopped"))
         timeout = self.config.debugger.timeout_s if timeout_s is None else min(self.config.debugger.timeout_s, max(0.1, timeout_s))
         session.status = "running"
-        session.stop_reason = None
         response = self._gdb_command(session, "-exec-continue", min(timeout, CONTINUE_COMMAND_TIMEOUT_CAP_S))
         # A post-execution audit break (executed=True) means the target is now
         # running: fall through to the wait/interrupt containment below so it is
@@ -859,6 +862,8 @@ class GdbDebugSessions:
         if response.result_class not in {"running", "done"} and not audit_refused_running:
             session.status = "error"
             return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out, response=response))
+        session.stop_reason = None
+        self._write_session_log(session)
         assert session.gdb is not None
         stop = session.gdb.wait_for_stop(timeout)
         if stop.timed_out:
@@ -878,6 +883,23 @@ class GdbDebugSessions:
         session.stop_reason = self._stop_reason_from_gdb(session, stop)
         stop_reason = str(session.stop_reason.get("stop_reason"))
         session.status = "error" if stop_reason == "debugger_error" else "halted"
+        if stop_reason == "debugger_error":
+            result: JsonObject = {
+                "ok": False,
+                "tool": tool,
+                "backend": self.backend_name,
+                "error_type": "debugger_error",
+                "summary": "GDB failed while the target was running; the target state is unconfirmed.",
+                "stop_reason": stop_reason,
+                "stop": session.stop_reason,
+                "session": self._session_status(session),
+                "log_path": display_path(self.config, session.log_path),
+                "target_state": "unknown",
+                "side_effect_status": "unknown",
+            }
+            result.update(target_stop_fields(session.stop_reason))
+            self._write_session_log(session)
+            return self._report(result)
         result = self._stopped_result(tool, session, "Target stopped")
         self._write_session_log(session)
         return self._report(result)
@@ -912,7 +934,10 @@ class GdbDebugSessions:
             timeout = min(timeout, max(0.1, timeout_s))
         response = self._gdb_command(session, "-exec-interrupt --all", timeout, containment=True)
         if not response.ok:
-            return self._report(self._gdb_failure(tool, session, response.error_message, response.timed_out, response=response))
+            failure = self._gdb_failure(tool, session, response.error_message, response.timed_out, response=response)
+            if self._acknowledged_gdb_refusal(response):
+                failure.update({"halt_requested": True, "halt_command_acknowledged": False, "halt_confirmed": False, "target_state": "unknown"})
+            return self._report(failure)
         assert session.gdb is not None
         stop = session.gdb.wait_for_stop(timeout)
         session.stop_reason = self._stop_reason_from_gdb(session, stop)
@@ -1391,6 +1416,8 @@ class GdbDebugSessions:
         if session is None or session.status in {"stopped", "error", "cleanup_required"} or session.gdb is None or not session.gdb.is_running():
             if session is not None and session.status == "cleanup_required":
                 return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "resource_quarantined", "summary": "Debug session requires cleanup before further effects.", "cleanup_required": True, "quarantined": True, "hardware_state": "unknown"}
+            if session is not None and session.status == "error":
+                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "session_not_active", "summary": "Debug session is in error and cannot accept commands; stop it with debug_stop_session before starting another session.", **remediation_fields("session_not_active")}
             return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "session_not_active", "summary": "No debug session is active. Start one with debug_start_session first.", **remediation_fields("session_not_active")}
         return {"ok": True, "session": session}
 
@@ -1404,7 +1431,7 @@ class GdbDebugSessions:
         timeout = min(self.config.debugger.timeout_s, GDB_COMMAND_TIMEOUT_CAP_S) if timeout_s is None else timeout_s
         response = session.gdb.command(command, timeout)
         self._write_session_log(session)
-        if not response.ok:
+        if not response.ok and not self._acknowledged_gdb_refusal(response) and not getattr(response, "audit_failure", False):
             session.stop_reason = {"stop_reason": "debugger_error", "backend_stop_reason": "timeout" if response.timed_out else "error", "backend_error": response.error_message}
             return response
         if self._audit_broken is not None and not containment:
@@ -1412,6 +1439,20 @@ class GdbDebugSessions:
             # audit break synchronously so no multi-command path continues.
             return _AuditRefusedResponse(self._audit_broken, response)
         return response
+
+    @staticmethod
+    def _acknowledged_gdb_refusal(response: object) -> bool:
+        """Whether GDB explicitly rejected a command without running it."""
+        if getattr(response, "audit_failure", False) or bool(getattr(response, "executed", False)):
+            return False
+        line = getattr(response, "line", "")
+        match = RESULT_RECORD_PATTERN.match(line) if isinstance(line, str) else None
+        return (
+            getattr(response, "result_class", None) == "error"
+            and not bool(getattr(response, "timed_out", False))
+            and match is not None
+            and match.group(2) == "error"
+        )
 
     def _gdb_failure(self, tool: str, session: GdbDebugSession, message: str | None, timed_out: bool, response: object | None = None) -> JsonObject:
         if response is not None and getattr(response, "audit_failure", False):
@@ -1433,7 +1474,10 @@ class GdbDebugSessions:
             }
         error_type = "timeout" if timed_out else "debugger_error"
         backend_error_type = "gdb_timeout" if timed_out else "gdb_error"
-        return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": error_type, "backend_error_type": backend_error_type, "summary": message or "GDB/MI command failed.", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)}
+        failure = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": error_type, "backend_error_type": backend_error_type, "summary": message or "GDB/MI command failed.", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path)}
+        if response is not None and self._acknowledged_gdb_refusal(response):
+            failure.update({"side_effect_committed": False, "side_effect_status": "not_started"})
+        return failure
 
     def _refresh_session_stop(self, session: GdbDebugSession, wait_timeout_s: float = 0.0) -> JsonObject | None:
         assert session.gdb is not None
@@ -1550,31 +1594,22 @@ class GdbDebugSessions:
         validated = self._validate_symbol(tool, symbol)
         if not validated["ok"]:
             return validated
-        # The stop reason as it stood before the queries. GDB answers `^error`
-        # for an untyped symbol and for a name it does not have, and
-        # _gdb_command records every failed command as a debugger_error stop,
-        # which would make the next debug_continue short-circuit on "Target is
-        # already stopped". The stop reason describes the target, and a name the
-        # debugger could not resolve says nothing about the target, so the
-        # record is put back the moment the refusal is known, whichever route
-        # answers afterwards and whether any does (#493); the same reason
-        # clear_breakpoints restores it. Only a query that never got an answer
-        # keeps the record, because that one is about the debugger.
-        prior_stop_reason = session.stop_reason
+        # An acknowledged `^error` says nothing about target execution, so the
+        # existing stop record remains valid and the ELF symbol table may
+        # provide the fallback answer (#493). A query with no GDB result is a
+        # debugger failure and must keep its debugger_error stop instead.
         address_value, failed = self._evaluate_symbol_expression(session, f"(unsigned long)&{symbol}")
         size_value = None
         if failed is None:
             size_value, failed = self._evaluate_symbol_expression(session, f"sizeof({symbol})")
         if failed is None:
             return {"ok": True, "symbol": symbol, "address": hex(int(address_value)), "address_value": int(address_value), "size_bytes": int(size_value), "resolved_from": "debug_info"}
-        if failed.timed_out or getattr(failed, "audit_failure", False):
+        if not self._acknowledged_gdb_refusal(failed):
             # A query that never got an answer says nothing about the symbol. The
             # symbol table would answer a question the caller never got to ask
             # and would hide a debugger that has stopped responding or an audit
             # trail that has broken, so neither is covered by this fallback.
             return self._symbol_expression_failure(tool, symbol, failed)
-        if session.stop_reason is not None and str(session.stop_reason.get("stop_reason")) == "debugger_error":
-            session.stop_reason = prior_stop_reason
         table = read_elf_symbol(str(session.artifact["resolved_path"]), symbol)
         if not table["ok"]:
             return {**self._symbol_expression_failure(tool, symbol, failed), "symbol_table_lookup": table["reason"]}

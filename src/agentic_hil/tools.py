@@ -2497,7 +2497,14 @@ class AgenticHILToolService:
         )
 
     def _result_requires_quarantine(self, result: JsonObject) -> bool:
-        if result.get("audit_ok") is False or result.get("cleanup_required") is True:
+        if result.get("audit_ok") is False:
+            return True
+        # A resource_quarantined response is a refusal on an incident already
+        # under containment. It did not reach the session operation, and its
+        # cleanup fields describe the existing hold rather than a new effect.
+        if result.get("error_type") == "resource_quarantined":
+            return False
+        if result.get("cleanup_required") is True:
             return True
         if result.get("error_type") in {
             "permission_denied",
@@ -2509,7 +2516,6 @@ class AgenticHILToolService:
             "artifact_validation_failed",
             "output_validation_failed",
             "resource_busy",
-            "resource_quarantined",
         }:
             return False
         if result.get("side_effect_status") in {"unknown", "partial"}:
