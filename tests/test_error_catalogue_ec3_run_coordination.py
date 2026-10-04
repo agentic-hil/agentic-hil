@@ -22,7 +22,12 @@ The run result follows one rule for its advice: it looks up the error_type it
 publishes, scoped to the test reactor with the bare entry behind it, whatever
 that type is, including a type a debug step passed up. A result that already
 carries advice keeps it, and a run whose cleanup failed carries the scoped
-`cleanup_failed:test_reactor` entry, not the debug session's.
+`cleanup_failed:test_reactor` entry, not the debug session's. Since #694 a run
+that publishes its failing step's own type takes that step's `remediation` and
+`do_not` with it where the step had them, because the catalogue holds those per
+backend and the run's own lookup cannot see which backend answered; the record
+keeps what the result carried, so every later answer about the run says the
+same thing.
 """
 from __future__ import annotations
 
@@ -875,17 +880,25 @@ SAYS: dict[str, Says] = {
         do_not=((r"do not count the steps that never ran as passed",), (r"do not report the plan as failed",)),
         never=(r"\brecovery (ran|was attempted)\b",),
     ),
+    # Since #666 the run's own call answers with the report it wrote instead of
+    # letting the exception out, so the entry may no longer send a reader to a
+    # protocol failure or a traceback for it, and since #667 the handle behind
+    # that run names the same type the report does.
     "reactor_exception": Says(
-        meaning=((r"defect",), (r"exception_type",), (r"report was written",), (r"raises", r"internal error", r"traceback")),
+        meaning=((r"defect",), (r"exception_type",), (r"report was written",), (r"answers with this failed report", r"handle", r"same error type")),
         first=(r"get_last_report", r"cleanup_ok"),
         order=(r"get_last_report", r"hardware_lease_status", r"report the defect"),
         do_not=((r"do not rerun the plan in a loop",), (r"do not trust an older report",)),
+        never=(r"internal error", r"traceback"),
     ),
+    # #667: the record is the report's own type, so the entry says what the
+    # handle names instead of stating the disagreement it used to.
     "interrupted": Says(
-        meaning=((r"interrupted",), (r"report was written",), (r"record", r"reactor_exception")),
+        meaning=((r"interrupted",), (r"report was written",), (r"record", r"handle", r"interrupted")),
         first=(r"get_last_report", r"hardware_lease_status"),
         order=(r"get_last_report", r"start the plan again"),
         do_not=((r"do not read the steps that did not run as passed",), (r"do not delete lock files",)),
+        never=(r"reactor_exception",),
     ),
     "junit_xml_requires_synchronous_run": Says(
         meaning=((r"detached start",), (r"no run began",)),
@@ -1470,8 +1483,13 @@ def test_an_interrupted_run_leaves_its_advice_in_the_report(tmp_path: Path, monk
         reactorrun.run_plan(config, str(plan), run_handle=handle)
 
     assert_refusal_carries_its_entry(last_report(workspace), "interrupted")
-    # What the entry tells a reader about the record behind the handle.
-    assert runlifecycle.run_status(config, handle).get("error_type") == "reactor_exception"
+    # What the entry tells a reader about the record behind the handle: since
+    # #667 the record is written from the report, so an interrupted run is
+    # `interrupted` in both and the status carries that entry's advice rather
+    # than the one that calls a Ctrl+C a defect in Agentic HIL.
+    status = runlifecycle.run_status(config, handle)
+    assert status.get("error_type") == "interrupted", status
+    assert_carries_advice(status, "interrupted")
 
 
 def test_run_whose_reactor_close_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

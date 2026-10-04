@@ -909,9 +909,7 @@ def audit_unavailable(tool: str, error: Exception) -> JsonObject:
         "summary": "Hardware action was not started because audit output is unavailable.",
         "side_effect_committed": False,
         "audit_ok": False,
-        "audit_error": error.to_dict()
-        if isinstance(error, ConfigError)
-        else {"error_type": type(error).__name__, "backend_error": str(error)},
+        "audit_error": audit_error_detail(error),
         **remediation_fields("audit_unavailable"),
     }
 
@@ -1121,11 +1119,7 @@ def merge_audit_status(result: JsonObject, *sources: JsonObject) -> JsonObject:
 
 def mark_audit_failure(result: JsonObject, error: Exception) -> JsonObject:
     enriched = dict(result)
-    new_error = {
-        "error_type": getattr(error, "error_type", type(error).__name__),
-        "summary": getattr(error, "summary", "Audit output could not be written."),
-        "backend_error": str(error),
-    }
+    new_error = audit_error_detail(error)
     errors = audit_errors(result)
     if new_error not in errors:
         errors.append(new_error)
@@ -1135,6 +1129,49 @@ def mark_audit_failure(result: JsonObject, error: Exception) -> JsonObject:
     if enriched.get("side_effect_committed") is True:
         enriched["retry_safe"] = False
     return enriched
+
+
+def audit_error_detail(error: Exception) -> JsonObject:
+    """One nested `audit_error` for both audit paths, advice and diagnosis intact.
+
+    A configuration refusal is nested whole, its own `error_type`, its details
+    and its own remediation, which is what the refusal before an action has
+    always handed back. Anything else is a filesystem fault, and it is named by
+    a catalogue type a caller can look up instead of by its Python class, which
+    no entry ever had (#675).
+
+    Either way the marker says what failed and not only what it means, under one
+    key on both paths. A refusal that already carries the operating system's
+    message in its details keeps that one: it names the write this refusal is
+    about, which a summary about a kind of path cannot. A refusal that carries
+    none is given its own message there, so a caller reading
+    `audit_error.backend_error` after a session log that could not be appended
+    finds the diagnosis whichever branch answered it.
+
+    For a filesystem fault three fields each answer a different question.
+    `error_class` and `errno` classify it without the state-root path, the way
+    the read side classifies the same fault for `report_unreadable`.
+    `backend_error` is what the write itself answered, and it is kept rather
+    than dropped for two reasons: it is the only statement of *which* write
+    failed, which is what an operator reads after a session log and a report
+    both go wrong under one call, and `report_write_failed` below tells one
+    failure from two by counting the markers a result carries. Two markers that
+    differ in nothing are equal, `mark_audit_failure` keeps one of them, and the
+    count stops growing, so the field that distinguishes them is what makes that
+    count mean anything.
+    """
+    if isinstance(error, ConfigError):
+        refusal = error.to_dict()
+        if not refusal.get("backend_error"):
+            refusal["backend_error"] = str(error)
+        return refusal
+    return {
+        "error_type": "report_write_failed",
+        "summary": "Audit output could not be written.",
+        **filesystem_error_detail(error),
+        "backend_error": str(error),
+        **remediation_fields("report_write_failed"),
+    }
 
 
 def audit_errors(result: JsonObject) -> list[JsonObject]:

@@ -100,6 +100,7 @@ from agentic_hil.report import (
     CONTACT_MARKER_KEY,
     CONTACT_MARKER_SOURCE_KEY,
     attach_canonical_audit_evidence,
+    audit_error_detail,
     audit_unavailable,
     claim_auto_recover_default_warning,
     ensure_audit_ready,
@@ -1126,7 +1127,7 @@ class AgenticHILToolService:
                 if poison_error is not None:
                     result["quarantine_error"] = str(poison_error)
                 if isinstance(error, (ConfigError, OSError)):
-                    result.update({"audit_ok": False, "audit_error": error.to_dict() if isinstance(error, ConfigError) else {"error_type": type(error).__name__, "backend_error": str(error)}})
+                    result.update({"audit_ok": False, "audit_error": audit_error_detail(error)})
                 written = write_report(self.config, result)
                 if written.get("audit_ok") is False:
                     self._poison_quietly("hardware_exception_audit_broken", audit_broken=True)
@@ -1583,7 +1584,7 @@ class AgenticHILToolService:
         try:
             if payload.get("detach") is True:
                 return start_plan_detached(self.config, test_config_path)
-            return run_plan(self.config, test_config_path)
+            return run_plan(self.config, test_config_path, return_failed_report=True)
         except ConfigError as error:
             return {"tool": "test_reactor_run", "side_effect_committed": False, **error.to_dict()}
         except CoordinationError as error:

@@ -2730,8 +2730,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "The test reactor raised outside any step, which is a defect in Agentic HIL rather than a verdict on the "
             "firmware. Every containment step was attempted, the report was written with no steps and with "
             "`cleanup` and `cleanup_ok` from the containment, and `exception_type` names what was raised. The run's "
-            "own call does not answer with this result but raises, so an MCP client sees an internal error and the "
-            "command line a traceback; the type is read from the report and from the run's status."
+            "own call answers with this failed report, and its handle carries the same error type."
         ),
         remediation=(
             "Read the report (`get_last_report`) for `cleanup` and `cleanup_ok`: they say whether the devices were "
@@ -2750,7 +2749,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning=(
             "The run was interrupted (Ctrl+C or a process exit) before it finished. Every containment step was "
             "attempted and the report was written with no steps and with `cleanup` and `cleanup_ok` from the "
-            "containment. The run record behind its handle names this run `reactor_exception`."
+            "containment. The run record behind its handle names this run `interrupted`."
         ),
         remediation=(
             "Read the report (`get_last_report`) for `cleanup` and `cleanup_ok`, then call `hardware_lease_status` "
@@ -4227,6 +4226,24 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not delete or recreate the report state to get past it. It is this project's record of what ran.",
             "Do not read this as an empty record or as a pass.",
+        ),
+    ),
+    "report_write_failed": ErrorRemedy(
+        meaning=(
+            "Writing a report or audit record failed. `error_class` and `errno`, when present, identify the "
+            "filesystem fault without exposing the state-root path. `backend_error` is what the write itself "
+            "answered, and it is what tells one failed write from another when a call had more than one to make."
+        ),
+        remediation=(
+            "Read `error_class` and `errno` for the fault and `backend_error` for the write that failed, then have "
+            "the operator restore write access or free space at the report destination.",
+            "Retry only after the report destination is writable; a hardware action whose audit failed may need "
+            "the incident resolved before another action can run.",
+        ),
+        do_not=(
+            "Do not delete or recreate report state to get past the write failure. It is this project's record of "
+            "what ran.",
+            "Do not repeat an action whose audit failed before resolving any incident it left behind.",
         ),
     ),
     "config_unreadable": ErrorRemedy(
