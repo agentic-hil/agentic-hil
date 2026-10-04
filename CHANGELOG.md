@@ -56,7 +56,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Fixed
 
-- Debug session command refusals preserve the target's last stop and report when no effect occurred. Sessions that still owe cleanup expose that state in breakpoint listings without adding new cleanup reasons, and a registered error session can be halted for recovery. A GDB failure after the core resumed no longer claims a confirmed stop or a committed effect. (#648, #649, #650, #651, #652, #653)
+- Debug session command refusals preserve the target's last stop and report when no effect occurred. Sessions that still owe cleanup expose that state in breakpoint listings without adding new cleanup reasons, and a registered error session refuses commands and directs callers to `debug_stop_session` before starting another session. A GDB failure after the core resumed no longer claims a confirmed stop or a committed effect. (#648, #649, #650, #651, #652, #653)
 
 - Test reactor exceptions return the failure report already written through MCP and the command line; interruptions and crashes keep their distinct types in terminal records. A failed report write cannot leave `run_ok: true` or an invented report path. Run answers retain the failing step's remediation, and both audit paths preserve configuration refusal details or a catalogued filesystem failure with its write diagnostic. (#666, #667, #674, #675, #694)
 
