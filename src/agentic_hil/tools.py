@@ -51,7 +51,7 @@ from agentic_hil.config import (
     write_generated_config,
 )
 from agentic_hil.configreload import PROJECT_CONFIG_RELOAD, reload_description
-from agentic_hil.configstate import config_status, with_config_status
+from agentic_hil.configstate import config_status, copy_pending_description_restarts, with_config_status
 from agentic_hil.configwrite import (
     NOT_STARTED,
     PROJECT_CONFIG_DESCRIBE,
@@ -1667,11 +1667,15 @@ class AgenticHILToolService:
         if debugger is not None:
             if debugger.probe_id is not None and fold_hardware_id(debugger.probe_id) == fold_hardware_id(selected_probe):
                 return None
-            return replace(self.config, debugger=replace(debugger, probe_id=selected_probe))
+            recovery_config = replace(self.config, debugger=replace(debugger, probe_id=selected_probe))
+            copy_pending_description_restarts(self.config, recovery_config)
+            return recovery_config
         if selected_debugger is None or selected_debugger not in self.config.debuggers:
             return None
         bound = bind_debugger(self.config, selected_debugger)
-        return replace(bound, debugger=replace(bound.debugger, probe_id=selected_probe))
+        recovery_config = replace(bound, debugger=replace(bound.debugger, probe_id=selected_probe))
+        copy_pending_description_restarts(bound, recovery_config)
+        return recovery_config
 
     def _recovery_backend(self, recovery_config: AgenticHILConfig | None) -> tuple[DebuggerBackend, bool]:
         """The backend a recovery action drives, and whether this call owns it.

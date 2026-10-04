@@ -335,10 +335,9 @@ def config_in_force(config: AgenticHILConfig) -> JsonObject:
     happen" is the question an audit trail exists to answer, and for a flash or a
     mass erase it is the only one that matters.
 
-    The digest is ``AgenticHILConfig.config_digest`` (the exact bytes this
-    server parsed and is enforcing), published in the spelling ``config_status``
-    already uses, so the record and a live answer can be compared directly and
-    the fact has one name. It is deliberately *not* the coordinator's
+    The digest is ``config_status.loaded_digest``: the exact file snapshot this
+    server parsed, or the fingerprint of the effective configuration after a
+    partial description reload. It is deliberately *not* the coordinator's
     ``config_sha256``: that one answers a different question ("is the file the
     same now as when this lease was taken", which is what ``recover`` compares),
     it is published in a different spelling (the bare hex the lease records on

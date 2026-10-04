@@ -667,9 +667,11 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "names, the devices it knows and the permissions it enforces are the ones from an older document. Which "
             "document is in `config_status.description_source`: `startup` means all of it came from the version parsed "
             "at startup, which is the normal case because the server does not reload while it runs; "
-            "`description_reload` means the devices and the backend came from the last explicit "
-            "`project_config_reload_description` (`description_reloaded_at`, and `loaded_digest` is that document's) "
-            "while the permissions still came from startup (`loaded_at`). Nothing failed; what an answer says and what "
+            "`description_reload` means the four device sections came from the last explicit "
+            "`project_config_reload_description` (`description_reloaded_at`) while values outside those sections and "
+            "permissions still came from startup (`loaded_at`). If any such values differ from the file, "
+            "`restart_required_for` names them and `loaded_digest` fingerprints the effective description. Nothing "
+            "failed; what an answer says and what "
             "the file says have come apart, and the file is the one an operator reads. This says the two digests differ "
             "and nothing more: not what the file now contains, and not what a restart onto it would produce."
         ),
@@ -678,10 +680,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "the file on disk differs from the one this server loaded, and the steps below are for that; `missing` "
             "means the file is gone, so it has to be restored before there is anything to restart onto; `unreadable` "
             "means it is there and will not open, so it has to be made readable first.",
-            "If what changed is the description of the bench (`target`, a `debuggers`, `com_ports` or `can_buses` "
-            "entry, a probe id, a COM device, a baudrate), call `project_config_reload_description`. It re-reads those "
-            "four sections and clears this, without a restart and without touching a single permission. Its result "
-            "names anything in the file it did not take.",
+            "If what changed is the device description (`target`, a `debuggers`, `com_ports` or `can_buses` entry, a "
+            "probe id, a COM device, a baudrate), call `project_config_reload_description`. It re-reads those four "
+            "sections without a restart or touching a permission. Its result names anything outside those sections "
+            "that still needs a restart.",
             "Otherwise, ask the operator to restart the MCP server, then repeat the call. Say which server: the one "
             "the agent host started for this workspace, not the `agentic-hil` command line, which reads the file fresh "
             "every time and is already current. A restart is what adopts a changed permission, a changed `version`, "
@@ -4230,8 +4232,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "config_unreadable": ErrorRemedy(
         meaning=(
             "The configuration file exists and cannot be read: it is a directory or another non-regular file, the "
-            "operating system refused or failed the read, or, on the paths that write the file, its bytes are not "
-            "UTF-8. `path` and `backend_error` say which. Nothing was decided from it and nothing was written to it."
+            "operating system refused or failed the read, or its bytes are not UTF-8. `path` and `backend_error` say "
+            "which. Nothing was decided from it and nothing was written to it."
         ),
         remediation=(
             "Read `path` and `backend_error`.",
@@ -8072,7 +8074,7 @@ These are refused by name rather than quietly skipped, because each of them is e
 
 ### After a reload
 
-`config_status` compares the file against the description now in force, so a reload that just took the file's description does **not** leave `config_stale: true` behind for it. What does not disappear is the other half: when the file's permissions differ from the ones being enforced, the status carries `permissions_source`, which says the grants came from the document parsed at startup and that a restart is what adopts the file's. The reload's own result lists them under `permission_differences`, taken at the moment both documents were in hand.
+`config_status` compares the file against the effective description. If the file also changed a section this reload does not take, `restart_required_for` names those values and the status stays changed until a restart. When permissions differ from the ones being enforced, the status carries `permissions_source`, which says the grants came from the document parsed at startup. The reload's result lists changed grants under `permission_differences` and other deferred values under `restart_required_for`.
 
 At a shell the same operation is `agentic-hil config-reload`, which loads this file the way a server does and reports what a running server's reload would take from it and what it would leave: the pre-flight for asking an agent to make the call.
 

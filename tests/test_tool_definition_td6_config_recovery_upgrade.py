@@ -1595,7 +1595,7 @@ def test_a_reread_takes_the_device_sections_and_leaves_debug_and_permissions_for
         reloaded = call(service, RELOAD, {})
         assert reloaded["ok"] is True, reloaded
         assert reloaded["description_changes"] == ["com_ports.dut_uart.baudrate"], reloaded
-        assert reloaded["restart_required_for"] == ["debuggers.dut.allow_flash"], reloaded
+        assert set(reloaded["restart_required_for"]) == {"debuggers.dut.permissions.allow_flash", "debug.gdb_executable"}, reloaded
         assert {"debug", "permissions", "<entry>.permissions"} <= {entry["section"] for entry in reloaded["not_reloaded_sections"]}, reloaded
         assert service.config.com_ports["dut_uart"].baudrate == 9600
         assert service.config.debuggers["dut"].permissions.allow_flash is True, "the grant this server loaded stays in force"
@@ -1922,7 +1922,7 @@ def test_reload_leaves_a_changed_grant_for_a_restart(tmp_path: Path, monkeypatch
         rewrite(path, lambda document: document["debuggers"]["dut"]["permissions"].update({"allow_flash": False}))
         reloaded = call(service, RELOAD, {})
         assert reloaded["ok"] is True, reloaded
-        assert reloaded["restart_required_for"] == ["debuggers.dut.allow_flash"], reloaded
+        assert reloaded["restart_required_for"] == ["debuggers.dut.permissions.allow_flash"], reloaded
         assert reloaded["description_changes"] == [], reloaded
         assert service.config.debuggers["dut"].permissions.allow_flash is True, "the grant this server loaded stays in force"
     finally:
@@ -1942,11 +1942,17 @@ def test_reload_gives_a_new_device_every_permission_false(tmp_path: Path, monkey
         close(service)
 
 
-# The re-read goes through the startup loader, which names a file that is not
-# UTF-8 config_invalid where describe names it config_unreadable.
+# The re-read goes through the startup loader, and since #688 that loader names
+# an undecodable file what every other path names it: `config_unreadable`, the
+# same answer `FILE_FAULTS` above expects from describe. One fault had two names
+# depending on which tool met it, and a caller acting on the reload's refusal
+# went looking for a bad key in a file whose only problem was its encoding.
+# A file that is valid UTF-8 and not valid YAML keeps `config_invalid`: there the
+# document really is the fault, and the keys that advice talks about are the ones
+# to repair. So the two cases stay two cases, and only their names agree now.
 RELOAD_FILE_FAULTS = [
     pytest.param(does_not_parse, "config_invalid", id="bad-yaml"),
-    pytest.param(unreadable, "config_invalid", id="not-utf8"),
+    pytest.param(unreadable, "config_unreadable", id="not-utf8"),
 ]
 
 

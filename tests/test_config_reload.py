@@ -244,9 +244,9 @@ def test_permissions_on_disk_do_not_move_across_a_reload(tmp_path: Path, monkeyp
         assert permission_summary(tools.config) == before
         # Reported rather than hidden: every grant the file states that this
         # server is not enforcing is listed, and the list is not empty.
-        assert "debuggers.dut.allow_mass_erase" in result["permission_differences"]
-        assert "debuggers.dut.allow_flash" in result["permission_differences"]
-        assert "com_ports.dut_uart.allow_write" in result["permission_differences"]
+        assert "debuggers.dut.permissions.allow_mass_erase" in result["permission_differences"]
+        assert "debuggers.dut.permissions.allow_flash" in result["permission_differences"]
+        assert "com_ports.dut_uart.permissions.allow_write" in result["permission_differences"]
         assert "artifacts.allow_upload" in result["permission_differences"]
         assert "debug.allow_all_symbols" in result["permission_differences"]
         assert result["restart_required_for"] == result["permission_differences"]
@@ -941,8 +941,8 @@ def test_a_version_one_read_grant_that_moves_is_reported_as_a_difference(tmp_pat
         result = tools.call(PROJECT_CONFIG_RELOAD)
 
         assert result["ok"] is True
-        assert "debuggers.dut.allow_probe" in result["permission_differences"]
-        assert "com_ports.dut_uart.allow_read" in result["permission_differences"]
+        assert "debuggers.dut.permissions.allow_probe" in result["permission_differences"]
+        assert "com_ports.dut_uart.permissions.allow_read" in result["permission_differences"]
         # Not adopted, and not hidden: the grants in force are still the
         # startup document's and `config_status` says which document that is.
         assert tools.config.debuggers["dut"].permissions.allow_probe is True
