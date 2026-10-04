@@ -646,8 +646,10 @@ COLLECTED_TYPE_COUNT = 218
 # function that writes one it did not write before, adds one: raise the number
 # in the same change. The newest is `report.audit_error_detail`, which names a
 # filesystem fault an audit write met `report_write_failed` (#675); that is the
-# one type and the one producer these two numbers last gained.
-PRODUCER_COUNT = 643
+# one new type. The integrated debugger fix also adds the `debugger_error`
+# producer in `GdbDebugSessions.continue_execution`; the joint host scan finds
+# two additional producers, with every previous producer still present.
+PRODUCER_COUNT = 644
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
