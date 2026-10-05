@@ -189,11 +189,13 @@ PINNED_EXPRESSIONS: dict[tuple[str, str, str], Callable[[str | None], frozenset[
     # hands its output to the classifier it was constructed with (pinned
     # below), and the result carries what that answers, with `debugger_error`
     # for a classification that matched nothing. On OpenOCD that is
-    # `_classify_output` without a tool. pyOCD's and stlink's readings of the
-    # same output always name an error type of their own, merged over this one
-    # (pinned below), so on those two this value never reaches a result.
+    # `_classify_output` without a tool, less every word OpenOCD's own reading
+    # renames through `BACKEND_ERROR_TO_PUBLIC_ERROR`, as the command path does
+    # (#654). pyOCD's and stlink's readings of the same output always name an
+    # error type of their own, merged over this one (pinned below), so on those
+    # two this value never reaches a result.
     ("gdbdebug.py", "_start_failure", "backend_error_type if backend_error_type != 'unknown_debugger_error' else 'debugger_error'"): lambda backend: (
-        (classifier_returns_without_a_tool(openocd) - {"unknown_debugger_error"}) | {"debugger_error"} if backend in {None, "openocd"} else frozenset()
+        (classifier_returns_without_a_tool(openocd) - {"unknown_debugger_error"} - set(openocd.BACKEND_ERROR_TO_PUBLIC_ERROR)) | {"debugger_error"} if backend in {None, "openocd"} else frozenset()
     ),
     # A stop that did not get every teardown proof answers with the first one
     # it missed, in the order `_TEARDOWN_PROOFS` takes them. On a server with a
@@ -668,7 +670,6 @@ def scanned_debug_pairs() -> dict[Pair, tuple[str, ...]]:
 # Every pair the scan reads, so a scan that silently stops reading a site, or a
 # refusal added to the source, is a change to this table.
 INVENTORY_BY_TYPE: dict[str, tuple[str | None, ...]] = {
-    "adapter_access_denied": ("openocd",),
     "adapter_not_found": BACKENDS,
     # ST-LINK_gdbserver's own refusals at a session start (stlink.py).
     "adapter_usb_error": ("stlink",),
@@ -679,7 +680,7 @@ INVENTORY_BY_TYPE: dict[str, tuple[str | None, ...]] = {
     "breakpoints_not_removed": ("pyocd", "stlink"),
     "cleanup_failed": BACKENDS,
     "cleanup_required": (None,),
-    "config_file_not_found": ("openocd", "stlink"),
+    "config_file_not_found": ("stlink",),
     "debug_session_setup_failed": BACKENDS,
     "debugger_command_rejected": ("openocd",),
     "debugger_config_not_found": ("openocd",),
@@ -695,7 +696,6 @@ INVENTORY_BY_TYPE: dict[str, tuple[str | None, ...]] = {
     "gdb_not_found": (None, gdbdebug.GDB_AUTODETECTED_MISSING_SCOPE, gdbdebug.GDB_NOT_CONFIGURED_SCOPE),
     "gdb_start_failed": BACKENDS,
     "halt_not_confirmed": BACKENDS,
-    "interface_config_not_found": ("openocd",),
     "invalid_argument": (None, *BACKENDS),
     "memory_read_failed": BACKENDS,
     # The tool service merges a scope of its own for a call no probe can be
@@ -719,7 +719,6 @@ INVENTORY_BY_TYPE: dict[str, tuple[str | None, ...]] = {
     "symbol_resolution_failed": BACKENDS,
     "symbol_source_changed": ("pyocd", "stlink"),
     "symbol_source_not_available": ("pyocd", "stlink"),
-    "target_config_not_found": ("openocd",),
     "target_exception": BACKENDS,
     "target_not_detected": BACKENDS,
     "target_state_unconfirmed": ("openocd", "stlink"),
@@ -754,7 +753,6 @@ EXCLUDED: frozenset[Pair] = frozenset(OWNED_ELSEWHERE) | SILENT | frozenset(NEVE
 
 # Pairs the bare key cannot answer, each with why: the scoped key has to exist.
 OWN_KEY_REQUIRED: dict[tuple[str, str], str] = {
-    ("config_file_not_found", "openocd"): "the bare entry is about the Agentic HIL configuration file, and this is an OpenOCD script the debug server could not find",
     ("not_supported", "openocd"): "no bare `not_supported` is true for every refusal of that name, and the other backends' keys are about debug sessions",
     **{("audit_broken", backend): "the bare key is the coordination ledger's, which #646 writes; this is the debug session's own evidence" for backend in BACKENDS},
     **{("debugger_not_found", backend): "the executable that is missing, and where it comes from, is each backend's own" for backend in BACKENDS},
@@ -785,11 +783,9 @@ BARE_KEY_REQUIRED: dict[str, str] = {
 WRITTEN_KEYS: frozenset[str] = frozenset(
     {
         *(f"{error_type}:{backend}" for error_type in ("timeout", "debugger_not_found") for backend in BACKENDS),
-        "config_file_not_found:openocd",
         "not_supported:openocd",
         *(f"audit_broken:{backend}" for backend in BACKENDS),
         *BARE_KEY_REQUIRED,
-        "adapter_access_denied",
         "breakpoint_reconciliation_failed",
         "breakpoints_not_removed",
         "debug_session_setup_failed",
@@ -797,10 +793,8 @@ WRITTEN_KEYS: frozenset[str] = frozenset(
         "gdb_async_unsupported",
         "gdb_start_failed",
         "halt_not_confirmed",
-        "interface_config_not_found",
         "session_already_active",
         "stop_reason_not_available",
-        "target_config_not_found",
     }
 )
 
@@ -808,21 +802,17 @@ WRITTEN_KEYS: frozenset[str] = frozenset(
 # answered with an entry about something else, and which this change writes.
 WRITTEN_HERE: frozenset[Pair] = frozenset(
     {
-        ("adapter_access_denied", "openocd"),
         ("breakpoint_reconciliation_failed", "openocd"),
         ("cleanup_failed", "openocd"),
-        ("config_file_not_found", "openocd"),
         ("debug_session_setup_failed", "openocd"),
         ("detach_resume_not_confirmed", "openocd"),
         ("gdb_async_unsupported", "openocd"),
         ("gdb_start_failed", "openocd"),
         ("halt_not_confirmed", "openocd"),
-        ("interface_config_not_found", "openocd"),
         ("not_supported", "openocd"),
         ("session_already_active", "openocd"),
         ("stop_reason_not_available", "openocd"),
         ("symbol_ambiguous", "openocd"),
-        ("target_config_not_found", "openocd"),
         ("target_exception", "openocd"),
         ("unexpected_breakpoint", "openocd"),
         *((error_type, backend) for backend in BACKENDS for error_type in ("debugger_error", "debugger_not_found", "output_write_failed", "probe_discovery_failed", "reset_failed", "symbol_not_found", "symbol_resolution_failed", "timeout")),
@@ -1203,14 +1193,12 @@ CONTRACTS: dict[str, Contract] = {
     # The backends' tables and bootstrap.py 230, 331, 500, 793 (probe discovery).
     "debugger_not_found": Contract(steps=(r"\bexecutable\b", r"\bPATH\b|install")),
     # The raw name the session start publishes (decision: no behaviour change).
-    "config_file_not_found:openocd": Contract(means=(r"OpenOCD",), steps=(r"interface_cfg|target_cfg|\.cfg", r"log_path|stderr|output"), never=(r"project_config_create",)),
     # openocd.py list_probes: an adapter with no USB identity to list.
     "not_supported:openocd": Contract(means=(r"OpenOCD",), steps=(r"probe_id",)),
     # gdbdebug.py 232: the session evidence latch; quarantined, refused until
     # resolved. The sessions on every backend share it (#624).
     **{f"audit_broken:{backend}": Contract(means=(r"audit|evidence",), steps=(r"operator",), avoid=(RETRY,)) for backend in BACKENDS},
     # The libusb refusal OpenOCD prints off Windows (openocd.py).
-    "adapter_access_denied": Contract(means=(r"USB|libusb|adapter",), steps=(r"udev|group",), avoid=(r"\bsudo\b|\broot\b|administrator",)),
     # gdbdebug.py 566/575: cleanup_required, side_effect_status unknown; a
     # reconciled clear resolves the incident (tools.py, the debug quarantine).
     "breakpoint_reconciliation_failed": Contract(steps=(r"backend_reconciled",), beside=((r"debug_clear_breakpoints", RETRY),), avoid=(r"debug_continue",)),
@@ -1220,8 +1208,6 @@ CONTRACTS: dict[str, Contract] = {
     "gdb_start_failed": Contract(steps=(r"gdb_executable", r"cleanup_required|cleanup_error"), beside=((r"debug_start_session", r"cleanup_confirmed|retry_safe"),)),
     # gdbdebug.py 920: GDB refused mi-async before the target was contacted.
     "gdb_async_unsupported": Contract(means=(r"async",), steps=(r"gdb_executable",), avoid=(RETRY,)),
-    "interface_config_not_found": Contract(steps=(r"interface_cfg",), never=(r"project_config_create",)),
-    "target_config_not_found": Contract(steps=(r"target_cfg",), never=(r"project_config_create",)),
     # gdbdebug.py 227.
     "session_already_active": Contract(order=(r"debug_stop_session", r"debug_start_session")),
     # gdbdebug.py 711.
@@ -1804,11 +1790,13 @@ REFUSALS = [
     Refusal("debug_start_session", "debug_session_setup_failed", "openocd", started_without_output_readers),
     Refusal("debug_start_session", "debugger_not_found", "openocd", started_with_a_server_that_will_not_spawn),
     Refusal("debug_start_session", "timeout", "openocd", started_with_a_server_that_never_gets_ready),
-    Refusal("debug_start_session", "target_config_not_found", "openocd", started_on_a_server_that_printed("Error: Can't find target/stm32f4x.cfg\n")),
-    Refusal("debug_start_session", "interface_config_not_found", "openocd", started_on_a_server_that_printed("Error: Can't find interface/stlink.cfg\n")),
-    Refusal("debug_start_session", "config_file_not_found", "openocd", started_on_a_server_that_printed("Error: Can't find board/other.cfg\n")),
+    # A missing script is named as probe_target names it; `backend_error_type`
+    # says which script (#654).
+    Refusal("debug_start_session", "debugger_config_not_found", "openocd", started_on_a_server_that_printed("Error: Can't find target/stm32f4x.cfg\n")),
+    Refusal("debug_start_session", "debugger_config_not_found", "openocd", started_on_a_server_that_printed("Error: Can't find interface/stlink.cfg\n")),
+    Refusal("debug_start_session", "debugger_config_not_found", "openocd", started_on_a_server_that_printed("Error: Can't find board/other.cfg\n")),
     Refusal("debug_start_session", "debugger_error", "openocd", started_on_a_server_that_printed(GAVE_UP)),
-    Refusal("debug_start_session", "adapter_access_denied", "openocd", started_on_a_probe_this_user_may_not_open),
+    Refusal("debug_start_session", "adapter_not_found", "openocd", started_on_a_probe_this_user_may_not_open),
     # Catalogued already; the start's result is built without the merge.
     Refusal("debug_start_session", "adapter_not_found", "openocd", started_on_a_server_with_no_probe),
     # A granted key that blocks the start: the exclusive scope, carried on the result.

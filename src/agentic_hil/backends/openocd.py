@@ -850,11 +850,9 @@ class OpenOCDBackend:
         because it is not a reading of the output.
         """
         values = [server_args[index + 1] for index, item in enumerate(server_args) if item == "-c" and index + 1 < len(server_args)]
-        if not values:
-            return None
-        rejected = rejected_openocd_commands(values[-1], output, tuple(values[:-1]))
+        rejected = rejected_openocd_commands(values[-1], output, tuple(values[:-1])) if values else []
         if not rejected:
-            return None
+            return self._debug_start_public_error(output)
         backend_error_type = "command_rejected_before_init"
         error_type = self._public_error_type(backend_error_type)
         return {
@@ -862,6 +860,29 @@ class OpenOCDBackend:
             "backend_error_type": backend_error_type,
             "summary": f"Debug server exited before the GDB port became ready: {self._failure_summary(backend_error_type, error_type)}",
             "rejected_commands": rejected,
+        }
+
+    def _debug_start_public_error(self, output: str) -> JsonObject | None:
+        """The public name for what a dead debug server's output classifies as, where it has one, or None.
+
+        `gdbdebug` publishes the classifier's own word as `error_type`, and the
+        command path publishes `BACKEND_ERROR_TO_PUBLIC_ERROR`'s: a missing
+        `target_cfg` was `target_config_not_found` from debug_start_session and
+        `debugger_config_not_found` from probe_target. A caller that branches on
+        `error_type` had two words for one missing script, so the start maps
+        through the same table the command path does, keeps the classifier's
+        word in `backend_error_type`, and says what the command path says about
+        it, which names the configured field the script came from (#654).
+        `unknown_debugger_error` is left to `gdbdebug`, which already publishes
+        it as `debugger_error` with its own sentence."""
+        backend_error_type = self._classify_output(output)
+        error_type = self._public_error_type(backend_error_type)
+        if error_type == backend_error_type or backend_error_type == "unknown_debugger_error":
+            return None
+        return {
+            "error_type": error_type,
+            "backend_error_type": backend_error_type,
+            "summary": f"Debug server exited before the GDB port became ready: {self._failure_summary(backend_error_type, error_type)}",
         }
 
     def _debug_start_context(self, classified: JsonObject) -> JsonObject | None:

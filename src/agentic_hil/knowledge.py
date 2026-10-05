@@ -1691,11 +1691,16 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "debugger_config_not_found": ErrorRemedy(
         meaning=(
-            "A debugger script this entry names could not be used: the interface or target configuration file the "
-            "backend was pointed at is not where the configuration says it is. Nothing was run and the bench was not "
-            "touched."
+            "OpenOCD could not find a script it was told to read, and stopped before it reached the target. "
+            "`backend_error_type` says which: `interface_config_not_found` for the script "
+            "`debuggers.<name>.interface_cfg` names, `target_config_not_found` for `target_cfg`, and "
+            "`config_file_not_found` for a file one of them pulls in with `source [find ...]`, missing from this "
+            "OpenOCD's script tree. probe_target, flash_firmware, reset_target and debug_start_session report it "
+            "alike. This is OpenOCD's script, not the Agentic HIL configuration file, and the bench was not touched."
         ),
         remediation=(
+            "Read the OpenOCD output, in the result or in the log at `log_path` for a debug session: it names the file "
+            "it could not find.",
             "Check `debuggers.<name>.interface_cfg` and `.target_cfg` against what is installed on this machine; "
             "`agentic-hil doctor` names the entry, says of each value whether it is an OpenOCD search name or a path, "
             "and for a path whether the file is there.",
@@ -1703,8 +1708,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "(`interface/stlink.cfg`, `target/stm32f4x.cfg`), which the installed OpenOCD resolves against its script "
             "path, or to absolute paths of the script files. A configured script path must be absolute and must live "
             "outside the workspace.",
-            "If the search names do not resolve, the OpenOCD on this machine has no script tree where it expects one: "
-            "install the scripts, or point `OPENOCD_SCRIPTS` at them, or name the files by absolute path.",
+            "If the search names do not resolve, or `backend_error_type` is `config_file_not_found`, the OpenOCD on "
+            "this machine has no complete script tree where it expects one: install the scripts or a complete OpenOCD, "
+            "or point `OPENOCD_SCRIPTS` at them, or name the files by absolute path.",
         ),
         do_not=(
             "Do not copy OpenOCD scripts into the repository and point the configuration at them. A script inside the "
@@ -3470,6 +3476,14 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "OpenOCD 0.12.0 and newer are passed it as `adapter serial`, older releases as the adapter driver's own "
             "serial command (`hla_serial` for `interface/stlink.cfg`).",
             "Close whatever else holds the probe.",
+            "With `backend_error_type` `adapter_access_denied` the probe is attached and this user may not open it: "
+            "OpenOCD printed `LIBUSB_ERROR_ACCESS`. Have the operator install the probe's udev rule (OpenOCD ships one "
+            "as `60-openocd.rules`) and add this user to the group it gives the device to, plugdev on Debian and "
+            "Ubuntu, then log in again so the new group applies.",
+        ),
+        do_not=(
+            "Do not run the server or OpenOCD as root, or through sudo, to get past a refused opening. The debugger "
+            "would then run with every right on the host, and the next call as this user fails the same way.",
         ),
     ),
     "adapter_not_found:stlink": ErrorRemedy(
@@ -4922,29 +4936,6 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "does not see that run.",
         ),
     ),
-    "config_file_not_found:openocd": ErrorRemedy(
-        meaning=(
-            "OpenOCD, started as a debug session's server, exited because it could not find a file it was told to "
-            "read, and that file is neither of the two scripts the entry names: most often a script `interface_cfg` or "
-            "`target_cfg` pulls in with `source [find ...]`, missing from this OpenOCD's script tree. This is "
-            "OpenOCD's script, not the Agentic HIL configuration file. The server stopped before the target was "
-            "reached."
-        ),
-        remediation=(
-            "Read the server output in the log at `log_path` (`server_stderr_tail`): OpenOCD names the file it could "
-            "not find.",
-            "Check that the OpenOCD this entry runs has a complete script tree. The file has to resolve wherever "
-            "`interface_cfg` and `target_cfg` resolve, and `agentic-hil doctor` says of each whether it is a search "
-            "name or a path, and for a path whether the file is there.",
-            "Install the missing scripts or a complete OpenOCD, or point `OPENOCD_SCRIPTS` at the tree that has them, "
-            "then start the session again with debug_start_session.",
-        ),
-        do_not=(
-            "Do not copy OpenOCD scripts into the repository to supply the missing file. A script inside the "
-            "workspace is repository-controlled Tcl running in the debugger.",
-            "Do not run `openocd` directly to get past it.",
-        ),
-    ),
     "not_supported:openocd": ErrorRemedy(
         meaning=(
             "debugger_probes_list has no enumeration for this entry's adapter. OpenOCD has no command that lists "
@@ -5038,28 +5029,6 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not expect hardware_recover to settle it. A broken audit is the operator's own route.",
         ),
     ),
-    "adapter_access_denied": ErrorRemedy(
-        meaning=(
-            "OpenOCD reached the probe on USB and was refused opening it: libusb answered `LIBUSB_ERROR_ACCESS`. The "
-            "probe is attached, and this user may not open its USB device. The debug session start reports it under "
-            "this name; probe_target, flash_firmware and reset_target report it as `adapter_not_found` with this "
-            "`backend_error_type`. It is read only off Windows: there the same libusb error can also mean that another "
-            "program holds the device. "
-            "The target was not reached."
-        ),
-        remediation=(
-            "Have the operator give this user access to the probe's USB device: install the udev rule for the probe "
-            "(OpenOCD ships one as `60-openocd.rules`) and add this user to the group the rule gives the device to, "
-            "plugdev on Debian and Ubuntu, then log in again so the new group applies.",
-            "`ls -l /dev/bus/usb/<bus>/<device>`, with the bus and device numbers lsusb prints for the probe, shows the "
-            "owner, group and mode the device node has.",
-            "Start the session again with debug_start_session once the user is in that group.",
-        ),
-        do_not=(
-            "Do not run the server or OpenOCD as root, or through sudo, to get past it. The debugger would then run "
-            "with every right on the host, and the next start as this user fails the same way.",
-        ),
-    ),
     "breakpoint_reconciliation_failed": ErrorRemedy(
         meaning=(
             "debug_clear_breakpoints could not prove that the backend holds no breakpoints: GDB's breakpoint list "
@@ -5137,50 +5106,6 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not repeat debug_start_session with the same GDB. It refuses the setting the same way every time.",
             "Do not run a session in synchronous MI by hand. A timeout in it cannot interrupt the target, and the "
             "board keeps running with nobody watching it.",
-        ),
-    ),
-    "interface_config_not_found": ErrorRemedy(
-        meaning=(
-            "OpenOCD, started as a debug session's server, exited because it could not find the script "
-            "`debuggers.<name>.interface_cfg` names. The debug session start reports it under this name; probe_target, "
-            "flash_firmware and reset_target report the same failure as `debugger_config_not_found`. The server stopped "
-            "before the target was reached."
-        ),
-        remediation=(
-            "Read the server output in the log at `log_path`: OpenOCD names what it looked for.",
-            "Check `debuggers.<name>.interface_cfg` with project_config_describe or `agentic-hil doctor`. A search "
-            "name such as `interface/stlink.cfg` has to resolve in this OpenOCD's script tree, and a path has to be "
-            "absolute, exist and lie outside the workspace.",
-            "Correct it with project_config_set behind `allow_config_description_write`, with the operator's word, or "
-            "install the OpenOCD scripts the search name expects, then start the session again with "
-            "debug_start_session.",
-        ),
-        do_not=(
-            "Do not copy OpenOCD scripts into the repository and point the configuration at them. A script inside the "
-            "workspace is repository-controlled Tcl running in the debugger.",
-            "Do not run `openocd` directly to get past it.",
-        ),
-    ),
-    "target_config_not_found": ErrorRemedy(
-        meaning=(
-            "OpenOCD, started as a debug session's server, exited because it could not find the script "
-            "`debuggers.<name>.target_cfg` names. The debug session start reports it under this name; probe_target, "
-            "flash_firmware and reset_target report the same failure as `debugger_config_not_found`. The server stopped "
-            "before the target was reached."
-        ),
-        remediation=(
-            "Read the server output in the log at `log_path`: OpenOCD names what it looked for.",
-            "Check `debuggers.<name>.target_cfg` with project_config_describe or `agentic-hil doctor`. It has to match "
-            "the MCU family; a search name such as `target/stm32f4x.cfg` has to resolve in this OpenOCD's script tree, "
-            "and a path has to be absolute, exist and lie outside the workspace.",
-            "Correct it with project_config_set behind `allow_config_description_write`, with the operator's word, or "
-            "install the OpenOCD scripts the search name expects, then start the session again with "
-            "debug_start_session.",
-        ),
-        do_not=(
-            "Do not copy OpenOCD scripts into the repository and point the configuration at them. A script inside the "
-            "workspace is repository-controlled Tcl running in the debugger.",
-            "Do not run `openocd` directly to get past it.",
         ),
     ),
     "session_already_active": ErrorRemedy(
