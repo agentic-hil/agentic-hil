@@ -748,7 +748,7 @@ def test_the_command_line_meeting_the_lock_records_a_refusal_that_names_no_step(
         assert status == 1, report
         assert report["ok"] is False, report
         assert report["error_type"] == "device_busy", report
-        assert report["tool"] == "test_reactor", report
+        assert report["tool"] == "test_reactor_run", report
         assert report["steps"] == [], report
         assert report["resource"] in declared, report
         assert report["declared_devices"], report
@@ -759,7 +759,7 @@ def test_the_command_line_meeting_the_lock_records_a_refusal_that_names_no_step(
 
         recorded = holder.call("get_last_report")
         assert recorded["ok"] is True, recorded
-        assert recorded["report"]["tool"] == "test_reactor", recorded
+        assert recorded["report"]["tool"] == "test_reactor_run", recorded
         assert recorded["report"]["error_type"] == "device_busy", recorded
         assert recorded["report"]["steps"] == [], recorded
 
@@ -767,7 +767,7 @@ def test_the_command_line_meeting_the_lock_records_a_refusal_that_names_no_step(
         assert classified["ok"] is True, classified
         assert classified["tool"] == "classify_last_error", classified
         assert classified["error_type"] == "device_busy", classified
-        assert classified["source_tool"] == "test_reactor", classified
+        assert classified["source_tool"] == "test_reactor_run", classified
         assert "No step ran." in classified["summary"], classified["summary"]
     finally:
         release(holder)

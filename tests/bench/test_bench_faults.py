@@ -1057,14 +1057,14 @@ def test_the_declared_plan_over_a_board_with_the_wrong_banner_is_red_on_every_su
     assert errored is False, last
     assert last["ok"] is True, last
     assert last["tool"] == "get_last_report", last
-    assert last["report"]["tool"] == "test_reactor", last["report"]
+    assert last["report"]["tool"] == "test_reactor_run", last["report"]
     assert last["report"]["error_type"] == "comparator_unmet", last["report"]
     assert last["report"]["failed_step"] == 4, last["report"]
 
     errored, classified = server.call("classify_last_error")
     assert classified["ok"] is True, classified
     assert classified["error_type"] == "comparator_unmet", classified
-    assert classified["source_tool"] == "test_reactor", classified
+    assert classified["source_tool"] == "test_reactor_run", classified
     assert classified["failed_step"] == 4, classified
     assert classified["step_error_type"] == "comparator_unmet", classified
     assert isinstance(classified["likely_causes"], list) and classified["likely_causes"], classified

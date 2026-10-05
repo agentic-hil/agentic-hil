@@ -458,7 +458,7 @@ def test_a_run_started_over_mcp_is_watched_and_stopped_between_two_steps_and_the
     try:
         started = server.call("test_reactor_run", {"test_config_path": plan, "detach": True})
         assert started["ok"] is True, started
-        assert started["tool"] == "test_reactor_start", started
+        assert started["tool"] == "test_reactor_run", started
         handle = started["run"]
         assert isinstance(handle, str) and RUN_HANDLE.match(handle), started
         # A start answers once the run holds its devices, so a printed handle is
@@ -671,7 +671,7 @@ def test_a_run_detached_from_the_command_line_is_stopped_inside_a_long_delay_and
     status, started = bench.document("test-reactor", "--test-config", plan, "--detach")
     assert status == 0, started
     assert started["ok"] is True, started
-    assert started["tool"] == "test_reactor_start", started
+    assert started["tool"] == "test_reactor_run", started
     handle = started["run"]
     assert isinstance(handle, str) and RUN_HANDLE.match(handle), started
     assert started["state"] == "running", started
@@ -1037,7 +1037,7 @@ def test_a_red_plan_leaves_a_junit_document_with_its_failure_its_skipped_steps_a
     assert status == 1, refused
     assert refused == {
         "ok": False,
-        "tool": "test_reactor_start",
+        "tool": "test_reactor_run",
         "error_type": "junit_xml_requires_synchronous_run",
         "summary": (
             "--junit-xml writes the report of a run this command waited for, and --detach returns before the run "

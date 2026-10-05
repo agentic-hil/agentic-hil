@@ -98,7 +98,7 @@ def run_plan(
         # would produce a bundle that could not say which plan the outcome
         # belongs to.
         error.details.setdefault("test_config_path", test_config_path or DEFAULT_TEST_CONFIG_PATH)
-        write_refusal_junit_xml(junit_xml, {"tool": "test_reactor", **error.to_dict()}, plan_steps=() if test_config is None else test_config.steps)
+        write_refusal_junit_xml(junit_xml, {"tool": "test_reactor_run", **error.to_dict()}, plan_steps=() if test_config is None else test_config.steps)
         raise
     with registration:
         try:
@@ -143,7 +143,6 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
                 config,
                 with_run_remediation(
                     {
-                        "tool": "test_reactor",
                         "name": test_config.name,
                         "test_config_path": test_config.path,
                         **plan_digest_field(test_config),
@@ -152,6 +151,7 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
                         "cleanup_ok": True,
                         "declared_devices": devices,
                         **error.result,
+                        "tool": "test_reactor_run",
                         "summary": str(error.result.get("summary", "A device this plan declares is unavailable.")) + " No step ran.",
                         "run": registration.handle,
                     }
@@ -185,7 +185,7 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
         primary_error = error
         result = {
             "ok": False,
-            "tool": "test_reactor",
+            "tool": "test_reactor_run",
             "name": test_config.name,
             "test_config_path": test_config.path,
             **plan_digest_field(test_config),
@@ -209,7 +209,7 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
             "action": "close",
             "result": {
                 "ok": False,
-                "tool": "test_reactor",
+                "tool": "test_reactor_run",
                 "error_type": "cleanup_exception",
                 "summary": "Per-device service cleanup raised an exception.",
                 "exception_type": type(error).__name__,
@@ -237,7 +237,7 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
             "action": "close",
             "result": {
                 "ok": False,
-                "tool": "test_reactor",
+                "tool": "test_reactor_run",
                 "error_type": "cleanup_exception",
                 "summary": "Agentic HIL service cleanup raised an exception.",
                 "exception_type": type(error).__name__,

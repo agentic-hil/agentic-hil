@@ -269,7 +269,7 @@ def test_a_plan_stops_at_main_reads_the_counter_before_it_starts_and_reads_it_co
     assert reached["stop"]["frame"]["function"] == ENTRY_FUNCTION, reached["stop"]
 
     for claim in (at_main, at_main_signed):
-        assert claim["tool"] == "test_reactor", claim
+        assert claim["tool"] == "test_reactor_run", claim
         assert claim["summary"] == "The symbol held the expected value.", claim
         assert claim["symbol"] == COUNTER_SYMBOL, claim
         assert claim["size_bytes"] == COUNTER_SIZE_BYTES, claim

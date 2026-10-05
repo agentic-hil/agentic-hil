@@ -758,7 +758,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
     try:
         wait_s = validated_wait(wait_s)
     except ConfigError as error:
-        return {"ok": False, "tool": "test_reactor_start", "side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged", "retry_safe": False, **error.to_dict()}
+        return {"ok": False, "tool": "test_reactor_run", "side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged", "retry_safe": False, **error.to_dict()}
     handle = new_run_handle()
     report = display_path(config, last_report_path(config))
     worker = spawn_run_worker(config, handle, test_config_path, wait_s=wait_s)
@@ -778,7 +778,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
             _prune_after_a_start_that_left_no_record(config, handle)
             return {
                 "ok": False,
-                "tool": "test_reactor_start",
+                "tool": "test_reactor_run",
                 "error_type": "run_worker_failed",
                 "summary": "The detached run's worker process ended before it could say what it was doing.",
                 "run": handle,
@@ -799,7 +799,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
             _prune_after_a_start_that_left_no_record(config, handle)
             return {
                 "ok": False,
-                "tool": "test_reactor_start",
+                "tool": "test_reactor_run",
                 "error_type": "run_worker_unresponsive",
                 "summary": "The detached run's worker process did not say what it was doing within the startup window; a cooperative stop was left under its handle in case it is still alive.",
                 "run": handle,
@@ -814,7 +814,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
         return _detached_terminal_result(handle, record, report)
     return {
         "ok": True,
-        "tool": "test_reactor_start",
+        "tool": "test_reactor_run",
         "run": handle,
         "state": state,
         "detached": True,
@@ -847,7 +847,7 @@ def _detached_terminal_result(handle: str, record: JsonObject, _report: str) -> 
     report_path = run_report_named(record)
     result: JsonObject = {
         "ok": run_ok,
-        "tool": "test_reactor_start",
+        "tool": "test_reactor_run",
         "run": handle,
         "state": str(record.get("state")),
         "detached": True,

@@ -991,7 +991,7 @@ def test_a_can_plan_runs_green_against_the_scripted_peer(tmp_path: Path, vcan: s
     assert ran.returncode == 0, ran.stdout + ran.stderr
     result = json.loads(ran.stdout)
     assert result["ok"] is True, result
-    assert result["tool"] == "test_reactor", result
+    assert result["tool"] == "test_reactor_run", result
     assert [step["action"] for step in result["steps"]] == ["can_open", "can_send", "can_read", "can_close"], result
     assert all(step["result"]["ok"] is True for step in result["steps"]), result
     answered = result["steps"][2]["result"]

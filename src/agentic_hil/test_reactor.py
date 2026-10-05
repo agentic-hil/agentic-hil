@@ -1374,7 +1374,7 @@ class StepDevice:
         if bound is None:
             return {
                 "ok": False,
-                "tool": "test_reactor",
+                "tool": "test_reactor_run",
                 "error_type": "not_supported",
                 "summary": f"The {self.kind} device kind does not serve this test reactor action.",
                 self.route_field: self.id,
@@ -1402,7 +1402,7 @@ class StepDevice:
             return None
         return {
             "ok": False,
-            "tool": "test_reactor",
+            "tool": "test_reactor_run",
             "error_type": "invalid_argument",
             "summary": "Test step does not satisfy its action's schema.",
             self.route_field: self.id,
@@ -1442,7 +1442,7 @@ class StepDevice:
         waited_ms = int(round((time.monotonic() - started) * 1000))
         result: JsonObject = {
             "ok": True,
-            "tool": "test_reactor",
+            "tool": "test_reactor_run",
             "summary": "Test plan waited.",
             self.route_field: self.id,
             "action": "delay",
@@ -1571,7 +1571,7 @@ class SessionDevice(StepDevice):
         if identity not in self._owned_sessions:
             return {
                 "ok": False,
-                "tool": "test_reactor",
+                "tool": "test_reactor_run",
                 "error_type": self.not_owned_error,
                 "summary": self.not_owned_summary,
                 self.route_field: self.id,
@@ -1773,7 +1773,7 @@ class UartRunner(SessionDevice):
         if outcome.matched:
             return {
                 "ok": True,
-                "tool": "test_reactor",
+                "tool": "test_reactor_run",
                 "summary": appeared,
                 "port_id": self.id,
                 f"expected_{field_name}": expected,
@@ -1783,7 +1783,7 @@ class UartRunner(SessionDevice):
             }
         return {
             "ok": False,
-            "tool": "test_reactor",
+            "tool": "test_reactor_run",
             "error_type": "uart_expect_timeout",
             "summary": missing,
             "port_id": self.id,
@@ -1805,8 +1805,8 @@ class UartRunner(SessionDevice):
             return outcome.read_failure
         common = {"port_id": self.id, **comparator.report(), "timeout_s": timeout_s, "bytes_received": outcome.bytes_received, "reads": outcome.reads}
         if outcome.matched:
-            return {"ok": True, "tool": "test_reactor", "summary": met, **common, **outcome.matched_result(comparator.matched_text)}
-        return {"ok": False, "tool": "test_reactor", "error_type": "comparator_unmet", "summary": unmet, **common, **outcome.tail_result}
+            return {"ok": True, "tool": "test_reactor_run", "summary": met, **common, **outcome.matched_result(comparator.matched_text)}
+        return {"ok": False, "tool": "test_reactor_run", "error_type": "comparator_unmet", "summary": unmet, **common, **outcome.tail_result}
 
     def _read_until(self, timeout_s: float, written: str, matches: Callable[[str, bool], bool]) -> UartReadOutcome:
         """Read this line until `matches` is satisfied or the deadline passes.
@@ -2173,8 +2173,8 @@ class CanRunner(SessionDevice):
             return outcome.read_failure
         common = {"bus_id": self.id, **comparator.report(), "timeout_s": timeout_s, "frames_read": outcome.frames_read, "reads": outcome.reads}
         if outcome.frame is not None:
-            return {"ok": True, "tool": "test_reactor", "summary": met, **common, "frame": outcome.frame}
-        return {"ok": False, "tool": "test_reactor", "error_type": "comparator_unmet", "summary": unmet, **common, **outcome.tail_result}
+            return {"ok": True, "tool": "test_reactor_run", "summary": met, **common, "frame": outcome.frame}
+        return {"ok": False, "tool": "test_reactor_run", "error_type": "comparator_unmet", "summary": unmet, **common, **outcome.tail_result}
 
     def _read_until(self, comparator: CanFrameComparator, max_frames: object | None, timeout_s: float, participant: object = None) -> CanReadOutcome:
         """Read this bus until a frame meets the claim or the deadline passes.
@@ -2381,7 +2381,7 @@ class DebuggerRunner(StepDevice):
         if declared is not None and int(declared) != int(size_bytes or 0):
             return merge_result_status({
                 "ok": False,
-                "tool": "test_reactor",
+                "tool": "test_reactor_run",
                 "error_type": "symbol_size_mismatch",
                 "summary": "The symbol is not the width this step declared.",
                 "debugger": self.id,
@@ -2400,7 +2400,7 @@ class DebuggerRunner(StepDevice):
             # looking at firmware that is behaving.
             return merge_result_status({
                 "ok": False,
-                "tool": "test_reactor",
+                "tool": "test_reactor_run",
                 "error_type": "symbol_width_not_numeric",
                 "summary": "The symbol's width carries no integer reading, so this step's comparator could not be judged.",
                 "debugger": self.id,
@@ -2413,8 +2413,8 @@ class DebuggerRunner(StepDevice):
         matched = claim.matches(int(result[claim.reading]))
         common = {"debugger": self.id, **read, **claim.report()}
         if matched:
-            return merge_result_status({"ok": True, "tool": "test_reactor", "summary": met, **common}, result)
-        return merge_result_status({"ok": False, "tool": "test_reactor", "error_type": "comparator_unmet", "summary": unmet, **common}, result)
+            return merge_result_status({"ok": True, "tool": "test_reactor_run", "summary": met, **common}, result)
+        return merge_result_status({"ok": False, "tool": "test_reactor_run", "error_type": "comparator_unmet", "summary": unmet, **common}, result)
 
     @step_action("debug_start", schema="debugStart", tool="debug_start_session")
     def _debug_start(self, step: TestStep) -> JsonObject:
@@ -2778,7 +2778,7 @@ class DebuggerRunner(StepDevice):
                 return merge_result_status({**continued, "breakpoint_cleanup": cleared}, breakpoint_result, continued, cleared)
             return merge_result_status({
                 "ok": False,
-                "tool": "test_reactor",
+                "tool": "test_reactor_run",
                 "error_type": result_error_type(cleared) if cleared.get("audit_ok") is False or cleared.get("target_ok") is False else "breakpoint_cleanup_failed",
                 "summary": "Target stopped, but the reactor breakpoint could not be removed.",
                 "debugger": self.id,
@@ -2792,7 +2792,7 @@ class DebuggerRunner(StepDevice):
         if continued.get("stop_reason") != "breakpoint_hit" or actual_id != expected_id:
             return merge_result_status({
                 "ok": False,
-                "tool": "test_reactor",
+                "tool": "test_reactor_run",
                 "error_type": "unexpected_stop",
                 "summary": "Target did not stop at the breakpoint created by this test step.",
                 "debugger": self.id,
@@ -2801,7 +2801,7 @@ class DebuggerRunner(StepDevice):
             }, breakpoint_result, continued, cleared)
         return merge_result_status({
             "ok": True,
-            "tool": "test_reactor",
+            "tool": "test_reactor_run",
             "summary": "Target stopped at the expected breakpoint.",
             "breakpoint": breakpoint_result["breakpoint"],
             "stop_reason": continued["stop_reason"],
@@ -2991,7 +2991,7 @@ class TestReactor:
         try:
             device = self.step_device(step)
         except DeviceError as error:
-            return {"tool": "test_reactor", **error.result}
+            return {"tool": "test_reactor_run", **error.result}
         return device.execute(step)
 
     def execute_steps(self, steps: Sequence[TestStep], records: list[JsonObject], *, top_level: bool = False) -> StepOutcome | None:
@@ -3061,7 +3061,7 @@ class TestReactor:
         try:
             result: JsonObject = self.execute_step(step)
         except Exception as error:
-            result = exception_result("test_reactor", "step_exception", "Test reactor step raised an exception.", error)
+            result = exception_result("test_reactor_run", "step_exception", "Test reactor step raised an exception.", error)
         record["result"] = result
         return result if result_failed(result) else None
 
@@ -3106,7 +3106,7 @@ class TestReactor:
             if aborted is not None and aborted.stopped:
                 record["result"] = {
                     "ok": False,
-                    "tool": "test_reactor",
+                    "tool": "test_reactor_run",
                     "action": REPEAT_ACTION,
                     "error_type": RUN_STOPPED_ERROR,
                     "summary": f"A stop was requested on iteration {completed} of this repeat block.",
@@ -3121,7 +3121,7 @@ class TestReactor:
                 failed_index, failure = aborted.index, aborted.failure
                 record["result"] = {
                     "ok": False,
-                    "tool": "test_reactor",
+                    "tool": "test_reactor_run",
                     "action": REPEAT_ACTION,
                     "error_type": result_error_type(failure or {}),
                     "summary": f"A step failed on iteration {completed} of this repeat block, so the run stopped there.",
@@ -3142,7 +3142,7 @@ class TestReactor:
                 break
         record["result"] = {
             "ok": True,
-            "tool": "test_reactor",
+            "tool": "test_reactor_run",
             "action": REPEAT_ACTION,
             "summary": f"Repeat block ran {completed} iteration(s) and ended on its {exit_reason} bound.",
             **bounds,
@@ -3168,7 +3168,7 @@ class TestReactor:
             validation_error = {
                 "field": "$",
                 "summary": "Test reactor preflight raised an exception.",
-                **exception_result("test_reactor", "preflight_exception", "Test reactor preflight raised an exception.", error),
+                **exception_result("test_reactor_run", "preflight_exception", "Test reactor preflight raised an exception.", error),
             }
         if validation_error is not None:
             # The catalogue's own fix, on the refusal itself, from the same
@@ -3195,7 +3195,7 @@ class TestReactor:
             scope = EXCLUSIVE_PERMISSION_SCOPE if validation_error.get("permission_granted") else None
             result: JsonObject = {
                 "ok": False,
-                "tool": "test_reactor",
+                "tool": "test_reactor_run",
                 "name": test_config.name,
                 "test_config_path": test_config.path,
                 **plan_digest_field(test_config),
@@ -3248,7 +3248,7 @@ class TestReactor:
         ok = failure is None and cleanup_ok and not stopped
         result: JsonObject = {
             "ok": ok,
-            "tool": "test_reactor",
+            "tool": "test_reactor_run",
             "name": test_config.name,
             "test_config_path": test_config.path,
             **plan_digest_field(test_config),
