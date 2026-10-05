@@ -1590,6 +1590,36 @@ def test_a_debug_stop_whose_release_cannot_be_recorded_says_what_is_unsettled(tm
     assert re.search(r"release could not be recorded", summary), summary
 
 
+def test_a_probe_after_a_debugger_call_raised_does_not_blame_another_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#677: an OSError in a debugger call leaves an incident this process holds; the next probe answers that."""
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path, auto_recover="off"))))
+    original = service.backend.probe_target
+
+    def raising(*args: object, **kwargs: object) -> dict:
+        raise OSError(errno.EIO, "Input/output error")
+
+    try:
+        monkeypatch.setattr(service.backend, "probe_target", raising)
+        first = service.call("probe_target")
+        monkeypatch.setattr(service.backend, "probe_target", original)
+        again = service.call("probe_target")
+        status = service.call("hardware_lease_status")
+    finally:
+        monkeypatch.setattr(service.backend, "probe_target", original)
+        try:
+            service.close()
+        except RuntimeError:
+            pass
+        service.coordinator.close()
+    assert first.get("error_type") == "audit_failed_after_action", first
+    assert first.get("quarantined") is True, first
+    assert status.get("incident_stands") is True, status
+    assert "another Agentic HIL process" not in str(again.get("summary")), again
+    assert again.get("error_type") != "resource_busy", again
+    if again.get("ok") is not True:
+        assert again.get("quarantine_id") == status.get("quarantine_id"), (again, status)
+
+
 def test_a_debug_shutdown_whose_release_cannot_be_recorded_says_what_is_unsettled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """#676: shutdown still fails closed, and its words name the lease record rather than the target."""
     service = debug_service(tmp_path)
