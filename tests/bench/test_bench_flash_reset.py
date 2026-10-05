@@ -936,3 +936,34 @@ def test_a_raw_image_with_a_load_address_is_written_there_and_boots(bench: Bench
     if result["backend"] == "openocd":
         commanded = debugger_log(bench, result["log_path"])["command"]
         assert re.search(rf'program "[^"]*\.bin" {FLASH_BASE} verify reset', commanded), commanded
+
+
+@pytest.mark.parametrize(("key", "value"), [("allow_flash", False), ("allow_mass_erase", True)])
+def test_a_flash_refused_by_a_debugger_permission_writes_no_report(bench: Bench, firmware: Path, tmp_path: Path, key: str, value: bool) -> None:
+    """Every flash permission refusal answers the same way: refused, and nothing recorded.
+
+    Catches the interlock (`allow_mass_erase` on refuses flashing) taking the
+    probe's lease and writing a report that a closed `allow_flash` never
+    writes, so `classify_last_error` would explain one refusal and not the
+    other. The permissions are set in a copy of this tier's configuration, so
+    no other test meets them; nothing is said to the debugger, so the board
+    keeps the demo.
+    """
+    import yaml
+
+    document = bench.configuration()
+    document["debuggers"][bench.debugger_name()].setdefault("permissions", {})[key] = value
+    variant = tmp_path / "flash-permission-config.yaml"
+    variant.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    server = MCPServer(dataclasses.replace(bench, config=variant))
+    try:
+        server.open()
+        result = server.call("flash_firmware", {"image_path": firmware.relative_to(bench.project).as_posix()})
+    finally:
+        server.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "permission_denied", result
+    assert result["permission"] == f"debuggers.{bench.debugger_name()}.permissions.{key}", result
+    assert "report_path" not in result, result
+    assert "log_path" not in result, result
