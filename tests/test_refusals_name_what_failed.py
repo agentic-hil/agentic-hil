@@ -24,13 +24,15 @@ from agentic_hil import report
 from agentic_hil.adopt import PROJECT_CONFIG_ADOPT, discovery_remedy
 from agentic_hil.bootstrap import _discovery_failure
 from agentic_hil.cli import (
-    _doctor_state_root,
+    _doctor_report_state,
     _record_external_configuration,
     adopt_hardware,
     build_parser,
+    doctor,
+    init_config,
     register_agent_mcp,
 )
-from agentic_hil.config import ConfigError, load_config
+from agentic_hil.config import ConfigError, load_authoritative_config, load_config
 from agentic_hil.humanize import render_result
 from agentic_hil.knowledge import CONFIG_DESCRIPTION_RIGHT, ERROR_CATALOGUE
 from agentic_hil.report import audit_unavailable, ensure_audit_ready, read_report_state, report_state_path
@@ -106,12 +108,33 @@ def test_every_damaged_report_state_answers_the_same_type(tmp_path: Path, conten
 
 def test_doctor_names_the_damaged_report_state_and_its_repair(damaged_state: tuple[AgenticHILToolService, Path]) -> None:
     service, state_file = damaged_state
-    check = _doctor_state_root(service.config)
+    check = _doctor_report_state(service.config)
     assert check["ok"] is False, check
     assert check["error_type"] == "report_state_damaged", check
     # The operator's own command is where the file is named.
     assert check["path"] == str(state_file), check
     assert REPAIR_COMMAND in check["summary"], check
+
+
+def test_doctor_counts_a_damaged_report_state_apart_from_the_state_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "firmware"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    assert init_config()["ok"] is True
+    state_file = Path(report_state_path(load_authoritative_config(workspace)))
+    state_file.write_text("{", encoding="utf-8")
+
+    report = doctor()
+
+    assert report["ok"] is False, report
+    assert "report_state" in report["unhealthy"], report
+    # The root accepts writes; it is not what is wrong, and the repair is not a
+    # rewritten configuration.
+    assert report["state_root"]["ok"] is True, report
+    assert "state_root" not in report["unhealthy"], report
+    assert report["report_state"]["path"] == str(state_file), report
+    assert REPAIR_COMMAND in report["summary"], report
+    assert "init --force" not in report["report_state"]["summary"], report
 
 
 def test_the_repair_moves_the_damaged_state_aside_and_starts_a_fresh_one(damaged_state: tuple[AgenticHILToolService, Path]) -> None:
@@ -130,7 +153,7 @@ def test_the_repair_moves_the_damaged_state_aside_and_starts_a_fresh_one(damaged
     assert read_report_state(service.config) == {"version": 1, "last_report": None, "last_failure": None}
     ensure_audit_ready(service.config)
     assert service.call("get_last_report")["error_type"] == "report_not_found"
-    assert _doctor_state_root(service.config)["ok"] is True
+    assert _doctor_report_state(service.config)["ok"] is True
 
 
 def test_the_repair_leaves_a_report_state_that_reads_alone(tmp_path: Path) -> None:

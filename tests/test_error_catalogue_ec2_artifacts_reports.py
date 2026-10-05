@@ -372,6 +372,7 @@ EXPECTED_INVENTORY: dict[str, frozenset[str]] = {
             "config_invalid",
             "coordination_state_invalid",
             "report_not_found",
+            "report_state_damaged",
             "report_unreadable",
             "report_write_failed",
             "unknown_debugger_error",
@@ -425,6 +426,10 @@ NEW_ENTRIES = frozenset(
         "hardware_mismatch",
         "output_validation_failed",
         "report_not_found",
+        # A report state that reads and holds something damaged (#689). It used
+        # to answer `config_invalid` with configuration advice; the repair is
+        # `agentic-hil report-state-repair`, not the configuration.
+        "report_state_damaged",
         "report_unreadable",
         # The nested `audit_error` of a report or log write the filesystem
         # refused (`report.audit_error_detail`, #675). Both audit paths nest the
@@ -786,10 +791,18 @@ FACTS: dict[str, Facts] = {
         never=(r"\bmeans? (the|a|that the) (call|run) (failed|passed)",),
     ),
     "report_unreadable": Facts(
-        says=(r"exists and reading it failed", r"path is\s+withheld", r"damaged answers `config_invalid`"),
+        says=(r"exists and reading it failed", r"path is\s+withheld", r"damaged answers `report_state_damaged`"),
         steps=(r"error_class", r"state_root", r"audit_unavailable"),
         do_not=(r"delete or recreate", r"empty record"),
         never=(r"\bdelete\b",),
+    ),
+    # Damaged content, not a failed read: its own repair command, the damaged
+    # copy kept, and never the configuration as the cause (#689).
+    "report_state_damaged": Facts(
+        says=(r"exists and reads", r"not JSON", r"configuration is not involved", r"withheld", r"audit_unavailable"),
+        steps=(r"agentic-hil report-state-repair", r"every byte kept", r"Call again once it is repaired"),
+        do_not=(r"delete or edit", r"configuration"),
+        never=(r"config_invalid", r"init --force"),
     ),
     # The write side of the same fault, nested as `audit_error` by both audit
     # paths. It may never read as a record that was written, nor offer a retry

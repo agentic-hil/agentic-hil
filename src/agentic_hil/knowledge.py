@@ -4212,7 +4212,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Read `audit_error` for the path or the fault that stopped the record.",
-            "Have the operator repair the destination: `agentic-hil doctor` checks that `state_root` accepts writes. "
+            "Have the operator repair the destination: `agentic-hil doctor` checks that `state_root` accepts writes "
+            "and that this project's report state reads. "
             "Free the disk or restore write access. A destination this profile refuses outright is a configuration "
             "refusal, and the `audit_error` that names it carries its own remediation for that path.",
             "Call again once it is repaired. Nothing was started, so there is nothing to recover first.",
@@ -4336,7 +4337,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "report_unreadable": ErrorRemedy(
         meaning=(
             "This project's report state exists and reading it failed. `error_class` and `errno` say how; the path is "
-            "withheld on purpose. A report state that reads and is damaged answers `config_invalid` instead."
+            "withheld on purpose. A report state that reads and is damaged answers `report_state_damaged` instead."
         ),
         remediation=(
             "Read `error_class` and `errno`: a refused permission and a failing disk are different repairs.",
@@ -4346,6 +4347,32 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not delete or recreate the report state to get past it. It is this project's record of what ran.",
             "Do not read this as an empty record or as a pass.",
+        ),
+    ),
+    # The report state reads and its content is damaged, which a crash or a full
+    # disk during a write can leave behind. It used to answer `config_invalid`,
+    # whose advice is about the configuration file, and nothing named a way back
+    # (#689).
+    "report_state_damaged": ErrorRemedy(
+        meaning=(
+            "This project's report state (`report-state.json` under `state_root`, the record `get_last_report` and "
+            "`classify_last_error` read and every hardware call updates) exists and reads, and what it holds is "
+            "damaged: it is not JSON, has an unsupported format, or holds an entry that is not an object. A crash or "
+            "a full disk during a write can leave it truncated. The configuration is not involved. The absolute path "
+            "is withheld from tool answers; `agentic-hil doctor` prints it. Until it is repaired every hardware call "
+            "is refused before it starts as `audit_unavailable`, with this under `audit_error`."
+        ),
+        remediation=(
+            "Have the operator run `agentic-hil report-state-repair` on this machine. It moves the damaged file aside "
+            "beside itself, every byte kept under a name that says it is damaged, starts a fresh, empty report state, "
+            "and prints both paths.",
+            "Call again once it is repaired. Nothing was started, so there is nothing to recover first. The last "
+            "report and failure recorded before the damage are not carried over; the per-run reports are untouched.",
+        ),
+        do_not=(
+            "Do not delete or edit the report state to get past this. The repair keeps the damaged copy as this "
+            "project's record of what ran; a deletion throws it away.",
+            "Do not change the Agentic HIL configuration for this. It is not the file that is damaged.",
         ),
     ),
     "report_write_failed": ErrorRemedy(

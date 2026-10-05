@@ -639,7 +639,7 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 
 SCANNED_MODULE_COUNT = 48
 # `can_broker_disconnected`, a broker connection that ended (#664), is the 219th.
-COLLECTED_TYPE_COUNT = 217
+COLLECTED_TYPE_COUNT = 219
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -667,7 +667,11 @@ COLLECTED_TYPE_COUNT = 217
 # eight producers, the names `_public_error_type` can answer, and the four
 # script and access words `GdbDebugSessions._start_failure` no longer writes
 # for OpenOCD go, three of them out of the types altogether.
-PRODUCER_COUNT = 661
+# Two types follow: `agent_mcp_config_invalid` (#693), which the three agent
+# MCP registrations write in place of the `config_invalid` they wrote, and
+# `report_state_damaged` (#689), written by `report._report_state_damaged`
+# for a report state that reads and is damaged.
+PRODUCER_COUNT = 662
 
 
 def pin_problems(inventory: Inventory) -> list[str]:

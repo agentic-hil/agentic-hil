@@ -105,7 +105,13 @@ from agentic_hil.knowledge import (
 )
 from agentic_hil.reactorrun import run_plan, start_plan_detached
 from agentic_hil.redact import redact_sensitive
-from agentic_hil.report import conclusive_success, overall_success
+from agentic_hil.report import (
+    conclusive_success,
+    overall_success,
+    read_report_state,
+    repair_report_state,
+    report_state_path,
+)
 from agentic_hil.runevidence import write_run_evidence
 from agentic_hil.runlifecycle import request_run_stop, run_status
 from agentic_hil.stdio import run_stdio_server
@@ -616,6 +622,10 @@ def build_parser() -> argparse.ArgumentParser:
     reactor_stop_parser.add_argument("--run", required=True, help="the handle the run was started under")
 
     subparsers.add_parser("lease-status", help="show persistent hardware ownership and quarantine state")
+    subparsers.add_parser(
+        "report-state-repair",
+        help="move this project's damaged report state aside, every byte kept, and start a fresh one; a report state that reads is left as it is",
+    )
     recover_parser = subparsers.add_parser(
         "recover",
         help="release quarantined resources after operator-confirmed physical recovery",
@@ -743,6 +753,8 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return run_status(load_cli_authoritative_config(None), args.run, command_line=True)
     if args.command == "test-reactor-stop":
         return request_run_stop(load_cli_authoritative_config(None), args.run, command_line=True)
+    if args.command == "report-state-repair":
+        return repair_report_state(load_cli_authoritative_config(None))
     if args.command in {"lease-status", "recover"}:
         config = load_cli_authoritative_config(None)
         coordinator = HardwareCoordinator(config, "operator-cli")
@@ -2121,7 +2133,12 @@ DOCTOR_STANDING_INCIDENT_FINDING = "standing_incident"
 # wrote over it and repeat the check's words as warnings, because the finding is
 # about this account on this machine and the document binds the right hardware.
 DOCTOR_DEVICE_ACCESS_FINDING = "device_access"
-DOCTOR_FINDINGS_SETUP_KEEPS = frozenset({DOCTOR_UNBOUND_FINDING, DOCTOR_STANDING_INCIDENT_FINDING, DOCTOR_DEVICE_ACCESS_FINDING})
+# This project's report state reads and is damaged (#689). `setup` keeps the
+# file it wrote over it: the state is about what ran on this machine, a rolled
+# back configuration repairs none of it, and `agentic-hil report-state-repair`
+# does.
+DOCTOR_REPORT_STATE_FINDING = "report_state"
+DOCTOR_FINDINGS_SETUP_KEEPS = frozenset({DOCTOR_UNBOUND_FINDING, DOCTOR_STANDING_INCIDENT_FINDING, DOCTOR_DEVICE_ACCESS_FINDING, DOCTOR_REPORT_STATE_FINDING})
 
 
 def doctor_findings_setup_keeps(doctor_result: JsonObject) -> bool:
@@ -5064,6 +5081,34 @@ def _doctor_state_root(config: AgenticHILConfig) -> JsonObject:
     return {"ok": True, "field": "state_root", "path": str(root), "summary": "The configured state root accepts the writes every hardware action is recorded by."}
 
 
+def _doctor_report_state(config: AgenticHILConfig) -> JsonObject:
+    """Whether this project's report state reads, under a root that accepts writes.
+
+    A damaged one refuses every hardware call as `audit_unavailable` while the
+    root itself is sound, and `doctor` reported nothing wrong (#689). Read, never
+    initialized and without the report lock, so this still opens no bench. Its
+    own finding rather than a `state_root` one: the root is fine, and the repair
+    is `agentic-hil report-state-repair`, not a rewritten configuration. This is
+    where the operator is told which file it is.
+    """
+    path = report_state_path(config)
+    try:
+        read_report_state(config)
+    except ConfigError as error:
+        if error.error_type != "report_state_damaged":
+            raise
+        return {
+            **error.to_dict(),
+            "path": path,
+            "summary": f"{error.summary} It is {path}; `agentic-hil report-state-repair` moves it aside, every byte kept, and starts a fresh one.",
+        }
+    except (OSError, ValueError):
+        # Access to the file, not its content: the hardware call that meets it
+        # names the fault, and the write check on the root has already passed.
+        pass
+    return {"ok": True, "path": path, "summary": "This project's report state reads, or none has been written yet."}
+
+
 def _adopt_reads_board_instruction(config: AgenticHILConfig) -> str:
     """The debugger-aware `adopt-hardware` that reads the board to fill identity keys.
 
@@ -5339,6 +5384,8 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # root, `doctor` is already red on it when it is not, and a walk over a root
     # the enforcer refuses would answer nothing while looking like an all-clear.
     standing = standing_foreign_incidents(config, project_resource(config)) if state_root_ok else []
+    # Only where the root is usable, for the same reason: its file is under it.
+    report_state_check = _doctor_report_state(config) if state_root_ok else None
     # And the binding counts the same way, for the same reason: a file that
     # names no hardware refuses the first plan run against it, and a green
     # verdict over that is a newcomer being told to go ahead (#433).
@@ -5355,6 +5402,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         *(["debuggers"] if any(result.get("ok") is not True for result in checks.values()) else []),
         *(["target_support"] if unsupported else []),
         *([] if state_root_ok else ["state_root"]),
+        *([DOCTOR_REPORT_STATE_FINDING] if report_state_check is not None and report_state_check.get("ok") is not True else []),
         *([] if binding_ok else [DOCTOR_UNBOUND_FINDING]),
         *([DOCTOR_STANDING_INCIDENT_FINDING] if standing else []),
         *([DOCTOR_DEVICE_ACCESS_FINDING] if denied_access else []),
@@ -5382,6 +5430,8 @@ def doctor(config_path: str | None = None) -> JsonObject:
             f"profile will not accept, so every plan is refused at its first step with `audit_unavailable`. `{CONFIG_REOPEN_COMMAND}` rewrites "
             "the configuration with a state root it does accept."
         )
+    if report_state_check is not None and report_state_check.get("ok") is not True:
+        summary = f"{summary} {report_state_check['summary']}"
     if "next_step" in binding_check:
         # In the headline, beside the state root sentence and for the same
         # reason: a caller that keeps only `summary` has to be told that this
@@ -5454,6 +5504,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         **report,
         "config_path": config.config_path,
         "state_root": state_root_check,
+        **({"report_state": report_state_check} if report_state_check is not None else {}),
         # One field a script reads for the whole question, beside the one it
         # already reads for the state root: `bench_binding.ok` is false exactly
         # when this file names a device it does not identify, and `unbound`

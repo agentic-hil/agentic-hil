@@ -603,9 +603,10 @@ def test_a_corrupt_report_state_is_a_refusal_without_the_state_root_path(tmp_pat
         for tool in ("get_last_report", "classify_last_error"):
             result = service.call(tool)
             assert result["ok"] is False, (tool, result)
-            assert result["error_type"] == "config_invalid", (tool, result)
+            # Its own type since #689: the configuration is not what is damaged.
+            assert result["error_type"] == "report_state_damaged", (tool, result)
             assert result["tool"] == tool, result
-            assert result["summary"] == "Agentic HIL report state is not valid JSON.", result
+            assert result["summary"].startswith("This project's report state (report-state.json under state_root) is not valid JSON"), result
             serialised = json.dumps(result)
             assert state_root not in serialised, serialised
             assert "path" not in result, result

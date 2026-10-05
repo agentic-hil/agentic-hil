@@ -556,23 +556,23 @@ UNREADABLE = r"\breading it failed\b|\bcannot be read\b|\bcould not be read\b|\b
 DAMAGED = r"\b(?:damaged|malformed|corrupt\w*)\b"
 
 
-def says_damaged_state_answers_config_invalid(clause: str) -> bool:
-    """A damaged state and `config_invalid` in one clause, in either order, that no
+def says_damaged_state_answers_report_state_damaged(clause: str) -> bool:
+    """A damaged state and `report_state_damaged` in one clause, in either order, that no
     negation reaches, between them or before them: "a damaged one answers
-    `config_invalid`", never "a damaged one never answers `config_invalid`" and
-    never "No damaged report state answers `config_invalid`"."""
+    `report_state_damaged`", never "a damaged one never answers `report_state_damaged`" and
+    never "No damaged report state answers `report_state_damaged`"."""
     unnegated = rf"(?:(?!{NEGATION})[^.;])*?"
-    return stated(rf"{DAMAGED}{unnegated}\bconfig_invalid\b|\bconfig_invalid\b{unnegated}{DAMAGED}", clause)
+    return stated(rf"{DAMAGED}{unnegated}\breport_state_damaged\b|\breport_state_damaged\b{unnegated}{DAMAGED}", clause)
 
 
 def says_unreadable_state_apart(meaning: str) -> bool:
     """The catalogue's `report_unreadable`: a report state that exists and could
-    not be read (an OSError or ValueError on the read, report.py:646-656), apart
-    from one that reads and is damaged, which raises `config_invalid`
-    (report.py:666-673, 642-645), and from one that is not there (`report_not_found`)."""
+    not be read (an OSError or ValueError on the read), apart from one that reads
+    and is damaged, which raises `report_state_damaged` (it answered
+    `config_invalid` until #689), and from one that is not there (`report_not_found`)."""
     unreadable = one_of(clauses(meaning), r"\bexists?\b", UNREADABLE)
-    damaged = any(says_damaged_state_answers_config_invalid(part) for part in clauses(meaning))
-    merged = any(re.search(r"\breport_not_found\b|\bconfig_invalid\b", part) and re.search(UNREADABLE, part, re.IGNORECASE) for part in clauses(meaning))
+    damaged = any(says_damaged_state_answers_report_state_damaged(part) for part in clauses(meaning))
+    merged = any(re.search(r"\breport_not_found\b|\breport_state_damaged\b", part) and re.search(UNREADABLE, part, re.IGNORECASE) for part in clauses(meaning))
     return unreadable and damaged and not merged
 
 
@@ -818,7 +818,7 @@ def test_the_catalogue_tells_an_unreadable_report_state_from_a_damaged_or_missin
     """Which read failure is which left the report tools' descriptions for the
     catalogue, where a refusal's remediation sends its caller. Resolved through
     the resource a host reads: `report_unreadable` is a state that exists and
-    could not be read, and one that reads and is damaged answers `config_invalid`."""
+    could not be read, and one that reads and is damaged answers `report_state_damaged`."""
     service = new_service(tmp_path / "catalogue")
     try:
         entry = json.loads(read_text(service, ERROR_URI_PREFIX + "report_unreadable"))
@@ -830,16 +830,16 @@ def test_the_catalogue_tells_an_unreadable_report_state_from_a_damaged_or_missin
 @pytest.mark.parametrize(
     ("pattern", "replacement"),
     [
-        (r"\banswers `config_invalid`", "never answers `config_invalid`"),
-        (r"\banswers `config_invalid`", "cannot answer `config_invalid`"),
-        (r"\bis damaged answers `config_invalid` instead", "is damaged answers this as well"),
-        (r"A report state that reads and is damaged answers `config_invalid` instead\.", "No damaged report state answers `config_invalid`."),
+        (r"\banswers `report_state_damaged`", "never answers `report_state_damaged`"),
+        (r"\banswers `report_state_damaged`", "cannot answer `report_state_damaged`"),
+        (r"\bis damaged answers `report_state_damaged` instead", "is damaged answers this as well"),
+        (r"A report state that reads and is damaged answers `report_state_damaged` instead\.", "No damaged report state answers `report_state_damaged`."),
     ],
     ids=["negated", "cannot", "merged", "subject"],
 )
 def test_the_unreadable_check_refuses_a_served_entry_that_inverts_the_damaged_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pattern: str, replacement: str) -> None:
-    """A malformed report state raises `config_invalid` (report.py:666-673); only
-    an OSError or ValueError on the read is `report_unreadable` (report.py:646-656).
+    """A malformed report state raises `report_state_damaged` (#689); only an
+    OSError or ValueError on the read is `report_unreadable`.
     The same entry, with that mapping negated or folded into this one, has to fail
     the check when it is read the way a host reads it."""
     planted, count = re.subn(pattern, replacement, ERROR_CATALOGUE["report_unreadable"].meaning)
@@ -1065,20 +1065,20 @@ PARAPHRASES = [
     (
         says_unreadable_state_apart,
         (
-            "This project's report state exists and reading it failed. A report state that reads and is damaged answers `config_invalid` instead.",
-            "The state exists but cannot be read; a malformed one is config_invalid.",
+            "This project's report state exists and reading it failed. A report state that reads and is damaged answers `report_state_damaged` instead.",
+            "The state exists but cannot be read; a malformed one is report_state_damaged.",
         ),
         (
             "This project's report state exists and reading it failed.",
             "The report state exists and reading it failed; a damaged one answers this too.",
-            "The state exists and reading it failed, or it reads and is damaged: config_invalid.",
-            "Nothing is stored yet: report_not_found. The state exists and reading it failed, or is damaged: report_not_found or config_invalid.",
-            "This project's report state exists and reading it failed. A report state that reads and is damaged never answers `config_invalid`.",
-            "The state exists but cannot be read; a malformed one does not answer config_invalid.",
-            "The state exists but cannot be read; a damaged state cannot answer `config_invalid`.",
-            "The state exists but cannot be read; a malformed one can't answer config_invalid.",
-            "The state exists but cannot be read; config_invalid is never a damaged one.",
-            "This project's report state exists and reading it failed. No damaged report state answers `config_invalid`.",
+            "The state exists and reading it failed, or it reads and is damaged: report_state_damaged.",
+            "Nothing is stored yet: report_not_found. The state exists and reading it failed, or is damaged: report_not_found or report_state_damaged.",
+            "This project's report state exists and reading it failed. A report state that reads and is damaged never answers `report_state_damaged`.",
+            "The state exists but cannot be read; a malformed one does not answer report_state_damaged.",
+            "The state exists but cannot be read; a damaged state cannot answer `report_state_damaged`.",
+            "The state exists but cannot be read; a malformed one can't answer report_state_damaged.",
+            "The state exists but cannot be read; report_state_damaged is never a damaged one.",
+            "This project's report state exists and reading it failed. No damaged report state answers `report_state_damaged`.",
         ),
     ),
     (
@@ -1883,7 +1883,7 @@ def test_some_refusals_record_no_report(tmp_path: Path, permissions: dict | None
 
 
 @pytest.mark.parametrize("tool", REPORT_TOOLS)
-def test_a_malformed_report_state_answers_config_invalid(tmp_path: Path, tool: str) -> None:
+def test_a_malformed_report_state_answers_report_state_damaged(tmp_path: Path, tool: str) -> None:
     service = new_service(tmp_path / "ws", debugger_executable=FAKE_OPENOCD_NO_TARGET)
     try:
         flash(service)
@@ -1892,7 +1892,7 @@ def test_a_malformed_report_state_answers_config_invalid(tmp_path: Path, tool: s
     finally:
         close(service)
     assert answer["ok"] is False, answer
-    assert answer["error_type"] == "config_invalid", answer
+    assert answer["error_type"] == "report_state_damaged", answer
 
 
 @pytest.mark.parametrize("tool", REPORT_TOOLS)

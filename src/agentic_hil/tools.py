@@ -3769,7 +3769,7 @@ def generation_audit_barrier(current: AgenticHILConfig) -> ConfigError | None:
     what a regeneration replaces, because `provisionable_state_root` chooses a
     root that passes the same check. Every other failure is about content under a
     `state_root` that is otherwise fine: a corrupt `report-state.json` is
-    `config_invalid`, a full disk or a vanished mount is an `OSError`. A
+    `report_state_damaged`, a full disk or a vanished mount is an `OSError`. A
     regeneration does not touch those, so reading the board around them would
     bypass the audit gate for a failure it does not repair and then report a
     repair that never happened, the next hardware call would meet the very same
