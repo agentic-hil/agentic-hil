@@ -305,6 +305,81 @@ def test_participant_scoped_failure_does_not_quarantine_peer_session(tmp_path: P
         service.close()
 
 
+UNSHARED_YAML = f'''can_buses:
+  {BUS}:
+    adapter: process
+    channel: exclusive
+    executable: fake-bridge
+    permissions:
+      allow_read: true
+      allow_write: true
+'''
+
+
+class ExclusiveFakeAdapter:
+    """A single-owner adapter session that opens, idles and closes."""
+
+    adapter_name = "process"
+
+    def __init__(self):
+        self.closed = False
+
+    def send(self, frame) -> dict:
+        return {"ok": True}
+
+    def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+        return {"ok": True, "frames": []}
+
+    def status(self) -> dict:
+        return {"ok": True, "active": not self.closed}
+
+    def close(self) -> dict:
+        self.closed = True
+        return {"ok": True, "safe_state_confirmed": True, "process_reaped": True}
+
+
+def test_stop_refuses_a_participant_the_shared_bus_does_not_declare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A misspelled participant is refused, not told the bus is idle (#632)."""
+    import agentic_hil.canbroker as broker_module
+
+    monkeypatch.setattr(broker_module, "attach_participant", lambda config, bus_id, participant, **kwargs: SharedFakeParticipant(participant))
+    service = AgenticHILToolService(config_for(tmp_path))
+    try:
+        started = service.call("can_session_start", {"bus_id": BUS, "participant": "ecu_a", "clear_rx_queue": False})
+        assert started["ok"] is True, started
+        stopped = service.call("can_session_stop", {"bus_id": BUS, "participant": "ecu_x"})
+        assert stopped["ok"] is False, stopped
+        assert stopped["error_type"] == "can_participant_not_configured", stopped
+        assert stopped["participant"] == "ecu_x", stopped
+        assert stopped["configured_participants"] == ["ecu_a", "ecu_b"], stopped
+        assert stopped["side_effect_committed"] is False, stopped
+        assert stopped["remediation"], stopped
+        assert "was_active" not in stopped, stopped
+        assert (BUS, "ecu_a") in service.can_buses.sessions
+        assert service.call("can_session_stop", {"bus_id": BUS, "participant": "ecu_a"})["was_active"] is True
+    finally:
+        service.close()
+
+
+def test_stop_refuses_a_participant_on_a_bus_without_shares(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The open session is not hidden behind a "was not active" (#632)."""
+    adapter = ExclusiveFakeAdapter()
+    monkeypatch.setattr("agentic_hil.can.open_adapter", lambda config, bus_id, bus_config, clear_rx_queue, contact=None: {"ok": True, "session": adapter})
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path, can_buses_yaml=UNSHARED_YAML))))
+    try:
+        started = service.call("can_session_start", {"bus_id": BUS, "clear_rx_queue": False})
+        assert started["ok"] is True, started
+        stopped = service.call("can_session_stop", {"bus_id": BUS, "participant": "nobody"})
+        assert stopped["ok"] is False, stopped
+        assert stopped["error_type"] == "can_participant_not_configured", stopped
+        assert stopped["configured_participants"] == [], stopped
+        assert adapter.closed is False
+        plain = service.call("can_session_stop", {"bus_id": BUS})
+        assert plain["was_active"] is True, plain
+    finally:
+        service.close()
+
+
 def test_unshared_bus_keeps_exclusive_session_semantics(tmp_path: Path):
     config = load_config(str(write_config(tmp_path, can_buses_yaml=f'''can_buses:\n  {BUS}:\n    adapter: process\n    channel: exclusive\n    executable: fake-bridge\n''')))
     device = resolve_devices(config, [{"kind": "can", "id": BUS}]).devices[0]
