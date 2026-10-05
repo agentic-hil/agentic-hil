@@ -10850,13 +10850,22 @@ def _logged_arguments(tmp_path: Path, result: dict) -> list[str]:
     return shlex.split(logged, posix=True)
 
 
-@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
+def _openocd_program_line(arguments: list[str]) -> str:
+    """The `program` command out of the script OpenOCD was handed with `-c`."""
+    scripts = [argument for argument in arguments if "program " in argument]
+    assert len(scripts) == 1, arguments
+    lines = [part.strip() for part in scripts[0].split(";") if part.strip().startswith("program ")]
+    assert len(lines) == 1, scripts
+    return lines[0]
+
+
+@pytest.mark.parametrize("backend", ["openocd", "stlink", "pyocd"])
 def test_bin_flash_carries_the_flash_address_in_the_tool_argument_order(tmp_path: Path, backend: str) -> None:
     firmware = tmp_path / "build" / "firmware.bin"
     firmware.parent.mkdir(parents=True)
     firmware.write_bytes(b"\x01\x02\x03\x04")
-    probe = {"stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
-    target_type = {"stlink": None, "pyocd": "stm32f446re"}[backend]
+    probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+    target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
     config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
     service = AgenticHILToolService(config)
     try:
@@ -10874,6 +10883,13 @@ def test_bin_flash_carries_the_flash_address_in_the_tool_argument_order(tmp_path
         # displaced.
         assert arguments[at + 3] == "-v", arguments
         assert arguments.count("0x08000000") == 1, arguments
+    elif backend == "openocd":
+        # OpenOCD's `program` takes a binary image's load address as its
+        # offset argument, which its `help program` lists right after the file;
+        # without one it writes the image from address 0.
+        script = _openocd_program_line(arguments)
+        assert re.fullmatch(r'program "[^"]*\.bin" 0x08000000 verify', script), script
+        assert script.count("0x08000000") == 1, script
     else:
         # The fake is a script, so the interpreter and the script stand in
         # front of pyOCD's own subcommand; the order asserted starts there.
@@ -10887,7 +10903,7 @@ def test_bin_flash_carries_the_flash_address_in_the_tool_argument_order(tmp_path
         assert arguments.count("0x08000000") == 1, arguments
 
 
-@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
+@pytest.mark.parametrize("backend", ["openocd", "stlink", "pyocd"])
 def test_an_elf_flash_never_carries_the_flash_address_even_when_configured(tmp_path: Path, backend: str) -> None:
     """The neighbour: the address is for a raw image and is not read for an ELF.
 
@@ -10899,8 +10915,8 @@ def test_an_elf_flash_never_carries_the_flash_address_even_when_configured(tmp_p
     firmware = tmp_path / "build" / "firmware.elf"
     firmware.parent.mkdir(parents=True)
     firmware.write_bytes(b"\x7fELFfake")
-    probe = {"stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
-    target_type = {"stlink": None, "pyocd": "stm32f446re"}[backend]
+    probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+    target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
     config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
     service = AgenticHILToolService(config)
     try:
@@ -10916,11 +10932,13 @@ def test_an_elf_flash_never_carries_the_flash_address_even_when_configured(tmp_p
         at = arguments.index("-w")
         assert Path(arguments[at + 1]).suffix == ".elf", arguments
         assert arguments[at + 2] == "-v", arguments
+    elif backend == "openocd":
+        assert re.fullmatch(r'program "[^"]*\.elf" verify', _openocd_program_line(arguments)), arguments
     else:
         assert Path(arguments[-1]).suffix == ".elf", arguments
 
 
-@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
+@pytest.mark.parametrize("backend", ["openocd", "stlink", "pyocd"])
 def test_a_bin_flash_without_a_flash_address_runs_no_tool_at_all(tmp_path: Path, backend: str) -> None:
     """The other neighbour: the refusal stays, and it stays before the tool runs.
 
@@ -10931,8 +10949,8 @@ def test_a_bin_flash_without_a_flash_address_runs_no_tool_at_all(tmp_path: Path,
     firmware = tmp_path / "build" / "firmware.bin"
     firmware.parent.mkdir(parents=True)
     firmware.write_bytes(b"\x01\x02\x03\x04")
-    probe = {"stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
-    target_type = {"stlink": None, "pyocd": "stm32f446re"}[backend]
+    probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+    target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
     config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type)))
     service = AgenticHILToolService(config)
     try:
@@ -10945,7 +10963,7 @@ def test_a_bin_flash_without_a_flash_address_runs_no_tool_at_all(tmp_path: Path,
     assert "log_path" not in result, result
 
 
-@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
+@pytest.mark.parametrize("backend", ["openocd", "stlink", "pyocd"])
 def test_a_hex_flash_never_carries_the_flash_address_even_when_configured(tmp_path: Path, backend: str) -> None:
     """The other format that carries its own addresses: an Intel HEX record names
     where every byte goes, so a configured `flash_address` is not read for it
@@ -10954,8 +10972,8 @@ def test_a_hex_flash_never_carries_the_flash_address_even_when_configured(tmp_pa
     firmware.parent.mkdir(parents=True)
     records = [intel_hex_record(0, 0x04, bytes([0x08, 0x00])), intel_hex_record(0, 0x00, b"\x01\x02\x03\x04"), ":00000001FF"]
     firmware.write_text("\n".join(records) + "\n", encoding="ascii")
-    probe = {"stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
-    target_type = {"stlink": None, "pyocd": "stm32f446re"}[backend]
+    probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+    target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
     config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
     service = AgenticHILToolService(config)
     try:
@@ -10971,6 +10989,8 @@ def test_a_hex_flash_never_carries_the_flash_address_even_when_configured(tmp_pa
         at = arguments.index("-w")
         assert Path(arguments[at + 1]).suffix == ".hex", arguments
         assert arguments[at + 2] == "-v", arguments
+    elif backend == "openocd":
+        assert re.fullmatch(r'program "[^"]*\.hex" verify', _openocd_program_line(arguments)), arguments
     else:
         assert Path(arguments[-1]).suffix == ".hex", arguments
 
@@ -10996,6 +11016,62 @@ def test_a_bin_flash_with_a_reset_keeps_the_address_between_the_file_and_the_fla
     assert Path(arguments[at + 1]).suffix == ".bin", arguments
     assert arguments[at + 2 : at + 5] == ["0x08000000", "-v", "-rst"], arguments
     assert arguments.count("0x08000000") == 1, arguments
+
+
+def test_an_openocd_bin_flash_with_a_reset_keeps_the_address_after_the_file(tmp_path: Path) -> None:
+    """The reset is one more word on the same `program` line, and the address
+    stays where `help program` puts it: right after the file (#680)."""
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"")
+    config = load_config(str(write_config(tmp_path, flash_address="0x08000000")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin", "reset_after_flash": True})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert result["reset_after_flash"] is True
+    script = _openocd_program_line(_logged_arguments(tmp_path, result))
+    assert re.fullmatch(r'program "[^"]*\.bin" 0x08000000 verify reset', script), script
+
+
+# What each backend calls itself in the answers a caller repeats to the user:
+# the tool that ran, never the probe model (#681).
+BACKEND_TOOL_NAMES = {"openocd": "OpenOCD", "pyocd": "pyOCD", "stlink": "STM32CubeProgrammer"}
+
+
+@pytest.mark.parametrize("backend", sorted(BACKEND_TOOL_NAMES))
+def test_the_bin_refusal_names_the_backend_tool_that_needs_the_address(tmp_path: Path, backend: str) -> None:
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"")
+    config = load_config(str(write_config(tmp_path, debugger_type=backend)))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "invalid_argument", result
+    assert result["summary"] == f"Flashing .bin artifacts with {BACKEND_TOOL_NAMES[backend]} requires debuggers.<name>.flash_address.", result
+
+
+@pytest.mark.parametrize("backend", sorted(BACKEND_TOOL_NAMES))
+def test_the_probe_answer_names_the_backend_tool_that_ran(tmp_path: Path, backend: str) -> None:
+    probe = {"openocd": None, "stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+    target_type = {"openocd": None, "stlink": None, "pyocd": "stm32f446re"}[backend]
+    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type)))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "probe_target", {})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert result["summary"] == f"Target detected through {BACKEND_TOOL_NAMES[backend]}.", result
 
 
 FLASH_TOOL_HELP_RECORDINGS = Path(__file__).resolve().parent / "fixtures" / "flash_tool_help_recordings.json"
