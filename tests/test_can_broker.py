@@ -865,7 +865,8 @@ def test_broker_permission_refusals_name_the_participant_key(tmp_path: Path, mon
         "          allow_read: true\n"
         "          allow_write: true\n"
     )
-    config = shared_config(tmp_path, monkeypatch, config_version=2, shares=shares)
+    # A legacy file, where reading is a grant of its own rather than free.
+    config = shared_config(tmp_path, monkeypatch, config_version=1, shares=shares)
     broker, seated = _inprocess_broker(tmp_path, config)
 
     sent = broker._handle_send(seated["alpha"], {"frame": canbroker.frame_to_wire(0x201, b"\x01")})

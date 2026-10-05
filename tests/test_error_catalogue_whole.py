@@ -650,7 +650,9 @@ COLLECTED_TYPE_COUNT = 218
 # producer in `GdbDebugSessions.continue_execution`; the joint host scan finds
 # two additional producers, with every previous producer still present.
 # `CanBusService.session_stop` writes `can_participant_not_configured` (#632).
-PRODUCER_COUNT = 645
+# The broker's two `permission_denied` refusals are written by one function,
+# `CanBroker._permission_refusal`, which names the key (#657).
+PRODUCER_COUNT = 644
 
 
 def pin_problems(inventory: Inventory) -> list[str]:

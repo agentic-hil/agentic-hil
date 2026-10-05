@@ -411,6 +411,16 @@ def broker_incident_scope(result: JsonObject) -> str | None:
     return None
 
 
+def backend_remediation_fields(result: JsonObject) -> JsonObject:
+    """The advice for a refusal a backend answered, by its type.
+
+    A `permission_denied` the broker answers names the key it read closed under
+    `permission`; the advice for that key is the one the server's own refusal
+    carries, and without the key the keyed entry has nothing to say (#657)."""
+    permission = result.get("permission")
+    return remediation_fields(result.get("error_type"), permission=permission if isinstance(permission, str) and permission else None)
+
+
 def socketcan_bitrate_honesty_fields(bus_config: CanBusConfig) -> JsonObject:
     """Whether this bus's ``bitrate`` is a fact this session set, said honestly.
 
@@ -758,7 +768,7 @@ class CanBusService:
             # process bridge is code this project did not write and need not.
             # Both are the same error type to the caller, so both name the same
             # causes about the bus (#517).
-            result = {"tool": "can_send", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "log_path": display_path(self.config, session.log_path), **remediation_fields(sent.get("error_type")), **can_likely_causes(sent.get("error_type")), **sent}
+            result = {"tool": "can_send", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "log_path": display_path(self.config, session.log_path), **backend_remediation_fields(sent), **can_likely_causes(sent.get("error_type")), **sent}
             if result.get("side_effect_committed") is not False and result.get("side_effect_status") is None:
                 result.update({"side_effect_status": "unknown", "cleanup_required": True})
             audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "direction": "tx", **result})
@@ -801,7 +811,7 @@ class CanBusService:
         if not read["ok"]:
             if session.participant is not None and broker_incident_scope(read) == "bus":
                 session.lease.quarantine("can_read_effect_unconfirmed", read)
-            result = {"tool": "can_read", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "adapter": session.adapter_session.adapter_name, "log_path": display_path(self.config, session.log_path), **remediation_fields(read.get("error_type")), **read}
+            result = {"tool": "can_read", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "adapter": session.adapter_session.adapter_name, "log_path": display_path(self.config, session.log_path), **backend_remediation_fields(read), **read}
             if result.get("side_effect_committed") is not False and result.get("side_effect_status") is None:
                 result.update({"side_effect_status": "unknown", "cleanup_required": True})
             audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "direction": "rx", **result})
@@ -840,7 +850,7 @@ class CanBusService:
             if not read["ok"]:
                 if session.participant is not None and broker_incident_scope(read) == "bus":
                     session.lease.quarantine("can_read_effect_unconfirmed", read)
-                result = {"tool": "can_read", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "adapter": adapter, "log_path": display_path(self.config, session.log_path), **remediation_fields(read.get("error_type")), **read, **kept}
+                result = {"tool": "can_read", "bus_id": bus_id, **({"participant": session.participant} if session.participant is not None else {}), "adapter": adapter, "log_path": display_path(self.config, session.log_path), **backend_remediation_fields(read), **read, **kept}
                 if result.get("side_effect_committed") is not False and result.get("side_effect_status") is None:
                     result.update({"side_effect_status": "unknown", "cleanup_required": True})
                 audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "direction": "rx", **result})
