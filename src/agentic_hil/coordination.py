@@ -645,6 +645,11 @@ class HardwareCoordinator:
         self.adopted_reason: str | None = None
         self.quarantine_id: str | None = None
         self.incident_resources: set[str] = set()
+        # Leases of sessions whose handle is closed and whose ledger broke,
+        # handed into the standing incident by `hand_over_to_incident`. They
+        # hold no lock, and are kept only so the project record goes on naming
+        # them, and their broken audit, until the operator signs.
+        self.incident_leases: dict[str, HardwareLease] = {}
         self._state = "open"
         self._guard = threading.RLock()
 
@@ -936,6 +941,7 @@ class HardwareCoordinator:
         claimed = sorted({item.lock_key if isinstance(item, Device) else fold_resource_name(item) for item in resources if isinstance(item, Device) or (isinstance(item, str) and item)})
         with self._guard:
             self._require_open()
+            self.settle_external_recovery()
             undeclared = self._undeclared(claimed)
             if undeclared:
                 raise CoordinationError(
@@ -1224,6 +1230,77 @@ class HardwareCoordinator:
                 return
             lease.cleanup_events.append(details)
             self._persist_lease(lease)
+
+    def hand_over_to_incident(self, lease: HardwareLease) -> bool:
+        """Give the locks of a closed session back into the standing incident.
+
+        For a session whose handle is closed and whose lease is held by an
+        incident that stands (a broken audit). Nothing this process can do
+        ends that incident, and ``recover`` refuses while a live owner holds a
+        lock, so a lease kept here would leave the operator nothing to sign
+        until the server stops. The lease leaves this owner's population, its
+        resource locks, its machine-wide hold and, with no other lease left,
+        the project lock are given back, and the markers keep saying
+        ``cleanup_required`` under the same quarantine id: the resources stay
+        quarantined on disk, and this owner refuses them in memory, until the
+        operator's ``recover`` signs. ``settle_external_recovery`` is how this
+        owner then learns the signature happened.
+
+        False, and nothing changed, for a lease this does not apply to: no
+        standing incident, a lease that is not in cleanup state, or one that is
+        not this owner's."""
+        with self._guard:
+            if not isinstance(lease, HardwareLease) or not self.incident_stands or lease.state not in {"cleanup_required", "quarantined"} or not self._valid_lease(lease):
+                return False
+            remaining = {lease_id: item for lease_id, item in self.leases.items() if lease_id != lease.lease_id}
+            self.incident_leases[lease.lease_id] = lease
+            try:
+                self._persist_lease(lease)
+                self._persist_project("cleanup_required", leases=remaining)
+            except (CoordinationError, ConfigError, OSError, ValueError):
+                self.incident_leases.pop(lease.lease_id, None)
+                return False
+            self.leases = remaining
+            lease.valid = False
+            while lease.locks:
+                lease.locks[-1].release()
+                lease.locks.pop()
+            self.bench.release(lease.bench_resources)
+            lease.bench_resources = []
+            if not self.leases and self.project_lock is not None:
+                self.project_lock.release()
+                self.project_lock = None
+            return True
+
+    def settle_external_recovery(self) -> bool:
+        """Learn that an operator's ``recover`` in another process signed this owner's incident.
+
+        Only for an incident this owner holds no lock for, which is what lets
+        another process sign it at all: the project record then says
+        ``released`` under the quarantine id this owner was holding, and the
+        incident ends here too. Anything else leaves the incident as it is."""
+        with self._guard:
+            if self._state != "open" or not self.blocked or self.leases or self.project_lock is not None or not self.quarantine_id:
+                return False
+            try:
+                record = self._read_record(self.project_key)
+            except CoordinationError:
+                return False
+            if record is None or record.get("state") != "released" or record.get("recovered_quarantine_id") != self.quarantine_id:
+                return False
+            self.blocked = False
+            self.audit_incident = False
+            self.adopted_reason = None
+            self.quarantine_id = None
+            self.incident_resources.clear()
+            self.incident_leases.clear()
+            return True
+
+    def held_lease_next_step(self, stop_tool: str) -> str:
+        """What ends the incident a closed session's lease is held under."""
+        if self.run_active:
+            return f"Call bench_run_stop: the run's teardown ends the incident, and {stop_tool} then gives the resource back."
+        return f"End the session that holds the incident open (debug_stop_session for a debug session), then call {stop_tool} again."
 
     def stand_down(self) -> JsonObject | None:
         """End an incident that owes no gate, and leave the ledger saying so.
@@ -1625,6 +1702,7 @@ class HardwareCoordinator:
 
     def status(self) -> JsonObject:
         with self._guard:
+            self.settle_external_recovery()
             owner_active = self.project_lock is not None
             snapshot_atomic = True
             released_dead_owner: JsonObject | None = None
@@ -2105,6 +2183,7 @@ class HardwareCoordinator:
                 self.adopted_reason = None
                 self.quarantine_id = None
                 self.incident_resources.clear()
+                self.incident_leases.clear()
                 return {
                     "ok": True,
                     "tool": "hardware_recover",
@@ -2231,7 +2310,7 @@ class HardwareCoordinator:
         if resources is None:
             resources = sorted({resource for lease in population.values() for resource in lease.resources} | (self.incident_resources if state in {"cleanup_required", "quarantined"} else set()))
         record = self._base_record(state, resources)
-        record["leases"] = [lease.status() for lease in population.values()]
+        record["leases"] = [lease.status() for lease in population.values()] + [lease.status() for lease_id, lease in self.incident_leases.items() if lease_id not in population]
         if state in {"cleanup_required", "quarantined"}:
             record["quarantine_id"] = self.quarantine_id
             if self.adopted_reason and not any(lease.status().get("cleanup_reasons") for lease in population.values()):

@@ -943,6 +943,10 @@ class AgenticHILToolService:
             # and does not cover.
             if name in probe_addressing_tools() and len(self.config.debuggers) > 1 and self.config.debugger is not None and self.config.debugger.probe_id is None:
                 return unnamed_probe_error(name, self.config)
+            # An operator's `recover` in another process may have signed an
+            # incident this owner handed its locks into; learn it before the
+            # incident is read below.
+            self.coordinator.settle_external_recovery()
             blocked_before = self.coordinator.blocked
             if blocked_before and name in audited_hardware_tools() and name not in containment_tools():
                 try:
