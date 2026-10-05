@@ -4287,20 +4287,54 @@ def _read_record_entries(path: Path) -> list[Path] | None:
     configuration lives somewhere else, and a question about a record must not
     plant the root it would have lived under.
     """
+    entries, _ = _read_record(path)
+    return entries
+
+
+# How a record failed to read, in the words its refusal states it (#692).
+RECORD_UNOPENABLE = "unopenable"
+RECORD_NOT_JSON = "not_json"
+RECORD_WRONG_SHAPE = "wrong_shape"
+_RECORD_FAILURE_WORDS = {
+    RECORD_UNOPENABLE: "could not be opened",
+    RECORD_NOT_JSON: "is not JSON",
+    RECORD_WRONG_SHAPE: "is not a JSON object whose `configurations` is a list of absolute paths",
+}
+
+
+def _read_record(path: Path) -> tuple[list[Path] | None, str | None]:
+    """`_read_record_entries`, with how the read failed when it did."""
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return []
-    except (OSError, UnicodeDecodeError):
-        return None
+        return [], None
+    except UnicodeDecodeError:
+        return None, RECORD_NOT_JSON
+    except OSError:
+        return None, RECORD_UNOPENABLE
     try:
         document = json.loads(raw)
     except json.JSONDecodeError:
-        return None
+        return None, RECORD_NOT_JSON
     entries = document.get("configurations") if isinstance(document, dict) else None
     if not isinstance(entries, list) or not all(isinstance(entry, str) and Path(entry).is_absolute() for entry in entries):
-        return None
-    return [absolute_without_symlinks(Path(entry)) for entry in entries]
+        return None, RECORD_WRONG_SHAPE
+    return [absolute_without_symlinks(Path(entry)) for entry in entries], None
+
+
+def _unreadable_record_source() -> tuple[Path, str] | None:
+    """The first record `_recorded_external_configurations` could not read, and how.
+
+    The union reads every coexisting record and gives up on the first that does
+    not read, without saying which. A refusal that named the record this user's
+    commands write to instead sent the operator to a healthy file while the
+    damaged copy stood beside the other configuration root (#692).
+    """
+    for source in _external_project_record_read_sources():
+        entries, failure = _read_record(source)
+        if entries is None:
+            return source, failure or RECORD_UNOPENABLE
+    return None
 
 
 def _recorded_external_configurations() -> list[Path] | None:
@@ -4385,11 +4419,19 @@ def _record_external_configuration(config_path: Path) -> JsonObject | None:
     path = _external_project_record_path()
     recorded = _recorded_external_configurations()
     if recorded is None:
+        # The record that failed is the one named, and how; the record writes go
+        # to is reported apart, because it may be the healthy one (#692).
+        unreadable, failure = _unreadable_record_source() or (path, RECORD_UNOPENABLE)
         return {
             "ok": False,
             "error_type": "agent_project_record_unreadable",
-            "summary": f"{path} is not the record of Agentic HIL projects it has to be, so this project could not be recorded and no deny rule was written; left untouched.",
-            "path": str(path),
+            "summary": (
+                f"{unreadable} {_RECORD_FAILURE_WORDS[failure]}, so it is not the record of Agentic HIL projects it has "
+                "to be; this project could not be recorded and no deny rule was written. Left untouched."
+            ),
+            "path": str(unreadable),
+            "reason": failure,
+            "write_path": str(path),
             **remediation_fields("agent_project_record_unreadable"),
         }
     absolute = absolute_without_symlinks(config_path)

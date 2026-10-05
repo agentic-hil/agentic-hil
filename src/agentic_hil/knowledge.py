@@ -1334,13 +1334,13 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "record it has to be: it could not be opened, is not JSON, or is not a JSON object whose `configurations` "
             "is a list of absolute paths. A record that may name projects and cannot be read is no ground to write "
             "rules from, so this project was not recorded, no deny rule was written, and the file was left untouched. "
-            "`path` is the record this user's commands write to; a second copy can stand beside the other "
-            "configuration root, and an unreadable copy there refuses the same way."
+            "`path` is the record that did not read, and `reason` says how: `unopenable`, `not_json` or "
+            "`wrong_shape`. A copy can stand beside each configuration root, so `write_path`, the record this "
+            "user's commands write to, is reported apart and may be a different, healthy file."
         ),
         remediation=(
-            "Open `external-projects.json` at `path`, and the copy beside the other configuration root if there is "
-            "one, and find the one that does not read: a file this account cannot open, a syntax error, or an entry "
-            "that is not an absolute path.",
+            "Open `external-projects.json` at `path` and find what `reason` names: a file this account cannot open "
+            "(`unopenable`), a syntax error (`not_json`), or an entry that is not an absolute path (`wrong_shape`).",
             "Have the operator repair that file in place, keeping every path it names: a JSON object whose "
             "`configurations` key holds a list of absolute configuration paths.",
             "Run the same command again.",
