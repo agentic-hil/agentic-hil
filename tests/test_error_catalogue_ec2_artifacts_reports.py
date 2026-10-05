@@ -1572,6 +1572,41 @@ def test_a_debug_stop_whose_release_cannot_be_recorded(tmp_path: Path, monkeypat
     assert re.search(r"no debug session is active", str(again.get("summary")), re.IGNORECASE), again
 
 
+def test_a_debug_stop_whose_release_cannot_be_recorded_says_what_is_unsettled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#676: the session ended with its target state confirmed, and only the lease record is unsettled."""
+    service = debug_service(tmp_path)
+    coordinator = service.coordinator
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        monkeypatch.setattr(coordinator, "_write_record", failing_write_record(coordinator, lambda resource, record: record.get("state") == "released"))
+        result = service.call("debug_stop_session")
+    finally:
+        monkeypatch.setattr(coordinator, "_write_record", type(coordinator)._write_record.__get__(coordinator))
+        service.close()
+    summary = str(result.get("summary"))
+    assert result.get("error_type") == "cleanup_required", result
+    assert "target state remains unconfirmed" not in summary, summary
+    assert re.search(r"debug session is over", summary, re.IGNORECASE), summary
+    assert re.search(r"release could not be recorded", summary), summary
+
+
+def test_a_debug_shutdown_whose_release_cannot_be_recorded_says_what_is_unsettled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#676: shutdown still fails closed, and its words name the lease record rather than the target."""
+    service = debug_service(tmp_path)
+    coordinator = service.coordinator
+    assert start_debug_session(service, mode="attach")["ok"] is True
+    monkeypatch.setattr(coordinator, "_write_record", failing_write_record(coordinator, lambda resource, record: record.get("state") == "released"))
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            service.close()
+    finally:
+        monkeypatch.setattr(coordinator, "_write_record", type(coordinator)._write_record.__get__(coordinator))
+        coordinator.close()
+    message = str(raised.value)
+    assert "target state remains unconfirmed" not in message, message
+    assert re.search(r"release could not be recorded", message), message
+
+
 # audit_unavailable from the other modules that build it.
 
 
