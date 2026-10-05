@@ -833,10 +833,10 @@ FACTS: dict[str, Facts] = {
     ),
     "not_supported:unbound_debugger": Facts(
         says=(r"binds none", r"declares no debugger at all, or it declares several", r"retry_safe: false"),
-        steps=(r"configured_debuggers", r"empty.*project_config_create", r"several.*test_reactor_run"),
-        mentions=(r"agentic-hil init --force", r"agentic-hil://reference/test-plan", r"allow_config_write"),
+        steps=(r"configured_debuggers", r"empty.*project_config_set.*project_config_reload_description.*project_config_create", r"several.*test_reactor_run"),
+        mentions=(r"agentic-hil init --force", r"agentic-hil://reference/test-plan", r"allow_config_write", r"allow_config_description_write", r"every grant closed"),
         do_not=(r"other arguments", r"delete or hand-edit"),
-        never=(r"debugger_id", r"project_config_set", r"only the operator can add"),
+        never=(r"debugger_id", r"only the operator can add"),
     ),
     "not_supported:unnamed_probe": Facts(
         says=(r"names no `probe_id` while other entries exist", r"nothing was started"),
