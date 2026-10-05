@@ -498,7 +498,7 @@ class STLinkBackend:
         result = self._run_stlink("probe_target", self._connection_args("HOTPLUG"))
         if result.get("ok"):
             result["target_detected"] = True
-            result["summary"] = "Target detected through ST-Link."
+            result["summary"] = "Target detected through STM32CubeProgrammer."
         return self._write_action_report(result)
 
     def flash_firmware(self, artifact: JsonObject, reset_after_flash: bool = False) -> JsonObject:
@@ -513,7 +513,7 @@ class STLinkBackend:
         write_args = ["-w", artifact_path]
         if Path(artifact_path).suffix.lower() == ".bin":
             if self.config.debugger.flash_address is None:
-                return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with ST-Link requires debuggers.<name>.flash_address.", "artifact": {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}}
+                return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with STM32CubeProgrammer requires debuggers.<name>.flash_address.", "artifact": {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}}
             write_args.append(self.config.debugger.flash_address)
         reset_args = ["-rst"] if reset_after_flash else []
         result = self._run_stlink("flash_firmware", [*self._connection_args(self._flash_connect_mode()), *write_args, "-v", *reset_args])

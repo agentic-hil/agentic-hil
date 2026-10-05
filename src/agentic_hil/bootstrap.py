@@ -718,7 +718,7 @@ def discover_attached_hardware(
         target, target_discovery = _stlink_target_identity(executable, probe_id, timeout_s)
         if target is None:
             return {**target_discovery, "executable": executable, "probe_id": probe_id, "com_ports": com_ports, **found_by}
-        summary = "One attached STM32 target was identified through ST-Link HOTPLUG discovery."
+        summary = "One attached board was identified through STM32CubeProgrammer HOTPLUG discovery."
     else:
         target, target_discovery = _openocd_target_identity(executable, probe_id, profile, timeout_s)
         if target is None and target_discovery.get("ok") is False:
