@@ -1979,10 +1979,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`backend_error`, or the summary.",
             "A permission, a full disk or a file another program holds open is fixed where it is, and the same call "
             "then reads the record again; nothing else has to change.",
-            "A record that is corrupted, from another version or inconsistent is the operator's to judge: no command "
-            "rewrites a coordination record or the canonical ledger, and `agentic-hil lease-status` and "
-            "`agentic-hil recover` stop on the same record. Hand the operator the refusal as it is, with the record "
-            "it names.",
+            "A record that is corrupted, from another version or inconsistent is the operator's to judge, and "
+            "`agentic-hil lease-status` and `agentic-hil recover` stop on the same record. Hand the operator the "
+            "refusal as it is, with the record it names. After checking the board they run `agentic-hil recover "
+            "--confirm-safe-state --retire-records`, adding `--quarantine-id <quarantine_id>` where the project "
+            "record still names one: it keeps each record's bytes under `retired/`, writes the recovery ledger "
+            "first, and frees the bench. The canonical audit ledger has no such route.",
             "`unlockable_lock_keys` is a defect in a device kind, not a bench fault: report it with the plan that "
             "declared the device.",
         ),
@@ -2038,8 +2040,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "When the refusal names a `resource`, that marker is the disagreement. If it is another project's "
             "incident on the same device, `standing_incidents` names it and it resolves in that project's workspace "
             "first.",
-            "When the same id is refused again on the same `resource`, nothing on this side reconciles that marker: "
-            "hand the operator the refusal with the `agentic-hil lease-status` output.",
+            "When the same id is refused again on the same `resource`, no hardware call and no `hardware_recover` "
+            "reconciles that marker: hand the operator the refusal with the `agentic-hil lease-status` output. After "
+            "checking the board they run `agentic-hil recover --confirm-safe-state --retire-records --quarantine-id "
+            "<quarantine_id>`, which sets the marker aside with its bytes kept and writes the recovery ledger.",
         ),
         do_not=(
             "Do not edit or delete the marker to make it match, and do not sign again with the old id.",

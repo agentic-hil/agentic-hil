@@ -610,7 +610,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("lease-status", help="show persistent hardware ownership and quarantine state")
     recover_parser = subparsers.add_parser("recover", help="release quarantined resources after operator-confirmed physical recovery")
     recover_parser.add_argument("--confirm-safe-state", action="store_true", required=True)
-    recover_parser.add_argument("--quarantine-id", required=True)
+    recover_parser.add_argument("--quarantine-id", default=None, help="the incident lease-status names; required, except by --retire-records over a project record that cannot be read")
+    recover_parser.add_argument(
+        "--retire-records",
+        action="store_true",
+        help="set aside this project's coordination records that no recovery can clear (unreadable, from another version, or disagreeing with the incident), keeping their bytes and writing the recovery ledger",
+    )
     recover_parser.add_argument("--accept-config-change", action="store_true", help="explicit operator override: accept that the authoritative config changed since the incident was recorded")
 
     schema_parser = subparsers.add_parser("schema", help="print or write bundled config schema")
@@ -729,6 +734,10 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command in {"lease-status", "recover"}:
         config = load_cli_authoritative_config(None)
         coordinator = HardwareCoordinator(config, "operator-cli")
+        # The way out of a record every other command stops on, so it reads no
+        # status first: that read would stop on the same record (#669).
+        if args.command == "recover" and getattr(args, "retire_records", False):
+            return coordinator.retire_records(safe_state_confirmed=args.confirm_safe_state, quarantine_id=args.quarantine_id)
         status = coordinator.status()
         if args.command == "lease-status":
             return status

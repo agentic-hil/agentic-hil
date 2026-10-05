@@ -660,7 +660,9 @@ COLLECTED_TYPE_COUNT = 220
 # of `can_adapter_close_failed` (#633, #665).
 # The empty-payload refusal adds `invalid_argument` in `comports.payload_bytes`
 # (#634).
-PRODUCER_COUNT = 651
+# `HardwareCoordinator.retire_records` adds six: it answers the refusals
+# `recover` answers, for the operator's way out of a damaged record (#669).
+PRODUCER_COUNT = 657
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
