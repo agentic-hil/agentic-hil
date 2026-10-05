@@ -35,15 +35,16 @@ from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 
-def start_plan_detached(config: AgenticHILConfig, test_config_path: str | None = None, *, wait_s: float = 0.0) -> JsonObject:
+def start_plan_detached(config: AgenticHILConfig, test_config_path: str | None = None, *, wait_s: float = 0.0, command_line: bool = False) -> JsonObject:
     """Start a run in its own process and answer at once.
 
     The plan is loaded here as well as in the worker, and deliberately: a plan
     that does not load is a fault in the file, and answering it with a handle to
     go and ask about would put a refusal a caller could have had immediately
-    behind a second command."""
+    behind a second command. `command_line` is the one thing the frontend adds:
+    whether the answer names the commands or the tools that follow the run."""
     load_test_config(test_config_path, config.work_dir)
-    return start_detached_run(config, test_config_path or DEFAULT_TEST_CONFIG_PATH, wait_s=wait_s)
+    return start_detached_run(config, test_config_path or DEFAULT_TEST_CONFIG_PATH, wait_s=wait_s, command_line=command_line)
 
 
 def run_plan(

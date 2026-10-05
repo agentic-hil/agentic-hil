@@ -740,9 +740,9 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         # one to explain that would leave exactly that job with nothing.
         return write_run_evidence(args.report, args.out)
     if args.command == "test-reactor-status":
-        return run_status(load_cli_authoritative_config(None), args.run)
+        return run_status(load_cli_authoritative_config(None), args.run, command_line=True)
     if args.command == "test-reactor-stop":
-        return request_run_stop(load_cli_authoritative_config(None), args.run)
+        return request_run_stop(load_cli_authoritative_config(None), args.run, command_line=True)
     if args.command in {"lease-status", "recover"}:
         config = load_cli_authoritative_config(None)
         coordinator = HardwareCoordinator(config, "operator-cli")
@@ -3359,7 +3359,7 @@ def initialized_config_path(workspace: Path) -> Path:
 
 def start_detached_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0) -> JsonObject:
     """Start a run in its own process and answer at once, for this working directory."""
-    return start_plan_detached(load_authoritative_config(Path.cwd()), test_config_path, wait_s=wait_s)
+    return start_plan_detached(load_authoritative_config(Path.cwd()), test_config_path, wait_s=wait_s, command_line=True)
 
 
 def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0, run_handle: str | None = None, junit_xml: str | None = None) -> JsonObject:

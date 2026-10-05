@@ -758,9 +758,9 @@ WIRING: list[tuple[list[str], str, dict[str, object]]] = [
     (["debugger-probes"], "debugger_probes", {}),
     (["upgrade", "--agent", "codex", "--agent", "claude-code"], "upgrade_installation", {"agents": ["codex", "claude-code"]}),
     (["uninstall", "--agent", "codex"], "uninstall_agent_integration", {"agents": ["codex"]}),
-    (["test-reactor-status", "--run", "run-0123456789abcdef"], "run_status", {"config": CONFIG, "handle": "run-0123456789abcdef"}),
-    (["test-reactor-status"], "run_status", {"config": CONFIG, "handle": None}),
-    (["test-reactor-stop", "--run", "run-0123456789abcdef"], "request_run_stop", {"config": CONFIG, "handle": "run-0123456789abcdef"}),
+    (["test-reactor-status", "--run", "run-0123456789abcdef"], "run_status", {"config": CONFIG, "handle": "run-0123456789abcdef", "command_line": True}),
+    (["test-reactor-status"], "run_status", {"config": CONFIG, "handle": None, "command_line": True}),
+    (["test-reactor-stop", "--run", "run-0123456789abcdef"], "request_run_stop", {"config": CONFIG, "handle": "run-0123456789abcdef", "command_line": True}),
 ]
 
 

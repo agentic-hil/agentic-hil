@@ -627,11 +627,11 @@ def test_a_killed_worker_is_reported_gone_rather_than_guessed_at(tmp_path: Path,
     gone = wait_for_state(config, result["run"], {"worker_gone", "finished", "stopped"})
 
     assert gone["state"] == "worker_gone", gone
-    assert "lease-status" in gone["next_step"]
+    assert "hardware_lease_status" in gone["next_step"]
     refused = request_run_stop(config, result["run"])
     assert refused["ok"] is False
     assert refused["error_type"] == "run_worker_gone"
-    assert "lease-status" in refused["next_step"]
+    assert "hardware_lease_status" in refused["next_step"]
 
 
 def test_a_killed_worker_leaves_the_bench_to_the_machinery_that_already_owns_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detached_runs) -> None:
