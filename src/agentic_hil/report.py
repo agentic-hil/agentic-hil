@@ -804,6 +804,11 @@ def overall_success(result: JsonObject) -> bool:
     return failed_success_check(result) is None
 
 
+# The tools whose answer is a reading of the bench rather than an action on it.
+# `conclusive_success` takes their verdict from `ok` alone.
+STATE_READ_TOOLS = frozenset({"hardware_lease_status"})
+
+
 def conclusive_success(result: JsonObject) -> bool:
     """`overall_success`, which is the whole of what a verdict may be taken from.
 
@@ -824,12 +829,19 @@ def conclusive_success(result: JsonObject) -> bool:
     and the containment checks above, which is what the nonzero status is for.
 
     Kept as its own name rather than folded into `overall_success` because the
-    two answer different questions to different readers: `is_failure_report` and
-    the MCP ``isError`` flag ask "may this go on", while the exit status and the
-    rendering ask "is there anything standing". They agree today, and a marker
-    that belongs to only one of them has somewhere to go that is not the shared
-    predicate.
+    two answer different questions to different readers: `is_failure_report`
+    asks "may this go on", while the exit status, the rendering and the MCP
+    ``isError`` flag ask whether the call did its job. They differ for one kind
+    of call: a read of the bench's state (`STATE_READ_TOOLS`). Its containment
+    markers describe what it found, not anything it did, so it did its job when
+    it read the record, and the incident it found is data in the answer
+    (`blocked`, `incident_stands`, `cleanup_required`). Scored on those
+    markers, a status read over an open incident answered `isError: true` beside
+    `ok: true` and exited nonzero, so a caller could not tell a record that could
+    not be read from one that was read and named an incident (#684).
     """
+    if result.get("tool") in STATE_READ_TOOLS:
+        return result.get("ok") is True
     return overall_success(result)
 
 
