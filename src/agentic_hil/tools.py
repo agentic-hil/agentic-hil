@@ -3006,15 +3006,28 @@ def unbound_debugger_error(tool: str, config: AgenticHILConfig) -> JsonObject:
     which route exists, and mark the call unretryable so nobody loops on it."""
     configured = sorted(config.debuggers)
     if not configured:
-        summary = (
-            "No debugger is configured in the authoritative config, so this tool has no probe to act on. "
-            "Only the operator can add one."
+        # The configuration tools can add one in place (#691): an entry written
+        # with project_config_set is bound by project_config_reload_description,
+        # since a server with no debugger binds the only one, and
+        # project_config_create generates a configuration with one. Only where
+        # this configuration grants neither is it the operator's to add.
+        routes = []
+        if config.permissions.allow_config_description_write:
+            routes.append("write an entry with `project_config_set` and bind it with `project_config_reload_description`")
+        if config.permissions.allow_config_write:
+            routes.append("generate a configuration with one from the attached hardware with `project_config_create`")
+        how = (
+            f"One can be added here: {' or '.join(routes)}."
+            if routes
+            else "This configuration grants no configuration writes, so adding one is the operator's to do."
         )
+        summary = f"No debugger is configured in the authoritative config, so this tool has no probe to act on. {how}"
     else:
         summary = (
             f"This MCP surface drives a single debug probe, and the authoritative config declares {len(configured)}, "
             "so none is bound. Debugger tools are unavailable here until the project configures exactly one probe. "
-            "A multi-board run goes through `agentic-hil test-reactor` with a plan whose steps name their probe."
+            "A multi-board run goes through `test_reactor_run` (`agentic-hil test-reactor` on the command line) with "
+            "a plan whose steps name their probe."
         )
     return {
         "ok": False,

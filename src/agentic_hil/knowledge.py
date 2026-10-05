@@ -4427,8 +4427,13 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Read `configured_debuggers`.",
-            "If it is empty, the configuration has no debugger: `project_config_create` generates one from the "
-            "attached hardware (it needs `permissions.allow_config_write`), or the operator runs `{reopen_command}`.",
+            "If it is empty, the configuration has no debugger. `project_config_set` writes an entry "
+            "(`debuggers.<name>.type`, `.executable`, and for OpenOCD `.interface_cfg` and `.target_cfg`; it needs "
+            "`permissions.allow_config_description_write`) and `project_config_reload_description` binds it, because a "
+            "server with no debugger binds the only one; `project_config_create` generates a configuration with one "
+            "from the attached hardware (it needs `permissions.allow_config_write`); without either grant the operator "
+            "runs `{reopen_command}`. An entry written this way has every grant closed: the next call's "
+            "`permission_denied` names the key the operator opens.",
             "If it names several, drive them through `test_reactor_run` with a test plan that names the device of "
             "each step (`{test_plan_reference}`). Keeping only one entry is the operator's decision.",
         ),
