@@ -20,7 +20,7 @@ from agentic_hil.config import ConfigError
 from agentic_hil.coordination import CoordinationError
 from agentic_hil.devices import declared_keys
 from agentic_hil.junit import result_with_junit_xml, write_refusal_junit_xml
-from agentic_hil.knowledge import remediation_fields, with_run_remediation
+from agentic_hil.knowledge import TEST_REACTOR_SCOPE, lookup_remedy, remediation_fields, with_run_remediation
 from agentic_hil.report import write_report
 from agentic_hil.runlifecycle import RunRegistration, new_run_handle, start_detached_run
 from agentic_hil.test_reactor import (
@@ -139,7 +139,15 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
         except CoordinationError as error:
             service.close()
             # The refusal's own advice when the coordinator chose one for it,
-            # and otherwise the advice for the type it refused with.
+            # and otherwise the advice for the type it refused with. A type the
+            # catalogue reads differently for a plan run is the exception: the
+            # coordinator's advice is written for whoever holds `bench_run_start`,
+            # and a plan run cannot take the moves it names, such as a `wait_s`
+            # its tool refuses (#673).
+            refusal = dict(error.result)
+            if lookup_remedy(str(refusal.get("error_type")), TEST_REACTOR_SCOPE) is not lookup_remedy(str(refusal.get("error_type"))):
+                refusal.pop("remediation", None)
+                refusal.pop("do_not", None)
             return write_report(
                 config,
                 with_run_remediation(
@@ -151,7 +159,7 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
                         "cleanup": [],
                         "cleanup_ok": True,
                         "declared_devices": devices,
-                        **error.result,
+                        **refusal,
                         "tool": "test_reactor_run",
                         "summary": str(error.result.get("summary", "A device this plan declares is unavailable.")) + " No step ran.",
                         "run": registration.handle,

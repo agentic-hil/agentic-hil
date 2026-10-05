@@ -2884,6 +2884,32 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not delete coordination records or lock files to free the bench.",
         ),
     ),
+    # A plan run's own reading of a held device. The bare entry advises a
+    # bounded `wait_s` on the run start, which `bench_run_start` takes and
+    # `test_reactor_run` does not: its schema refuses the argument, and its
+    # definition says a held device is refused at once (#673).
+    "device_busy:test_reactor": ErrorRemedy(
+        meaning=(
+            "A device this plan declares is held by another owner for the duration of their run, so the plan ran no "
+            "step. The refusal names the holder in `holder` (pid, host, frontend, and the run label when there is "
+            "one) and when it took the device in `held_since`. Nothing was touched."
+        ),
+        remediation=(
+            "Read `holder` and wait for that run, or ask its owner to finish. This is not a fault: it is the exclusivity "
+            "that replaced the read permission.",
+            "A refusal that carries no `holder` is the same hold by an owner whose record does not name it yet: wait for "
+            "it the same way, and do not take the missing heartbeat for a hang.",
+            "A plan run over MCP does not wait for a held device: `test_reactor_run` refuses at once, so call it again "
+            "once the holder's run has ended. An operator who wants the run to wait asks for it bounded, with "
+            "`agentic-hil test-reactor --wait-s <seconds>`.",
+            "A holder whose `heartbeat_age_s` is large and `holder_heartbeat_stale` is true is hung rather than busy; "
+            "the hold is still real, so stop that process rather than deleting anything.",
+        ),
+        do_not=(
+            "Do not delete the lock file, and do not retry in a loop. The hold belongs to a live process; removing it "
+            "would let two runs drive one board, which is the failure the mutex exists to prevent.",
+        ),
+    ),
     # The reactor's verdicts on a step. Each is a firmware or plan outcome the
     # step's own record holds the evidence for, so the entries send the reader
     # to the step at `failed_step` rather than to the bench.

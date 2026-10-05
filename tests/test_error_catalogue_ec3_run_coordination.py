@@ -1414,15 +1414,15 @@ def test_a_detached_run_refused_the_bench_answers_with_its_advice_everywhere(tmp
         stranger.release_all()
 
     report = json.loads((workspace / ".agentic-hil" / "reports" / "last-report.json").read_text(encoding="utf-8"))
-    assert_refusal_carries_its_entry(report, "device_busy")
+    assert_refusal_carries_its_entry(report, "device_busy:test_reactor")
     assert started.get("state") == "finished", started
-    assert_refusal_carries_its_entry(started, "device_busy")
+    assert_refusal_carries_its_entry(started, "device_busy:test_reactor")
     # Status and stop answer the question they were asked, so `ok` is theirs;
     # the run's failure and its advice travel beside it.
     assert status.get("ok") is True and status.get("run_ok") is False, status
-    assert_carries_advice(status, "device_busy")
+    assert_carries_advice(status, "device_busy:test_reactor")
     assert stop.get("ok") is True and stop.get("stop_requested") is False, stop
-    assert_carries_advice(stop, "device_busy")
+    assert_carries_advice(stop, "device_busy:test_reactor")
 
 
 def test_a_detached_run_stopped_before_its_first_step_answers_with_its_advice_everywhere(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
