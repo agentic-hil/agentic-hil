@@ -784,7 +784,7 @@ def enumerated_stlink_ports(discovery: JsonObject) -> list[JsonObject]:
     return [port for port in ports if isinstance(port, dict)] if isinstance(ports, list) else []
 
 
-def discovery_remedy(discovery: JsonObject) -> str:
+def discovery_remedy(discovery: JsonObject, *, frontend: str = "cli") -> str:
     """The one move that clears a failed discovery, named from its own answer.
 
     "Attach the bench" is the right move for `adapter_not_found` only when
@@ -804,6 +804,11 @@ def discovery_remedy(discovery: JsonObject) -> str:
     it under the placeholder file's next steps (#416), and `agentic-hil
     adopt-hardware` answers a failed discovery with it, where it used to tell
     every operator to attach the board, a host with no toolchain included (#504).
+
+    `frontend` is who reads it. A command line names the command and its
+    `--probe-id`; an MCP answer names `project_config_adopt_hardware` and its
+    `probe_id` argument, because its caller has the tool and may have no shell
+    (#690).
     """
     error_type = discovery.get("error_type")
     if error_type == "debugger_not_found":
@@ -850,6 +855,26 @@ def discovery_remedy(discovery: JsonObject) -> str:
             f"board responds, which fills in {ADOPT_FILLS}."
         )
     if error_type == "adapter_not_found":
+        requested = discovery.get("requested_probe_id")
+        if isinstance(requested, str) and requested:
+            # A serial was asked for, by the caller or by the configured entry,
+            # and it is not among the attached ones. The bench is attached, so
+            # "attach the bench and adopt again" only reads the same serial again
+            # and gets the same answer. The usual case is a swapped board, and the
+            # way out is choosing among `probes` (#690).
+            if frontend == "mcp":
+                again = f"call `{PROJECT_CONFIG_ADOPT}` again"
+                select = f"pass the serial of an attached probe as `probe_id` to `{PROJECT_CONFIG_ADOPT}`"
+            else:
+                again = "run `agentic-hil adopt-hardware` again"
+                select = "name one with `agentic-hil adopt-hardware --probe-id <serial>`"
+            return (
+                f"No attached probe has the requested serial '{requested}' (`requested_probe_id`); the serials this host "
+                f"can see are listed under `probes`. To use an attached probe, {select}; to keep '{requested}', attach "
+                f"that board and {again}. Adoption fills in {ADOPT_FILLS} for an entry that names no serial yet. An "
+                "entry configured with another serial is refused as `hardware_mismatch`, because repointing it at a "
+                "different board is the operator's edit."
+            )
         if enumerated_stlink_ports(discovery):
             # Enumeration ran and this host is showing an ST-Link serial port, but
             # no probe serial could be read off it to bind. "Attach the bench"
@@ -998,7 +1023,7 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
             # operator with no toolchain to attach a board that may have been
             # plugged in the whole time, the misdirection #416 took out of
             # `init` (#504).
-            "next_step": str(discovery.get("next_step") or f"{discovery_remedy(discovery)} Nothing was written."),
+            "next_step": str(discovery.get("next_step") or f"{discovery_remedy(discovery, frontend='mcp' if via.startswith('mcp:') else 'cli')} Nothing was written."),
             **NOT_STARTED,
         }
 
