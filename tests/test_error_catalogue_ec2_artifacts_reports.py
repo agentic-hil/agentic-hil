@@ -373,6 +373,7 @@ EXPECTED_INVENTORY: dict[str, frozenset[str]] = {
             "coordination_state_invalid",
             "report_not_found",
             "report_unreadable",
+            "report_write_failed",
             "unknown_debugger_error",
         }
     ),
@@ -425,6 +426,12 @@ NEW_ENTRIES = frozenset(
         "output_validation_failed",
         "report_not_found",
         "report_unreadable",
+        # The nested `audit_error` of a report or log write the filesystem
+        # refused (`report.audit_error_detail`, #675). Both audit paths nest the
+        # same shape, the refusal before an action and the failure after one, so
+        # the type a caller looks up is a catalogue key rather than the Python
+        # class name that used to stand there.
+        "report_write_failed",
         "service_cleanup_required",
         "service_closed",
         "unknown_device",
@@ -488,15 +495,19 @@ OWNED_ELSEWHERE: dict[str, str] = {
 # Every expression a value is computed from rather than written, each pinned on
 # its own with why no entry follows from it. Keyed by the expression, so a second
 # computed value in a function that already has one is a new key here.
+#
+# Three nested `audit_error` expressions used to sit here, one per path that met
+# a failed write: `audit_unavailable`, `mark_audit_failure` and the dispatcher.
+# All three now nest `report.audit_error_detail`, which writes the
+# `report_write_failed` literal above for a filesystem fault and hands a
+# configuration refusal its own `to_dict()`, so none of them computes a type any
+# more and the nested error is classified like every other refusal (#675).
 DYNAMIC_SITES: dict[tuple[str, str, str], str] = {
-    ("report", "audit_unavailable", "type(error).__name__"): "the nested `audit_error` of an OSError, a Python class name under the enclosing audit_unavailable entry",
-    ("report", "mark_audit_failure", "getattr(error, 'error_type', type(error).__name__)"): "a nested `audit_errors` item under the enclosing refusal's entry",
     ("report", "classify_failure_report", "report.get('error_type')"): "classify_last_error answers ok:true with the recorded failure's own type as a label; that type's entry is the advice",
     ("report", "classify_failure_report", "report.get('target_error_type')"): "the same label, taken from the target's own failure type",
     ("tools", "AgenticHILToolService._capture_result", "failure['error_type']"): "copies the capture failure built just above it, whose two sources are pinned on their own",
     ("tools", "AgenticHILToolService._capture_result", "reader_error.get('error_type', 'serial_read_failed')"): "the COM reader's own refusal, owned by #635 (COM half)",
     ("tools", "AgenticHILToolService._capture_result", "stop.get('error_type', 'com_port_close_failed')"): "the COM session stop's own refusal, owned by #635 (COM half)",
-    ("tools", "AgenticHILToolService._dispatch_tool", "type(error).__name__"): "the nested `audit_error` of an OSError the dispatcher caught, under audit_failed_after_action",
 }
 
 # Helpers that forward an error_type parameter; their callers are scanned instead.
@@ -779,6 +790,17 @@ FACTS: dict[str, Facts] = {
         steps=(r"error_class", r"state_root", r"audit_unavailable"),
         do_not=(r"delete or recreate", r"empty record"),
         never=(r"\bdelete\b",),
+    ),
+    # The write side of the same fault, nested as `audit_error` by both audit
+    # paths. It may never read as a record that was written, nor offer a retry
+    # before the destination is repaired: an action whose audit failed may have
+    # reached the board.
+    "report_write_failed": Facts(
+        says=(r"report or audit record failed", r"`error_class` and `errno`.*filesystem fault", r"without exposing the state-root path"),
+        steps=(r"`error_class` and `errno`", r"restore write access or free space", r"[Rr]etry only after the report destination is writable"),
+        mentions=(r"incident resolved",),
+        do_not=(r"delete or recreate report state", r"repeat an action whose audit failed"),
+        never=(r"\breport (was|is) written\b", r"retry is safe"),
     ),
     "config_unreadable": Facts(
         says=(r"exists and cannot be read", r"nothing was decided from it and nothing was written"),
@@ -1149,6 +1171,59 @@ def test_a_report_read_back_before_its_promotion_committed(tmp_path: Path, monke
         assert expected, "no catalogue entry for canonical_write_pending"
         assert marker.get("remediation") == expected["remediation"], marker
         assert marker.get("do_not") == expected.get("do_not"), marker
+
+
+def test_a_report_write_the_filesystem_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The nested `audit_error` a failed report write leaves (#675).
+
+    The type is a catalogue key rather than the Python class name that used to
+    stand there, `error_class` and `errno` say which filesystem fault it was,
+    and the entry's own advice travels with the marker, as it does for every
+    other nested marker a caller reads."""
+    config = load_config(str(write_config(tmp_path)))
+
+    def no_space(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr("agentic_hil.report.safe_write_text", no_space)
+
+    written = write_report(config, {"ok": True, "tool": "probe_target", "summary": "Target answered."})
+
+    assert written["audit_ok"] is False, written
+    expected = remediation_fields("report_write_failed")
+    assert expected, "no catalogue entry for report_write_failed"
+    for marker in (written["audit_error"], *written["audit_errors"]):
+        assert marker["error_type"] == "report_write_failed", marker
+        assert marker["error_class"] == "OSError", marker
+        assert marker["errno"] == errno.ENOSPC, marker
+        assert marker.get("remediation") == expected["remediation"], marker
+        assert marker.get("do_not") == expected.get("do_not"), marker
+
+
+def test_a_configuration_refusal_keeps_its_advice_on_both_audit_paths(tmp_path: Path) -> None:
+    """One nested shape for both audit paths, as #675 asks.
+
+    The refusal met before an action and the one met after a write that failed
+    are the same configuration refusal, so they nest the same document:
+    its own `error_type`, its details and its own remediation. `path` is the
+    open question in the issue and is left out of the comparison."""
+    from agentic_hil import report as report_module
+
+    refusal = ConfigError(
+        "unsafe_configured_path",
+        "Output file must be a single-link regular file without symlinked parents.",
+        {"path": str(tmp_path / "last-report.json"), "resolved_parent": str(tmp_path)},
+    )
+
+    before = report_module.audit_unavailable("probe_target", refusal)["audit_error"]
+    after = report_module.mark_audit_failure({"ok": True, "tool": "probe_target"}, refusal)["audit_error"]
+
+    assert before.get("remediation") == remediation_fields("unsafe_configured_path")["remediation"], before
+    assert after["error_type"] == "unsafe_configured_path", after
+    assert after["summary"] == refusal.summary, after
+    assert after["resolved_parent"] == str(tmp_path), after
+    dropped = {key: value for key, value in before.items() if key != "path" and after.get(key) != value}
+    assert dropped == {}, f"the refusal met after the write dropped {sorted(dropped)}: {after}"
 
 
 # project_config_adopt_hardware and project_config_create: adopt.py, configwrite.py, bootstrap.py.

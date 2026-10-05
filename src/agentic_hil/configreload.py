@@ -68,29 +68,30 @@ Two more that are refused by name, for the same reason:
 
 ## What a reload leaves visible
 
-Afterwards the description in force *is* the file's, so ``config_status`` reports
-that file as unchanged: a server that had just taken the disk's description and
-still called it stale would be lying about its own state. What does not
-disappear is the other half: if the file's permission blocks differ from the ones
-this server is enforcing, ``config_status`` carries ``permissions_source``, which
-says that the permissions in force came from the document parsed at startup and
-that a restart is what adopts the file's. Not hidden, and not adopted.
+The four reloaded sections are in force afterwards. Values outside those
+sections remain as they were at startup, and ``restart_required_for`` names each
+one that differs from the file. ``config_status`` stays changed until a restart
+adopts them. If the file's permission blocks also differ from the ones this
+server is enforcing, ``config_status`` carries ``permissions_source`` to say the
+grants still come from the startup document.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import asdict, replace
 from typing import Any
 
 from agentic_hil.config import (
     ConfigError,
+    config_digest,
     load_authoritative_config,
     permission_summary,
     revalidate_permission_dependent_pinning,
     utc_now,
 )
-from agentic_hil.configstate import config_status
+from agentic_hil.configstate import config_status, remember_pending_description_restarts
 from agentic_hil.knowledge import CONFIG_SHAPE_URI, remediation_fields
 from agentic_hil.types import (
     AgenticHILConfig,
@@ -161,7 +162,84 @@ def permission_view(config: AgenticHILConfig) -> JsonObject:
     is added because it decides whether reading needs one at all, and a file that
     moved from 1 to 2 has widened this bench whatever its ``allow_*`` keys say.
     """
-    return {"version": config.config_version, **permission_summary(config)}
+    summary = permission_summary(config)
+    return {
+        "version": config.config_version,
+        "permissions": {name: summary[name] for name in (
+            "allow_config_write",
+            "allow_config_description_write",
+            "allow_config_permissions_write",
+            "allow_recover",
+            "allow_upgrade",
+        )},
+        **{
+            section: {name: {"permissions": grants} for name, grants in summary[section].items()}
+            for section in ("debuggers", "com_ports", "can_buses")
+        },
+        "debug": summary["debug"],
+        "artifacts": summary["artifacts"],
+    }
+
+
+def restart_view(config: AgenticHILConfig) -> JsonObject:
+    """Values that this description reload leaves for a server restart.
+
+    Permission grants are reported separately by ``permission_view``. The
+    remaining values in mixed sections such as ``debug`` and ``artifacts`` are
+    descriptions or allowlists and must remain visible as restart work.
+
+    What comes out of here is a list of *configuration keys*: an operator has to
+    find each one in the file, and a caller matches them against the keys it just
+    wrote. So a field that records how a value was **loaded**, rather than what the
+    document says, has no place in it, however much it looks like a key after
+    ``asdict``. Two of them do, and both are popped below:
+
+    ``debug.gdb_executable_autodetected``
+        pinning sets it to record that the GDB in force was found on this host
+        rather than named in the document (``config.pin_configured_executables``,
+        read by the session path), and the parsed document always leaves it false.
+        It moved exactly when a file started naming the GDB it had been
+        autodetecting, a file whose real change (``debug.gdb_executable``) is
+        already in this list.
+    ``recovery.auto_recover_explicit``
+        ``config.recovery_config`` derives it as ``"auto_recover" in raw``: from
+        whether the key is mentioned, not from what it says. So it moved on its own
+        in the one case an operator is actually told to bring about, writing down
+        the ``reset_halt`` policy their bench was already running. Nothing in force
+        changed, and the answer claimed a restart was owed for it.
+
+    Neither is a key the schema declares (``recovery`` is ``auto_recover`` and
+    ``max_attempts``, ``additionalProperties: false``), so neither can be found in
+    the file, listed by ``project_config_describe`` or written by
+    ``project_config_set``, and a restart would not make any of that true. Both
+    flags themselves are untouched here and go on deciding what they decided: the
+    session's refusal wording for the first, machine recovery's
+    ``auto_recover_policy_source`` and its one-time reset warning for the second.
+    Every real value of these sections stays, which is the point: this list is how
+    #686 tells an operator that the server is behind its file.
+    """
+    debug = asdict(config.debug)
+    debug.pop("allow_all_symbols", None)
+    debug.pop("gdb_executable_autodetected", None)
+    artifacts = asdict(config.artifacts)
+    artifacts.pop("allow_upload", None)
+    recovery = asdict(config.recovery)
+    recovery.pop("auto_recover_explicit", None)
+    return {
+        "version": config.config_version,
+        "workspace_root": config.workspace_root,
+        "state_root": config.state_root,
+        "debug": debug,
+        "artifacts": artifacts,
+        "validation": asdict(config.validation),
+        "recovery": recovery,
+        "reports": asdict(config.reports),
+        "logs": asdict(config.logs),
+    }
+
+
+def restart_required_changes(loaded: AgenticHILConfig, disk: AgenticHILConfig) -> list[str]:
+    return moved_paths(restart_view(loaded), restart_view(disk))
 
 
 def _flatten(node: object, prefix: str = "") -> dict[str, Any]:
@@ -257,6 +335,7 @@ def merged_description(loaded: AgenticHILConfig, disk: AgenticHILConfig) -> Agen
     debugger_id = loaded.debugger_id if loaded.debugger_id in debuggers else (next(iter(debuggers)) if len(debuggers) == 1 else None)
     debugger = debuggers.get(debugger_id) if debugger_id is not None else None
     target = debugger.target if debugger is not None and debugger.target is not None else disk.target
+    pending_restart = tuple(restart_required_changes(loaded, disk))
     merged = replace(
         loaded,
         target=target,
@@ -281,7 +360,16 @@ def merged_description(loaded: AgenticHILConfig, disk: AgenticHILConfig) -> Agen
         permissions_match_description=not permission_differences(loaded, disk),
         description_reloaded_at=utc_now(),
     )
-    return revalidate_permission_dependent_pinning(merged)
+    merged = revalidate_permission_dependent_pinning(merged)
+    if pending_restart:
+        effective_view = {
+            "description": description_view(merged),
+            "restart_sections": restart_view(merged),
+            "permissions": permission_summary(merged),
+        }
+        status_digest = config_digest(json.dumps(effective_view, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8"))
+        remember_pending_description_restarts(merged, pending_restart, status_digest)
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +428,8 @@ def reload_description(
         return None, _uncomposable_refusal(existing, error)
     changes = description_changes(existing, disk)
     differences = permission_differences(existing, disk)
+    restart_changes = restart_required_changes(existing, disk)
+    restart_required = sorted(set(differences) | set(restart_changes))
     # Taken against the reloaded configuration, so it reports the description
     # that is now in force. Its own read, deliberately: if the file moved again
     # between the load above and this line, that is a fact about the file and the
@@ -351,7 +441,7 @@ def reload_description(
         "tool": PROJECT_CONFIG_RELOAD,
         "reloaded": True,
         "description_changed": bool(changes),
-        "summary": _summary(changes, differences),
+        "summary": _summary(changes, differences, restart_changes),
         "config_status": status,
         "path": reloaded.config_path,
         "workspace_root": reloaded.workspace_root,
@@ -364,30 +454,40 @@ def reload_description(
         "permissions_reloaded": False,
         "permissions_in_force": permission_summary(reloaded),
         "permission_differences": differences,
-        "restart_required_for": differences,
+        "restart_required_for": restart_required,
         "reference": CONFIG_SHAPE_URI,
-        "next_steps": _next_steps(changes, differences),
+        "next_steps": _next_steps(changes, differences, restart_changes),
         **NOT_STARTED,
         "cleanup_required": False,
     }
 
 
-def _summary(changes: list[str], differences: list[str]) -> str:
+def _summary(changes: list[str], differences: list[str], restart_changes: list[str]) -> str:
     head = (
         f"The description on disk was re-read and is now the one in force; {len(changes)} description value(s) moved."
         if changes
-        else "The description on disk was re-read and matched the one already in force; nothing moved."
+        else (
+            f"The reloaded description did not move; {len(restart_changes)} value(s) outside the reloaded sections "
+            "still differ and need a restart."
+            if restart_changes
+            else "The description on disk was re-read and matched the one already in force; nothing moved."
+        )
     )
-    if not differences:
+    if not differences and not restart_changes:
         return f"{head} The permissions in force are unchanged, as they always are here, and are the ones this file states."
-    return (
+    summary = (
         f"{head} The permissions in force are unchanged, as they always are here: they are the ones this server parsed "
         f"at startup, and {len(differences)} permission value(s) in this file differ from them. Restarting the MCP "
         "server is what adopts those; nothing here does."
+        if differences
+        else f"{head} The permissions in force are the ones this file states and are unchanged by this reload."
     )
+    if restart_changes:
+        summary += f" A restart is also needed for: {', '.join(restart_changes)}."
+    return summary
 
 
-def _next_steps(changes: list[str], differences: list[str]) -> list[str]:
+def _next_steps(changes: list[str], differences: list[str], restart_changes: list[str]) -> list[str]:
     steps = [
         "The devices in this answer are the ones on disk. A device this server had never seen carries no grant at all: "
         "it can be probed and read, and flashing, reset, mass erase and COM/CAN writes are denied on it until the "
@@ -399,7 +499,12 @@ def _next_steps(changes: list[str], differences: list[str]) -> list[str]:
             "them and ask the operator to restart the MCP server if any of them is one this bench needs; do not call "
             "this tool again for them, it does not adopt permissions in either direction."
         )
-    if not changes:
+    if restart_changes:
+        steps.append(
+            "The following values are outside the sections this reload takes and remain as loaded at startup: "
+            f"{', '.join(restart_changes)}. Ask the operator to restart the MCP server to adopt them."
+        )
+    if not changes and not restart_changes:
         steps.append("Nothing in the description moved, so no answer from this server changes. The file and the loaded description already agreed.")
     steps.append(f"{CONFIG_SHAPE_URI} says which sections this reload covers and which ones still need a restart.")
     return steps

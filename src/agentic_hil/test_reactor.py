@@ -3269,6 +3269,10 @@ class TestReactor:
             step_error_type = result_error_type(failure)
             result["step_error_type"] = step_error_type
             result["error_type"] = "cleanup_failed" if not cleanup_ok else step_error_type
+            if result["error_type"] == step_error_type:
+                for field in ("remediation", "do_not"):
+                    if field in failure:
+                        result[field] = failure[field]
         elif stopped:
             # A stopped run is not a passed run and it is not a failed one
             # either, so it says which of the two it is by name. The steps that

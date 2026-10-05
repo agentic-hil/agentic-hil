@@ -51,7 +51,7 @@ from agentic_hil.config import (
     write_generated_config,
 )
 from agentic_hil.configreload import PROJECT_CONFIG_RELOAD, reload_description
-from agentic_hil.configstate import config_status, with_config_status
+from agentic_hil.configstate import config_status, copy_pending_description_restarts, with_config_status
 from agentic_hil.configwrite import (
     NOT_STARTED,
     PROJECT_CONFIG_DESCRIBE,
@@ -100,6 +100,7 @@ from agentic_hil.report import (
     CONTACT_MARKER_KEY,
     CONTACT_MARKER_SOURCE_KEY,
     attach_canonical_audit_evidence,
+    audit_error_detail,
     audit_unavailable,
     claim_auto_recover_default_warning,
     ensure_audit_ready,
@@ -1126,7 +1127,7 @@ class AgenticHILToolService:
                 if poison_error is not None:
                     result["quarantine_error"] = str(poison_error)
                 if isinstance(error, (ConfigError, OSError)):
-                    result.update({"audit_ok": False, "audit_error": error.to_dict() if isinstance(error, ConfigError) else {"error_type": type(error).__name__, "backend_error": str(error)}})
+                    result.update({"audit_ok": False, "audit_error": audit_error_detail(error)})
                 written = write_report(self.config, result)
                 if written.get("audit_ok") is False:
                     self._poison_quietly("hardware_exception_audit_broken", audit_broken=True)
@@ -1583,7 +1584,7 @@ class AgenticHILToolService:
         try:
             if payload.get("detach") is True:
                 return start_plan_detached(self.config, test_config_path)
-            return run_plan(self.config, test_config_path)
+            return run_plan(self.config, test_config_path, return_failed_report=True)
         except ConfigError as error:
             return {"tool": "test_reactor_run", "side_effect_committed": False, **error.to_dict()}
         except CoordinationError as error:
@@ -1667,11 +1668,15 @@ class AgenticHILToolService:
         if debugger is not None:
             if debugger.probe_id is not None and fold_hardware_id(debugger.probe_id) == fold_hardware_id(selected_probe):
                 return None
-            return replace(self.config, debugger=replace(debugger, probe_id=selected_probe))
+            recovery_config = replace(self.config, debugger=replace(debugger, probe_id=selected_probe))
+            copy_pending_description_restarts(self.config, recovery_config)
+            return recovery_config
         if selected_debugger is None or selected_debugger not in self.config.debuggers:
             return None
         bound = bind_debugger(self.config, selected_debugger)
-        return replace(bound, debugger=replace(bound.debugger, probe_id=selected_probe))
+        recovery_config = replace(bound, debugger=replace(bound.debugger, probe_id=selected_probe))
+        copy_pending_description_restarts(bound, recovery_config)
+        return recovery_config
 
     def _recovery_backend(self, recovery_config: AgenticHILConfig | None) -> tuple[DebuggerBackend, bool]:
         """The backend a recovery action drives, and whether this call owns it.
@@ -2497,7 +2502,14 @@ class AgenticHILToolService:
         )
 
     def _result_requires_quarantine(self, result: JsonObject) -> bool:
-        if result.get("audit_ok") is False or result.get("cleanup_required") is True:
+        if result.get("audit_ok") is False:
+            return True
+        # A resource_quarantined response is a refusal on an incident already
+        # under containment. It did not reach the session operation, and its
+        # cleanup fields describe the existing hold rather than a new effect.
+        if result.get("error_type") == "resource_quarantined":
+            return False
+        if result.get("cleanup_required") is True:
             return True
         if result.get("error_type") in {
             "permission_denied",
@@ -2509,7 +2521,6 @@ class AgenticHILToolService:
             "artifact_validation_failed",
             "output_validation_failed",
             "resource_busy",
-            "resource_quarantined",
         }:
             return False
         if result.get("side_effect_status") in {"unknown", "partial"}:

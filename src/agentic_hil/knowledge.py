@@ -667,9 +667,11 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "names, the devices it knows and the permissions it enforces are the ones from an older document. Which "
             "document is in `config_status.description_source`: `startup` means all of it came from the version parsed "
             "at startup, which is the normal case because the server does not reload while it runs; "
-            "`description_reload` means the devices and the backend came from the last explicit "
-            "`project_config_reload_description` (`description_reloaded_at`, and `loaded_digest` is that document's) "
-            "while the permissions still came from startup (`loaded_at`). Nothing failed; what an answer says and what "
+            "`description_reload` means the four device sections came from the last explicit "
+            "`project_config_reload_description` (`description_reloaded_at`) while values outside those sections and "
+            "permissions still came from startup (`loaded_at`). If any such values differ from the file, "
+            "`restart_required_for` names them and `loaded_digest` fingerprints the effective description. Nothing "
+            "failed; what an answer says and what "
             "the file says have come apart, and the file is the one an operator reads. This says the two digests differ "
             "and nothing more: not what the file now contains, and not what a restart onto it would produce."
         ),
@@ -678,10 +680,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "the file on disk differs from the one this server loaded, and the steps below are for that; `missing` "
             "means the file is gone, so it has to be restored before there is anything to restart onto; `unreadable` "
             "means it is there and will not open, so it has to be made readable first.",
-            "If what changed is the description of the bench (`target`, a `debuggers`, `com_ports` or `can_buses` "
-            "entry, a probe id, a COM device, a baudrate), call `project_config_reload_description`. It re-reads those "
-            "four sections and clears this, without a restart and without touching a single permission. Its result "
-            "names anything in the file it did not take.",
+            "If what changed is the device description (`target`, a `debuggers`, `com_ports` or `can_buses` entry, a "
+            "probe id, a COM device, a baudrate), call `project_config_reload_description`. It re-reads those four "
+            "sections without a restart or touching a permission. Its result names anything outside those sections "
+            "that still needs a restart.",
             "Otherwise, ask the operator to restart the MCP server, then repeat the call. Say which server: the one "
             "the agent host started for this workspace, not the `agentic-hil` command line, which reads the file fresh "
             "every time and is already current. A restart is what adopts a changed permission, a changed `version`, "
@@ -2728,8 +2730,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "The test reactor raised outside any step, which is a defect in Agentic HIL rather than a verdict on the "
             "firmware. Every containment step was attempted, the report was written with no steps and with "
             "`cleanup` and `cleanup_ok` from the containment, and `exception_type` names what was raised. The run's "
-            "own call does not answer with this result but raises, so an MCP client sees an internal error and the "
-            "command line a traceback; the type is read from the report and from the run's status."
+            "own call answers with this failed report, and its handle carries the same error type."
         ),
         remediation=(
             "Read the report (`get_last_report`) for `cleanup` and `cleanup_ok`: they say whether the devices were "
@@ -2748,7 +2749,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning=(
             "The run was interrupted (Ctrl+C or a process exit) before it finished. Every containment step was "
             "attempted and the report was written with no steps and with `cleanup` and `cleanup_ok` from the "
-            "containment. The run record behind its handle names this run `reactor_exception`."
+            "containment. The run record behind its handle names this run `interrupted`."
         ),
         remediation=(
             "Read the report (`get_last_report`) for `cleanup` and `cleanup_ok`, then call `hardware_lease_status` "
@@ -4227,11 +4228,29 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not read this as an empty record or as a pass.",
         ),
     ),
+    "report_write_failed": ErrorRemedy(
+        meaning=(
+            "Writing a report or audit record failed. `error_class` and `errno`, when present, identify the "
+            "filesystem fault without exposing the state-root path. `backend_error` is what the write itself "
+            "answered, and it is what tells one failed write from another when a call had more than one to make."
+        ),
+        remediation=(
+            "Read `error_class` and `errno` for the fault and `backend_error` for the write that failed, then have "
+            "the operator restore write access or free space at the report destination.",
+            "Retry only after the report destination is writable; a hardware action whose audit failed may need "
+            "the incident resolved before another action can run.",
+        ),
+        do_not=(
+            "Do not delete or recreate report state to get past the write failure. It is this project's record of "
+            "what ran.",
+            "Do not repeat an action whose audit failed before resolving any incident it left behind.",
+        ),
+    ),
     "config_unreadable": ErrorRemedy(
         meaning=(
             "The configuration file exists and cannot be read: it is a directory or another non-regular file, the "
-            "operating system refused or failed the read, or, on the paths that write the file, its bytes are not "
-            "UTF-8. `path` and `backend_error` say which. Nothing was decided from it and nothing was written to it."
+            "operating system refused or failed the read, or its bytes are not UTF-8. `path` and `backend_error` say "
+            "which. Nothing was decided from it and nothing was written to it."
         ),
         remediation=(
             "Read `path` and `backend_error`.",
@@ -6892,7 +6911,7 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
         attempted="debug_continue or debug_halt lost confirmation of whether the target is running or halted.",
         confirmed="The session is still owned; the command sequence up to the failure is in the session log.",
         unknown="Whether the target is currently running or halted.",
-        physical_check="A successful debug_halt clears this without an operator; otherwise observe the board (heartbeat LED, console output) to see whether firmware runs, reset it by its own controls, then sign.",
+        physical_check="A successful debug_halt clears this without an operator only while the session status is not error; if the session is in error, stop it with debug_stop_session before starting another session. Otherwise observe the board (heartbeat LED, console output) to see whether firmware runs, reset it by its own controls, then sign.",
     ),
     "debug_session_cleanup_unconfirmed": QuarantineReasonGuide(
         attempted="debug_stop_session could not confirm the debug server and GDB were torn down.",
@@ -8072,7 +8091,7 @@ These are refused by name rather than quietly skipped, because each of them is e
 
 ### After a reload
 
-`config_status` compares the file against the description now in force, so a reload that just took the file's description does **not** leave `config_stale: true` behind for it. What does not disappear is the other half: when the file's permissions differ from the ones being enforced, the status carries `permissions_source`, which says the grants came from the document parsed at startup and that a restart is what adopts the file's. The reload's own result lists them under `permission_differences`, taken at the moment both documents were in hand.
+`config_status` compares the file against the effective description. If the file also changed a section this reload does not take, `restart_required_for` names those values and the status stays changed until a restart. When permissions differ from the ones being enforced, the status carries `permissions_source`, which says the grants came from the document parsed at startup. The reload's result lists changed grants under `permission_differences` and other deferred values under `restart_required_for`.
 
 At a shell the same operation is `agentic-hil config-reload`, which loads this file the way a server does and reports what a running server's reload would take from it and what it would leave: the pre-flight for asking an agent to make the call.
 
