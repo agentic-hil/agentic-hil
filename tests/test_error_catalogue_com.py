@@ -1323,6 +1323,7 @@ def test_a_reader_whose_log_broke_is_answered_with_its_error_nested(tmp_path: Pa
             refusal = call(service, tool, arguments)
             assert refusal["error_type"] == "resource_quarantined", refusal
             assert "com_reader_audit_broken" in refusal["cleanup_reasons"], refusal
+            carries_its_entry(refusal, "resource_quarantined")
 
         listed = call(service, "com_ports_list", {})["ports"][PORT_ID]
         assert listed["reader_error"]["error_type"] == "audit_write_failed", listed
@@ -1365,6 +1366,61 @@ def test_a_port_the_open_run_did_not_declare_is_refused_with_a_type_that_resolve
     assert refusal["error_type"] == "undeclared_device", refusal
     assert resolved(bench.service, refusal["error_type"]) == entry_of("undeclared_device")
     assert remediation_fields(refusal["error_type"]), refusal
+
+
+def test_the_coordination_refusals_carry_their_entry(bench: SimpleNamespace) -> None:
+    """A refusal the coordinator builds hands out its entry's steps (#662).
+
+    The same server gives the steps for its other refusals, so these four carry
+    them too, wherever the refusal is built or forwarded: a port the open run
+    did not declare (a session and a flash capture), a second run, and a port
+    another server holds."""
+    on_the_line(bench)
+    run = call(bench.service, "bench_run_start", {"devices": [{"kind": "uart", "id": DECLARED_PORT_ID}], "label": "catalogue-com"})
+    assert run["ok"] is True, run
+    image = bench.tmp_path / "workspace" / "build" / "app.elf"
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    try:
+        session = call(bench.service, "com_session_start", {"port_id": PORT_ID})
+        capture = call(
+            bench.service,
+            "flash_firmware",
+            {"image_path": "build/app.elf", "reset_after_flash": True, "capture": {"port_id": PORT_ID}},
+        )
+        second = call(bench.service, "bench_run_start", {"devices": [{"kind": "uart", "id": DECLARED_PORT_ID}], "label": "catalogue-com-again"})
+    finally:
+        call(bench.service, "bench_run_stop", {})
+
+    carries_its_entry(session, "undeclared_device")
+    carries_its_entry(capture, "undeclared_device")
+    carries_its_entry(second, "run_already_active")
+
+    started(bench)
+    other_config = write_config(bench.tmp_path / "other", com_ports_yaml=COM_PORTS_YAML, state_root=bench.tmp_path / "other-state")
+    other = AgenticHILToolService(load_config(str(other_config)), frontend="mcp")
+    try:
+        busy = call(other, "com_session_start", {"port_id": PORT_ID})
+    finally:
+        close(other)
+    carries_its_entry(busy, "device_busy")
+
+
+def test_the_undeclared_device_refusal_names_both_ways_to_declare(bench: SimpleNamespace) -> None:
+    """A run declares its devices in the test description or in `devices` on
+    `bench_run_start`; the refusal names both, so a caller on either path finds
+    its own fix in the text (#662)."""
+    on_the_line(bench)
+    run = call(bench.service, "bench_run_start", {"devices": [{"kind": "uart", "id": DECLARED_PORT_ID}], "label": "catalogue-com"})
+    assert run["ok"] is True, run
+    try:
+        refusal = call(bench.service, "com_session_start", {"port_id": PORT_ID})
+    finally:
+        call(bench.service, "bench_run_stop", {})
+
+    assert refusal["error_type"] == "undeclared_device", refusal
+    assert "test description" in refusal["summary"], refusal
+    assert "`devices` on `bench_run_start`" in refusal["summary"], refusal
 
 
 # ---------------------------------------------------------------------------
