@@ -528,6 +528,7 @@ class PyOCDBackend:
         # names no reset, and read as a flash it would carry the flash's steps.
         reset = self._run_pyocd("flash_firmware", ["commander", "--command", "reset", *self._connection_args()], classify_as="reset_target")
         if not reset.get("ok"):
+            reset_timed_out = reset.get("error_type") == "timeout"
             reset["artifact"] = self._artifact_summary(artifact)
             reset["reset_after_flash"] = False
             reset["side_effect_committed"] = True
@@ -535,6 +536,13 @@ class PyOCDBackend:
             reset["retry_safe"] = False
             reset["error_type"] = "reset_failed"
             reset["summary"] = "Firmware flashed, but the post-flash reset failed."
+            if reset_timed_out:
+                # The reset's own error, kept where a refused reset keeps its
+                # classification (#655): a reset that hung is told apart from one
+                # the target refused, and the causes and steps are the timeout's.
+                reset["backend_error_type"] = "timeout"
+                reset["summary"] = "Firmware flashed, but the post-flash reset timed out."
+                reset.update(remediation_fields("timeout", self.backend_name))
             reset["verify"] = False
             reset["target_contacted"] = result.get("target_contacted", True)
             reset["hardware_state"] = "changed"
