@@ -7,12 +7,16 @@ was written and a target that then would not reset has never been driven: a
 flash that stopped at that point leaves the board holding the new image and
 not running it, which is neither a success nor a retry-safe refusal.
 
-`flash` is answered exactly as fake_pyocd.py answers it. The reset line is
-representative, not recorded: pyOCD reports a failed reset as an `E` log line
-naming the reset (test_failure_classification.py carries the same shape as one
-of its genuine reset failures), and no bench recording of a reset that failed
-after a flash that succeeded exists yet. What this fixture pins is the
-backend's reading of a reset the commander refused, whatever the wording.
+`flash` is answered exactly as fake_pyocd.py answers it. The reset is answered
+the way pyOCD 0.45.1's commander answers any command whose transfer to the
+target failed: it catches the TransferError, prints `Error: memory transfer
+failed` on stdout (pyocd/commands/commander.py:125) and exits 0, because the
+commander subcommand returns 0 whatever happened
+(pyocd/subcommands/commander_cmd.py:77). That shape is recorded on the
+reference bench for a `savemem` (tests/fixtures/pyocd_failure_recordings.json);
+for a reset it is the same handler, and no bench can make a reset fail on
+purpose without unplugging something. What this fixture pins is the backend's
+reading of a reset the commander reported failed, exit status 0 included.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ from __future__ import annotations
 import json
 import sys
 
-RESET_FAILED = "0000684 E Error attempting to reset target: reset failed [board]"
+RESET_FAILED = "Error: memory transfer failed"
 
 
 def main() -> int:
@@ -37,8 +41,8 @@ def main() -> int:
     text = " ".join(args)
     print(text)
     if args and args[0] in {"commander", "cmd"} and "reset" in text:
-        print(RESET_FAILED, file=sys.stderr)
-        return 1
+        print(RESET_FAILED)
+        return 0
     if args and args[0] == "flash":
         print("[==================================] 100%")
         print("Programmed 8192 bytes @ 0x08000000")

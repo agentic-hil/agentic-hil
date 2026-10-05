@@ -9,10 +9,12 @@ classifier's bucket for that is `memory_read_failed`, anchored on the
 operation rather than on a phrase, and nothing in the suite had driven it
 through the tool result.
 
-The error line is representative, not recorded: it carries the `E` log prefix
-pyOCD 0.45.1 uses and a failure word, and no bench recording of a `savemem`
-that failed after a successful connect exists yet. The file `savemem` would
-have written is deliberately never created.
+The error is the one pyOCD 0.45.1 printed on the reference bench for a
+`savemem` of an address no region of the part decodes
+(tests/fixtures/pyocd_failure_recordings.json): `Error: memory transfer failed`
+on stdout and exit status 0, because the commander catches the TransferError
+itself and its subcommand returns 0 whatever happened. The file `savemem`
+would have written is deliberately never created.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from __future__ import annotations
 import json
 import sys
 
-READ_FAILED = "0000817 E Transfer error while reading 4 bytes @ 0x20000080 [savemem]"
+READ_FAILED = "Error: memory transfer failed"
 
 
 def main() -> int:
@@ -37,8 +39,8 @@ def main() -> int:
     text = " ".join(args)
     print(text)
     if args and args[0] in {"commander", "cmd"} and "savemem" in text:
-        print(READ_FAILED, file=sys.stderr)
-        return 1
+        print(READ_FAILED)
+        return 0
     if args and args[0] == "flash":
         print("[==================================] 100%")
         print("Programmed 8192 bytes @ 0x08000000")
