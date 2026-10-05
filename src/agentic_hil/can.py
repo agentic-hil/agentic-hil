@@ -698,6 +698,11 @@ class CanBusService:
         configured = self.config.can_buses.get(bus_id)
         if configured is not None and configured.shares and participant is None:
             return self._write_report({"ok": False, "tool": "can_session_stop", "bus_id": bus_id, "error_type": "can_participant_required", "summary": "This bus is shared; name the participant whose session this call stops.", "configured_participants": sorted(configured.shares), "side_effect_committed": False, **remediation_fields("can_participant_required")})
+        if configured is not None and participant is not None and participant not in configured.shares:
+            # Refused as the other CAN tools refuse it. Looked up instead, a name
+            # the config does not declare finds no session and answers "was not
+            # active" while the session it was meant to stop still holds the bus.
+            return self._write_report({"ok": False, "tool": "can_session_stop", "bus_id": bus_id, "participant": participant, "error_type": "can_participant_not_configured", "summary": "The authoritative config declares no such participant view on this CAN bus.", "configured_participants": sorted(configured.shares), "side_effect_committed": False, "retry_safe": False, **remediation_fields("can_participant_not_configured")})
         session = self.sessions.get(key)
         if session is None:
             return self._write_report({"ok": True, "tool": "can_session_stop", "bus_id": bus_id, "was_active": False, "summary": "CAN bus session was not active."})

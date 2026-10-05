@@ -678,8 +678,8 @@ def test_closing_the_server_closes_an_open_session(tmp_path: Path, monkeypatch: 
 
 
 def test_a_participant_name_with_no_open_session_stops_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """On a bus without `shares` a participant name finds no session, so the
-    stop answers `was_active: false` and the open session goes on."""
+    """On a bus without `shares` the config declares no participant, so the
+    stop refuses the name and the open session goes on."""
     service, opened = single_owner_service(tmp_path, monkeypatch)
     try:
         assert service.call(START, {"bus_id": "bench"})["ok"] is True
@@ -690,7 +690,9 @@ def test_a_participant_name_with_no_open_session_stops_nothing(tmp_path: Path, m
     finally:
         service.close()
 
-    assert named["ok"] is True and named["was_active"] is False, named
+    assert named["ok"] is False, named
+    assert named["error_type"] == "can_participant_not_configured", named
+    assert named["configured_participants"] == [], named
     assert listed["buses"]["bench"]["session_active"] is True, listed
     assert sent["ok"] is True, sent
     assert len(opened[0].sent) == 1
@@ -706,7 +708,9 @@ def test_an_unconfigured_participant_on_a_shared_bus_stops_nothing(tmp_path: Pat
     finally:
         service.close()
 
-    assert unknown["ok"] is True and unknown["was_active"] is False, unknown
+    assert unknown["ok"] is False, unknown
+    assert unknown["error_type"] == "can_participant_not_configured", unknown
+    assert unknown["configured_participants"] == ["ecu_a", "ecu_b"], unknown
     assert active == ["ecu_a"], active
 
 

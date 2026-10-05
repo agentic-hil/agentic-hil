@@ -6448,6 +6448,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Pick a name from `configured_participants`, the shares declared on this bus.",
+            "An empty `configured_participants` means the bus declares no `shares:` and has one owner: call the tool "
+            "again without `participant`.",
             "If the name should exist, declare it under `can_buses.<id>.shares`. A running broker keeps the "
             "configuration it started with, so a new share is seen once every participant has detached and a fresh "
             "broker starts.",

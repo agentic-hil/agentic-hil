@@ -649,7 +649,8 @@ COLLECTED_TYPE_COUNT = 218
 # one new type. The integrated debugger fix also adds the `debugger_error`
 # producer in `GdbDebugSessions.continue_execution`; the joint host scan finds
 # two additional producers, with every previous producer still present.
-PRODUCER_COUNT = 644
+# `CanBusService.session_stop` writes `can_participant_not_configured` (#632).
+PRODUCER_COUNT = 645
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
