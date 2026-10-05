@@ -1180,7 +1180,7 @@ def test_a_mismatch_whose_board_moved_names_the_device_key_and_the_reload(bench:
     assert refusal["expected_device"] == moved_to, refusal
     assert says([refusal.get("next_step", "")], rf"`com_ports\.{DECLARED_PORT_ID}\.device`", re.escape(moved_to)), refusal
     advice = [refusal.get("next_step", ""), *refusal["remediation"]]
-    assert says(advice, r"`expected_device`", r"`device`", r"`project_config_set`"), advice
+    assert says(advice, r"`expected_device`", r"\.device`", r"`project_config_set`"), advice
     assert says(advice, r"`project_config_reload_description`"), advice
     assert not says([*advice, *refusal["do_not"]], r"adopt"), advice
 

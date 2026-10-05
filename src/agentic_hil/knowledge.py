@@ -2091,8 +2091,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Read `expected_device` when it is present: the board this entry names is still attached, under that name, "
-            "and the entry is simply out of date. `project_config_adopt_hardware` rewrites it from the attached "
-            "hardware.",
+            "and the entry's `device` is simply out of date. Set `com_ports.<name>.device` to `expected_device` with "
+            "`project_config_set`, or have the operator edit the configuration, then call "
+            "`project_config_reload_description` and `com_session_start` again. `next_step` names the key and the value.",
             "Without `expected_device` the named board is not attached at all. Plug it in, or work on the board that is "
             "there by naming its own entry.",
             "On Linux, prefer `/dev/serial/by-id/usb-<vendor>_<product>_<serial>-ifNN` for `device`. udev builds that "

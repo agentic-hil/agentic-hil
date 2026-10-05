@@ -403,8 +403,10 @@ def _identity_unverified(tool: str, port_id: str, port: ComPortConfig, expectati
 
     Retry-safe and no-contact by construction: the port was never touched, so
     restoring the check (installing the serial backend, plugging the board in,
-    a host that reports the adapter's serial) or running `adopt-hardware` to
-    rewrite the entry, then calling again, is the whole repair."""
+    a host that reports the adapter's serial) or setting `device` explicitly to
+    the name the host lists for the board, then calling again, is the whole
+    repair. Not adoption: the entry's `device` is set, or this would be
+    `com_port_not_bound`, and adoption keeps a `device` that is set (#658)."""
     return {
         "ok": False,
         "tool": tool,
@@ -420,8 +422,9 @@ def _identity_unverified(tool: str, port_id: str, port: ComPortConfig, expectati
         "next_step": (
             "This entry names a board on purpose, so it is opened only once the host confirms the name still leads to it. "
             "Restore the check (install the serial backend, plug the board in, or use a host that reports the adapter's "
-            "serial) or run `agentic-hil adopt-hardware` to rewrite the entry for the board that is attached. Drop the "
-            "entry's `serial_number`/`vid`/`pid`/`resource_id` only if it genuinely names no fixed board."
+            "serial), or set `device` explicitly to the name this host lists for the board (`agentic-hil com-ports` "
+            "shows it) and call `project_config_reload_description`. Drop the entry's "
+            "`serial_number`/`vid`/`pid`/`resource_id` only if it genuinely names no fixed board."
         ),
         # Nothing was reached, so the bench stays in service and this is not an
         # incident: restore the check and call again.
@@ -466,8 +469,8 @@ def _identity_mismatch(
         **{name: identity[name] for name in ("found_serial_number", "found_vid", "found_pid") if name in identity},
         "likely_causes": likely_causes,
         # Nothing was reached, so the bench stays in service and this is not an
-        # incident: fix the named cause (plug the board in, or let
-        # `adopt-hardware` rewrite the entry) and call again.
+        # incident: fix the named cause (plug the board in, or set `device` to
+        # `expected_device` where the board moved) and call again.
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
@@ -494,7 +497,7 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
     reach its board before use, and "the check could not run" does not prove it;
     reporting the gap in a result the caller reads *after* it has already written
     to whatever the name now reaches is no protection at all. Every one is
-    retry-safe and no-contact: restore the check, or `adopt-hardware` the entry,
+    retry-safe and no-contact: restore the check, or set `device` explicitly,
     and call again.
 
     An entry that declares no hardware costs nothing here: the host is not
@@ -588,6 +591,12 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
                 moved = str(elsewhere.get("stable_device") or elsewhere.get("device") or "")
                 result["expected_device"] = moved
                 result["summary"] += f" The hardware it names is attached as '{moved}'."
+                # The key and its value, because adoption keeps a `device` that
+                # is set and would leave this refusal standing (#658).
+                result["next_step"] = (
+                    f"Set `com_ports.{port_id}.device` to '{moved}' with `project_config_set`, or have the operator edit "
+                    "the configuration, then call `project_config_reload_description` and `com_session_start` again."
+                )
             return result
 
     # The type check. It runs after the serial and never instead of it: a serial
