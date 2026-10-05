@@ -7028,6 +7028,12 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
         unknown="How many of the requested bytes reached the wire: the target may have received a truncated command.",
         physical_check="Check the device console/behavior for a partially applied command, bring the device to a known state by its own controls, then sign.",
     ),
+    "serial_write_incomplete": QuarantineReasonGuide(
+        attempted="com_write sent a payload of `bytes_requested` bytes, and the line took fewer of them.",
+        confirmed="`bytes_written` bytes reached the line and the rest never left the host: every write returned normally, and the COM log records exactly the bytes that were sent. Nothing is quarantined and the session stays usable.",
+        unknown="What the target made of a partial message: whether it ignored it, is waiting for the rest, or acted on what arrived.",
+        physical_check="No signature is owed and `agentic-hil recover` has nothing to settle. Call `com_read` to see how the target took the partial message, then send the missing bytes or bring the target to a known state by its own protocol before the next command.",
+    ),
     "com_buffer_clear_unconfirmed": QuarantineReasonGuide(
         attempted="Clearing the port's receive buffer failed after the OS-level clear had started.",
         confirmed="No stimulus was written; only received bytes were being discarded.",
