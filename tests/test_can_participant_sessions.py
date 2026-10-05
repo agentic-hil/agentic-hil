@@ -380,6 +380,43 @@ def test_stop_refuses_a_participant_on_a_bus_without_shares(tmp_path: Path, monk
         service.close()
 
 
+def test_a_broker_permission_refusal_carries_the_key_and_its_remediation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The broker's own refusal reaches the caller with the key it names (#657).
+
+    The server's grants say yes, the broker's say no: the broker loaded the file
+    after the server did."""
+    from agentic_hil.knowledge import remediation_fields
+
+    write_key = f"can_buses.{BUS}.shares.ecu_a.permissions.allow_write"
+    read_key = f"can_buses.{BUS}.shares.ecu_a.permissions.allow_read"
+
+    class NarrowedParticipant(SharedFakeParticipant):
+        def send(self, frame_id: int, data: bytes, *, extended: bool = False, rtr: bool = False) -> dict:
+            return {"ok": False, "error_type": "permission_denied", "summary": f"Writing is disabled. The permission is `{write_key}` and it is false.", "bus_id": BUS, "participant": self.name, "permission": write_key, "retry_safe": False, "side_effect_committed": False}
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            return {"ok": False, "error_type": "permission_denied", "summary": f"Reading is disabled. The permission is `{read_key}` and it is false.", "bus_id": BUS, "participant": self.name, "permission": read_key, "retry_safe": False, "side_effect_committed": False}
+
+    import agentic_hil.canbroker as broker_module
+
+    monkeypatch.setattr(broker_module, "attach_participant", lambda config, bus_id, participant, **kwargs: NarrowedParticipant(participant))
+    service = AgenticHILToolService(config_for(tmp_path))
+    try:
+        assert service.call("can_session_start", {"bus_id": BUS, "participant": "ecu_a", "clear_rx_queue": False})["ok"] is True
+        sent = service.call("can_send", {"bus_id": BUS, "participant": "ecu_a", "frame_id": 0x123, "data_hex": "01"})
+        read = service.call("can_read", {"bus_id": BUS, "participant": "ecu_a"})
+        until = service.call("can_read", {"bus_id": BUS, "participant": "ecu_a", "until_id": 0x123, "wait_timeout_s": 0})
+    finally:
+        service.close()
+    assert sent["error_type"] == "permission_denied", sent
+    assert sent["permission"] == write_key, sent
+    assert sent["remediation"] == remediation_fields("permission_denied", permission=write_key)["remediation"], sent
+    for answer in (read, until):
+        assert answer["error_type"] == "permission_denied", answer
+        assert answer["permission"] == read_key, answer
+        assert answer["remediation"] == remediation_fields("permission_denied", permission=read_key)["remediation"], answer
+
+
 def test_unshared_bus_keeps_exclusive_session_semantics(tmp_path: Path):
     config = load_config(str(write_config(tmp_path, can_buses_yaml=f'''can_buses:\n  {BUS}:\n    adapter: process\n    channel: exclusive\n    executable: fake-bridge\n''')))
     device = resolve_devices(config, [{"kind": "can", "id": BUS}]).devices[0]
