@@ -685,6 +685,18 @@ class OpenOCDBackend:
         if self.config.debugger.permissions.allow_mass_erase:
             return self._exclusive_permission_denied("flash_firmware", "Flashing", "allow_mass_erase")
 
+        # A raw binary carries no load address, and `program` writes one from
+        # address 0 unless it is given the address as its offset argument, which
+        # `help program` lists right after the file. An ELF or a HEX file names
+        # its own addresses, and an offset would move them, so the field is read
+        # for a .bin alone, and a .bin without it is refused before OpenOCD runs,
+        # as pyOCD and STM32CubeProgrammer refuse it. The config schema holds the
+        # field to a hex or decimal number, so it is a safe Tcl word as it is.
+        offset = ""
+        if Path(str(artifact["resolved_path"])).suffix.lower() == ".bin":
+            if self.config.debugger.flash_address is None:
+                return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with OpenOCD requires debuggers.<name>.flash_address.", "artifact": {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}}
+            offset = f" {self.config.debugger.flash_address}"
         command_path = escape_tcl_double_quoted_word(openocd_path_for_command(str(artifact["resolved_path"])))
         marker = OPENOCD_SUCCESS_MARKERS["flash_firmware"]
         reset_command = " reset" if reset_after_flash else ""
@@ -694,7 +706,7 @@ class OpenOCDBackend:
         # stopped before adapter_init opened the probe, which is what lets a
         # missing config script or an absent adapter refuse instead of
         # quarantining the bench (see _failure_result).
-        result = self._run_openocd("flash_firmware", f'{OPENOCD_INIT_PREFIX}program "{command_path}" verify{reset_command}; echo "{marker}"; shutdown', marker)
+        result = self._run_openocd("flash_firmware", f'{OPENOCD_INIT_PREFIX}program "{command_path}"{offset} verify{reset_command}; echo "{marker}"; shutdown', marker)
         result["artifact"] = {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
         result["verify"] = True
         result["reset_after_flash"] = reset_after_flash

@@ -7212,7 +7212,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "interface_cfg": {"status": "required", "default": "interface/stlink.cfg", "note": "OpenOCD script, passed as `-f`. Either an OpenOCD search name such as `interface/stlink.cfg`, which OpenOCD resolves against its own script path and which therefore does not have to exist on this host, or an absolute path to an existing file outside the workspace. A path under the system temporary directory is refused: it is cleared without warning and the configuration would stop describing this bench."},
         "target_cfg": {"status": "required", "default": "target/stm32f4x.cfg", "note": "OpenOCD script, passed as `-f`, a search name or an absolute path outside the workspace like interface_cfg. Must match the MCU family."},
         "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "OpenOCD reaches the target through the scripts named above, and connecting under reset is a `reset_config` decision inside them that depends on how SRST is wired for this adapter and this part. `under_reset` is therefore refused at load here rather than accepted and ignored; ask for the same effect in interface_cfg or target_cfg."},
-        "flash_address": {"status": "ignored", "note": "OpenOCD takes the load address from the image."},
+        "flash_address": {"status": "conditional", "note": "Required to flash a .bin, which carries no load address; passed as the offset of `program`, which otherwise writes the image from address 0. Not read for .elf or .hex."},
     },
     "stlink": {
         "tool": "STM32_Programmer_CLI (STM32CubeProgrammer)",
@@ -7254,7 +7254,7 @@ MULTI_PROBE_RULE = {
 }
 
 FLASH_ADDRESS_RULE = {
-    "rule": "flash_address is required only for a .bin artifact on backends stlink and pyocd.",
+    "rule": "flash_address is required only for a .bin artifact, on every backend (openocd, stlink and pyocd).",
     "why": ".bin carries no load address. .elf and .hex do, and the field is not read for them.",
     "failure_when_missing": "error_type `invalid_argument` from flash_firmware, before anything reaches the target.",
     "example": "0x08000000 for STM32 internal flash.",
@@ -8531,7 +8531,7 @@ interface: SWD
 
 The two OpenOCD values above are search names: OpenOCD resolves them against its own script path, so they name no file on this host and the configuration accepts them without one. Give an absolute path instead when this bench should run exactly the script files it names; a path is then checked as a path, and must exist, live outside the workspace, and not be under the system temporary directory.
 
-`flash_address: "0x08000000"` is required only to flash a `.bin` on `stlink` or `pyocd`.
+`flash_address: "0x08000000"` is required only to flash a `.bin`, on every backend.
 
 ## pyOCD target types mostly come from CMSIS packs
 
