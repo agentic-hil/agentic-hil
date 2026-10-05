@@ -792,47 +792,6 @@ def write_report_state(config: AgenticHILConfig, state: JsonObject) -> None:
     atomic_write_text(report_state_path(config), json.dumps(state, indent=2) + "\n")
 
 
-def read_report_file(config: AgenticHILConfig, path_factory: Callable[[AgenticHILConfig], str], tool: str, missing_summary: str) -> JsonObject:
-    try:
-        report_path = path_factory(config)
-        text = safe_read_text(report_path, workspace=config.work_dir)
-    except FileNotFoundError:
-        return {
-            "ok": False,
-            "tool": tool,
-            "error_type": "report_not_found",
-            "summary": missing_summary,
-        }
-    except ConfigError as error:
-        return {"tool": tool, **error.to_dict()}
-    except UnicodeDecodeError:
-        return {
-            "ok": False,
-            "tool": tool,
-            "error_type": "config_invalid",
-            "summary": "Agentic HIL report is not valid UTF-8 text.",
-            "report_path": display_path(config, report_path),
-        }
-    except OSError as error:
-        return {
-            "ok": False,
-            "tool": tool,
-            "error_type": "report_unreadable",
-            "summary": "Agentic HIL report could not be read.",
-            "backend_error": str(error),
-        }
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {
-            "ok": False,
-            "tool": tool,
-            "error_type": "config_invalid",
-            "summary": "Agentic HIL report is not valid JSON.",
-            "report_path": display_path(config, report_path),
-        }
-
-
 def is_failure_report(report: JsonObject) -> bool:
     return not overall_success(report)
 

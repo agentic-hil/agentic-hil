@@ -7634,8 +7634,9 @@ CONFIG_RIGHTS: dict[str, str] = {
 def permissions_frozen_notice(closed_key: str, frozen: JsonObject, path: str) -> JsonObject:
     """What the call that closes the permissions grant has to say for itself.
 
-    Said here, in the result of that call, and nowhere else. A reference an agent
-    could have read beforehand is not where this belongs: whoever writes
+    Said in full here, in the result of that call. The `project_config_set`
+    description names the freeze beforehand, but a reference an agent could have
+    read is not enough on its own: whoever writes
     ``allow_config_permissions_write: false`` loses the way back in the same
     instant, and if the result does not say so, an agent nails the bench shut in
     passing and the operator is in front of a file they have to open by hand:

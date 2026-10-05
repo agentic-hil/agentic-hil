@@ -64,7 +64,6 @@ from test_error_catalogue_ec1_debug import (
     error_type_expressions,
 )
 from test_error_catalogue_ec2_artifacts_reports import DYNAMIC_SITES as ARTIFACT_DYNAMIC_SITES
-from test_error_catalogue_ec2_artifacts_reports import EXCLUDED_SITES as ARTIFACT_EXCLUDED_SITES
 from test_error_catalogue_ec2_artifacts_reports import clauses
 from test_error_catalogue_ec3_run_coordination import CONSUMERS, NEGATION
 from test_error_catalogue_ec3_run_coordination import EXCLUDED as RUN_EXCLUDED
@@ -673,7 +672,9 @@ COLLECTED_TYPE_COUNT = 219
 # for a report state that reads and is damaged.
 # `OpenOCDBackend.flash_firmware` now writes `invalid_argument` for a .bin with
 # no `flash_address` (#680).
-PRODUCER_COUNT = 663
+# no `flash_address` (#680). Deleting `report.read_report_file` and
+# `DebuggerDevice.routing_refusal`, which nothing called, takes five away (#682).
+PRODUCER_COUNT = 658
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
@@ -780,7 +781,6 @@ def check_every_step_runs_on_a_kind_that_serves_it(_tmp_path: Path) -> None:
     assert any(isinstance(node, ast.Assign) and same(node.value, "(device_class.kind, config_id)") for node in ast.walk(builder))
     assert any(isinstance(node, ast.Call) and _callee(node) == "device_class" for node in ast.walk(builder))
     assert callers("execute") == {("test_reactor", "TestReactor.execute_step")}
-    assert callers("routing_refusal") == {("devices", "Device.execute")}
 
 
 def check_preflight_refuses_a_step_no_kind_serves(tmp_path: Path) -> None:
@@ -980,9 +980,8 @@ EXCLUDED: dict[Pair, Exclusion] = {
     ),
     ("not_supported", None): Exclusion(
         "a step runs only on a device of a kind STEP_DEVICE_CLASSES_BY_ACTION lists for its action, and every kind listed serves it, "
-        "so StepDevice.execute never meets an action its kind does not serve; and DebuggerDevice.routing_refusal: "
-        + ARTIFACT_EXCLUDED_SITES[("devices", "DebuggerDevice.routing_refusal")],
-        frozenset({("devices", "DebuggerDevice.routing_refusal"), ("test_reactor", "StepDevice.execute")}),
+        "so StepDevice.execute never meets an action its kind does not serve",
+        frozenset({("test_reactor", "StepDevice.execute")}),
         check_every_step_runs_on_a_kind_that_serves_it,
     ),
     ("unknown_action", None): Exclusion(

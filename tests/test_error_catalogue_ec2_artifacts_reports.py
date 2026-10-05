@@ -360,7 +360,6 @@ EXPECTED_INVENTORY: dict[str, frozenset[str]] = {
             "can_participant_required",
             "coordination_state_invalid",
             "invalid_argument",
-            "not_supported",
             "unknown_device",
         }
     ),
@@ -453,10 +452,9 @@ SCOPED_SITES: dict[tuple[str, str], str] = {
 }
 SCOPED_VALUE = "not_supported"
 
-# A not_supported site that never reaches a tool result.
-EXCLUDED_SITES: dict[tuple[str, str], str] = {
-    ("devices", "DebuggerDevice.routing_refusal"): "only `Device.execute` calls it, and nothing in src calls `Device.execute`",
-}
+# A not_supported site that never reaches a tool result. None is left since
+# `DebuggerDevice.routing_refusal` went with `Device.execute` (#682).
+EXCLUDED_SITES: dict[tuple[str, str], str] = {}
 
 # Values only attached-hardware discovery writes in these modules. Discovery has
 # no configured debugger to scope by, and the per-backend entries these types
@@ -522,10 +520,9 @@ FORWARDING_SITES: dict[tuple[str, str, str], str] = {
     ("tools", "tool_error", ERROR_TYPE_KEY): "every caller passes a literal",
 }
 
-# Functions whose sites are left out of the delivery, each with why.
-DEAD_SITES: dict[tuple[str, str], str] = {
-    ("report", "read_report_file"): "nothing in src calls it; the report readers go through read_report_state_entry",
-}
+# Functions whose sites are left out of the delivery, each with why. None is
+# left since `read_report_file` was deleted (#682).
+DEAD_SITES: dict[tuple[str, str], str] = {}
 
 NEW_KEYS = tuple(
     sorted(NEW_ENTRIES | set(SCOPED_SITES.values()) | {f"{value}:{DISCOVERY_SCOPE}" for value in DISCOVERY_SCOPED})

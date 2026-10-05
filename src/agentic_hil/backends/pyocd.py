@@ -507,7 +507,6 @@ class PyOCDBackend:
         reset = self._run_pyocd("flash_firmware", ["commander", "--command", "reset", *self._connection_args()])
         if not reset.get("ok"):
             reset["artifact"] = self._artifact_summary(artifact)
-            reset["verify"] = True
             reset["reset_after_flash"] = False
             reset["side_effect_committed"] = True
             reset["side_effect_status"] = "partial"

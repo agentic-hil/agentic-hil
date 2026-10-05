@@ -21,17 +21,16 @@ device is taken. Backends no longer each reach for the lock in their own shape,
 and a run acquires its whole declared set up front, in a fixed order, all or
 nothing (see ``DeviceSet.acquire``).
 
-**One execution shape.** ``Device.execute(service, action, arguments)`` is the
-same call for a debugger, a UART and a CAN bus; the device knows which tools it
-owns and which argument names its own config entry into them. Arguments stay
-free-form so a device kind can grow a tool without a new plumbing path.
+Devices run nothing themselves: a plan step reaches its tool through the test
+reactor's step devices, which take the argument that names the config entry
+from ``scope_field`` here.
 """
 from __future__ import annotations
 
 import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import ClassVar, Protocol
+from typing import ClassVar
 
 from agentic_hil.bench import BenchMutex, fold_resource_name, is_physical_resource
 from agentic_hil.knowledge import remediation_fields
@@ -105,33 +104,19 @@ class DeviceError(RuntimeError):
         self.result = result
 
 
-class ToolCaller(Protocol):
-    """What ``Device.execute`` needs from a tool service.
-
-    Deliberately structural: ``agentic_hil.tools`` imports the coordination layer
-    that imports this module, so naming AgenticHILToolService here would close a
-    cycle for no benefit."""
-
-    config: AgenticHILConfig
-
-    def call(self, name: str, arguments: JsonObject | None = None) -> JsonObject: ...
-
-
 @dataclass(frozen=True)
 class Device:
     """One physical unit that drives the DUT.
 
-    Subclasses supply the identity and the tool vocabulary; the mutex and the
-    execution shape are inherited and identical for all of them."""
+    Subclasses supply the identity and the tool vocabulary; the mutex is
+    inherited and identical for all of them."""
 
     kind: ClassVar[str] = "device"
     # The argument name a tool uses to address this device's config entry.
     # None for the debugger: no MCP tool schema carries a probe name, because
     # that surface drives exactly one bound probe.
     scope_field: ClassVar[str | None] = None
-    # Tool names this device owns, plus short action aliases onto them. Both are
-    # accepted by execute(), so a plan can say "flash" and a caller that already
-    # knows the tool can say "flash_firmware".
+    # Tool names this device owns, plus short action aliases onto them.
     tools: ClassVar[frozenset[str]] = frozenset()
     actions: ClassVar[dict[str, str]] = {}
 
@@ -220,53 +205,6 @@ class Device:
     def holder(self, bench: BenchMutex) -> JsonObject | None:
         """The recorded holder of this device, whoever it is."""
         return bench.holder(self.lock_key)
-
-    # --- execution with freely choosable arguments -----------------------
-
-    def resolve_action(self, action: str) -> str | None:
-        return self.actions.get(action) or (action if action in self.tools else None)
-
-    def execute(self, service: ToolCaller, action: str, arguments: JsonObject | None = None) -> JsonObject:
-        """Run one action on this device, with whatever arguments it takes.
-
-        The device supplies its own config-entry name for the argument that
-        addresses it, so a caller cannot ask ``dut_uart`` to write to
-        ``bootloader_uart`` by passing a different ``port_id``."""
-        tool = self.resolve_action(action)
-        if tool is None:
-            return {
-                "ok": False,
-                "tool": action,
-                "error_type": "invalid_argument",
-                "summary": f"A {self.kind} device has no action named '{action}'.",
-                "device": self.as_json(),
-                "supported_actions": sorted(set(self.actions) | set(self.tools)),
-                "side_effect_committed": False,
-                "retry_safe": False,
-            }
-        payload = dict(arguments or {})
-        scope = self.scope_field
-        if scope is not None:
-            named = payload.get(scope)
-            if named is not None and str(named) != self.config_id:
-                return {
-                    "ok": False,
-                    "tool": tool,
-                    "error_type": "invalid_argument",
-                    "summary": f"This action names {scope} '{named}', but it was asked of device '{self.config_id}'.",
-                    "device": self.as_json(),
-                    "side_effect_committed": False,
-                    "retry_safe": False,
-                }
-            payload[scope] = self.config_id
-        refusal = self.routing_refusal(service, tool)
-        if refusal is not None:
-            return refusal
-        return service.call(tool, payload)
-
-    def routing_refusal(self, service: ToolCaller, tool: str) -> JsonObject | None:
-        """Refuse an action the service cannot route to *this* unit."""
-        return None
 
 
 @dataclass(frozen=True)
@@ -364,30 +302,6 @@ class DebuggerDevice(Device):
     @property
     def identity_warning(self) -> str | None:
         return None if self.identity_source in {"resource_id", "probe_id"} else UNIDENTIFIED_DEBUGGER_WARNING
-
-    def routing_refusal(self, service: ToolCaller, tool: str) -> JsonObject | None:
-        """Never drive a probe this service is not bound to.
-
-        No debugger tool schema carries a probe name, so a service bound to
-        another entry would run this action on the wrong board silently. A
-        multi-probe run gets one service per probe (see the test reactor)."""
-        bound = getattr(service.config, "debugger_id", None)
-        if bound == self.config_id:
-            return None
-        return {
-            "ok": False,
-            "tool": tool,
-            "error_type": "not_supported",
-            "summary": (
-                f"This tool service drives debugger '{bound}', not '{self.config_id}', and no debugger tool "
-                "can name a probe in its arguments. Use a service bound to this debugger."
-            ),
-            "device": self.as_json(),
-            "bound_debugger": bound,
-            "side_effect_committed": False,
-            "side_effect_status": "not_started",
-            "retry_safe": False,
-        }
 
 
 # The Windows device namespace, in which `\\.\COM7` opens what `COM7` opens.

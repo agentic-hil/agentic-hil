@@ -657,7 +657,10 @@ TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     "bench_run_start": {"title": "Declare a bench run", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
     # Releases the run's devices, and closing a run that is not open is how an
     # agent recovers from losing track of its own state: it answers `ok` with
-    # `run_was_active: false` and writes nothing.
+    # `run_was_active: false`. Open run or not, an incident still standing once
+    # the devices are released is recovered by this call, which can reset the
+    # board into halt and writes reports and ledger entries. destructiveHint
+    # stays false under the rule reset_target follows.
     "bench_run_stop": {"title": "End the bench run", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     # In-memory only; it does not even read the holder files.
     "bench_run_status": {"title": "Bench run status", "readOnlyHint": True, "openWorldHint": False},
