@@ -2497,11 +2497,13 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "undeclared_device": ErrorRemedy(
         meaning=(
-            "A run reached for a device its test description does not name. `declared_devices` lists what it declared, "
+            "A run reached for a device it did not declare. A run declares its devices in its test description, or in "
+            "`devices` on `bench_run_start` when it was opened that way. `declared_devices` lists what it declared, "
             "`undeclared_devices` what it reached for. Nothing was touched."
         ),
         remediation=(
-            "Add the device to the test description and rerun. The declaration is what the mutex locks before the run "
+            "Add the device to the declaration and rerun: to the test description, or to `devices` on "
+            "`bench_run_start` for a run opened with it. The declaration is what the mutex locks before the run "
             "starts, so a device that is not declared was never locked and could be driven by somebody else mid-run.",
             "A test plan declares a debugger with `debugger: <name>` and a serial line with `port_id: <name>` on the "
             "steps that use them.",

@@ -1754,7 +1754,7 @@ class ComPortService:
         if session is None or self.coordinator.incident_stands or session.audit_broken or session.lease.state != "active" or not self._session_is_active(session):
             result: JsonObject = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "session_not_active", "summary": "COM port session is not active. Start it with com_session_start first."}
             if session is not None and (self.coordinator.incident_stands or session.audit_broken or session.lease.state != "active"):
-                result.update({"error_type": "resource_quarantined", "summary": "COM port requires cleanup or audit recovery before further actions.", "cleanup_required": True, "quarantined": True})
+                result.update({"error_type": "resource_quarantined", "summary": "COM port requires cleanup or audit recovery before further actions.", "cleanup_required": True, "quarantined": True, **remediation_fields("resource_quarantined")})
             else:
                 result.update(remediation_fields("session_not_active"))
             if session is not None and session.reader_error:

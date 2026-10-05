@@ -742,7 +742,7 @@ class HardwareCoordinator:
         with self._guard:
             self._require_open()
             if self.run_active:
-                raise CoordinationError({"ok": False, "error_type": "run_already_active", "summary": "A device run is already open on this owner; close it before declaring another.", "declared_devices": sorted(self.declared_resources or ()), "run_label": self.run_label, "run_started_at": self.run_started_at, "retry_safe": False, "side_effect_committed": False})
+                raise CoordinationError({"ok": False, "error_type": "run_already_active", "summary": "A device run is already open on this owner; close it before declaring another.", "declared_devices": sorted(self.declared_resources or ()), "run_label": self.run_label, "run_started_at": self.run_started_at, "retry_safe": False, "side_effect_committed": False, **remediation_fields("run_already_active")})
             if self.incident_stands:
                 # A new run is the stimulus class, so it waits. The recovery
                 # class does not need a run to reach the board, which is what
@@ -948,12 +948,16 @@ class HardwareCoordinator:
                     {
                         "ok": False,
                         "error_type": "undeclared_device",
-                        "summary": "This run did not declare the device it is reaching for, so the access is refused; add it to the test description and rerun.",
+                        "summary": (
+                            "This run did not declare the device it is reaching for, so the access is refused; add it to the "
+                            "test description, or to `devices` on `bench_run_start` for a run opened that way, and rerun."
+                        ),
                         "undeclared_devices": undeclared,
                         "declared_devices": sorted(self.declared_resources or ()),
                         "run_label": self.run_label,
                         "retry_safe": False,
                         "side_effect_committed": False,
+                        **remediation_fields("undeclared_device"),
                     }
                 )
             if self.incident_stands and not for_recovery:
@@ -2415,6 +2419,7 @@ class HardwareCoordinator:
             "cleanup_reasons": reasons,
             "retry_safe": False,
             "quarantine_id": self.quarantine_id,
+            **remediation_fields("resource_quarantined"),
         }
 
     def _require_open(self) -> None:

@@ -48,6 +48,7 @@ from agentic_hil.config import (
     safe_directory,
     safe_read_text,
 )
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.redact import filesystem_error_detail
 from agentic_hil.types import JsonObject, fold_device_path, fold_hardware_id
 
@@ -526,6 +527,10 @@ class BenchMutex:
                 result["holder_heartbeat_stale"] = True
         if waited_s > 0:
             result["waited_s"] = round(waited_s, 3)
+        # The catalogue's steps, merged where the refusal is built, so every path
+        # that forwards it whole (a bare hardware call, a run, a session start)
+        # hands them out, not only the plan run that used to add them (#662).
+        result.update(remediation_fields("device_busy"))
         return result
 
     def _take(self, resource: str, deadline: float, stop_requested: Callable[[], bool] | None = None) -> bool:

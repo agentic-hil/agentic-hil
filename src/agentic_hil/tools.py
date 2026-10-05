@@ -988,6 +988,7 @@ class AgenticHILToolService:
                         refusal["auto_recovery_attempted"] = True
                     refusal["cleanup_reasons"] = sorted({reason for lease in self.coordinator.leases.values() for reason in lease.cleanup_reasons()})
                     refusal["quarantine_id"] = self.coordinator.quarantine_id
+                    refusal.update(remediation_fields("resource_quarantined"))
                     return refusal
             if name in audit_gated_tools():
                 try:
