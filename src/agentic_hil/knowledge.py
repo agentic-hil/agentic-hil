@@ -2744,8 +2744,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "handles."
         ),
         remediation=(
-            "Call `hardware_lease_status`: it reads and heals the dead owner's holds, and names a `quarantine_id` "
-            "if the run had reached the board.",
+            "Call `hardware_lease_status`: it reads the dead owner's holds without changing them. "
+            "`dead_owner_no_contact` means the run never reached the board and the next hardware call releases the "
+            "holds; otherwise the next hardware call inherits them as an incident and names its `quarantine_id`.",
             "With an incident standing, recover it the way `resource_quarantined` describes; then start the plan "
             "again for a verdict.",
         ),

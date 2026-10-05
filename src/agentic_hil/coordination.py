@@ -972,6 +972,15 @@ class HardwareCoordinator:
                     self.project_lock.release()
                     self.project_lock = None
                     raise
+                if stale is not None and stale.get("state") == "active":
+                    # An owner that exited between calls without reaching a board
+                    # is released here, on the same evidence and with the same
+                    # ledger line the settling status read writes. The read-only
+                    # status tool leaves that record to this acquire (#670).
+                    finding = self._dead_owner_made_no_contact(stale)
+                    released = self._release_dead_owner(finding) if finding is not None else None
+                    if released is not None:
+                        stale = released
                 if stale is not None and stale.get("state") not in {None, "released"}:
                     stale_resources = [item for item in stale.get("resources", []) if isinstance(item, str)] or normalized
                     self._adopt_incident(stale, stale_resources, "owner_process_exited_without_release")
@@ -1704,12 +1713,23 @@ class HardwareCoordinator:
                 self.project_lock = self._acquire_lock(self.project_key, resources or [self.project_key])
             self._persist_project("cleanup_required", sorted(self.incident_resources))
 
-    def status(self) -> JsonObject:
+    def status(self, *, settle_dead_owner: bool = True) -> JsonObject:
+        """This project's lease and incident state, and the device holds.
+
+        ``settle_dead_owner`` False makes this a pure read: an `active` record
+        whose owner has exited is reported as it is found, with what the next
+        acquire will do about it, and nothing is released, adopted or written.
+        That is the answer `hardware_lease_status` gives, because it is annotated
+        read-only and a host runs such a call without asking (#670). The
+        transition itself is made by `acquire`, which meets the same record.
+        """
         with self._guard:
             self.settle_external_recovery()
             owner_active = self.project_lock is not None
             snapshot_atomic = True
             released_dead_owner: JsonObject | None = None
+            pending_dead_owner: JsonObject | None = None
+            unsettled_dead_owner = False
             if owner_active:
                 record = self._read_record(self.project_key)
             else:
@@ -1727,7 +1747,12 @@ class HardwareCoordinator:
                         # Only a record read while holding the probe lock may drive
                         # the exited-owner quarantine transition.
                         record = self._read_record(self.project_key)
-                        if record is not None and record.get("state") == "active":
+                        if record is not None and record.get("state") == "active" and not settle_dead_owner:
+                            # Read only: say what the next acquire will find,
+                            # and leave the record for it to settle.
+                            pending_dead_owner = self._dead_owner_made_no_contact(record)
+                            unsettled_dead_owner = pending_dead_owner is None
+                        elif record is not None and record.get("state") == "active":
                             stale_resources = [item for item in record.get("resources", []) if isinstance(item, str)]
                             finding = self._dead_owner_made_no_contact(record)
                             released = self._release_dead_owner(finding) if finding is not None else None
@@ -1752,8 +1777,13 @@ class HardwareCoordinator:
                     finally:
                         probe.release()
             blocked_state = bool(record and record.get("state") in {"cleanup_required", "quarantined", "recovery_pending"})
-            blocked = self.blocked or blocked_state
+            blocked = self.blocked or blocked_state or unsettled_dead_owner
             reasons = _record_cleanup_reasons(record)
+            if unsettled_dead_owner:
+                # The reason the settling read would have written, reported
+                # without writing it: the owner exited holding the bench, and
+                # nothing it left says it never reached a board.
+                reasons = sorted({*reasons, "owner_process_exited_without_release"})
             # Asked after the project block, never inside it: the probe lock above
             # is released by then, so no device is taken while a project lock is.
             holds = self.device_holds()
@@ -1787,7 +1817,7 @@ class HardwareCoordinator:
                 # quarantine narrowed is a different question from whether an
                 # incident is open. Only a damaged evidence chain answers yes,
                 # and it is the one route `recover` still has work to do on.
-                "incident_stands": self.incident_stands or (blocked_state and record_audit_broken(record)),
+                "incident_stands": self.incident_stands or ((blocked_state or unsettled_dead_owner) and record_audit_broken(record)),
                 # Lifted out of the record so an operator can decide between
                 # retrying and walking to the bench without opening state files.
                 "cleanup_reasons": reasons,
@@ -1807,6 +1837,10 @@ class HardwareCoordinator:
                 # what evidence, or the difference is invisible to the operator
                 # who would otherwise have signed for it.
                 result["released_dead_owner"] = released_dead_owner
+            if pending_dead_owner is not None:
+                # The read-only counterpart: the owner exited without reaching a
+                # board, and the next acquire releases it on this evidence.
+                result["dead_owner_no_contact"] = pending_dead_owner
             if blocked:
                 # The signature `recover --confirm-safe-state` asks for is only
                 # as good as what the signer was told: name what was attempted,

@@ -1213,8 +1213,11 @@ class AgenticHILToolService:
         # A record this version cannot trust is answered with its own refusal,
         # the way every other tool that meets it answers, and not as a protocol
         # error a caller cannot tell from a broken server.
+        #
+        # A pure read, as its annotation says: a dead owner's record is reported
+        # as found and settled by the next acquire, never here (#670).
         try:
-            return self.coordinator.status()
+            return self.coordinator.status(settle_dead_owner=False)
         except CoordinationError as error:
             return {"tool": "hardware_lease_status", "side_effect_committed": False, **error.result}
 
