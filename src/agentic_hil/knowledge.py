@@ -361,6 +361,14 @@ EXCLUSIVE_PERMISSION_SCOPE = "exclusive"
 # this scope, so a type with no scoped entry falls back to its bare one.
 TEST_REACTOR_SCOPE = "test_reactor"
 
+# The scope for the COM errors `flash_firmware` answers for its `capture`. The
+# capture opens, reads and stops a session of its own, so the bare entries'
+# advice, written for a caller who called `com_session_start` and holds the
+# session, sends this caller to a tool it never called or to a session that is
+# already stopped. Before the flash the retry is the flash with the same
+# capture; after it, the image is on the board and is not the thing to retry.
+FLASH_CAPTURE_SCOPE = "flash_capture"
+
 
 def exclusive_permission_fields(blocking: str, debugger_id: str | None) -> JsonObject:
     """The key an exclusivity refusal is about, and the direction it has to move.
@@ -2196,6 +2204,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "board, and a stimulus sent to the wrong board is the failure the port identity check exists to prevent.",
         ),
     ),
+    f"{COM_PORT_BUSY_ERROR}:{FLASH_CAPTURE_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The COM port a `flash_firmware` `capture` names is held by another program, so the capture's session was "
+            "refused where the operating system refused the open, before the flash: nothing was flashed, the target "
+            "was not reset and no handle was created. `configured_device` is the device name that was tried."
+        ),
+        remediation=(
+            "Find the holder and stop it. On Linux, `fuser -v <device>` or `lsof <device>` names the process; on "
+            "Windows, close the terminal, IDE serial monitor or flashing tool that has the port open.",
+            "Then call `flash_firmware` again with the same `capture`. Nothing was flashed, so the retry starts from "
+            "nothing.",
+        ),
+        do_not=(
+            "Do not run `recover --confirm-safe-state` over this. No lease was quarantined and the board was not "
+            "touched.",
+            "Do not point the entry at a different device name to get the port opened. The other name is a different "
+            "board.",
+        ),
+    ),
     "com_port_not_bound": ErrorRemedy(
         meaning=(
             "A configured `com_ports` entry names a port and no device, so there is nothing to open. `field` names the "
@@ -2270,6 +2297,26 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "enumeration order, so another name that opens is usually another board.",
         ),
     ),
+    f"com_port_open_failed:{FLASH_CAPTURE_SCOPE}": ErrorRemedy(
+        meaning=(
+            "Opening the COM port a `flash_firmware` `capture` names failed, before the flash: nothing was flashed and "
+            "the target was not reset. `backend_error` is the line the open failed with, and `likely_causes` reads it. "
+            "No session was registered. With `cleanup_error` present, a handle the failed open left standing would not "
+            "close, and that is recorded under `cleanup_reasons`."
+        ),
+        remediation=(
+            "Read `backend_error` and `likely_causes` first: they say whether the device is missing, held by another "
+            "program, or closed to this user. On Linux a permission refusal is fixed by the group that owns the device "
+            "(`dialout` or `uucp`) and a new login; a missing device by plugging the adapter in, with `agentic-hil "
+            "com-ports` showing what this host lists.",
+            "Then call `flash_firmware` again with the same `capture`. Nothing was flashed, and with `cleanup_error` "
+            "present the capture's open in that call is also what settles the recorded handle.",
+        ),
+        do_not=(
+            "Do not switch the entry to a different device just because that one opens. A device name is an "
+            "enumeration order, so another name that opens is usually another board.",
+        ),
+    ),
     "serial_backend_not_available": ErrorRemedy(
         meaning=(
             "pyserial, the backend Agentic HIL reaches serial ports through, could not be imported in the process that "
@@ -2336,6 +2383,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "checks.",
         ),
     ),
+    f"com_port_identity_unverified:{FLASH_CAPTURE_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The COM port a `flash_firmware` `capture` names could not be checked against the hardware its entry names, "
+            "so it was not opened and the flash was not started: nothing was flashed and the target was not reset. It "
+            "is not a mismatch, there was no way to tell. `identity.status` says which check had no answer."
+        ),
+        remediation=(
+            "Read `identity.status` and `identity.summary`, and restore the check that status names: install the serial "
+            "backend for `backend_unavailable`; plug the board in, or check that `device` is the name this host lists "
+            "for it, for `port_not_enumerated`; use an adapter and driver that report the missing serial or USB ids for "
+            "`serial_unknown` and `usb_ids_unknown`.",
+            "Then call `flash_firmware` again with the same `capture`. Nothing was touched, so there is nothing to "
+            "recover.",
+        ),
+        do_not=(
+            "Do not delete `serial_number`, `vid` or `pid` from the entry to get it opened. Removing them to silence "
+            "this refusal opens a name that nothing checks.",
+        ),
+    ),
     "com_reader_start_failed": ErrorRemedy(
         meaning=(
             "The port was opened, but the background reader that buffers its input could not be started, so the "
@@ -2351,6 +2417,23 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not read the port with another serial program in the meantime. It would hold the device, and the next "
             "`com_session_start` could not open it.",
+        ),
+    ),
+    f"com_reader_start_failed:{FLASH_CAPTURE_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The COM port a `flash_firmware` `capture` names was opened, but the background reader that buffers its "
+            "input could not be started, so the port was closed again and the flash was not started: nothing was "
+            "flashed and the target was not reset. `backend_error` says why the reader would not start."
+        ),
+        remediation=(
+            "Call `flash_firmware` again with the same `capture`: the port was closed cleanly, so the retry begins "
+            "from nothing.",
+            "If it fails the same way again, `backend_error` names what the server process could not do, and "
+            "restarting the MCP server is the repair.",
+        ),
+        do_not=(
+            "Do not read the port with another serial program in the meantime. It would hold the device, and the "
+            "capture could not open it.",
         ),
     ),
     "com_port_close_failed": ErrorRemedy(
@@ -2395,6 +2478,27 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not open the device from another program in the meantime. The resource stays reserved for this "
             "session until the stop that follows the incident's end.",
             "Do not call the stop in a loop. The answer stays the same until the call `next_step` names has run.",
+        ),
+    ),
+    f"com_port_close_failed:{FLASH_CAPTURE_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The firmware was flashed, the target reset and its boot output read into `capture`, but closing the "
+            "capture's COM session did not confirm, and `backend_error` says which part failed. The session remains "
+            "registered so that the close can be retried, and the failure is recorded under `cleanup_reasons`. Until "
+            "it is closed, another `capture` on this port is refused. `quarantined` is true only when the audit log "
+            "broke as well."
+        ),
+        remediation=(
+            "Call `com_session_stop` with the same `port_id`. The close is retried from the registered session, and a "
+            "stop that succeeds releases the port.",
+            "The flash needs nothing: the image is on the board and `capture` holds what it printed, so `flash_firmware` "
+            "is not the retry for this.",
+            "If `quarantined` is true, fix the audit destination first, then follow `quarantine_guidance` to the "
+            "operator's signature.",
+        ),
+        do_not=(
+            "Do not sign `agentic-hil recover --confirm-safe-state` for this while `quarantined` is false. The next stop "
+            "settles the handle, and the operating system refuses a new open by itself if it is really stuck.",
         ),
     ),
     "serial_write_failed": ErrorRemedy(
@@ -2503,6 +2607,27 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not keep calling `com_read` or `com_write` on the failed session in the hope it recovers. A failed "
             "reader does not restart; only `com_session_start` opens the port again.",
+        ),
+    ),
+    f"serial_read_failed:{FLASH_CAPTURE_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The reader of the COM session a `flash_firmware` `capture` opened failed after a good flash: the firmware "
+            "was flashed and the target reset, the capture's session was stopped, and `capture` holds what was read "
+            "before the failure, with `reader_error` beside it. `capture.log_path` is the session's log of every byte "
+            "received."
+        ),
+        remediation=(
+            "Read `capture.reader_error`: its `backend_error` and `likely_causes` say why the read failed. A port that "
+            "was disconnected is the first of them, and the adapter has to be back before the port can be read again.",
+            "The image is on the board. To see the boot output again, call `flash_firmware` with the same `capture` "
+            "once the port is back, which flashes and resets again; or open a session of your own with "
+            "`com_session_start`, then `reset_target` and `com_read`, which reads the next boot without writing the "
+            "image again.",
+        ),
+        do_not=(
+            "Do not call `com_read` on the port for what the capture missed. The capture's session is stopped, and what "
+            "it received is already in `capture` and in its log.",
+            "Do not report the flash as failed: `success_confirmed` and `side_effect_status` say the image was written.",
         ),
     ),
     "audit_write_failed": ErrorRemedy(

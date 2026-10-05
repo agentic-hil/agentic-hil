@@ -84,6 +84,8 @@ from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.devices import DeviceError, can_device, resolve_devices, uart_device
 from agentic_hil.knowledge import (
     AUDIT_BROKEN_SCOPE,
+    ERROR_CATALOGUE,
+    FLASH_CAPTURE_SCOPE,
     RECOVERY_PHYSICAL_CHECK_ERROR,
     UNBOUND_DEBUGGER_SCOPE,
     UNNAMED_PROBE_SCOPE,
@@ -418,7 +420,7 @@ class AgenticHILToolService:
             refusal = {key: value for key, value in opened.items() if key not in _CAPTURE_SESSION_FIELDS}
             if opened.get("ok") is True:
                 refusal.update({"error_type": "audit_unavailable", "summary": "The flash was not started: the capture's COM port session opened, but it could not be audited.", **remediation_fields("audit_unavailable")})
-            return {**refusal, "ok": False, "tool": "flash_firmware", **NOT_STARTED}
+            return {**_flash_capture_advice(refusal), "ok": False, "tool": "flash_firmware", **NOT_STARTED}
         try:
             result = self.backend.flash_firmware(artifact, True)
         except BaseException:
@@ -470,6 +472,11 @@ class AgenticHILToolService:
         if failure is not None:
             answer.update({"ok": False, "error_type": failure["error_type"], "summary": failure["summary"]})
             answer.setdefault("backend_error", failure["backend_error"])
+            # The flash succeeded, so whatever advice it carried is not about
+            # this failure; the capture's own takes its place.
+            answer.pop("remediation", None)
+            answer.pop("do_not", None)
+            answer = _flash_capture_advice(answer, fallback=True)
         if stop_error is not None:
             answer["cleanup_error"] = stop_error
         return answer
@@ -2782,6 +2789,27 @@ _SESSION_START_TOOLS = frozenset({"com_session_start", "can_session_start", "deb
 # debugger lease reports under the same names; the session's are merged into the
 # answer only after that lease has written its own.
 _CAPTURE_SESSION_FIELDS = frozenset({"lease_id", "resources", "lease_state", "safe_state_confirmed", "processes_reaped", "audit_ok", "audit_error", "audit_errors", "cleanup_required", "quarantined", "cleanup_reasons", "quarantine_id", "report_path", CONTACT_MARKER_KEY, CONTACT_MARKER_SOURCE_KEY})
+
+
+def _flash_capture_advice(answer: JsonObject, *, fallback: bool = False) -> JsonObject:
+    """`answer` with the advice for a `flash_firmware` capture's COM error.
+
+    The COM session answers with the advice for a session the caller opened
+    with `com_session_start`; the capture's session is the flash's own, so that
+    advice names a tool the caller never called, or a session that is already
+    stopped. The scoped entry replaces it where there is one. With `fallback`,
+    an error with no scoped entry takes its bare entry, for an answer that
+    carries no advice of its own (#663)."""
+    error_type = answer.get("error_type")
+    if not isinstance(error_type, str):
+        return answer
+    if f"{error_type}:{FLASH_CAPTURE_SCOPE}" not in ERROR_CATALOGUE and not fallback:
+        return answer
+    advice = remediation_fields(error_type, FLASH_CAPTURE_SCOPE)
+    if not advice:
+        return answer
+    rest = {key: value for key, value in answer.items() if key not in ("remediation", "do_not")}
+    return {**rest, **advice}
 
 
 def debugger_one_shot_tools() -> set[str]:
