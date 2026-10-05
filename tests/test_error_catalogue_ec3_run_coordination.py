@@ -1796,6 +1796,63 @@ def test_lease_status_command_over_a_record_it_cannot_read(
     assert_refusal_carries_its_entry(result, "coordination_state_invalid")
 
 
+def damaged_project_record(tmp_path: Path):
+    config = load_config(str(write_config(tmp_path)))
+    coordinator = HardwareCoordinator(config, "setup")
+    try:
+        coordinator._record_path(coordinator.project_key).write_text('{"version": 999}\n', encoding="utf-8")
+    finally:
+        coordinator.close()
+    return config
+
+
+@pytest.mark.parametrize("tool", ["hardware_lease_status", "hardware_recover"])
+def test_the_lease_tools_answer_a_damaged_record_with_its_refusal(tmp_path: Path, tool: str) -> None:
+    """The two tools that are the way out of a broken bench answer the record's
+    own refusal, not a protocol error that cannot be told from a broken server."""
+    service = AgenticHILToolService(damaged_project_record(tmp_path))
+    try:
+        response = handle_mcp_message({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": {}}}, service)
+    finally:
+        service.close()
+
+    assert isinstance(response, dict)
+    assert "error" not in response, response
+    result = response["result"]["structuredContent"]
+    assert result.get("resource"), result
+    assert_refusal_carries_its_entry(result, "coordination_state_invalid")
+
+
+def test_recover_whose_resource_lock_cannot_be_taken(tmp_path: Path) -> None:
+    """A resource lock recovery cannot take is answered the way the project lock
+    a few lines above it is: as the lock's own refusal, and nothing cleared."""
+    config = config_for(tmp_path)
+    resource = "physical:ec3-catalogue-resource-lock"
+    incident = standing_incident(config, resource)
+    service = AgenticHILToolService(config)
+    try:
+        original = service.coordinator._acquire_lock
+
+        def resource_lock_held_elsewhere(name: str, requested: list[str]):
+            if name == resource:
+                raise CoordinationError({"ok": False, "error_type": "resource_busy", "summary": "held", "resources": requested, "retry_safe": True, **remediation_fields("resource_busy")})
+            return original(name, requested)
+
+        service.coordinator._acquire_lock = resource_lock_held_elsewhere
+        response = handle_mcp_message({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "hardware_recover", "arguments": {}}}, service)
+        service.coordinator._acquire_lock = original
+        after = service.call("hardware_lease_status")
+    finally:
+        service.close()
+
+    assert isinstance(response, dict)
+    assert "error" not in response, response
+    result = response["result"]["structuredContent"]
+    assert result.get("resources"), result
+    assert_refusal_carries_its_entry(result, "resource_busy")
+    assert after.get("incident_stands") is True and after.get("quarantine_id") == incident, after
+
+
 def write_plan(workspace: Path) -> Path:
     path = workspace / ".agentic-hil" / "testconfig.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
