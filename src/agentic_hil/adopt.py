@@ -70,6 +70,7 @@ from agentic_hil.configwrite import (
     NOT_STARTED,
     PROJECT_CONFIG_SET,
     authoritative_write_target,
+    config_change_next_steps,
     leases_under_incident,
     load_config_document,
     project_config_set,
@@ -1629,10 +1630,7 @@ def _next_steps(plan: JsonObject, *, applied: bool) -> list[str]:
         if item.get("next_step"):
             steps.append(str(item["next_step"]))
     if applied:
-        steps.append(
-            "This server is still serving the configuration it loaded at startup. Ask the operator to restart the MCP "
-            "server before relying on anything this change decides."
-        )
+        steps.extend(config_change_next_steps([str(item["key"]) for item in plan["carried"]]))
         if plan["creates_com_port"]:
             steps.append("The COM port entry this created carries every permission false, written by the server. Writing to that port stays an operator's decision.")
     steps.append(f"{CONFIG_SHAPE_URI} explains which keys this configuration has and which permission opens each of them.")

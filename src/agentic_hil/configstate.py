@@ -26,12 +26,11 @@ sides and can therefore only ever take a right away.
 
 One thing does change what this module compares against, and it is not automatic:
 ``agentic_hil.configreload`` re-reads the *description* (devices, not grants)
-when it is asked for by name, and moves ``config_digest`` onto the document it
-took. After that, "unchanged" is a claim about the description in force, and the
-permission half of the same configuration may be older. That is not hidden here:
-``_permissions_source`` reports which document the grants came from whenever the
-two have come apart, in every state, so a `unchanged` answer never means more
-than it should.
+when it is asked for by name. It records which non-permission values it had to
+leave at their startup settings. In that case the effective-description digest
+is compared with the file even when the file bytes themselves have not changed
+since the reload. The permission half may also be older; ``_permissions_source``
+reports which document those grants came from whenever the two have come apart.
 
 It also costs this module a sentence it used to be able to say. "Every answer
 comes from the version loaded at startup" was true while nothing could re-read
@@ -54,6 +53,7 @@ does not load, startup says why, with the message it already produces.
 from __future__ import annotations
 
 import errno
+import weakref
 from pathlib import Path
 
 from agentic_hil.config import (
@@ -90,12 +90,44 @@ STALE_STATES = frozenset({STATE_CHANGED, STATE_MISSING, STATE_UNREADABLE})
 
 RUNNING_SERVER_SCOPE = "running_server"
 
-# Which document the description in force came from, and therefore which
-# document `loaded_digest` names. `loaded_at` is always the startup parse (that
-# is when the permissions were taken and they are never taken again), so without
-# this the two fields sit under one word while naming two different snapshots.
+# Which configuration source the description in force came from. `loaded_at` is
+# always the startup parse (that is when the permissions were taken and they are
+# never taken again), so without this the fields would read as one snapshot.
 DESCRIPTION_FROM_STARTUP = "startup"
 DESCRIPTION_FROM_RELOAD = "description_reload"
+
+# A partial description reload can leave values from sections it does not take
+# behind. Key those values by the effective-description fingerprint so status
+# can continue explaining the restart requirement without adding runtime fields
+# to the public configuration dataclass.
+_PENDING_DESCRIPTION_RESTARTS: dict[int, tuple[weakref.ReferenceType[AgenticHILConfig], tuple[str, ...], str]] = {}
+
+
+def remember_pending_description_restarts(config: AgenticHILConfig, keys: tuple[str, ...], digest: str) -> None:
+    if keys:
+        key = id(config)
+
+        def discard(reference: weakref.ReferenceType[AgenticHILConfig]) -> None:
+            current = _PENDING_DESCRIPTION_RESTARTS.get(key)
+            if current is not None and current[0] is reference:
+                _PENDING_DESCRIPTION_RESTARTS.pop(key, None)
+
+        reference = weakref.ref(config, discard)
+        _PENDING_DESCRIPTION_RESTARTS[key] = (reference, keys, digest)
+
+
+def pending_description_restarts(config: AgenticHILConfig) -> tuple[tuple[str, ...], str | None]:
+    current = _PENDING_DESCRIPTION_RESTARTS.get(id(config))
+    if current is None or current[0]() is not config:
+        return (), None
+    return current[1], current[2]
+
+
+def copy_pending_description_restarts(source: AgenticHILConfig, target: AgenticHILConfig) -> None:
+    """Carry deferred status metadata across a supported config copy."""
+    keys, digest = pending_description_restarts(source)
+    if keys and digest is not None:
+        remember_pending_description_restarts(target, keys, digest)
 
 
 def read_config_snapshot(path: str | Path) -> tuple[bytes | None, Exception | None]:
@@ -143,13 +175,12 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
     base: JsonObject = {
         "path": str(path),
         "digest_algorithm": CONFIG_DIGEST_ALGORITHM,
-        "loaded_digest": config.config_digest or None,
+        "loaded_digest": (pending_description_restarts(config)[1] or config.config_digest) or None,
         "loaded_at": config.loaded_at or None,
-        # Which document `loaded_digest` names. On a server that has never
-        # reloaded it is the startup one and the two agree; after a description
-        # reload `loaded_digest` is the reloaded document's while `loaded_at` is
-        # still the startup parse, and a reader has to be able to tell which
-        # field belongs to which snapshot rather than take both as one.
+        # On startup and after a complete description reload this is the exact
+        # file snapshot. With values waiting for restart, it fingerprints the
+        # effective hybrid configuration so it differs from the file snapshot.
+        # `loaded_at` remains the startup parse time.
         "description_source": DESCRIPTION_FROM_RELOAD if reloaded else DESCRIPTION_FROM_STARTUP,
         "description_reloaded_at": config.description_reloaded_at or None,
         "checked_at": utc_now(),
@@ -181,7 +212,8 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
     current = config_digest(raw)
 
     divergence = _permissions_source(config)
-    if current == config.config_digest:
+    pending_restart, _ = pending_description_restarts(config)
+    if current == config.config_digest and not pending_restart:
         return {
             **base,
             "state": STATE_UNCHANGED,
@@ -197,7 +229,7 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
             ),
             **divergence,
         }
-    return {
+    changed: JsonObject = {
         **base,
         "state": STATE_CHANGED,
         "current_digest": current,
@@ -207,6 +239,13 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
         **remediation_fields(CONFIG_STALE_ERROR),
         **divergence,
     }
+    if pending_restart:
+        changed["restart_required_for"] = list(pending_restart)
+        changed["summary"] = (
+            f"{changed['summary']} The description reload left these values at their startup settings: "
+            f"{', '.join(pending_restart)}. Restart the MCP server to adopt them."
+        )
+    return changed
 
 
 def _changed_summary(reloaded: bool) -> str:

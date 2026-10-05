@@ -638,14 +638,18 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # What the pins hold.
 
 SCANNED_MODULE_COUNT = 48
-COLLECTED_TYPE_COUNT = 217
+COLLECTED_TYPE_COUNT = 218
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
 # misses that; this one moves. A new function that writes a type, or a
 # function that writes one it did not write before, adds one: raise the number
-# in the same change.
-PRODUCER_COUNT = 642
+# in the same change. The newest is `report.audit_error_detail`, which names a
+# filesystem fault an audit write met `report_write_failed` (#675); that is the
+# one new type. The integrated debugger fix also adds the `debugger_error`
+# producer in `GdbDebugSessions.continue_execution`; the joint host scan finds
+# two additional producers, with every previous producer still present.
+PRODUCER_COUNT = 644
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
@@ -871,6 +875,31 @@ def check_every_failed_target_names_its_type(_tmp_path: Path) -> None:
     assert aggregate == {"target_ok": False, "target_error_type": "target_exception"}
 
 
+# The last statement of `run_plan`'s `with registration:` block, which is what
+# decides the terminal record a run leaves. Since #666 and #667 it is the
+# wrapper around the run rather than a bare `finish`, and it is pinned whole
+# because each part of it carries the exclusion below: the normal path finishes
+# from the run's own result, which names its type; an exception finishes from
+# the report the run recorded on it wherever there is one, so an interrupted or
+# a crashed run is recorded under the type that report names instead of falling
+# to the `__exit__` fallback; and only an `Exception` carrying such a report is
+# answered as a result, so `KeyboardInterrupt` and `SystemExit` still leave by
+# `raise`, with their record already written.
+RUN_PLAN_REGISTERED_BLOCK = '''try:
+    result = run_registered_plan(config, test_config, wait_s=wait_s, registration=registration)
+except BaseException as error:
+    written = getattr(error, "agentic_hil_report", None)
+    if isinstance(written, dict):
+        registration.finish(written)
+    if return_failed_report and isinstance(error, Exception) and isinstance(written, dict):
+        result = written
+    else:
+        raise
+else:
+    registration.finish(result)
+'''
+
+
 def check_every_ended_run_names_its_type(_tmp_path: Path) -> None:
     terminal = set()
     for module, source in package_sources().items():
@@ -887,7 +916,12 @@ def check_every_ended_run_names_its_type(_tmp_path: Path) -> None:
     }
     assert taken == {("reactorrun", "run_plan")}
     (registered,) = [node for node in ast.walk(definition("reactorrun", "run_plan")) if isinstance(node, ast.With) and [ast.unparse(item.context_expr) for item in node.items] == ["registration"]]
-    assert ast.unparse(registered.body[-1]) == "registration.finish(result)"
+    ended = registered.body[-1]
+    assert isinstance(ended, ast.Try), ast.unparse(ended)
+    # The run that returned still has its record finished from its own result.
+    assert [ast.unparse(statement) for statement in ended.orelse] == ["registration.finish(result)"]
+    # And the wrapper around it is the one above, to the statement.
+    assert ast.dump(ended) == ast.dump(ast.parse(RUN_PLAN_REGISTERED_BLOCK).body[0]), ast.unparse(ended)
     assert not any(isinstance(node, (ast.Return, ast.Break, ast.Continue)) for node in ast.walk(registered))
     # Every failed run result names its type: the reactor's own, and the
     # refusals and cleanup failures run_registered_plan builds around it.

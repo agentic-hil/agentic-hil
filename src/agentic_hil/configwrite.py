@@ -115,6 +115,33 @@ from agentic_hil.types import AgenticHILConfig, JsonObject
 PROJECT_CONFIG_SET = "project_config_set"
 PROJECT_CONFIG_DESCRIBE = "project_config_describe"
 
+
+def config_change_next_steps(keys: list[str]) -> list[str]:
+    """Give follow-up advice for the sections each written key belongs to."""
+    changed = sorted(set(keys))
+    reloadable = []
+    for key in changed:
+        resolved = resolve_config_key(key)
+        if (
+            resolved is not None
+            and resolved.section in {"target", "debuggers", "com_ports", "can_buses"}
+            and not resolved.under_permissions
+        ):
+            reloadable.append(key)
+    restart = [key for key in changed if key not in reloadable]
+    steps: list[str] = []
+    if reloadable:
+        steps.append(
+            "Call `project_config_reload_description` to apply these device description keys without a restart: "
+            f"{', '.join(reloadable)}."
+        )
+    if restart:
+        steps.append(
+            "Ask the operator to restart the MCP server to adopt these keys before relying on their values: "
+            f"{', '.join(restart)}."
+        )
+    return steps
+
 # Who is changing the file, in `provenance`'s own two words. Not a decoration:
 # the description grant exists to gate *the agent*, and a person at the CLI is
 # the one that grant belongs to: `agentic-hil init` consults no permission
@@ -898,8 +925,7 @@ def _project_config_set(
         "next_steps": [
             *(frozen["next_steps"] if frozen is not None else []),
             "Report which keys changed and where the file is.",
-            "This server is still serving the configuration it loaded at startup. Ask the operator to restart the MCP "
-            "server before relying on anything this change decides.",
+            *config_change_next_steps([str(item["key"]) for item in applied]),
             f"`project_config_describe` says what else this configuration leaves open; {CONFIG_SHAPE_URI} explains the shape.",
         ],
         **NOT_STARTED,

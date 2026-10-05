@@ -60,6 +60,12 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Fixed
 
+- Debug session command refusals preserve the target's last stop and report when no effect occurred. Sessions that still owe cleanup expose that state in breakpoint listings without adding new cleanup reasons, and a registered error session refuses commands and directs callers to `debug_stop_session` before starting another session. A GDB failure after the core resumed no longer claims a confirmed stop or a committed effect. (#648, #649, #650, #651, #652, #653)
+
+- Test reactor exceptions return the failure report already written through MCP and the command line; interruptions and crashes keep their distinct types in terminal records. A failed report write cannot leave `run_ok: true` or an invented report path. Run answers retain the failing step's remediation, and both audit paths preserve configuration refusal details or a catalogued filesystem failure with its write diagnostic. (#666, #667, #674, #675, #694)
+
+- Configuration write and adoption guidance distinguishes description reloads from server restarts. Reload answers retain deferred changes outside the reloaded sections, name permissions with their authoritative dotted keys and exclude internal runtime provenance markers. Non-UTF-8 configuration text consistently reports `config_unreadable`; permissions and recovery warning behavior are unchanged. (#685, #686, #687, #688)
+
 - A pyOCD command whose probe listing succeeded but could not be written to the action log is refused as `audit_unavailable`, with `target_contacted: false` and the listing kept underneath. It answered `ok: true` with the listing's "1 connected debugger probe(s) detected.", so a flash that never ran read as a success, the bench recorded an ELF the board never received as its symbol source, and a boot capture waited its whole timeout for a banner.
 
 - An STM32CubeProgrammer flash that loses its probe after a download phase began no longer reports `probe_not_found` with `target_contacted: false`, `hardware_state: unchanged` and `retry_safe: true`. `ST-LINK error (DEV_NO_STLINK)` can come at any point of a run, so a write phase in the transcript now leaves the flash unconfirmed; a read keeps the no-contact claim.
