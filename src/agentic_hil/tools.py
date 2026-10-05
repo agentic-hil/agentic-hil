@@ -2479,7 +2479,7 @@ class AgenticHILToolService:
                     self._debug_lease = None
                     return self._recommit_lease_report(written, lease)
                 if lease.state != "active":
-                    written = self._lease_result({**result, "ok": False, "error_type": "cleanup_required", "summary": "Debug process cleanup completed, but prior target state remains unconfirmed.", **remediation_fields("cleanup_required")}, lease)
+                    written = self._lease_result({**result, "ok": False, "error_type": "cleanup_required", "summary": f"The debug session is over, but {_unsettled_debug_release(lease)}.", **remediation_fields("cleanup_required")}, lease)
                 return self._recommit_lease_report(written, lease)
             else:
                 lease.quarantine("debug_session_cleanup_unconfirmed", audit_broken=result.get("audit_ok") is False)
@@ -2628,7 +2628,7 @@ class AgenticHILToolService:
                         # by a prior release-persist fault; a genuine quarantine
                         # returns False and stays unconfirmed for operator recovery.
                         if not lease.release():
-                            raise RuntimeError("Debug shutdown completed, but prior target state remains unconfirmed.")
+                            raise RuntimeError(f"Debug shutdown ended the session, but {_unsettled_debug_release(lease)}.")
                     except BaseException as error:
                         try:
                             lease.quarantine("debug_shutdown_reporting_failed", error, audit_broken=bool(shutdown_result and shutdown_result.get("audit_ok") is False))
@@ -2969,6 +2969,23 @@ def ended_incident_next_step(result: JsonObject) -> str:
         because.append("`cleanup_required` is true")
     why = f": {' and '.join(because)}" if because else ""
     return f"The incident this result reported has ended, and nothing holds the bench. This call is not safe to repeat as it stands{why}, so confirm the board's state before calling it again."
+
+
+def _unsettled_debug_release(lease: HardwareLease) -> str:
+    """What is left unsettled when a debug session ended and its lease could not be given back (#676).
+
+    The session's own teardown succeeded, so the target state it proved is not
+    what is open: the lease's reasons say what is. A release whose record could
+    not be written, and a stop whose report could not be, are named as such; any
+    other reason is the incident the lease is held under, named by its reasons."""
+    reasons = lease.cleanup_reasons()
+    if reasons and all(reason == "lease_release_unconfirmed" for reason in reasons):
+        return "the probe lease's release could not be recorded"
+    if any(reason.endswith("audit_broken") for reason in reasons):
+        return "the stop's report could not be written, so the probe lease stays held"
+    if reasons:
+        return f"the probe lease stays held under {', '.join(reasons)}"
+    return "the probe lease could not be handed back"
 
 
 def unbound_debugger_error(tool: str, config: AgenticHILConfig) -> JsonObject:
