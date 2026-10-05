@@ -7236,7 +7236,7 @@ def test_register_agent_mcp_codex_rejects_invalid_toml_without_changes(
     result = register_agent_mcp("codex", force=True)
 
     assert result["ok"] is False
-    assert result["error_type"] == "config_invalid"
+    assert result["error_type"] == "agent_mcp_config_invalid"
     assert path.read_text(encoding="utf-8") == existing
 
 
@@ -7294,7 +7294,7 @@ def test_register_agent_mcp_rejects_duplicate_json_keys_without_changes(
     result = register_agent_mcp(agent, force=True)
 
     assert result["ok"] is False
-    assert result["error_type"] == "config_invalid"
+    assert result["error_type"] == "agent_mcp_config_invalid"
     assert path.read_text(encoding="utf-8") == existing
 
 

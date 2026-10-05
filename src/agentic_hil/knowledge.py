@@ -1302,6 +1302,31 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "that agent, and a new file throws them away.",
         ),
     ),
+    # The agent's own MCP file, not the Agentic HIL configuration: Codex's
+    # `config.toml`, `opencode.json` or Claude Code's `.claude.json`. It used to
+    # answer `config_invalid` and so carried the advice for a file that is not
+    # involved (#693).
+    "agent_mcp_config_invalid": ErrorRemedy(
+        meaning=(
+            "The agent's own MCP configuration at `path` could not be used to register the Agentic HIL server: it "
+            "does not parse (a TOML or JSON syntax error), its server table (`mcp` for opencode, `mcpServers` for "
+            "Claude Code) is not an object, or the Agentic HIL managed markers in Codex's `config.toml` are "
+            "malformed, duplicated or hold no `agentic-hil` table. `parse_error`, where present, is the parser's own "
+            "account. The file belongs to the agent and the operator, so it was left exactly as it was and nothing "
+            "was registered. The Agentic HIL configuration is not involved and nothing in it needs to change."
+        ),
+        remediation=(
+            "Open the file at `path` and find what the summary names: the syntax error (`parse_error` gives its "
+            "line where the parser reported one), the server table holding another type, or the managed marker "
+            "lines that do not pair up.",
+            "Have the operator repair it in place, keeping the servers and settings it already holds.",
+            "Run the same command again.",
+        ),
+        do_not=(
+            "Do not delete or replace the file to get past this. It holds the operator's own settings and servers "
+            "for that agent, and a new file throws them away.",
+        ),
+    ),
     "agent_project_record_unreadable": ErrorRemedy(
         meaning=(
             "A project bound through `AGENTIC_HIL_CONFIG` outside the projects directory has to be named in "

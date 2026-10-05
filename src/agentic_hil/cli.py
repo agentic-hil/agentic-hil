@@ -4689,11 +4689,11 @@ def _register_codex_mcp(command: str, force: bool) -> JsonObject:
     existing = secure_optional_read_text(path) or ""
     parsed, parse_error = _parse_toml(existing)
     if parsed is None:
-        return {"ok": False, "error_type": "config_invalid", "agent": "codex", "path": str(path), "summary": "Existing Codex config.toml is not valid TOML or cannot be parsed safely; left untouched.", "parse_error": parse_error}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "codex", "path": str(path), "summary": "Existing Codex config.toml is not valid TOML or cannot be parsed safely; left untouched.", "parse_error": parse_error, **remediation_fields("agent_mcp_config_invalid")}
     start_count = existing.count(AGENTIC_HIL_MCP_START)
     end_count = existing.count(AGENTIC_HIL_MCP_END)
     if start_count != end_count or start_count > 1:
-        return {"ok": False, "error_type": "config_invalid", "agent": "codex", "path": str(path), "summary": "Codex config.toml contains malformed or duplicate Agentic HIL managed markers; left untouched."}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "codex", "path": str(path), "summary": "Codex config.toml contains malformed or duplicate Agentic HIL managed markers; left untouched.", **remediation_fields("agent_mcp_config_invalid")}
     has_managed = start_count == 1
     servers = parsed.get("mcp_servers", {})
     entry = servers.get("agentic-hil") if isinstance(servers, dict) else None
@@ -4701,7 +4701,7 @@ def _register_codex_mcp(command: str, force: bool) -> JsonObject:
     if not has_managed and entry is not None:
         return {"ok": False, "error_type": "mcp_config_conflict", "agent": "codex", "format": "codex-toml", "path": str(path), **_existing_command_field(entry), "summary": "An unmanaged Codex agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP, **remediation_fields("mcp_config_conflict")}
     if has_managed and not isinstance(entry, dict):
-        return {"ok": False, "error_type": "config_invalid", "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "The Agentic HIL managed markers do not contain an agentic-hil MCP table; left untouched."}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "The Agentic HIL managed markers do not contain an agentic-hil MCP table; left untouched.", **remediation_fields("agent_mcp_config_invalid")}
     if has_managed and entry == desired_entry:
         return {"ok": True, "skipped": True, "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "Codex MCP entry already registered with the trusted launcher."}
     if has_managed:
@@ -4713,7 +4713,7 @@ def _register_codex_mcp(command: str, force: bool) -> JsonObject:
         next_text = f"{trimmed}{separator}{block}\n"
     next_parsed, next_parse_error = _parse_toml(next_text)
     if next_parsed is None:
-        return {"ok": False, "error_type": "config_invalid", "agent": "codex", "path": str(path), "summary": "Generated Codex config.toml failed TOML validation; existing config was left untouched.", "parse_error": next_parse_error}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "codex", "path": str(path), "summary": "Generated Codex config.toml failed TOML validation; existing config was left untouched.", "parse_error": next_parse_error, **remediation_fields("agent_mcp_config_invalid")}
     secure_atomic_write_text(path, next_text)
     return {"ok": True, "agent": "codex", "format": "codex-toml", "path": str(path), "migrated": has_managed, "summary": "Registered agentic-hil MCP server in the Codex user config.toml."}
 
@@ -4789,10 +4789,10 @@ def _register_opencode_mcp(command: str, force: bool) -> JsonObject:
     path = _agent_mcp_config_path("opencode")
     data = _load_json_object(path)
     if data is None:
-        return {"ok": False, "error_type": "config_invalid", "agent": "opencode", "path": str(path), "summary": "Existing opencode.json is not valid JSON; left untouched."}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "opencode", "path": str(path), "summary": "Existing opencode.json is not valid JSON; left untouched.", **remediation_fields("agent_mcp_config_invalid")}
     servers = data.setdefault("mcp", {})
     if not isinstance(servers, dict):
-        return {"ok": False, "error_type": "config_invalid", "agent": "opencode", "path": str(path), "summary": "Existing opencode.json 'mcp' is not an object; left untouched."}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "opencode", "path": str(path), "summary": "Existing opencode.json 'mcp' is not an object; left untouched.", **remediation_fields("agent_mcp_config_invalid")}
     desired_entry: JsonObject = {"type": "local", "command": [command, "mcp-stdio"], "enabled": True}
     existing_entry = servers.get("agentic-hil")
     kind = _opencode_mcp_entry_kind(existing_entry, desired_entry) if "agentic-hil" in servers else None
@@ -4810,10 +4810,10 @@ def _register_claude_mcp(command: str, force: bool) -> JsonObject:
     path = _agent_mcp_config_path("claude-code")
     data = _load_json_object(path)
     if data is None:
-        return {"ok": False, "error_type": "config_invalid", "agent": "claude-code", "path": str(path), "summary": "Existing ~/.claude.json is not valid JSON; left untouched."}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "claude-code", "path": str(path), "summary": "Existing ~/.claude.json is not valid JSON; left untouched.", **remediation_fields("agent_mcp_config_invalid")}
     servers = data.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
-        return {"ok": False, "error_type": "config_invalid", "agent": "claude-code", "path": str(path), "summary": "Existing ~/.claude.json 'mcpServers' is not an object; left untouched."}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "claude-code", "path": str(path), "summary": "Existing ~/.claude.json 'mcpServers' is not an object; left untouched.", **remediation_fields("agent_mcp_config_invalid")}
     desired_entry: JsonObject = {"type": "stdio", "command": command, "args": ["mcp-stdio"]}
     existing_entry = servers.get("agentic-hil")
     kind = _claude_mcp_entry_kind(existing_entry, desired_entry) if "agentic-hil" in servers else None
