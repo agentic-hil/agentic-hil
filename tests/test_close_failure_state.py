@@ -142,30 +142,27 @@ def held_by_the_run(result: dict, tool: str) -> None:
     assert result.get("remediation"), result
 
 
-def test_a_buffer_clear_that_failed_inside_a_run_is_held_until_the_run_ends(com: SimpleNamespace) -> None:
-    """#660, COM: the handle is closed and the lease is held for the run's
-    teardown. Neither the start nor any stop says `cleanup_confirmed: true`
-    while it is held, the stop answers a refusal of its own that names
-    `bench_run_stop`, and after the run the stop completes."""
+def test_a_buffer_clear_that_failed_inside_a_run_confirms_only_a_released_lease(com: SimpleNamespace) -> None:
+    """#660, COM: a start whose buffer clear failed closes its handle again.
+    Nothing reached the line, so no effect is left unconfirmed and the lease is
+    given back even inside the run; `cleanup_confirmed: true` then comes with a
+    released lease, never a held one, and the port opens again in the same run."""
     run = call(com.service, "bench_run_start", {"devices": [{"kind": "uart", "id": PORT_ID}], "label": "close-state"})
     assert run["ok"] is True, run
     com.line.refuse_input_reset.add(DEVICE)
 
     refused = call(com.service, "com_session_start", {"port_id": PORT_ID, "clear_buffer": True})
     assert refused["error_type"] == "com_buffer_clear_failed", refused
-    assert refused.get("cleanup_confirmed") is not True, refused
+    assert refused.get("cleanup_confirmed") is True, refused
+    assert refused["lease_state"] == "released", refused
     com.line.refuse_input_reset.clear()
 
-    for _ in range(2):
-        held_by_the_run(call(com.service, "com_session_stop", {"port_id": PORT_ID}), "com_session_stop")
-    held_by_the_run(call(com.service, "com_session_start", {"port_id": PORT_ID}), "com_session_start")
-
-    ended = call(com.service, "bench_run_stop", {})
-    assert ended["ok"] is True, ended
     stopped = call(com.service, "com_session_stop", {"port_id": PORT_ID})
-    assert stopped["ok"] is True, stopped
+    assert stopped["ok"] is True and stopped["was_active"] is False, stopped
     reopened = call(com.service, "com_session_start", {"port_id": PORT_ID})
     assert reopened["ok"] is True and reopened["already_active"] is False, reopened
+    assert call(com.service, "com_session_stop", {"port_id": PORT_ID})["ok"] is True
+    assert call(com.service, "bench_run_stop", {})["ok"] is True
 
 
 def test_a_write_whose_effect_is_unknown_inside_a_run_is_held_until_the_run_ends(com: SimpleNamespace) -> None:

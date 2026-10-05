@@ -82,6 +82,7 @@ COM_INVENTORY = frozenset(
         "serial_backend_not_available",
         "serial_write_failed",
         "serial_write_incomplete",
+        "session_lease_held",
         "session_not_active",
     }
 )
@@ -708,6 +709,15 @@ CLAIMS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
         ("steps", (r"`com_read`", r"\bdiscard")),
         ("do_not", (r"\b(fresh|stale|old)\b",)),
     ],
+    "session_lease_held": [
+        ("meaning", (r"\bclosed\b", r"\blease\b")),
+        ("meaning", (r"`cleanup_confirmed`", r"\bnever\b")),
+        ("meaning", (r"`next_step`",)),
+        ("meaning", (r"`participant`",)),
+        ("first", (r"`next_step`", r"`bench_run_stop`")),
+        ("steps", (r"\bstop\b", r"\bagain\b")),
+        ("do_not", (r"\bloop\b",)),
+    ],
     "session_not_active": [
         ("meaning", (r"`port_id`",)),
         ("meaning", (r"`bus_id`",)),
@@ -747,6 +757,7 @@ ORDER: dict[str, list[tuple[str, ...]]] = {
     "audit_write_failed": [(r"`backend_error`|`log_path`",), (r"confirm-safe-state",)],
     "com_port_close_failed": [(r"`com_session_stop`",), (r"`quarantine_guidance`",)],
     "com_buffer_clear_failed": [(r"`cleanup_confirmed`",), (r"`com_read`",)],
+    "session_lease_held": [(r"`bench_run_stop`",), (r"\bagain\b",)],
 }
 
 
@@ -1010,6 +1021,19 @@ def stop_whose_close_is_refused(bench: SimpleNamespace) -> dict:
     return call(bench.service, "com_session_stop", {"port_id": PORT_ID})
 
 
+def stop_held_by_a_run(bench: SimpleNamespace) -> dict:
+    """A write of unknown effect inside a run: the stop closes the handle and
+    the run's incident keeps the lease. The run is ended afterwards, so the
+    port is given back before the server closes."""
+    run = call(bench.service, "bench_run_start", {"devices": [{"kind": "uart", "id": PORT_ID}], "label": "catalogue"})
+    assert run["ok"] is True, run
+    write_that_dies_on_the_line(bench)
+    refusal = call(bench.service, "com_session_stop", {"port_id": PORT_ID})
+    assert call(bench.service, "bench_run_stop", {})["ok"] is True
+    assert call(bench.service, "com_session_stop", {"port_id": PORT_ID})["ok"] is True
+    return refusal
+
+
 def write_without_a_session(bench: SimpleNamespace) -> dict:
     return call(bench.service, "com_write", {"port_id": PORT_ID, "text": "ping\n"})
 
@@ -1043,6 +1067,7 @@ REFUSALS = [
     pytest.param(start_whose_input_reset_fails, "com_buffer_clear_failed", id="com_session_start-com_buffer_clear_failed-new-session"),
     pytest.param(restart_whose_input_reset_fails, "com_buffer_clear_failed", id="com_session_start-com_buffer_clear_failed-active-session"),
     pytest.param(stop_whose_close_is_refused, "com_port_close_failed", id="com_session_stop-com_port_close_failed"),
+    pytest.param(stop_held_by_a_run, "session_lease_held", id="com_session_stop-session_lease_held"),
     pytest.param(write_without_a_session, "session_not_active", id="com_write-session_not_active"),
     pytest.param(write_that_dies_on_the_line, "serial_write_failed", id="com_write-serial_write_failed"),
     pytest.param(write_the_line_takes_only_part_of, "serial_write_incomplete", id="com_write-serial_write_incomplete"),

@@ -2298,12 +2298,13 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "how. The session remains registered so that the close can be retried: until it is, `com_read` and "
             "`com_write` on this port answer `session_not_active`, and `com_ports_list` shows it with "
             "`session_active` false. The failure is recorded under `cleanup_reasons`. `quarantined` is true only when "
-            "the audit log broke as well; then no later call can close the session, and the incident stands until an "
-            "operator recovers it."
+            "the audit log broke as well; then the incident stands until an operator recovers it, and the handle, "
+            "once closed, is no longer retried."
         ),
         remediation=(
             "Call `com_session_stop` again with the same `port_id`. The close is retried from the registered session, "
-            "and a stop that succeeds releases the port.",
+            "and a stop that succeeds releases the port. If an incident this call may not end holds the lease, the "
+            "stop answers `session_lease_held` instead and names the call that ends it.",
             "`com_session_start` on the same port retries the close as well, and opens a fresh session once it "
             "succeeds.",
             "Read `quarantine_guidance` for what the failed close leaves unconfirmed. If `quarantined` is true, fix "
@@ -2313,6 +2314,26 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not sign `agentic-hil recover --confirm-safe-state` for this while `quarantined` is false. Nothing is "
             "held for a signature: the next stop or start settles the handle, and the operating system refuses that "
             "open by itself if the handle is really stuck.",
+        ),
+    ),
+    "session_lease_held": ErrorRemedy(
+        meaning=(
+            "The session's handle is closed, but its lease could not be given back: an open incident holds it, and "
+            "this call may not end that incident. Inside a bench run, the run's teardown ends it; outside a run, a "
+            "debug session that is still open keeps it. The session stays registered for nothing but its lease, "
+            "nothing was sent to the device, and `cleanup_confirmed` is never true here because the lease is still "
+            "held. `next_step` names the call that ends the incident; a CAN refusal carries the `participant`."
+        ),
+        remediation=(
+            "Follow `next_step`: inside a run, call `bench_run_stop`; otherwise end the session that holds the "
+            "incident open, a debug session with `debug_stop_session`.",
+            "Then call the stop again with the same arguments. It gives the lease back without touching the device "
+            "again, and a start after it opens a fresh session.",
+        ),
+        do_not=(
+            "Do not open the device from another program in the meantime. The resource stays reserved for this "
+            "session until the stop that follows the incident's end.",
+            "Do not call the stop in a loop. The answer stays the same until the call `next_step` names has run.",
         ),
     ),
     "serial_write_failed": ErrorRemedy(
@@ -2431,8 +2452,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`resource_quarantined`. This error is shown in `com_ports_list`, under the port's `reader_error`, with "
             "`backend_error` saying why the log write failed. `flash_firmware` with a `capture` answers it as its own "
             "`error_type` when this happened to the capture's reader after the flash, and `capture` holds what was "
-            "read. `com_session_stop` cannot close such a session cleanly either: it answers `com_port_close_failed` "
-            "with `quarantined` true. The incident stands until an operator recovers it."
+            "read. `com_session_stop` closes such a session and answers `com_port_close_failed` with `quarantined` "
+            "true; the port's lease stays with the incident, and the incident stands until an operator recovers it, "
+            "which this server picks up while it runs."
         ),
         remediation=(
             "Fix what `backend_error` names first: free disk space, or restore write permission where `log_path` "
