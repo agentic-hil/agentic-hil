@@ -3950,8 +3950,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "flash_erase_failed:pyocd": ErrorRemedy(
         meaning=(
-            "pyOCD could not erase a flash sector the image covers, and said so in its own words: `Failed to erase "
-            "sector at <address>`. Nothing was written and nothing was verified, and the flash contents are unconfirmed "
+            "pyOCD could not erase a flash sector the image covers, and said so in its own words: `flash erase "
+            "sector failure (address <address>; result code <code>)` or another of its `flash erase` lines. Nothing was written and nothing was verified, and the flash contents are unconfirmed "
             "rather than known-unchanged: the sectors before the failing address may already be erased.\n\n"
             "This used to be reported as a plain `flash_failed`, and pyOCD logs `Resetting target` as a matter of "
             "course beside what it is doing, so the same failure with that line in the transcript came back as "
@@ -3960,7 +3960,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Read `programmer_output.stdout` and `programmer_output.stderr` on the result before anything else. They "
-            "are pyOCD's own account of what it loaded and tried to erase, and `Failed to erase sector at <address>` "
+            "are pyOCD's own account of what it loaded and tried to erase, and the `flash erase` line "
             "in them names the address the device refused, which is what places the failure inside the image. The log "
             "the result names by `log_path` holds the same capture.",
             "Ask the device about protection rather than about wiring. Read the option bytes for read-out protection, "
@@ -4040,13 +4040,14 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "verify_failed:pyocd": ErrorRemedy(
         meaning=(
-            "The captured pyOCD output says `Verify failed at <address>`. This service does not independently read "
+            "The captured pyOCD output reports a failed verify. pyOCD 0.45.1's flash prints no verify line of its own, "
+            "so the words come from whatever ran it. This service does not independently read "
             "flash back, so the transcript alone does not establish what pyOCD compared or how much of the image "
             "reached the device. Treat the image as indeterminate and keep the full transcript under `programmer_output`."
         ),
         remediation=(
             "Read `programmer_output.stdout` and `programmer_output.stderr` before anything else, and the log the "
-            "result names by `log_path`. Confirm the `Verify failed at <address>` line is present and read the lines "
+            "result names by `log_path`. Find the line that reports the verify and read the lines "
             "before it to see what pyOCD reported about the erase, program and target connection.",
             "Check that `debuggers.<name>.target_type` names this device. The CMSIS pack supplies pyOCD's target "
             "memory map and flash algorithm; a near neighbour can select the wrong address or page size. "

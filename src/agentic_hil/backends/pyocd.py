@@ -110,13 +110,14 @@ _TARGET_TYPE_NAME_CHARS = frozenset(string.ascii_letters + string.digits + "_")
 TARGET_TYPE_INVALID_PHRASES = ("unknown target type", "no target type", "target type is not")
 TARGET_TYPE_INVALID_DOC = "target_support.html"
 
-# pyOCD's own words for an erase that did not take: the FlashEraseFailure its
-# flash sequencer raises reaches the log as `Failed to erase sector at 0x...`, with
-# the `[flash]` logger name after it. One measured phrase, for the same reason
-# the ST-Link and OpenOCD marker lists hold one each: pyOCD is the backend
-# likeliest to print `Resetting target` beside a flash failure, so the phrase has
-# to be the erase line itself and not a family somebody assumed.
-PYOCD_ERASE_FAILURE_MARKERS = ["failed to erase sector", "flash erase sector failure"]
+# pyOCD's own words for an erase that did not take: every FlashEraseFailure
+# pyOCD 0.45.1 raises (pyocd/flash/flash.py:364-385, pyocd/flash/flash_dsq.py:141-164),
+# which `pyocd flash` logs as a critical line from `[__main__]`
+# (pyocd/__main__.py:170), e.g. `flash erase sector failure (address 0x08004000;
+# result code 0x1)`. The erase line itself and not a family somebody assumed:
+# pyOCD is the backend likeliest to print `Resetting target` beside a flash
+# failure. `Failed to erase sector at` is in no file of the package (#561).
+PYOCD_ERASE_FAILURE_MARKERS = ["flash erase sector", "flash erase chip", "flash erase all", "address is not within any sector"]
 
 # pyOCD 0.45.x programmer messages do not consistently use "failed" or
 # "error". These are operation failures when emitted by `pyocd flash`, so
@@ -129,7 +130,25 @@ PYOCD_FLASH_FAILURE_MARKERS = [
     "program page sequence not available",
     "delegate is not available",
     "flash program page failure",
+    # The rest of pyOCD 0.45.1's flash failures, none of which says "failed" or
+    # "error" (#561): the load refusing an address no memory region decodes
+    # (pyocd/flash/loader.py:237, recorded on the reference bench for a `.bin`
+    # based past the end of flash), and the flash algorithm's init and program
+    # steps failing or timing out (pyocd/flash/flash.py:262-264 and 408,
+    # pyocd/flash/builder.py:931). Each whole, because pyOCD warns `flash init
+    # sequence not available` on runs that succeed.
+    "no memory region defined for address",
+    "flash program page timeout",
+    "flash program page timed out",
+    "flash init failure",
+    "flash init timed out",
 ]
+
+# The words the operation-anchored rules read a failure out of: the shared two,
+# and pyOCD's own, which words its flash and link failures "failure"
+# (`FlashFailure`, pyocd/core/exceptions.py:140; `SWD/JTAG communication
+# failure`, pyocd/probe/pydapaccess/dap_access_cmsis_dap.py:372) (#561).
+PYOCD_FAILURE_WORDS = [*FAILURE_WORDS, "failure"]
 
 # The format `pyocd flash --format` is told to read an image as, by its extension
 # compared without case, the way validation compares it (#580). Given no format,
@@ -504,7 +523,10 @@ class PyOCDBackend:
             result["summary"] = "Firmware flashed. Target was not reset."
             return self._write_action_report(result)
 
-        reset = self._run_pyocd("flash_firmware", ["commander", "--command", "reset", *self._connection_args()])
+        # Classified as the reset it is: the commander reports a failed reset as
+        # `Error: memory transfer failed` (pyocd/commands/commander.py:125), which
+        # names no reset, and read as a flash it would carry the flash's steps.
+        reset = self._run_pyocd("flash_firmware", ["commander", "--command", "reset", *self._connection_args()], classify_as="reset_target")
         if not reset.get("ok"):
             reset["artifact"] = self._artifact_summary(artifact)
             reset["reset_after_flash"] = False
@@ -912,7 +934,7 @@ class PyOCDBackend:
             return dict(PYOCD_NOT_FOUND)
         return {"ok": True, "executable": found, "executable_path": found}
 
-    def _run_pyocd(self, tool: str, action_args: list[str]) -> JsonObject:
+    def _run_pyocd(self, tool: str, action_args: list[str], classify_as: str | None = None) -> JsonObject:
         started_at = utc_now_iso()
         start = time.perf_counter()
         resolved = self._resolve_executable()
@@ -941,11 +963,11 @@ class PyOCDBackend:
             return self._finish_log_audit({"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}, audit_error)
         output = f"{completed.stdout}{completed.stderr}"
         if completed.returncode == 0:
-            backend_error_type = self._backend_error_from_output(output, tool)
+            backend_error_type = self._backend_error_from_output(output, classify_as or tool)
             if backend_error_type is not None:
                 return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path, completed), audit_error)
             return self._finish_log_audit({"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "pyOCD command completed successfully.", "log_path": display_path(self.config, log_path)}, audit_error)
-        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._confirm_target_support(self._classify_output(output, tool)), log_path, completed), audit_error)
+        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._confirm_target_support(self._classify_output(output, classify_as or tool)), log_path, completed), audit_error)
 
     def _prepare_symbol_read(self, tool: str, symbol: str, symbol_elf: JsonObject | None) -> JsonObject:
         """Everything both memory reads settle before a probe is opened.
@@ -1375,7 +1397,7 @@ class PyOCDBackend:
             return "verify_failed"
         if reports_reset_failure(output):
             return "reset_failed"
-        if tool == "flash_firmware" and contains_any(lower, FAILURE_WORDS):
+        if tool == "flash_firmware" and contains_any(lower, PYOCD_FAILURE_WORDS):
             return "flash_failed"
         # The twin of the flash bucket above, anchored on the operation rather
         # than on a word: when the tool is `reset_target`, the operation that
@@ -1383,7 +1405,7 @@ class PyOCDBackend:
         # it. That is what keeps a genuine reset failure classified without the
         # rule above having to guess from a stray "reset" somewhere in a
         # transcript, which is what it used to do (#333).
-        if tool == "reset_target" and contains_any(lower, FAILURE_WORDS):
+        if tool == "reset_target" and contains_any(lower, PYOCD_FAILURE_WORDS):
             return "reset_failed"
         # The same rule once more, anchored on the operation rather than on a
         # word: when the tool is one of the memory reads, the operation that
@@ -1391,7 +1413,7 @@ class PyOCDBackend:
         # it. Without it a `savemem` that could not reach the address would land
         # in the unknown bucket and answer "Debugger failed with an unknown
         # error", which tells a caller nothing about what was being attempted.
-        if tool in SESSIONLESS_DEBUG_READS and contains_any(lower, FAILURE_WORDS):
+        if tool in SESSIONLESS_DEBUG_READS and contains_any(lower, PYOCD_FAILURE_WORDS):
             return "memory_read_failed"
         return "unknown_debugger_error"
 
