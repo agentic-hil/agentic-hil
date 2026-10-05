@@ -316,9 +316,9 @@ def load_config(config_path: str | None = None, work_dir: str | None = None) -> 
         ) from error
     except UnicodeDecodeError as error:
         raise ConfigError(
-            "config_invalid",
-            "Agentic HIL configuration file is not valid UTF-8 text.",
-            {"path": resolved_config_path},
+            "config_unreadable",
+            "Agentic HIL configuration file is not UTF-8 text and cannot be read as a configuration.",
+            {"path": resolved_config_path, "backend_error": str(error)},
         ) from error
     except yaml.YAMLError as error:
         details: JsonObject = {"path": resolved_config_path}
@@ -422,7 +422,14 @@ def bind_debugger(config: AgenticHILConfig, debugger_id: str) -> AgenticHILConfi
     # A probe's own target overrides the project target for everything that
     # runs on it. Applying it here rather than at one call site means every
     # consumer of config.target sees the board it is actually driving.
-    return replace(config, debugger_id=debugger_id, debugger=debugger, target=debugger.target or config.target)
+    bound = replace(config, debugger_id=debugger_id, debugger=debugger, target=debugger.target or config.target)
+    # A reload may have left non-description values waiting for restart. Keep
+    # that status attached when binding the same effective configuration to a
+    # debugger-specific service.
+    from agentic_hil.configstate import copy_pending_description_restarts
+
+    copy_pending_description_restarts(config, bound)
+    return bound
 
 
 def load_authoritative_config(expected_workspace: str | Path | None = None) -> AgenticHILConfig:

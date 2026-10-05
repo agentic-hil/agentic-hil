@@ -3367,7 +3367,14 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
         error.details.setdefault("test_config_path", test_config_path or DEFAULT_TEST_CONFIG_PATH)
         write_refusal_junit_xml(junit_xml, {"tool": "test_reactor", **error.to_dict()})
         raise
-    return run_plan(config, test_config_path, wait_s=wait_s, run_handle=run_handle, junit_xml=junit_xml)
+    return run_plan(
+        config,
+        test_config_path,
+        wait_s=wait_s,
+        run_handle=run_handle,
+        junit_xml=junit_xml,
+        return_failed_report=True,
+    )
 
 
 def opened_flash_interlocks(config: AgenticHILConfig) -> list[str]:

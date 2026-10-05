@@ -11377,11 +11377,20 @@ def test_load_config_reports_unreadable_path_as_config_error(tmp_path: Path) -> 
 
 
 def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> None:
+    """A file that does not decode is `config_unreadable` here too (#688).
+
+    This load is what server startup and `agentic-hil doctor` perform, and it
+    used to answer `config_invalid` while `project_config_describe`,
+    `project_config_set` and `config_status` answered `config_unreadable` for
+    the same file. One fault now has one type on every path, which is what
+    tests/test_wave75_config_answers.py holds across all five of them; this is
+    the loader on its own, and it still raises rather than returning.
+    """
     config_path = tmp_path / "config.yaml"
     config_path.write_bytes(b"\xff\xfe\x00 broken")
     with pytest.raises(ConfigError) as excinfo:
         load_config(str(config_path))
-    assert excinfo.value.error_type == "config_invalid"
+    assert excinfo.value.error_type == "config_unreadable"
 
 
 def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:

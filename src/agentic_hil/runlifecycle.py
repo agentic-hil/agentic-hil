@@ -48,7 +48,7 @@ from agentic_hil.config import (
 from agentic_hil.knowledge import remediation_fields, run_remediation_fields
 from agentic_hil.process import spawn_detached_process
 from agentic_hil.redact import filesystem_error_detail
-from agentic_hil.report import CANONICAL_REPORT_KEY, last_report_path
+from agentic_hil.report import CANONICAL_REPORT_KEY, last_report_path, overall_success
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 RUN_RECORD_VERSION = 1
@@ -645,13 +645,16 @@ class RunRegistration:
         self._pending = None
         stopped = bool(result.get("stopped"))
         fields: JsonObject = {
-            "run_ok": bool(result.get("ok")),
+            "run_ok": overall_success(result),
             "error_type": result.get("error_type"),
             "failed_step": result.get("failed_step"),
             "stopped_after_step": result.get("stopped_after_step"),
-            "report_path": result.get("report_path", self.report_path),
+            "report_path": result.get("report_path"),
             "finished_at": utc_now_iso(),
         }
+        for field in ("remediation", "do_not"):
+            if field in result:
+                fields[field] = result[field]
         canonical = result.get(CANONICAL_REPORT_KEY)
         if isinstance(canonical, str) and canonical:
             fields[CANONICAL_REPORT_KEY] = canonical
@@ -688,6 +691,8 @@ class RunRegistration:
             return False
         self._last_write = now
         record = {**self._base, **fields, "state": state, "updated_at": utc_now_iso()}
+        if "report_path" in fields and fields["report_path"] is None:
+            record.pop("report_path", None)
         try:
             write_run_record(self.config, self.handle, record)
         except (ConfigError, OSError, ValueError):
@@ -824,7 +829,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
     }
 
 
-def _detached_terminal_result(handle: str, record: JsonObject, report: str) -> JsonObject:
+def _detached_terminal_result(handle: str, record: JsonObject, _report: str) -> JsonObject:
     """The start command's answer for a run that already ended.
 
     The worker published a terminal record before it could be caught at
@@ -837,6 +842,9 @@ def _detached_terminal_result(handle: str, record: JsonObject, report: str) -> J
     stopped = str(record.get("state")) == RUN_STOPPED
     verdict = "passed" if run_ok else f"did not pass ({record.get('error_type') or 'unknown'})"
     ended = "was stopped on request" if stopped else "ended"
+    # A terminal answer uses only the path its record proves was written. The
+    # supplied shared path is only for a worker that is still running.
+    report_path = run_report_named(record)
     result: JsonObject = {
         "ok": run_ok,
         "tool": "test_reactor_start",
@@ -846,14 +854,13 @@ def _detached_terminal_result(handle: str, record: JsonObject, report: str) -> J
         "run_ok": run_ok,
         "name": record.get("name"),
         "test_config_path": record.get("test_config_path"),
-        "report_path": record.get("report_path", report),
         "started_at": record.get("started_at"),
         "finished_at": record.get("finished_at"),
-        "summary": (
-            f"The detached run under handle {handle} {ended} before the start command returned and {verdict}; "
-            f"its report is at {run_report_named(record) or report}."
-        ),
+        "summary": f"The detached run under handle {handle} {ended} before the start command returned and {verdict}; "
+        + (f"its report is at {report_path}." if report_path else "no report was written."),
     }
+    if report_path:
+        result["report_path"] = report_path
     if record.get(CANONICAL_REPORT_KEY):
         result[CANONICAL_REPORT_KEY] = record[CANONICAL_REPORT_KEY]
     if not run_ok:
@@ -868,13 +875,14 @@ def _detached_terminal_result(handle: str, record: JsonObject, report: str) -> J
 def ended_run_remediation(record: JsonObject) -> JsonObject:
     """The advice for the error an ended run's record names, for every answer built from that record.
 
-    The record keeps the type and not the advice, so the advice is looked up
-    again by the same rule the run's own result used. A refusal the run was
-    answered with under a narrower scope (another project's incident on a
-    device it declared) is read back here under its bare entry: the record does
-    not say which scope it was."""
+    A run record keeps advice selected from its failing step so every answer
+    about that run stays consistent. Older records without stored advice still
+    use the run's type lookup."""
     if record.get("run_ok") is True:
         return {}
+    stored = {key: record[key] for key in ("remediation", "do_not") if key in record}
+    if stored:
+        return stored
     return run_remediation_fields(record.get("error_type"))
 
 
@@ -1069,7 +1077,9 @@ def run_status_summary(state: str, record: JsonObject, requested_at: str | None)
     if state in TERMINAL_RUN_STATES:
         verdict = "passed" if record.get("run_ok") else f"did not pass ({record.get('error_type') or 'unknown'})"
         ended = "was stopped on request" if state == RUN_STOPPED else "ended"
-        return f"This run {ended} and {verdict}; its report is at {run_report_named(record)}."
+        report = run_report_named(record)
+        location = f"its report is at {report}." if report else "no report was written."
+        return f"This run {ended} and {verdict}; {location}"
     if state == RUN_STARTING:
         # A run that has not published `running` holds nothing yet: it is
         # taking its devices, or waiting for a holder to give one up. Saying it

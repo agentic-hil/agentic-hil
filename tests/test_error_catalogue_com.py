@@ -22,7 +22,9 @@ handed out nested under `reader_error`. `com_session_start` forwards the
 coordinator's refusal whole when it cannot take the port, so the types the
 coordinator raises are derived from its source as well. And `session_not_active`
 is one bare entry for three kinds of session (COM, CAN and the debug session),
-so it is checked against every place that returns it.
+so it is checked against every place that returns it. The debug session returns
+it from two of those places, and one of them sends the caller to stop the
+session rather than to start one, so the places are catalogued per site.
 """
 
 from __future__ import annotations
@@ -131,14 +133,27 @@ CATALOGUED_BEFORE = frozenset(
 )
 NEW_ENTRIES = COM_ERROR_TYPES - CATALOGUED_BEFORE
 
-# The start tool each kind of session names in its own `session_not_active`
-# summary, by the file that returns it.
+# The session tool each `session_not_active` summary names, by the file that
+# returns it and once for every site in that file.
+#
+# Three kinds of session answer this type, and the debug session answers it
+# from two sites that send a caller to different tools. A session that ended in
+# an error is still registered, so the way on is `debug_stop_session`: nothing
+# runs on it until it is stopped, and the start it would otherwise be told to
+# make is the call that session refuses. A session that was never started, or
+# that has been stopped, is told to start one. Both are genuine producers, so
+# each is named here with the tool it directs the caller to, rather than one
+# tuple standing for a whole file.
 SESSION_NOT_ACTIVE_SITES = {
-    "backends/gdbdebug.py": ("debug_start_session",),
-    "can.py": ("can_session_start",),
-    "comports.py": ("com_session_start",),
+    "backends/gdbdebug.py": (("debug_stop_session",), ("debug_start_session",)),
+    "can.py": (("can_session_start",),),
+    "comports.py": (("com_session_start",),),
 }
-START_TOOL = re.compile(r"\b[a-z]+_(?:session_start|start_session)\b")
+# Widened from the start tools alone for the error-ended debug session, whose
+# summary names a stop. Still read off the summary the code writes, so a site
+# that names no session tool, or another kind's, is a drift the catalogue below
+# fails on.
+SESSION_TOOL = re.compile(r"\b[a-z]+_(?:session_start|session_stop|start_session|stop_session)\b")
 
 # Port ids and devices of this module alone: device locks are machine-wide.
 PORT_ID = "catalogue_com"
@@ -278,7 +293,7 @@ def inventory_drift(scan: Scan) -> tuple[list[str], list[str]]:
 
 
 def session_not_active_sites() -> list[tuple[str, int, tuple[str, ...]]]:
-    """Every result in the package that answers `session_not_active`, with the start tool its summary names."""
+    """Every result in the package that answers `session_not_active`, with the session tool its summary names."""
     package = Path(str(agentic_hil.__file__)).parent
     sites: list[tuple[str, int, tuple[str, ...]]] = []
     for path in sorted(package.rglob("*.py")):
@@ -291,7 +306,7 @@ def session_not_active_sites() -> list[tuple[str, int, tuple[str, ...]]]:
                 continue
             summary = fields.get("summary")
             text = summary.value if isinstance(summary, ast.Constant) and isinstance(summary.value, str) else ""
-            sites.append((path.relative_to(package).as_posix(), node.lineno, tuple(START_TOOL.findall(text))))
+            sites.append((path.relative_to(package).as_posix(), node.lineno, tuple(SESSION_TOOL.findall(text))))
     return sites
 
 
@@ -1204,10 +1219,20 @@ def test_a_port_the_open_run_did_not_declare_is_refused_with_a_type_that_resolve
 
 
 def test_session_not_active_is_answered_by_the_three_kinds_of_session() -> None:
-    sites = session_not_active_sites()
+    """Three kinds of session, four sites, and each site's own session tool.
 
-    assert {path: tools for path, _, tools in sites} == SESSION_NOT_ACTIVE_SITES, sites
-    assert len(sites) == len(SESSION_NOT_ACTIVE_SITES), sites
+    The debug session answers from two of them, and a catalogue holding one
+    tuple per file could not tell them apart: it would keep whichever the scan
+    walked last and still count three. So the sites are compared as pairs, one
+    per producer, which pins the multiplicity as well as what each one says.
+    Sorted rather than taken in scan order, because which of two returns inside
+    one function `ast.walk` reaches first is not a claim about the product.
+    """
+    sites = session_not_active_sites()
+    catalogued = sorted((path, tools) for path, per_file in SESSION_NOT_ACTIVE_SITES.items() for tools in per_file)
+
+    assert sorted((path, tools) for path, _, tools in sites) == catalogued, sites
+    assert len(sites) == len(catalogued), sites
 
 
 def test_a_debug_tool_without_a_session_carries_the_session_not_active_entry(tmp_path: Path) -> None:

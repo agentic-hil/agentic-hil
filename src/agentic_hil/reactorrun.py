@@ -53,6 +53,7 @@ def run_plan(
     wait_s: float = 0.0,
     run_handle: str | None = None,
     junit_xml: str | None = None,
+    return_failed_report: bool = False,
 ) -> JsonObject:
     """Run a plan to its end and answer with the report.
 
@@ -69,10 +70,10 @@ def run_plan(
     plan that would name the skipped cases is loaded here, and a run refused
     before its first step is exactly the run whose artifact a CI job needs.
 
-    One path deliberately leaves without one, and it is the path that prints no
-    JSON either: an interrupted run raises past this to the operator's terminal,
-    and its record is the report `run_registered_plan` committed before it
-    re-raised."""
+    Library callers can retain exception propagation or request the failed
+    report for an ordinary reactor exception. The CLI and MCP frontends request
+    that report; `KeyboardInterrupt` and `SystemExit` always propagate after
+    their report and terminal record are written."""
     test_config: TestConfig | None = None
     try:
         test_config = load_test_config(test_config_path, config.work_dir)
@@ -100,8 +101,18 @@ def run_plan(
         write_refusal_junit_xml(junit_xml, {"tool": "test_reactor", **error.to_dict()}, plan_steps=() if test_config is None else test_config.steps)
         raise
     with registration:
-        result = run_registered_plan(config, test_config, wait_s=wait_s, registration=registration)
-        registration.finish(result)
+        try:
+            result = run_registered_plan(config, test_config, wait_s=wait_s, registration=registration)
+        except BaseException as error:
+            written = getattr(error, "agentic_hil_report", None)
+            if isinstance(written, dict):
+                registration.finish(written)
+            if return_failed_report and isinstance(error, Exception) and isinstance(written, dict):
+                result = written
+            else:
+                raise
+        else:
+            registration.finish(result)
     if junit_xml is None:
         return result
     return result_with_junit_xml(result, junit_xml, plan_steps=test_config.steps)
@@ -180,7 +191,11 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
             **plan_digest_field(test_config),
             "error_type": "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "reactor_exception",
             "exception_type": type(error).__name__,
-            "summary": "Test reactor was interrupted; all containment steps were attempted.",
+            "summary": (
+                "Test reactor was interrupted; all containment steps were attempted."
+                if isinstance(error, (KeyboardInterrupt, SystemExit))
+                else "Test reactor raised unexpectedly; all containment steps were attempted."
+            ),
             "steps": [],
             "cleanup": getattr(error, "agentic_hil_cleanup", []),
             "cleanup_ok": False,
@@ -246,5 +261,6 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
     if primary_error is not None:
         if written.get("audit_ok") is False:
             primary_error.args = (*primary_error.args, "Final reactor audit failed.")
+        primary_error.agentic_hil_report = written
         raise primary_error
     return written
