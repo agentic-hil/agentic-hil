@@ -328,12 +328,43 @@ def _one_error_type_answered_once(result: JsonObject) -> JsonObject:
     which is rendered from a copy.
     """
     error_type = _error_type(result)
+    if not error_type:
+        return result
+    result = _failed_steps_answered_once(result, error_type)
     nested = result.get("validation_error")
-    if not error_type or not isinstance(nested, Mapping) or nested.get("error_type") != error_type:
+    if not isinstance(nested, Mapping) or nested.get("error_type") != error_type:
         return result
     if _strings(nested.get("remediation")) or _strings(nested.get("do_not")):
         return result
     return {**result, "validation_error": {key: value for key, value in nested.items() if key != "error_type"}}
+
+
+def _failed_steps_answered_once(result: JsonObject, answered_type: str) -> JsonObject:
+    """The same rule for a run that failed on a step (#678).
+
+    A plan that fails on a step answers with that step's type at the top, and
+    the step's result keeps the type and its advice, so the advice was printed
+    under the step and again under "What to do". The step's copy goes where it
+    would print exactly what the refusal prints: same type, same steps, same
+    `do_not`. A step whose advice differs, such as a step's own reading of a
+    type the run answers under its own scope, keeps it, because that is a
+    second answer rather than a copy. Repeat blocks are walked too, since the
+    step that failed may be nested in one.
+    """
+    answered = _remediation(result, command_line=False)
+
+    def walk(node: object) -> object:
+        if isinstance(node, Mapping):
+            copy = {key: walk(value) for key, value in node.items()}
+            if _error_type(copy) == answered_type and _remediation(copy, command_line=False) == answered:
+                return {key: value for key, value in copy.items() if key not in {"error_type", "remediation", "do_not"}}
+            return copy
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    steps = result.get("steps")
+    return {**result, "steps": walk(steps)} if isinstance(steps, list) else result
 
 
 def _holds(node: object, needle: JsonObject) -> bool:
