@@ -64,8 +64,10 @@ from agentic_hil.bench import BenchMutex
 from agentic_hil.cli import build_parser, dispatch, entrypoint
 from agentic_hil.config import load_authoritative_config, load_config
 from agentic_hil.coordination import (
+    ATTESTATION_OPERATOR,
     DEBUGGER_DISCOVERY_RESOURCE,
     LEASE_RELEASE_RETRY_REASON,
+    RECOVERY_ACTOR_HUMAN,
     CoordinationError,
     HardwareCoordinator,
 )
@@ -1773,6 +1775,129 @@ def test_recover_command_over_inconsistent_markers(tmp_path: Path, monkeypatch: 
     result = cli_recover(["--confirm-safe-state", "--quarantine-id", incident])
 
     assert_refusal_carries_its_entry(result, "coordination_state_invalid")
+
+
+# --- the operator's way out of a record nothing else can clear (#669) ---------
+
+
+def recovery_ledger_lines(config) -> list[dict]:
+    path = HardwareCoordinator(config, "ec3-ledger-reader").root / "recovery.jsonl"
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_retire_records_sets_a_damaged_project_record_aside_and_frees_the_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every command stops on a record this version cannot read. The operator's
+    route is `recover --confirm-safe-state --retire-records`: the record's bytes
+    are kept beside it, the ledger says who retired what, and the bench is free."""
+    import hashlib
+
+    config = command_line_bench(tmp_path, monkeypatch)
+    resource = "physical:ec3-catalogue-retire-project"
+    standing_incident(config, resource)
+    doctor = HardwareCoordinator(config, "ec3-record-doctor")
+    damaged = b'{"version": 999}\n'
+    try:
+        doctor._record_path(doctor.project_key).write_bytes(damaged)
+        marker_before = doctor._read_record(resource)
+    finally:
+        doctor.close()
+    assert marker_before is not None and marker_before["state"] in {"cleanup_required", "quarantined"}
+
+    result = cli_recover(["--confirm-safe-state", "--retire-records"])
+
+    assert result["ok"] is True, result
+    retired = {entry["resource"]: entry for entry in result["retired"]}
+    assert set(retired) == {doctor.project_key, resource}, result
+    assert retired[doctor.project_key]["sha256"] == hashlib.sha256(damaged).hexdigest()
+    kept = doctor.record_directory / retired[doctor.project_key]["retired_as"]
+    assert kept.read_bytes() == damaged
+    line = recovery_ledger_lines(config)[-1]
+    assert line["recovery"] == "records_retired", line
+    assert line["actor"] == RECOVERY_ACTOR_HUMAN
+    assert line["attestation"] == ATTESTATION_OPERATOR
+    assert {entry["resource"] for entry in line["retired"]} == {doctor.project_key, resource}
+    after = HardwareCoordinator(config, "ec3-after-retire")
+    try:
+        status = after.status()
+        assert status["blocked"] is False, status
+        assert after._read_record(resource)["state"] == "released"
+        lease = after.acquire(resource)
+        assert lease.release() is True
+    finally:
+        after.close()
+
+
+def test_retire_records_clears_a_marker_naming_another_incident(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = command_line_bench(tmp_path, monkeypatch)
+    resource = "physical:ec3-catalogue-retire-marker"
+    incident = standing_incident(config, resource)
+    doctor = HardwareCoordinator(config, "ec3-marker-doctor")
+    try:
+        marker = doctor._read_record(resource)
+        assert marker is not None
+        doctor._write_record(resource, {**marker, "quarantine_id": "another-incident"})
+    finally:
+        doctor.close()
+    assert_refusal_carries_its_entry(cli_recover(["--confirm-safe-state", "--quarantine-id", incident]), "quarantine_changed")
+
+    result = cli_recover(["--confirm-safe-state", "--retire-records", "--quarantine-id", incident])
+
+    assert result["ok"] is True, result
+    assert resource in {entry["resource"] for entry in result["retired"]}, result
+    after = HardwareCoordinator(config, "ec3-after-retire")
+    try:
+        assert after.status()["blocked"] is False
+        assert after._read_record(resource)["state"] == "released"
+    finally:
+        after.close()
+
+
+def test_retire_records_signs_for_the_incident_a_readable_record_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A project record that can still be read names its incident, and a
+    retirement signs for that id the way every recovery does."""
+    config = command_line_bench(tmp_path, monkeypatch)
+    resource = "physical:ec3-catalogue-retire-id"
+    standing_incident(config, resource)
+
+    missing = cli_recover(["--confirm-safe-state", "--retire-records"])
+    wrong = cli_recover(["--confirm-safe-state", "--retire-records", "--quarantine-id", "not-the-incident"])
+
+    assert_refusal_carries_its_entry(missing, "quarantine_id_required")
+    assert_refusal_carries_its_entry(wrong, "quarantine_changed")
+    assert recovery_ledger_lines(config) == []
+
+
+def test_retire_records_whose_ledger_line_cannot_be_written_changes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = command_line_bench(tmp_path, monkeypatch)
+    standing_incident(config, "physical:ec3-catalogue-retire-ledger")
+    doctor = HardwareCoordinator(config, "ec3-record-doctor")
+    path = doctor._record_path(doctor.project_key)
+    doctor.close()
+    path.write_bytes(b"not json\n")
+
+    def ledger_refuses(*args: object, **kwargs: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("agentic_hil.coordination.safe_append_text", ledger_refuses)
+    result = cli_recover(["--confirm-safe-state", "--retire-records"])
+
+    assert "backend_error" in result, result
+    assert_refusal_carries_its_entry(result, "recovery_audit_failed")
+    assert path.read_bytes() == b"not json\n"
+    assert not (path.parent / "retired").exists()
+
+
+def test_recover_without_an_incident_id_is_refused_by_the_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--quarantine-id` is optional on the parser now that `--retire-records`
+    may run without one; a plain recovery still requires it."""
+    config = command_line_bench(tmp_path, monkeypatch)
+    standing_incident(config, "physical:ec3-catalogue-cli-no-id")
+
+    result = cli_recover(["--confirm-safe-state"])
+
+    assert_refusal_carries_its_entry(result, "quarantine_id_required")
 
 
 def test_lease_status_command_over_a_record_it_cannot_read(
