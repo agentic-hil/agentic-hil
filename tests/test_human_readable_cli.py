@@ -624,6 +624,60 @@ def test_a_nested_finding_with_a_reason_of_its_own_keeps_its_own_advice() -> Non
     assert "Read `field` and `validator` together" in out
 
 
+def test_a_failed_steps_advice_is_printed_once_under_the_run_that_failed_on_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#678: the same rule for a plan that ran and failed on a step.
+
+    A run that fails on a step answers with the step's type at the top, and the
+    step's own result keeps that type and its catalogue advice. The rendering
+    printed the advice under the step and again under "What to do", so one
+    failure read as two. Drawn from a real run, so the document is the one the
+    reactor writes rather than a remembered copy of it.
+    """
+    from test_run_lifecycle import bench_workspace
+
+    from agentic_hil.backends.openocd import OpenOCDBackend
+    from agentic_hil.config import load_authoritative_config
+    from agentic_hil.reactorrun import run_plan
+
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, "version: 4\nsteps:\n  - {device: dut, action: reset}\n")
+    refusal = {"ok": False, "tool": "reset_target", "error_type": "invalid_argument", "summary": "The reset mode is not one this backend takes."}
+    monkeypatch.setattr(OpenOCDBackend, "reset_target", lambda self, mode="run": dict(refusal))
+    result = run_plan(load_authoritative_config(workspace), str(plan), return_failed_report=True)
+    assert result["error_type"] == "invalid_argument", result
+    assert result["steps"][0]["result"]["error_type"] == "invalid_argument", result["steps"]
+
+    out = _reflowed(_rendered(result, "test-reactor"))
+
+    advice = remediation_fields("invalid_argument")
+    for step in advice["remediation"]:
+        assert out.count(_reflowed(step)) == 1, out
+    for item in advice.get("do_not", []):
+        assert out.count(_reflowed(item)) == 1, out
+    # The step's own facts are untouched.
+    assert "The reset mode is not one this backend takes." in out
+
+
+def test_a_failed_step_with_a_reason_of_its_own_keeps_its_advice_under_the_run() -> None:
+    """The other side of #678: a step whose type is not the run's is a second fact.
+
+    A run whose cleanup failed after a step failed answers `cleanup_failed` at the
+    top, and the step's own type explains the step. Its advice stays where it is.
+    """
+    step_advice = remediation_fields("comparator_unmet")
+    document = {
+        **PLAN_FAILED,
+        "steps": [
+            {**PLAN_FAILED["steps"][2], "result": {**PLAN_FAILED["steps"][2]["result"], **step_advice}},
+        ],
+        "cleanup_ok": False,
+        "error_type": "cleanup_failed",
+    }
+
+    out = _reflowed(_rendered(document, "test-reactor"))
+
+    assert out.count(_reflowed(step_advice["remediation"][0])) == 1, out
+
+
 def test_a_permission_refusal_prints_the_key_and_the_line_that_opens_it() -> None:
     """#443: a refusal an operator can act on without opening the file.
 

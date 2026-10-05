@@ -1275,3 +1275,187 @@ def test_clauses_are_the_unit_every_relation_is_read_in() -> None:
     fact split across two clauses is not one the check accepts."""
     assert clauses("Default false; returns `steps`.") == ["Default false;", "returns `steps`."]
     assert not a_plain_run_answers_at_the_plans_end("Default false. It answers at once; `steps` come later.")
+
+
+# --- what the plan tools' answers name (#671, #672, #673) -------------------
+#
+# An MCP caller is told the tools it holds and the arguments they take; an
+# operator at a shell is told the commands and their flags. The answers are
+# built in one module for both, so each half is asked of its own route here.
+
+COMMAND_LINE_FLAG = re.compile(r"(?<![\w-])--[a-z]")
+GONE_HANDLE = "run-00000000000000a1"
+
+
+def in_mcp_words(text: str) -> bool:
+    """No command line and no flag: nothing an MCP caller cannot call."""
+    return "agentic-hil " not in text and not COMMAND_LINE_FLAG.search(text)
+
+
+class LiveWorker:
+    """A worker the start command sees as alive, so it reads the record it finds."""
+
+    def poll(self) -> None:
+        return None
+
+
+def started_without_a_worker(monkeypatch: pytest.MonkeyPatch, config, handle: str) -> None:
+    """A detached start that finds its run already published as running.
+
+    The worker is not what these tests are about: the answer the start command
+    builds from a running record is, and a real worker would only make it race."""
+    runlifecycle.runs_directory(config).mkdir(parents=True, exist_ok=True)
+    runlifecycle.write_run_record(config, handle, {"version": runlifecycle.RUN_RECORD_VERSION, "run": handle, "state": RUN_RUNNING, "run_ok": None})
+    monkeypatch.setattr(runlifecycle, "new_run_handle", lambda: handle)
+    monkeypatch.setattr(runlifecycle, "spawn_run_worker", lambda *_, **__: LiveWorker())
+
+
+def gone_worker(monkeypatch: pytest.MonkeyPatch, config) -> None:
+    """A run whose record still says running behind a process that is gone."""
+    runlifecycle.runs_directory(config).mkdir(parents=True, exist_ok=True)
+    runlifecycle.write_run_record(config, GONE_HANDLE, {"version": runlifecycle.RUN_RECORD_VERSION, "run": GONE_HANDLE, "state": RUN_RUNNING, "run_ok": None})
+    monkeypatch.setattr(runlifecycle, "worker_is_gone", lambda *_: True)
+
+
+def test_the_run_listing_over_mcp_names_the_run_argument_rather_than_a_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#671: the listing told an MCP caller to name a run "with --run"."""
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, RESET_PLAN)
+    service = bound_service(workspace)
+    try:
+        ran = mcp_call(service, PLAN_RUN, {"test_config_path": str(plan)})
+        listed_runs = mcp_call(service, PLAN_STATUS, {})
+    finally:
+        service.close()
+
+    assert ran["ok"] is True, ran
+    assert in_mcp_words(listed_runs["summary"]), listed_runs["summary"]
+    assert PLAN_STATUS in listed_runs["summary"] and "`run`" in listed_runs["summary"], listed_runs["summary"]
+
+
+def test_the_run_listing_at_the_command_line_keeps_its_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """The other half of #671: an operator names a run with `--run`."""
+    import json
+
+    from agentic_hil.cli import entrypoint, run_test_reactor
+
+    _, plan = bench_workspace(tmp_path, monkeypatch, RESET_PLAN)
+    assert run_test_reactor(str(plan))["ok"] is True
+
+    entrypoint(["test-reactor-status", "--json"])
+
+    listed_runs = json.loads(capsys.readouterr().out)
+    assert "--run" in listed_runs["summary"], listed_runs["summary"]
+
+
+def test_a_detached_start_over_mcp_names_the_status_and_stop_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#671 and #672: the handle comes with the tools that read and stop it,
+    under the name of the tool that started it."""
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, RESET_PLAN)
+    config = load_authoritative_config(workspace)
+    handle = "run-00000000000000b2"
+    started_without_a_worker(monkeypatch, config, handle)
+    service = bound_service(workspace)
+    try:
+        started = mcp_call(service, PLAN_RUN, {"test_config_path": str(plan), "detach": True})
+    finally:
+        service.close()
+
+    assert started["ok"] is True and started["run"] == handle, started
+    assert started["tool"] == PLAN_RUN, started
+    assert in_mcp_words(started["summary"]), started["summary"]
+    assert PLAN_STATUS in started["summary"] and PLAN_STOP in started["summary"], started["summary"]
+
+
+def test_a_detached_start_at_the_command_line_keeps_its_command_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of #671: an operator is told the commands and the flag."""
+    from agentic_hil.cli import start_detached_test_reactor
+
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, RESET_PLAN)
+    handle = "run-00000000000000c3"
+    started_without_a_worker(monkeypatch, load_authoritative_config(workspace), handle)
+
+    started = start_detached_test_reactor(str(plan))
+
+    assert started["ok"] is True, started
+    assert f"agentic-hil test-reactor-status --run {handle}" in started["summary"], started["summary"]
+    assert f"agentic-hil test-reactor-stop --run {handle}" in started["summary"], started["summary"]
+
+
+@pytest.mark.parametrize("tool_name", [PLAN_STATUS, PLAN_STOP])
+def test_a_gone_worker_over_mcp_names_the_lease_tool_and_leaves_the_signature_to_the_operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool_name: str) -> None:
+    """#671: the next step named `agentic-hil lease-status` and handed an MCP
+    caller the operator's `recover --confirm-safe-state` as its own move."""
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, RESET_PLAN)
+    gone_worker(monkeypatch, load_authoritative_config(workspace))
+    service = bound_service(workspace)
+    try:
+        answer = mcp_call(service, tool_name, {"run": GONE_HANDLE})
+    finally:
+        service.close()
+
+    assert answer["state"] == RUN_WORKER_GONE, answer
+    next_step = answer["next_step"]
+    assert in_mcp_words(next_step), next_step
+    assert LEASE in next_step, next_step
+    assert "operator" in next_step, next_step
+
+
+@pytest.mark.parametrize("argv", [["test-reactor-status", "--run", GONE_HANDLE], ["test-reactor-stop", "--run", GONE_HANDLE]], ids=["status", "stop"])
+def test_a_gone_worker_at_the_command_line_keeps_its_command_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]) -> None:
+    """The other half of #671: the operator's own commands, signature included."""
+    import json
+
+    from agentic_hil.cli import entrypoint
+
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, RESET_PLAN)
+    gone_worker(monkeypatch, load_authoritative_config(workspace))
+
+    entrypoint([*argv, "--json"])
+
+    answer = json.loads(capsys.readouterr().out)
+    assert "agentic-hil lease-status" in answer["next_step"], answer
+    assert "agentic-hil recover --confirm-safe-state" in answer["next_step"], answer
+
+
+def test_a_plan_run_and_its_classification_name_a_tool_the_server_lists(listed: dict[str, dict], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#672: `tool` and `source_tool` named `test_reactor`, which no tool is."""
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, RESET_PLAN)
+    config = load_authoritative_config(workspace)
+    service = bound_service(workspace)
+    try:
+        passed = mcp_call(service, PLAN_RUN, {"test_config_path": str(plan)})
+        stranger = BenchMutex(frontend="stranger", label="td5-plan-holder")
+        stranger.acquire(declared_devices(config, load_test_config(str(plan), config.work_dir)))
+        try:
+            refused = mcp_call(service, PLAN_RUN, {"test_config_path": str(plan)})
+        finally:
+            stranger.release_all()
+        classified = mcp_call(service, "classify_last_error", {})
+    finally:
+        service.close()
+
+    assert passed["ok"] is True and passed["tool"] == PLAN_RUN, passed
+    assert refused["error_type"] == "device_busy" and refused["tool"] == PLAN_RUN, refused
+    assert classified["source_tool"] == PLAN_RUN, classified
+    assert PLAN_RUN in listed
+
+
+def test_a_plan_run_refused_a_held_device_is_not_told_to_pass_an_argument_it_refuses(listed: dict[str, dict], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#673: the `device_busy` advice said `wait_s` on the run start, and
+    `test_reactor_run` has no `wait_s`: its schema refuses the argument."""
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, RESET_PLAN)
+    config = load_authoritative_config(workspace)
+    stranger = BenchMutex(frontend="stranger", label="td5-plan-holder")
+    stranger.acquire(declared_devices(config, load_test_config(str(plan), config.work_dir)))
+    service = bound_service(workspace)
+    try:
+        refused = mcp_call(service, PLAN_RUN, {"test_config_path": str(plan)})
+    finally:
+        service.close()
+        stranger.release_all()
+
+    assert refused["error_type"] == "device_busy", refused
+    assert "wait_s" not in listed[PLAN_RUN]["inputSchema"].get("properties", {})
+    advice = " ".join([*refused.get("remediation", []), *refused.get("do_not", [])])
+    assert advice, refused
+    assert "`wait_s`" not in advice, advice
