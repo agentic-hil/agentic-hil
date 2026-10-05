@@ -853,6 +853,54 @@ def test_stop_session_detach_guard_failure_is_not_reported_safe_and_survives_ret
         service.coordinator.close()
 
 
+def test_a_retried_stop_reports_the_original_failure_and_names_the_call_that_settles_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # #637: a stop that confirmed the halt and could not confirm the
+    # auto-resume-on-detach guard answers `detach_resume_not_confirmed` with
+    # `halt_not_confirmed: false`. A retry has no connection to prove anything
+    # with, so it must not turn that into "the halt was never confirmed", and
+    # neither answer may promise a retry of this call that cannot succeed: the
+    # call that settles the session is probe_target.
+    service = debug_service(tmp_path)
+    debug = service.backend._debug
+    original = debug._gdb_command
+
+    def refuse_detach_guard(session, command: str, timeout_s=None, **kwargs):
+        if "gdb-detach" in command:
+            return GdbMiCommandResult(result_class="error", line="", error_message="monitor command refused")
+        return original(session, command, timeout_s, **kwargs)
+
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        monkeypatch.setattr(debug, "_gdb_command", refuse_detach_guard)
+
+        first = service.call("debug_stop_session")
+        assert first["error_type"] == "detach_resume_not_confirmed", first
+        assert first["halt_not_confirmed"] is False
+        assert "probe_target" in first["summary"], first["summary"]
+        assert "retained for retry" not in first["summary"], first["summary"]
+
+        monkeypatch.setattr(debug, "_gdb_command", original)
+        retried = service.call("debug_stop_session")
+        assert retried["ok"] is False
+        assert retried["error_type"] == "detach_resume_not_confirmed", retried
+        assert retried["halt_not_confirmed"] is False
+        assert retried["breakpoints_removed_confirmed"] is True
+        assert retried["detach_resume_guard_confirmed"] is False
+        assert retried["summary"] == first["summary"]
+        assert retried["safe_state_confirmed"] is False
+        assert retried["cleanup_required"] is True
+
+        probed = service.call("probe_target")
+        assert probed["ok"] is True, probed
+        assert service.call("debug_stop_session")["summary"] == "No debug session is active."
+    finally:
+        monkeypatch.setattr(debug, "_gdb_command", original)
+        try:
+            service.close()
+        finally:
+            service.coordinator.close()
+
+
 def test_reset_target_recovery_after_a_stuck_stop_lets_a_new_session_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Review round 1, finding 3: once a failed stop sets
     # session.hardware_state_unconfirmed, stop_session can never retire that
