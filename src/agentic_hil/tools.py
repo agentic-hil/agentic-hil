@@ -88,6 +88,8 @@ from agentic_hil.knowledge import (
     UNBOUND_DEBUGGER_SCOPE,
     UNNAMED_PROBE_SCOPE,
     attach_quarantine_guidance,
+    exclusive_permission_fields,
+    exclusive_permission_summary,
     permission_denied_next_step,
     permission_denied_summary,
     permission_key,
@@ -294,6 +296,14 @@ class AgenticHILToolService:
         payload = payload or {}
         if not self.debugger_permissions.allow_flash:
             return tool_error("flash_firmware", "permission_denied", "Flashing is disabled by the authoritative config.", self.debugger_permission_key("allow_flash"))
+        # The two grants flashing is interlocked against refuse here, before the
+        # probe is leased and before a capture opens its port, as allow_flash
+        # does and as `debug_start_session` refuses them: a refusal that needs
+        # no board leaves no report, whichever permission gave it (#679). The
+        # backends keep their own check behind this one.
+        for blocking in ("allow_raw_debugger_commands", "allow_mass_erase"):
+            if getattr(self.debugger_permissions, blocking):
+                return {"ok": False, "tool": "flash_firmware", "error_type": "permission_denied", "summary": exclusive_permission_summary("Flashing", blocking, self.config.debugger_id), **exclusive_permission_fields(blocking, self.config.debugger_id)}
         image_path = payload.get("image_path")
         artifact_id = payload.get("artifact_id")
         if bool(image_path) == bool(artifact_id):
@@ -2268,7 +2278,8 @@ class AgenticHILToolService:
 
     def _debug_permission_failure(self, name: str, args: JsonObject) -> JsonObject | None:
         if name == "flash_firmware":
-            if not self.debugger_permissions.allow_flash:
+            permissions = self.debugger_permissions
+            if not permissions.allow_flash or permissions.allow_raw_debugger_commands or permissions.allow_mass_erase:
                 return self._invoke_dispatch(lambda: self.flash_firmware(args))
             if args.get("reset_after_flash") is True and not self.debugger_permissions.allow_reset:
                 return self._invoke_dispatch(lambda: self.flash_firmware(args))

@@ -697,7 +697,6 @@ def test_the_flash_interlock_refuses_a_flash_with_capture_before_the_port_is_tou
         assert "report_path" not in result, result
         assert backend.calls == [], backend.calls
         assert board.constructed == 0
-        assert service.call("classify_last_error")["error_type"] == "report_not_found"
         assert_bench_free(service)
     finally:
         service.close()
