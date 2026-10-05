@@ -1041,16 +1041,24 @@ class ComPortService:
         ports: JsonObject = {}
         for port_id, port_config in self.config.com_ports.items():
             ports[port_id] = self._port_status(port_id, port_config, self.sessions.get(port_id))
-        # Host discovery is not scoped to one configured port, so it needs at
-        # least one port the operator allowed reading from.
-        if any(self.config.com_read_allowed(port_config) for port_config in self.config.com_ports.values()):
+        # Host discovery is not scoped to one configured port. Where reading
+        # needs no grant (version 2) it runs with or without an entry, because
+        # listing the host's ports is how a new project finds the adapter its
+        # first entry will name (#656). A version 1 file still needs at least
+        # one port the operator allowed reading from.
+        if self.config.read_free or any(self.config.com_read_allowed(port_config) for port_config in self.config.com_ports.values()):
             available = list_available_com_ports()
         else:
             available = {
                 "ok": False,
                 "tool": "com_ports_available",
                 "error_type": "permission_denied",
-                "summary": "Host COM port discovery is disabled by the authoritative config; no configured COM port has permissions.allow_read.",
+                "summary": (
+                    "Host COM port discovery is disabled by the authoritative config; no configured COM port has permissions.allow_read."
+                    if self.config.com_ports
+                    else "Host COM port discovery is disabled by the authoritative config: a version 1 configuration lists host ports only "
+                    "once a `com_ports` entry with permissions.allow_read is configured, and none is."
+                ),
             }
         available_count = len(available.get("ports", [])) if available.get("ok") else 0
         return {

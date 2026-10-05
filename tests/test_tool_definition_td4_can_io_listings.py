@@ -368,8 +368,8 @@ def port_id_not_device_path(text: str) -> bool:
 
 
 def host_ports_withheld_without_a_readable_port(text: str) -> bool:
-    """comports.py:959-967: host discovery runs only if a configured port may be read, so with
-    none configured, or none readable on a version-1 file, `available_com_ports` is `permission_denied`."""
+    """comports.py `list_ports`: on a version-1 file host discovery runs only if a configured port may be
+    read, so with none configured or none readable `available_com_ports` is `permission_denied`."""
     return stated(text, field("permission_denied"), r"\b(no|none|unless|without)\b", r"\bconfigured\b|`com_ports`", unless=r"\b(always listed|whatever)\b")
 
 
