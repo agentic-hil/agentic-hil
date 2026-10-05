@@ -993,7 +993,9 @@ def test_pyocd_flash_then_timed_out_reset_names_the_timeout(tmp_path: Path) -> N
     the summary, the causes and the steps are the timeout's, so a caller can
     tell a reset that hung from one the target refused.
     """
-    config = config_for(tmp_path, "pyocd", FAKE_PYOCD_RESET_HANGS, timeout_s=2)
+    # Long enough for the flash, a spawned interpreter, on a loaded machine;
+    # the reset sleeps far past it.
+    config = config_for(tmp_path, "pyocd", FAKE_PYOCD_RESET_HANGS, timeout_s=8)
 
     result = call(config, "flash_firmware", {"image_path": "build/firmware.elf", "reset_after_flash": True})
 

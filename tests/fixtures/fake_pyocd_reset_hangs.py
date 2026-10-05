@@ -28,7 +28,7 @@ def main() -> int:
     text = " ".join(args)
     print(text, flush=True)
     if args and args[0] in {"commander", "cmd"} and "reset" in text:
-        time.sleep(60)
+        time.sleep(120)
         return 0
     if args and args[0] == "flash":
         print("[==================================] 100%")
