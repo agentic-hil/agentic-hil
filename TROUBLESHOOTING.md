@@ -325,7 +325,7 @@ What it means: the entry is fine and the *name* is not. `/dev/ttyACM0` and `COM7
 
 The refusal is the good outcome. Without it an unchanged configuration keeps working against a board nobody meant, and a flash, a reset or a `com_write` goes there with nothing in the result saying so.
 
-Fix: read `expected_device`. When it is present, the board this entry names is still attached under that name and the entry is simply out of date: run `agentic-hil adopt-hardware` (add `--com-port <id>` on a bench with several ports) and it rewrites the entry from the attached hardware. When it is absent, the named board is not attached at all: plug it in, or work on the board that is there by naming its own entry.
+Fix: read `expected_device`. When it is present, the board this entry names is still attached under that name and the entry's `device` is simply out of date: set `com_ports.<id>.device` to `expected_device` (an agent does it with `project_config_set`, the refusal's `next_step` names the key and the value), then call `project_config_reload_description`. `agentic-hil adopt-hardware` does not repair this: it fills only keys that are unset, and keeps a `device` that is set. When it is absent, the named board is not attached at all: plug it in, or work on the board that is there by naming its own entry.
 
 Do not point `serial_number` at the serial that was found, and do not delete the key. That turns the one check that noticed into agreement with whatever happens to be plugged in.
 
