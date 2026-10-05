@@ -31,7 +31,12 @@ from agentic_hil.coordination import (
     HardwareCoordinator,
     lease_config_sha256,
 )
-from agentic_hil.knowledge import RECOVERY_PHYSICAL_CHECK_ERROR, catalogue_entry, recovery_operator_command, remediation_fields
+from agentic_hil.knowledge import (
+    RECOVERY_PHYSICAL_CHECK_ERROR,
+    catalogue_entry,
+    recovery_operator_command,
+    remediation_fields,
+)
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.tools import AgenticHILToolService
 
