@@ -642,6 +642,40 @@ def test_a_script_that_is_neither_configured_field_is_config_file_not_found(tmp_
     assert_refused_before_contact(result, config)
 
 
+@pytest.mark.parametrize(
+    ("stderr", "backend_error_type", "field"),
+    [
+        ("Error: Can't find target/stm32f4x.cfg\n", "target_config_not_found", "target_cfg"),
+        ("Error: Can't find interface/stlink.cfg\n", "interface_config_not_found", "interface_cfg"),
+        ("Error: Can't find board/other.cfg\n", "config_file_not_found", None),
+    ],
+)
+def test_a_debug_start_names_a_missing_script_as_probe_target_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: str, backend_error_type: str, field: str | None) -> None:
+    """#654: one missing script, one public word, whichever call met it.
+
+    The session start published the classifier's own name as `error_type`
+    while probe_target maps it through the backend's public names. Both now
+    answer `debugger_config_not_found` with the classifier's name in
+    `backend_error_type`, and the start's summary names the field as the probe's
+    does."""
+    play_transcript(monkeypatch, stderr=stderr, returncode=1)
+    probed = call(config_for(tmp_path / "probe", "openocd", FAKE_TRANSCRIPT), "probe_target")
+    service = debug_service(tmp_path / "start", server=FAKE_TRANSCRIPT)
+    try:
+        started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": START_TIMEOUT_S})
+    finally:
+        service.close()
+
+    assert probed["error_type"] == "debugger_config_not_found", probed
+    assert started["error_type"] == probed["error_type"], started
+    assert started["backend_error_type"] == backend_error_type == probed["backend_error_type"], started
+    assert started["summary"].startswith("Debug server exited before the GDB port became ready"), started["summary"]
+    if field is not None:
+        assert field in started["summary"], started["summary"]
+    assert started["remediation"] == remediation_fields("debugger_config_not_found", "openocd")["remediation"], started
+    assert started["side_effect_status"] == "not_started", started
+
+
 def test_a_flash_that_failed_without_reaching_its_marker_is_flash_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """OpenOCD's own `** Programming Failed **`, with no erase, verify or reset word beside it.
 
