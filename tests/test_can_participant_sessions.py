@@ -417,6 +417,75 @@ def test_a_broker_permission_refusal_carries_the_key_and_its_remediation(tmp_pat
         assert answer["remediation"] == remediation_fields("permission_denied", permission=read_key)["remediation"], answer
 
 
+def broker_failure(kind: str, name: str) -> BaseException:
+    from agentic_hil.canbroker import ParticipantError
+
+    if kind == "timeout":
+        return ParticipantError({"ok": False, "error_type": "can_broker_timeout", "summary": "The CAN broker did not answer within the request timeout.", "bus_id": BUS, "participant": name, "side_effect_status": "unknown"})
+    if kind == "invalid_message":
+        return ParticipantError({"ok": False, "error_type": "can_broker_invalid_message", "summary": "The CAN broker answered with a message this client cannot read.", "bus_id": BUS, "participant": name})
+    return BrokenPipeError(32, "The pipe has been ended")
+
+
+BROKER_FAILURE_TYPES = {"timeout": "can_broker_timeout", "invalid_message": "can_broker_invalid_message", "gone": "can_broker_disconnected"}
+
+
+@pytest.mark.parametrize("kind", sorted(BROKER_FAILURE_TYPES))
+@pytest.mark.parametrize("tool", ["can_send", "can_read"])
+def test_a_broker_failure_is_a_can_refusal_and_never_an_audit_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str, kind: str):
+    """A slow, garbled or ended broker is a connection failure with its own type (#664).
+
+    Not `hardware_action_exception`, not `audit_failed_after_action`, and no
+    audit-broken incident waiting for an operator's signature. A broker that has
+    ended fails every request, status included; a slow or garbled one fails the
+    request in hand."""
+    from agentic_hil.knowledge import ERROR_CATALOGUE
+
+    class FailingParticipant(SharedFakeParticipant):
+        ended = False
+
+        def send(self, frame_id: int, data: bytes, *, extended: bool = False, rtr: bool = False) -> dict:
+            self.ended = kind == "gone"
+            raise broker_failure(kind, self.name)
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            self.ended = kind == "gone"
+            raise broker_failure(kind, self.name)
+
+        def status(self) -> dict:
+            if self.ended:
+                raise broker_failure(kind, self.name)
+            return super().status()
+
+    import agentic_hil.canbroker as broker_module
+
+    monkeypatch.setattr(broker_module, "attach_participant", lambda config, bus_id, participant, **kwargs: FailingParticipant(participant))
+    service = AgenticHILToolService(config_for(tmp_path))
+    try:
+        assert service.call("can_session_start", {"bus_id": BUS, "participant": "ecu_a", "clear_rx_queue": False})["ok"] is True
+        if tool == "can_send":
+            answer = service.call("can_send", {"bus_id": BUS, "participant": "ecu_a", "frame_id": 0x123, "data_hex": "01"})
+        else:
+            answer = service.call("can_read", {"bus_id": BUS, "participant": "ecu_a"})
+        status = service.hardware_lease_status()
+    finally:
+        service.close()
+    error_type = BROKER_FAILURE_TYPES[kind]
+    assert answer["ok"] is False, answer
+    assert answer["error_type"] == error_type, answer
+    assert error_type in ERROR_CATALOGUE, error_type
+    assert answer["remediation"], answer
+    assert answer.get("audit_ok") is not False, answer
+    assert answer["participant"] == "ecu_a", answer
+    if tool == "can_send":
+        assert answer["side_effect_status"] == "unknown", answer
+    else:
+        assert answer["side_effect_status"] == "not_started", answer
+        assert answer["side_effect_committed"] is False, answer
+    assert status["incident_stands"] is False, status
+    assert not [reason for reason in status["cleanup_reasons"] if "audit_broken" in str(reason) or "hardware_exception" in str(reason)], status
+
+
 def test_unshared_bus_keeps_exclusive_session_semantics(tmp_path: Path):
     config = load_config(str(write_config(tmp_path, can_buses_yaml=f'''can_buses:\n  {BUS}:\n    adapter: process\n    channel: exclusive\n    executable: fake-bridge\n''')))
     device = resolve_devices(config, [{"kind": "can", "id": BUS}]).devices[0]
