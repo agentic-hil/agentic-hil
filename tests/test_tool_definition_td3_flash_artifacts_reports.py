@@ -355,11 +355,19 @@ def says_every_call_flashes_again(text: str) -> bool:
 
 
 def says_bin_needs_flash_address(text: str) -> bool:
-    """A .bin needs flash_address on pyOCD and STM32CubeProgrammer; OpenOCD is not named as needing it."""
-    needed = one_of(clauses(text), r"\.bin\b", r"\bflash_address\b", r"\bpyOCD\b", r"\bSTM32CubeProgrammer\b")
-    on_openocd = any(re.search(r"\.bin\b", part) and re.search(r"\bflash_address\b", part) and re.search(r"\bOpenOCD\b", part, re.IGNORECASE) for part in clauses(text))
-    everywhere = claims(text, r"\b(?:every|any|all)\s+(?:backends?|debuggers?)\b[^.;]*\bflash_address\b|\bflash_address\b[^.;]*\b(?:every|any|all)\s+backends?\b")
-    return needed and not on_openocd and not everywhere
+    """A .bin needs flash_address on every backend; never only on some of them (#680).
+
+    A .bin carries no load address, so each backend is handed the field: OpenOCD
+    as the `program` offset, pyOCD as `--base-address`, STM32CubeProgrammer after
+    the file. A sentence that names one or two backends as the ones that need it
+    tells the reader the third finds the address somewhere else."""
+    everywhere = one_of(clauses(text), r"\.bin\b", r"\bflash_address\b", r"\b(?:every|each|any|all|whichever)\s+(?:backends?|debuggers?)\b")
+    narrowed = any(
+        re.search(r"\.bin\b", part) and re.search(r"\bflash_address\b", part) and re.search(r"\b(?:OpenOCD|pyOCD|STM32CubeProgrammer)\b", part, re.IGNORECASE)
+        for part in clauses(text)
+    )
+    exempt = claims(text, r"\b(?:OpenOCD|pyOCD|STM32CubeProgrammer)\b[^.;]*\b(?:ignores?|takes? the load address|needs? no|does not need)\b")
+    return everywhere and not narrowed and not exempt
 
 
 def says_pyocd_does_not_verify(text: str) -> bool:
@@ -874,6 +882,10 @@ def test_classify_last_error_says_the_source_can_be_the_recovery_reset(listed: d
 def test_classify_last_error_says_some_refusals_record_nothing(listed: dict[str, dict]) -> None:
     text = text_of(listed, CLASSIFY)
     assert says_some_refusals_record_none(text), text
+    # The rule covers the interlock too, which refuses before the lease as
+    # allow_flash does (#679): a reader told only of allow_flash would expect a
+    # record of an allow_mass_erase refusal.
+    assert one_of(clauses(text), r"\ballow_mass_erase\b", r"\bnothing\b|\bnone\b|\bno record\b"), text
 
 
 @pytest.mark.parametrize("name", REPORT_TOOLS)
@@ -963,8 +975,8 @@ PARAPHRASES = [
     ),
     (
         says_bin_needs_flash_address,
-        ("A .bin needs flash_address on pyOCD and STM32CubeProgrammer.",),
-        ("A .bin needs flash_address on OpenOCD, pyOCD and STM32CubeProgrammer.", "A .bin needs flash_address on every backend; pyOCD and STM32CubeProgrammer check it.", "A .bin needs flash_address."),
+        ("A .bin needs flash_address on every backend.", "A .bin needs flash_address, whichever backend flashes it."),
+        ("A .bin needs flash_address on pyOCD and STM32CubeProgrammer.", "A .bin needs flash_address on every backend; OpenOCD ignores it.", "A .bin needs flash_address."),
     ),
     (
         says_pyocd_does_not_verify,
@@ -1138,7 +1150,7 @@ MUTATIONS = [
     pytest.param(UPLOAD, ("data_base64",), says_size_limit, (), r", else artifact_too_large", ", below it artifact_too_large", id="size:direction"),
     pytest.param(FLASH, None, says_timeout_bound, (), r"\beach debugger command\b", "the whole call", id="timeout:whole-call"),
     pytest.param(FLASH, None, says_timeout_bound, (), r"\bseconds\b", "ms", id="timeout:unit"),
-    pytest.param(FLASH, ("image_path",), says_bin_needs_flash_address, (), r"\bpyOCD and STM32CubeProgrammer\b", "OpenOCD", id="backend:bin-address"),
+    pytest.param(FLASH, ("image_path",), says_bin_needs_flash_address, (), r"\bevery backend\b", "pyOCD and STM32CubeProgrammer", id="backend:bin-address"),
     pytest.param(FLASH, ("image_path",), says_pyocd_does_not_verify, (), r"\bpyOCD does not verify\b", "OpenOCD does not verify", id="backend:verify"),
     pytest.param(FLASH, None, says_what_it_writes_and_through_what, (), r"\bnot st-flash\b", "OpenOCD only, not st-flash", id="backend:restriction"),
     pytest.param(LAST_REPORT, None, says_when_nothing_is_stored, (), r"\bnone yet: report_not_found\b", "None yet or unreadable: report_not_found", id="read-failure:merged"),
@@ -1408,15 +1420,15 @@ def test_an_image_the_server_may_not_flash_is_refused_by_name(tmp_path: Path, ar
 @pytest.mark.parametrize(
     ("debugger_type", "verified", "bin_needs_flash_address"),
     [
-        pytest.param("openocd", True, False, id="openocd"),
+        pytest.param("openocd", True, True, id="openocd"),
         pytest.param("stlink", True, True, id="stm32cubeprogrammer"),
         pytest.param("pyocd", False, True, id="pyocd"),
     ],
 )
 def test_each_backend_verifies_and_takes_a_bin_as_the_definition_says(tmp_path: Path, debugger_type: str, verified: bool, bin_needs_flash_address: bool) -> None:
     """OpenOCD and STM32CubeProgrammer verify what they wrote, pyOCD does not;
-    a .bin without flash_address is refused before anything is sent on pyOCD and
-    STM32CubeProgrammer, and taken as it is on OpenOCD."""
+    a .bin without flash_address is refused before anything is sent, on every
+    backend (#680)."""
     service = new_service(tmp_path / "ws", debugger_type=debugger_type)
     try:
         flashed = flash(service)
@@ -1869,6 +1881,11 @@ def test_the_failure_record_outlives_a_later_success_and_a_restart(tmp_path: Pat
     [
         pytest.param({**DEFAULT_TEST_PERMISSIONS, "allow_flash": False}, {"image_path": IMAGE}, id="allow_flash-off"),
         pytest.param(None, {"image_path": IMAGE, "artifact_id": UNKNOWN_ID}, id="arguments-the-schema-refuses"),
+        # The two permissions flashing is interlocked against refuse the flash
+        # before the probe's lease as allow_flash does, so they leave no record
+        # either (#679).
+        pytest.param({**DEFAULT_TEST_PERMISSIONS, "allow_mass_erase": True}, {"image_path": IMAGE}, id="allow_mass_erase-on"),
+        pytest.param({**DEFAULT_TEST_PERMISSIONS, "allow_raw_debugger_commands": True}, {"image_path": IMAGE}, id="allow_raw_debugger_commands-on"),
     ],
 )
 def test_some_refusals_record_no_report(tmp_path: Path, permissions: dict | None, arguments: dict) -> None:
@@ -1876,10 +1893,34 @@ def test_some_refusals_record_no_report(tmp_path: Path, permissions: dict | None
     try:
         refused = flash(service, **arguments)
         assert refused["ok"] is False, refused
+        assert "report_path" not in refused, refused
         assert last_report(service)["error_type"] == "report_not_found"
         assert classify(service)["error_type"] == "report_not_found"
     finally:
         close(service)
+
+
+@pytest.mark.parametrize("permission", ["allow_mass_erase", "allow_raw_debugger_commands"])
+def test_an_interlock_refusal_takes_no_lease(tmp_path: Path, permission: str) -> None:
+    """The refusal comes before the probe is leased, as `debug_start_session`'s
+    does: no lease is taken and nothing is started (#679)."""
+    service = new_service(tmp_path / "ws", permissions={**DEFAULT_TEST_PERMISSIONS, permission: True})
+    leased: list[str] = []
+    coordinated = service._coordinated_debug_call
+
+    def watch(name, callback):
+        leased.append(name)
+        return coordinated(name, callback)
+
+    service._coordinated_debug_call = watch
+    try:
+        refused = flash(service, image_path=IMAGE, reset_after_flash=True)
+    finally:
+        close(service)
+    assert refused["error_type"] == "permission_denied", refused
+    assert refused["permission"].endswith(f".permissions.{permission}"), refused
+    assert refused.get("side_effect_status", "not_started") == "not_started", refused
+    assert leased == [], leased
 
 
 @pytest.mark.parametrize("tool", REPORT_TOOLS)
