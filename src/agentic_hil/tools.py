@@ -83,6 +83,7 @@ from agentic_hil.coordination import (
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.devices import DeviceError, can_device, resolve_devices, uart_device
 from agentic_hil.knowledge import (
+    AUDIT_BROKEN_SCOPE,
     RECOVERY_PHYSICAL_CHECK_ERROR,
     UNBOUND_DEBUGGER_SCOPE,
     UNNAMED_PROBE_SCOPE,
@@ -1322,7 +1323,34 @@ class AgenticHILToolService:
         # attestation into the very file whose failure raised the incident,
         # so this one family keeps the operator's own route, as it did before.
         audit_broken = sorted(reason for reason in reasons if "audit_broken" in reason)
-        if physical and operator_statement and not audit_broken:
+        if audit_broken:
+            # Answered the same with or without a statement, and never as a
+            # missing one: a caller told to fetch a sentence that cannot help
+            # asks the operator again and meets this refusal again. What clears
+            # it is the operator's own command, so that is what the answer relays.
+            command = recovery_operator_command(quarantine_id)
+            return {
+                "ok": False,
+                "tool": "hardware_recover",
+                "error_type": RECOVERY_PHYSICAL_CHECK_ERROR,
+                "summary": (
+                    "This quarantine names a broken audit trail, and no statement clears that: the attestation would go into "
+                    "the very ledger whose failure raised it. The operator clears it by running operator_command at a shell."
+                ),
+                "next_step": f"Hand the operator this command to run at the bench, after they have checked the board: {command}",
+                "quarantine_id": quarantine_id,
+                "cleanup_reasons": reasons,
+                "physical_check_reasons": physical,
+                "audit_broken_reasons": audit_broken,
+                "agent_clearable_reasons": sorted(allowed),
+                "operator_command": command,
+                "cleanup_required": True,
+                "quarantined": True,
+                "retry_safe": False,
+                "side_effect_committed": False,
+                **remediation_fields(RECOVERY_PHYSICAL_CHECK_ERROR, AUDIT_BROKEN_SCOPE),
+            }
+        if physical and operator_statement:
             # The operator answered, and the agent is relaying what they said.
             # This is not the agent attesting anything: it holds no opinion
             # about the board and the ledger does not record one. It records a

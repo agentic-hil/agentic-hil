@@ -231,6 +231,10 @@ COM_PORT_BUSY_ERROR = "com_port_busy"
 # because the missing thing is a statement about a physical board and not an
 # authorization. The refusal carries the command the person runs instead.
 RECOVERY_PHYSICAL_CHECK_ERROR = "recovery_requires_physical_check"
+# The same refusal for an incident whose reasons name a broken audit trail. No
+# statement clears that one, so its entry relays the operator's command instead
+# of asking for a sentence.
+AUDIT_BROKEN_SCOPE = "audit_broken"
 
 
 def recovery_operator_command(quarantine_id: str | None) -> str:
@@ -1586,6 +1590,27 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "whatever it could verify without an operator, before this refusal existed.",
             "Do not clear the state files under `state_root` by hand, and do not ask the operator to. The routes "
             "above are the supported ones and they keep the ledger line saying who cleared what, and on what.",
+        ),
+    ),
+    f"{RECOVERY_PHYSICAL_CHECK_ERROR}:{AUDIT_BROKEN_SCOPE}": ErrorRemedy(
+        meaning=(
+            "`hardware_recover` was allowed to run and refused because a reason this incident names is a broken audit "
+            "trail (`audit_broken_reasons`). No `operator_statement` clears that, with or without one passed: the "
+            "statement would be written into the very ledger whose failure raised the incident. Only the operator's "
+            "own command clears it, and `operator_command` is that command with this incident's `quarantine_id` in it."
+        ),
+        remediation=(
+            "Show the operator `quarantine_guidance` and relay `operator_command` verbatim. They check the board and "
+            "run it at a shell on this host; that is the one route that clears this incident.",
+            "Say plainly that hardware effects stay blocked until they have run it, and stop there. Once they say it "
+            "is done, `hardware_lease_status` shows whether anything still stands.",
+        ),
+        do_not=(
+            "Do not ask the operator for a statement to pass back here, and do not call again with one. No statement "
+            "clears this reason, so the call answers the same refusal.",
+            "Do not run the command yourself or invent the operator's confirmation. It attests a physical state only a "
+            "person can speak for.",
+            "Do not clear the state files under `state_root` by hand, and do not ask the operator to.",
         ),
     ),
     "config_changed": ErrorRemedy(
