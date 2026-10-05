@@ -5932,25 +5932,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Found under `cleanup_error` of a `can_session_start` refusal, and in words as the `backend_error` of "
             "`can_adapter_close_failed`. A CAN process bridge was asked to put its controller in a safe state and "
             "close, never confirmed that it had, and this server then ended its process anyway. Only the bridge can "
-            "confirm a safe state, so once its process has ended there is nothing left to confirm it with, and the "
-            "bus stays held."
+            "confirm a safe state, so once its process has ended there is nothing left to confirm it with: the "
+            "unconfirmed close is recorded under `cleanup_reasons`, and the bus is given back."
         ),
         remediation=(
             "Read `close_response`, the bridge's answer to the close: `can_adapter_timeout` means it did not answer "
             "in time, `can_adapter_process_exited` that it was already gone, `can_adapter_close_interrupted` that "
             "sending the close raised, and an answer without `safe_state_confirmed: true` that it replied without "
             "confirming.",
-            "`safe_state_confirmed` stays false from here on. Every later `can_session_stop` and `can_session_start` "
-            "on this bus finds the process ended and answers `can_adapter_close_failed`, for as long as this server "
-            "runs.",
-            "Check the bench by hand (the controller off the bus, the target in a known state), then restart the MCP "
-            "server. The new server may find the bus `resource_quarantined`, and that entry names the sign-off.",
+            "`safe_state_confirmed` stays false for that session. The `can_session_stop` or `can_session_start` "
+            "that met the ended process answers `can_adapter_close_failed` once, ends the session and gives the bus "
+            "back; the next `can_session_start` opens a fresh bridge.",
+            "Check the bench by hand (the controller off the bus, the target in a known state) before that "
+            "`can_session_start` puts the bus back to work.",
         ),
         do_not=(
             "Do not make a bridge answer `safe_state_confirmed: true` without having put its controller in a safe "
             "state. That field is the only evidence this server has about the bus.",
-            "Do not call `can_session_stop` in a loop waiting for this to clear. Nothing over MCP can confirm a safe "
-            "state for a process that has ended.",
+            "Do not take the next session's frames as a continuation of the old one. What the ended bridge last did "
+            "on the bus is unknown.",
         ),
     ),
     "can_adapter_close_failed": ErrorRemedy(
@@ -5958,23 +5958,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "A CAN session could not be closed. `can_session_stop` was closing it, or `can_session_start` was "
             "replacing a session still registered on the bus or closing the one a failed receive-queue clear left. "
             "Either the adapter's close raised and the session stays registered on this server for a cleanup retry, "
-            "or the adapter closed and the lease on the bus would not release."
+            "or the adapter closed and the lease on the bus would not release, or a process bridge ended without "
+            "confirming its close, which is final: then the summary says so, the session is ended and the bus given "
+            "back, and the unconfirmed close is recorded under `cleanup_reasons`."
         ),
         remediation=(
             "Read `backend_error`. Present, it is what the adapter's close raised; absent, the adapter closed and the "
             "lease would not release, which `cleanup_reasons` and `quarantine_id` explain.",
             "On a direct adapter (`socketcan`, `peak`) whose close raised, `can_session_stop` called again runs the "
             "driver's shutdown again, and a shutdown that completes ends the session and frees the bus.",
-            "A process bridge that ended without confirming a safe state cannot confirm it afterwards: every "
-            "`can_session_stop` and `can_session_start` on this bus answers this refusal again, with the same "
-            "`backend_error`, for as long as this server runs.",
-            "In that case, and whenever the lease is quarantined, check the bench by hand and restart the MCP "
-            "server. The new server may find the bus `resource_quarantined`, and that entry names the sign-off.",
+            "A process bridge that ended without confirming a safe state cannot confirm it afterwards, so this is "
+            "answered once: the bus is already given back. Check the bench by hand, then `can_session_start` opens "
+            "a fresh bridge.",
+            "Whenever the lease is quarantined, `quarantine_id` names the incident and `resource_quarantined` names "
+            "the sign-off.",
             "`can_buses_list` shows the session still registered on the bus, with its `adapter_status`.",
         ),
         do_not=(
-            "Do not call `can_session_stop` or `can_session_start` over and over on a process bus. Once the bridge "
-            "has ended unconfirmed, every call answers the same, and nothing over MCP changes that.",
+            "Do not call `can_session_stop` or `can_session_start` over and over while the driver's shutdown keeps "
+            "raising. Each call retries the same close; fix what `backend_error` names first.",
             "Do not open the adapter or its channel from another program while the session is registered: an adapter "
             "whose close failed may still have the channel open.",
         ),
@@ -6059,14 +6061,14 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         remediation=(
             "Read `stderr_tail`: the bridge's last output usually says why it exited, an exception, a driver error or "
             "a device that went away.",
-            "A bridge that has exited cannot confirm a safe state any more, so from here `can_session_stop` answers "
-            "`can_adapter_close_failed` every time it is called, for as long as this server runs.",
-            "Fix what made it exit, check the bench by hand, then restart the MCP server; the new server may answer "
-            "`resource_quarantined` for this bus first, and that entry names the sign-off.",
+            "A bridge that has exited cannot confirm a safe state any more, so `can_session_stop` answers "
+            "`can_adapter_close_failed` once, records the unconfirmed close and gives the bus back.",
+            "Fix what made it exit and check the bench by hand, then `can_session_start` opens a fresh bridge.",
         ),
         do_not=(
-            "Do not start the bridge by hand to take the bus back. This server still holds the bus for the session "
-            "it lost, and a second bridge on the channel is outside every record.",
+            "Do not start the bridge by hand to take the bus back. Until `can_session_stop` ends the session this "
+            "server still holds the bus for it, and a bridge on the channel outside a session is outside every "
+            "record.",
         ),
     ),
     "can_adapter_process_start_failed": ErrorRemedy(
