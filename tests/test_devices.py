@@ -160,40 +160,17 @@ def test_a_debugger_that_names_no_hardware_says_so(tmp_path: Path) -> None:
     assert named.lock_key == "probe:0669ff"
 
 
-def test_the_execution_shape_is_the_same_for_debugger_uart_and_can(tmp_path: Path) -> None:
-    """One call for every kind, with whatever arguments that kind takes."""
-    config = config_for(
-        tmp_path,
-        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n',
-        can_buses_yaml='can_buses:\n  main:\n    adapter: peak\n    channel: "PCAN_USBBUS1"\n',
-    )
-    seen: list[tuple[str, dict]] = []
+def test_a_device_names_and_locks_hardware_and_runs_nothing() -> None:
+    """Plan steps run through the reactor's own step devices, so a device is
+    identity and the mutex and nothing else: an execution path of its own, with
+    a routing refusal only it reached, was a second way to call a tool that no
+    caller used (#682)."""
+    from agentic_hil.devices import CanDevice, DebuggerDevice, Device, UartDevice
 
-    class Recorder:
-        def __init__(self) -> None:
-            self.config = config
-
-        def call(self, name: str, arguments: dict | None = None) -> dict:
-            seen.append((name, dict(arguments or {})))
-            return {"ok": True, "tool": name}
-
-    service = Recorder()
-    debugger_device(config).execute(service, "flash", {"image_path": "build/app.bin", "reset_after_flash": True})
-    uart_device(config, "dut_uart").execute(service, "write", {"text": "ping\n"})
-    can_device(config, "main").execute(service, "send", {"frame_id": 291, "data_hex": "01"})
-
-    assert seen == [
-        ("flash_firmware", {"image_path": "build/app.bin", "reset_after_flash": True}),
-        ("com_write", {"text": "ping\n", "port_id": "dut_uart"}),
-        ("can_send", {"frame_id": 291, "data_hex": "01", "bus_id": "main"}),
-    ]
-    # The device supplies its own name, so an action cannot be redirected at
-    # another entry by passing a different id.
-    redirected = uart_device(config, "dut_uart").execute(service, "write", {"port_id": "somewhere_else", "text": "x"})
-    assert redirected["error_type"] == "invalid_argument"
-    unknown = can_device(config, "main").execute(service, "flash", {})
-    assert unknown["error_type"] == "invalid_argument"
-    assert "flash" in unknown["summary"]
+    for kind in (Device, DebuggerDevice, UartDevice, CanDevice):
+        assert not hasattr(kind, "execute"), kind
+        assert not hasattr(kind, "routing_refusal"), kind
+        assert not hasattr(kind, "resolve_action"), kind
 
 
 def test_the_mutex_is_reachable_from_the_device_itself(tmp_path: Path) -> None:
@@ -214,25 +191,6 @@ def test_the_mutex_is_reachable_from_the_device_itself(tmp_path: Path) -> None:
     finally:
         bench.release_all()
     assert device.is_held(bench) is False
-
-
-def test_a_debugger_action_is_refused_by_a_service_bound_to_another_probe(tmp_path: Path) -> None:
-    """No debugger tool schema carries a probe name, so a wrong binding would
-    silently drive the wrong board."""
-    config = config_for(tmp_path, debuggers_yaml=PROBE_AND_ITS_VCP_DEBUGGER)
-
-    class Recorder:
-        def __init__(self) -> None:
-            self.config = config
-
-        def call(self, name: str, arguments: dict | None = None) -> dict:  # pragma: no cover - must not run
-            raise AssertionError("a call reached a service bound to another probe")
-
-    result = debugger_device(config, "second_probe").execute(Recorder(), "reset", {"mode": "halt"})
-
-    assert result["ok"] is False
-    assert result["error_type"] == "not_supported"
-    assert result["device"]["id"] == "second_probe"
 
 
 # --- identity: two config entries, one physical unit ---------------------

@@ -1688,3 +1688,12 @@ def test_a_can_session_whose_log_cannot_be_created(tmp_path: Path, monkeypatch: 
     finally:
         service.close()
     assert_carries_entry(result, "audit_unavailable")
+
+
+def test_the_report_module_reads_reports_one_way() -> None:
+    """`read_report_file` had no caller: the report readers go through
+    `read_report_state_entry`, so its refusal sites were texts no answer could
+    carry (#682)."""
+    import agentic_hil.report as report
+
+    assert not hasattr(report, "read_report_file")
