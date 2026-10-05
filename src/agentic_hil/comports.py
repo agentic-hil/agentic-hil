@@ -1955,6 +1955,17 @@ class ComPortService:
 
 
 def payload_bytes(port_config: ComPortConfig, payload: JsonObject) -> JsonObject:
+    encoded = _payload_bytes(port_config, payload)
+    if encoded["ok"] and not encoded["data"]:
+        # A payload that encodes to no byte is a caller's mistake, such as an
+        # unfilled template, not a stimulus: answering it "written" would send
+        # the caller to wait on a reply to a command the line never carried,
+        # and the session log would record a transmission of nothing (#634).
+        return {"ok": False, "tool": "com_write", "error_type": "invalid_argument", "summary": "The payload is empty: text or hex must encode to at least one byte."}
+    return encoded
+
+
+def _payload_bytes(port_config: ComPortConfig, payload: JsonObject) -> JsonObject:
     if set(payload) - {"text", "hex"}:
         return {"ok": False, "tool": "com_write", "error_type": "invalid_argument", "summary": "COM write payload contains unsupported fields."}
     has_text = payload.get("text") is not None
