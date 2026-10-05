@@ -23,6 +23,9 @@ carries without a second channel:
 ``FAKE_CAN_BRIDGE_TX_LOG``
     Path a line of JSON is appended to per accepted ``send``, so a test can see
     what actually reached the medium rather than what the broker said it sent.
+``FAKE_CAN_BRIDGE_EXIT_ON_CLOSE``
+    ``close`` is answered by exiting without a reply, the way a bridge that dies
+    in its close leaves the safe state unconfirmed.
 """
 from __future__ import annotations
 
@@ -59,6 +62,7 @@ def main() -> int:
     fail_read_from = int(os.environ.get("FAKE_CAN_BRIDGE_FAIL_READ", "0") or 0)
     fail_send = bool(os.environ.get("FAKE_CAN_BRIDGE_FAIL_SEND", ""))
     tx_log = os.environ.get("FAKE_CAN_BRIDGE_TX_LOG", "")
+    exit_on_close = bool(os.environ.get("FAKE_CAN_BRIDGE_EXIT_ON_CLOSE", ""))
     read_calls = 0
     for line in sys.stdin:
         line = line.strip()
@@ -70,6 +74,8 @@ def main() -> int:
         if method == "open":
             result = {"ok": True, "protocol_version": PROTOCOL_VERSION, "backend": "fake-can-bridge", "listen_only": bool(params.get("listen_only", False))}
         elif method == "close":
+            if exit_on_close:
+                return 0
             result = {"ok": True, "protocol_version": PROTOCOL_VERSION, "safe_state_confirmed": True}
         elif method == "send":
             if fail_send:
