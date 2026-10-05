@@ -671,7 +671,9 @@ COLLECTED_TYPE_COUNT = 219
 # MCP registrations write in place of the `config_invalid` they wrote, and
 # `report_state_damaged` (#689), written by `report._report_state_damaged`
 # for a report state that reads and is damaged.
-PRODUCER_COUNT = 662
+# `OpenOCDBackend.flash_firmware` now writes `invalid_argument` for a .bin with
+# no `flash_address` (#680).
+PRODUCER_COUNT = 663
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
