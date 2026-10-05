@@ -365,12 +365,45 @@ class BrokerCanAdapterSession:
         self.participant = participant
         self.active = True
         self.detach_unconfirmed = False
+        # The first transport failure of this connection, kept. After a timeout
+        # the broker's late answer is still in the pipe and would be read as the
+        # answer to the next request, so no request is put after one: every later
+        # send, read and status answers this failure until the session is stopped.
+        self.broker_failure: JsonObject | None = None
+
+    def _broker_failed(self, error: BaseException) -> JsonObject:
+        from agentic_hil.canbroker import broker_request_failure
+
+        if self.broker_failure is None:
+            name = getattr(self.participant, "name", None)
+            self.broker_failure = broker_request_failure(error, str(getattr(self.participant, "bus_id", "")), str(name) if name is not None else "")
+        return dict(self.broker_failure)
 
     def send(self, frame: CanFrame) -> JsonObject:
-        return self.participant.send(frame.id, frame.data, extended=frame.extended, rtr=frame.rtr)
+        from agentic_hil.canbroker import ParticipantError
+
+        if self.broker_failure is None:
+            try:
+                return self.participant.send(frame.id, frame.data, extended=frame.extended, rtr=frame.rtr)
+            except (ParticipantError, OSError, EOFError) as error:
+                self._broker_failed(error)
+        # The request may have reached the broker, and the broker the bus, so
+        # what became of the frame is unknown, as on any send left unanswered.
+        return {**(self.broker_failure or {}), "ok": False, "side_effect_status": "unknown", "retry_safe": False}
 
     def read(self, max_frames: int, wait_timeout_s: float) -> JsonObject:
-        result = self.participant.read(max_frames, wait_timeout_s)
+        from agentic_hil.canbroker import ParticipantError
+
+        result: JsonObject | None = None
+        if self.broker_failure is None:
+            try:
+                result = self.participant.read(max_frames, wait_timeout_s)
+            except (ParticipantError, OSError, EOFError) as error:
+                self._broker_failed(error)
+        if result is None:
+            # A read puts nothing on the bus. Frames the broker may have handed
+            # out in an answer that never arrived are lost to this view, not sent.
+            return {**(self.broker_failure or {}), "ok": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": False}
         frames = result.get("frames") if isinstance(result.get("frames"), list) else []
         result["frames"] = [{key: value for key, value in frame.items() if key in {"id", "extended", "rtr", "data_hex", "dlc", "frame_seq", "origin", "delivery_status"}} for frame in frames if isinstance(frame, dict)]
         for frame in result["frames"]:
@@ -394,7 +427,17 @@ class BrokerCanAdapterSession:
     def status(self) -> JsonObject:
         if not self.active:
             return {"ok": True, "active": False, "detached": True, "cleanup_required": self.detach_unconfirmed}
-        result = self.participant.status()
+        from agentic_hil.canbroker import ParticipantError
+
+        if self.broker_failure is not None:
+            return dict(self.broker_failure)
+        try:
+            result = self.participant.status()
+        except (ParticipantError, OSError, EOFError) as error:
+            # Not `active: false`: the session is still registered and holds its
+            # lease, and the call that meets the failure names it. Stopping the
+            # session is what ends it.
+            return self._broker_failed(error)
         return {**result, "active": result.get("abort") is None and result.get("bus_gated") is not True}
 
 

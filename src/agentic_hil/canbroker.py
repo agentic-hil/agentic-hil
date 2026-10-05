@@ -1372,10 +1372,14 @@ class Participant:
     # -- plumbing ----------------------------------------------------------
 
     def _request(self, payload: JsonObject) -> JsonObject:
-        self.connection.send(payload)
-        if not self.connection.poll(CLIENT_REQUEST_TIMEOUT_S):
+        try:
+            self.connection.send(payload)
+            answered = self.connection.poll(CLIENT_REQUEST_TIMEOUT_S)
+            answer = self.connection.recv() if answered else None
+        except (OSError, EOFError) as error:
+            raise ParticipantError(broker_request_failure(error, self.bus_id, self.name)) from error
+        if not answered:
             raise ParticipantError({"ok": False, "error_type": "can_broker_timeout", "summary": "The CAN broker did not answer within the request timeout.", "bus_id": self.bus_id, "participant": self.name, "side_effect_status": "unknown"})
-        answer = self.connection.recv()
         if not isinstance(answer, dict):
             raise ParticipantError({"ok": False, "error_type": "can_broker_invalid_message", "summary": "The CAN broker answered with a message this client cannot read.", "bus_id": self.bus_id, "participant": self.name})
         return answer
@@ -1383,6 +1387,18 @@ class Participant:
     def _log(self, event: JsonObject) -> None:
         with suppress(ConfigError, OSError, ValueError):
             safe_append_text(self.log_path, json.dumps({"at": utc_now_iso(), **event}) + "\n")
+
+
+def broker_request_failure(error: BaseException, bus_id: str, participant: str) -> JsonObject:
+    """What a request to the broker that failed in transport answers (#664).
+
+    A `ParticipantError` already carries its refusal. A pipe that broke or
+    ended means the broker process has exited or closed this connection: a
+    connection failure, which the caller cures by starting the session again,
+    and never a failure of the audit trail, which the pipe is no part of."""
+    if isinstance(error, ParticipantError):
+        return dict(error.result)
+    return {"ok": False, "error_type": "can_broker_disconnected", "summary": "The connection to the CAN broker ended: the broker process has exited or closed this participant's connection.", "bus_id": bus_id, "participant": participant, "backend_error": f"{type(error).__name__}: {error}"}
 
 
 def attach_participant(

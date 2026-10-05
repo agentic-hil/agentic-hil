@@ -638,7 +638,8 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # What the pins hold.
 
 SCANNED_MODULE_COUNT = 48
-COLLECTED_TYPE_COUNT = 218
+# `can_broker_disconnected`, a broker connection that ended (#664), is the 219th.
+COLLECTED_TYPE_COUNT = 219
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -652,7 +653,8 @@ COLLECTED_TYPE_COUNT = 218
 # `CanBusService.session_stop` writes `can_participant_not_configured` (#632).
 # The broker's two `permission_denied` refusals are written by one function,
 # `CanBroker._permission_refusal`, which names the key (#657).
-PRODUCER_COUNT = 644
+# `canbroker.broker_request_failure` writes `can_broker_disconnected` (#664).
+PRODUCER_COUNT = 645
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
@@ -721,69 +723,6 @@ def check_silent(pair: Pair) -> Callable[[Path], None]:
         assert pair in SILENT
 
     return check
-
-
-def _participant_requests() -> frozenset[str]:
-    """Participant's methods that put a request to the broker, `_request` itself included."""
-    (participant,) = [node for node in package_sources()["canbroker"].tree.body if isinstance(node, ast.ClassDef) and node.name == "Participant"]
-    return frozenset(
-        method.name for method in participant.body if isinstance(method, ast.FunctionDef) and any(isinstance(node, ast.Call) and _callee(node) == "_request" for node in ast.walk(method))
-    ) | {"_request"}
-
-
-def module_functions_reached(module: str, start: str) -> dict[str, ast.FunctionDef]:
-    """`start` and every module function of `module` it reaches by name."""
-    top = {node.name: node for node in package_sources()[module].tree.body if isinstance(node, ast.FunctionDef)}
-    reached: dict[str, ast.FunctionDef] = {}
-    pending = [start]
-    while pending:
-        name = pending.pop()
-        if name in reached:
-            continue
-        reached[name] = top[name]
-        pending.extend(node.func.id for node in ast.walk(top[name]) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in top)
-    return reached
-
-
-def check_broker_timeout(_tmp_path: Path) -> None:
-    """Only the attach is answered from a ParticipantError, and the attach puts no request."""
-    catching = set()
-    for module, source in package_sources().items():
-        for node in ast.walk(source.tree):
-            if isinstance(node, ast.Name) and node.id == "ParticipantError" and not any(isinstance(parent, ast.Raise) for parent in _ancestors(source, node)):
-                catching.add((module, written_in(source, node)))
-    assert catching == {("can", "CanBusService._participant_session_start"), ("canbroker", "Participant.detach")}
-    function = definition("can", "CanBusService._participant_session_start")
-    (attach,) = [node for node in ast.walk(function) if isinstance(node, ast.Try) and any("ParticipantError" in ast.unparse(handler) for handler in node.handlers)]
-    assert {_callee(node) for statement in attach.body for node in ast.walk(statement) if isinstance(node, ast.Call)} == {"attach_participant"}
-    # The attach puts no request: a Participant is built only to be returned,
-    # what holds one only hands it on, and building one asks the broker nothing.
-    source = package_sources()["canbroker"]
-    requests = _participant_requests()
-    assert requests >= {"_request", "send", "read", "status", "detach"}
-    chain = module_functions_reached("canbroker", "attach_participant")
-    assert "_attach_once" in chain
-    for function in chain.values():
-        held = {
-            target.id
-            for node in ast.walk(function)
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and _callee(node.value) in {"Participant", *chain}
-            for target in node.targets
-            if isinstance(target, ast.Name)
-        }
-        for node in ast.walk(function):
-            if isinstance(node, ast.Call) and _callee(node) == "Participant":
-                assert isinstance(source.parents[node], ast.Return), f"{function.name}: {ast.unparse(node)}"
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id in held:
-                assert node.func.attr not in requests, f"{function.name}: {ast.unparse(node)}"
-    built = definition("canbroker", "Participant.__init__")
-    assert not [ast.unparse(node) for node in ast.walk(built) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and ast.unparse(node.func.value) == "self" and node.func.attr in requests]
-
-
-def _ancestors(source: Source, node: ast.AST) -> Iterator[ast.AST]:
-    while node in source.parents:
-        node = source.parents[node]
-        yield node
 
 
 def check_broker_not_attached(_tmp_path: Path) -> None:
@@ -1009,9 +948,6 @@ EXCLUDED: dict[Pair, Exclusion] = {
         SILENT_REASON,
         frozenset({("backends.gdbdebug", "GdbDebugSessions._start_failure"), ("backends.openocd", "OpenOCDBackend._failure_result"), ("backends.openocd", "OpenOCDBackend.info")}),
         check_silent(("verify_failed", "openocd")),
-    ),
-    ("can_broker_timeout", None): Exclusion(
-        NOT_RETURNED_BY_A_TOOL["can_broker_timeout"], frozenset({("canbroker", "Participant._request")}), check_broker_timeout
     ),
     ("can_broker_not_attached", None): Exclusion(
         NOT_RETURNED_BY_A_TOOL["can_broker_not_attached"], frozenset({("canbroker", "CanBroker._serve_connection")}), check_broker_not_attached

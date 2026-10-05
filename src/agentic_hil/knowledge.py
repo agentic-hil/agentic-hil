@@ -6141,14 +6141,40 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "counter the others are waiting on.",
         ),
     ),
+    "can_broker_disconnected": ErrorRemedy(
+        meaning=(
+            "The connection between this participant and the broker for this shared CAN bus ended in the middle of a "
+            "request: the broker process has exited, or it closed this participant's connection. It is a connection "
+            "failure and nothing else; no audit record failed, because the trail is not written through that pipe."
+        ),
+        remediation=(
+            "Read `backend_error`, the pipe's own error, and `side_effect_status`: `unknown` on `can_send` means the "
+            "request may have reached the broker before it ended, so the frame may be on the bus; `not_started` on "
+            "`can_read` means the read put nothing on the bus.",
+            "After an unknown send the lease is quarantined, so the next call on this participant answers "
+            "`resource_quarantined`; check the bus from the target's side and follow that entry.",
+            "This session puts no further request to the broker: until it is stopped, a later `can_send` or "
+            "`can_read` on it answers this failure, or `resource_quarantined` after an unknown send. Stop it with "
+            "`can_session_stop` and start it again with `can_session_start`, which starts a fresh broker when the old "
+            "one has exited.",
+        ),
+        do_not=(
+            "Do not send the frame again to find out whether the first one went out. A duplicate stimulus on a live "
+            "bus is the outcome the unknown status exists to prevent.",
+        ),
+    ),
     "can_broker_invalid_message": ErrorRemedy(
         meaning=(
             "The broker for this shared CAN bus and this client could not read each other: the broker received a "
-            "message it cannot parse, or it answered the attach with something that is not an answer. Both ends are "
-            "code from this package, so this is a fault in the broker connection rather than on the bus."
+            "message it cannot parse, or it answered the attach, a send or a read with something that is not an "
+            "answer. Both ends are code from this package, so this is a fault in the broker connection rather than "
+            "on the bus."
         ),
         remediation=(
             "Read `summary`: it says which end could not read the other.",
+            "On `can_send`, `side_effect_status` is `unknown`: the broker had the request, so the frame may be on the "
+            "bus, and the lease is quarantined. On `can_read` it is `not_started`. Either way this session puts no "
+            "further request to the broker until it is stopped.",
             "The broker keeps running while any participant is attached, so it is replaced only after every "
             "participant has detached and it exits; stop the others with `can_session_stop`, then call "
             "`can_session_start` again.",
@@ -6214,6 +6240,28 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not end the stopping broker by hand. It is closing the adapter, and cutting that short leaves the "
             "bus in whatever state the close had reached.",
+        ),
+    ),
+    "can_broker_timeout": ErrorRemedy(
+        meaning=(
+            "The broker for this shared CAN bus did not answer a request of this participant within the client's "
+            "request timeout of 30 seconds. The request had been written, so whether the broker acted on it is "
+            "unknown, and on a send whether the frame reached the bus is unknown too. A late answer would be read as "
+            "the answer to the next request, so this session puts no further request to the broker."
+        ),
+        remediation=(
+            "Read `side_effect_status`: `unknown` on `can_send` means the frame may be on the bus and the lease is "
+            "quarantined, so the next call on this participant answers `resource_quarantined`; `not_started` on "
+            "`can_read` means the read put nothing on the bus.",
+            "Until the session is stopped, a later `can_send` or `can_read` on it answers this failure, or "
+            "`resource_quarantined` after an unknown send. Stop it with `can_session_stop` and start it again with "
+            "`can_session_start`.",
+            "A read waits in the broker for the shorter of its `wait_timeout_s`, `can_buses.<id>.timeout_s` and 60 "
+            "seconds, so a read asked to wait 30 seconds or longer can outlast the client; keep the wait shorter.",
+        ),
+        do_not=(
+            "Do not send the frame again to find out whether the first one went out. A duplicate stimulus on a live "
+            "bus is the outcome the unknown status exists to prevent.",
         ),
     ),
     "can_broker_unavailable": ErrorRemedy(

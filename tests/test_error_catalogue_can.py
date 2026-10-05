@@ -44,8 +44,8 @@ Kept out of the required set, each for a reason stated where it is listed:
   its one bare entry is written with the COM refusals of #635. The CAN refusal
   is required to carry whatever that entry says, and the tests that hold it stay
   red until that entry exists.
-* `can_broker_timeout` and `can_broker_not_attached` are spelled in the broker
-  and returned by no CAN tool.
+* `can_broker_not_attached` is spelled in the broker and returned by no CAN
+  tool.
 * Two configuration types the broker can forward have no bare entry, and one
   configuration type is raised only on a path no CAN tool reaches.
 * The types every hardware tool shares (`audit_unavailable`,
@@ -327,6 +327,7 @@ PINNED_INVENTORY: dict[str, frozenset[str]] = {
         {
             "can_broker_authentication_failed",
             "can_broker_counter_mismatch",
+            "can_broker_disconnected",
             "can_broker_invalid_message",
             "can_broker_not_attached",
             "can_broker_not_bus_owner",
@@ -422,10 +423,6 @@ OWNED_BY_THE_COM_REFUSALS: dict[str, str] = {
 # Spelled on the CAN path and returned by no CAN tool, so an entry for them would
 # describe an answer nobody reads.
 NOT_RETURNED_BY_A_TOOL: dict[str, str] = {
-    "can_broker_timeout": (
-        "raised as a ParticipantError out of Participant._request; can_send and can_read re-raise it and the caller"
-        " reads hardware_action_exception, which #645 owns"
-    ),
     "can_broker_not_attached": (
         "the broker answers it only to a connection whose first message is not an attach, and _attach_once always"
         " sends the attach first"
@@ -478,10 +475,12 @@ NEW_ENTRIES = frozenset(
         "can_backend_not_available",
         "can_broker_authentication_failed",
         "can_broker_counter_mismatch",
+        "can_broker_disconnected",
         "can_broker_invalid_message",
         "can_broker_not_bus_owner",
         "can_broker_protocol_mismatch",
         "can_broker_stopping",
+        "can_broker_timeout",
         "can_broker_unavailable",
         "can_broker_wrong_bus",
         "can_bus_gated",
@@ -927,6 +926,12 @@ CONTENT: dict[str, dict] = {
         names=("broker_counter", "client_counter", "retry_safe"),
         says=((any_of("already", "retried"), any_of("deadline")),),
     ),
+    "can_broker_disconnected": spec(
+        first="backend_error",
+        names=("side_effect_status", "resource_quarantined", "can_session_stop", "can_session_start"),
+        says=((any_of("exited", "closed"), any_of("broker")), (any_of("audit"), any_of("no", "not"))),
+        never=(RESEND_IS_SAFE,),
+    ),
     "can_broker_invalid_message": spec(
         first="summary",
         says=((any_of("every", "all"), any_of("participant", "participants"), r"\bexit\w*"),),
@@ -944,6 +949,12 @@ CONTENT: dict[str, dict] = {
     "can_broker_stopping": spec(
         names=("retry_safe", "can_session_start"),
         says=((any_of("fresh"), any_of("broker")),),
+    ),
+    "can_broker_timeout": spec(
+        first="side_effect_status",
+        names=("side_effect_status", "resource_quarantined", "can_session_stop", "wait_timeout_s"),
+        says=((any_of("late"), any_of("next")), (any_of("unknown"), any_of("bus"))),
+        never=(RESEND_IS_SAFE,),
     ),
     "can_broker_unavailable": spec(
         first="summary",
@@ -1478,6 +1489,9 @@ ATTACH_REFUSALS = (
 # What the broker answers a participant's send and read with.
 SEND_REFUSALS = ("can_participant_filter_violation", "can_participant_frame_budget_exhausted", "can_participant_incident", "can_bus_incident", "can_send_failed")
 READ_REFUSALS = ("can_participant_incident", "can_bus_incident")
+# What a send or read meets when the request to the broker fails in transport:
+# `Participant._request` raises them, and the broker session answers them (#664).
+TRANSPORT_FAILURES = ("can_broker_timeout", "can_broker_invalid_message", "can_broker_disconnected")
 
 
 def test_every_broker_refusal_has_a_behavioural_carrier() -> None:
@@ -1485,7 +1499,8 @@ def test_every_broker_refusal_has_a_behavioural_carrier() -> None:
     of them can have an entry that no refusal carries."""
     broker_types = {error_type for error_type in PINNED_INVENTORY["canbroker.py"] if error_type.startswith("can_") and error_type in REQUIRED}
 
-    assert broker_types <= {*ATTACH_REFUSALS, *SEND_REFUSALS, *READ_REFUSALS}, sorted(broker_types - {*ATTACH_REFUSALS, *SEND_REFUSALS, *READ_REFUSALS})
+    carried = {*ATTACH_REFUSALS, *SEND_REFUSALS, *READ_REFUSALS, *TRANSPORT_FAILURES}
+    assert broker_types <= carried, sorted(broker_types - carried)
 
 
 @pytest.mark.parametrize("error_type", ATTACH_REFUSALS)
@@ -1896,6 +1911,35 @@ def test_a_read_the_broker_refuses_carries_its_entry(tmp_path: Path, monkeypatch
         assert service.call("can_session_start", {"bus_id": SHARED_BUS, "participant": "ecu_a", "clear_rx_queue": False})["ok"] is True
 
         result = service.call("can_read", {"bus_id": SHARED_BUS, "participant": "ecu_a"})
+    finally:
+        service.close()
+
+    assert_carries_its_entry(result, error_type)
+
+
+@pytest.mark.parametrize("error_type", TRANSPORT_FAILURES)
+@pytest.mark.parametrize("tool", ["can_send", "can_read"])
+def test_a_broker_request_that_fails_in_transport_carries_its_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str, error_type: str) -> None:
+    """A slow, garbled or ended broker, met by a send or a read (#664)."""
+
+    def failure() -> BaseException:
+        if error_type == "can_broker_disconnected":
+            return BrokenPipeError(32, "The pipe has been ended")
+        return ParticipantError(broker_refusal(error_type, "ecu_a"))
+
+    class Failing(RefusingParticipant):
+        def send(self, frame_id: int, data: bytes, *, extended: bool = False, rtr: bool = False) -> dict:
+            raise failure()
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            raise failure()
+
+    monkeypatch.setattr(canbroker_module_under_test, "attach_participant", lambda config, bus_id, participant, **kwargs: Failing(participant))
+    service = AgenticHILToolService(can_config(tmp_path))
+    try:
+        assert service.call("can_session_start", {"bus_id": SHARED_BUS, "participant": "ecu_a", "clear_rx_queue": False})["ok"] is True
+        arguments = {"frame_id": 0x123, "data_hex": "01"} if tool == "can_send" else {}
+        result = service.call(tool, {"bus_id": SHARED_BUS, "participant": "ecu_a", **arguments})
     finally:
         service.close()
 
