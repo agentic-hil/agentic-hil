@@ -54,8 +54,9 @@ from agentic_hil.backends.gdbdebug import resolve_gdb_executable
 from agentic_hil.config import load_config
 from agentic_hil.gdbmi import unescape_mi_string
 
-from .conftest import BENCH_ONLY, DEMO_IMAGE, Bench, BoardImages, child_command
-from .killed_flash_support import debugger_logs_since, recovery_report
+from .conftest import BENCH_ONLY, DEMO_IMAGE, REENUMERATES_THE_PROBE, Bench, BoardImages, child_command
+from .killed_flash_support import debugger_logs_since, recovery_report, wait_for_the_serial_port
+from .usb_reset_support import tty_device_snapshot
 
 pytestmark = [pytest.mark.bench, BENCH_ONLY]
 
@@ -111,6 +112,10 @@ PROC = Path("/proc")
 # image is open for all of it, so a poll this fine cannot miss the window.
 KILL_POLL_S = 0.01
 FLASH_UNCONFIRMED = "debugger_result_unconfirmed"
+# Where a Linux host lists its ttys and their nodes, for the check that the
+# killed flash did not make the probe re-enumerate its serial port (#620).
+SYS_CLASS_TTY = Path("/sys/class/tty")
+DEV = Path("/dev")
 
 
 class Server:
@@ -1138,6 +1143,23 @@ def holds_open(pid: int, path: str) -> bool:
     return False
 
 
+def serial_port_snapshot(bench: Bench, port: str) -> Callable[[], dict]:
+    """How the configured port's tty looks now, through sysfs and `stat`.
+
+    A name that does not lead to a tty, a stable link left dangling among them,
+    is a snapshot without a name and with the reason, so it reads as changed.
+    """
+    device = str(((bench.configuration().get("com_ports") or {}).get(port) or {}).get("device") or "")
+
+    def take() -> dict:
+        try:
+            return tty_device_snapshot(device, sysfs_root=SYS_CLASS_TTY, device_root=DEV)
+        except ValueError:
+            return {"name": None, "sysfs_stat_error": {"error_type": "ValueError", "errno": None}}
+
+    return take
+
+
 def kill_the_flash_while_it_writes(server: Server, image: Path, finished: threading.Event) -> None:
     """SIGKILL the debugger process this test's own server started, while it has the image open.
 
@@ -1174,6 +1196,7 @@ def kill_the_flash_while_it_writes(server: Server, image: Path, finished: thread
     )
 
 
+@getattr(pytest.mark, REENUMERATES_THE_PROBE)
 def test_a_flash_killed_mid_write_is_recovered_by_the_product_and_a_second_flash_brings_the_demo_back(
     bench: Bench, board_images: BoardImages, servers
 ) -> None:
@@ -1183,6 +1206,11 @@ def test_a_flash_killed_mid_write_is_recovered_by_the_product_and_a_second_flash
     board without a whole image, for as long as the recovery and the second
     flash take. The kill is the only thing done outside the product, and it
     lands on the product's own child (see `kill_the_flash_while_it_writes`).
+    On a bench it runs after every other test of the tier too, by its mark: the
+    in-circuit debugger can remove its serial port and create it again on the
+    first open after the kill (#620), and a container started with fixed
+    `--device` bindings keeps the old node. The test then fails under a message
+    that names the re-enumeration, and no test after it inherits the binding.
 
     What is asserted is the documented answer, in order. The call fails, as the
     single-action run it is, and that run aborts into the recovery action:
@@ -1202,6 +1230,12 @@ def test_a_flash_killed_mid_write_is_recovered_by_the_product_and_a_second_flash
     # From the erase on, the board holds no whole image until the demo is back.
     board_images.displaced = True
     server = servers()
+    port = bench.com_port_name()
+    port_snapshot = serial_port_snapshot(bench, port)
+    # Only a port that is a tty here can be watched for a re-enumeration.
+    before = port_snapshot()
+    if before.get("name") is None:
+        before = None
     logs = bench.project / str((bench.configuration().get("logs") or {}).get("directory") or ".agentic-hil/logs")
     started = time.time()
 
@@ -1277,7 +1311,17 @@ def test_a_flash_killed_mid_write_is_recovered_by_the_product_and_a_second_flash
     assert answered["nothing_to_recover"] is True, answered
     assert answered["was_quarantined"] is False, answered
 
-    port = bench.com_port_name()
-    open_port(server, port)
-    settle_and_discard(server, port)
-    flash_the_demo_over(server, port)
+    if before is not None:
+        reenumerated = wait_for_the_serial_port(before, port_snapshot, SYS_CLASS_TTY)
+        if reenumerated is not None:
+            pytest.fail(reenumerated, pytrace=False)
+    try:
+        open_port(server, port)
+        settle_and_discard(server, port)
+        flash_the_demo_over(server, port)
+    except AssertionError as failed:
+        # The second flash opens the debugger again, which can be the open that re-enumerates it.
+        reenumerated = None if before is None else wait_for_the_serial_port(before, port_snapshot, SYS_CLASS_TTY, timeout_s=1.0)
+        if reenumerated is not None:
+            raise AssertionError(reenumerated) from failed
+        raise
