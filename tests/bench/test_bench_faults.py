@@ -55,6 +55,7 @@ from agentic_hil.config import load_config
 from agentic_hil.gdbmi import unescape_mi_string
 
 from .conftest import BENCH_ONLY, DEMO_IMAGE, Bench, BoardImages, child_command
+from .killed_flash_support import debugger_logs_since, recovery_report
 
 pytestmark = [pytest.mark.bench, BENCH_ONLY]
 
@@ -1201,6 +1202,8 @@ def test_a_flash_killed_mid_write_is_recovered_by_the_product_and_a_second_flash
     # From the erase on, the board holds no whole image until the demo is back.
     board_images.displaced = True
     server = servers()
+    logs = bench.project / str((bench.configuration().get("logs") or {}).get("directory") or ".agentic-hil/logs")
+    started = time.time()
 
     answers: dict = {}
     finished = threading.Event()
@@ -1235,14 +1238,20 @@ def test_a_flash_killed_mid_write_is_recovered_by_the_product_and_a_second_flash
     assert run["implicit"] is True, run
     assert run["aborted"] is True, run
     recovery = aborted["recovery"]
-    assert recovery["attempted"] is True, recovery
+
+    def why() -> str:
+        # A string, which pytest prints whole, where the dict's repr is cut off
+        # after a few fields: the line that says why is the one it cut (#621).
+        return recovery_report(recovery, debugger_logs_since(logs, started))
+
+    assert recovery["attempted"] is True, why()
     if recovery["auto_recover_policy"] == "reset_halt":
-        assert recovery["actions"] == ["reap_processes", "reset_halt", "probe_target"], recovery
-        assert recovery["safe_state_predicate"] == "reset_halt", recovery
-        assert recovery["outcome"] == "recovered", recovery
-        assert recovery["incident_resolved"] is True, recovery
-        assert recovery["resolved_reason"] == FLASH_UNCONFIRMED, recovery
-    assert aborted["quarantined"] is False, aborted
+        assert recovery["actions"] == ["reap_processes", "reset_halt", "probe_target"], why()
+        assert recovery["safe_state_predicate"] == "reset_halt", why()
+        assert recovery["outcome"] == "recovered", why()
+        assert recovery["incident_resolved"] is True, why()
+        assert recovery["resolved_reason"] == FLASH_UNCONFIRMED, why()
+    assert aborted["quarantined"] is False, why()
 
     errored, classified = server.call("classify_last_error")
     assert classified["ok"] is True, classified
