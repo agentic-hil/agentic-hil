@@ -1339,7 +1339,7 @@ UNSETTLED_STOPS = [(proof.error_type, backend) for proof in gdbdebug._TEARDOWN_P
 
 @pytest.mark.parametrize(("error_type", "backend"), UNSETTLED_STOPS, ids=[f"{error_type}-{backend}" for error_type, backend in UNSETTLED_STOPS])
 def test_an_unsettled_stop_names_the_call_that_settles_it(error_type: str, backend: str) -> None:
-    """#637: a retried `debug_stop_session` forces every proof false and settles nothing
+    """#637: a retried `debug_stop_session` repeats the first stop's answer and settles nothing
     (gdbdebug.py `stop_session`); the recovery probe_target runs first does."""
     advice = remediation_fields(error_type, backend)
 

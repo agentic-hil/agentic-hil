@@ -5464,8 +5464,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not call debug_stop_session again while `halt_not_confirmed` is true or `breakpoints_removed_confirmed` "
-            "or `detach_resume_guard_confirmed` is false. Over an unconfirmed target state a repeated stop forces every "
-            "proof false and settles nothing.",
+            "or `detach_resume_guard_confirmed` is false. Over an unconfirmed target state a repeated stop repeats the "
+            "first stop's answer and settles nothing.",
             "Do not start a new debug session over it. debug_start_session is refused as `session_already_active` "
             "until this one ends.",
         ),
@@ -5485,7 +5485,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not call debug_stop_session again for this. A stop after an unconfirmed halt brings no new evidence: "
-            "every proof is forced false and the incident stays where it is.",
+            "it repeats the answer the first stop gave, and the incident stays where it is.",
             "Do not start a new debug session to get a fresh halt. debug_start_session is refused as "
             "`session_already_active` until this one ends.",
         ),
@@ -5511,7 +5511,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not call debug_stop_session again for this. A stop after an unconfirmed removal brings no new evidence: "
-            "every proof is forced false and the incident stays where it is.",
+            "it repeats the answer the first stop gave, and the incident stays where it is.",
             "Do not start a new debug session to clear them. debug_start_session is refused as "
             "`session_already_active` until this one ends.",
         ),
@@ -5532,7 +5532,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not call debug_stop_session again for this. A stop after an unconfirmed detach brings no new evidence: "
-            "every proof is forced false and the incident stays where it is.",
+            "it repeats the answer the first stop gave, and the incident stays where it is.",
             "Do not start a new debug session to get a fresh halt. debug_start_session is refused as "
             "`session_already_active` until this one ends.",
         ),

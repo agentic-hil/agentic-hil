@@ -121,9 +121,8 @@ class _TeardownProof:
 
 # In the order a teardown takes them. The first proof missing names the error;
 # every missing one is named in the summary. A retry that could not gather new
-# evidence reports all of them as unconfirmed even when only one was the original
-# cause, so the phrasing has to make sense for any combination, not just for
-# whichever single proof failed on the attempt that discovered it.
+# evidence reports the proofs the original teardown got, unchanged (#637), so
+# the phrasing has to make sense for any combination of them.
 _TEARDOWN_PROOFS = (
     _TeardownProof("halt_not_confirmed", "the target's halt could not be reconfirmed", "the target was halted"),
     _TeardownProof(
@@ -137,6 +136,13 @@ _TEARDOWN_PROOFS = (
         "the backend's auto-resume-on-detach override was installed",
     ),
 )
+
+
+# What a stop that left the target's state unconfirmed says comes next (#637).
+# No retry of debug_stop_session can take a proof again over a connection that
+# is gone; the recovery probe_target runs first reaps what is left and reads the
+# target back, and a confirmed read ends the session.
+UNSETTLED_STOP_NEXT_STEP = "Calling debug_stop_session again cannot settle this; probe_target settles it where the bench allows automatic recovery, and the operator's recovery does otherwise."
 
 
 def _unconfirmed_teardown_proofs(confirmed: tuple[bool, ...]) -> list[_TeardownProof]:
@@ -301,6 +307,11 @@ class GdbDebugSession:
         # (where the target state proof already succeeded) -- see
         # `stop_session` and `close`.
         self.hardware_state_unconfirmed = False
+        # The proofs (halt, breakpoints removed, detach guard) the teardown that
+        # set `hardware_state_unconfirmed` got. A retried teardown has no
+        # connection to take them again on, so it reports these (#637). All
+        # false until a teardown records its own.
+        self.teardown_proofs: tuple[bool, bool, bool] = (False, False, False)
         # What a server without a detach command did as its guard: ended before
         # GDB detached, and whether it was gone. Logged with the session, so the
         # evidence for a guard confirmed this way is the server's own exit.
@@ -639,15 +650,17 @@ class GdbDebugSessions:
         #
         # A target-state incident is different: nothing about retrying this
         # call can manufacture new evidence about a connection that is
-        # already, permanently gone, so every proof stays false and the
-        # incident is preserved every time this is called again, until an
-        # operator's recovery or a later machine action that resets and rereads
-        # the target establishes the board state. That is tracked at the lease
-        # level, not synthesized here from a retry alone.
+        # already, permanently gone, so the incident is preserved every time
+        # this is called again, until an operator's recovery or a later machine
+        # action that resets and rereads the target establishes the board state.
+        # That is tracked at the lease level, not synthesized here from a retry
+        # alone. The retry repeats the proofs the original teardown got (#637):
+        # forcing them all false told a caller the halt was never confirmed when
+        # it had been, and a proof a retry cannot take again is not unproven.
         already_unsettled = session.status == "cleanup_required"
         retry_without_new_evidence = already_unsettled and session.hardware_state_unconfirmed
         if retry_without_new_evidence:
-            proofs = (False, False, False)
+            proofs = session.teardown_proofs
         elif already_unsettled:
             proofs = (True, True, True)
         else:
@@ -665,10 +678,12 @@ class GdbDebugSessions:
             session.status = "cleanup_required"
             if unconfirmed:
                 session.hardware_state_unconfirmed = True
+                session.teardown_proofs = proofs
             return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": True, "status": "cleanup_required", "hardware_state": "unknown", "cleanup_required": True, "safe_state_confirmed": False, **teardown_fields, "error_type": "cleanup_failed", "cleanup_error": cleanup_error, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session cleanup failed; ownership is retained for retry."})
         if unconfirmed:
             session.status = "cleanup_required"
             session.hardware_state_unconfirmed = True
+            session.teardown_proofs = proofs
             unconfirmed_what = _joined_clauses([proof.unconfirmed for proof in unconfirmed], "and")
             return self._report({
                 "ok": False,
@@ -683,7 +698,7 @@ class GdbDebugSessions:
                 "error_type": unconfirmed[0].error_type,
                 "session": self._session_status(session),
                 "log_path": display_path(self.config, session.log_path),
-                "summary": f"Debug session processes were cleaned up, but {unconfirmed_what} before the session ended; ownership is retained for retry.",
+                "summary": f"Debug session processes were cleaned up, but {unconfirmed_what} before the session ended. {UNSETTLED_STOP_NEXT_STEP}",
             })
         session.status = "stopped"
         session.hardware_state_unconfirmed = False
@@ -1055,7 +1070,7 @@ class GdbDebugSessions:
             already_unsettled = session.status == "cleanup_required"
             retry_without_new_evidence = already_unsettled and session.hardware_state_unconfirmed
             if retry_without_new_evidence:
-                proofs = (False, False, False)
+                proofs = session.teardown_proofs
             elif already_unsettled:
                 proofs = (True, True, True)
             else:
@@ -1069,10 +1084,12 @@ class GdbDebugSessions:
                 session.status = "cleanup_required"
                 if unconfirmed:
                     session.hardware_state_unconfirmed = True
+                    session.teardown_proofs = proofs
                 raise RuntimeError(f"Debug session cleanup failed: {cleanup_error}")
             if unconfirmed:
                 session.status = "cleanup_required"
                 session.hardware_state_unconfirmed = True
+                session.teardown_proofs = proofs
                 reason = _joined_clauses([proof.close_reason for proof in unconfirmed], "or")
                 raise RuntimeError(f"Debug session closed without reconfirming {reason}.")
             session.status = "stopped"
