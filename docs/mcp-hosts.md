@@ -3,7 +3,7 @@
 Agentic Hardware-in-the-Loop (Agentic HIL) exposes the same local MCP stdio server and the same tool semantics in every host. Only the host configuration syntax changes.
 
 Every block below was verified against the linked host documentation on
-2026-09-30. Moving that date is a release chore, described under "The Host
+2026-10-03. Moving that date is a release chore, described under "The Host
 Documentation Check" in [Release Strategy](release-strategy.md), because a date
 nobody moves invites more trust than it can carry.
 

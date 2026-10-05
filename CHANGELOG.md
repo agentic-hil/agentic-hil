@@ -4,7 +4,7 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
-## [Unreleased]
+## [0.23.0] - 2026-10-03
 
 ### Added
 
@@ -53,6 +53,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - `flash_firmware`, `artifact_upload`, `get_last_report` and `classify_last_error` now say what they need, what bounds them and how they fail: the flash names its permissions, what a debug session or another owner of the probe answers, that `timeout_s` caps each debugger command, which backends need `flash_address` for a `.bin` and that pyOCD does not verify, and that a failed flash may be followed by a recovery reset into halt; the upload names where it stores the image, how the `artifact_id` follows from the bytes and the lowercased extension, and each refusal; the report tools say that the outer `ok` is true even for a failed report, which fields judge it, that the newest report can be the recovery's, that the failure record outlives successes, and that `report_not_found` means nothing is stored yet. (#640)
 
 - The `tools/list` definitions of `project_config_describe`, `project_config_set`, `project_config_adopt_hardware`, `project_config_reload_description`, `hardware_recover` and `server_upgrade` now say what each call is for, which sibling does the neighbouring job, and what it needs, answers and leaves: which grant opens which half of the file and that permissions only narrow, which keys a description re-read takes (not `debug` or `permissions`), that adoption fills placeholders and otherwise only gives a COM device its stable name and corrects a stale `identity_source`, that it flashes and erases nothing, and that its recovery may reset a board left in an unknown state into halt, the 10 s bound per read step and 600 s per manager run, when to clear a quarantine and that the operator's statement is passed verbatim, and that `running_version` stays old until the server restarts. The refusals for a held run or session and for a failed recovery say the rest in the error catalogue. (#643)
+
+- Both one-line installers pin Astral's uv installer at 0.12.23 and carry the SHA-256 of exactly those bytes, `b8e6c43099ee9f9a550984d3ad56948457c689e7a99c090b35377234ac241491` for the POSIX installer and `536e6ebe00d41efc96b0ab1121bf6f969b0e9cbd88d1e19cfd09e63722e96160` for the PowerShell one, and the TLS-proxy eval image carries the POSIX pair. Read against 0.12.21, the new installers differ only in the version strings and the per-artifact checksums: Astral's POSIX installer still verifies each archive it downloads against a per-artifact SHA-256 and their PowerShell installer still unpacks with no checksum step at all, so on Windows this pin remains the only integrity check between `astral.sh` and an executed script, and the comment in `install.ps1` that says so names the release it was read at.
+
+- `docs/mcp-hosts.md` was read again against every page its blocks link, and every block still matches the shape its host documents now: VS Code's `servers` container in `mcp.json`, with `cwd` defaulting to the workspace folder only when a workspace runs the server; the JetBrains AI Assistant's `mcpServers` with its separate Working directory field, and the Copilot plugin's `servers` in `mcp.json`; Codex's `[mcp_servers.<name>]` table with `cwd` and `enabled`; Claude Code's `mcpServers`; OpenCode's `mcp` with `type: local`, one command array, `cwd` and `enabled`. No block and no link moved, and the date at the top of the page says the day it was read.
 
 ### Fixed
 
