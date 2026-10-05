@@ -2119,8 +2119,14 @@ class HardwareCoordinator:
                     return {"ok": False, "tool": "hardware_recover", "error_type": "coordination_state_invalid", "summary": "Quarantine resource markers are inconsistent.", **remediation_fields("coordination_state_invalid")}
                 resuming = state == "recovery_pending"
                 for resource in sorted(set(resources)):
-                    locks.append(self._acquire_lock(resource, resources))
-                    marker = self._read_record(resource)
+                    # Answered like the project lock above: a lock or a marker
+                    # this recovery cannot take or read is the refusal it is,
+                    # with nothing cleared, never an exception out of the tool.
+                    try:
+                        locks.append(self._acquire_lock(resource, resources))
+                        marker = self._read_record(resource)
+                    except CoordinationError as error:
+                        return {"tool": "hardware_recover", **error.result}
                     marker_state = (marker or {}).get("state")
                     if marker is not None and marker_state == "released" and marker.get("recovered_quarantine_id") == quarantine_id:
                         # Already committed by an interrupted run of the same

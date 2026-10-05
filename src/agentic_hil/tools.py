@@ -1208,7 +1208,13 @@ class AgenticHILToolService:
         self.can_buses.reconfigure(config)
 
     def hardware_lease_status(self) -> JsonObject:
-        return self.coordinator.status()
+        # A record this version cannot trust is answered with its own refusal,
+        # the way every other tool that meets it answers, and not as a protocol
+        # error a caller cannot tell from a broken server.
+        try:
+            return self.coordinator.status()
+        except CoordinationError as error:
+            return {"tool": "hardware_lease_status", "side_effect_committed": False, **error.result}
 
     def hardware_recover(self, operator_statement: str | None = None, accept_config_change: bool = False) -> JsonObject:
         """Clear this bench's quarantine, on its own or on a relayed statement.
@@ -1277,7 +1283,10 @@ class AgenticHILToolService:
         # the incident would send the operator hunting for an id, on a host that
         # has no shell to run `lease-status` in, which is the situation this tool
         # exists for.
-        status = self.coordinator.status()
+        try:
+            status = self.coordinator.status()
+        except CoordinationError as error:
+            return {"tool": "hardware_recover", "side_effect_committed": False, **error.result}
         quarantine_id = status.get("quarantine_id")
         reasons = [reason for reason in status.get("cleanup_reasons", []) if isinstance(reason, str)]
         # Asked before the grant, because `allow_recover` gates the operator
