@@ -1608,9 +1608,8 @@ def test_a_probe_after_a_debugger_call_raised_does_not_blame_another_process(tmp
         monkeypatch.setattr(service.backend, "probe_target", original)
         try:
             service.close()
-        except RuntimeError:
-            pass
-        service.coordinator.close()
+        finally:
+            service.coordinator.close()
     assert first.get("error_type") == "audit_failed_after_action", first
     assert first.get("quarantined") is True, first
     assert status.get("incident_stands") is True, status

@@ -2409,6 +2409,13 @@ class AgenticHILToolService:
                 lease.quarantine("debugger_call_exception", error)
                 if starts_session:
                     self._debug_lease = lease
+                elif one_shot and lease is not self._debug_lease and lease.state != "released":
+                    # Kept like a one-shot whose result quarantined it, so the
+                    # recovery-class call the incident allows runs on this hold.
+                    # Dropped, the locks stayed held by nothing anyone could
+                    # reach, and the next probe_target was refused as owned by
+                    # another process (#677).
+                    self._quarantined_lease = lease
             raise
         if lease is None:
             return result
