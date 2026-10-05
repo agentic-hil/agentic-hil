@@ -30,7 +30,7 @@ from agentic_hil.coordination import (
     HardwareCoordinator,
     lease_config_sha256,
 )
-from agentic_hil.knowledge import RECOVERY_PHYSICAL_CHECK_ERROR, catalogue_entry, recovery_operator_command
+from agentic_hil.knowledge import RECOVERY_PHYSICAL_CHECK_ERROR, catalogue_entry, recovery_operator_command, remediation_fields
 from agentic_hil.tools import AgenticHILToolService
 
 TOOL = "hardware_recover"
@@ -654,6 +654,36 @@ def test_a_statement_does_not_reach_the_audit_broken_family(tmp_path: Path) -> N
         assert service.coordinator.status()["blocked"] is True
     finally:
         service.close()
+
+
+@pytest.mark.parametrize("arguments", [{}, {"operator_statement": "The board is idle and runs the expected firmware."}])
+def test_the_audit_broken_refusal_relays_the_command_and_asks_for_no_statement(tmp_path: Path, arguments: dict) -> None:
+    """With or without a statement, the answer says that no statement clears an
+    audit_broken reason and hands over the operator's command. It never names the
+    statement as missing, and never asks for one: a caller that followed that
+    advice would ask the operator again and meet the same refusal."""
+    config = config_for(tmp_path)
+    incident = quarantine(config, "audit_broken")
+    service = AgenticHILToolService(config)
+    try:
+        status = service.call("hardware_lease_status")
+        assert status["incident_stands"] is True, status
+        result = service.call(TOOL, arguments)
+    finally:
+        service.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == RECOVERY_PHYSICAL_CHECK_ERROR
+    assert "missing_argument" not in result, result
+    command = recovery_operator_command(incident)
+    assert result["operator_command"] == command
+    assert command in result["next_step"], result["next_step"]
+    assert "operator_statement" not in result["next_step"], result["next_step"]
+    assert "no statement clears" in result["summary"].lower(), result["summary"]
+    assert "call again with their answer" not in result["summary"].lower(), result["summary"]
+    assert result["remediation"] == remediation_fields(RECOVERY_PHYSICAL_CHECK_ERROR, "audit_broken")["remediation"]
+    assert not any("operator_statement` set to" in step for step in result["remediation"]), result["remediation"]
+    assert ledger(config) == []
 
 
 # ---------------------------------------------------------------------------
