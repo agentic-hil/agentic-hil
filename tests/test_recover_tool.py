@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from conftest import write_config
 
+from agentic_hil.cli import entrypoint
 from agentic_hil.config import load_config
 from agentic_hil.configwrite import ACTOR_AGENT
 from agentic_hil.contracts import MCP_TOOLS, TOOL_ANNOTATIONS
@@ -31,6 +32,7 @@ from agentic_hil.coordination import (
     lease_config_sha256,
 )
 from agentic_hil.knowledge import RECOVERY_PHYSICAL_CHECK_ERROR, catalogue_entry, recovery_operator_command, remediation_fields
+from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.tools import AgenticHILToolService
 
 TOOL = "hardware_recover"
@@ -861,6 +863,65 @@ def test_an_incident_that_does_not_stand_answers_nothing_to_recover(tmp_path: Pa
         assert service.coordinator.status()["incident_stands"] is False
     finally:
         service.close()
+
+
+def lease_status_over_mcp(service: AgenticHILToolService) -> dict:
+    response = handle_mcp_message({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "hardware_lease_status", "arguments": {}}}, service)
+    assert isinstance(response, dict) and "result" in response, response
+    return response["result"]
+
+
+@pytest.mark.parametrize("standing", [False, True], ids=["open", "standing"])
+def test_a_status_read_that_finds_an_incident_is_not_an_error(tmp_path: Path, standing: bool) -> None:
+    """The read succeeded and the incident is data: `blocked`, `incident_stands`
+    and `cleanup_required` say what the bench owes. `isError` beside `ok: true`
+    told a client the read failed, and over an incident that does not stand it
+    contradicted the answer's own "Nothing to sign for"."""
+    config = config_for(tmp_path)
+    (quarantine if standing else open_incident)(config, "debugger_result_unconfirmed")
+    service = AgenticHILToolService(config)
+    try:
+        result = lease_status_over_mcp(service)
+    finally:
+        service.close()
+
+    content = result["structuredContent"]
+    assert content["ok"] is True and content["blocked"] is True, content
+    assert content["incident_stands"] is standing
+    assert content["cleanup_required"] is True
+    assert result["isError"] is False, content
+
+
+def test_a_status_read_that_could_not_read_the_record_is_still_an_error(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    coordinator = HardwareCoordinator(config, "setup")
+    try:
+        coordinator._record_path(coordinator.project_key).write_text('{"version": 999}\n', encoding="utf-8")
+    finally:
+        coordinator.close()
+    service = AgenticHILToolService(config)
+    try:
+        result = lease_status_over_mcp(service)
+    finally:
+        service.close()
+
+    assert result["structuredContent"]["error_type"] == "coordination_state_invalid"
+    assert result["isError"] is True
+
+
+def test_the_lease_status_command_exits_zero_over_an_open_incident(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A script reading the exit status tells "the record could not be read"
+    (nonzero) from "it was read and an incident is open" (zero, with the
+    incident in the document)."""
+    config = config_for(tmp_path)
+    open_incident(config, "debugger_result_unconfirmed")
+    monkeypatch.setattr("agentic_hil.cli.load_cli_authoritative_config", lambda path: config)
+
+    exit_code = entrypoint(["lease-status", "--json"])
+
+    document = json.loads(capsys.readouterr().out)
+    assert document["blocked"] is True, document
+    assert exit_code == 0
 
 
 def test_the_bench_that_answered_nothing_to_recover_is_actually_free(tmp_path: Path) -> None:
