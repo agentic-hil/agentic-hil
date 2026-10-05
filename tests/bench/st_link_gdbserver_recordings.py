@@ -952,7 +952,7 @@ class StLinkRecorder(Recorder):
         record["semihost_console_port_named"] = moved
         for label, offset in (("gdb_port_taken", 0), ("port_after_the_gdb_port_taken", 1)):
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
-                holder.bind(("0.0.0.0", 0))
+                holder.bind(("127.0.0.1", 0))
                 taken = holder.getsockname()[1]
                 holder.listen(1)
                 gdb_port = taken - offset
