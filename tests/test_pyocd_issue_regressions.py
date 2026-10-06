@@ -46,6 +46,48 @@ def test_pyocd_flash_error_shapes_are_classified(backend: PyOCDBackend, message:
     assert backend._classify_output(message, "flash_firmware") == expected
 
 
+# pyOCD 0.45.1 warns `flash uninit sequence not available`
+# (pyocd/flash/flash_dsq.py:133) on flash runs that succeed, for a target
+# whose flash description has no uninit sequence, and raises its real uninit
+# failures as `flash uninit` with a result code or `flash uninit timed out`
+# (pyocd/flash/flash.py:303-305), logged as a `C` line by pyocd/__main__.py:170
+# (#704).
+PYOCD_SUCCESSFUL_FLASH_WITH_UNINIT_WARNING = (
+    "0000912 I Loading firmware.elf [load_cmd]\n"
+    "0001845 W flash uninit sequence not available [flash_dsq]\n"
+    "0001846 I Erased 16384 bytes (1 sector), programmed 8192 bytes (32 pages), identical 0 bytes (0 pages) at 12.34 kB/s [loader]\n"
+)
+
+
+def test_pyocd_uninit_sequence_warning_on_a_successful_flash_is_not_a_failure(backend: PyOCDBackend, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from agentic_hil.backends.common import CompletedCommand
+
+    executable = tmp_path / "pyocd.exe"
+    monkeypatch.setattr(backend, "_resolve_executable", lambda: {"ok": True, "executable_path": str(executable), "executable": str(executable)})
+    monkeypatch.setattr(
+        "agentic_hil.backends.pyocd.spawn_command",
+        lambda *args, **kwargs: CompletedCommand(stdout="", stderr=PYOCD_SUCCESSFUL_FLASH_WITH_UNINIT_WARNING, returncode=0, timed_out=False, not_found=False),
+    )
+
+    result = backend._run_pyocd("flash_firmware", ["flash", "firmware.elf"])
+
+    assert result["ok"] is True
+    assert "error_type" not in result
+    assert backend._classify_output(PYOCD_SUCCESSFUL_FLASH_WITH_UNINIT_WARNING, "flash_firmware") == "unknown_debugger_error"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "0001845 C flash uninit (result code 0x1) [__main__]",
+        "0001845 C flash uninit timed out [__main__]",
+    ],
+)
+def test_pyocd_real_uninit_failure_is_a_flash_failure(backend: PyOCDBackend, line: str) -> None:
+    assert backend._classify_output(line + "\n", "flash_firmware") == "flash_failed"
+    assert backend._classify_output(PYOCD_SUCCESSFUL_FLASH_WITH_UNINIT_WARNING + line + "\n", "flash_firmware") == "flash_failed"
+
+
 def test_failed_post_flash_reset_keeps_the_successful_flash_contact(backend: PyOCDBackend, monkeypatch: pytest.MonkeyPatch) -> None:
     responses = iter(
         [
