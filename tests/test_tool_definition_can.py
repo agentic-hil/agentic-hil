@@ -828,11 +828,12 @@ def test_a_bridge_open_is_bounded_by_the_entry_timeout(tmp_path: Path, monkeypat
     assert unset.can_buses["bench"].timeout_s == 10.0
 
 
-def test_a_bridge_silent_for_a_second_at_close_fails_the_stop_and_keeps_the_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_bridge_silent_for_a_second_at_close_fails_the_stop_once_and_gives_the_bus_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The close request gives a bridge 1 s (bridge.py:68). Unanswered, the
-    bridge's safe state is unconfirmed, the close raises (bridge.py:98-110), and
-    the stop answers `can_adapter_close_failed` with the session still
-    registered (can.py:704-707)."""
+    bridge's safe state is unconfirmed, its process is reaped and the close
+    raises. A reaped bridge cannot confirm anything later, so the stop answers
+    `can_adapter_close_failed` once and ends the session (#633); this used to
+    pin a session kept registered for a retry that could never succeed."""
     waits: list[tuple[str, float]] = []
 
     class SilentBridge(ProcessCanAdapterSession):
@@ -856,4 +857,5 @@ def test_a_bridge_silent_for_a_second_at_close_fails_the_stop_and_keeps_the_sess
 
     assert waits == [("close", 1)], waits
     assert stopped["ok"] is False and stopped["error_type"] == "can_adapter_close_failed", stopped
-    assert kept is True
+    assert "without confirming its close" in stopped["summary"], stopped
+    assert kept is False

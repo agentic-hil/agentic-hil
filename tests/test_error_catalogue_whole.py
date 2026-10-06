@@ -639,7 +639,7 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 
 SCANNED_MODULE_COUNT = 48
 # `can_broker_disconnected`, a broker connection that ended (#664), is the 219th.
-COLLECTED_TYPE_COUNT = 219
+COLLECTED_TYPE_COUNT = 220
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -654,7 +654,11 @@ COLLECTED_TYPE_COUNT = 219
 # The broker's two `permission_denied` refusals are written by one function,
 # `CanBroker._permission_refusal`, which names the key (#657).
 # `canbroker.broker_request_failure` writes `can_broker_disconnected` (#664).
-PRODUCER_COUNT = 645
+# `session_lease_held` (#660) is one new type, written by the COM and the CAN
+# `_end_session_lease`; the CAN close helpers `_retire_session`,
+# `_end_unconfirmed_close` and `_end_session_lease` add three more producers
+# of `can_adapter_close_failed` (#633, #665).
+PRODUCER_COUNT = 650
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
