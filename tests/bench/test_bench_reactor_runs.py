@@ -470,8 +470,8 @@ def test_a_run_started_over_mcp_is_watched_and_stopped_between_two_steps_and_the
         assert isinstance(started["report_path"], str) and started["report_path"], started
         assert isinstance(started["started_at"], str) and started["started_at"], started
         assert started["summary"] == (
-            f"The run is detached under handle {handle}; ask `agentic-hil test-reactor-status --run {handle}` what it is doing "
-            f"and `agentic-hil test-reactor-stop --run {handle}` to end it early."
+            f"The run is detached under handle {handle}; call `test_reactor_status` with `run` set to it to see what it is "
+            "doing, and `test_reactor_stop` with the same `run` to end it early."
         ), started["summary"]
 
         def status() -> dict:
@@ -584,7 +584,7 @@ def test_a_run_started_over_mcp_is_watched_and_stopped_between_two_steps_and_the
         states = {entry["run"]: entry["state"] for entry in listing["runs"]}
         assert (states[handle], states[following]) == ("stopped", "finished"), states
         assert handle not in listing["active_runs"] and following not in listing["active_runs"], listing
-        assert listing["summary"] == f"This bench has records of {len(handles)} test run(s); name one with --run to see what it is doing.", listing["summary"]
+        assert listing["summary"] == f"This bench has records of {len(handles)} test run(s); call `test_reactor_status` with one of them as `run` to see what it is doing.", listing["summary"]
     finally:
         with suppress(*TEARDOWN_FAULTS):
             server.shut_down()
