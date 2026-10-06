@@ -96,6 +96,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - The bench tier's killed-flash test prints the whole recovery result and the debugger logs of the reset when its recovery fails, so the backend's error line reaches the log and the JUnit report. (#621)
 
+- The recovery after a failed run tries its reset into halt again, on a bounded backoff of about ten seconds, while OpenOCD answers `Error: mode (transport) not supported by device` or `Error: init mode failed (unable to connect to the target)`, as the in-circuit debugger does while it re-enumerates right after a flash was killed mid-write. Any other failure is reported at once, and the recovery result names the attempts (`reset_halt_attempts`, `reset_halt_retried_on`) and the backend's own error line (`backend_error_line`, also in the summary). (#621)
+
+- A successful pyOCD flash is no longer reported as a flash failure because pyOCD printed its harmless warning `flash uninit sequence not available`. Only pyOCD's real uninit failures (`flash uninit (result code ...)`, `flash uninit timed out`) count as flash failures. (#704)
+
 ## [0.23.0] - 2026-10-03
 
 ### Added
