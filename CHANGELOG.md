@@ -16,6 +16,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - The tool definition score gate now decides on the mean TDQS of all tools, rounded to one decimal, instead of the overall score. The overall score leaned 28 % on the single lowest tool and 30 % on the judged coherence, both of which swing between identical runs, so identical text was blocked at random. The overall score, its parts and the lowest tool stay in the report.
 
+- The tool definition score gate now judges with Claude Opus 5.5 through Claude Code 2.1.288, calibrated again against the registry. Its scores sit about 0.35 below the registry's but follow them tool by tool (a correlation of 0.89 instead of 0.58), and they are steadier between runs: scoring the same definitions again moves a tool's TDQS by 0.10 on average instead of 0.20, and the coherence held at 3.3 in all three runs where it ranged from 3.3 to 4.0.
+
 - `debug_symbol_info`, `debug_symbol_value` and `debug_dump_symbol_ihex` now say in their MCP definitions that pyOCD and STM32CubeProgrammer resolve symbols through an open debug session, and against the ELF `flash_firmware` last wrote only while no session is open. (#698)
 
 - Run results over MCP name the tools and their `run` argument (`test_reactor_status`, `test_reactor_stop`, `hardware_lease_status`) instead of `agentic-hil` commands and `--run`. The CLI keeps its command wording. (#671)

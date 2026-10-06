@@ -1,6 +1,6 @@
 {
-  "model": "claude-haiku-4-5-20251001",
-  "cli_version": "2.1.258",
+  "model": "claude-opus-5-5",
+  "cli_version": "2.1.288",
   "spec_commit": "b9881b0cfec88969e42672c92544487ca191a992",
   "spec_version": "1.3",
   "prompt_sha256": {

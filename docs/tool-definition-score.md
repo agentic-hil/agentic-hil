@@ -27,8 +27,8 @@ How close the gate's scores come to the registry's is measured below, in
   `~/.cache`. The prompt texts are never stored in this repository, because the
   specification repository grants no license to copy them. A prompt that no
   longer matches its hash stops the gate.
-- **The model.** `claude-haiku-4-5-20251001`, asked through the Claude Code
-  command line 2.1.258, which `tools/tdqs/package-lock.json` pins by version
+- **The model.** `claude-opus-5-5`, asked through the Claude Code
+  command line 2.1.288, which `tools/tdqs/package-lock.json` pins by version
   and integrity. Each tool is one call, the coherence of the whole set is one
   more, and an answer that cannot be read is asked again up to two times. The
   calls run with no tools, no MCP servers, no settings, no project memory and
@@ -48,10 +48,11 @@ The mean TDQS over all tools decides, compared as its rollup: the exact mean
 rounded half up to one decimal once. The overall score, description quality,
 coherence and the lowest TDQS are reported next to it as information. They do
 not decide because they are not steady enough on identical text: the overall
-weighs the single lowest tool at 28 % and the judged coherence at 30 %, the
-lowest tool rotates among a handful of tools near 2.5 to 3.0 from one run to
-the next, and coherence moved from 3.3 to 4.3 on the same definitions. The mean
-over every tool moves far less, and it still falls when descriptions get worse.
+weighs the single lowest tool at 28 % and the judged coherence at 30 %. Over
+three runs of the same definitions the lowest TDQS moved from 1.7 to 2.1 and
+the overall from 2.8 to 3.0; over three runs of another set, coherence moved
+from 3.3 to 3.5. The mean over every tool moved by less than 0.05 unrounded in
+both, and it still falls when descriptions get worse.
 
 | Result | Exit code | When |
 |---|---|---|
@@ -59,10 +60,10 @@ over every tool moves far less, and it still falls when descriptions get worse.
 | BLOCK | 1 | The first pair drops and two more pairs confirm it: the head's median mean TDQS over the three pairs is below the base's |
 | INVALID | 2 | The definitions changed and could not be scored completely: no token, a prompt that fails its hash, an answer still unreadable after its retries, a different model answering, or a saved report that no longer matches the exports |
 
-One scoring run of the same definitions can differ from the next by 0.1 on
-the mean TDQS (the three calibration runs below gave 3.4, 3.4 and 3.3, against
-2.9, 3.1 and 3.0 on the overall score), so a drop on one pair alone never
-blocks.
+One scoring run of the same definitions can still differ from the next by 0.1
+on the mean TDQS once it is rounded (the three calibration runs below gave 3.2,
+3.2 and 3.3, from 3.207 to 3.255 unrounded, against 2.8, 3.0 and 2.9 on the
+overall score), so a drop on one pair alone never blocks.
 
 The size of the definitions is reported next to the scores and is never part
 of the decision: description characters, `tools/list` bytes and the bytes of
@@ -89,7 +90,7 @@ python tools/tool_definition_score.py --base origin/master
 ```
 
 Another installed version of Claude Code also works; the report then carries a
-warning that the scores were calibrated with 2.1.258. On Windows the gate
+warning that the scores were calibrated with 2.1.288. On Windows the gate
 refuses a `claude.cmd` batch wrapper, which cannot pass the system prompt
 intact, and needs the native `claude` executable.
 
@@ -104,8 +105,8 @@ intact, and needs the native `claude` executable.
 | `--check REPORT` | check a saved report against the current exports instead of scoring |
 | `--calibrate CAPTURE` with `--runs N` | score a capture of the registry's published definitions N times and write `calibration.json` |
 
-One pair of the 44 tools takes about three minutes and 90 model calls at the
-default concurrency; a confirmed drop takes three pairs.
+One pair of the 44 tools takes about two and a half minutes and 90 model calls
+at the default concurrency; a confirmed drop takes three pairs.
 
 The end-to-end test of the gate against the real model is left out of every
 test run unless `AGENTIC_HIL_TDQS_MODEL` is exactly `1`:
@@ -155,15 +156,15 @@ version digest, the scored set hash and the definition differences.
 
 | Measure | Registry | Gate runs | Gate median |
 |---|---|---|---|
-| Overall | 3.1 (B) | 2.9, 3.1, 3.0 | 3.0 (B) |
-| Description quality | 2.8 (C) | 2.7, 2.7, 2.7 | 2.7 (C) |
-| Coherence | 3.8 (A) | 3.3, 4.0, 3.8 | 3.8 (A) |
-| Mean TDQS | 3.6 | 3.4, 3.4, 3.3 | 3.4 |
-| Lowest TDQS | 1.7 `debug_symbol_info` | 1.8, 1.6, 1.8 `hardware_recover` | 1.8 |
+| Overall | 3.1 (B) | 2.8, 3.0, 2.9 | 2.9 (C) |
+| Description quality | 2.8 (C) | 2.6, 2.8, 2.7 | 2.7 (C) |
+| Coherence | 3.8 (A) | 3.3, 3.3, 3.3 | 3.3 (B) |
+| Mean TDQS | 3.6 | 3.2, 3.2, 3.3 | 3.2 |
+| Lowest TDQS | 1.7 `debug_symbol_info` | 1.7, 2.1, 1.8 `debug_symbol_info` | 1.8 |
 
 Scored once on `5762f9b`'s own `tools/list`, with the titles, the gate gives
-3.1 (B) overall, 2.7 description quality, 4.0 coherence, 3.3 mean TDQS and
-1.8 lowest (`hardware_recover`).
+2.9 (C) overall, 2.7 description quality, 3.3 coherence, 3.2 mean TDQS and
+2.0 lowest (`debug_symbol_info`).
 
 ### Per dimension
 
@@ -172,49 +173,55 @@ score, over the 44 tools:
 
 | Measure | Mean absolute difference | Mean signed difference | Gate higher | Gate lower | Equal |
 |---|---|---|---|---|---|
-| TDQS | 0.50 | -0.22 | 16 | 24 | 4 |
-| Purpose clarity | 0.50 | -0.36 | 3 | 16 | 25 |
-| Usage guidelines | 0.68 | -0.18 | 9 | 14 | 21 |
-| Behavioral transparency | 0.84 | +0.07 | 19 | 14 | 11 |
-| Parameter semantics | 0.91 | +0.23 | 24 | 10 | 10 |
-| Conciseness and structure | 0.70 | -0.39 | 5 | 16 | 23 |
-| Contextual completeness | 1.00 | -1.00 | 0 | 35 | 9 |
+| TDQS | 0.40 | -0.35 | 4 | 37 | 3 |
+| Purpose clarity | 0.48 | -0.30 | 4 | 17 | 23 |
+| Usage guidelines | 0.23 | -0.18 | 1 | 9 | 34 |
+| Behavioral transparency | 0.59 | -0.55 | 1 | 24 | 19 |
+| Parameter semantics | 0.25 | -0.16 | 2 | 9 | 33 |
+| Conciseness and structure | 0.50 | -0.41 | 2 | 19 | 23 |
+| Contextual completeness | 0.68 | -0.68 | 0 | 30 | 14 |
 
 ### The largest differences
 
 | Tool | Registry | Gate | Difference | Dimensions that differ (gate minus registry) |
 |---|---|---|---|---|
-| `test_reactor_run` | 4.3 | 2.0 | -2.3 | purpose clarity -2, usage guidelines -2, behavioral transparency -2, parameter semantics -3, conciseness and structure -2, contextual completeness -3 |
-| `bench_run_start` | 4.4 | 2.5 | -1.9 | purpose clarity -2, usage guidelines -2, behavioral transparency -2, parameter semantics -1, conciseness and structure -3, contextual completeness -2 |
-| `hardware_recover` | 3.3 | 1.8 | -1.5 | purpose clarity -1, usage guidelines -1, behavioral transparency -1, parameter semantics -2, conciseness and structure -3, contextual completeness -2 |
-| `project_config_set` | 4.0 | 2.8 | -1.2 | usage guidelines -2, behavioral transparency -2, parameter semantics -1, conciseness and structure -1, contextual completeness -2 |
-| `test_reactor_status` | 3.4 | 2.2 | -1.2 | purpose clarity -2, usage guidelines -1, parameter semantics -1, conciseness and structure -2, contextual completeness -1 |
-| `project_config_create` | 4.3 | 3.5 | -0.8 | purpose clarity -1, usage guidelines -1, behavioral transparency -1, parameter semantics +1, conciseness and structure -1, contextual completeness -2 |
-| `can_session_stop` | 2.7 | 3.4 | +0.7 | usage guidelines +1, behavioral transparency +1, parameter semantics +1, conciseness and structure +1 |
-| `debug_clear_breakpoints` | 3.8 | 4.5 | +0.7 | usage guidelines +2, behavioral transparency +1, parameter semantics +1 |
-| `debug_get_session_status` | 3.2 | 3.9 | +0.7 | usage guidelines +1, behavioral transparency +2, parameter semantics +1, contextual completeness -1 |
-| `debug_list_breakpoints` | 3.7 | 4.4 | +0.7 | purpose clarity +1, usage guidelines +1, behavioral transparency +1, parameter semantics +1, contextual completeness -1 |
+| `bench_run_start` | 4.4 | 3.6 | -0.8 | purpose clarity -1, behavioral transparency -1, parameter semantics -1, conciseness and structure -1, contextual completeness -1 |
+| `debug_start_session` | 2.9 | 2.1 | -0.8 | purpose clarity -1, behavioral transparency -1, parameter semantics -1, conciseness and structure -1, contextual completeness -1 |
+| `flash_firmware` | 4.5 | 3.7 | -0.8 | purpose clarity -1, usage guidelines -1, behavioral transparency -1, parameter semantics -1, conciseness and structure +1, contextual completeness -1 |
+| `test_reactor_run` | 4.3 | 3.5 | -0.8 | purpose clarity -1, behavioral transparency -2, contextual completeness -1 |
+| `project_config_set` | 4.0 | 3.3 | -0.7 | usage guidelines -1, behavioral transparency -1, parameter semantics -1, conciseness and structure -1, contextual completeness -1 |
+| `artifact_upload` | 3.3 | 2.7 | -0.6 | behavioral transparency -1, parameter semantics -1, conciseness and structure -1, contextual completeness -1 |
+| `classify_last_error` | 3.4 | 2.8 | -0.6 | purpose clarity -1, behavioral transparency -1, conciseness and structure -1, contextual completeness -1 |
+| `debug_continue` | 3.3 | 2.7 | -0.6 | usage guidelines -1, behavioral transparency -1, conciseness and structure -1, contextual completeness -1 |
+| `debug_stop_session` | 2.8 | 2.2 | -0.6 | purpose clarity -1, parameter semantics -1, conciseness and structure -1, contextual completeness -1 |
+| `get_last_report` | 3.4 | 2.8 | -0.6 | purpose clarity -1, behavioral transparency -1, conciseness and structure -1, contextual completeness -1 |
 
 ### Likely causes
 
-- **A different model.** The gate scores with `claude-haiku-4-5-20251001`;
-  the registry does not say which model it scores with, and its justifications
-  read differently. The part of the difference that goes one way is the
-  clearest sign: contextual completeness is lower on 35 tools and higher on
-  none, and purpose clarity and conciseness are lower far more often than
-  higher. That is a stricter judge on those dimensions, not chance.
-- **Dense descriptions.** The largest differences fall on descriptions that
-  carry several rules in one or two sentences, lead with what the tool
-  replaces, or point to a resource for details: `test_reactor_run`,
-  `bench_run_start`, `hardware_recover`, `project_config_set`. The registry
-  rated most of them 4.0 to 4.4; the pinned model marks them down on conciseness
-  and structure and on contextual completeness, the same way in all three runs.
-  Short, single-purpose descriptions such as `can_session_stop` and
-  `debug_clear_breakpoints` go the other way.
+- **A stricter judge, by a constant offset.** The gate scores with
+  `claude-opus-5-5`; the registry does not say which model it scores with,
+  and its justifications read differently. The gate is lower on 37 tools and
+  higher on 4, by 0.35 TDQS on average, but it orders the tools much as the
+  registry does: per tool, the gate's median and the registry's score
+  correlate at 0.89, and for 32 of the 44 tools the difference lies within 0.3
+  of that 0.35 offset. A judge that disagreed about the tools would scatter;
+  this one sits one step lower on nearly all of them. The offset comes mostly
+  from contextual completeness (lower on 30 tools, higher on none), behavioral
+  transparency (lower on 24, higher on 1) and conciseness and structure, while
+  usage guidelines and parameter semantics match the registry on 34 and 33
+  tools.
+- **Dense descriptions.** The largest differences, 0.6 to 0.8, fall on
+  descriptions that carry several rules in one or two sentences or point to a
+  resource for details: `bench_run_start`, `flash_firmware`,
+  `test_reactor_run`, `project_config_set`. Each is one or two points lower on
+  three to five dimensions rather than far lower on one, and below the registry in
+  every run. No tool differs by more than 0.8, and the four the gate rates
+  higher differ by at most 0.4.
 - **Run-to-run variation.** The gate's own three runs differ from each other by
-  0.20 TDQS per tool on average and by up to 0.9; the median of three narrows
-  that, but the registry's single published score carries its own variation,
-  which one score cannot show.
+  0.10 TDQS per tool on average and by up to 0.6, and gave the same coherence
+  in all three; the median of three narrows that further, but the registry's
+  single published score carries its own variation, which one score cannot
+  show.
 - **The request around the prompts.** The command line puts a billing line and
   one sentence naming the SDK ahead of the system prompt, and a reminder with
   the date ahead of the prompt itself, and samples at its default temperature.
@@ -223,61 +230,63 @@ score, over the 44 tools:
 - **Not the definitions.** The calibration scored the registry's own
   definitions, so the missing `annotations.title` is not a cause here.
 
-Across the whole set the per-tool differences largely cancel: the overall
-score is 3.0 against the registry's 3.1, and the coherence median matches.
+Across the whole set the offset shows in every rollup: the mean TDQS is 3.2
+against the registry's 3.6, the overall 2.9 against 3.1, and coherence 3.3
+against 3.8. The lowest tool is the same, `debug_symbol_info`, at 1.8 against
+1.7.
 
 The gate compares a head with its own base under the same model, so an offset
 the pinned model holds against the registry applies to both sides and leaves
 the decision alone. What it cannot see is a change the two models would judge
-in opposite directions.
+in opposite directions; the close per-tool agreement above makes that rare.
 
 ### Every tool
 
 | Tool | Registry | Gate (median) | Difference | Gate runs |
 |---|---|---|---|---|
-| `artifact_upload` | 3.3 | 3.3 | 0.0 | 3.3, 2.9, 3.3 |
-| `bench_run_start` | 4.4 | 2.5 | -1.9 | 3.0, 2.5, 2.5 |
-| `bench_run_status` | 3.9 | 3.3 | -0.6 | 3.1, 3.3, 3.4 |
-| `bench_run_stop` | 4.2 | 4.7 | +0.5 | 4.7, 4.6, 4.8 |
-| `can_buses_list` | 4.4 | 4.2 | -0.2 | 4.1, 4.2, 4.2 |
-| `can_read` | 3.5 | 4.0 | +0.5 | 3.1, 4.0, 4.0 |
-| `can_send` | 3.2 | 3.0 | -0.2 | 3.2, 3.0, 2.9 |
-| `can_session_start` | 2.9 | 2.9 | 0.0 | 2.9, 2.9, 2.9 |
-| `can_session_stop` | 2.7 | 3.4 | +0.7 | 3.4, 3.4, 3.1 |
-| `classify_last_error` | 3.4 | 3.1 | -0.3 | 3.1, 3.3, 3.0 |
-| `com_ports_list` | 4.4 | 4.6 | +0.2 | 4.7, 4.6, 4.6 |
-| `com_read` | 3.8 | 3.5 | -0.3 | 3.9, 3.5, 3.3 |
-| `com_session_start` | 2.9 | 2.6 | -0.3 | 2.5, 2.8, 2.6 |
-| `com_session_stop` | 2.6 | 3.0 | +0.4 | 2.9, 3.0, 3.0 |
-| `com_write` | 2.9 | 2.9 | 0.0 | 2.7, 2.9, 2.9 |
-| `debug_clear_breakpoints` | 3.8 | 4.5 | +0.7 | 4.5, 4.5, 4.4 |
-| `debug_continue` | 3.3 | 2.9 | -0.4 | 2.7, 2.9, 3.0 |
-| `debug_dump_symbol_ihex` | 3.0 | 2.4 | -0.6 | 2.4, 2.2, 2.6 |
-| `debug_get_session_status` | 3.2 | 3.9 | +0.7 | 3.7, 3.9, 4.0 |
-| `debug_get_stop_reason` | 3.1 | 3.1 | 0.0 | 3.3, 3.1, 2.6 |
-| `debug_halt` | 3.0 | 2.7 | -0.3 | 2.9, 2.6, 2.7 |
-| `debug_list_breakpoints` | 3.7 | 4.4 | +0.7 | 4.6, 4.4, 4.2 |
-| `debug_set_breakpoint` | 3.4 | 2.7 | -0.7 | 2.7, 2.6, 2.7 |
-| `debug_start_session` | 2.9 | 2.4 | -0.5 | 2.1, 2.4, 2.4 |
-| `debug_stop_session` | 2.8 | 2.9 | +0.1 | 2.9, 3.0, 2.8 |
-| `debug_symbol_info` | 1.7 | 2.1 | +0.4 | 2.1, 1.8, 2.1 |
-| `debug_symbol_value` | 3.8 | 3.4 | -0.4 | 3.4, 3.3, 3.4 |
-| `debugger_info` | 3.9 | 4.2 | +0.3 | 4.1, 4.6, 4.2 |
-| `debugger_probes_list` | 4.4 | 4.6 | +0.2 | 4.7, 4.6, 4.6 |
-| `flash_firmware` | 4.5 | 4.1 | -0.4 | 4.1, 4.2, 3.9 |
-| `get_last_report` | 3.4 | 3.7 | +0.3 | 3.7, 3.7, 3.7 |
-| `hardware_lease_status` | 3.9 | 3.2 | -0.7 | 3.1, 3.6, 3.2 |
-| `hardware_recover` | 3.3 | 1.8 | -1.5 | 1.8, 1.6, 1.8 |
-| `probe_target` | 3.4 | 3.5 | +0.1 | 3.5, 3.9, 3.5 |
-| `project_config_adopt_hardware` | 4.1 | 4.0 | -0.1 | 4.0, 3.8, 4.0 |
-| `project_config_create` | 4.3 | 3.5 | -0.8 | 3.3, 3.5, 3.9 |
-| `project_config_describe` | 4.6 | 4.7 | +0.1 | 4.7, 4.7, 5.0 |
-| `project_config_reload_description` | 4.4 | 4.0 | -0.4 | 4.2, 4.0, 3.9 |
-| `project_config_set` | 4.0 | 2.8 | -1.2 | 2.8, 2.8, 2.3 |
-| `reset_target` | 3.6 | 3.9 | +0.3 | 4.4, 3.7, 3.9 |
-| `server_upgrade` | 4.1 | 4.0 | -0.1 | 4.0, 4.0, 3.9 |
-| `test_reactor_run` | 4.3 | 2.0 | -2.3 | 2.0, 2.1, 1.9 |
-| `test_reactor_status` | 3.4 | 2.2 | -1.2 | 2.5, 2.1, 2.2 |
+| `artifact_upload` | 3.3 | 2.7 | -0.6 | 2.7, 2.7, 2.7 |
+| `bench_run_start` | 4.4 | 3.6 | -0.8 | 3.6, 3.6, 3.8 |
+| `bench_run_status` | 3.9 | 3.8 | -0.1 | 3.8, 3.7, 3.8 |
+| `bench_run_stop` | 4.2 | 4.1 | -0.1 | 4.1, 4.1, 4.1 |
+| `can_buses_list` | 4.4 | 4.2 | -0.2 | 4.2, 4.2, 4.1 |
+| `can_read` | 3.5 | 3.8 | +0.3 | 3.8, 3.8, 3.9 |
+| `can_send` | 3.2 | 3.2 | 0.0 | 2.9, 3.4, 3.2 |
+| `can_session_start` | 2.9 | 2.6 | -0.3 | 2.6, 2.5, 2.7 |
+| `can_session_stop` | 2.7 | 2.4 | -0.3 | 2.4, 2.4, 2.4 |
+| `classify_last_error` | 3.4 | 2.8 | -0.6 | 2.8, 2.7, 2.8 |
+| `com_ports_list` | 4.4 | 4.1 | -0.3 | 4.1, 4.2, 4.1 |
+| `com_read` | 3.8 | 4.1 | +0.3 | 4.1, 3.5, 4.1 |
+| `com_session_start` | 2.9 | 2.7 | -0.2 | 2.7, 2.7, 2.7 |
+| `com_session_stop` | 2.6 | 2.4 | -0.2 | 2.2, 2.4, 2.6 |
+| `com_write` | 2.9 | 2.9 | 0.0 | 2.9, 2.9, 2.9 |
+| `debug_clear_breakpoints` | 3.8 | 3.4 | -0.4 | 3.4, 3.4, 3.4 |
+| `debug_continue` | 3.3 | 2.7 | -0.6 | 2.7, 2.9, 2.7 |
+| `debug_dump_symbol_ihex` | 3.0 | 2.7 | -0.3 | 2.7, 2.7, 2.7 |
+| `debug_get_session_status` | 3.2 | 2.7 | -0.5 | 2.7, 2.7, 2.7 |
+| `debug_get_stop_reason` | 3.1 | 2.7 | -0.4 | 2.7, 2.7, 2.7 |
+| `debug_halt` | 3.0 | 2.5 | -0.5 | 2.6, 2.5, 2.5 |
+| `debug_list_breakpoints` | 3.7 | 3.3 | -0.4 | 3.5, 3.1, 3.3 |
+| `debug_set_breakpoint` | 3.4 | 2.9 | -0.5 | 2.9, 2.9, 2.9 |
+| `debug_start_session` | 2.9 | 2.1 | -0.8 | 2.1, 2.2, 2.1 |
+| `debug_stop_session` | 2.8 | 2.2 | -0.6 | 2.2, 2.2, 2.2 |
+| `debug_symbol_info` | 1.7 | 1.8 | +0.1 | 1.7, 2.1, 1.8 |
+| `debug_symbol_value` | 3.8 | 3.3 | -0.5 | 3.3, 3.3, 3.1 |
+| `debugger_info` | 3.9 | 3.8 | -0.1 | 3.8, 3.8, 3.8 |
+| `debugger_probes_list` | 4.4 | 4.2 | -0.2 | 4.1, 4.2, 4.2 |
+| `flash_firmware` | 4.5 | 3.7 | -0.8 | 3.7, 3.7, 3.9 |
+| `get_last_report` | 3.4 | 2.8 | -0.6 | 2.8, 2.8, 2.8 |
+| `hardware_lease_status` | 3.9 | 3.8 | -0.1 | 3.9, 3.8, 3.8 |
+| `hardware_recover` | 3.3 | 3.7 | +0.4 | 3.9, 3.7, 3.6 |
+| `probe_target` | 3.4 | 3.0 | -0.4 | 3.0, 3.0, 3.0 |
+| `project_config_adopt_hardware` | 4.1 | 3.7 | -0.4 | 3.7, 3.7, 3.7 |
+| `project_config_create` | 4.3 | 3.7 | -0.6 | 3.7, 3.3, 3.7 |
+| `project_config_describe` | 4.6 | 4.2 | -0.4 | 4.2, 4.2, 4.4 |
+| `project_config_reload_description` | 4.4 | 3.8 | -0.6 | 3.8, 3.8, 3.8 |
+| `project_config_set` | 4.0 | 3.3 | -0.7 | 3.3, 3.2, 3.6 |
+| `reset_target` | 3.6 | 3.2 | -0.4 | 3.7, 3.1, 3.2 |
+| `server_upgrade` | 4.1 | 4.1 | 0.0 | 4.2, 4.1, 4.1 |
+| `test_reactor_run` | 4.3 | 3.5 | -0.8 | 3.5, 3.5, 3.7 |
+| `test_reactor_status` | 3.4 | 2.8 | -0.6 | 2.8, 2.8, 3.0 |
 | `test_reactor_stop` | 3.5 | 2.9 | -0.6 | 2.9, 2.9, 2.9 |
 
 ### Making the calibration again
