@@ -19,6 +19,7 @@ nav:
   - Tool definition score: tool-definition-score.md
   - Testing: testing.md
   - Bench battery: bench-battery.md
+  - Comparison protocol: comparison-protocol.md
   - Test plan contract: test-plan-contract.md
   - CI examples: ci-examples.md
   - Safety model: safety-model.md
