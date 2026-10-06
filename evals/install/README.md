@@ -497,7 +497,7 @@ revision that has no release behind it yet:
 ```json
 {
   "mode": "remote",
-  "expected_version": "0.23.0",
+  "expected_version": "0.24.0",
   "install_spec": "git+https://github.com/agentic-hil/agentic-hil@0123456789abcdef0123456789abcdef01234567",
   "expected_commit": "0123456789abcdef0123456789abcdef01234567"
 }
@@ -521,7 +521,7 @@ installs is what gets verified:
 ```json
 {
   "mode": "published",
-  "expected_version": "0.23.0",
+  "expected_version": "0.24.0",
   "guide_url": "https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/AI_AGENT_QUICKSTART.md"
 }
 ```
