@@ -494,6 +494,14 @@ def refuse_an_unknown_agent_without_a_target(parser: argparse.ArgumentParser, pa
         parser.error(str(refused))
 
 
+def require_an_incident_id_unless_retiring(parser: argparse.ArgumentParser, parsed: argparse.Namespace) -> None:
+    """`recover` signs for one incident, so its id stays the parser's to ask
+    for, with argparse's own words and exit status 2. `--retire-records` may
+    run without one: a project record that cannot be read names no id (#669)."""
+    if parsed.quarantine_id is None and not parsed.retire_records:
+        parser.error("the following arguments are required: --quarantine-id")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentic-hil", description="Agentic Hardware-in-the-Loop (Agentic HIL) local MCP stdio server")
     parser.add_argument("--version", action="version", version=__version__)
@@ -608,7 +616,11 @@ def build_parser() -> argparse.ArgumentParser:
     reactor_stop_parser.add_argument("--run", required=True, help="the handle the run was started under")
 
     subparsers.add_parser("lease-status", help="show persistent hardware ownership and quarantine state")
-    recover_parser = subparsers.add_parser("recover", help="release quarantined resources after operator-confirmed physical recovery")
+    recover_parser = subparsers.add_parser(
+        "recover",
+        help="release quarantined resources after operator-confirmed physical recovery",
+        check_parsed=require_an_incident_id_unless_retiring,
+    )
     recover_parser.add_argument("--confirm-safe-state", action="store_true", required=True)
     recover_parser.add_argument("--quarantine-id", default=None, help="the incident lease-status names; required, except by --retire-records over a project record that cannot be read")
     recover_parser.add_argument(

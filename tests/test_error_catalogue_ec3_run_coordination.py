@@ -1889,15 +1889,17 @@ def test_retire_records_whose_ledger_line_cannot_be_written_changes_nothing(tmp_
     assert not (path.parent / "retired").exists()
 
 
-def test_recover_without_an_incident_id_is_refused_by_the_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`--quarantine-id` is optional on the parser now that `--retire-records`
-    may run without one; a plain recovery still requires it."""
-    config = command_line_bench(tmp_path, monkeypatch)
-    standing_incident(config, "physical:ec3-catalogue-cli-no-id")
+def test_recover_without_an_incident_id_is_refused_by_the_command(capsys: pytest.CaptureFixture[str]) -> None:
+    """A plain recovery still needs its id from the parser; `--retire-records`
+    parses without one, since a record that cannot be read names none."""
+    with pytest.raises(SystemExit) as usage:
+        build_parser().parse_args(["recover", "--confirm-safe-state"])
+    assert usage.value.code == 2
+    assert "--quarantine-id" in capsys.readouterr().err
 
-    result = cli_recover(["--confirm-safe-state"])
-
-    assert_refusal_carries_its_entry(result, "quarantine_id_required")
+    parsed = build_parser().parse_args(["recover", "--confirm-safe-state", "--retire-records"])
+    assert parsed.retire_records is True
+    assert parsed.quarantine_id is None
 
 
 def test_lease_status_command_over_a_record_it_cannot_read(
