@@ -124,7 +124,13 @@ PYOCD_ERASE_FAILURE_MARKERS = ["flash erase sector", "flash erase chip", "flash 
 # classify them from command context instead of relying on generic words.
 PYOCD_FLASH_FAILURE_MARKERS = [
     "attempt to program invalid flash address",
-    "flash uninit",
+    # The flash algorithm's uninit step failing or timing out
+    # (pyocd/flash/flash.py:303-305, FlashFailure.__str__ in
+    # pyocd/core/exceptions.py:140 appending the result code). Each whole,
+    # because pyOCD warns `flash uninit sequence not available`
+    # (pyocd/flash/flash_dsq.py:133) on runs that succeed (#704).
+    "flash uninit (result code",
+    "flash uninit timed out",
     "target was not halted as expected",
     "flash algorithm overflowed stack",
     "program page sequence not available",

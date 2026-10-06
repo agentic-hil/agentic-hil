@@ -23,7 +23,7 @@ def backend(tmp_path: Path) -> PyOCDBackend:
     "message",
     [
         "attempt to program invalid flash address",
-        "flash uninit",
+        "flash uninit (result code 0x1)",
         "target was not halted as expected",
         "flash algorithm overflowed stack",
         "program page sequence not available",
