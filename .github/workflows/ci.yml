@@ -358,11 +358,11 @@ jobs:
           path: evals/install/artifacts/registration-gate/
           if-no-files-found: error
 
-  # The overall Tool Definition Quality Score of the MCP tools/list, base
+  # The mean Tool Definition Quality Score of the MCP tools/list, base
   # against head, scored by the pinned model through the pinned Claude Code
   # command line (tools/tdqs). A pull request whose tool definitions are
   # unchanged passes without a model call; one that changes them fails when
-  # the overall score falls. docs/tool-definition-score.md has the rules and
+  # the mean TDQS falls. docs/tool-definition-score.md has the rules and
   # the calibration. Only a pull request has a base to compare, so on a push
   # the job is skipped and Required CI accepts that skip.
   tool_definition_score:
