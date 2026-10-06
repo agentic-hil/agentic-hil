@@ -33,6 +33,9 @@ from agentic_hil.tools import AgenticHILToolService
 TRANSPORT_NOT_SUPPORTED = "Error: mode (transport) not supported by device"
 INIT_MODE_FAILED = "Error: init mode failed (unable to connect to the target)"
 # A failure that is not the probe coming back: the target itself would not halt.
+# Recorded on the bench right after a killed flash (2026-10-06), with the warning
+# OpenOCD wrote ahead of it, which is not the line the reset failed on.
+EXAMINATION_FAILED = "Warn : target stm32f4x.cpu examination failed"
 OTHER_FAILURE = "Error: timed out while waiting for target halted"
 
 STARTUP = (
@@ -52,12 +55,20 @@ def adapter_refused(line: str) -> CompletedCommand:
 
 
 def target_would_not_halt() -> CompletedCommand:
-    stderr = (
-        f"{STARTUP}Info : STLINK V2J30M19 (API v2) VID:PID 0483:374B\n"
-        "Info : Target voltage: 3.264253\n"
-        "Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected\n"
-        f"{OPENOCD_INIT_STAGE_MARKER}\n"
-        f"{OTHER_FAILURE}\n"
+    """The bench's recording: the warning, then the tail of the capture as it was logged."""
+    stderr = "".join(
+        f"{line}\n"
+        for line in (
+            EXAMINATION_FAILED,
+            "Info : gdb port disabled",
+            OPENOCD_INIT_STAGE_MARKER,
+            "Info : Unable to match requested speed 2000 kHz, using 1800 kHz",
+            "Info : Unable to match requested speed 2000 kHz, using 1800 kHz",
+            "Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected",
+            "Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints",
+            OTHER_FAILURE,
+            "TARGET: stm32f4x.cpu - Not halted",
+        )
     )
     return CompletedCommand(stdout="", stderr=stderr, returncode=1, timed_out=False, not_found=False)
 
