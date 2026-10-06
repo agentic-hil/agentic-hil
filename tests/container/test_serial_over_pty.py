@@ -1091,7 +1091,8 @@ def test_an_entry_that_names_hardware_is_not_opened_on_a_device_the_inventory_do
             assert refused["identity"][key] == value, refused
         assert refused["side_effect_committed"] is False, refused
         assert refused["retry_safe"] is True, refused
-        assert "adopt-hardware" in refused["next_step"], refused
+        assert "adopt-hardware" not in refused["next_step"], refused
+        assert "project_config_reload_description" in refused["next_step"], refused
         assert stty_speed(pty_pair.dut) == UNOPENED_BAUDRATE
 
         assert server.call("com_ports_list")["ports"][PORT]["session_active"] is False

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from conftest import write_config
+from support import trusted_launcher
 from test_bootstrap import NUCLEO_VCP, _linux_openocd_host
 from test_config_adopt import placeholder_bench
 from test_config_adopt import service as adopt_service
@@ -283,6 +284,9 @@ def test_a_broken_agent_mcp_file_is_refused_with_advice_about_that_file(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
+    # The refusal comes from the agent's file, not from where the launcher is
+    # installed: a runner without a persistent install must reach it too.
+    monkeypatch.setattr("agentic_hil.cli.mcp_server_command", lambda: str(trusted_launcher()))
     target = Path.home() / relative
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
