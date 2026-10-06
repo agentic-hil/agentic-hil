@@ -639,7 +639,7 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 
 SCANNED_MODULE_COUNT = 48
 # `can_broker_disconnected`, a broker connection that ended (#664), is the 219th.
-COLLECTED_TYPE_COUNT = 220
+COLLECTED_TYPE_COUNT = 217
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -662,7 +662,12 @@ COLLECTED_TYPE_COUNT = 220
 # (#634).
 # `HardwareCoordinator.retire_records` adds six: it answers the refusals
 # `recover` answers, for the operator's way out of a damaged record (#669).
-PRODUCER_COUNT = 657
+# A debug start on OpenOCD names a dead server's output by the public name the
+# command path uses (#654): `OpenOCDBackend._debug_start_public_error` adds
+# eight producers, the names `_public_error_type` can answer, and the four
+# script and access words `GdbDebugSessions._start_failure` no longer writes
+# for OpenOCD go, three of them out of the types altogether.
+PRODUCER_COUNT = 661
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
@@ -954,7 +959,14 @@ EXCLUDED: dict[Pair, Exclusion] = {
     ),
     ("verify_failed", "openocd"): Exclusion(
         SILENT_REASON,
-        frozenset({("backends.gdbdebug", "GdbDebugSessions._start_failure"), ("backends.openocd", "OpenOCDBackend._failure_result"), ("backends.openocd", "OpenOCDBackend.info")}),
+        frozenset(
+            {
+                ("backends.gdbdebug", "GdbDebugSessions._start_failure"),
+                ("backends.openocd", "OpenOCDBackend._debug_start_public_error"),
+                ("backends.openocd", "OpenOCDBackend._failure_result"),
+                ("backends.openocd", "OpenOCDBackend.info"),
+            }
+        ),
         check_silent(("verify_failed", "openocd")),
     ),
     ("can_broker_not_attached", None): Exclusion(
