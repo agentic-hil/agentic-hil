@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import replace
@@ -21,6 +22,8 @@ from agentic_hil.adopt import (
     project_config_adopt_hardware,
 )
 from agentic_hil.artifacts import ArtifactManager
+from agentic_hil.backends.common import failure_text_lines
+from agentic_hil.backends.openocd import openocd_probe_reenumerating_line
 from agentic_hil.bench import BenchMutex, DeviceBusyError, validated_wait
 from agentic_hil.bootstrap import (
     DEFAULT_PROJECT_PROFILE,
@@ -163,6 +166,34 @@ def recovery_check_clause(check: str) -> str:
     tables together, so the fallback stays a safety net rather than the thing an
     operator reads."""
     return RECOVERY_CHECK_CLAUSES.get(check, f"the result failed its {check} check")
+
+
+# The waits between the recovery's attempts at a reset into halt that OpenOCD
+# refused while the in-circuit debugger was still re-enumerating (#621): ten
+# seconds in all, six attempts. Only the reset is tried again, never anything
+# that writes flash, and only on the two lines
+# `openocd_probe_reenumerating_line` names.
+RECOVERY_RESET_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 3.0, 3.5)
+
+
+def recovery_reset_retry_sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def backend_error_line(result: JsonObject) -> str | None:
+    """The backend's own line a failed action stopped on, or None when it wrote none.
+
+    The probe's re-enumeration line when the result carries one, else the first
+    line of the capture that reports a failure: a debugger tool stops at the
+    first command that fails, so the lines after it follow from it."""
+    reenumerating = openocd_probe_reenumerating_line(result)
+    if reenumerating is not None:
+        return reenumerating
+    output = result.get("programmer_output")
+    if not isinstance(output, dict):
+        return None
+    lines = failure_text_lines(f"{output.get('stdout') or ''}\n{output.get('stderr') or ''}")
+    return lines[0].strip() if lines else None
 
 
 class AgenticHILToolService:
@@ -2027,10 +2058,14 @@ class AgenticHILToolService:
         reset_halt = self.config.recovery.auto_recover == "reset_halt"
         if reset_halt:
             actions.append("reset_halt")
-            reset = self._invoke_dispatch(lambda: self.backend.reset_target("halt"))
+            reset, retried_on = self._reset_halt_for_recovery()
+            attempts = len(retried_on) + 1
+            result["reset_halt_attempts"] = attempts
+            if retried_on:
+                result["reset_halt_retried_on"] = retried_on
             failed_check = failed_success_check(reset)
             if failed_check is not None:
-                return self._recovery_action_failed(
+                failure = self._recovery_action_failed(
                     result,
                     "reset_halt",
                     failed_check,
@@ -2046,6 +2081,7 @@ class AgenticHILToolService:
                     else f"The target confirmed the reset into halt, but {recovery_check_clause(failed_check)}, so the incident stands even though the target is halted.",
                     reset,
                 )
+                return self._with_reset_halt_evidence(failure, reset, attempts)
         actions.append("probe_target")
         verification = self._invoke_dispatch(self.backend.probe_target)
         detected = verification.get("target_detected") is True
@@ -2067,6 +2103,40 @@ class AgenticHILToolService:
             )
         result["safe_state_predicate"] = "reset_halt" if reset_halt else "readonly_probe"
         return {**result, "outcome": "recovered"}
+
+    def _reset_halt_for_recovery(self) -> tuple[JsonObject, list[str]]:
+        """The recovery's reset into halt, tried again while the probe re-enumerates (#621).
+
+        Killing OpenOCD in the middle of a flash leaves the in-circuit debugger
+        coming back for a moment, and a reset sent into that moment is refused by
+        the adapter driver before any target is addressed. Only those refusals
+        (`openocd_probe_reenumerating_line`) are tried again, on the bounded
+        backoff of `RECOVERY_RESET_RETRY_DELAYS_S`; any other answer is the
+        answer. Returns the last result and the line of every attempt that was
+        tried again."""
+        reset = self._invoke_dispatch(lambda: self.backend.reset_target("halt"))
+        retried_on: list[str] = []
+        for delay in RECOVERY_RESET_RETRY_DELAYS_S:
+            line = openocd_probe_reenumerating_line(reset)
+            if line is None:
+                break
+            retried_on.append(line)
+            recovery_reset_retry_sleep(delay)
+            reset = self._invoke_dispatch(lambda: self.backend.reset_target("halt"))
+        return reset, retried_on
+
+    @staticmethod
+    def _with_reset_halt_evidence(failure: JsonObject, reset: JsonObject, attempts: int) -> JsonObject:
+        """A failed reset into halt, with the attempts made and the backend's own line in its summary."""
+        summary = str(failure.get("summary") or "")
+        if attempts > 1:
+            summary += f" It made {attempts} attempts while the in-circuit debugger was re-enumerating."
+        line = backend_error_line(reset)
+        if line is not None:
+            failure["backend_error_line"] = line
+            summary += f" The backend's line: {line}"
+        failure["summary"] = summary
+        return failure
 
     @staticmethod
     def _recovery_action_failed(result: JsonObject, action: str, failed_check: str | None, summary: str, source: JsonObject) -> JsonObject:

@@ -289,6 +289,34 @@ def _last_written_line(output: str) -> str:
     return lines[-1] if lines else ""
 
 
+# What the adapter driver answers while the in-circuit debugger is still
+# re-enumerating, as it is for a moment after an OpenOCD was killed in the middle
+# of a flash (#621). Both lines are written while `init` opens the probe, before
+# any target is addressed, so a call refused with one of them never reached the
+# board.
+OPENOCD_PROBE_REENUMERATING_LINES = (
+    "Error: mode (transport) not supported by device",
+    "Error: init mode failed (unable to connect to the target)",
+)
+
+
+def openocd_probe_reenumerating_line(result: JsonObject) -> str | None:
+    """The line of a failed OpenOCD call saying the probe was still coming back, or None.
+
+    Only an OpenOCD result that did not succeed, and only one of the two lines
+    above as a whole line of its own capture: a line that quotes the words inside
+    another report is that other report."""
+    if result.get("backend") != "openocd" or result.get("ok") is True:
+        return None
+    output = result.get("programmer_output")
+    if not isinstance(output, dict):
+        return None
+    for line in f"{output.get('stdout') or ''}\n{output.get('stderr') or ''}".splitlines():
+        if line.strip() in OPENOCD_PROBE_REENUMERATING_LINES:
+            return line.strip()
+    return None
+
+
 def read_failure_reason(completed: CompletedCommand, what: str, timeout_s: float, expected: str) -> str:
     """Why one configuration-stage read of an OpenOCD answered nothing, in its own words where it wrote any.
 
