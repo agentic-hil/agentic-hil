@@ -3,8 +3,8 @@
 Every pull request that changes the MCP tool definitions is scored before it
 merges. The gate exports the `tools/list` of the base and of the head, scores
 both with the Tool Definition Quality Score (TDQS) v1.3 using one pinned model,
-and fails when the overall score falls. A pull request that leaves the tool
-definitions unchanged passes without a single model call.
+and fails when the mean TDQS of the tools falls. A pull request that leaves the
+tool definitions unchanged passes without a single model call.
 
 The scores are the same kind a public MCP registry publishes for this server.
 How close the gate's scores come to the registry's is measured below, in
@@ -44,15 +44,25 @@ How close the gate's scores come to the registry's is measured below, in
 
 ## The decision
 
+The mean TDQS over all tools decides, compared as its rollup: the exact mean
+rounded half up to one decimal once. The overall score, description quality,
+coherence and the lowest TDQS are reported next to it as information. They do
+not decide because they are not steady enough on identical text: the overall
+weighs the single lowest tool at 28 % and the judged coherence at 30 %, the
+lowest tool rotates among a handful of tools near 2.5 to 3.0 from one run to
+the next, and coherence moved from 3.3 to 4.3 on the same definitions. The mean
+over every tool moves far less, and it still falls when descriptions get worse.
+
 | Result | Exit code | When |
 |---|---|---|
-| PASS | 0 | The definitions are unchanged; or the first pair holds (head overall at least base overall); or the first pair drops but the median of each side over three pairs does not |
-| BLOCK | 1 | The first pair drops and two more pairs confirm it: the head's median overall over the three pairs is below the base's |
+| PASS | 0 | The definitions are unchanged; or the first pair holds (head mean TDQS at least base mean TDQS); or the first pair drops but the median of each side over three pairs does not |
+| BLOCK | 1 | The first pair drops and two more pairs confirm it: the head's median mean TDQS over the three pairs is below the base's |
 | INVALID | 2 | The definitions changed and could not be scored completely: no token, a prompt that fails its hash, an answer still unreadable after its retries, a different model answering, or a saved report that no longer matches the exports |
 
-One scoring run of the same definitions can differ from the next by 0.1 or
-0.2 on the overall score (the three calibration runs below gave 2.9, 3.1 and
-3.0), so a drop on one pair alone never blocks.
+One scoring run of the same definitions can differ from the next by 0.1 on
+the mean TDQS (the three calibration runs below gave 3.4, 3.4 and 3.3, against
+2.9, 3.1 and 3.0 on the overall score), so a drop on one pair alone never
+blocks.
 
 The size of the definitions is reported next to the scores and is never part
 of the decision: description characters, `tools/list` bytes and the bytes of
@@ -60,9 +70,11 @@ each tool's definition, for base, head and the change between them.
 
 The report is written to `.tool-definition-score/tool-definition-score.json`,
 with a Markdown summary beside it in `tool-definition-score.md`; in CI the
-summary is also the job summary. When the overall score drops, the report names
-the tools that fell, the dimensions that fell with the model's justification
-for each, and what each tool's fall alone costs the overall score.
+summary is also the job summary. When the mean TDQS drops on the first pair,
+the report names the tools that fell, the dimensions that fell with the model's
+justification for each, and what each tool's fall alone costs the unrounded
+mean TDQS; the coherence dimensions that fell and a fallen minimum are listed as
+information.
 
 ## Running it locally
 
