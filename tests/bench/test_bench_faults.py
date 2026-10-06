@@ -1287,10 +1287,21 @@ def test_a_flash_killed_mid_write_is_recovered_by_the_product_and_a_second_flash
         assert recovery["resolved_reason"] == FLASH_UNCONFIRMED, why()
     assert aborted["quarantined"] is False, why()
 
+    # Named on every run, passed or failed: how the reset into halt went is the
+    # evidence #621 asks for.
+    print(f"recovery reset into halt: {recovery.get('reset_halt_attempts')} attempts, tried again on {recovery.get('reset_halt_retried_on', [])}")
+
     errored, classified = server.call("classify_last_error")
     assert classified["ok"] is True, classified
-    assert classified["source_tool"] == "flash_firmware", classified
-    assert classified["error_type"] == (aborted.get("target_error_type") or aborted["error_type"]), classified
+    if (recovery.get("reset_halt_attempts") or 1) > 1:
+        # The recovery's reset into halt was refused while the in-circuit
+        # debugger re-enumerated and tried again (#621). Each refused attempt is
+        # a failure of its own, written after the flash's, so it is the one the
+        # last failure names.
+        assert classified["source_tool"] == "reset_target", classified
+    else:
+        assert classified["source_tool"] == "flash_firmware", classified
+        assert classified["error_type"] == (aborted.get("target_error_type") or aborted["error_type"]), classified
 
     _, status = bench.document("lease-status")
     assert status["blocked"] is False, status
