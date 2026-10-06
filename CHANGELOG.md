@@ -6,6 +6,96 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- `agentic-hil recover --confirm-safe-state --retire-records` gives the operator a way out of a damaged coordination record or a marker that names another incident. It records the step in the recovery ledger first and keeps each retired record's bytes under `retired/`. (#669)
+
+- A damaged `report-state.json` now answers `report_state_damaged` instead of `config_invalid` with configuration advice. The new `agentic-hil report-state-repair` command moves it aside, every byte kept, and starts a fresh one. `agentic-hil doctor` reports it as its own `report_state` finding with the path. (#689)
+
+### Changed
+
+- `debug_symbol_info`, `debug_symbol_value` and `debug_dump_symbol_ihex` now say in their MCP definitions that pyOCD and STM32CubeProgrammer resolve symbols through an open debug session, and against the ELF `flash_firmware` last wrote only while no session is open. (#698)
+
+- Run results over MCP name the tools and their `run` argument (`test_reactor_status`, `test_reactor_stop`, `hardware_lease_status`) instead of `agentic-hil` commands and `--run`. The CLI keeps its command wording. (#671)
+
+- Plan run results, their steps, saved reports and detached starts report the tool as `test_reactor_run`, the tool that started them, instead of `test_reactor` or `test_reactor_start`. (#672)
+
+- The pyOCD failure lines the tests replay are now recorded from pyOCD 0.45.1 on the reference bench, or cited from its source with file and line. The phrases pyOCD never prints are gone from the tests, the catalogue and TROUBLESHOOTING. A bench test re-runs the recorded flash refusal through the product and compares pyOCD's line with the recording. (#516)
+
+- Removed unused device execution and report reading code, and corrected comments on `bench_run_stop`, hardware discovery and the frozen permissions notice. (#682)
+
+### Fixed
+
+- On pyOCD, `probe_target` after `reset_target` with mode `halt` no longer lets the core run from its reset vector. The probe's connect ran the target pack's DebugCoreStart sequence; it now skips it, like the read does, and a halted core stays halted while a running core keeps running. (#631)
+
+- `can_session_stop` refuses a participant the configuration does not declare with `can_participant_not_configured`, as the other CAN tools do. Before, it answered that the session was not active while it still held the bus. (#632)
+
+- A CAN broker's `permission_denied` on `can_send` and `can_read` names the participant key (`can_buses.<bus>.shares.<participant>.permissions.allow_write` or `allow_read`) and carries its remediation. (#657)
+
+- A slow, garbled or ended CAN broker answers `can_send` and `can_read` with `can_broker_timeout`, `can_broker_invalid_message` or the new `can_broker_disconnected`, each with a catalogue entry, instead of `hardware_action_exception` or a false audit failure. (#664)
+
+- A CAN process bridge that exits or dies without confirming its close no longer makes every later `can_session_stop` and `can_session_start` on that bus answer `can_adapter_close_failed`: the call that meets the reaped bridge answers it once, records the unconfirmed close under `cleanup_reasons`, gives the bus back, and the next start opens a fresh bridge. (#633)
+
+- A close that fails while `com_session_start` or `can_session_start` replaces an old session no longer wedges the port or bus: the session and its lease stay registered, a retried stop closes and releases them, and the start's refusal says `side_effect_committed: false`. (#665)
+
+- Inside a bench run, stopping a session whose effect is unconfirmed now answers `session_lease_held` (with `participant` on CAN, and `next_step` naming `bench_run_stop`) instead of `*_close_failed`, and no answer says `cleanup_confirmed: true` while the lease is held. A start whose buffer clear failed releases its lease and opens again in the same run. (#660)
+
+- A COM or CAN session whose audit log broke during the stop can be signed off while the server runs: its closed handle's lease is handed into the standing incident, the operator's `recover` releases it, the port or bus opens again, and the server shutdown no longer raises over it. (#661)
+
+- `com_write` refuses a payload whose `text` or `hex` encodes to no byte as `invalid_argument`, before the line is written or the session log records anything, instead of reporting a zero-byte stimulus as written. (#634)
+
+- `com_ports_list` lists the host's serial ports on a version 2 configuration with no `com_ports` entry, and the version 1 refusal names the missing entry instead of `permissions.allow_read`, a key version 2 refuses. (#656)
+
+- COM identity refusals no longer send the caller to adopt-hardware, which keeps a `device` that is already set. A board found under another name gets a `next_step` that names `com_ports.<id>.device`, the value to set and the reload. (#658)
+
+- A short `com_write` (`serial_write_incomplete`) carries its own quarantine guidance: what was attempted, the `bytes_written` that reached the line, that the target's reaction to the partial message is unknown, and that no signature is owed. (#659)
+
+- `hardware_lease_status` and the other lease tools answer a damaged coordination record or a busy resource lock as a refusal, not an internal error, and `recover` no longer raises when its resource lock is held. (#668)
+
+- The `device_busy`, `undeclared_device`, `run_already_active` and `resource_quarantined` refusals carry `remediation` and `do_not`, and `undeclared_device` names both ways to declare a device: the test description, or `devices` on `bench_run_start`. (#662)
+
+- `hardware_lease_status` is now a pure read as its read-only hint says; a dead owner's holds are released by the next acquire. (#670)
+
+- `hardware_recover` on an `audit_broken` incident relays the operator's `agentic-hil recover` command instead of asking for an `operator_statement`. (#683)
+
+- A lease status read that finds an open incident is no longer reported as an error beside `ok: true`. (#684)
+
+- A plan run refused a held device no longer advises passing a `wait_s` that `test_reactor_run` does not take. It says the run refuses at once and points an operator to the bounded `test-reactor --wait-s`. (#673)
+
+- `test-reactor` output prints a failed step's advice once instead of under both the step and "What to do". (#678)
+
+- A `debug_stop_session` repeated after a stop that could not confirm its teardown repeats that stop's answer instead of reporting every proof as failed, and says that `probe_target`, or the operator's recovery, settles it rather than another stop. (#637)
+
+- A debug stop or shutdown whose lease release cannot be recorded says that the probe lease is what stays held, and under which reasons, instead of saying that the target state is unconfirmed. (#676)
+
+- After a one-shot debugger call raised, the next call on the same server answers with the incident that call opened, instead of `resource_busy` naming another process. (#677)
+
+- The refusal for a configuration with no debugger names the configuration tools its grants allow (`project_config_set` with `project_config_reload_description`, or `project_config_create`), and leaves it to the operator only where neither grant is open. With several debuggers it names `test_reactor_run` for a multi-board run. (#691)
+
+- `debug_start_session` on OpenOCD reports a missing script or a probe this user may not open as `debugger_config_not_found` or `adapter_not_found`, like `probe_target`, `flash_firmware` and `reset_target`, with OpenOCD's own word in `backend_error_type`. (#654)
+
+- A `flash_firmware` capture failure now carries advice for the flash, not for `com_session_start`: a failure after a good flash says the image is written, and a close failure says to retry `com_session_stop`. (#663)
+
+- A flash refused by `allow_flash` or `allow_mass_erase` is now refused before the lease and the capture port, and neither writes a report. (#679)
+
+- OpenOCD now writes a `.bin` at its `flash_address`, and a `.bin` without `flash_address` is refused on every backend instead of being flashed at an assumed address. (#680)
+
+- STM32CubeProgrammer probe and `.bin` refusal messages now name STM32CubeProgrammer. (#681)
+
+- pyOCD's real failures are now classified by pyOCD's own wording, including "failure" and "timed out", for example `flash program page failure`, `no memory region defined for address` and `flash init failure`. Before, they fell through to an unknown debugger error. A failed reset after a flash is classified as a reset and carries the reset steps, not the flash steps. (#561)
+
+- On pyOCD, a reset after a flash that times out still answers `reset_failed` with the partial-flash fields, and now names the timeout in `backend_error_type: "timeout"`, with the timeout's summary, causes and remediation. (#655)
+
+- `project_config_adopt_hardware` with a configured serial that is not attached now points to `probes` and passing an attached probe's serial as `probe_id`, instead of telling the agent to attach the bench and run the CLI. (#690)
+
+- `agent_project_record_unreadable` now names the record that did not read in `path`, says how in `reason` (`unopenable`, `not_json`, `wrong_shape`), and reports the write target apart as `write_path`. (#692)
+
+- A malformed agent MCP configuration file (Claude Code, OpenCode, Codex) is now refused as `agent_mcp_config_invalid`, with advice about that file instead of the Agentic HIL configuration. (#693)
+
+- The bench tier runs the killed-flash test after every other test and fails it under its own message when the kill re-enumerated the probe's serial port, instead of failing every later module with `com_port_open_failed`. (#620)
+
+- The bench tier's killed-flash test prints the whole recovery result and the debugger logs of the reset when its recovery fails, so the backend's error line reaches the log and the JUnit report. (#621)
+
 ## [0.23.0] - 2026-10-03
 
 ### Added
