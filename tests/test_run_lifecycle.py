@@ -426,7 +426,9 @@ def test_a_device_another_session_holds_is_refused_with_its_entry(tmp_path: Path
 
     assert result["ok"] is False, result
     assert result["error_type"] == "device_busy", result
-    advice = remediation_fields("device_busy")
+    # A plan run reads its own scoped entry: `test_reactor_run` takes no
+    # `wait_s`, so the bare entry's bounded wait is not its advice (#673).
+    advice = remediation_fields("device_busy", "test_reactor" if tool == "test_reactor_run" else None)
     assert result.get("remediation") == advice["remediation"], result
     assert result.get("do_not") == advice.get("do_not"), result
 
