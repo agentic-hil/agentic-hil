@@ -1289,7 +1289,10 @@ def test_a_flash_killed_mid_write_is_recovered_by_the_product_and_a_second_flash
 
     # Named on every run, passed or failed: how the reset into halt went is the
     # evidence #621 asks for.
-    print(f"recovery reset into halt: {recovery.get('reset_halt_attempts')} attempts, tried again on {recovery.get('reset_halt_retried_on', [])}")
+    # And whether `init` examined nothing first, the state the reset ahead of the
+    # reset into halt is for.
+    unexamined = sum(1 for log in debugger_logs_since(logs, started) if "reset_target" in log["name"] and "examination failed" in str(log.get("stderr") or ""))
+    print(f"recovery reset into halt: {recovery.get('reset_halt_attempts')} attempts, tried again on {recovery.get('reset_halt_retried_on', [])}, target unexamined at init in {unexamined}")
 
     errored, classified = server.call("classify_last_error")
     assert classified["ok"] is True, classified
