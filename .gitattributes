@@ -3,4 +3,5 @@
 # everything checks out with the same line endings on every platform.
 * text=auto eol=lf
 *.png binary
+*.webp binary
 *.ico binary
