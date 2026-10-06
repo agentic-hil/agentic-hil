@@ -4,7 +4,8 @@ import json
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -484,6 +485,8 @@ class OpenOCDBackend:
 
     def __init__(self, config: AgenticHILConfig):
         self.config = config
+        # Set while the recovery resets into halt (`recovery_reset`), and only then.
+        self._recovery_reset = False
         # The release each OpenOCD file this backend has run says it is, by path,
         # modification time and size, so a file replaced in place is asked again.
         # Only answers are kept: an OpenOCD that did not say is asked next time.
@@ -742,12 +745,22 @@ class OpenOCDBackend:
             result["summary"] = summary_with_carried_warnings(result, "Firmware flashed, verified, and target reset." if reset_after_flash else "Firmware flashed and verified. Target was not reset.")
         return self._write_action_report(result)
 
+    @contextmanager
+    def recovery_reset(self) -> Iterator[None]:
+        """Inside, `reset_target("halt")` is the recovery's: it runs the reconnecting reset ahead of the halt (#621)."""
+        self._recovery_reset = True
+        try:
+            yield
+        finally:
+            self._recovery_reset = False
+
     def reset_target(self, mode: str = "run") -> JsonObject:
         allowed_modes = ["run", "halt", "init"]
         if mode not in allowed_modes:
             return {"ok": False, "tool": "reset_target", "error_type": "invalid_argument", "summary": "Invalid reset mode.", "allowed_values": allowed_modes}
         marker = OPENOCD_SUCCESS_MARKERS["reset_target"]
-        result = self._run_openocd("reset_target", openocd_reset_command(mode, marker), marker)
+        command = openocd_recovery_reset_halt_command(marker) if mode == "halt" and self._recovery_reset else openocd_reset_command(mode, marker)
+        result = self._run_openocd("reset_target", command, marker)
         result["mode"] = mode
         if result.get("ok"):
             result["summary"] = summary_with_carried_warnings(result, f"Target reset with mode '{mode}'.")
@@ -1468,6 +1481,28 @@ def openocd_reset_command(mode: str, marker: str) -> str:
     writes flash (src/flash/startup.tcl), which is why flashing works today
     without a prefix and a bare `reset` does not."""
     return f'{OPENOCD_INIT_PREFIX}reset {mode}; echo "{marker}"; shutdown'
+
+
+# Run ahead of the recovery's `reset halt`, with its failure caught (#621).
+# Recorded on the bench after a flash killed mid-write: the next OpenOCD finds
+# the in-circuit debugger answering USB but every debug-port access failing, and
+# waiting does not clear it. A `reset halt` sent then writes its halt request and
+# vector catch through that connection, the writes fail silently, and the
+# adapter's own reset that follows brings the connection back with the core
+# running, so the reset times out waiting for a halt. The reset run first is the
+# one that brings the connection back, and the `reset halt` after it sets its
+# vector catch and halts. It runs every time, because whether `init` examined
+# the target does not tell the state apart: OpenOCD 0.12.0 examined nothing,
+# 0.11.0 counted the target as examined while every access still failed. On a
+# healthy connection it is one more reset into halt, so the target never runs
+# between the two, and nothing in it assumes a reset line is wired: it is the
+# reset the configuration already does.
+OPENOCD_RECONNECTING_RESET = "catch {reset halt}; "
+
+
+def openocd_recovery_reset_halt_command(marker: str) -> str:
+    """The recovery's reset into halt: `openocd_reset_command("halt")` with the reconnecting reset ahead of it."""
+    return f'{OPENOCD_INIT_PREFIX}{OPENOCD_RECONNECTING_RESET}reset halt; echo "{marker}"; shutdown'
 
 
 def rejected_openocd_commands(openocd_command: str, output: str, configuration_commands: tuple[str, ...] = ()) -> list[str]:

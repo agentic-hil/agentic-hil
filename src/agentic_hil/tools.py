@@ -23,7 +23,7 @@ from agentic_hil.adopt import (
 )
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends.common import failure_text_lines
-from agentic_hil.backends.openocd import openocd_probe_reenumerating_line
+from agentic_hil.backends.openocd import OpenOCDBackend, openocd_probe_reenumerating_line
 from agentic_hil.bench import BenchMutex, DeviceBusyError, validated_wait
 from agentic_hil.bootstrap import (
     DEFAULT_PROJECT_PROFILE,
@@ -174,6 +174,19 @@ def recovery_check_clause(check: str) -> str:
 # that writes flash, and only on the two lines
 # `openocd_probe_reenumerating_line` names.
 RECOVERY_RESET_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 3.0, 3.5)
+
+
+def recovery_reset_halt(backend: DebuggerBackend) -> JsonObject:
+    """The recovery's reset into halt on `backend`.
+
+    OpenOCD's runs one reset into halt ahead of it, which reaches the target again
+    when a killed flash left the in-circuit debugger unable to (#621,
+    `OPENOCD_RECONNECTING_RESET`); every other backend gets its plain
+    `reset_target("halt")`."""
+    if isinstance(backend, OpenOCDBackend):
+        with backend.recovery_reset():
+            return backend.reset_target("halt")
+    return backend.reset_target("halt")
 
 
 def recovery_reset_retry_sleep(seconds: float) -> None:
@@ -1885,7 +1898,7 @@ class AgenticHILToolService:
             self._machine_recovery_ran = True
             try:
                 if needs_reset:
-                    reset = self._invoke_dispatch(lambda: backend.reset_target("halt"))
+                    reset = self._invoke_dispatch(lambda: recovery_reset_halt(backend))
                     if not overall_success(reset):
                         return None
                 verification = self._invoke_dispatch(backend.probe_target)
@@ -2118,7 +2131,7 @@ class AgenticHILToolService:
         backoff of `RECOVERY_RESET_RETRY_DELAYS_S`; any other answer is the
         answer. Returns the last result and the line of every attempt that was
         tried again."""
-        reset = self._invoke_dispatch(lambda: self.backend.reset_target("halt"))
+        reset = self._invoke_dispatch(lambda: recovery_reset_halt(self.backend))
         retried_on: list[str] = []
         for delay in RECOVERY_RESET_RETRY_DELAYS_S:
             line = openocd_probe_reenumerating_line(reset)
@@ -2126,7 +2139,7 @@ class AgenticHILToolService:
                 break
             retried_on.append(line)
             recovery_reset_retry_sleep(delay)
-            reset = self._invoke_dispatch(lambda: self.backend.reset_target("halt"))
+            reset = self._invoke_dispatch(lambda: recovery_reset_halt(self.backend))
         return reset, retried_on
 
     @staticmethod
