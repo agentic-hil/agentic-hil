@@ -156,7 +156,7 @@ def test_a_link_that_leaves_the_repository_is_read_and_not_followed(tmp_path: Pa
     root = _index(
         tmp_path,
         "- [STM32 starter](https://github.com/agentic-hil/stm32-starter): three steps on a board.\n"
-        "- [Read the Docs](https://agentic-hil.readthedocs.io/): the rendered documentation.\n",
+        "- [Documentation](https://agentic-hil.github.io/docs/): the rendered documentation.\n",
     )
 
     assert index_problems(root) == []
