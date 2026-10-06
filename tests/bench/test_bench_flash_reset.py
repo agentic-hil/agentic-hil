@@ -935,7 +935,9 @@ def test_a_raw_image_with_a_load_address_is_written_there_and_boots(bench: Bench
     assert result["capture"]["until_matched"] is True, result["capture"]
     if result["backend"] == "openocd":
         commanded = debugger_log(bench, result["log_path"])["command"]
-        assert re.search(rf'program "[^"]*\.bin" {FLASH_BASE} verify reset', commanded), commanded
+        # The recorded command is one shell line, so the quotes around the
+        # file come back escaped.
+        assert re.search(rf'program \\?"[^"]*?\.bin\\?" {FLASH_BASE} verify reset', commanded), commanded
 
 
 @pytest.mark.parametrize(("key", "value"), [("allow_flash", False), ("allow_mass_erase", True)])
