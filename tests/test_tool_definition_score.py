@@ -82,7 +82,8 @@ COHERENCE_DIMENSIONS = ("disambiguation", "naming_consistency", "tool_count_appr
 PROMPT_KEYS = {"tool_system", "tool_user", "coherence_system", "coherence_user"}
 # The confirmation procedure of the brief, as the version record states it.
 CONFIRMATION_PROCEDURE = {"version": 1, "initial_pairs": 1, "confirmation_pairs_on_drop": 2, "statistic": "median_per_side"}
-PINNED_MODEL = "claude-haiku-4-5-20251001"
+PINNED_MODEL = "claude-opus-5-5"
+PINNED_CLI_VERSION = "2.1.288"
 TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
 MISSING_TOKEN_LINE = f"INVALID: The tool definitions changed and {TOKEN_VARIABLE} is not set, so they cannot be scored."
 GIT_CALL_S = 60
@@ -1847,7 +1848,7 @@ def test_the_committed_version_record_pins_model_spec_prompts_and_rubric() -> No
     record = tds.load_version_record()
 
     assert record["model"] == PINNED_MODEL
-    assert re.fullmatch(r"\d+\.\d+\.\d+", record["cli_version"])
+    assert record["cli_version"] == PINNED_CLI_VERSION
     assert re.fullmatch(r"[0-9a-f]{40}", record["spec_commit"])
     assert record["spec_commit"].startswith("b9881b0cfec8")
     assert record["spec_version"] == "1.3"
@@ -2007,6 +2008,18 @@ def test_the_committed_calibration_record_holds_together() -> None:
     document = CALIBRATION_DOCUMENT.read_text(encoding="utf-8")
     assert "mean absolute difference" in document.lower()
     assert f"{calibration['summary']['meanAbsoluteDifference']['tdqs']:.2f}" in document
+
+
+def test_the_document_names_the_pinned_model_and_command_line() -> None:
+    """The page that explains the scores names the judge that gives them, and no other."""
+    record = tds.load_version_record()
+    document = CALIBRATION_DOCUMENT.read_text(encoding="utf-8")
+
+    assert f"`{record['model']}`" in document
+    assert f"command line {record['cli_version']}" in document
+    assert f"calibrated with {record['cli_version']}" in document
+    assert set(re.findall(r"\b2\.\d+\.\d{3}\b", document)) == {record["cli_version"]}
+    assert set(re.findall(r"`(claude-[a-z0-9-]+)`", document)) == {record["model"]}
 
 
 # --- the prompts: fetched, extracted, verified, never committed ---------------
