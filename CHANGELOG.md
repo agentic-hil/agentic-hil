@@ -14,6 +14,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Changed
 
+- The tool definition score gate now decides on the mean TDQS of all tools, rounded to one decimal, instead of the overall score. The overall score leaned 28 % on the single lowest tool and 30 % on the judged coherence, both of which swing between identical runs, so identical text was blocked at random. The overall score, its parts and the lowest tool stay in the report.
+
 - `debug_symbol_info`, `debug_symbol_value` and `debug_dump_symbol_ihex` now say in their MCP definitions that pyOCD and STM32CubeProgrammer resolve symbols through an open debug session, and against the ELF `flash_firmware` last wrote only while no session is open. (#698)
 
 - Run results over MCP name the tools and their `run` argument (`test_reactor_status`, `test_reactor_stop`, `hardware_lease_status`) instead of `agentic-hil` commands and `--run`. The CLI keeps its command wording. (#671)
