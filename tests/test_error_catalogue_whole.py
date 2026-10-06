@@ -658,7 +658,9 @@ COLLECTED_TYPE_COUNT = 220
 # `_end_session_lease`; the CAN close helpers `_retire_session`,
 # `_end_unconfirmed_close` and `_end_session_lease` add three more producers
 # of `can_adapter_close_failed` (#633, #665).
-PRODUCER_COUNT = 650
+# The empty-payload refusal adds `invalid_argument` in `comports.payload_bytes`
+# (#634).
+PRODUCER_COUNT = 651
 
 
 def pin_problems(inventory: Inventory) -> list[str]:

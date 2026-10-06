@@ -872,7 +872,6 @@ def test_a_tool_name_inside_a_longer_word_is_not_rewritten() -> None:
 # The catalogue entries whose way forward is adoption, each with the command a
 # person meets it from. Both surfaces make that move, under their own names.
 _ADOPTION_REFUSALS = {
-    "com_port_identity_mismatch": "test-reactor",
     "com_port_not_bound": "test-reactor",
     "probe_inventory_incomplete": "init",
     "test_config_invalid": "test-reactor",
