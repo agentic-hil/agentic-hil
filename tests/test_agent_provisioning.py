@@ -86,7 +86,7 @@ def attached_hardware(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> d
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
         "cleanup_required": False,
-        "summary": "One attached STM32 target was identified through ST-Link HOTPLUG discovery.",
+        "summary": "One attached board was identified through STM32CubeProgrammer HOTPLUG discovery.",
     }
     discovery.update(overrides)
 

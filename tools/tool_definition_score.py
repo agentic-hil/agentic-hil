@@ -1,8 +1,12 @@
 """Keep the server's Tool Definition Quality Score from falling.
 
-A change passes when the overall score of the tool definitions after it is at
-least the overall score before it. The number decides, not the letter tier: a
-drop from 3.7 to 3.6 blocks although both are an A.
+A change passes when the mean TDQS of the tool definitions after it is at least
+the mean TDQS before it. The number decides, not the letter tier: a drop from
+3.7 to 3.6 blocks although both are an A. The overall score, description
+quality, coherence and the lowest tool are reported, but they do not decide:
+the lowest tool and the judged coherence swing between runs of identical text,
+and the mean over every tool is far steadier while it still falls when the
+descriptions get worse.
 
 The score is the TDQS method, version 1.3, as published at the pinned upstream
 commit recorded in tools/tdqs/version.json: context signals and invocation
@@ -95,7 +99,7 @@ PROMPT_KEYS = ("coherence_system", "coherence_user", "tool_system", "tool_user")
 # answering the contract, and more attempts would only hide it.
 RETRIES = 2
 # Fixed in advance and versioned: one pair, and on a drop exactly two more,
-# decided by the median overall of each side.
+# decided by the median mean TDQS of each side.
 CONFIRMATION = {"version": 1, "initial_pairs": 1, "confirmation_pairs_on_drop": 2, "statistic": "median_per_side"}
 EXIT_CODES = {"pass": 0, "block": 1, "invalid": 2}
 
@@ -192,10 +196,6 @@ def coherence_score(values: dict[str, int]) -> Fraction:
 
 def overall_score(quality: Fraction, coherence: Fraction) -> Fraction:
     return round1(OVERALL_WEIGHTS["description_quality"] // 10 * _exact(quality) + OVERALL_WEIGHTS["coherence"] // 10 * _exact(coherence), 10)
-
-
-def _unrounded_quality(values: Sequence[Fraction]) -> Fraction:
-    return Fraction(DESCRIPTION_QUALITY_WEIGHTS["mean"], 100) * sum(values, Fraction(0)) / len(values) + Fraction(DESCRIPTION_QUALITY_WEIGHTS["minimum"], 100) * min(values)
 
 
 def rollups(results: dict[str, dict], names: Sequence[str], coherence: dict) -> dict:
@@ -905,8 +905,9 @@ def _sides(pair: object) -> tuple[dict, dict]:
     return base, head
 
 
-def _overall(side: dict) -> Fraction:
-    return _number(side["rollups"]["overallScore"])
+def _mean(side: dict) -> Fraction:
+    """What decides: the side's mean TDQS rollup, rounded once like every rollup."""
+    return _number(side["rollups"]["meanTdqs"])
 
 
 def _median(values: Sequence[Fraction]) -> Fraction:
@@ -917,15 +918,15 @@ def _median(values: Sequence[Fraction]) -> Fraction:
 
 def medians(pairs: Sequence[object]) -> dict[str, Fraction]:
     sides = [_sides(pair) for pair in pairs]
-    return {"base": _median([_overall(base) for base, _ in sides]), "head": _median([_overall(head) for _, head in sides])}
+    return {"base": _median([_mean(base) for base, _ in sides]), "head": _median([_mean(head) for _, head in sides])}
 
 
 def decide(pairs: Sequence[object]) -> str:
-    """One pair passes when the head holds; a drop needs exactly two more pairs and the per-side medians decide."""
+    """One pair passes when the head's mean TDQS holds; a drop needs exactly two more pairs and the per-side medians decide."""
     if not pairs:
         raise IncompleteResult("No pair was scored.")
     base, head = _sides(pairs[0])
-    if _overall(head) >= _overall(base):
+    if _mean(head) >= _mean(base):
         if len(pairs) != CONFIRMATION["initial_pairs"]:
             raise InvalidComparison(f"The first pair held, so there must be exactly one pair, not {len(pairs)}.")
         return "pass"
@@ -939,7 +940,7 @@ def decide(pairs: Sequence[object]) -> str:
 def confirm(run_pair: Callable[[], tuple[dict, dict]]) -> dict:
     pairs = [run_pair()]
     base, head = pairs[0]
-    if _overall(head) < _overall(base):
+    if _mean(head) < _mean(base):
         pairs.extend(run_pair() for _ in range(CONFIRMATION["confirmation_pairs_on_drop"]))
     return {"decision": decide(pairs), "pairs": [{"base": base, "head": head} for base, head in pairs], "median": medians(pairs)}
 
@@ -956,17 +957,14 @@ def _decimal(value: Fraction, places: int = 1) -> str:
 
 
 def _causes(base: dict, head: dict) -> dict:
-    """What fell on the first pair, and how much each fall alone costs the unrounded overall."""
+    """What fell on the first pair, and how much each fall alone costs the unrounded mean TDQS of the base."""
     base_values = {name: _number(result["tdqs"]) for name, result in base["tools"].items()}
     head_values = {name: _number(result["tdqs"]) for name, result in head["tools"].items()}
     names = list(base_values)
-    weight = Fraction(OVERALL_WEIGHTS["description_quality"], 100)
-    before = _unrounded_quality([base_values[name] for name in names])
     tools = []
     for name in names:
         if name not in head_values or head_values[name] >= base_values[name]:
             continue
-        alone = _unrounded_quality([head_values[other] if other == name else base_values[other] for other in names])
         dimensions = [
             {
                 "dimension": dimension,
@@ -977,7 +975,8 @@ def _causes(base: dict, head: dict) -> dict:
             for dimension in DIMENSIONS
             if head["tools"][name]["scores"][dimension] < base["tools"][name]["scores"][dimension]
         ]
-        tools.append({"tool": name, "base": base_values[name], "head": head_values[name], "effect": weight * (before - alone), "dimensions": dimensions})
+        effect = (base_values[name] - head_values[name]) / len(names)
+        tools.append({"tool": name, "base": base_values[name], "head": head_values[name], "effect": effect, "dimensions": dimensions})
     tools.sort(key=lambda item: (-item["effect"], item["tool"]))
     coherence = [
         {
@@ -1011,7 +1010,7 @@ def _report(
     warnings: Sequence[str] = (),
 ) -> dict:
     first = _sides(pairs[0]) if pairs else None
-    dropped = first is not None and _overall(first[1]) < _overall(first[0])
+    dropped = first is not None and _mean(first[1]) < _mean(first[0])
     return {
         "decision": decision,
         "exitCode": EXIT_CODES[decision],
@@ -1032,14 +1031,14 @@ def _report(
 
 
 def _reason(decision: str, pairs: Sequence[object]) -> str:
-    base, head = (_overall(side) for side in _sides(pairs[0]))
+    base, head = (_mean(side) for side in _sides(pairs[0]))
     if len(pairs) == 1:
-        return f"The overall score holds: {_decimal(base)} before, {_decimal(head)} after."
+        return f"The mean TDQS holds: {_decimal(base)} before, {_decimal(head)} after."
     middle = medians(pairs)
     if decision == "block":
-        return f"The overall score fell from {_decimal(middle['base'])} to {_decimal(middle['head'])}, the median of each side over three pairs."
+        return f"The mean TDQS fell from {_decimal(middle['base'])} to {_decimal(middle['head'])}, the median of each side over three pairs."
     return (
-        f"The first pair dropped from {_decimal(base)} to {_decimal(head)}, but the medians over three pairs are "
+        f"The first pair's mean TDQS dropped from {_decimal(base)} to {_decimal(head)}, but the medians over three pairs are "
         f"{_decimal(middle['base'])} before and {_decimal(middle['head'])} after, so the drop is not confirmed."
     )
 
@@ -1104,14 +1103,16 @@ def summary_markdown(report: dict) -> str:
             f"| Mean TDQS | {_decimal(_number(b['meanTdqs']))} | {_decimal(_number(h['meanTdqs']))} |",
             f"| Minimum TDQS | {_decimal(_number(b['minTdqs']))} `{b['minTool']}` | {_decimal(_number(h['minTdqs']))} `{h['minTool']}` |",
             "",
+            "The mean TDQS decides. The overall score, description quality, coherence and minimum are information.",
+            "",
         ]
         if len(report["pairs"]) > 1:
-            lines += ["| Pair | Base overall | Head overall |", "|---|---|---|"]
+            lines += ["| Pair | Base mean TDQS | Head mean TDQS |", "|---|---|---|"]
             for number, pair in enumerate(report["pairs"], 1):
                 pair_base, pair_head = _sides(pair)
-                lines.append(f"| {number} | {_decimal(_overall(pair_base))} | {_decimal(_overall(pair_head))} |")
+                lines.append(f"| {number} | {_decimal(_mean(pair_base))} | {_decimal(_mean(pair_head))} |")
             middle = report["median"]
-            lines += ["", f"Median overall: {_decimal(_number(middle['base']))} before, {_decimal(_number(middle['head']))} after.", ""]
+            lines += ["", f"Median mean TDQS: {_decimal(_number(middle['base']))} before, {_decimal(_number(middle['head']))} after.", ""]
     causes = report.get("causes")
     if causes:
         lines += ["### What fell on the first pair", ""]
@@ -1120,11 +1121,11 @@ def summary_markdown(report: dict) -> str:
             lines += [
                 f"The minimum term fell: `{minimum['head']['tool']}` is the head's minimum at {_decimal(_number(minimum['head']['tdqs']))}, "
                 f"against `{minimum['base']['tool']}` at {_decimal(_number(minimum['base']['tdqs']))} on the base. "
-                "Description quality weighs the minimum at 40 %.",
+                "The minimum is information; it counts in the mean only as one tool among the rest.",
                 "",
             ]
         if causes["tools"]:
-            lines += ["Tools whose TDQS fell, by how much each fall alone lowers the unrounded overall:", "", "| Tool | Base | Head | Effect |", "|---|---|---|---|"]
+            lines += ["Tools whose TDQS fell, by how much each fall alone lowers the unrounded mean TDQS:", "", "| Tool | Base | Head | Effect |", "|---|---|---|---|"]
             for item in causes["tools"]:
                 lines.append(f"| `{item['tool']}` | {_decimal(_number(item['base']))} | {_decimal(_number(item['head']))} | {_decimal(_number(item['effect']), 4)} |")
             lines.append("")
@@ -1133,7 +1134,7 @@ def summary_markdown(report: dict) -> str:
                     lines.append(f"- `{item['tool']}` {dimension['dimension']} {dimension['base']} to {dimension['head']}: {_collapsed(dimension['justification'])}")
             lines.append("")
         for dimension in causes["coherence"]:
-            lines.append(f"- Coherence {dimension['dimension']} {dimension['base']} to {dimension['head']}: {_collapsed(dimension['justification'])}")
+            lines.append(f"- Coherence (information) {dimension['dimension']} {dimension['base']} to {dimension['head']}: {_collapsed(dimension['justification'])}")
         if causes["coherence"]:
             lines.append("")
     if report.get("warnings"):
@@ -1655,7 +1656,7 @@ def make_scorer(prompts: dict[str, str], record: dict, args: argparse.Namespace,
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Keep the overall Tool Definition Quality Score from falling.")
+    parser = argparse.ArgumentParser(description="Keep the mean Tool Definition Quality Score from falling.")
     parser.add_argument("--base", help="the base revision, for example origin/master")
     parser.add_argument("--head", help="a head revision; the default is the working tree")
     parser.add_argument("--repo", default=".", help="the repository root (default: the current directory)")

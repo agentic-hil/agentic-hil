@@ -65,7 +65,7 @@ def detached_junit_refusal(junit_xml_path: str) -> JsonObject:
     """The answer to `--junit-xml` beside `--detach`, refused before anything starts."""
     return {
         "ok": False,
-        "tool": "test_reactor_start",
+        "tool": "test_reactor_run",
         "error_type": JUNIT_DETACHED_ERROR,
         "summary": (
             "--junit-xml writes the report of a run this command waited for, and --detach returns before the run "

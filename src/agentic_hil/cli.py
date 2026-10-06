@@ -105,7 +105,13 @@ from agentic_hil.knowledge import (
 )
 from agentic_hil.reactorrun import run_plan, start_plan_detached
 from agentic_hil.redact import redact_sensitive
-from agentic_hil.report import conclusive_success, overall_success
+from agentic_hil.report import (
+    conclusive_success,
+    overall_success,
+    read_report_state,
+    repair_report_state,
+    report_state_path,
+)
 from agentic_hil.runevidence import write_run_evidence
 from agentic_hil.runlifecycle import request_run_stop, run_status
 from agentic_hil.stdio import run_stdio_server
@@ -494,6 +500,14 @@ def refuse_an_unknown_agent_without_a_target(parser: argparse.ArgumentParser, pa
         parser.error(str(refused))
 
 
+def require_an_incident_id_unless_retiring(parser: argparse.ArgumentParser, parsed: argparse.Namespace) -> None:
+    """`recover` signs for one incident, so its id stays the parser's to ask
+    for, with argparse's own words and exit status 2. `--retire-records` may
+    run without one: a project record that cannot be read names no id (#669)."""
+    if parsed.quarantine_id is None and not parsed.retire_records:
+        parser.error("the following arguments are required: --quarantine-id")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentic-hil", description="Agentic Hardware-in-the-Loop (Agentic HIL) local MCP stdio server")
     parser.add_argument("--version", action="version", version=__version__)
@@ -608,9 +622,22 @@ def build_parser() -> argparse.ArgumentParser:
     reactor_stop_parser.add_argument("--run", required=True, help="the handle the run was started under")
 
     subparsers.add_parser("lease-status", help="show persistent hardware ownership and quarantine state")
-    recover_parser = subparsers.add_parser("recover", help="release quarantined resources after operator-confirmed physical recovery")
+    subparsers.add_parser(
+        "report-state-repair",
+        help="move this project's damaged report state aside, every byte kept, and start a fresh one; a report state that reads is left as it is",
+    )
+    recover_parser = subparsers.add_parser(
+        "recover",
+        help="release quarantined resources after operator-confirmed physical recovery",
+        check_parsed=require_an_incident_id_unless_retiring,
+    )
     recover_parser.add_argument("--confirm-safe-state", action="store_true", required=True)
-    recover_parser.add_argument("--quarantine-id", required=True)
+    recover_parser.add_argument("--quarantine-id", default=None, help="the incident lease-status names; required, except by --retire-records over a project record that cannot be read")
+    recover_parser.add_argument(
+        "--retire-records",
+        action="store_true",
+        help="set aside this project's coordination records that no recovery can clear (unreadable, from another version, or disagreeing with the incident), keeping their bytes and writing the recovery ledger",
+    )
     recover_parser.add_argument("--accept-config-change", action="store_true", help="explicit operator override: accept that the authoritative config changed since the incident was recorded")
 
     schema_parser = subparsers.add_parser("schema", help="print or write bundled config schema")
@@ -723,12 +750,18 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         # one to explain that would leave exactly that job with nothing.
         return write_run_evidence(args.report, args.out)
     if args.command == "test-reactor-status":
-        return run_status(load_cli_authoritative_config(None), args.run)
+        return run_status(load_cli_authoritative_config(None), args.run, command_line=True)
     if args.command == "test-reactor-stop":
-        return request_run_stop(load_cli_authoritative_config(None), args.run)
+        return request_run_stop(load_cli_authoritative_config(None), args.run, command_line=True)
+    if args.command == "report-state-repair":
+        return repair_report_state(load_cli_authoritative_config(None))
     if args.command in {"lease-status", "recover"}:
         config = load_cli_authoritative_config(None)
         coordinator = HardwareCoordinator(config, "operator-cli")
+        # The way out of a record every other command stops on, so it reads no
+        # status first: that read would stop on the same record (#669).
+        if args.command == "recover" and getattr(args, "retire_records", False):
+            return coordinator.retire_records(safe_state_confirmed=args.confirm_safe_state, quarantine_id=args.quarantine_id)
         status = coordinator.status()
         if args.command == "lease-status":
             return status
@@ -2100,7 +2133,12 @@ DOCTOR_STANDING_INCIDENT_FINDING = "standing_incident"
 # wrote over it and repeat the check's words as warnings, because the finding is
 # about this account on this machine and the document binds the right hardware.
 DOCTOR_DEVICE_ACCESS_FINDING = "device_access"
-DOCTOR_FINDINGS_SETUP_KEEPS = frozenset({DOCTOR_UNBOUND_FINDING, DOCTOR_STANDING_INCIDENT_FINDING, DOCTOR_DEVICE_ACCESS_FINDING})
+# This project's report state reads and is damaged (#689). `setup` keeps the
+# file it wrote over it: the state is about what ran on this machine, a rolled
+# back configuration repairs none of it, and `agentic-hil report-state-repair`
+# does.
+DOCTOR_REPORT_STATE_FINDING = "report_state"
+DOCTOR_FINDINGS_SETUP_KEEPS = frozenset({DOCTOR_UNBOUND_FINDING, DOCTOR_STANDING_INCIDENT_FINDING, DOCTOR_DEVICE_ACCESS_FINDING, DOCTOR_REPORT_STATE_FINDING})
 
 
 def doctor_findings_setup_keeps(doctor_result: JsonObject) -> bool:
@@ -3338,7 +3376,7 @@ def initialized_config_path(workspace: Path) -> Path:
 
 def start_detached_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0) -> JsonObject:
     """Start a run in its own process and answer at once, for this working directory."""
-    return start_plan_detached(load_authoritative_config(Path.cwd()), test_config_path, wait_s=wait_s)
+    return start_plan_detached(load_authoritative_config(Path.cwd()), test_config_path, wait_s=wait_s, command_line=True)
 
 
 def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0, run_handle: str | None = None, junit_xml: str | None = None) -> JsonObject:
@@ -3365,7 +3403,7 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
         # comes before any configuration exists, so it is the only place that
         # value can be attached to it.
         error.details.setdefault("test_config_path", test_config_path or DEFAULT_TEST_CONFIG_PATH)
-        write_refusal_junit_xml(junit_xml, {"tool": "test_reactor", **error.to_dict()})
+        write_refusal_junit_xml(junit_xml, {"tool": "test_reactor_run", **error.to_dict()})
         raise
     return run_plan(
         config,
@@ -4266,20 +4304,54 @@ def _read_record_entries(path: Path) -> list[Path] | None:
     configuration lives somewhere else, and a question about a record must not
     plant the root it would have lived under.
     """
+    entries, _ = _read_record(path)
+    return entries
+
+
+# How a record failed to read, in the words its refusal states it (#692).
+RECORD_UNOPENABLE = "unopenable"
+RECORD_NOT_JSON = "not_json"
+RECORD_WRONG_SHAPE = "wrong_shape"
+_RECORD_FAILURE_WORDS = {
+    RECORD_UNOPENABLE: "could not be opened",
+    RECORD_NOT_JSON: "is not JSON",
+    RECORD_WRONG_SHAPE: "is not a JSON object whose `configurations` is a list of absolute paths",
+}
+
+
+def _read_record(path: Path) -> tuple[list[Path] | None, str | None]:
+    """`_read_record_entries`, with how the read failed when it did."""
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return []
-    except (OSError, UnicodeDecodeError):
-        return None
+        return [], None
+    except UnicodeDecodeError:
+        return None, RECORD_NOT_JSON
+    except OSError:
+        return None, RECORD_UNOPENABLE
     try:
         document = json.loads(raw)
     except json.JSONDecodeError:
-        return None
+        return None, RECORD_NOT_JSON
     entries = document.get("configurations") if isinstance(document, dict) else None
     if not isinstance(entries, list) or not all(isinstance(entry, str) and Path(entry).is_absolute() for entry in entries):
-        return None
-    return [absolute_without_symlinks(Path(entry)) for entry in entries]
+        return None, RECORD_WRONG_SHAPE
+    return [absolute_without_symlinks(Path(entry)) for entry in entries], None
+
+
+def _unreadable_record_source() -> tuple[Path, str] | None:
+    """The first record `_recorded_external_configurations` could not read, and how.
+
+    The union reads every coexisting record and gives up on the first that does
+    not read, without saying which. A refusal that named the record this user's
+    commands write to instead sent the operator to a healthy file while the
+    damaged copy stood beside the other configuration root (#692).
+    """
+    for source in _external_project_record_read_sources():
+        entries, failure = _read_record(source)
+        if entries is None:
+            return source, failure or RECORD_UNOPENABLE
+    return None
 
 
 def _recorded_external_configurations() -> list[Path] | None:
@@ -4364,11 +4436,19 @@ def _record_external_configuration(config_path: Path) -> JsonObject | None:
     path = _external_project_record_path()
     recorded = _recorded_external_configurations()
     if recorded is None:
+        # The record that failed is the one named, and how; the record writes go
+        # to is reported apart, because it may be the healthy one (#692).
+        unreadable, failure = _unreadable_record_source() or (path, RECORD_UNOPENABLE)
         return {
             "ok": False,
             "error_type": "agent_project_record_unreadable",
-            "summary": f"{path} is not the record of Agentic HIL projects it has to be, so this project could not be recorded and no deny rule was written; left untouched.",
-            "path": str(path),
+            "summary": (
+                f"{unreadable} {_RECORD_FAILURE_WORDS[failure]}, so it is not the record of Agentic HIL projects it has "
+                "to be; this project could not be recorded and no deny rule was written. Left untouched."
+            ),
+            "path": str(unreadable),
+            "reason": failure,
+            "write_path": str(path),
             **remediation_fields("agent_project_record_unreadable"),
         }
     absolute = absolute_without_symlinks(config_path)
@@ -4668,11 +4748,11 @@ def _register_codex_mcp(command: str, force: bool) -> JsonObject:
     existing = secure_optional_read_text(path) or ""
     parsed, parse_error = _parse_toml(existing)
     if parsed is None:
-        return {"ok": False, "error_type": "config_invalid", "agent": "codex", "path": str(path), "summary": "Existing Codex config.toml is not valid TOML or cannot be parsed safely; left untouched.", "parse_error": parse_error}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "codex", "path": str(path), "summary": "Existing Codex config.toml is not valid TOML or cannot be parsed safely; left untouched.", "parse_error": parse_error, **remediation_fields("agent_mcp_config_invalid")}
     start_count = existing.count(AGENTIC_HIL_MCP_START)
     end_count = existing.count(AGENTIC_HIL_MCP_END)
     if start_count != end_count or start_count > 1:
-        return {"ok": False, "error_type": "config_invalid", "agent": "codex", "path": str(path), "summary": "Codex config.toml contains malformed or duplicate Agentic HIL managed markers; left untouched."}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "codex", "path": str(path), "summary": "Codex config.toml contains malformed or duplicate Agentic HIL managed markers; left untouched.", **remediation_fields("agent_mcp_config_invalid")}
     has_managed = start_count == 1
     servers = parsed.get("mcp_servers", {})
     entry = servers.get("agentic-hil") if isinstance(servers, dict) else None
@@ -4680,7 +4760,7 @@ def _register_codex_mcp(command: str, force: bool) -> JsonObject:
     if not has_managed and entry is not None:
         return {"ok": False, "error_type": "mcp_config_conflict", "agent": "codex", "format": "codex-toml", "path": str(path), **_existing_command_field(entry), "summary": "An unmanaged Codex agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP, **remediation_fields("mcp_config_conflict")}
     if has_managed and not isinstance(entry, dict):
-        return {"ok": False, "error_type": "config_invalid", "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "The Agentic HIL managed markers do not contain an agentic-hil MCP table; left untouched."}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "The Agentic HIL managed markers do not contain an agentic-hil MCP table; left untouched.", **remediation_fields("agent_mcp_config_invalid")}
     if has_managed and entry == desired_entry:
         return {"ok": True, "skipped": True, "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "Codex MCP entry already registered with the trusted launcher."}
     if has_managed:
@@ -4692,7 +4772,7 @@ def _register_codex_mcp(command: str, force: bool) -> JsonObject:
         next_text = f"{trimmed}{separator}{block}\n"
     next_parsed, next_parse_error = _parse_toml(next_text)
     if next_parsed is None:
-        return {"ok": False, "error_type": "config_invalid", "agent": "codex", "path": str(path), "summary": "Generated Codex config.toml failed TOML validation; existing config was left untouched.", "parse_error": next_parse_error}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "codex", "path": str(path), "summary": "Generated Codex config.toml failed TOML validation; existing config was left untouched.", "parse_error": next_parse_error, **remediation_fields("agent_mcp_config_invalid")}
     secure_atomic_write_text(path, next_text)
     return {"ok": True, "agent": "codex", "format": "codex-toml", "path": str(path), "migrated": has_managed, "summary": "Registered agentic-hil MCP server in the Codex user config.toml."}
 
@@ -4768,10 +4848,10 @@ def _register_opencode_mcp(command: str, force: bool) -> JsonObject:
     path = _agent_mcp_config_path("opencode")
     data = _load_json_object(path)
     if data is None:
-        return {"ok": False, "error_type": "config_invalid", "agent": "opencode", "path": str(path), "summary": "Existing opencode.json is not valid JSON; left untouched."}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "opencode", "path": str(path), "summary": "Existing opencode.json is not valid JSON; left untouched.", **remediation_fields("agent_mcp_config_invalid")}
     servers = data.setdefault("mcp", {})
     if not isinstance(servers, dict):
-        return {"ok": False, "error_type": "config_invalid", "agent": "opencode", "path": str(path), "summary": "Existing opencode.json 'mcp' is not an object; left untouched."}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "opencode", "path": str(path), "summary": "Existing opencode.json 'mcp' is not an object; left untouched.", **remediation_fields("agent_mcp_config_invalid")}
     desired_entry: JsonObject = {"type": "local", "command": [command, "mcp-stdio"], "enabled": True}
     existing_entry = servers.get("agentic-hil")
     kind = _opencode_mcp_entry_kind(existing_entry, desired_entry) if "agentic-hil" in servers else None
@@ -4789,10 +4869,10 @@ def _register_claude_mcp(command: str, force: bool) -> JsonObject:
     path = _agent_mcp_config_path("claude-code")
     data = _load_json_object(path)
     if data is None:
-        return {"ok": False, "error_type": "config_invalid", "agent": "claude-code", "path": str(path), "summary": "Existing ~/.claude.json is not valid JSON; left untouched."}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "claude-code", "path": str(path), "summary": "Existing ~/.claude.json is not valid JSON; left untouched.", **remediation_fields("agent_mcp_config_invalid")}
     servers = data.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
-        return {"ok": False, "error_type": "config_invalid", "agent": "claude-code", "path": str(path), "summary": "Existing ~/.claude.json 'mcpServers' is not an object; left untouched."}
+        return {"ok": False, "error_type": "agent_mcp_config_invalid", "agent": "claude-code", "path": str(path), "summary": "Existing ~/.claude.json 'mcpServers' is not an object; left untouched.", **remediation_fields("agent_mcp_config_invalid")}
     desired_entry: JsonObject = {"type": "stdio", "command": command, "args": ["mcp-stdio"]}
     existing_entry = servers.get("agentic-hil")
     kind = _claude_mcp_entry_kind(existing_entry, desired_entry) if "agentic-hil" in servers else None
@@ -4999,6 +5079,34 @@ def _doctor_state_root(config: AgenticHILConfig) -> JsonObject:
             "summary": f"{error.summary} The audit trail, the leases and the reports are all written under this root, so no hardware action can be recorded and every plan is refused at its first step with `audit_unavailable`. `{CONFIG_REOPEN_COMMAND}` rewrites the configuration with a state root this profile accepts.",
         }
     return {"ok": True, "field": "state_root", "path": str(root), "summary": "The configured state root accepts the writes every hardware action is recorded by."}
+
+
+def _doctor_report_state(config: AgenticHILConfig) -> JsonObject:
+    """Whether this project's report state reads, under a root that accepts writes.
+
+    A damaged one refuses every hardware call as `audit_unavailable` while the
+    root itself is sound, and `doctor` reported nothing wrong (#689). Read, never
+    initialized and without the report lock, so this still opens no bench. Its
+    own finding rather than a `state_root` one: the root is fine, and the repair
+    is `agentic-hil report-state-repair`, not a rewritten configuration. This is
+    where the operator is told which file it is.
+    """
+    path = report_state_path(config)
+    try:
+        read_report_state(config)
+    except ConfigError as error:
+        if error.error_type != "report_state_damaged":
+            raise
+        return {
+            **error.to_dict(),
+            "path": path,
+            "summary": f"{error.summary} It is {path}; `agentic-hil report-state-repair` moves it aside, every byte kept, and starts a fresh one.",
+        }
+    except (OSError, ValueError):
+        # Access to the file, not its content: the hardware call that meets it
+        # names the fault, and the write check on the root has already passed.
+        pass
+    return {"ok": True, "path": path, "summary": "This project's report state reads, or none has been written yet."}
 
 
 def _adopt_reads_board_instruction(config: AgenticHILConfig) -> str:
@@ -5276,6 +5384,8 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # root, `doctor` is already red on it when it is not, and a walk over a root
     # the enforcer refuses would answer nothing while looking like an all-clear.
     standing = standing_foreign_incidents(config, project_resource(config)) if state_root_ok else []
+    # Only where the root is usable, for the same reason: its file is under it.
+    report_state_check = _doctor_report_state(config) if state_root_ok else None
     # And the binding counts the same way, for the same reason: a file that
     # names no hardware refuses the first plan run against it, and a green
     # verdict over that is a newcomer being told to go ahead (#433).
@@ -5292,6 +5402,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         *(["debuggers"] if any(result.get("ok") is not True for result in checks.values()) else []),
         *(["target_support"] if unsupported else []),
         *([] if state_root_ok else ["state_root"]),
+        *([DOCTOR_REPORT_STATE_FINDING] if report_state_check is not None and report_state_check.get("ok") is not True else []),
         *([] if binding_ok else [DOCTOR_UNBOUND_FINDING]),
         *([DOCTOR_STANDING_INCIDENT_FINDING] if standing else []),
         *([DOCTOR_DEVICE_ACCESS_FINDING] if denied_access else []),
@@ -5319,6 +5430,8 @@ def doctor(config_path: str | None = None) -> JsonObject:
             f"profile will not accept, so every plan is refused at its first step with `audit_unavailable`. `{CONFIG_REOPEN_COMMAND}` rewrites "
             "the configuration with a state root it does accept."
         )
+    if report_state_check is not None and report_state_check.get("ok") is not True:
+        summary = f"{summary} {report_state_check['summary']}"
     if "next_step" in binding_check:
         # In the headline, beside the state root sentence and for the same
         # reason: a caller that keeps only `summary` has to be told that this
@@ -5391,6 +5504,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         **report,
         "config_path": config.config_path,
         "state_root": state_root_check,
+        **({"report_state": report_state_check} if report_state_check is not None else {}),
         # One field a script reads for the whole question, beside the one it
         # already reads for the state root: `bench_binding.ok` is false exactly
         # when this file names a device it does not identify, and `unbound`

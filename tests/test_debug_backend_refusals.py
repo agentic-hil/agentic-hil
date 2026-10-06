@@ -89,8 +89,13 @@ FAKE_TRANSCRIPT = FIXTURES / "fake_debugger_transcript.py"
 FAKE_PYOCD_RESET_REFUSED = FIXTURES / "fake_pyocd_reset_refused.py"
 FAKE_PYOCD_READ_FAILED = FIXTURES / "fake_pyocd_read_failed.py"
 FAKE_PYOCD_SILENT_READ = FIXTURES / "fake_pyocd_silent_read.py"
+FAKE_PYOCD_RESET_HANGS = FIXTURES / "fake_pyocd_reset_hangs.py"
 RECORDINGS_PATH = FIXTURES / "debugger_refusal_recordings.json"
 RECORDINGS = json.loads(RECORDINGS_PATH.read_text(encoding="utf-8"))
+# pyOCD 0.45.1's failures off the reference bench, and the lines its source
+# prints for the ones no bench can provoke without unplugging the probe or
+# protecting the flash (#516, #561).
+PYOCD_FAILURES = json.loads((FIXTURES / "pyocd_failure_recordings.json").read_text(encoding="utf-8"))
 TROUBLESHOOTING = ROOT.parent / "TROUBLESHOOTING.md"
 
 BACKENDS = ["openocd", "pyocd", "stlink"]
@@ -126,6 +131,14 @@ assert VERIFY_FAILED in RECORDINGS["phrases_in_the_openocd_binary"]["phrases"]
 
 def recording(name: str) -> dict:
     return RECORDINGS["recordings"][name]
+
+
+def pyocd_recording(name: str) -> dict:
+    return PYOCD_FAILURES["recordings"][name]
+
+
+def pyocd_source_line(name: str) -> str:
+    return PYOCD_FAILURES["phrases_in_the_pyocd_source"]["phrases"][name]["line"] + "\n"
 
 
 def cube_recording(name: str) -> dict:
@@ -642,6 +655,40 @@ def test_a_script_that_is_neither_configured_field_is_config_file_not_found(tmp_
     assert_refused_before_contact(result, config)
 
 
+@pytest.mark.parametrize(
+    ("stderr", "backend_error_type", "field"),
+    [
+        ("Error: Can't find target/stm32f4x.cfg\n", "target_config_not_found", "target_cfg"),
+        ("Error: Can't find interface/stlink.cfg\n", "interface_config_not_found", "interface_cfg"),
+        ("Error: Can't find board/other.cfg\n", "config_file_not_found", None),
+    ],
+)
+def test_a_debug_start_names_a_missing_script_as_probe_target_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: str, backend_error_type: str, field: str | None) -> None:
+    """#654: one missing script, one public word, whichever call met it.
+
+    The session start published the classifier's own name as `error_type`
+    while probe_target maps it through the backend's public names. Both now
+    answer `debugger_config_not_found` with the classifier's name in
+    `backend_error_type`, and the start's summary names the field as the probe's
+    does."""
+    play_transcript(monkeypatch, stderr=stderr, returncode=1)
+    probed = call(config_for(tmp_path / "probe", "openocd", FAKE_TRANSCRIPT), "probe_target")
+    service = debug_service(tmp_path / "start", server=FAKE_TRANSCRIPT)
+    try:
+        started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": START_TIMEOUT_S})
+    finally:
+        service.close()
+
+    assert probed["error_type"] == "debugger_config_not_found", probed
+    assert started["error_type"] == probed["error_type"], started
+    assert started["backend_error_type"] == backend_error_type == probed["backend_error_type"], started
+    assert started["summary"].startswith("Debug server exited before the GDB port became ready"), started["summary"]
+    if field is not None:
+        assert field in started["summary"], started["summary"]
+    assert started["remediation"] == remediation_fields("debugger_config_not_found", "openocd")["remediation"], started
+    assert started["side_effect_status"] == "not_started", started
+
+
 def test_a_flash_that_failed_without_reaching_its_marker_is_flash_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """OpenOCD's own `** Programming Failed **`, with no erase, verify or reset word beside it.
 
@@ -701,7 +748,10 @@ def test_a_zero_exit_with_error_text_is_a_failure(tmp_path: Path, monkeypatch: p
 # `recorded`: a real tool recording. `in tree`: a phrase an existing fixture
 # already prints, typed from the tool by whoever wrote it. `issue`: the phrase
 # #506 quotes. `rule`: the classifier's own table words, with no recording
-# behind them; each of those rows is a recording owed.
+# behind them; each of those rows is a recording owed. `pyocd source`: the line
+# the pyOCD 0.45.1 package prints, with the file and line that print it in
+# tests/fixtures/pyocd_failure_recordings.json, for a failure no bench provokes
+# without unplugging the probe or protecting the flash.
 CLASSIFIER_ROWS = [
     ("stlink", "probe_target", "Error: No ST-LINK detected!\n", "probe_not_found", "in tree"),
     ("stlink", "probe_target", STLINK_NO_TARGET_STDOUT + STLINK_NO_TARGET_STDERR, "target_not_detected", "issue"),
@@ -712,11 +762,19 @@ CLASSIFIER_ROWS = [
     ("stlink", "flash_firmware", "ST-LINK SN  : STLINK123\nMemory Programming ...\nError: Download failed\n", "flash_failed", "rule"),
     ("pyocd", "probe_target", recording("pyocd_commander_status_no_probe")["stdout"], "probe_not_found", "recorded"),
     ("pyocd", "probe_target", "0000000:ERROR:Error attempting to connect to target\nError: unable to connect to the target\n", "target_not_detected", "in tree"),
-    ("pyocd", "probe_target", "0000512 E No ACK received [__main__]\n", "target_not_detected", "rule"),
+    ("pyocd", "probe_target", pyocd_source_line("swd_no_ack"), "target_not_detected", "pyocd source"),
     ("pyocd", "flash_firmware", "0001042 C Target type stm32f446re not recognized. Use 'pyocd list --targets' to see currently available target types. See <https://pyocd.io/docs/target_support.html> for how to install additional target support. [__main__]\n", "target_type_invalid", "in tree"),
+    # No pyOCD 0.45.1 source: its flash prints no verify line at all. The row
+    # keeps the rule's words pinned for a tool that would print them.
     ("pyocd", "flash_firmware", "0000900 E Verify failed at 0x08000000 [load_cmd]\n", "verify_failed", "rule"),
-    ("pyocd", "flash_firmware", "0000900 C Flash programming failed [load_cmd]\n", "flash_failed", "rule"),
-    ("pyocd", "debug_symbol_value", "0000817 E Transfer error while reading 4 bytes @ 0x20000080 [savemem]\n", "memory_read_failed", "rule"),
+    ("pyocd", "flash_firmware", pyocd_recording("pyocd_flash_bin_outside_flash")["stderr"], "flash_failed", "recorded"),
+    ("pyocd", "flash_firmware", pyocd_source_line("flash_program_page_failure"), "flash_failed", "pyocd source"),
+    ("pyocd", "flash_firmware", pyocd_source_line("flash_program_page_timeout"), "flash_failed", "pyocd source"),
+    ("pyocd", "flash_firmware", pyocd_source_line("flash_init_failure"), "flash_failed", "pyocd source"),
+    ("pyocd", "flash_firmware", pyocd_source_line("flash_erase_sector_failure"), "flash_erase_failed", "pyocd source"),
+    ("pyocd", "flash_firmware", pyocd_source_line("flash_erase_sector_timed_out"), "flash_erase_failed", "pyocd source"),
+    ("pyocd", "flash_firmware", pyocd_source_line("flash_erase_not_within_a_sector"), "flash_erase_failed", "pyocd source"),
+    ("pyocd", "debug_symbol_value", pyocd_recording("pyocd_read_unmapped_address")["stdout"], "memory_read_failed", "recorded"),
 ]
 
 
@@ -752,7 +810,8 @@ TOOL_RESULT_ROWS = [
     ("pyocd", "probe_target", {}, "0000000:ERROR:Error attempting to connect to target\nError: unable to connect to the target\n", "target_not_detected", "target_not_detected", "refused"),
     ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, "0001042 C Target type stm32f446re not recognized. Use 'pyocd list --targets' to see currently available target types. See <https://pyocd.io/docs/target_support.html> for how to install additional target support. [__main__]\n", "target_type_invalid", "target_type_invalid", "refused"),
     ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, "0000900 E Verify failed at 0x08000000 [load_cmd]\n", "verify_failed", "verify_failed", "quarantined"),
-    ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, "0000900 C Flash programming failed [load_cmd]\n", "flash_failed", "flash_failed", "quarantined"),
+    ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, pyocd_recording("pyocd_flash_bin_outside_flash")["stderr"], "flash_failed", "flash_failed", "quarantined"),
+    ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, pyocd_source_line("flash_program_page_failure"), "flash_failed", "flash_failed", "quarantined"),
 ]
 
 
@@ -889,7 +948,7 @@ def test_a_pyocd_read_the_commander_reported_failed_is_memory_read_failed(tmp_pa
     assert value["ok"] is False, value
     assert value["backend_error_type"] == "memory_read_failed", value
     assert value["error_type"] == "memory_read_failed", value
-    assert "Transfer error" in value["programmer_output"]["stderr"], value["programmer_output"]
+    assert "Error: memory transfer failed" in value["programmer_output"]["stdout"], value["programmer_output"]
     assert "hex" not in value, value
     assert value.get("remediation") == remediation_fields("memory_read_failed", "pyocd").get("remediation"), value.get("remediation")
 
@@ -913,9 +972,44 @@ def test_pyocd_flash_then_failed_reset_is_partial(tmp_path: Path) -> None:
     assert result["reset_after_flash"] is False, result
     assert result["verify"] is False, result
     assert result["artifact"]["path"] == "build/firmware.elf", result
-    assert "reset failed" in result["programmer_output"]["stderr"], result["programmer_output"]
+    # The commander's own report of the reset that failed, the way pyOCD 0.45.1
+    # prints it (on stdout, exit 0), classified as the reset it was and not as
+    # the flash the tool is named after.
+    assert "Error: memory transfer failed" in result["programmer_output"]["stdout"], result["programmer_output"]
+    assert result["backend_error_type"] == "reset_failed", result
+    assert result.get("remediation") == remediation_fields("reset_failed", "pyocd").get("remediation"), result.get("remediation")
     # The firmware is on the board, so the failure is not one of the refusals
     # that promise the hardware was never touched.
+    assert result.get("target_contacted") is not False, result
+    assert "success_confirmed" not in result, result
+
+
+def test_pyocd_flash_then_timed_out_reset_names_the_timeout(tmp_path: Path) -> None:
+    """The same partial effect, but the reset never answered: the timeout is a field, not only a cause (#655).
+
+    `error_type` stays `reset_failed`, the word for a failed post-flash reset,
+    and the partial-flash fields stay as the refused reset has them. What the
+    reset's own run ended in, a timeout, travels in `backend_error_type`, and
+    the summary, the causes and the steps are the timeout's, so a caller can
+    tell a reset that hung from one the target refused.
+    """
+    # Long enough for the flash, a spawned interpreter, on a loaded machine;
+    # the reset sleeps far past it.
+    config = config_for(tmp_path, "pyocd", FAKE_PYOCD_RESET_HANGS, timeout_s=8)
+
+    result = call(config, "flash_firmware", {"image_path": "build/firmware.elf", "reset_after_flash": True})
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "reset_failed", result
+    assert result["backend_error_type"] == "timeout", result
+    assert result["summary"] == "Firmware flashed, but the post-flash reset timed out.", result
+    assert any("timeout_s" in cause for cause in result["likely_causes"]), result["likely_causes"]
+    assert result.get("remediation") == remediation_fields("timeout", "pyocd").get("remediation"), result.get("remediation")
+    assert result["side_effect_committed"] is True, result
+    assert result["side_effect_status"] == "partial", result
+    assert result["retry_safe"] is False, result
+    assert result["reset_after_flash"] is False, result
+    assert result["artifact"]["path"] == "build/firmware.elf", result
     assert result.get("target_contacted") is not False, result
     assert "success_confirmed" not in result, result
 
@@ -1598,7 +1692,7 @@ def test_the_three_buckets_grow_no_unscoped_entry(bucket: str) -> None:
 SCOPED_REMEDIATION_ROWS = [
     ("stlink", "", "ST-LINK SN  : STLINK123\nMemory Programming ...\nError: Verify failed at address 0x08000000\n", "verify_failed", "STM32CubeProgrammer"),
     ("pyocd", "", "0000900 E Verify failed at 0x08000000 [load_cmd]\n", "verify_failed", "pyOCD"),
-    ("pyocd", "", "0000900 C Flash programming failed [load_cmd]\n", "flash_failed", "pyOCD"),
+    ("pyocd", "", pyocd_recording("pyocd_flash_bin_outside_flash")["stderr"], "flash_failed", "pyOCD"),
     ("openocd", f"{PROGRAMMING_FAILED}\n", "Error: failed to write memory at 0x08000000\n", "flash_failed", "OpenOCD"),
 ]
 
@@ -1689,7 +1783,7 @@ def test_the_clock_the_pyocd_flash_steps_offer_as_slower_is_below_pyocds_recorde
 # entry answers both, so the steps have to be about a read that could not be
 # taken rather than about the words of one transcript.
 PYOCD_READ_FAILURE_SHAPES = [
-    (FAKE_PYOCD_READ_FAILED, "Transfer error while reading"),
+    (FAKE_PYOCD_READ_FAILED, "Error: memory transfer failed"),
     (FAKE_PYOCD_SILENT_READ, "pyOCD reported a completed run but left no file holding the requested bytes."),
 ]
 

@@ -93,7 +93,7 @@ from agentic_hil.config import (
     safe_read_text,
 )
 from agentic_hil.devices import DeviceError, can_device
-from agentic_hil.knowledge import CAN_SEND_FAILED_ERROR
+from agentic_hil.knowledge import CAN_SEND_FAILED_ERROR, permission_denied_fields, permission_denied_summary
 from agentic_hil.process import spawn_detached_process
 from agentic_hil.report import logs_directory, safe_filename, timestamp_for_filename
 from agentic_hil.types import AgenticHILConfig, CanBusConfig, CanShareConfig, JsonObject
@@ -1037,6 +1037,16 @@ class CanBroker:
             self._log_bus({"event": "incident", "bus_id": self.bus_id, "scope": scope, "reason": reason, "reported_by": attached.name, "aborted_participants": aborted, "bus_gated": self.bus_gated})
             return {"ok": True, "message": "incident_recorded", "scope": scope, "reason": reason, "bus_gated": self.bus_gated, "aborted_participants": aborted, "abort": abort}
 
+    def _permission_refusal(self, attached: _Attached, permission: str, summary: str) -> JsonObject:
+        """A grant this broker read as closed, named by the key the file uses (#657).
+
+        The broker loads the file when it is spawned and the server at its own
+        start, so after an edit the broker can refuse a grant the server still
+        holds open. The key is what lets the caller tell the operator which line
+        to look at; the server merges the remediation for it."""
+        key = f"can_buses.{self.bus_id}.shares.{attached.name}.permissions.{permission}"
+        return {"ok": False, "error_type": "permission_denied", "summary": permission_denied_summary(summary, key), **permission_denied_fields(key), "bus_id": self.bus_id, "participant": attached.name, "retry_safe": False, "side_effect_committed": False}
+
     def _handle_send(self, attached: _Attached, message: JsonObject) -> JsonObject:
         from agentic_hil.can import CanFrame, listen_only_send_refusal
 
@@ -1066,7 +1076,7 @@ class CanBroker:
                 "listen_only_proof": listen_only_proof(self.bus_config),
             }
         if not attached.share.permissions.allow_write:
-            return {"ok": False, "error_type": "permission_denied", "summary": "Writing this CAN bus is disabled for this participant by the authoritative config.", "bus_id": self.bus_id, "participant": attached.name, "retry_safe": False, "side_effect_committed": False}
+            return self._permission_refusal(attached, "allow_write", "Writing this CAN bus is disabled for this participant by the authoritative config.")
         wire = message.get("frame")
         if not wire_frame_valid(wire):
             return {"ok": False, "error_type": "invalid_argument", "summary": "The CAN broker received a frame it cannot read.", "participant": attached.name, "side_effect_committed": False}
@@ -1130,7 +1140,7 @@ class CanBroker:
 
     def _handle_read(self, attached: _Attached, message: JsonObject) -> JsonObject:
         if not self.config.read_free and not attached.share.permissions.allow_read:
-            return {"ok": False, "error_type": "permission_denied", "summary": "Reading this CAN bus is disabled for this participant by the authoritative config.", "bus_id": self.bus_id, "participant": attached.name, "retry_safe": False, "side_effect_committed": False}
+            return self._permission_refusal(attached, "allow_read", "Reading this CAN bus is disabled for this participant by the authoritative config.")
         try:
             max_frames = int(message.get("max_frames") or 1)
             wait_timeout_s = float(message.get("wait_timeout_s") or 0.0)
@@ -1362,10 +1372,14 @@ class Participant:
     # -- plumbing ----------------------------------------------------------
 
     def _request(self, payload: JsonObject) -> JsonObject:
-        self.connection.send(payload)
-        if not self.connection.poll(CLIENT_REQUEST_TIMEOUT_S):
+        try:
+            self.connection.send(payload)
+            answered = self.connection.poll(CLIENT_REQUEST_TIMEOUT_S)
+            answer = self.connection.recv() if answered else None
+        except (OSError, EOFError) as error:
+            raise ParticipantError(broker_request_failure(error, self.bus_id, self.name)) from error
+        if not answered:
             raise ParticipantError({"ok": False, "error_type": "can_broker_timeout", "summary": "The CAN broker did not answer within the request timeout.", "bus_id": self.bus_id, "participant": self.name, "side_effect_status": "unknown"})
-        answer = self.connection.recv()
         if not isinstance(answer, dict):
             raise ParticipantError({"ok": False, "error_type": "can_broker_invalid_message", "summary": "The CAN broker answered with a message this client cannot read.", "bus_id": self.bus_id, "participant": self.name})
         return answer
@@ -1373,6 +1387,18 @@ class Participant:
     def _log(self, event: JsonObject) -> None:
         with suppress(ConfigError, OSError, ValueError):
             safe_append_text(self.log_path, json.dumps({"at": utc_now_iso(), **event}) + "\n")
+
+
+def broker_request_failure(error: BaseException, bus_id: str, participant: str) -> JsonObject:
+    """What a request to the broker that failed in transport answers (#664).
+
+    A `ParticipantError` already carries its refusal. A pipe that broke or
+    ended means the broker process has exited or closed this connection: a
+    connection failure, which the caller cures by starting the session again,
+    and never a failure of the audit trail, which the pipe is no part of."""
+    if isinstance(error, ParticipantError):
+        return dict(error.result)
+    return {"ok": False, "error_type": "can_broker_disconnected", "summary": "The connection to the CAN broker ended: the broker process has exited or closed this participant's connection.", "bus_id": bus_id, "participant": participant, "backend_error": f"{type(error).__name__}: {error}"}
 
 
 def attach_participant(

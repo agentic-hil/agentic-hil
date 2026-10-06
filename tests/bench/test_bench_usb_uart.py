@@ -396,6 +396,37 @@ def test_with_assert_dtr_false_the_open_pulses_dtr_at_most_once_and_the_session_
 
 
 # ---------------------------------------------------------------------------
+# A write that carries no byte.
+
+
+def test_an_empty_payload_is_refused_and_nothing_reaches_the_peer(servers: Servers, peer: Peer, port: str, record_property: RecordProperty) -> None:
+    """`invalid_argument` for a `com_write` whose text or hex encodes to no byte (#634).
+
+    An empty text, an empty hex and a hex of only whitespace are refused
+    before the line is written, so the peer counts nothing from them; the
+    session stays open, and a real stimulus after them is answered and is all
+    the peer received.
+    """
+    peer.start_responder(PING_PONG)
+    server = servers()
+    started = server.tool("com_session_start", port_id=port)
+    assert started["ok"] is True, started
+
+    refusals = {name: server.tool("com_write", port_id=port, **payload) for name, payload in (("text", {"text": ""}), ("hex", {"hex": ""}), ("blank_hex", {"hex": " \t"}))}
+    record_property("empty_payloads", json.dumps({name: {key: answer.get(key) for key in ("ok", "error_type", "summary", "bytes_written")} for name, answer in refusals.items()}))
+    assert server.tool("com_write", port_id=port, text="PING\r\n")["ok"] is True
+    answered, reads = read_bytes_until(server, port, b"PONG\r\n")
+    stopped = server.tool("com_session_stop", port_id=port)
+
+    for answer in refusals.values():
+        assert (answer["ok"], answer["error_type"]) == (False, "invalid_argument"), answer
+        assert "bytes_written" not in answer, answer
+    assert answered == b"PONG\r\n", (answered, reads)
+    assert stopped["ok"] is True, stopped
+    assert peer.received(server=server) == Tally.of(b"PING\r\n")
+
+
+# ---------------------------------------------------------------------------
 # A write the line cannot carry within write_timeout_s.
 
 
@@ -472,6 +503,7 @@ def test_a_write_the_line_cannot_carry_in_time_is_short_by_exactly_what_never_re
         "reads_refused": refused,
         "stop": {key: stopped.get(key) for key in ("ok", "error_type", "summary")},
     }
+    evidence["quarantine_guidance"] = {"write": written.get("quarantine_guidance"), "stop": stopped.get("quarantine_guidance")}
     if counted is None:
         # Whether the peer still answers on the probe's own line, at its own rate.
         try:
@@ -509,3 +541,11 @@ def test_a_write_the_line_cannot_carry_in_time_is_short_by_exactly_what_never_re
     assert int(counted["lost"]) == 0, report
     assert stopped.get("ok") is True, report
     assert left is None, report
+    # #659: the guidance for the short write is its own, not the fallback for
+    # a reason this version has no guide for: what was attempted, what reached
+    # the line, what is unknown, and no signature owed.
+    for answer in (written, stopped):
+        guides = [guide for guide in answer.get("quarantine_guidance", []) if guide["reason"] == "serial_write_incomplete"]
+        assert len(guides) == 1, report
+        assert "`bytes_requested`" in guides[0]["attempted"] and "`bytes_written`" in guides[0]["confirmed"], report
+        assert "partial" in guides[0]["unknown"] and "No signature is owed" in guides[0]["physical_check"], report

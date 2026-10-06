@@ -21,6 +21,7 @@ from agentic_hil.bench import (
 )
 from agentic_hil.config import (
     ConfigError,
+    atomic_write_bytes,
     atomic_write_text,
     derived_state_directory,
     safe_append_text,
@@ -645,6 +646,11 @@ class HardwareCoordinator:
         self.adopted_reason: str | None = None
         self.quarantine_id: str | None = None
         self.incident_resources: set[str] = set()
+        # Leases of sessions whose handle is closed and whose ledger broke,
+        # handed into the standing incident by `hand_over_to_incident`. They
+        # hold no lock, and are kept only so the project record goes on naming
+        # them, and their broken audit, until the operator signs.
+        self.incident_leases: dict[str, HardwareLease] = {}
         self._state = "open"
         self._guard = threading.RLock()
 
@@ -737,7 +743,7 @@ class HardwareCoordinator:
         with self._guard:
             self._require_open()
             if self.run_active:
-                raise CoordinationError({"ok": False, "error_type": "run_already_active", "summary": "A device run is already open on this owner; close it before declaring another.", "declared_devices": sorted(self.declared_resources or ()), "run_label": self.run_label, "run_started_at": self.run_started_at, "retry_safe": False, "side_effect_committed": False})
+                raise CoordinationError({"ok": False, "error_type": "run_already_active", "summary": "A device run is already open on this owner; close it before declaring another.", "declared_devices": sorted(self.declared_resources or ()), "run_label": self.run_label, "run_started_at": self.run_started_at, "retry_safe": False, "side_effect_committed": False, **remediation_fields("run_already_active")})
             if self.incident_stands:
                 # A new run is the stimulus class, so it waits. The recovery
                 # class does not need a run to reach the board, which is what
@@ -936,18 +942,23 @@ class HardwareCoordinator:
         claimed = sorted({item.lock_key if isinstance(item, Device) else fold_resource_name(item) for item in resources if isinstance(item, Device) or (isinstance(item, str) and item)})
         with self._guard:
             self._require_open()
+            self.settle_external_recovery()
             undeclared = self._undeclared(claimed)
             if undeclared:
                 raise CoordinationError(
                     {
                         "ok": False,
                         "error_type": "undeclared_device",
-                        "summary": "This run did not declare the device it is reaching for, so the access is refused; add it to the test description and rerun.",
+                        "summary": (
+                            "This run did not declare the device it is reaching for, so the access is refused; add it to the "
+                            "test description, or to `devices` on `bench_run_start` for a run opened that way, and rerun."
+                        ),
                         "undeclared_devices": undeclared,
                         "declared_devices": sorted(self.declared_resources or ()),
                         "run_label": self.run_label,
                         "retry_safe": False,
                         "side_effect_committed": False,
+                        **remediation_fields("undeclared_device"),
                     }
                 )
             if self.incident_stands and not for_recovery:
@@ -962,6 +973,15 @@ class HardwareCoordinator:
                     self.project_lock.release()
                     self.project_lock = None
                     raise
+                if stale is not None and stale.get("state") == "active":
+                    # An owner that exited between calls without reaching a board
+                    # is released here, on the same evidence and with the same
+                    # ledger line the settling status read writes. The read-only
+                    # status tool leaves that record to this acquire (#670).
+                    finding = self._dead_owner_made_no_contact(stale)
+                    released = self._release_dead_owner(finding) if finding is not None else None
+                    if released is not None:
+                        stale = released
                 if stale is not None and stale.get("state") not in {None, "released"}:
                     stale_resources = [item for item in stale.get("resources", []) if isinstance(item, str)] or normalized
                     self._adopt_incident(stale, stale_resources, "owner_process_exited_without_release")
@@ -1224,6 +1244,77 @@ class HardwareCoordinator:
                 return
             lease.cleanup_events.append(details)
             self._persist_lease(lease)
+
+    def hand_over_to_incident(self, lease: HardwareLease) -> bool:
+        """Give the locks of a closed session back into the standing incident.
+
+        For a session whose handle is closed and whose lease is held by an
+        incident that stands (a broken audit). Nothing this process can do
+        ends that incident, and ``recover`` refuses while a live owner holds a
+        lock, so a lease kept here would leave the operator nothing to sign
+        until the server stops. The lease leaves this owner's population, its
+        resource locks, its machine-wide hold and, with no other lease left,
+        the project lock are given back, and the markers keep saying
+        ``cleanup_required`` under the same quarantine id: the resources stay
+        quarantined on disk, and this owner refuses them in memory, until the
+        operator's ``recover`` signs. ``settle_external_recovery`` is how this
+        owner then learns the signature happened.
+
+        False, and nothing changed, for a lease this does not apply to: no
+        standing incident, a lease that is not in cleanup state, or one that is
+        not this owner's."""
+        with self._guard:
+            if not isinstance(lease, HardwareLease) or not self.incident_stands or lease.state not in {"cleanup_required", "quarantined"} or not self._valid_lease(lease):
+                return False
+            remaining = {lease_id: item for lease_id, item in self.leases.items() if lease_id != lease.lease_id}
+            self.incident_leases[lease.lease_id] = lease
+            try:
+                self._persist_lease(lease)
+                self._persist_project("cleanup_required", leases=remaining)
+            except (CoordinationError, ConfigError, OSError, ValueError):
+                self.incident_leases.pop(lease.lease_id, None)
+                return False
+            self.leases = remaining
+            lease.valid = False
+            while lease.locks:
+                lease.locks[-1].release()
+                lease.locks.pop()
+            self.bench.release(lease.bench_resources)
+            lease.bench_resources = []
+            if not self.leases and self.project_lock is not None:
+                self.project_lock.release()
+                self.project_lock = None
+            return True
+
+    def settle_external_recovery(self) -> bool:
+        """Learn that an operator's ``recover`` in another process signed this owner's incident.
+
+        Only for an incident this owner holds no lock for, which is what lets
+        another process sign it at all: the project record then says
+        ``released`` under the quarantine id this owner was holding, and the
+        incident ends here too. Anything else leaves the incident as it is."""
+        with self._guard:
+            if self._state != "open" or not self.blocked or self.leases or self.project_lock is not None or not self.quarantine_id:
+                return False
+            try:
+                record = self._read_record(self.project_key)
+            except CoordinationError:
+                return False
+            if record is None or record.get("state") != "released" or record.get("recovered_quarantine_id") != self.quarantine_id:
+                return False
+            self.blocked = False
+            self.audit_incident = False
+            self.adopted_reason = None
+            self.quarantine_id = None
+            self.incident_resources.clear()
+            self.incident_leases.clear()
+            return True
+
+    def held_lease_next_step(self, stop_tool: str) -> str:
+        """What ends the incident a closed session's lease is held under."""
+        if self.run_active:
+            return f"Call bench_run_stop: the run's teardown ends the incident, and {stop_tool} then gives the resource back."
+        return f"End the session that holds the incident open (debug_stop_session for a debug session), then call {stop_tool} again."
 
     def stand_down(self) -> JsonObject | None:
         """End an incident that owes no gate, and leave the ledger saying so.
@@ -1623,11 +1714,23 @@ class HardwareCoordinator:
                 self.project_lock = self._acquire_lock(self.project_key, resources or [self.project_key])
             self._persist_project("cleanup_required", sorted(self.incident_resources))
 
-    def status(self) -> JsonObject:
+    def status(self, *, settle_dead_owner: bool = True) -> JsonObject:
+        """This project's lease and incident state, and the device holds.
+
+        ``settle_dead_owner`` False makes this a pure read: an `active` record
+        whose owner has exited is reported as it is found, with what the next
+        acquire will do about it, and nothing is released, adopted or written.
+        That is the answer `hardware_lease_status` gives, because it is annotated
+        read-only and a host runs such a call without asking (#670). The
+        transition itself is made by `acquire`, which meets the same record.
+        """
         with self._guard:
+            self.settle_external_recovery()
             owner_active = self.project_lock is not None
             snapshot_atomic = True
             released_dead_owner: JsonObject | None = None
+            pending_dead_owner: JsonObject | None = None
+            unsettled_dead_owner = False
             if owner_active:
                 record = self._read_record(self.project_key)
             else:
@@ -1645,7 +1748,12 @@ class HardwareCoordinator:
                         # Only a record read while holding the probe lock may drive
                         # the exited-owner quarantine transition.
                         record = self._read_record(self.project_key)
-                        if record is not None and record.get("state") == "active":
+                        if record is not None and record.get("state") == "active" and not settle_dead_owner:
+                            # Read only: say what the next acquire will find,
+                            # and leave the record for it to settle.
+                            pending_dead_owner = self._dead_owner_made_no_contact(record)
+                            unsettled_dead_owner = pending_dead_owner is None
+                        elif record is not None and record.get("state") == "active":
                             stale_resources = [item for item in record.get("resources", []) if isinstance(item, str)]
                             finding = self._dead_owner_made_no_contact(record)
                             released = self._release_dead_owner(finding) if finding is not None else None
@@ -1670,8 +1778,13 @@ class HardwareCoordinator:
                     finally:
                         probe.release()
             blocked_state = bool(record and record.get("state") in {"cleanup_required", "quarantined", "recovery_pending"})
-            blocked = self.blocked or blocked_state
+            blocked = self.blocked or blocked_state or unsettled_dead_owner
             reasons = _record_cleanup_reasons(record)
+            if unsettled_dead_owner:
+                # The reason the settling read would have written, reported
+                # without writing it: the owner exited holding the bench, and
+                # nothing it left says it never reached a board.
+                reasons = sorted({*reasons, "owner_process_exited_without_release"})
             # Asked after the project block, never inside it: the probe lock above
             # is released by then, so no device is taken while a project lock is.
             holds = self.device_holds()
@@ -1705,7 +1818,7 @@ class HardwareCoordinator:
                 # quarantine narrowed is a different question from whether an
                 # incident is open. Only a damaged evidence chain answers yes,
                 # and it is the one route `recover` still has work to do on.
-                "incident_stands": self.incident_stands or (blocked_state and record_audit_broken(record)),
+                "incident_stands": self.incident_stands or ((blocked_state or unsettled_dead_owner) and record_audit_broken(record)),
                 # Lifted out of the record so an operator can decide between
                 # retrying and walking to the bench without opening state files.
                 "cleanup_reasons": reasons,
@@ -1725,6 +1838,10 @@ class HardwareCoordinator:
                 # what evidence, or the difference is invisible to the operator
                 # who would otherwise have signed for it.
                 result["released_dead_owner"] = released_dead_owner
+            if pending_dead_owner is not None:
+                # The read-only counterpart: the owner exited without reaching a
+                # board, and the next acquire releases it on this evidence.
+                result["dead_owner_no_contact"] = pending_dead_owner
             if blocked:
                 # The signature `recover --confirm-safe-state` asks for is only
                 # as good as what the signer was told: name what was attempted,
@@ -2041,8 +2158,14 @@ class HardwareCoordinator:
                     return {"ok": False, "tool": "hardware_recover", "error_type": "coordination_state_invalid", "summary": "Quarantine resource markers are inconsistent.", **remediation_fields("coordination_state_invalid")}
                 resuming = state == "recovery_pending"
                 for resource in sorted(set(resources)):
-                    locks.append(self._acquire_lock(resource, resources))
-                    marker = self._read_record(resource)
+                    # Answered like the project lock above: a lock or a marker
+                    # this recovery cannot take or read is the refusal it is,
+                    # with nothing cleared, never an exception out of the tool.
+                    try:
+                        locks.append(self._acquire_lock(resource, resources))
+                        marker = self._read_record(resource)
+                    except CoordinationError as error:
+                        return {"tool": "hardware_recover", **error.result}
                     marker_state = (marker or {}).get("state")
                     if marker is not None and marker_state == "released" and marker.get("recovered_quarantine_id") == quarantine_id:
                         # Already committed by an interrupted run of the same
@@ -2105,6 +2228,7 @@ class HardwareCoordinator:
                 self.adopted_reason = None
                 self.quarantine_id = None
                 self.incident_resources.clear()
+                self.incident_leases.clear()
                 return {
                     "ok": True,
                     "tool": "hardware_recover",
@@ -2128,6 +2252,165 @@ class HardwareCoordinator:
                         else "Quarantined hardware resources were released after a recovery action drove the target into a state it then read back."
                         if attestation == ATTESTATION_RECOVERY_ACTION
                         else "Quarantined hardware resources were released: every reason it was held for names a call that never reached the hardware."
+                    ),
+                }
+            finally:
+                for lock in reversed(locks):
+                    lock.release()
+                project_lock.release()
+
+    def retire_records(
+        self,
+        *,
+        safe_state_confirmed: bool,
+        quarantine_id: str | None = None,
+        actor: str = RECOVERY_ACTOR_HUMAN,
+        via: str = "cli:recover",
+        attestation: str = ATTESTATION_OPERATOR,
+    ) -> JsonObject:
+        """Set aside this project's records that no recovery can clear (#669).
+
+        `recover` stops on a record it cannot trust (corrupted, from another
+        version, of the wrong shape) and on a marker that disagrees with the
+        incident, and so does every other command, so an operator was left with
+        a refusal and no step to take. This is that step, behind the same
+        signature `recover` asks for: the operator has checked the board.
+
+        Only this project's records are touched: the project record, every
+        record of this project that can still be read, and the records of this
+        configuration's devices that cannot be read at all. Another project's
+        readable incident is left where it is; it resolves in its own workspace.
+        A record the operating system refused to read is answered with that
+        refusal, because a permission or a full disk is fixed where it is.
+
+        Nothing is deleted. Each record's bytes are kept under `retired/` beside
+        the live records, and the ledger line, written before anything moves,
+        names each one with its digest. Then a `released` record takes its place.
+        """
+        if not safe_state_confirmed:
+            return {"ok": False, "tool": "hardware_recover", "error_type": "operator_confirmation_required", "summary": "Retiring coordination records requires explicit operator confirmation of physical safe state.", **remediation_fields("operator_confirmation_required")}
+        with self._guard:
+            self._require_open()
+            if self.project_lock is not None or self.leases:
+                return {"ok": False, "tool": "hardware_recover", "error_type": "resource_busy", "summary": "Live owner still holds project resources.", **remediation_fields("resource_busy")}
+            try:
+                project_lock = self._acquire_lock(self.project_key, [self.project_key])
+            except CoordinationError as error:
+                return {"tool": "hardware_recover", **error.result}
+            locks: list[_LifetimeLock] = []
+            try:
+                names = {DEBUGGER_DISCOVERY_RESOURCE, *config_devices(self.config).lock_keys}
+                # The resources a readable record of this project names, wherever
+                # it is: a damaged project record no longer says which they were,
+                # and the markers of its incident each carry the whole list.
+                for path in sorted(self.record_directory.glob("*.json")):
+                    try:
+                        found = _read_record_at(path, path.stem)
+                    except CoordinationError:
+                        continue
+                    if found is not None and found.get("project_resource") == self.project_key:
+                        names.update(item for item in found.get("resources", []) if isinstance(item, str))
+                names.discard(self.project_key)
+                retire: list[tuple[str, str]] = []
+                left_alone: list[JsonObject] = []
+                project_record: JsonObject | None = None
+                for resource in [self.project_key, *sorted(names)]:
+                    try:
+                        if resource != self.project_key:
+                            locks.append(self._acquire_lock(resource, [resource]))
+                        record = self._read_record(resource)
+                    except CoordinationError as error:
+                        # Only a record whose content cannot be trusted is retired.
+                        # One the operating system refused to read is answered with
+                        # that refusal: it is fixed where it is.
+                        if error.result.get("error_type") != "coordination_state_invalid" or not (error.__cause__ is None or isinstance(error.__cause__, ValueError)):
+                            return {"tool": "hardware_recover", **error.result}
+                        retire.append((resource, "unreadable"))
+                        continue
+                    if record is None or record.get("state") in {None, "released"}:
+                        continue
+                    if record.get("project_resource") != self.project_key:
+                        left_alone.append({"resource": resource, "project_resource": record.get("project_resource"), "state": record.get("state")})
+                        continue
+                    if resource == self.project_key:
+                        project_record = record
+                    retire.append((resource, str(record.get("state"))))
+                # A project record that can still be read names its incident, and
+                # the signature is for that incident, the way `recover` asks it.
+                if project_record is not None and project_record.get("state") in {"cleanup_required", "quarantined", "recovery_pending"}:
+                    if not quarantine_id:
+                        return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_id_required", "summary": "This project's record names an incident; retiring its records signs for that quarantine_id.", **remediation_fields("quarantine_id_required")}
+                    if project_record.get("quarantine_id") != quarantine_id:
+                        return {"ok": False, "tool": "hardware_recover", "error_type": "quarantine_changed", "summary": "Quarantine incident changed; inspect lease-status and confirm the current incident.", **remediation_fields("quarantine_changed")}
+                if not retire:
+                    return {
+                        "ok": True,
+                        "tool": "hardware_recover",
+                        "nothing_to_recover": True,
+                        "retired": [],
+                        "left_alone": left_alone,
+                        "summary": "No record of this project needed retiring; nothing changed.",
+                    }
+                stamp = utc_now_iso().replace(":", "").replace(".", "")
+                entries: list[JsonObject] = []
+                contents: dict[str, bytes] = {}
+                for resource, found_as in retire:
+                    path = self._record_path(resource)
+                    data = safe_read_bytes(path)
+                    contents[resource] = data
+                    entries.append({"resource": resource, "found": found_as, "sha256": hashlib.sha256(data).hexdigest(), "retired_as": f"retired/{path.stem}.{stamp}.json"})
+                audit_event = {
+                    "event": "recovery",
+                    "recovery": "records_retired",
+                    "actor": actor,
+                    "via": via,
+                    "attestation": attestation,
+                    **({"quarantine_id": quarantine_id} if quarantine_id else {}),
+                    "retired": entries,
+                    "left_alone": left_alone,
+                    "workspace": self.config.workspace_root,
+                    "config_path": self.config.config_path,
+                    "current_config_sha256": self.config_sha256,
+                    "time": utc_now_iso(),
+                }
+                # Evidence first, as in `recover`: a retirement the ledger does
+                # not hold does not happen.
+                try:
+                    safe_append_text(self.root / "recovery.jsonl", json.dumps(audit_event) + "\n")
+                except BaseException as error:
+                    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                        raise
+                    return {"ok": False, "tool": "hardware_recover", "error_type": "recovery_audit_failed", "summary": "The retirement could not be written to the recovery ledger; no record was moved.", "backend_error": str(error), "audit_ok": False, "quarantine_id": quarantine_id, **remediation_fields("recovery_audit_failed")}
+                resources = sorted(resource for resource, _ in retire if resource != self.project_key)
+                released = self._base_record("released", resources)
+                released.update({"recovered_at": utc_now_iso(), "safe_state_confirmed": True, "released_reason": "records_retired", **({"recovered_quarantine_id": quarantine_id} if quarantine_id else {})})
+                try:
+                    retired_directory = self._state_directory("coordination", "records", "retired")
+                    for entry in entries:
+                        resource = str(entry["resource"])
+                        atomic_write_bytes(retired_directory / Path(str(entry["retired_as"])).name, contents[resource])
+                        self._write_record(resource, released)
+                except BaseException as error:
+                    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                        raise
+                    return {"ok": False, "tool": "hardware_recover", "error_type": "recovery_persist_failed", "summary": "The retirement is in the ledger but not every record could be set aside; run the same command again.", "backend_error": str(error), "retry_safe": True, **remediation_fields("recovery_persist_failed")}
+                self.blocked = False
+                self.audit_incident = False
+                self.adopted_reason = None
+                self.quarantine_id = None
+                self.incident_resources.clear()
+                return {
+                    "ok": True,
+                    "tool": "hardware_recover",
+                    "retired": entries,
+                    "left_alone": left_alone,
+                    "safe_state_confirmed": True,
+                    "actor": actor,
+                    "attestation": attestation,
+                    **({"recovered_quarantine_id": quarantine_id} if quarantine_id else {}),
+                    "summary": (
+                        f"Set aside {len(entries)} coordination record(s) of this project after operator-confirmed recovery; "
+                        "each one's bytes are kept under `retired/` beside the records and named in the recovery ledger."
                     ),
                 }
             finally:
@@ -2231,7 +2514,7 @@ class HardwareCoordinator:
         if resources is None:
             resources = sorted({resource for lease in population.values() for resource in lease.resources} | (self.incident_resources if state in {"cleanup_required", "quarantined"} else set()))
         record = self._base_record(state, resources)
-        record["leases"] = [lease.status() for lease in population.values()]
+        record["leases"] = [lease.status() for lease in population.values()] + [lease.status() for lease_id, lease in self.incident_leases.items() if lease_id not in population]
         if state in {"cleanup_required", "quarantined"}:
             record["quarantine_id"] = self.quarantine_id
             if self.adopted_reason and not any(lease.status().get("cleanup_reasons") for lease in population.values()):
@@ -2330,6 +2613,7 @@ class HardwareCoordinator:
             "cleanup_reasons": reasons,
             "retry_safe": False,
             "quarantine_id": self.quarantine_id,
+            **remediation_fields("resource_quarantined"),
         }
 
     def _require_open(self) -> None:

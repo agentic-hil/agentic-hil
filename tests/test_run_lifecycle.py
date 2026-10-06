@@ -399,6 +399,40 @@ def test_a_detached_start_on_a_held_bench_answers_with_the_run_that_was_refused(
     assert report["run"] == result["run"]
 
 
+@pytest.mark.parametrize("tool", ["probe_target", "bench_run_start", "test_reactor_run"])
+def test_a_device_another_session_holds_is_refused_with_its_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str) -> None:
+    """Every `device_busy` hands out the catalogue's steps, not only the plan
+    run's: a bare hardware call and an explicit run meet the same holder (#662)."""
+    from agentic_hil.bench import BenchMutex
+    from agentic_hil.knowledge import remediation_fields
+    from agentic_hil.test_reactor import declared_devices
+    from agentic_hil.tools import AgenticHILToolService
+
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    arguments = {
+        "probe_target": {},
+        "bench_run_start": {"devices": [{"kind": "debugger", "id": "dut"}], "label": "held-elsewhere"},
+        "test_reactor_run": {"test_config_path": str(plan)},
+    }[tool]
+    stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+    stranger.acquire(declared_devices(config, load_test_config(str(plan), config.work_dir)))
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call(tool, arguments)
+    finally:
+        service.close()
+        stranger.release_all()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "device_busy", result
+    # A plan run reads its own scoped entry: `test_reactor_run` takes no
+    # `wait_s`, so the bare entry's bounded wait is not its advice (#673).
+    advice = remediation_fields("device_busy", "test_reactor" if tool == "test_reactor_run" else None)
+    assert result.get("remediation") == advice["remediation"], result
+    assert result.get("do_not") == advice.get("do_not"), result
+
+
 def test_the_publish_window_grows_with_the_bounded_device_wait() -> None:
     """The startup deadline accounts for the wait the worker was handed.
 
@@ -595,11 +629,11 @@ def test_a_killed_worker_is_reported_gone_rather_than_guessed_at(tmp_path: Path,
     gone = wait_for_state(config, result["run"], {"worker_gone", "finished", "stopped"})
 
     assert gone["state"] == "worker_gone", gone
-    assert "lease-status" in gone["next_step"]
+    assert "hardware_lease_status" in gone["next_step"]
     refused = request_run_stop(config, result["run"])
     assert refused["ok"] is False
     assert refused["error_type"] == "run_worker_gone"
-    assert "lease-status" in refused["next_step"]
+    assert "hardware_lease_status" in refused["next_step"]
 
 
 def test_a_killed_worker_leaves_the_bench_to_the_machinery_that_already_owns_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detached_runs) -> None:

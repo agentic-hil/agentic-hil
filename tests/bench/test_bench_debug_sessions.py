@@ -806,3 +806,51 @@ def test_a_server_that_ends_with_a_session_open_hands_the_board_to_the_next_one(
 
     stopped = successor.tool("debug_stop_session")
     assert stopped["ok"] is True, stopped
+
+
+def test_a_debug_start_on_a_missing_target_script_is_named_as_probe_target_names_it(
+    bench: Bench, gdb: None, firmware: Path
+) -> None:
+    """One missing OpenOCD script, one public name, whichever tool met it (#654).
+
+    The configuration is a copy of the tier's with `target_cfg` pointing at a
+    script no OpenOCD ships, so the real OpenOCD stops at its configuration
+    stage before it opens the probe. debug_start_session used to publish the
+    classifier's own word for that, `target_config_not_found`, where probe_target
+    publishes `debugger_config_not_found`; a caller branching on `error_type`
+    had two words for one cause. Both are asked here, on one server, and both
+    have to answer the same `error_type` and the same `backend_error_type`, name
+    the field, and give the bench straight back. The copy sits beside the tier's
+    configuration and is removed afterwards; the tier's own is never written.
+    """
+    import dataclasses
+
+    import yaml
+
+    document = bench.configuration()
+    entry = document["debuggers"][bench.debugger_name()]
+    if entry.get("type") != "openocd":
+        pytest.skip("this bench's debugger is not `type: openocd`, and the missing script is OpenOCD's")
+    entry["target_cfg"] = "target/agentic-hil-no-such-target.cfg"
+    variant = bench.config.parent / "bench-missing-target-script.yaml"
+    variant.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    missing = dataclasses.replace(bench, config=variant)
+    server: McpServer | None = None
+    try:
+        server = McpServer(missing)
+        started = server.tool("debug_start_session", {"image_path": workspace_image(bench, firmware), "mode": "attach"})
+        probed = server.tool("probe_target")
+    finally:
+        if server is not None:
+            server.shut_down()
+        variant.unlink(missing_ok=True)
+
+    assert started["ok"] is False, started
+    assert started["error_type"] == "debugger_config_not_found", started
+    assert started["backend_error_type"] == "target_config_not_found", started
+    assert "target_cfg" in started["summary"], started["summary"]
+    assert started.get("quarantined") is not True, started
+    assert probed["ok"] is False, probed
+    assert probed["error_type"] == started["error_type"], (started["error_type"], probed)
+    assert probed["backend_error_type"] == started["backend_error_type"], (started["backend_error_type"], probed)
+    assert blocking_incident(bench) is None

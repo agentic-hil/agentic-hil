@@ -360,7 +360,6 @@ EXPECTED_INVENTORY: dict[str, frozenset[str]] = {
             "can_participant_required",
             "coordination_state_invalid",
             "invalid_argument",
-            "not_supported",
             "unknown_device",
         }
     ),
@@ -372,6 +371,7 @@ EXPECTED_INVENTORY: dict[str, frozenset[str]] = {
             "config_invalid",
             "coordination_state_invalid",
             "report_not_found",
+            "report_state_damaged",
             "report_unreadable",
             "report_write_failed",
             "unknown_debugger_error",
@@ -425,6 +425,10 @@ NEW_ENTRIES = frozenset(
         "hardware_mismatch",
         "output_validation_failed",
         "report_not_found",
+        # A report state that reads and holds something damaged (#689). It used
+        # to answer `config_invalid` with configuration advice; the repair is
+        # `agentic-hil report-state-repair`, not the configuration.
+        "report_state_damaged",
         "report_unreadable",
         # The nested `audit_error` of a report or log write the filesystem
         # refused (`report.audit_error_detail`, #675). Both audit paths nest the
@@ -448,10 +452,9 @@ SCOPED_SITES: dict[tuple[str, str], str] = {
 }
 SCOPED_VALUE = "not_supported"
 
-# A not_supported site that never reaches a tool result.
-EXCLUDED_SITES: dict[tuple[str, str], str] = {
-    ("devices", "DebuggerDevice.routing_refusal"): "only `Device.execute` calls it, and nothing in src calls `Device.execute`",
-}
+# A not_supported site that never reaches a tool result. None is left since
+# `DebuggerDevice.routing_refusal` went with `Device.execute` (#682).
+EXCLUDED_SITES: dict[tuple[str, str], str] = {}
 
 # Values only attached-hardware discovery writes in these modules. Discovery has
 # no configured debugger to scope by, and the per-backend entries these types
@@ -517,10 +520,9 @@ FORWARDING_SITES: dict[tuple[str, str, str], str] = {
     ("tools", "tool_error", ERROR_TYPE_KEY): "every caller passes a literal",
 }
 
-# Functions whose sites are left out of the delivery, each with why.
-DEAD_SITES: dict[tuple[str, str], str] = {
-    ("report", "read_report_file"): "nothing in src calls it; the report readers go through read_report_state_entry",
-}
+# Functions whose sites are left out of the delivery, each with why. None is
+# left since `read_report_file` was deleted (#682).
+DEAD_SITES: dict[tuple[str, str], str] = {}
 
 NEW_KEYS = tuple(
     sorted(NEW_ENTRIES | set(SCOPED_SITES.values()) | {f"{value}:{DISCOVERY_SCOPE}" for value in DISCOVERY_SCOPED})
@@ -786,10 +788,18 @@ FACTS: dict[str, Facts] = {
         never=(r"\bmeans? (the|a|that the) (call|run) (failed|passed)",),
     ),
     "report_unreadable": Facts(
-        says=(r"exists and reading it failed", r"path is\s+withheld", r"damaged answers `config_invalid`"),
+        says=(r"exists and reading it failed", r"path is\s+withheld", r"damaged answers `report_state_damaged`"),
         steps=(r"error_class", r"state_root", r"audit_unavailable"),
         do_not=(r"delete or recreate", r"empty record"),
         never=(r"\bdelete\b",),
+    ),
+    # Damaged content, not a failed read: its own repair command, the damaged
+    # copy kept, and never the configuration as the cause (#689).
+    "report_state_damaged": Facts(
+        says=(r"exists and reads", r"not JSON", r"configuration is not involved", r"withheld", r"audit_unavailable"),
+        steps=(r"agentic-hil report-state-repair", r"every byte kept", r"Call again once it is repaired"),
+        do_not=(r"delete or edit", r"configuration"),
+        never=(r"config_invalid", r"init --force"),
     ),
     # The write side of the same fault, nested as `audit_error` by both audit
     # paths. It may never read as a record that was written, nor offer a retry
@@ -833,10 +843,10 @@ FACTS: dict[str, Facts] = {
     ),
     "not_supported:unbound_debugger": Facts(
         says=(r"binds none", r"declares no debugger at all, or it declares several", r"retry_safe: false"),
-        steps=(r"configured_debuggers", r"empty.*project_config_create", r"several.*test_reactor_run"),
-        mentions=(r"agentic-hil init --force", r"agentic-hil://reference/test-plan", r"allow_config_write"),
+        steps=(r"configured_debuggers", r"empty.*project_config_set.*project_config_reload_description.*project_config_create", r"several.*test_reactor_run"),
+        mentions=(r"agentic-hil init --force", r"agentic-hil://reference/test-plan", r"allow_config_write", r"allow_config_description_write", r"every grant closed"),
         do_not=(r"other arguments", r"delete or hand-edit"),
-        never=(r"debugger_id", r"project_config_set", r"only the operator can add"),
+        never=(r"debugger_id", r"only the operator can add"),
     ),
     "not_supported:unnamed_probe": Facts(
         says=(r"names no `probe_id` while other entries exist", r"nothing was started"),
@@ -1572,6 +1582,70 @@ def test_a_debug_stop_whose_release_cannot_be_recorded(tmp_path: Path, monkeypat
     assert re.search(r"no debug session is active", str(again.get("summary")), re.IGNORECASE), again
 
 
+def test_a_debug_stop_whose_release_cannot_be_recorded_says_what_is_unsettled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#676: the session ended with its target state confirmed, and only the lease record is unsettled."""
+    service = debug_service(tmp_path)
+    coordinator = service.coordinator
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        monkeypatch.setattr(coordinator, "_write_record", failing_write_record(coordinator, lambda resource, record: record.get("state") == "released"))
+        result = service.call("debug_stop_session")
+    finally:
+        monkeypatch.setattr(coordinator, "_write_record", type(coordinator)._write_record.__get__(coordinator))
+        service.close()
+    summary = str(result.get("summary"))
+    assert result.get("error_type") == "cleanup_required", result
+    assert "target state remains unconfirmed" not in summary, summary
+    assert re.search(r"debug session is over", summary, re.IGNORECASE), summary
+    assert re.search(r"release could not be recorded", summary), summary
+
+
+def test_a_probe_after_a_debugger_call_raised_does_not_blame_another_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#677: an OSError in a debugger call leaves an incident this process holds; the next probe answers that."""
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path, auto_recover="off"))))
+    original = service.backend.probe_target
+
+    def raising(*args: object, **kwargs: object) -> dict:
+        raise OSError(errno.EIO, "Input/output error")
+
+    try:
+        monkeypatch.setattr(service.backend, "probe_target", raising)
+        first = service.call("probe_target")
+        monkeypatch.setattr(service.backend, "probe_target", original)
+        again = service.call("probe_target")
+        status = service.call("hardware_lease_status")
+    finally:
+        monkeypatch.setattr(service.backend, "probe_target", original)
+        try:
+            service.close()
+        finally:
+            service.coordinator.close()
+    assert first.get("error_type") == "audit_failed_after_action", first
+    assert first.get("quarantined") is True, first
+    assert status.get("incident_stands") is True, status
+    assert "another Agentic HIL process" not in str(again.get("summary")), again
+    assert again.get("error_type") != "resource_busy", again
+    if again.get("ok") is not True:
+        assert again.get("quarantine_id") == status.get("quarantine_id"), (again, status)
+
+
+def test_a_debug_shutdown_whose_release_cannot_be_recorded_says_what_is_unsettled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#676: shutdown still fails closed, and its words name the lease record rather than the target."""
+    service = debug_service(tmp_path)
+    coordinator = service.coordinator
+    assert start_debug_session(service, mode="attach")["ok"] is True
+    monkeypatch.setattr(coordinator, "_write_record", failing_write_record(coordinator, lambda resource, record: record.get("state") == "released"))
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            service.close()
+    finally:
+        monkeypatch.setattr(coordinator, "_write_record", type(coordinator)._write_record.__get__(coordinator))
+        coordinator.close()
+    message = str(raised.value)
+    assert "target state remains unconfirmed" not in message, message
+    assert re.search(r"release could not be recorded", message), message
+
+
 # audit_unavailable from the other modules that build it.
 
 
@@ -1611,3 +1685,12 @@ def test_a_can_session_whose_log_cannot_be_created(tmp_path: Path, monkeypatch: 
     finally:
         service.close()
     assert_carries_entry(result, "audit_unavailable")
+
+
+def test_the_report_module_reads_reports_one_way() -> None:
+    """`read_report_file` had no caller: the report readers go through
+    `read_report_state_entry`, so its refusal sites were texts no answer could
+    carry (#682)."""
+    import agentic_hil.report as report
+
+    assert not hasattr(report, "read_report_file")

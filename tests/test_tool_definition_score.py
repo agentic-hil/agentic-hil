@@ -1,9 +1,10 @@
 """The tool-definition score gate, held to the TDQS specification v1.3.
 
-`tools/tool_definition_score.py` keeps the server's overall Tool Definition
-Quality Score from falling: a change passes when the overall score after it is
-at least the overall score before it, compared on the number, not the letter
-tier. Everything in this file runs without a model and without the network.
+`tools/tool_definition_score.py` keeps the mean Tool Definition Quality Score
+of the server's tools from falling: a change passes when the mean TDQS after it
+is at least the mean TDQS before it, compared on the number, not the letter
+tier. The overall score, description quality, coherence and the minimum are
+reported as information and never decide. Everything in this file runs without a model and without the network.
 The scorer is a fake that hands back canned answers, the command-line backend
 runs a stand-in program in place of the real one, and the prompt texts are
 stand-ins, because the upstream specification carries no license and its
@@ -81,7 +82,8 @@ COHERENCE_DIMENSIONS = ("disambiguation", "naming_consistency", "tool_count_appr
 PROMPT_KEYS = {"tool_system", "tool_user", "coherence_system", "coherence_user"}
 # The confirmation procedure of the brief, as the version record states it.
 CONFIRMATION_PROCEDURE = {"version": 1, "initial_pairs": 1, "confirmation_pairs_on_drop": 2, "statistic": "median_per_side"}
-PINNED_MODEL = "claude-haiku-4-5-20251001"
+PINNED_MODEL = "claude-opus-5-5"
+PINNED_CLI_VERSION = "2.1.288"
 TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
 MISSING_TOKEN_LINE = f"INVALID: The tool definitions changed and {TOKEN_VARIABLE} is not set, so they cannot be scored."
 GIT_CALL_S = 60
@@ -238,8 +240,8 @@ def export(tools: list[dict], version: str = "1.0") -> dict:
     return tds.export_from_tools(copy.deepcopy(tools), server_name="agentic-hil", server_version=version)
 
 
-def overall_pairs(report: dict) -> list[tuple[Fraction, Fraction]]:
-    return [(pair["base"]["rollups"]["overallScore"], pair["head"]["rollups"]["overallScore"]) for pair in report["pairs"]]
+def mean_pairs(report: dict) -> list[tuple[Fraction, Fraction]]:
+    return [(pair["base"]["rollups"]["meanTdqs"], pair["head"]["rollups"]["meanTdqs"]) for pair in report["pairs"]]
 
 
 # --- round1 and the tiers (Computing the score, Tiers) ------------------------
@@ -1330,12 +1332,15 @@ def test_score_side_scores_every_tool_and_flags_the_shadowed_one() -> None:
 # --- the confirmation procedure -----------------------------------------------
 
 
-def side(overall: str) -> dict:
-    return {"rollups": {"overallScore": Fraction(overall)}}
+def side(mean: str, overall: str | None = None) -> dict:
+    rollups = {"meanTdqs": Fraction(mean)}
+    if overall is not None:
+        rollups["overallScore"] = Fraction(overall)
+    return {"rollups": rollups}
 
 
 class PairRunner:
-    """Hands out the given (base, head) overall scores one pair per call, and counts the calls."""
+    """Hands out the given (base, head) mean TDQS one pair per call, and counts the calls."""
 
     def __init__(self, pairs: list[tuple[str, str]]) -> None:
         self.pairs = list(pairs)
@@ -1375,6 +1380,36 @@ def test_confirmation_procedure(pairs: list[tuple[str, str]], decision: str, cal
     assert len(result["pairs"]) == calls
 
 
+@pytest.mark.parametrize(
+    ("pairs", "decision", "calls"),
+    [
+        pytest.param([(("3.4", "3.7"), ("3.4", "3.5"))], "pass", 1, id="the-overall-falls-the-mean-holds-one-pair-passes"),
+        pytest.param([(("3.4", "3.5"), ("3.3", "3.7"))] * 3, "block", 3, id="the-overall-rises-the-mean-falls-and-blocks"),
+        pytest.param(
+            [(("3.4", "3.7"), ("3.3", "3.9")), (("3.4", "3.9"), ("3.4", "3.1")), (("3.4", "3.9"), ("3.5", "3.1"))],
+            "pass",
+            3,
+            id="the-medians-of-the-mean-clear-what-the-overall-would-block",
+        ),
+    ],
+)
+def test_the_mean_decides_not_the_overall(pairs: list[tuple[tuple[str, str], tuple[str, str]]], decision: str, calls: int) -> None:
+    """Each side carries a mean TDQS and an overall that disagree: the mean triggers the
+    confirmation pairs and its per-side medians decide."""
+    count = [0]
+
+    def run_pair() -> tuple[dict, dict]:
+        (base_mean, base_overall), (head_mean, head_overall) = pairs[count[0]]
+        count[0] += 1
+        return side(base_mean, base_overall), side(head_mean, head_overall)
+
+    result = tds.confirm(run_pair)
+
+    assert result["decision"] == decision
+    assert count[0] == calls
+    assert tds.decide(result["pairs"]) == decision
+
+
 def test_an_invalid_pair_during_confirmation_never_passes() -> None:
     calls = []
 
@@ -1397,24 +1432,24 @@ ONE_AFTER = [tool("alpha_tool", "After.")]
     [
         pytest.param(
             [4, 4, 4, 4], [3, 5, 3, 5], "block",
-            [("4.0", "3.3"), ("4.0", "4.7"), ("4.0", "3.3")], [5],
+            [("4.0", "3.0"), ("4.0", "5.0"), ("4.0", "3.0")], [5],
             id="a-favourable-second-pair-then-a-blocking-median-and-an-unused-fourth",
         ),
-        pytest.param([4, 4, 4], [3, 5, 4], "pass", [("4.0", "3.3"), ("4.0", "4.7"), ("4.0", "4.0")], [], id="the-median-clears-the-first-drop"),
-        pytest.param([5, 3, 4], [3, 4, 4], "pass", [("4.7", "3.3"), ("3.3", "4.0"), ("4.0", "4.0")], [], id="per-side-medians-not-per-pair-differences"),
+        pytest.param([4, 4, 4], [3, 5, 4], "pass", [("4.0", "3.0"), ("4.0", "5.0"), ("4.0", "4.0")], [], id="the-median-clears-the-first-drop"),
+        pytest.param([5, 3, 4], [3, 4, 4], "pass", [("5.0", "3.0"), ("3.0", "4.0"), ("4.0", "4.0")], [], id="per-side-medians-not-per-pair-differences"),
     ],
 )
 def test_noisy_scores_run_through_the_comparison(
     base_values: list[int], head_values: list[int], decision: str, recorded: list[tuple[str, str]], unused: list[int]
 ) -> None:
-    """One tool per side, a coherence of 4.0 throughout: a tool scoring v gives the
-    overall 0.7 v + 1.2, so 3 gives 3.3, 4 gives 4.0 and 5 gives 4.7."""
+    """One tool per side: a tool scoring v in every dimension has a TDQS of v, and so a
+    mean TDQS of v, which is what decides."""
     scorer = QueueScorer({"Before.": base_values, "After.": head_values})
 
     report = tds.compare(export(ONE_BEFORE), export(ONE_AFTER), scorer, standin_record())
 
     assert report["decision"] == decision
-    assert overall_pairs(report) == [(Fraction(base), Fraction(head)) for base, head in recorded]
+    assert mean_pairs(report) == [(Fraction(base), Fraction(head)) for base, head in recorded]
     assert scorer.queues["After."] == unused
     assert scorer.queues["Before."] == base_values[3:]
 
@@ -1488,10 +1523,11 @@ def exact_mean(scored_side: dict) -> Fraction:
     return sum(values, Fraction(0)) / len(values)
 
 
-def test_a_new_tool_that_lowers_the_overall_only_through_the_minimum_term_blocks() -> None:
+def test_a_new_tool_that_lowers_only_the_minimum_and_the_overall_passes() -> None:
     """Base: 3.5 and 3.6, coherence 4.0, overall 3.7. Head: both rise to 4.5 and a new
-    tool at 2.5 joins; the mean rises (3.55 to 3.83) but the minimum falls to 2.5,
-    description quality falls to 3.3, and the overall to 3.5."""
+    tool at 2.5 joins; the minimum falls to 2.5, description quality to 3.3 and the
+    overall to 3.5, but the mean TDQS rises from 3.6 (3.55) to 3.8 (3.83), and the
+    mean decides: one pair, a pass, and the fallen overall shown as information."""
     base_tools = [tool("alpha_tool", "Alpha, before."), tool("beta_tool", "Beta, before.")]
     head_tools = [tool("alpha_tool", "Alpha, after."), tool("beta_tool", "Beta, after."), tool("new_tool", "New tool.")]
     scorer = FakeScorer(
@@ -1506,22 +1542,83 @@ def test_a_new_tool_that_lowers_the_overall_only_through_the_minimum_term_blocks
 
     report = tds.compare(export(base_tools), export(head_tools), scorer, standin_record())
 
-    assert report["decision"] == "block"
-    assert report["exitCode"] == 1
-    assert len(report["pairs"]) == 3
-    assert len(scorer.tool_calls) == 3 * (2 + 3)
-    assert len(scorer.coherence_calls) == 3 * 2
+    assert report["decision"] == "pass"
+    assert report["exitCode"] == 0
+    assert len(report["pairs"]) == 1
+    assert len(scorer.tool_calls) == 2 + 3
     first = report["pairs"][0]
     assert first["base"]["rollups"]["overallScore"] == Fraction("3.7")
     assert first["head"]["rollups"]["overallScore"] == Fraction("3.5")
     assert first["head"]["rollups"]["descriptionQualityScore"] == Fraction("3.3")
-    assert exact_mean(first["head"]) > exact_mean(first["base"])
-    assert report["causes"]["minimumTerm"]["head"]["tool"] == "new_tool"
+    assert mean_pairs(report) == [(Fraction("3.6"), Fraction("3.8"))]
+    assert report["causes"] is None
+    assert report["reason"] == "The mean TDQS holds: 3.6 before, 3.8 after."
     summary = tds.summary_markdown(report)
-    assert "new_tool" in summary
-    assert "minimum" in summary.lower()
-    assert "3.7" in summary
-    assert "3.5" in summary
+    assert markdown_row(summary, "Mean TDQS", "3.6", "3.8")
+    assert markdown_row(summary, "Overall", "3.7", "3.5")
+    assert markdown_row(summary, "Description quality", "3.5", "3.3")
+    minimum = re.search(r"^\|\s*Minimum TDQS\s*\|([^|]*)\|([^|]*)\|", summary, re.MULTILINE)
+    assert minimum
+    assert "new_tool" in minimum.group(2)
+
+
+def test_the_mean_is_compared_as_its_rollup_rounded_once_like_every_score() -> None:
+    """Base: two tools at 3.6. Head: 3.7 and 3.4, an exact mean of 3.55 that rounds half
+    up to 3.6. The mean TDQS rollup is compared, so the head holds on one pair, while
+    the minimum (3.4) pulls description quality down from 3.6 to 3.5."""
+    base_tools = [tool("alpha_tool", "Alpha, before."), tool("beta_tool", "Beta, before.")]
+    head_tools = [tool("alpha_tool", "Alpha, after."), tool("beta_tool", "Beta, after.")]
+    scorer = FakeScorer(
+        {
+            "Alpha, before.": tool_answer((4, 4, 3, 4, 3, 3)),
+            "Beta, before.": tool_answer((4, 4, 3, 4, 3, 3)),
+            "Alpha, after.": tool_answer((4, 4, 3, 4, 3, 4)),
+            "Beta, after.": tool_answer((3, 3, 4, 3, 4, 4)),
+        }
+    )
+
+    report = tds.compare(export(base_tools), export(head_tools), scorer, standin_record())
+
+    first = report["pairs"][0]
+    assert sorted(result["tdqs"] for result in first["head"]["tools"].values()) == [Fraction("3.4"), Fraction("3.7")]
+    assert exact_mean(first["head"]) < exact_mean(first["base"])
+    assert mean_pairs(report) == [(Fraction("3.6"), Fraction("3.6"))]
+    assert first["head"]["rollups"]["descriptionQualityScore"] < first["base"]["rollups"]["descriptionQualityScore"]
+    assert report["decision"] == "pass"
+    assert len(report["pairs"]) == 1
+
+
+def test_a_confirmed_drop_names_the_mean_in_the_reason_and_the_report() -> None:
+    """alpha_tool falls from 5.0 to 4.0 on every pair: the mean TDQS falls from 5.0 to 4.0,
+    the three pairs and the medians are the mean's, and the tools that fell are ranked
+    by what each fall alone costs the unrounded mean."""
+    base_tools = [tool("alpha_tool", "Alpha, before.")]
+    head_tools = [tool("alpha_tool", "Alpha, after.")]
+    scorer = FakeScorer({"Alpha, before.": tool_answer((5,) * 6), "Alpha, after.": tool_answer((4,) * 6)})
+
+    report = tds.compare(export(base_tools), export(head_tools), scorer, standin_record())
+
+    assert report["decision"] == "block"
+    assert report["reason"] == "The mean TDQS fell from 5.0 to 4.0, the median of each side over three pairs."
+    assert report["median"] == {"base": Fraction("5.0"), "head": Fraction("4.0")}
+    summary = tds.summary_markdown(report)
+    assert "The mean TDQS decides" in summary
+    assert re.search(r"^\|\s*Pair\s*\|\s*Base mean TDQS\s*\|\s*Head mean TDQS\s*\|", summary, re.MULTILINE)
+    assert markdown_row(summary, "3", "5.0", "4.0")
+    assert "Median mean TDQS: 5.0 before, 4.0 after." in summary
+    assert "lowers the unrounded mean TDQS" in summary
+    assert "overall" not in summary.split("### What fell on the first pair", 1)[1].split("### Size", 1)[0].lower()
+
+
+def test_a_first_pair_drop_the_medians_clear_says_so_in_mean_terms() -> None:
+    pairs = [(side("3.5"), side("3.4")), (side("3.4"), side("3.5")), (side("3.4"), side("3.4"))]
+
+    assert tds.decide(pairs) == "pass"
+    reason = tds._reason("pass", pairs)
+    assert reason == (
+        "The first pair's mean TDQS dropped from 3.5 to 3.4, but the medians over three pairs are "
+        "3.4 before and 3.4 after, so the drop is not confirmed."
+    )
 
 
 def test_a_drop_names_the_dimensions_and_coherence_that_fell_with_their_justifications() -> None:
@@ -1563,8 +1660,9 @@ def test_a_drop_names_the_dimensions_and_coherence_that_fell_with_their_justific
         assert expected in summary
 
 
-def test_the_tools_that_fell_are_sorted_by_their_effect_on_the_overall() -> None:
-    """zeta_tool falls 4.5 to 2.5 and becomes the minimum; beta_tool falls 4.5 to 4.3."""
+def test_the_tools_that_fell_are_sorted_by_their_effect_on_the_mean() -> None:
+    """zeta_tool falls 4.5 to 2.5 and becomes the minimum; beta_tool falls 4.5 to 4.3.
+    The mean TDQS falls from 4.3 to 3.6."""
     base_tools = [tool("beta_tool", "Beta, before."), tool("gamma_tool", "Gamma."), tool("zeta_tool", "Zeta, before.")]
     head_tools = [tool("beta_tool", "Beta, after."), tool("gamma_tool", "Gamma."), tool("zeta_tool", "Zeta, after.")]
     scorer = FakeScorer(
@@ -1580,15 +1678,17 @@ def test_the_tools_that_fell_are_sorted_by_their_effect_on_the_overall() -> None
     report = tds.compare(export(base_tools), export(head_tools), scorer, standin_record())
 
     assert report["decision"] == "block"
+    assert mean_pairs(report)[0] == (Fraction("4.3"), Fraction("3.6"))
     assert [item["tool"] for item in report["causes"]["tools"]] == ["zeta_tool", "beta_tool"]
+    assert [item["effect"] for item in report["causes"]["tools"]] == [Fraction(2, 3), Fraction(1, 15)]
     assert report["causes"]["minimumTerm"]["head"]["tool"] == "zeta_tool"
 
 
-def test_a_small_drop_of_the_minimum_tool_outranks_a_bigger_drop_elsewhere() -> None:
+def test_the_bigger_fall_outranks_the_minimum_tool_on_the_mean() -> None:
     """Five tools. zulu_tool, the minimum on both sides, falls 3.0 to 2.8; alpha_tool falls
-    4.5 to 3.9. Overall 3.8 to 3.7. Taken alone, zulu's fall lowers the unrounded
-    overall by 0.7 x (0.6 x 0.2 / 5 + 0.4 x 0.2) = 0.0728 and alpha's by
-    0.7 x 0.6 x 0.6 / 5 = 0.0504, so zulu comes first although alpha fell further."""
+    4.5 to 3.9. The mean TDQS falls from 4.2 to 4.0 (4.04). Taken alone, each fall
+    lowers the unrounded mean by its size over the five tools: alpha's by 0.6 / 5 = 0.12
+    and zulu's by 0.2 / 5 = 0.04, so alpha comes first; being the minimum adds nothing."""
     others = ("bravo_tool", "charlie_tool", "delta_tool")
     base_tools = [tool("zulu_tool", "Zulu, before."), tool("alpha_tool", "Alpha, before."), *[tool(name, "Steady.") for name in others]]
     head_tools = [tool("zulu_tool", "Zulu, after."), tool("alpha_tool", "Alpha, after."), *[tool(name, "Steady.") for name in others]]
@@ -1605,11 +1705,11 @@ def test_a_small_drop_of_the_minimum_tool_outranks_a_bigger_drop_elsewhere() -> 
     report = tds.compare(export(base_tools), export(head_tools), scorer, standin_record())
 
     assert report["decision"] == "block"
-    assert overall_pairs(report)[0] == (Fraction("3.8"), Fraction("3.7"))
+    assert mean_pairs(report)[0] == (Fraction("4.2"), Fraction("4.0"))
     causes = report["causes"]["tools"]
-    assert [item["tool"] for item in causes] == ["zulu_tool", "alpha_tool"]
-    assert [item["effect"] for item in causes] == [Fraction("0.0728"), Fraction("0.0504")]
-    assert [(item["base"], item["head"]) for item in causes] == [(Fraction("3.0"), Fraction("2.8")), (Fraction("4.5"), Fraction("3.9"))]
+    assert [item["tool"] for item in causes] == ["alpha_tool", "zulu_tool"]
+    assert [item["effect"] for item in causes] == [Fraction("0.12"), Fraction("0.04")]
+    assert [(item["base"], item["head"]) for item in causes] == [(Fraction("4.5"), Fraction("3.9")), (Fraction("3.0"), Fraction("2.8"))]
     assert report["causes"]["minimumTerm"]["base"]["tool"] == "zulu_tool"
     assert report["causes"]["minimumTerm"]["head"]["tool"] == "zulu_tool"
 
@@ -1658,6 +1758,8 @@ def test_the_report_carries_exports_versions_and_commits_and_serializes() -> Non
     assert markdown_row(summary, "Description quality", "4.0", "5.0")
     assert markdown_row(summary, "Coherence", "4.0", "4.0")
     assert markdown_row(summary, "Mean TDQS", "4.0", "5.0")
+    assert report["reason"] == "The mean TDQS holds: 4.0 before, 5.0 after."
+    assert "The mean TDQS decides" in summary
     minimum = re.search(r"^\|\s*Minimum TDQS\s*\|([^|]*)\|([^|]*)\|", summary, re.MULTILINE)
     assert minimum
     assert "4.0" in minimum.group(1) and "alpha_tool" in minimum.group(1)
@@ -1746,7 +1848,7 @@ def test_the_committed_version_record_pins_model_spec_prompts_and_rubric() -> No
     record = tds.load_version_record()
 
     assert record["model"] == PINNED_MODEL
-    assert re.fullmatch(r"\d+\.\d+\.\d+", record["cli_version"])
+    assert record["cli_version"] == PINNED_CLI_VERSION
     assert re.fullmatch(r"[0-9a-f]{40}", record["spec_commit"])
     assert record["spec_commit"].startswith("b9881b0cfec8")
     assert record["spec_version"] == "1.3"
@@ -1906,6 +2008,18 @@ def test_the_committed_calibration_record_holds_together() -> None:
     document = CALIBRATION_DOCUMENT.read_text(encoding="utf-8")
     assert "mean absolute difference" in document.lower()
     assert f"{calibration['summary']['meanAbsoluteDifference']['tdqs']:.2f}" in document
+
+
+def test_the_document_names_the_pinned_model_and_command_line() -> None:
+    """The page that explains the scores names the judge that gives them, and no other."""
+    record = tds.load_version_record()
+    document = CALIBRATION_DOCUMENT.read_text(encoding="utf-8")
+
+    assert f"`{record['model']}`" in document
+    assert f"command line {record['cli_version']}" in document
+    assert f"calibrated with {record['cli_version']}" in document
+    assert set(re.findall(r"\b2\.\d+\.\d{3}\b", document)) == {record["cli_version"]}
+    assert set(re.findall(r"`(claude-[a-z0-9-]+)`", document)) == {record["model"]}
 
 
 # --- the prompts: fetched, extracted, verified, never committed ---------------

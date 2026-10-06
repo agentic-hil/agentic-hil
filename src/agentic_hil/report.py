@@ -655,6 +655,25 @@ def read_report_state_entry(
         }
 
 
+REPORT_STATE_FILENAME = "report-state.json"
+
+
+def _report_state_damaged(problem: str, details: JsonObject | None = None) -> ConfigError:
+    """The refusal for a report state that reads and whose content is damaged.
+
+    Its own type, not `config_invalid`: the configuration is not the file that is
+    damaged, and that type's advice (the schema, `written_by_release`, `doctor`)
+    repairs nothing here (#689). The absolute path is left out on purpose, the
+    rule every tool answer about this file follows; the operator's commands,
+    `agentic-hil doctor` and `agentic-hil report-state-repair`, print it."""
+    return ConfigError(
+        "report_state_damaged",
+        f"This project's report state ({REPORT_STATE_FILENAME} under state_root) {problem}, so the last report and "
+        "failure it records cannot be read and no hardware call can be recorded until it is repaired.",
+        details,
+    )
+
+
 def read_report_state(config: AgenticHILConfig) -> JsonObject | None:
     path = report_state_path(config)
     try:
@@ -664,13 +683,66 @@ def read_report_state(config: AgenticHILConfig) -> JsonObject | None:
     try:
         state = json.loads(text)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ConfigError("config_invalid", "Agentic HIL report state is not valid JSON.", {"path": path}) from error
+        raise _report_state_damaged("is not valid JSON") from error
     if not isinstance(state, dict) or state.get("version") != 1:
-        raise ConfigError("config_invalid", "Agentic HIL report state has an unsupported format.", {"path": path})
+        raise _report_state_damaged("has an unsupported format")
     for key in ("last_report", "last_failure"):
         if state.get(key) is not None and not isinstance(state.get(key), dict):
-            raise ConfigError("config_invalid", "Agentic HIL report state contains an invalid entry.", {"path": path, "field": key})
+            raise _report_state_damaged(f"holds a `{key}` entry that is not an object", {"entry": key})
     return state
+
+
+def repair_report_state(config: AgenticHILConfig) -> JsonObject:
+    """`agentic-hil report-state-repair`: move a damaged report state aside.
+
+    The sanctioned way back from `report_state_damaged` (#689). Under the report
+    lock, so no writer is halfway through it. A state that reads, or none at all,
+    is left exactly as it is: this is a repair, not a reset. A damaged one is
+    renamed beside itself under a name that says so, every byte kept, because it
+    is this project's record of what ran and the refusal's `do_not` forbids
+    throwing it away; then a fresh, empty state is written in its place. The
+    per-run reports and logs are not touched."""
+    path = Path(report_state_path(config))
+    with safe_file_lock(report_lock_path(config)):
+        try:
+            read_report_state(config)
+        except ConfigError as error:
+            if error.error_type != "report_state_damaged":
+                raise
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            aside = path.with_name(f"report-state.damaged-{stamp}.json")
+            counter = 1
+            while aside.exists():
+                aside = path.with_name(f"report-state.damaged-{stamp}-{counter}.json")
+                counter += 1
+            os.rename(path, aside)
+            write_report_state(config, {"version": 1, "last_report": None, "last_failure": None})
+            return {
+                "ok": True,
+                "repaired": True,
+                "path": str(path),
+                "moved_to": str(aside),
+                "summary": (
+                    f"The damaged report state was moved aside to {aside} and a fresh, empty one was started at "
+                    f"{path}. Hardware calls are recorded again; the last report and failure recorded before the "
+                    "damage are not carried over, and the per-run reports were not touched."
+                ),
+            }
+        except (OSError, ValueError) as error:
+            return {
+                "ok": False,
+                "error_type": "report_unreadable",
+                "summary": f"The report state at {path} could not be read, so it was left as it is; moving it aside would not repair access to it.",
+                "path": str(path),
+                **filesystem_error_detail(error),
+                **remediation_fields("report_unreadable"),
+            }
+    return {
+        "ok": True,
+        "repaired": False,
+        "path": str(path),
+        "summary": f"The report state at {path} reads, or there is none yet, so there is nothing to repair; it was left as it is.",
+    }
 
 
 def load_or_initialize_report_state(config: AgenticHILConfig) -> JsonObject:
@@ -720,47 +792,6 @@ def write_report_state(config: AgenticHILConfig, state: JsonObject) -> None:
     atomic_write_text(report_state_path(config), json.dumps(state, indent=2) + "\n")
 
 
-def read_report_file(config: AgenticHILConfig, path_factory: Callable[[AgenticHILConfig], str], tool: str, missing_summary: str) -> JsonObject:
-    try:
-        report_path = path_factory(config)
-        text = safe_read_text(report_path, workspace=config.work_dir)
-    except FileNotFoundError:
-        return {
-            "ok": False,
-            "tool": tool,
-            "error_type": "report_not_found",
-            "summary": missing_summary,
-        }
-    except ConfigError as error:
-        return {"tool": tool, **error.to_dict()}
-    except UnicodeDecodeError:
-        return {
-            "ok": False,
-            "tool": tool,
-            "error_type": "config_invalid",
-            "summary": "Agentic HIL report is not valid UTF-8 text.",
-            "report_path": display_path(config, report_path),
-        }
-    except OSError as error:
-        return {
-            "ok": False,
-            "tool": tool,
-            "error_type": "report_unreadable",
-            "summary": "Agentic HIL report could not be read.",
-            "backend_error": str(error),
-        }
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {
-            "ok": False,
-            "tool": tool,
-            "error_type": "config_invalid",
-            "summary": "Agentic HIL report is not valid JSON.",
-            "report_path": display_path(config, report_path),
-        }
-
-
 def is_failure_report(report: JsonObject) -> bool:
     return not overall_success(report)
 
@@ -804,6 +835,11 @@ def overall_success(result: JsonObject) -> bool:
     return failed_success_check(result) is None
 
 
+# The tools whose answer is a reading of the bench rather than an action on it.
+# `conclusive_success` takes their verdict from `ok` alone.
+STATE_READ_TOOLS = frozenset({"hardware_lease_status"})
+
+
 def conclusive_success(result: JsonObject) -> bool:
     """`overall_success`, which is the whole of what a verdict may be taken from.
 
@@ -824,12 +860,19 @@ def conclusive_success(result: JsonObject) -> bool:
     and the containment checks above, which is what the nonzero status is for.
 
     Kept as its own name rather than folded into `overall_success` because the
-    two answer different questions to different readers: `is_failure_report` and
-    the MCP ``isError`` flag ask "may this go on", while the exit status and the
-    rendering ask "is there anything standing". They agree today, and a marker
-    that belongs to only one of them has somewhere to go that is not the shared
-    predicate.
+    two answer different questions to different readers: `is_failure_report`
+    asks "may this go on", while the exit status, the rendering and the MCP
+    ``isError`` flag ask whether the call did its job. They differ for one kind
+    of call: a read of the bench's state (`STATE_READ_TOOLS`). Its containment
+    markers describe what it found, not anything it did, so it did its job when
+    it read the record, and the incident it found is data in the answer
+    (`blocked`, `incident_stands`, `cleanup_required`). Scored on those
+    markers, a status read over an open incident answered `isError: true` beside
+    `ok: true` and exited nonzero, so a caller could not tell a record that could
+    not be read from one that was read and named an incident (#684).
     """
+    if result.get("tool") in STATE_READ_TOOLS:
+        return result.get("ok") is True
     return overall_success(result)
 
 

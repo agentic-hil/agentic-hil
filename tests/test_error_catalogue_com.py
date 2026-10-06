@@ -50,7 +50,13 @@ import agentic_hil
 from agentic_hil import bench as bench_module
 from agentic_hil import comports, coordination, readuntil
 from agentic_hil.config import load_config
-from agentic_hil.knowledge import ERROR_CATALOGUE, ERROR_URI_PREFIX, catalogue_entry, remediation_fields
+from agentic_hil.knowledge import (
+    ERROR_CATALOGUE,
+    ERROR_URI_PREFIX,
+    QUARANTINE_REASON_GUIDES,
+    catalogue_entry,
+    remediation_fields,
+)
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.tools import AgenticHILToolService
 
@@ -82,6 +88,7 @@ COM_INVENTORY = frozenset(
         "serial_backend_not_available",
         "serial_write_failed",
         "serial_write_incomplete",
+        "session_lease_held",
         "session_not_active",
     }
 )
@@ -708,6 +715,15 @@ CLAIMS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
         ("steps", (r"`com_read`", r"\bdiscard")),
         ("do_not", (r"\b(fresh|stale|old)\b",)),
     ],
+    "session_lease_held": [
+        ("meaning", (r"\bclosed\b", r"\blease\b")),
+        ("meaning", (r"`cleanup_confirmed`", r"\bnever\b")),
+        ("meaning", (r"`next_step`",)),
+        ("meaning", (r"`participant`",)),
+        ("first", (r"`next_step`", r"`bench_run_stop`")),
+        ("steps", (r"\bstop\b", r"\bagain\b")),
+        ("do_not", (r"\bloop\b",)),
+    ],
     "session_not_active": [
         ("meaning", (r"`port_id`",)),
         ("meaning", (r"`bus_id`",)),
@@ -747,6 +763,7 @@ ORDER: dict[str, list[tuple[str, ...]]] = {
     "audit_write_failed": [(r"`backend_error`|`log_path`",), (r"confirm-safe-state",)],
     "com_port_close_failed": [(r"`com_session_stop`",), (r"`quarantine_guidance`",)],
     "com_buffer_clear_failed": [(r"`cleanup_confirmed`",), (r"`com_read`",)],
+    "session_lease_held": [(r"`bench_run_stop`",), (r"\bagain\b",)],
 }
 
 
@@ -852,6 +869,8 @@ class Line:
         # How many bytes in all a device takes before every further write
         # confirms none, the way pyserial reports a write the line did not take.
         self.write_budget: dict[str, int] = {}
+        # Every payload a handle was asked to write, in order.
+        self.writes: list[bytes] = []
         # The handle last opened on each device, to feed its reader.
         self.handles: dict[str, LineHandle] = {}
 
@@ -868,6 +887,7 @@ class LineHandle(ScriptedSerialHandle):
         self.line.handles[self.port] = self
 
     def write(self, data: bytes) -> int:
+        self.line.writes.append(bytes(data))
         if self.port in self.line.write_dies:
             raise OSError("write died mid-line")
         if self.port not in self.line.write_budget:
@@ -1010,6 +1030,19 @@ def stop_whose_close_is_refused(bench: SimpleNamespace) -> dict:
     return call(bench.service, "com_session_stop", {"port_id": PORT_ID})
 
 
+def stop_held_by_a_run(bench: SimpleNamespace) -> dict:
+    """A write of unknown effect inside a run: the stop closes the handle and
+    the run's incident keeps the lease. The run is ended afterwards, so the
+    port is given back before the server closes."""
+    run = call(bench.service, "bench_run_start", {"devices": [{"kind": "uart", "id": PORT_ID}], "label": "catalogue"})
+    assert run["ok"] is True, run
+    write_that_dies_on_the_line(bench)
+    refusal = call(bench.service, "com_session_stop", {"port_id": PORT_ID})
+    assert call(bench.service, "bench_run_stop", {})["ok"] is True
+    assert call(bench.service, "com_session_stop", {"port_id": PORT_ID})["ok"] is True
+    return refusal
+
+
 def write_without_a_session(bench: SimpleNamespace) -> dict:
     return call(bench.service, "com_write", {"port_id": PORT_ID, "text": "ping\n"})
 
@@ -1043,6 +1076,7 @@ REFUSALS = [
     pytest.param(start_whose_input_reset_fails, "com_buffer_clear_failed", id="com_session_start-com_buffer_clear_failed-new-session"),
     pytest.param(restart_whose_input_reset_fails, "com_buffer_clear_failed", id="com_session_start-com_buffer_clear_failed-active-session"),
     pytest.param(stop_whose_close_is_refused, "com_port_close_failed", id="com_session_stop-com_port_close_failed"),
+    pytest.param(stop_held_by_a_run, "session_lease_held", id="com_session_stop-session_lease_held"),
     pytest.param(write_without_a_session, "session_not_active", id="com_write-session_not_active"),
     pytest.param(write_that_dies_on_the_line, "serial_write_failed", id="com_write-serial_write_failed"),
     pytest.param(write_the_line_takes_only_part_of, "serial_write_incomplete", id="com_write-serial_write_incomplete"),
@@ -1109,6 +1143,125 @@ def test_a_new_session_whose_buffer_cannot_be_cleared_is_closed_again(bench: Sim
     assert again["ok"] is True and again["already_active"] is False, again
 
 
+@pytest.mark.parametrize("payload", [{"text": ""}, {"hex": ""}, {"hex": "  "}, {"hex": " \n\t"}], ids=["empty-text", "empty-hex", "blank-hex", "whitespace-hex"])
+def test_an_empty_payload_is_refused_before_anything_is_written_or_logged(bench: SimpleNamespace, payload: dict) -> None:
+    """#634: a payload that carries no byte is a caller's mistake, not a
+    stimulus. It is refused as `invalid_argument`, the line is never asked to
+    write, and the session log records no transmission."""
+    started(bench)
+    session = bench.service.com_ports.sessions[PORT_ID]
+
+    refused = call(bench.service, "com_write", {"port_id": PORT_ID, **payload})
+
+    assert refused["ok"] is False and refused["error_type"] == "invalid_argument", refused
+    assert "bytes_written" not in refused, refused
+    assert bench.line.writes == [], bench.line.writes
+    logged = [json.loads(line) for line in Path(session.log_path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [entry for entry in logged if entry.get("direction") == "tx"] == [], logged
+
+
+def mismatch_whose_board_moved(bench: SimpleNamespace, moved_to: str) -> dict:
+    """The declared board is attached under `moved_to`; another board holds the configured name."""
+    other = SimpleNamespace(device=DEVICES[DECLARED_PORT_ID], serial_number="CATALOGUEOTHERSERIAL", vid=None, pid=None)
+    named = SimpleNamespace(device=moved_to, serial_number=DECLARED_SERIAL, vid=None, pid=None)
+    bench.monkeypatch.setattr("serial.tools.list_ports.comports", lambda: [other, named])
+    return call(bench.service, "com_session_start", {"port_id": DECLARED_PORT_ID})
+
+
+def test_a_mismatch_whose_board_moved_names_the_device_key_and_the_reload(bench: SimpleNamespace) -> None:
+    """#658: adoption keeps a `device` that is already set, so advice that sends
+    the caller there changes nothing and the next start is refused the same
+    way. The repair is the key itself: `device` set to `expected_device`, then a
+    reload."""
+    moved_to = "/dev/ttyCATCOM9"
+    refusal = mismatch_whose_board_moved(bench, moved_to)
+
+    carries_its_entry(refusal, "com_port_identity_mismatch")
+    assert refusal["expected_device"] == moved_to, refusal
+    assert says([refusal.get("next_step", "")], rf"`com_ports\.{DECLARED_PORT_ID}\.device`", re.escape(moved_to)), refusal
+    advice = [refusal.get("next_step", ""), *refusal["remediation"]]
+    assert says(advice, r"`expected_device`", r"\.device`", r"`project_config_set`"), advice
+    assert says(advice, r"`project_config_reload_description`"), advice
+    assert not says([*advice, *refusal["do_not"]], r"adopt"), advice
+
+
+def test_following_the_mismatch_advice_opens_the_port(bench: SimpleNamespace) -> None:
+    """The advice, carried out: `device` set to `expected_device` by an edit of
+    the file, and a server on that file opens the port the refusal named. The
+    reload itself needs the discovered configuration, which this test does not
+    install, so the edited file is loaded the way a restart would load it."""
+    moved_to = "/dev/ttyCATCOM9"
+    refusal = mismatch_whose_board_moved(bench, moved_to)
+    assert refusal["error_type"] == "com_port_identity_mismatch", refusal
+
+    config_path = bench.tmp_path / "workspace" / ".agentic-hil" / "config.yaml"
+    text = config_path.read_text(encoding="utf-8")
+    configured = f"device: {DEVICES[DECLARED_PORT_ID]}\n"
+    assert text.count(configured) == 1, text
+    config_path.write_text(text.replace(configured, f"device: {refusal['expected_device']}\n"), encoding="utf-8")
+
+    on_the_line(bench)
+    edited = AgenticHILToolService(load_config(str(config_path)), frontend="mcp")
+    try:
+        again = call(edited, "com_session_start", {"port_id": DECLARED_PORT_ID})
+        assert again["ok"] is True, again
+        assert again["identity"]["device"] == moved_to, again
+    finally:
+        close(edited)
+
+
+def test_an_unverified_identity_never_sends_the_caller_to_adoption(bench: SimpleNamespace) -> None:
+    """#658: the entry's `device` is set whenever this refusal can happen
+    (an unset one is `com_port_not_bound`), and adoption keeps a set `device`.
+    The way out is restoring the check or setting `device` explicitly."""
+    refusal = start_of_a_declared_port_the_host_does_not_list(bench)
+
+    assert refusal["error_type"] == "com_port_identity_unverified", refusal
+    assert not says([refusal["next_step"]], r"adopt"), refusal["next_step"]
+    assert says([refusal["next_step"]], r"\bset\b", r"`device`"), refusal["next_step"]
+
+
+def comports_reason_literals() -> set[str]:
+    """Every reason comports.py hands `record_cleanup_event` or `quarantine` as a literal."""
+    reasons: set[str] = set()
+    for node in ast.walk(ast.parse(inspect.getsource(comports))):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in {"record_cleanup_event", "quarantine"}):
+            continue
+        if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+            reasons.add(node.args[0].value)
+    return reasons
+
+
+def test_every_reason_comports_records_has_a_guide() -> None:
+    """#659: a reason without a guide is answered with the fallback for a
+    reason from another version, which tells the caller to treat the device
+    state as unknown and sign for it."""
+    reasons = comports_reason_literals()
+
+    assert "serial_write_incomplete" in reasons and "com_write_effect_unconfirmed" in reasons, reasons
+    assert sorted(reasons - QUARANTINE_REASON_GUIDES.keys()) == []
+
+
+def test_a_short_write_and_the_stop_after_it_carry_the_short_write_guide(bench: SimpleNamespace) -> None:
+    """#659: the short write is confirmed, nothing is quarantined, and the
+    guidance says what was attempted, what reached the line, what is unknown,
+    and that no signature is owed."""
+    refusal = write_the_line_takes_only_part_of(bench)
+    stopped = call(bench.service, "com_session_stop", {"port_id": PORT_ID})
+
+    for result in (refusal, stopped):
+        guides = [guide for guide in result.get("quarantine_guidance", []) if guide["reason"] == "serial_write_incomplete"]
+        assert len(guides) == 1, result
+        guide = guides[0]
+        assert "different Agentic HIL version" not in guide["attempted"], guide
+        assert "treat the device state as unknown" not in guide["unknown"], guide
+        assert says([guide["attempted"]], r"`bytes_requested`"), guide
+        assert says([guide["confirmed"]], r"`bytes_written`"), guide
+        assert says([guide["unknown"]], r"\bpartial\b"), guide
+        assert says([guide["physical_check"]], r"\bno\b", r"\bsign"), guide
+    assert stopped["ok"] is True, stopped
+
+
 # ---------------------------------------------------------------------------
 # The reader's own failures, nested under `reader_error`.
 
@@ -1170,6 +1323,7 @@ def test_a_reader_whose_log_broke_is_answered_with_its_error_nested(tmp_path: Pa
             refusal = call(service, tool, arguments)
             assert refusal["error_type"] == "resource_quarantined", refusal
             assert "com_reader_audit_broken" in refusal["cleanup_reasons"], refusal
+            carries_its_entry(refusal, "resource_quarantined")
 
         listed = call(service, "com_ports_list", {})["ports"][PORT_ID]
         assert listed["reader_error"]["error_type"] == "audit_write_failed", listed
@@ -1212,6 +1366,61 @@ def test_a_port_the_open_run_did_not_declare_is_refused_with_a_type_that_resolve
     assert refusal["error_type"] == "undeclared_device", refusal
     assert resolved(bench.service, refusal["error_type"]) == entry_of("undeclared_device")
     assert remediation_fields(refusal["error_type"]), refusal
+
+
+def test_the_coordination_refusals_carry_their_entry(bench: SimpleNamespace) -> None:
+    """A refusal the coordinator builds hands out its entry's steps (#662).
+
+    The same server gives the steps for its other refusals, so these four carry
+    them too, wherever the refusal is built or forwarded: a port the open run
+    did not declare (a session and a flash capture), a second run, and a port
+    another server holds."""
+    on_the_line(bench)
+    run = call(bench.service, "bench_run_start", {"devices": [{"kind": "uart", "id": DECLARED_PORT_ID}], "label": "catalogue-com"})
+    assert run["ok"] is True, run
+    image = bench.tmp_path / "workspace" / "build" / "app.elf"
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    try:
+        session = call(bench.service, "com_session_start", {"port_id": PORT_ID})
+        capture = call(
+            bench.service,
+            "flash_firmware",
+            {"image_path": "build/app.elf", "reset_after_flash": True, "capture": {"port_id": PORT_ID}},
+        )
+        second = call(bench.service, "bench_run_start", {"devices": [{"kind": "uart", "id": DECLARED_PORT_ID}], "label": "catalogue-com-again"})
+    finally:
+        call(bench.service, "bench_run_stop", {})
+
+    carries_its_entry(session, "undeclared_device")
+    carries_its_entry(capture, "undeclared_device")
+    carries_its_entry(second, "run_already_active")
+
+    started(bench)
+    other_config = write_config(bench.tmp_path / "other", com_ports_yaml=COM_PORTS_YAML, state_root=bench.tmp_path / "other-state")
+    other = AgenticHILToolService(load_config(str(other_config)), frontend="mcp")
+    try:
+        busy = call(other, "com_session_start", {"port_id": PORT_ID})
+    finally:
+        close(other)
+    carries_its_entry(busy, "device_busy")
+
+
+def test_the_undeclared_device_refusal_names_both_ways_to_declare(bench: SimpleNamespace) -> None:
+    """A run declares its devices in the test description or in `devices` on
+    `bench_run_start`; the refusal names both, so a caller on either path finds
+    its own fix in the text (#662)."""
+    on_the_line(bench)
+    run = call(bench.service, "bench_run_start", {"devices": [{"kind": "uart", "id": DECLARED_PORT_ID}], "label": "catalogue-com"})
+    assert run["ok"] is True, run
+    try:
+        refusal = call(bench.service, "com_session_start", {"port_id": PORT_ID})
+    finally:
+        call(bench.service, "bench_run_stop", {})
+
+    assert refusal["error_type"] == "undeclared_device", refusal
+    assert "test description" in refusal["summary"], refusal
+    assert "`devices` on `bench_run_start`" in refusal["summary"], refusal
 
 
 # ---------------------------------------------------------------------------

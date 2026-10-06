@@ -60,16 +60,21 @@ from test_tool_definition_debug_sessions import (
     unknown_identifiers,
 )
 from test_tool_definition_debug_symbol_info import (
+    SESSION_BACKENDS,
+    WITHOUT_A_SESSION,
     _says_what_the_sibling_does,
     _segments,
     allow_all_grants_when_true,
     allows_either_policy_key,
+    an_open_session_answers_on_every_backend,
     clauses,
     examples,
+    flashed_elf_only_without_a_session,
     names,
     names_symbol_syntax,
     openocd_needs_a_session,
     sentences,
+    session_on,
     sessionless_backends_need_this_servers_flashed_elf,
     states_allow_all_default_false,
 )
@@ -859,6 +864,18 @@ def test_each_read_ties_each_prerequisite_to_its_backend_in_one_sentence(listed:
 
 
 @pytest.mark.parametrize("tool", READS)
+def test_each_read_says_an_open_session_answers_on_every_backend(listed: dict[str, dict], tool: str) -> None:
+    """#698: an open session answers on every backend; without one, OpenOCD
+    refuses with session_not_active while pyOCD and STM32CubeProgrammer
+    resolve against the ELF flash_firmware last wrote. The session is still
+    named by the tool that opens it."""
+    text = description(listed, tool)
+    assert an_open_session_answers_on_every_backend(text), text
+    assert names(text, "debug_start_session"), text
+    assert flashed_elf_only_without_a_session(text), text
+
+
+@pytest.mark.parametrize("tool", READS)
 def test_each_read_states_the_size_cap(listed: dict[str, dict], tool: str) -> None:
     assert caps_the_read_size(whole(listed, tool)), whole(listed, tool)
 
@@ -1005,19 +1022,19 @@ WITNESS_READ_SYMBOL = (
     "debug.allow_all_symbols is true (default false), else permission_denied. Unknown in ELF: symbol_not_found."
 )
 WITNESS_BACKENDS = (
-    "OpenOCD reads only in debug_start_session (else session_not_active); pyOCD and STM32CubeProgrammer read "
-    "the ELF flash_firmware last wrote (else symbol_source_not_available)."
+    "Open debug_start_session serves any backend; no session: OpenOCD refuses (session_not_active), "
+    "pyOCD and STM32CubeProgrammer read flash_firmware's last ELF (else symbol_source_not_available)."
 )
-WITNESS_CAP = "Above debug.max_dump_size_bytes: permission_denied."
+WITNESS_CAP = "Above max_dump_size_bytes: permission_denied."
 WITNESS = {
     VALUE: (
-        "Reads a symbol's memory, like gdb print: hex, plus value_signed and value_unsigned if size_bytes is 8, 4, 2 or 1. "
-        "Where: debug_symbol_info; as a file: debug_dump_symbol_ihex. " + WITNESS_BACKENDS + " " + WITNESS_CAP,
+        "Reads a symbol's memory like gdb print: hex, plus value_signed and value_unsigned at 8, 4, 2 or 1 bytes. "
+        "Where: debug_symbol_info; file: debug_dump_symbol_ihex. " + WITNESS_BACKENDS + " " + WITNESS_CAP,
         {"symbol": WITNESS_READ_SYMBOL},
     ),
     DUMP: (
         "Reads an allowed symbol's memory on the board and saves it to output_path as Intel HEX; returns output, address and "
-        "size_bytes. Its value inline: debug_symbol_value. " + WITNESS_BACKENDS + " " + WITNESS_CAP,
+        "size_bytes. Value inline: debug_symbol_value. " + WITNESS_BACKENDS + " " + WITNESS_CAP,
         {
             "symbol": WITNESS_READ_SYMBOL,
             "output_path": (
@@ -1483,6 +1500,33 @@ def test_both_reads_name_the_missing_prerequisite_of_each_backend(tmp_path: Path
 
     assert answer["ok"] is False, answer
     assert answer["error_type"] == error_type, answer
+
+
+@pytest.mark.parametrize("tool", READS)
+@pytest.mark.parametrize("backend", SESSION_BACKENDS)
+def test_both_reads_answer_from_an_open_session_on_every_backend_and_fall_back_without_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, tool: str) -> None:
+    """The behaviour the definitions state (#698).
+
+    With a session open and no flash_firmware call in this server, every
+    backend reads through the session. Once it ends, OpenOCD refuses with
+    session_not_active and pyOCD and STM32CubeProgrammer look for the ELF
+    flash_firmware last wrote, of which there is none.
+    """
+    arguments = {"symbol": "boot_counter", "output_path": "build/session.hex"} if tool == DUMP else {"symbol": "boot_counter"}
+    service, started = session_on(backend, tmp_path, monkeypatch)
+    try:
+        during = service.call(tool, arguments)
+        assert service.call("debug_stop_session")["ok"] is True
+        after = service.call(tool, {**arguments, "output_path": "build/after.hex"} if tool == DUMP else arguments)
+    finally:
+        service.close()
+
+    assert during["ok"] is True, during
+    assert during["session"]["session_id"] == started["session"]["session_id"], during
+    assert "symbol_source" not in during, during
+    assert after["ok"] is False, after
+    assert after["error_type"] == WITHOUT_A_SESSION[backend], after
+    assert not (tmp_path / "build" / "after.hex").exists()
 
 
 @pytest.mark.parametrize("tool", READS)

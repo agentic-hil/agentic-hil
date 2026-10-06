@@ -11,6 +11,7 @@ import pytest
 from conftest import (
     FAKE_GDB,
     FAKE_PYOCD,
+    FAKE_PYOCD_HALT_RECORDED,
     FAKE_PYOCD_NO_TARGET,
     FAKE_PYOCD_SILENT_READ,
     FAKE_STLINK,
@@ -850,6 +851,54 @@ def test_stop_session_detach_guard_failure_is_not_reported_safe_and_survives_ret
         with pytest.raises(RuntimeError, match="auto-resume-on-detach"):
             service.close()
         service.coordinator.close()
+
+
+def test_a_retried_stop_reports_the_original_failure_and_names_the_call_that_settles_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # #637: a stop that confirmed the halt and could not confirm the
+    # auto-resume-on-detach guard answers `detach_resume_not_confirmed` with
+    # `halt_not_confirmed: false`. A retry has no connection to prove anything
+    # with, so it must not turn that into "the halt was never confirmed", and
+    # neither answer may promise a retry of this call that cannot succeed: the
+    # call that settles the session is probe_target.
+    service = debug_service(tmp_path)
+    debug = service.backend._debug
+    original = debug._gdb_command
+
+    def refuse_detach_guard(session, command: str, timeout_s=None, **kwargs):
+        if "gdb-detach" in command:
+            return GdbMiCommandResult(result_class="error", line="", error_message="monitor command refused")
+        return original(session, command, timeout_s, **kwargs)
+
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        monkeypatch.setattr(debug, "_gdb_command", refuse_detach_guard)
+
+        first = service.call("debug_stop_session")
+        assert first["error_type"] == "detach_resume_not_confirmed", first
+        assert first["halt_not_confirmed"] is False
+        assert "probe_target" in first["summary"], first["summary"]
+        assert "retained for retry" not in first["summary"], first["summary"]
+
+        monkeypatch.setattr(debug, "_gdb_command", original)
+        retried = service.call("debug_stop_session")
+        assert retried["ok"] is False
+        assert retried["error_type"] == "detach_resume_not_confirmed", retried
+        assert retried["halt_not_confirmed"] is False
+        assert retried["breakpoints_removed_confirmed"] is True
+        assert retried["detach_resume_guard_confirmed"] is False
+        assert retried["summary"] == first["summary"]
+        assert retried["safe_state_confirmed"] is False
+        assert retried["cleanup_required"] is True
+
+        probed = service.call("probe_target")
+        assert probed["ok"] is True, probed
+        assert service.call("debug_stop_session")["summary"] == "No debug session is active."
+    finally:
+        monkeypatch.setattr(debug, "_gdb_command", original)
+        try:
+            service.close()
+        finally:
+            service.coordinator.close()
 
 
 def test_reset_target_recovery_after_a_stuck_stop_lets_a_new_session_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2383,7 +2432,10 @@ def test_pyocd_read_connects_with_attach_and_nothing_that_disturbs_the_core(tmp_
     it guards against is silent. A read that quietly went back to halting would
     still return bytes, and they would be a halted board's bytes. So none of
     pyOCD's other three connect modes may appear, `--halt` may not, a
-    `connect_mode` session option may not, and no reset may ride along.
+    `connect_mode` session option may not, and no reset may ride along. The one
+    session option the read does send is the one that keeps a halted core
+    halted through the connect (#631): the target pack's DebugCoreStart
+    sequence, disabled.
     """
     service = pyocd_read_service(tmp_path)
     try:
@@ -2398,7 +2450,9 @@ def test_pyocd_read_connects_with_attach_and_nothing_that_disturbs_the_core(tmp_
         logged = logged_command(tmp_path, result)
         assert "--connect attach" in logged, result
         assert f"savemem {hex(BOOT_COUNTER_ADDRESS)} {BOOT_COUNTER_SIZE} " in logged, result
-        for forbidden in ("--halt", "-H", "pre-reset", "under-reset", "connect_mode", "-O", "reset"):
+        assert "-O pack.debug_sequences.disabled_sequences=DebugCoreStart" in logged, result
+        assert logged.count("-O ") == 1, result
+        for forbidden in ("--halt", "-H", "pre-reset", "under-reset", "connect_mode", "reset"):
             assert forbidden not in logged, (forbidden, result)
 
 
@@ -2426,6 +2480,118 @@ def test_pyocd_read_stays_attach_when_the_configuration_names_a_connect_mode(tmp
     with pytest.raises(ConfigError) as refused:
         load_config(str(write_config(tmp_path / "under-reset", debugger_type="pyocd", debugger_executable=FAKE_PYOCD, target_type="stm32f446re", connect_mode="under_reset")))
     assert refused.value.error_type == "config_invalid"
+
+
+# --- pyOCD: a reset into halt that the reads after it leave halted (#631) -----
+#
+# Without a session every call is its own `pyocd commander` process, so a halt
+# holds only if the process after the reset leaves it alone. On the reference
+# board it did not: the reset's halt held until the next read connected, and
+# the target pack's DebugCoreStart sequence, which that connect runs, wrote
+# DHCSR with C_DEBUGEN and without C_HALT and let the core run. The fake below
+# carries the core's state from process to process the way the recording
+# beside it says the board did.
+
+PYOCD_CORE_STATE_VARIABLE = "AGENTIC_HIL_FAKE_PYOCD_CORE_STATE"
+
+
+def pyocd_core_state_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AgenticHILToolService:
+    monkeypatch.setenv(PYOCD_CORE_STATE_VARIABLE, str(tmp_path / "core-state.json"))
+    return pyocd_read_service(tmp_path, debugger_executable=FAKE_PYOCD_HALT_RECORDED)
+
+
+def test_a_pyocd_reset_into_halt_holds_across_the_reads_after_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two reads of a counter after a reset into halt return the same value.
+
+    The reset reports the halt confirmed, and on the board it was: an observer
+    that does not resume read the counter frozen afterwards. What let the core
+    run was the read that came next, so a read must leave a halted core halted.
+    A counter that moves between two reads is a core the reads let run, while
+    the result of the reset still says it is halted.
+    """
+    service = pyocd_core_state_service(tmp_path, monkeypatch)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        halted = service.call("reset_target", {"mode": "halt"})
+        first = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+        second = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert halted["ok"] is True, halted
+    assert halted["safe_state_confirmed"] is True, halted
+    assert first["ok"] is True, first
+    assert second["ok"] is True, second
+    assert second["value_unsigned"] == first["value_unsigned"], (first["value_unsigned"], second["value_unsigned"])
+
+
+def test_a_pyocd_read_of_a_running_core_leaves_it_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half: a read neither halts a running core nor stops its counter.
+
+    Whatever keeps a halted core halted must not turn the read into a halt,
+    because a read that halted would return a halted board's bytes and leave
+    the board stopped for every caller after it.
+    """
+    service = pyocd_core_state_service(tmp_path, monkeypatch)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        running = service.call("reset_target", {"mode": "run"})
+        first = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+        second = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert running["ok"] is True, running
+    assert first["ok"] is True, first
+    assert second["ok"] is True, second
+    assert second["value_unsigned"] > first["value_unsigned"], (first["value_unsigned"], second["value_unsigned"])
+
+
+def test_a_pyocd_probe_of_a_core_reset_into_halt_leaves_it_halted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`probe_target` on a halted core leaves the halt for the reads after it.
+
+    The probe is a look at the target, and on the board it was the call that let
+    the halted core run: its commander connects the way the read did before the
+    read was fixed, and runs the same DebugCoreStart sequence. A probe must say
+    the core is halted, and two reads after it must return the same counter.
+    """
+    service = pyocd_core_state_service(tmp_path, monkeypatch)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        halted = service.call("reset_target", {"mode": "halt"})
+        probed = service.call("probe_target", {})
+        first = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+        second = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert halted["ok"] is True, halted
+    assert probed["ok"] is True, probed
+    assert probed["target_detected"] is True, probed
+    assert first["ok"] is True, first
+    assert second["ok"] is True, second
+    assert second["value_unsigned"] == first["value_unsigned"], (first["value_unsigned"], second["value_unsigned"])
+    assert "Halted" in logged_output(tmp_path, probed), probed
+
+
+def test_a_pyocd_probe_of_a_running_core_leaves_it_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half: a probe neither halts a running core nor stops its counter."""
+    service = pyocd_core_state_service(tmp_path, monkeypatch)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        running = service.call("reset_target", {"mode": "run"})
+        probed = service.call("probe_target", {})
+        first = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+        second = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert running["ok"] is True, running
+    assert probed["ok"] is True, probed
+    assert "Running" in logged_output(tmp_path, probed), probed
+    assert first["ok"] is True, first
+    assert second["ok"] is True, second
+    assert second["value_unsigned"] > first["value_unsigned"], (first["value_unsigned"], second["value_unsigned"])
 
 
 def test_pyocd_dump_writes_the_intel_hex_pyocd_itself_cannot(tmp_path: Path) -> None:
@@ -3203,6 +3369,11 @@ def stlink_symbol_value(service: AgenticHILToolService, symbol: str = "boot_coun
 
 def logged_command(tmp_path: Path, result: dict) -> str:
     return json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+
+
+def logged_output(tmp_path: Path, result: dict) -> str:
+    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))
+    return f"{logged.get('stdout') or ''}{logged.get('stderr') or ''}"
 
 
 def test_stlink_symbol_value_returns_the_bytes_the_openocd_path_would(tmp_path: Path) -> None:

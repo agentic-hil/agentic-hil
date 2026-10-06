@@ -557,8 +557,9 @@ def discover_attached_hardware(
     """Discover one attached STM32 bench before runtime policy exists.
 
     Commands are fixed here rather than supplied by project data. Discovery may
-    enumerate ST-Link probes and connect in HOTPLUG mode, but cannot reset,
-    halt, erase, flash, or open a serial port.
+    list probes and connect in HOTPLUG mode through STM32CubeProgrammer, and the
+    OpenOCD `init` that reads the target attaches over SWD, which can halt the
+    core. It never resets, erases, flashes or opens a serial port.
 
     ``probe_id`` names which of several attached probes this is about. It selects
     among what is enumerated and never adds to it: a serial that is not attached
@@ -718,7 +719,7 @@ def discover_attached_hardware(
         target, target_discovery = _stlink_target_identity(executable, probe_id, timeout_s)
         if target is None:
             return {**target_discovery, "executable": executable, "probe_id": probe_id, "com_ports": com_ports, **found_by}
-        summary = "One attached STM32 target was identified through ST-Link HOTPLUG discovery."
+        summary = "One attached board was identified through STM32CubeProgrammer HOTPLUG discovery."
     else:
         target, target_discovery = _openocd_target_identity(executable, probe_id, profile, timeout_s)
         if target is None and target_discovery.get("ok") is False:

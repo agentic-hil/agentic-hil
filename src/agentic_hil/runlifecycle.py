@@ -723,7 +723,7 @@ def worker_publish_window_s(wait_s: float) -> float:
     return WORKER_PUBLISH_TIMEOUT_S + max(0.0, min(device_wait, MAX_WAIT_S))
 
 
-def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_s: float) -> JsonObject:
+def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_s: float, command_line: bool = False) -> JsonObject:
     """Start a run in its own process and answer as soon as it has published.
 
     The wait is for the worker to say what it is doing, not for it to finish:
@@ -754,11 +754,15 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
     the start failed while a live process keeps waiting. Refusing the value up
     front keeps an invalid wait out of a process nobody is watching, and the one
     validated finite value is what both the worker and the publication window are
-    built from."""
+    built from.
+
+    `command_line` says who is reading: the answer names the commands and their
+    `--run` flag for an operator at a shell, and the tools and their `run`
+    argument for an MCP caller, who has the tools and may have no shell."""
     try:
         wait_s = validated_wait(wait_s)
     except ConfigError as error:
-        return {"ok": False, "tool": "test_reactor_start", "side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged", "retry_safe": False, **error.to_dict()}
+        return {"ok": False, "tool": "test_reactor_run", "side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged", "retry_safe": False, **error.to_dict()}
     handle = new_run_handle()
     report = display_path(config, last_report_path(config))
     worker = spawn_run_worker(config, handle, test_config_path, wait_s=wait_s)
@@ -778,7 +782,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
             _prune_after_a_start_that_left_no_record(config, handle)
             return {
                 "ok": False,
-                "tool": "test_reactor_start",
+                "tool": "test_reactor_run",
                 "error_type": "run_worker_failed",
                 "summary": "The detached run's worker process ended before it could say what it was doing.",
                 "run": handle,
@@ -799,7 +803,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
             _prune_after_a_start_that_left_no_record(config, handle)
             return {
                 "ok": False,
-                "tool": "test_reactor_start",
+                "tool": "test_reactor_run",
                 "error_type": "run_worker_unresponsive",
                 "summary": "The detached run's worker process did not say what it was doing within the startup window; a cooperative stop was left under its handle in case it is still alive.",
                 "run": handle,
@@ -814,7 +818,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
         return _detached_terminal_result(handle, record, report)
     return {
         "ok": True,
-        "tool": "test_reactor_start",
+        "tool": "test_reactor_run",
         "run": handle,
         "state": state,
         "detached": True,
@@ -825,6 +829,9 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
         "summary": (
             f"The run is detached under handle {handle}; ask `agentic-hil test-reactor-status --run {handle}` what it is doing "
             f"and `agentic-hil test-reactor-stop --run {handle}` to end it early."
+            if command_line
+            else f"The run is detached under handle {handle}; call `test_reactor_status` with `run` set to it to see what it is "
+            "doing, and `test_reactor_stop` with the same `run` to end it early."
         ),
     }
 
@@ -847,7 +854,7 @@ def _detached_terminal_result(handle: str, record: JsonObject, _report: str) -> 
     report_path = run_report_named(record)
     result: JsonObject = {
         "ok": run_ok,
-        "tool": "test_reactor_start",
+        "tool": "test_reactor_run",
         "run": handle,
         "state": str(record.get("state")),
         "detached": True,
@@ -1006,10 +1013,13 @@ def worker_output(config: AgenticHILConfig, handle: str, limit: int = 4000) -> s
     return text[-limit:]
 
 
-def run_status(config: AgenticHILConfig, handle: str | None = None) -> JsonObject:
-    """What a handle is doing, or what handles this bench knows."""
+def run_status(config: AgenticHILConfig, handle: str | None = None, *, command_line: bool = False) -> JsonObject:
+    """What a handle is doing, or what handles this bench knows.
+
+    `command_line` picks the reader's words where the answer names a next move:
+    commands and flags for an operator, tools and arguments for an MCP caller."""
     if handle is None:
-        return known_runs(config)
+        return known_runs(config, command_line=command_line)
     record = read_run_record(config, validated_run_handle(handle))
     if record is None:
         return {
@@ -1042,10 +1052,7 @@ def run_status(config: AgenticHILConfig, handle: str | None = None) -> JsonObjec
                 "state": RUN_WORKER_GONE,
                 "stop_requested_at": requested_at,
                 "summary": "The process that was running this plan is gone, so this run has no orderly end and no report of its own.",
-                "next_step": (
-                    "The bench is the dead-owner case the coordinator already handles: `agentic-hil lease-status` reads and heals it, "
-                    "and names a quarantine id for `agentic-hil recover --confirm-safe-state --quarantine-id <id>` if the run had reached the board."
-                ),
+                "next_step": worker_gone_next_step(command_line=command_line),
             }
     return {
         **public_run_fields(record),
@@ -1056,6 +1063,26 @@ def run_status(config: AgenticHILConfig, handle: str | None = None) -> JsonObjec
         "summary": run_status_summary(state, record, requested_at),
         **(ended_run_remediation(record) if state in TERMINAL_RUN_STATES else {}),
     }
+
+
+def worker_gone_next_step(*, command_line: bool) -> str:
+    """Where a run whose worker is gone sends its reader, in the reader's words.
+
+    The lease read heals the dead owner's holds and names any incident the run
+    left. Clearing a standing incident is the operator's signature on a board
+    they have checked, so an MCP caller is told to ask for it, never to give it:
+    `hardware_recover` takes the operator's own statement, and a caller with no
+    one to ask has no statement to pass."""
+    if command_line:
+        return (
+            "The bench is the dead-owner case the coordinator already handles: `agentic-hil lease-status` reads and heals it, "
+            "and names a quarantine id for `agentic-hil recover --confirm-safe-state --quarantine-id <id>` if the run had reached the board."
+        )
+    return (
+        "The bench is the dead-owner case the coordinator already handles: call `hardware_lease_status`, which reads and heals it "
+        "and names a `quarantine_id` if the run had reached the board. Clearing an incident that stands is the operator's step "
+        "after they have checked the board: ask them, and pass their answer to `hardware_recover` as `operator_statement`."
+    )
 
 
 def run_report_named(record: JsonObject) -> str | None:
@@ -1099,7 +1126,7 @@ def public_run_fields(record: JsonObject) -> JsonObject:
     return {key: value for key, value in record.items() if key not in {"version", "pid"}}
 
 
-def known_runs(config: AgenticHILConfig) -> JsonObject:
+def known_runs(config: AgenticHILConfig, *, command_line: bool = False) -> JsonObject:
     """Every run this bench still has a record of, newest first.
 
     A listing that could not be taken is refused rather than answered empty. The
@@ -1139,11 +1166,12 @@ def known_runs(config: AgenticHILConfig) -> JsonObject:
         "tool": "test_reactor_status",
         "runs": runs,
         "active_runs": [item["run"] for item in runs if item["state"] not in TERMINAL_RUN_STATES and item["state"] != RUN_WORKER_GONE],
-        "summary": f"This bench has records of {len(runs)} test run(s); name one with --run to see what it is doing.",
+        "summary": f"This bench has records of {len(runs)} test run(s); "
+        + ("name one with --run to see what it is doing." if command_line else "call `test_reactor_status` with one of them as `run` to see what it is doing."),
     }
 
 
-def request_run_stop(config: AgenticHILConfig, handle: str) -> JsonObject:
+def request_run_stop(config: AgenticHILConfig, handle: str, *, command_line: bool = False) -> JsonObject:
     """Ask a run to end after the step it is in.
 
     Cooperative and nothing else: this writes a file, and the run reads it
@@ -1182,10 +1210,7 @@ def request_run_stop(config: AgenticHILConfig, handle: str) -> JsonObject:
             "error_type": "run_worker_gone",
             "state": RUN_WORKER_GONE,
             "summary": "The process that was running this plan is gone, so there is nobody left to honour a cooperative stop.",
-            "next_step": (
-                "The bench is the dead-owner case the coordinator already handles: `agentic-hil lease-status` reads and heals it, "
-                "and names a quarantine id for `agentic-hil recover --confirm-safe-state --quarantine-id <id>` if the run had reached the board."
-            ),
+            "next_step": worker_gone_next_step(command_line=command_line),
             "retry_safe": False,
             "side_effect_committed": False,
             **remediation_fields("run_worker_gone"),

@@ -313,7 +313,7 @@ def test_a_corrupt_report_state_is_not_read_around_by_regeneration(tmp_path: Pat
     `ensure_audit_ready` refuses two ways and only one, the `state_root` spelling
     the enforcer will not accept, is the one a regeneration replaces. A corrupt
     `report-state.json` under a `state_root` that resolves cleanly is the other:
-    `config_invalid`, which the same regeneration leaves exactly in place, because
+    `report_state_damaged`, which the same regeneration leaves exactly in place, because
     it selects the same healthy root and rewrites nothing under it. Reading the
     board around it would bypass the gate for an integrity failure and report a
     repair that never lands, the next `probe_target` would meet the same wall.
@@ -328,8 +328,9 @@ def test_a_corrupt_report_state_is_not_read_around_by_regeneration(tmp_path: Pat
     assert created["ok"] is True, created
 
     # A healthy state_root with corrupt content under it: the file is there and it
-    # is not JSON, so `ensure_audit_ready` refuses with `config_invalid`, not with
-    # the `unsafe_configured_path` the repair path is for.
+    # is not JSON, so `ensure_audit_ready` refuses with `report_state_damaged`
+    # (`config_invalid` until #689), not with the `unsafe_configured_path` the
+    # repair path is for.
     config = load_authoritative_config(workspace)
     Path(report_state_path(config)).write_text("{ this is not report state", encoding="utf-8")
 
@@ -344,13 +345,13 @@ def test_a_corrupt_report_state_is_not_read_around_by_regeneration(tmp_path: Pat
     # The ordinary hardware call is refused, correctly, and names the integrity
     # failure underneath the audit gate.
     assert refused["error_type"] == "audit_unavailable", refused
-    assert refused["audit_error"]["error_type"] == "config_invalid"
+    assert refused["audit_error"]["error_type"] == "report_state_damaged"
     # And so is the regeneration: it is not read around, and it does not claim to
     # have repaired anything. No unaudited-read note is attached, because no
     # unaudited read happened.
     assert regenerated["ok"] is False, regenerated
     assert regenerated["error_type"] == "audit_unavailable", regenerated
-    assert regenerated["audit_error"]["error_type"] == "config_invalid"
+    assert regenerated["audit_error"]["error_type"] == "report_state_damaged"
     assert "hardware_read_unaudited_reason" not in regenerated
     assert "hardware_read_audited" not in regenerated
     # The gate is still shut afterwards, which is the whole proof: a regeneration

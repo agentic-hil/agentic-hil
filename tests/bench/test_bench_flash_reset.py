@@ -36,6 +36,7 @@ that read one.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import queue
 import re
@@ -95,6 +96,12 @@ OPENOCD_FLASH_CONFIRMED = "AGENTIC_HIL_RESULT:flash_firmware:ok"
 # a slow link.
 BOOT_BANNER = "Hello World"
 BOOT_BANNER_TIMEOUT_S = 15.0
+
+# The raw image the demo's build writes beside its ELF, the same bytes with no
+# load address, and the address the board's flash starts at, which is where
+# the demo's linker script puts it.
+DEMO_BINARY = Path("build") / "Debug" / "nucleo-f446re_demo.bin"
+FLASH_BASE = "0x08000000"
 
 
 class ServerGone(AssertionError):
@@ -852,3 +859,113 @@ def test_a_flash_with_capture_returns_the_boot_banner_of_the_image_it_flashed_an
     assert status["held_devices"] == [], status
     assert status["blocked"] is False, status
     assert status["incident_stands"] is False, status
+
+
+def bench_with_flash_address(bench: Bench, directory: Path, address: str | None) -> Bench:
+    """The configured bench with its debugger's `flash_address` set, or taken out.
+
+    A copy of the session's configuration rather than an edit of it, under this
+    test's own directory, so no other test meets the changed key.
+    """
+    import yaml
+
+    document = bench.configuration()
+    entry = document["debuggers"][bench.debugger_name()]
+    entry.pop("flash_address", None)
+    if address is not None:
+        entry["flash_address"] = address
+    variant = directory / "flash-address-config.yaml"
+    variant.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return dataclasses.replace(bench, config=variant)
+
+
+@pytest.fixture
+def demo_binary(bench: Bench, firmware: Path) -> Path:
+    """The `.bin` the demo's build wrote beside the ELF the board runs."""
+    binary = bench.project / DEMO_BINARY
+    assert binary.is_file(), f"the demo build left no raw image at {DEMO_BINARY}"
+    return binary
+
+
+def test_a_raw_image_without_a_load_address_is_refused_before_the_board_is_touched(bench: Bench, demo_binary: Path, tmp_path: Path) -> None:
+    """A `.bin` carries no address, so without `flash_address` nothing is written.
+
+    Catches a flash that wrote the image at an address nobody named: OpenOCD's
+    `program` writes a raw image from address 0 when it is given no offset,
+    which is not where this board's flash starts. The refusal names the key that
+    is missing, and the board keeps the demo it was running.
+    """
+    variant = bench_with_flash_address(bench, tmp_path, None)
+    server = MCPServer(variant)
+    try:
+        server.open()
+        result = server.call("flash_firmware", {"image_path": DEMO_BINARY.as_posix(), "reset_after_flash": True})
+    finally:
+        server.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "invalid_argument", result
+    assert "flash_address" in result["summary"], result["summary"]
+    assert "log_path" not in result, result
+
+
+def test_a_raw_image_with_a_load_address_is_written_there_and_boots(bench: Bench, demo_binary: Path, tmp_path: Path) -> None:
+    """With `flash_address` set, the `.bin` is written at that address and the board boots it.
+
+    Catches the address dropped on the way to the debugger, or put where the
+    debugger reads it as something else: the command the product recorded has
+    to carry the address right after the file, and the board has to print the
+    demo's banner from the image it was just given. The bytes are the demo's
+    own, so the board is left running the demo.
+    """
+    variant = bench_with_flash_address(bench, tmp_path, FLASH_BASE)
+    port = bench.com_port_name()
+    server = MCPServer(variant)
+    try:
+        server.open()
+        result = server.call(
+            "flash_firmware",
+            {"image_path": DEMO_BINARY.as_posix(), "reset_after_flash": True, "capture": {"port_id": port, "until": BOOT_BANNER, "wait_timeout_s": BOOT_BANNER_TIMEOUT_S}},
+        )
+    finally:
+        server.close()
+
+    assert_flash_holds(result)
+    assert result["reset_after_flash"] is True, result
+    assert result["capture"]["until_matched"] is True, result["capture"]
+    if result["backend"] == "openocd":
+        commanded = debugger_log(bench, result["log_path"])["command"]
+        # The recorded command is one shell line, so the quotes around the
+        # file come back escaped.
+        assert re.search(rf'program \\?"[^"]*?\.bin\\?" {FLASH_BASE} verify reset', commanded), commanded
+
+
+@pytest.mark.parametrize(("key", "value"), [("allow_flash", False), ("allow_mass_erase", True)])
+def test_a_flash_refused_by_a_debugger_permission_writes_no_report(bench: Bench, firmware: Path, tmp_path: Path, key: str, value: bool) -> None:
+    """Every flash permission refusal answers the same way: refused, and nothing recorded.
+
+    Catches the interlock (`allow_mass_erase` on refuses flashing) taking the
+    probe's lease and writing a report that a closed `allow_flash` never
+    writes, so `classify_last_error` would explain one refusal and not the
+    other. The permissions are set in a copy of this tier's configuration, so
+    no other test meets them; nothing is said to the debugger, so the board
+    keeps the demo.
+    """
+    import yaml
+
+    document = bench.configuration()
+    document["debuggers"][bench.debugger_name()].setdefault("permissions", {})[key] = value
+    variant = tmp_path / "flash-permission-config.yaml"
+    variant.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    server = MCPServer(dataclasses.replace(bench, config=variant))
+    try:
+        server.open()
+        result = server.call("flash_firmware", {"image_path": firmware.relative_to(bench.project).as_posix()})
+    finally:
+        server.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "permission_denied", result
+    assert result["permission"] == f"debuggers.{bench.debugger_name()}.permissions.{key}", result
+    assert "report_path" not in result, result
+    assert "log_path" not in result, result

@@ -404,6 +404,83 @@ def test_a_live_owner_is_never_decided_about(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The MCP status tool reads, and the next acquire settles (#670).
+#
+# `hardware_lease_status` is annotated read-only, and a host runs a read-only
+# call without asking. So the tool reports a dead owner without releasing it,
+# adopting it or writing the ledger, and the transition the status read used to
+# make moves to the call that takes the bench next.
+
+
+def coordination_files(config) -> dict[str, bytes]:
+    root = Path(HardwareCoordinator(config, "file-reader").root)
+    return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file() and path.suffix != ".lock"}
+
+
+def lease_status_tool(config) -> dict:
+    from agentic_hil.tools import AgenticHILToolService
+
+    service = AgenticHILToolService(config)
+    try:
+        return service.call("hardware_lease_status", {})
+    finally:
+        service.close()
+
+
+def test_the_status_tool_reports_a_dead_owner_without_releasing_it(tmp_path: Path) -> None:
+    config = leave_dead_owner(tmp_path)
+    before = coordination_files(config)
+
+    status = lease_status_tool(config)
+
+    assert status["ok"] is True, status
+    assert coordination_files(config) == before
+    assert recovery_ledger(config) == []
+    assert status["blocked"] is False, status
+    assert status["record"]["state"] == "active", status
+    assert "released_dead_owner" not in status
+    pending = status["dead_owner_no_contact"]
+    assert pending["reason"] == DEAD_OWNER_NO_CONTACT_REASON
+    assert pending["resources"] == [RESOURCE]
+
+
+def test_the_status_tool_reports_a_dead_owner_with_contact_without_adopting_it(tmp_path: Path) -> None:
+    config = leave_dead_owner(tmp_path, report=None)
+    setup = HardwareCoordinator(config, "dead-owner-setup")
+    write_report(config, no_contact_report(setup, side_effect_committed=True, side_effect_status="committed", ok=True, error_type=None))
+    before = coordination_files(config)
+
+    status = lease_status_tool(config)
+
+    assert status["ok"] is True, status
+    assert coordination_files(config) == before
+    assert recovery_ledger(config) == []
+    assert status["blocked"] is True, status
+    assert status["cleanup_required"] is True, status
+    assert status["cleanup_reasons"] == ["owner_process_exited_without_release"], status
+    assert status["incident_stands"] is False, status
+    assert "dead_owner_no_contact" not in status
+
+
+def test_the_next_acquire_releases_the_dead_owner_the_status_tool_reported(tmp_path: Path) -> None:
+    config = leave_dead_owner(tmp_path)
+    lease_status_tool(config)
+    taker = HardwareCoordinator(config, "next-owner")
+
+    lease = taker.acquire(RESOURCE)
+
+    try:
+        assert taker.incident_resources == set(), "a no-contact owner is released, not adopted"
+        assert taker.blocked is False
+        lines = recovery_ledger(config)
+        assert [line["reason"] for line in lines] == [DEAD_OWNER_NO_CONTACT_REASON]
+        assert lines[0]["via"] == "coordination:next-owner"
+    finally:
+        assert lease.release() is True
+        taker.close()
+
+
+# ---------------------------------------------------------------------------
 # The class boundary the sibling issue reads.
 
 

@@ -110,6 +110,12 @@ NEEDS_THE_WHEELHOUSE = "wheelhouse"
 CUBECLT_ENV = "AGENTIC_HIL_BENCH_CUBECLT"
 CUBECLT = "cubeclt"
 CUBECLT_LEFT_OUT = pytest.StashKey[str]()
+# The mark of a test that can make the in-circuit debugger remove its serial
+# port and create it again (#620). A container started with fixed `--device`
+# bindings keeps the node it was given, so every test after that one would fail
+# on the binding. On a bench the hook below runs such a test after every other,
+# so a re-enumeration fails it alone, under its own message.
+REENUMERATES_THE_PROBE = "reenumerates_the_probe"
 # What says a run is in the bench image, written by `tools/bench/Dockerfile`, and
 # what an image built on another distribution says it is: the distribution's
 # name, written by its head under `tools/bench/distributions`. The default image
@@ -894,7 +900,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     reason is reported after collection. So is a test with the USB-UART
     adapter's mark on a run that was handed no adapter, and a test that drives
     the board through an STM32CubeCLT tree, where
-    `why_the_cubeclt_tests_are_left_out` gives a reason.
+    `why_the_cubeclt_tests_are_left_out` gives a reason. What is kept runs in
+    collection order, except that a test marked `REENUMERATES_THE_PROBE` runs
+    after every other.
     """
     if os.environ.get(BENCH_ENV) != "1":
         return
@@ -923,9 +931,11 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         )
     if cubeclt_left_out is not None:
         config.stash[CUBECLT_LEFT_OUT] = f"tests marked {CUBECLT}: {cubeclt_left_out}"
+    # Stable, so the rest keep the order they were collected in.
+    kept.sort(key=lambda item: item.get_closest_marker(REENUMERATES_THE_PROBE) is not None)
     if deselected:
         config.hook.pytest_deselected(items=deselected)
-        items[:] = kept
+    items[:] = kept
 
 
 def pytest_report_collectionfinish(config: pytest.Config) -> str | list[str] | None:

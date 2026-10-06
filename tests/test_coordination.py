@@ -38,6 +38,7 @@ from agentic_hil.knowledge import (
     CAN_CLASSIC_FRAME_TOO_LARGE_ERROR,
     CAN_FD_FRAME_LENGTH_INVALID_ERROR,
     LEASE_LIFECYCLE_URI,
+    remediation_fields,
 )
 from agentic_hil.mcp import call_tool, handle_mcp_message
 from agentic_hil.process import (
@@ -770,6 +771,24 @@ def test_quarantined_lease_cannot_release_incident(tmp_path: Path) -> None:
     assert lease.state == "cleanup_required"
     assert coordinator._read_record(coordinator.project_key) == record_before
     coordinator.close()
+
+
+def test_an_acquire_over_a_standing_incident_carries_its_entry(tmp_path: Path) -> None:
+    """The coordinator's own quarantine refusal hands out the catalogue's steps,
+    so every caller that forwards it whole forwards the advice too (#662)."""
+    coordinator = HardwareCoordinator(config_for(tmp_path), "owner")
+    coordinator.acquire("physical:quarantine-advice").quarantine("unknown_effect", audit_broken=True)
+    try:
+        with pytest.raises(CoordinationError) as excinfo:
+            coordinator.acquire("physical:quarantine-advice-second")
+    finally:
+        coordinator.close()
+
+    refusal = excinfo.value.result
+    assert refusal["error_type"] == "resource_quarantined", refusal
+    advice = remediation_fields("resource_quarantined")
+    assert refusal.get("remediation") == advice["remediation"], refusal
+    assert refusal.get("do_not") == advice.get("do_not"), refusal
 
 
 def test_close_retries_lock_release_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -504,17 +504,15 @@ def test_lease_status_opens_with_a_sentence_about_the_bench(tmp_path: Path, monk
     assert "did not come back clean" not in opening, out
     assert "quarantin" in opening.lower(), out
     assert recovery_operator_command("q-experiment") in _reflowed(out), out
-    # The exit code over a standing quarantine, pinned where it was not. The
-    # issue left the verdict open: today's 1 is what #445's rule (a read that
-    # answered exits 0) argues against, and the rendering's own containment block
-    # promises "the exit code says so", which is what a `set -e` gate on a bench
-    # that owes a signature reads. This pins today's verdict as the test's own
-    # reading (`complete: false` is a fact about an enumeration, a quarantine is
-    # a fact about this bench) until the owner decides; if the decision goes to
-    # 0, this assertion flips and the "exit code says so" sentence goes with it.
+    # The exit code over a standing quarantine. A read that answered exits 0
+    # (#445's rule, and #684): the quarantine is in the document, and a script
+    # that exits on the status alone cannot otherwise tell a record that could
+    # not be read from a bench that was read and owes a signature. The
+    # containment block's "the exit code says so" goes with it.
     code, out, _ = _shell(["lease-status"])
-    assert code == 1
+    assert code == 0
     assert "q-experiment" in out
+    assert "the exit code says so" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -760,9 +758,9 @@ WIRING: list[tuple[list[str], str, dict[str, object]]] = [
     (["debugger-probes"], "debugger_probes", {}),
     (["upgrade", "--agent", "codex", "--agent", "claude-code"], "upgrade_installation", {"agents": ["codex", "claude-code"]}),
     (["uninstall", "--agent", "codex"], "uninstall_agent_integration", {"agents": ["codex"]}),
-    (["test-reactor-status", "--run", "run-0123456789abcdef"], "run_status", {"config": CONFIG, "handle": "run-0123456789abcdef"}),
-    (["test-reactor-status"], "run_status", {"config": CONFIG, "handle": None}),
-    (["test-reactor-stop", "--run", "run-0123456789abcdef"], "request_run_stop", {"config": CONFIG, "handle": "run-0123456789abcdef"}),
+    (["test-reactor-status", "--run", "run-0123456789abcdef"], "run_status", {"config": CONFIG, "handle": "run-0123456789abcdef", "command_line": True}),
+    (["test-reactor-status"], "run_status", {"config": CONFIG, "handle": None, "command_line": True}),
+    (["test-reactor-stop", "--run", "run-0123456789abcdef"], "request_run_stop", {"config": CONFIG, "handle": "run-0123456789abcdef", "command_line": True}),
 ]
 
 

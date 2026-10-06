@@ -305,6 +305,187 @@ def test_participant_scoped_failure_does_not_quarantine_peer_session(tmp_path: P
         service.close()
 
 
+UNSHARED_YAML = f'''can_buses:
+  {BUS}:
+    adapter: process
+    channel: exclusive
+    executable: fake-bridge
+    permissions:
+      allow_read: true
+      allow_write: true
+'''
+
+
+class ExclusiveFakeAdapter:
+    """A single-owner adapter session that opens, idles and closes."""
+
+    adapter_name = "process"
+
+    def __init__(self):
+        self.closed = False
+
+    def send(self, frame) -> dict:
+        return {"ok": True}
+
+    def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+        return {"ok": True, "frames": []}
+
+    def status(self) -> dict:
+        return {"ok": True, "active": not self.closed}
+
+    def close(self) -> dict:
+        self.closed = True
+        return {"ok": True, "safe_state_confirmed": True, "process_reaped": True}
+
+
+def test_stop_refuses_a_participant_the_shared_bus_does_not_declare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A misspelled participant is refused, not told the bus is idle (#632)."""
+    import agentic_hil.canbroker as broker_module
+
+    monkeypatch.setattr(broker_module, "attach_participant", lambda config, bus_id, participant, **kwargs: SharedFakeParticipant(participant))
+    service = AgenticHILToolService(config_for(tmp_path))
+    try:
+        started = service.call("can_session_start", {"bus_id": BUS, "participant": "ecu_a", "clear_rx_queue": False})
+        assert started["ok"] is True, started
+        stopped = service.call("can_session_stop", {"bus_id": BUS, "participant": "ecu_x"})
+        assert stopped["ok"] is False, stopped
+        assert stopped["error_type"] == "can_participant_not_configured", stopped
+        assert stopped["participant"] == "ecu_x", stopped
+        assert stopped["configured_participants"] == ["ecu_a", "ecu_b"], stopped
+        assert stopped["side_effect_committed"] is False, stopped
+        assert stopped["remediation"], stopped
+        assert "was_active" not in stopped, stopped
+        assert (BUS, "ecu_a") in service.can_buses.sessions
+        assert service.call("can_session_stop", {"bus_id": BUS, "participant": "ecu_a"})["was_active"] is True
+    finally:
+        service.close()
+
+
+def test_stop_refuses_a_participant_on_a_bus_without_shares(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The open session is not hidden behind a "was not active" (#632)."""
+    adapter = ExclusiveFakeAdapter()
+    monkeypatch.setattr("agentic_hil.can.open_adapter", lambda config, bus_id, bus_config, clear_rx_queue, contact=None: {"ok": True, "session": adapter})
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path, can_buses_yaml=UNSHARED_YAML))))
+    try:
+        started = service.call("can_session_start", {"bus_id": BUS, "clear_rx_queue": False})
+        assert started["ok"] is True, started
+        stopped = service.call("can_session_stop", {"bus_id": BUS, "participant": "nobody"})
+        assert stopped["ok"] is False, stopped
+        assert stopped["error_type"] == "can_participant_not_configured", stopped
+        assert stopped["configured_participants"] == [], stopped
+        assert adapter.closed is False
+        plain = service.call("can_session_stop", {"bus_id": BUS})
+        assert plain["was_active"] is True, plain
+    finally:
+        service.close()
+
+
+def test_a_broker_permission_refusal_carries_the_key_and_its_remediation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The broker's own refusal reaches the caller with the key it names (#657).
+
+    The server's grants say yes, the broker's say no: the broker loaded the file
+    after the server did."""
+    from agentic_hil.knowledge import remediation_fields
+
+    write_key = f"can_buses.{BUS}.shares.ecu_a.permissions.allow_write"
+    read_key = f"can_buses.{BUS}.shares.ecu_a.permissions.allow_read"
+
+    class NarrowedParticipant(SharedFakeParticipant):
+        def send(self, frame_id: int, data: bytes, *, extended: bool = False, rtr: bool = False) -> dict:
+            return {"ok": False, "error_type": "permission_denied", "summary": f"Writing is disabled. The permission is `{write_key}` and it is false.", "bus_id": BUS, "participant": self.name, "permission": write_key, "retry_safe": False, "side_effect_committed": False}
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            return {"ok": False, "error_type": "permission_denied", "summary": f"Reading is disabled. The permission is `{read_key}` and it is false.", "bus_id": BUS, "participant": self.name, "permission": read_key, "retry_safe": False, "side_effect_committed": False}
+
+    import agentic_hil.canbroker as broker_module
+
+    monkeypatch.setattr(broker_module, "attach_participant", lambda config, bus_id, participant, **kwargs: NarrowedParticipant(participant))
+    service = AgenticHILToolService(config_for(tmp_path))
+    try:
+        assert service.call("can_session_start", {"bus_id": BUS, "participant": "ecu_a", "clear_rx_queue": False})["ok"] is True
+        sent = service.call("can_send", {"bus_id": BUS, "participant": "ecu_a", "frame_id": 0x123, "data_hex": "01"})
+        read = service.call("can_read", {"bus_id": BUS, "participant": "ecu_a"})
+        until = service.call("can_read", {"bus_id": BUS, "participant": "ecu_a", "until_id": 0x123, "wait_timeout_s": 0})
+    finally:
+        service.close()
+    assert sent["error_type"] == "permission_denied", sent
+    assert sent["permission"] == write_key, sent
+    assert sent["remediation"] == remediation_fields("permission_denied", permission=write_key)["remediation"], sent
+    for answer in (read, until):
+        assert answer["error_type"] == "permission_denied", answer
+        assert answer["permission"] == read_key, answer
+        assert answer["remediation"] == remediation_fields("permission_denied", permission=read_key)["remediation"], answer
+
+
+def broker_failure(kind: str, name: str) -> BaseException:
+    from agentic_hil.canbroker import ParticipantError
+
+    if kind == "timeout":
+        return ParticipantError({"ok": False, "error_type": "can_broker_timeout", "summary": "The CAN broker did not answer within the request timeout.", "bus_id": BUS, "participant": name, "side_effect_status": "unknown"})
+    if kind == "invalid_message":
+        return ParticipantError({"ok": False, "error_type": "can_broker_invalid_message", "summary": "The CAN broker answered with a message this client cannot read.", "bus_id": BUS, "participant": name})
+    return BrokenPipeError(32, "The pipe has been ended")
+
+
+BROKER_FAILURE_TYPES = {"timeout": "can_broker_timeout", "invalid_message": "can_broker_invalid_message", "gone": "can_broker_disconnected"}
+
+
+@pytest.mark.parametrize("kind", sorted(BROKER_FAILURE_TYPES))
+@pytest.mark.parametrize("tool", ["can_send", "can_read"])
+def test_a_broker_failure_is_a_can_refusal_and_never_an_audit_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str, kind: str):
+    """A slow, garbled or ended broker is a connection failure with its own type (#664).
+
+    Not `hardware_action_exception`, not `audit_failed_after_action`, and no
+    audit-broken incident waiting for an operator's signature. A broker that has
+    ended fails every request, status included; a slow or garbled one fails the
+    request in hand."""
+    from agentic_hil.knowledge import ERROR_CATALOGUE
+
+    class FailingParticipant(SharedFakeParticipant):
+        ended = False
+
+        def send(self, frame_id: int, data: bytes, *, extended: bool = False, rtr: bool = False) -> dict:
+            self.ended = kind == "gone"
+            raise broker_failure(kind, self.name)
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            self.ended = kind == "gone"
+            raise broker_failure(kind, self.name)
+
+        def status(self) -> dict:
+            if self.ended:
+                raise broker_failure(kind, self.name)
+            return super().status()
+
+    import agentic_hil.canbroker as broker_module
+
+    monkeypatch.setattr(broker_module, "attach_participant", lambda config, bus_id, participant, **kwargs: FailingParticipant(participant))
+    service = AgenticHILToolService(config_for(tmp_path))
+    try:
+        assert service.call("can_session_start", {"bus_id": BUS, "participant": "ecu_a", "clear_rx_queue": False})["ok"] is True
+        if tool == "can_send":
+            answer = service.call("can_send", {"bus_id": BUS, "participant": "ecu_a", "frame_id": 0x123, "data_hex": "01"})
+        else:
+            answer = service.call("can_read", {"bus_id": BUS, "participant": "ecu_a"})
+        status = service.hardware_lease_status()
+    finally:
+        service.close()
+    error_type = BROKER_FAILURE_TYPES[kind]
+    assert answer["ok"] is False, answer
+    assert answer["error_type"] == error_type, answer
+    assert error_type in ERROR_CATALOGUE, error_type
+    assert answer["remediation"], answer
+    assert answer.get("audit_ok") is not False, answer
+    assert answer["participant"] == "ecu_a", answer
+    if tool == "can_send":
+        assert answer["side_effect_status"] == "unknown", answer
+    else:
+        assert answer["side_effect_status"] == "not_started", answer
+        assert answer["side_effect_committed"] is False, answer
+    assert status["incident_stands"] is False, status
+    assert not [reason for reason in status["cleanup_reasons"] if "audit_broken" in str(reason) or "hardware_exception" in str(reason)], status
+
+
 def test_unshared_bus_keeps_exclusive_session_semantics(tmp_path: Path):
     config = load_config(str(write_config(tmp_path, can_buses_yaml=f'''can_buses:\n  {BUS}:\n    adapter: process\n    channel: exclusive\n    executable: fake-bridge\n''')))
     device = resolve_devices(config, [{"kind": "can", "id": BUS}]).devices[0]

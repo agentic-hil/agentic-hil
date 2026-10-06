@@ -231,6 +231,10 @@ COM_PORT_BUSY_ERROR = "com_port_busy"
 # because the missing thing is a statement about a physical board and not an
 # authorization. The refusal carries the command the person runs instead.
 RECOVERY_PHYSICAL_CHECK_ERROR = "recovery_requires_physical_check"
+# The same refusal for an incident whose reasons name a broken audit trail. No
+# statement clears that one, so its entry relays the operator's command instead
+# of asking for a sentence.
+AUDIT_BROKEN_SCOPE = "audit_broken"
 
 
 def recovery_operator_command(quarantine_id: str | None) -> str:
@@ -356,6 +360,14 @@ EXCLUSIVE_PERMISSION_SCOPE = "exclusive"
 # belonged to a service that has already closed. Every failed run result names
 # this scope, so a type with no scoped entry falls back to its bare one.
 TEST_REACTOR_SCOPE = "test_reactor"
+
+# The scope for the COM errors `flash_firmware` answers for its `capture`. The
+# capture opens, reads and stops a session of its own, so the bare entries'
+# advice, written for a caller who called `com_session_start` and holds the
+# session, sends this caller to a tool it never called or to a session that is
+# already stopped. Before the flash the retry is the flash with the same
+# capture; after it, the image is on the board and is not the thing to retry.
+FLASH_CAPTURE_SCOPE = "flash_capture"
 
 
 def exclusive_permission_fields(blocking: str, debugger_id: str | None) -> JsonObject:
@@ -1298,6 +1310,31 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "that agent, and a new file throws them away.",
         ),
     ),
+    # The agent's own MCP file, not the Agentic HIL configuration: Codex's
+    # `config.toml`, `opencode.json` or Claude Code's `.claude.json`. It used to
+    # answer `config_invalid` and so carried the advice for a file that is not
+    # involved (#693).
+    "agent_mcp_config_invalid": ErrorRemedy(
+        meaning=(
+            "The agent's own MCP configuration at `path` could not be used to register the Agentic HIL server: it "
+            "does not parse (a TOML or JSON syntax error), its server table (`mcp` for opencode, `mcpServers` for "
+            "Claude Code) is not an object, or the Agentic HIL managed markers in Codex's `config.toml` are "
+            "malformed, duplicated or hold no `agentic-hil` table. `parse_error`, where present, is the parser's own "
+            "account. The file belongs to the agent and the operator, so it was left exactly as it was and nothing "
+            "was registered. The Agentic HIL configuration is not involved and nothing in it needs to change."
+        ),
+        remediation=(
+            "Open the file at `path` and find what the summary names: the syntax error (`parse_error` gives its "
+            "line where the parser reported one), the server table holding another type, or the managed marker "
+            "lines that do not pair up.",
+            "Have the operator repair it in place, keeping the servers and settings it already holds.",
+            "Run the same command again.",
+        ),
+        do_not=(
+            "Do not delete or replace the file to get past this. It holds the operator's own settings and servers "
+            "for that agent, and a new file throws them away.",
+        ),
+    ),
     "agent_project_record_unreadable": ErrorRemedy(
         meaning=(
             "A project bound through `AGENTIC_HIL_CONFIG` outside the projects directory has to be named in "
@@ -1305,13 +1342,13 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "record it has to be: it could not be opened, is not JSON, or is not a JSON object whose `configurations` "
             "is a list of absolute paths. A record that may name projects and cannot be read is no ground to write "
             "rules from, so this project was not recorded, no deny rule was written, and the file was left untouched. "
-            "`path` is the record this user's commands write to; a second copy can stand beside the other "
-            "configuration root, and an unreadable copy there refuses the same way."
+            "`path` is the record that did not read, and `reason` says how: `unopenable`, `not_json` or "
+            "`wrong_shape`. A copy can stand beside each configuration root, so `write_path`, the record this "
+            "user's commands write to, is reported apart and may be a different, healthy file."
         ),
         remediation=(
-            "Open `external-projects.json` at `path`, and the copy beside the other configuration root if there is "
-            "one, and find the one that does not read: a file this account cannot open, a syntax error, or an entry "
-            "that is not an absolute path.",
+            "Open `external-projects.json` at `path` and find what `reason` names: a file this account cannot open "
+            "(`unopenable`), a syntax error (`not_json`), or an entry that is not an absolute path (`wrong_shape`).",
             "Have the operator repair that file in place, keeping every path it names: a JSON object whose "
             "`configurations` key holds a list of absolute configuration paths.",
             "Run the same command again.",
@@ -1588,6 +1625,27 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "above are the supported ones and they keep the ledger line saying who cleared what, and on what.",
         ),
     ),
+    f"{RECOVERY_PHYSICAL_CHECK_ERROR}:{AUDIT_BROKEN_SCOPE}": ErrorRemedy(
+        meaning=(
+            "`hardware_recover` was allowed to run and refused because a reason this incident names is a broken audit "
+            "trail (`audit_broken_reasons`). No `operator_statement` clears that, with or without one passed: the "
+            "statement would be written into the very ledger whose failure raised the incident. Only the operator's "
+            "own command clears it, and `operator_command` is that command with this incident's `quarantine_id` in it."
+        ),
+        remediation=(
+            "Show the operator `quarantine_guidance` and relay `operator_command` verbatim. They check the board and "
+            "run it at a shell on this host; that is the one route that clears this incident.",
+            "Say plainly that hardware effects stay blocked until they have run it, and stop there. Once they say it "
+            "is done, `hardware_lease_status` shows whether anything still stands.",
+        ),
+        do_not=(
+            "Do not ask the operator for a statement to pass back here, and do not call again with one. No statement "
+            "clears this reason, so the call answers the same refusal.",
+            "Do not run the command yourself or invent the operator's confirmation. It attests a physical state only a "
+            "person can speak for.",
+            "Do not clear the state files under `state_root` by hand, and do not ask the operator to.",
+        ),
+    ),
     "config_changed": ErrorRemedy(
         meaning=(
             "The authoritative configuration changed after this incident was recorded: `recorded_config_sha256` is the "
@@ -1666,11 +1724,16 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "debugger_config_not_found": ErrorRemedy(
         meaning=(
-            "A debugger script this entry names could not be used: the interface or target configuration file the "
-            "backend was pointed at is not where the configuration says it is. Nothing was run and the bench was not "
-            "touched."
+            "OpenOCD could not find a script it was told to read, and stopped before it reached the target. "
+            "`backend_error_type` says which: `interface_config_not_found` for the script "
+            "`debuggers.<name>.interface_cfg` names, `target_config_not_found` for `target_cfg`, and "
+            "`config_file_not_found` for a file one of them pulls in with `source [find ...]`, missing from this "
+            "OpenOCD's script tree. probe_target, flash_firmware, reset_target and debug_start_session report it "
+            "alike. This is OpenOCD's script, not the Agentic HIL configuration file, and the bench was not touched."
         ),
         remediation=(
+            "Read the OpenOCD output, in the result or in the log at `log_path` for a debug session: it names the file "
+            "it could not find.",
             "Check `debuggers.<name>.interface_cfg` and `.target_cfg` against what is installed on this machine; "
             "`agentic-hil doctor` names the entry, says of each value whether it is an OpenOCD search name or a path, "
             "and for a path whether the file is there.",
@@ -1678,8 +1741,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "(`interface/stlink.cfg`, `target/stm32f4x.cfg`), which the installed OpenOCD resolves against its script "
             "path, or to absolute paths of the script files. A configured script path must be absolute and must live "
             "outside the workspace.",
-            "If the search names do not resolve, the OpenOCD on this machine has no script tree where it expects one: "
-            "install the scripts, or point `OPENOCD_SCRIPTS` at them, or name the files by absolute path.",
+            "If the search names do not resolve, or `backend_error_type` is `config_file_not_found`, the OpenOCD on "
+            "this machine has no complete script tree where it expects one: install the scripts or a complete OpenOCD, "
+            "or point `OPENOCD_SCRIPTS` at them, or name the files by absolute path.",
         ),
         do_not=(
             "Do not copy OpenOCD scripts into the repository and point the configuration at them. A script inside the "
@@ -1954,10 +2018,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`backend_error`, or the summary.",
             "A permission, a full disk or a file another program holds open is fixed where it is, and the same call "
             "then reads the record again; nothing else has to change.",
-            "A record that is corrupted, from another version or inconsistent is the operator's to judge: no command "
-            "rewrites a coordination record or the canonical ledger, and `agentic-hil lease-status` and "
-            "`agentic-hil recover` stop on the same record. Hand the operator the refusal as it is, with the record "
-            "it names.",
+            "A record that is corrupted, from another version or inconsistent is the operator's to judge, and "
+            "`agentic-hil lease-status` and `agentic-hil recover` stop on the same record. Hand the operator the "
+            "refusal as it is, with the record it names. After checking the board they run `agentic-hil recover "
+            "--confirm-safe-state --retire-records`, adding `--quarantine-id <quarantine_id>` where the project "
+            "record still names one: it keeps each record's bytes under `retired/`, writes the recovery ledger "
+            "first, and frees the bench. The canonical audit ledger has no such route.",
             "`unlockable_lock_keys` is a defect in a device kind, not a bench fault: report it with the plan that "
             "declared the device.",
         ),
@@ -2013,8 +2079,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "When the refusal names a `resource`, that marker is the disagreement. If it is another project's "
             "incident on the same device, `standing_incidents` names it and it resolves in that project's workspace "
             "first.",
-            "When the same id is refused again on the same `resource`, nothing on this side reconciles that marker: "
-            "hand the operator the refusal with the `agentic-hil lease-status` output.",
+            "When the same id is refused again on the same `resource`, no hardware call and no `hardware_recover` "
+            "reconciles that marker: hand the operator the refusal with the `agentic-hil lease-status` output. After "
+            "checking the board they run `agentic-hil recover --confirm-safe-state --retire-records --quarantine-id "
+            "<quarantine_id>`, which sets the marker aside with its bytes kept and writes the recovery ledger.",
         ),
         do_not=(
             "Do not edit or delete the marker to make it match, and do not sign again with the old id.",
@@ -2091,8 +2159,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Read `expected_device` when it is present: the board this entry names is still attached, under that name, "
-            "and the entry is simply out of date. `project_config_adopt_hardware` rewrites it from the attached "
-            "hardware.",
+            "and the entry's `device` is simply out of date. Set `com_ports.<name>.device` to `expected_device` with "
+            "`project_config_set`, or have the operator edit the configuration, then call "
+            "`project_config_reload_description` and `com_session_start` again. `next_step` names the key and the value.",
             "Without `expected_device` the named board is not attached at all. Plug it in, or work on the board that is "
             "there by naming its own entry.",
             "On Linux, prefer `/dev/serial/by-id/usb-<vendor>_<product>_<serial>-ifNN` for `device`. udev builds that "
@@ -2133,6 +2202,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "question; signing for a physical state nobody disturbed teaches the signature to mean nothing.",
             "Do not work around it by pointing the entry at a different device name. The other name is a different "
             "board, and a stimulus sent to the wrong board is the failure the port identity check exists to prevent.",
+        ),
+    ),
+    f"{COM_PORT_BUSY_ERROR}:{FLASH_CAPTURE_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The COM port a `flash_firmware` `capture` names is held by another program, so the capture's session was "
+            "refused where the operating system refused the open, before the flash: nothing was flashed, the target "
+            "was not reset and no handle was created. `configured_device` is the device name that was tried."
+        ),
+        remediation=(
+            "Find the holder and stop it. On Linux, `fuser -v <device>` or `lsof <device>` names the process; on "
+            "Windows, close the terminal, IDE serial monitor or flashing tool that has the port open.",
+            "Then call `flash_firmware` again with the same `capture`. Nothing was flashed, so the retry starts from "
+            "nothing.",
+        ),
+        do_not=(
+            "Do not run `recover --confirm-safe-state` over this. No lease was quarantined and the board was not "
+            "touched.",
+            "Do not point the entry at a different device name to get the port opened. The other name is a different "
+            "board.",
         ),
     ),
     "com_port_not_bound": ErrorRemedy(
@@ -2209,6 +2297,26 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "enumeration order, so another name that opens is usually another board.",
         ),
     ),
+    f"com_port_open_failed:{FLASH_CAPTURE_SCOPE}": ErrorRemedy(
+        meaning=(
+            "Opening the COM port a `flash_firmware` `capture` names failed, before the flash: nothing was flashed and "
+            "the target was not reset. `backend_error` is the line the open failed with, and `likely_causes` reads it. "
+            "No session was registered. With `cleanup_error` present, a handle the failed open left standing would not "
+            "close, and that is recorded under `cleanup_reasons`."
+        ),
+        remediation=(
+            "Read `backend_error` and `likely_causes` first: they say whether the device is missing, held by another "
+            "program, or closed to this user. On Linux a permission refusal is fixed by the group that owns the device "
+            "(`dialout` or `uucp`) and a new login; a missing device by plugging the adapter in, with `agentic-hil "
+            "com-ports` showing what this host lists.",
+            "Then call `flash_firmware` again with the same `capture`. Nothing was flashed, and with `cleanup_error` "
+            "present the capture's open in that call is also what settles the recorded handle.",
+        ),
+        do_not=(
+            "Do not switch the entry to a different device just because that one opens. A device name is an "
+            "enumeration order, so another name that opens is usually another board.",
+        ),
+    ),
     "serial_backend_not_available": ErrorRemedy(
         meaning=(
             "pyserial, the backend Agentic HIL reaches serial ports through, could not be imported in the process that "
@@ -2275,6 +2383,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "checks.",
         ),
     ),
+    f"com_port_identity_unverified:{FLASH_CAPTURE_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The COM port a `flash_firmware` `capture` names could not be checked against the hardware its entry names, "
+            "so it was not opened and the flash was not started: nothing was flashed and the target was not reset. It "
+            "is not a mismatch, there was no way to tell. `identity.status` says which check had no answer."
+        ),
+        remediation=(
+            "Read `identity.status` and `identity.summary`, and restore the check that status names: install the serial "
+            "backend for `backend_unavailable`; plug the board in, or check that `device` is the name this host lists "
+            "for it, for `port_not_enumerated`; use an adapter and driver that report the missing serial or USB ids for "
+            "`serial_unknown` and `usb_ids_unknown`.",
+            "Then call `flash_firmware` again with the same `capture`. Nothing was touched, so there is nothing to "
+            "recover.",
+        ),
+        do_not=(
+            "Do not delete `serial_number`, `vid` or `pid` from the entry to get it opened. Removing them to silence "
+            "this refusal opens a name that nothing checks.",
+        ),
+    ),
     "com_reader_start_failed": ErrorRemedy(
         meaning=(
             "The port was opened, but the background reader that buffers its input could not be started, so the "
@@ -2292,18 +2419,36 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`com_session_start` could not open it.",
         ),
     ),
+    f"com_reader_start_failed:{FLASH_CAPTURE_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The COM port a `flash_firmware` `capture` names was opened, but the background reader that buffers its "
+            "input could not be started, so the port was closed again and the flash was not started: nothing was "
+            "flashed and the target was not reset. `backend_error` says why the reader would not start."
+        ),
+        remediation=(
+            "Call `flash_firmware` again with the same `capture`: the port was closed cleanly, so the retry begins "
+            "from nothing.",
+            "If it fails the same way again, `backend_error` names what the server process could not do, and "
+            "restarting the MCP server is the repair.",
+        ),
+        do_not=(
+            "Do not read the port with another serial program in the meantime. It would hold the device, and the "
+            "capture could not open it.",
+        ),
+    ),
     "com_port_close_failed": ErrorRemedy(
         meaning=(
             "Closing the port, or stopping its reader, did not confirm, and `backend_error` says which part failed and "
             "how. The session remains registered so that the close can be retried: until it is, `com_read` and "
             "`com_write` on this port answer `session_not_active`, and `com_ports_list` shows it with "
             "`session_active` false. The failure is recorded under `cleanup_reasons`. `quarantined` is true only when "
-            "the audit log broke as well; then no later call can close the session, and the incident stands until an "
-            "operator recovers it."
+            "the audit log broke as well; then the incident stands until an operator recovers it, and the handle, "
+            "once closed, is no longer retried."
         ),
         remediation=(
             "Call `com_session_stop` again with the same `port_id`. The close is retried from the registered session, "
-            "and a stop that succeeds releases the port.",
+            "and a stop that succeeds releases the port. If an incident this call may not end holds the lease, the "
+            "stop answers `session_lease_held` instead and names the call that ends it.",
             "`com_session_start` on the same port retries the close as well, and opens a fresh session once it "
             "succeeds.",
             "Read `quarantine_guidance` for what the failed close leaves unconfirmed. If `quarantined` is true, fix "
@@ -2313,6 +2458,47 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not sign `agentic-hil recover --confirm-safe-state` for this while `quarantined` is false. Nothing is "
             "held for a signature: the next stop or start settles the handle, and the operating system refuses that "
             "open by itself if the handle is really stuck.",
+        ),
+    ),
+    "session_lease_held": ErrorRemedy(
+        meaning=(
+            "The session's handle is closed, but its lease could not be given back: an open incident holds it, and "
+            "this call may not end that incident. Inside a bench run, the run's teardown ends it; outside a run, a "
+            "debug session that is still open keeps it. The session stays registered for nothing but its lease, "
+            "nothing was sent to the device, and `cleanup_confirmed` is never true here because the lease is still "
+            "held. `next_step` names the call that ends the incident; a CAN refusal carries the `participant`."
+        ),
+        remediation=(
+            "Follow `next_step`: inside a run, call `bench_run_stop`; otherwise end the session that holds the "
+            "incident open, a debug session with `debug_stop_session`.",
+            "Then call the stop again with the same arguments. It gives the lease back without touching the device "
+            "again, and a start after it opens a fresh session.",
+        ),
+        do_not=(
+            "Do not open the device from another program in the meantime. The resource stays reserved for this "
+            "session until the stop that follows the incident's end.",
+            "Do not call the stop in a loop. The answer stays the same until the call `next_step` names has run.",
+        ),
+    ),
+    f"com_port_close_failed:{FLASH_CAPTURE_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The firmware was flashed, the target reset and its boot output read into `capture`, but closing the "
+            "capture's COM session did not confirm, and `backend_error` says which part failed. The session remains "
+            "registered so that the close can be retried, and the failure is recorded under `cleanup_reasons`. Until "
+            "it is closed, another `capture` on this port is refused. `quarantined` is true only when the audit log "
+            "broke as well."
+        ),
+        remediation=(
+            "Call `com_session_stop` with the same `port_id`. The close is retried from the registered session, and a "
+            "stop that succeeds releases the port.",
+            "The flash needs nothing: the image is on the board and `capture` holds what it printed, so `flash_firmware` "
+            "is not the retry for this.",
+            "If `quarantined` is true, fix the audit destination first, then follow `quarantine_guidance` to the "
+            "operator's signature.",
+        ),
+        do_not=(
+            "Do not sign `agentic-hil recover --confirm-safe-state` for this while `quarantined` is false. The next stop "
+            "settles the handle, and the operating system refuses a new open by itself if it is really stuck.",
         ),
     ),
     "serial_write_failed": ErrorRemedy(
@@ -2423,6 +2609,27 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "reader does not restart; only `com_session_start` opens the port again.",
         ),
     ),
+    f"serial_read_failed:{FLASH_CAPTURE_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The reader of the COM session a `flash_firmware` `capture` opened failed after a good flash: the firmware "
+            "was flashed and the target reset, the capture's session was stopped, and `capture` holds what was read "
+            "before the failure, with `reader_error` beside it. `capture.log_path` is the session's log of every byte "
+            "received."
+        ),
+        remediation=(
+            "Read `capture.reader_error`: its `backend_error` and `likely_causes` say why the read failed. A port that "
+            "was disconnected is the first of them, and the adapter has to be back before the port can be read again.",
+            "The image is on the board. To see the boot output again, call `flash_firmware` with the same `capture` "
+            "once the port is back, which flashes and resets again; or open a session of your own with "
+            "`com_session_start`, then `reset_target` and `com_read`, which reads the next boot without writing the "
+            "image again.",
+        ),
+        do_not=(
+            "Do not call `com_read` on the port for what the capture missed. The capture's session is stopped, and what "
+            "it received is already in `capture` and in its log.",
+            "Do not report the flash as failed: `success_confirmed` and `side_effect_status` say the image was written.",
+        ),
+    ),
     "audit_write_failed": ErrorRemedy(
         meaning=(
             "The background reader received bytes it could not append to the session's COM log, so the evidence of "
@@ -2431,8 +2638,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`resource_quarantined`. This error is shown in `com_ports_list`, under the port's `reader_error`, with "
             "`backend_error` saying why the log write failed. `flash_firmware` with a `capture` answers it as its own "
             "`error_type` when this happened to the capture's reader after the flash, and `capture` holds what was "
-            "read. `com_session_stop` cannot close such a session cleanly either: it answers `com_port_close_failed` "
-            "with `quarantined` true. The incident stands until an operator recovers it."
+            "read. `com_session_stop` closes such a session and answers `com_port_close_failed` with `quarantined` "
+            "true; the port's lease stays with the incident, and the incident stands until an operator recovers it, "
+            "which this server picks up while it runs."
         ),
         remediation=(
             "Fix what `backend_error` names first: free disk space, or restore write permission where `log_path` "
@@ -2449,11 +2657,13 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "undeclared_device": ErrorRemedy(
         meaning=(
-            "A run reached for a device its test description does not name. `declared_devices` lists what it declared, "
+            "A run reached for a device it did not declare. A run declares its devices in its test description, or in "
+            "`devices` on `bench_run_start` when it was opened that way. `declared_devices` lists what it declared, "
             "`undeclared_devices` what it reached for. Nothing was touched."
         ),
         remediation=(
-            "Add the device to the test description and rerun. The declaration is what the mutex locks before the run "
+            "Add the device to the declaration and rerun: to the test description, or to `devices` on "
+            "`bench_run_start` for a run opened with it. The declaration is what the mutex locks before the run "
             "starts, so a device that is not declared was never locked and could be driven by somebody else mid-run.",
             "A test plan declares a debugger with `debugger: <name>` and a serial line with `port_id: <name>` on the "
             "steps that use them.",
@@ -2694,8 +2904,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "handles."
         ),
         remediation=(
-            "Call `hardware_lease_status`: it reads and heals the dead owner's holds, and names a `quarantine_id` "
-            "if the run had reached the board.",
+            "Call `hardware_lease_status`: it reads the dead owner's holds without changing them. "
+            "`dead_owner_no_contact` means the run never reached the board and the next hardware call releases the "
+            "holds; otherwise the next hardware call inherits them as an incident and names its `quarantine_id`.",
             "With an incident standing, recover it the way `resource_quarantined` describes; then start the plan "
             "again for a verdict.",
         ),
@@ -2827,6 +3038,32 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "settle this. The run's sessions belonged to its own service, which has closed, and a retry with no new "
             "evidence leaves an unconfirmed state unconfirmed.",
             "Do not delete coordination records or lock files to free the bench.",
+        ),
+    ),
+    # A plan run's own reading of a held device. The bare entry advises a
+    # bounded `wait_s` on the run start, which `bench_run_start` takes and
+    # `test_reactor_run` does not: its schema refuses the argument, and its
+    # definition says a held device is refused at once (#673).
+    "device_busy:test_reactor": ErrorRemedy(
+        meaning=(
+            "A device this plan declares is held by another owner for the duration of their run, so the plan ran no "
+            "step. The refusal names the holder in `holder` (pid, host, frontend, and the run label when there is "
+            "one) and when it took the device in `held_since`. Nothing was touched."
+        ),
+        remediation=(
+            "Read `holder` and wait for that run, or ask its owner to finish. This is not a fault: it is the exclusivity "
+            "that replaced the read permission.",
+            "A refusal that carries no `holder` is the same hold by an owner whose record does not name it yet: wait for "
+            "it the same way, and do not take the missing heartbeat for a hang.",
+            "A plan run over MCP does not wait for a held device: `test_reactor_run` refuses at once, so call it again "
+            "once the holder's run has ended. An operator who wants the run to wait asks for it bounded, with "
+            "`agentic-hil test-reactor --wait-s <seconds>`.",
+            "A holder whose `heartbeat_age_s` is large and `holder_heartbeat_stale` is true is hung rather than busy; "
+            "the hold is still real, so stop that process rather than deleting anything.",
+        ),
+        do_not=(
+            "Do not delete the lock file, and do not retry in a loop. The hold belongs to a live process; removing it "
+            "would let two runs drive one board, which is the failure the mutex exists to prevent.",
         ),
     ),
     # The reactor's verdicts on a step. Each is a firmware or plan outcome the
@@ -3389,6 +3626,14 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "OpenOCD 0.12.0 and newer are passed it as `adapter serial`, older releases as the adapter driver's own "
             "serial command (`hla_serial` for `interface/stlink.cfg`).",
             "Close whatever else holds the probe.",
+            "With `backend_error_type` `adapter_access_denied` the probe is attached and this user may not open it: "
+            "OpenOCD printed `LIBUSB_ERROR_ACCESS`. Have the operator install the probe's udev rule (OpenOCD ships one "
+            "as `60-openocd.rules`) and add this user to the group it gives the device to, plugdev on Debian and "
+            "Ubuntu, then log in again so the new group applies.",
+        ),
+        do_not=(
+            "Do not run the server or OpenOCD as root, or through sudo, to get past a refused opening. The debugger "
+            "would then run with every right on the host, and the next call as this user fails the same way.",
         ),
     ),
     "adapter_not_found:stlink": ErrorRemedy(
@@ -3705,8 +3950,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "flash_erase_failed:pyocd": ErrorRemedy(
         meaning=(
-            "pyOCD could not erase a flash sector the image covers, and said so in its own words: `Failed to erase "
-            "sector at <address>`. Nothing was written and nothing was verified, and the flash contents are unconfirmed "
+            "pyOCD could not erase a flash sector the image covers, and said so in its own words: `flash erase "
+            "sector failure (address <address>; result code <code>)` or another of its `flash erase` lines. Nothing was written and nothing was verified, and the flash contents are unconfirmed "
             "rather than known-unchanged: the sectors before the failing address may already be erased.\n\n"
             "This used to be reported as a plain `flash_failed`, and pyOCD logs `Resetting target` as a matter of "
             "course beside what it is doing, so the same failure with that line in the transcript came back as "
@@ -3715,7 +3960,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Read `programmer_output.stdout` and `programmer_output.stderr` on the result before anything else. They "
-            "are pyOCD's own account of what it loaded and tried to erase, and `Failed to erase sector at <address>` "
+            "are pyOCD's own account of what it loaded and tried to erase, and the `flash erase` line "
             "in them names the address the device refused, which is what places the failure inside the image. The log "
             "the result names by `log_path` holds the same capture.",
             "Ask the device about protection rather than about wiring. Read the option bytes for read-out protection, "
@@ -3795,13 +4040,14 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "verify_failed:pyocd": ErrorRemedy(
         meaning=(
-            "The captured pyOCD output says `Verify failed at <address>`. This service does not independently read "
+            "The captured pyOCD output reports a failed verify. pyOCD 0.45.1's flash prints no verify line of its own, "
+            "so the words come from whatever ran it. This service does not independently read "
             "flash back, so the transcript alone does not establish what pyOCD compared or how much of the image "
             "reached the device. Treat the image as indeterminate and keep the full transcript under `programmer_output`."
         ),
         remediation=(
             "Read `programmer_output.stdout` and `programmer_output.stderr` before anything else, and the log the "
-            "result names by `log_path`. Confirm the `Verify failed at <address>` line is present and read the lines "
+            "result names by `log_path`. Find the line that reports the verify and read the lines "
             "before it to see what pyOCD reported about the erase, program and target connection.",
             "Check that `debuggers.<name>.target_type` names this device. The CMSIS pack supplies pyOCD's target "
             "memory map and flash algorithm; a near neighbour can select the wrong address or page size. "
@@ -4092,7 +4338,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Read `audit_error` for the path or the fault that stopped the record.",
-            "Have the operator repair the destination: `agentic-hil doctor` checks that `state_root` accepts writes. "
+            "Have the operator repair the destination: `agentic-hil doctor` checks that `state_root` accepts writes "
+            "and that this project's report state reads. "
             "Free the disk or restore write access. A destination this profile refuses outright is a configuration "
             "refusal, and the `audit_error` that names it carries its own remediation for that path.",
             "Call again once it is repaired. Nothing was started, so there is nothing to recover first.",
@@ -4216,7 +4463,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "report_unreadable": ErrorRemedy(
         meaning=(
             "This project's report state exists and reading it failed. `error_class` and `errno` say how; the path is "
-            "withheld on purpose. A report state that reads and is damaged answers `config_invalid` instead."
+            "withheld on purpose. A report state that reads and is damaged answers `report_state_damaged` instead."
         ),
         remediation=(
             "Read `error_class` and `errno`: a refused permission and a failing disk are different repairs.",
@@ -4226,6 +4473,32 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not delete or recreate the report state to get past it. It is this project's record of what ran.",
             "Do not read this as an empty record or as a pass.",
+        ),
+    ),
+    # The report state reads and its content is damaged, which a crash or a full
+    # disk during a write can leave behind. It used to answer `config_invalid`,
+    # whose advice is about the configuration file, and nothing named a way back
+    # (#689).
+    "report_state_damaged": ErrorRemedy(
+        meaning=(
+            "This project's report state (`report-state.json` under `state_root`, the record `get_last_report` and "
+            "`classify_last_error` read and every hardware call updates) exists and reads, and what it holds is "
+            "damaged: it is not JSON, has an unsupported format, or holds an entry that is not an object. A crash or "
+            "a full disk during a write can leave it truncated. The configuration is not involved. The absolute path "
+            "is withheld from tool answers; `agentic-hil doctor` prints it. Until it is repaired every hardware call "
+            "is refused before it starts as `audit_unavailable`, with this under `audit_error`."
+        ),
+        remediation=(
+            "Have the operator run `agentic-hil report-state-repair` on this machine. It moves the damaged file aside "
+            "beside itself, every byte kept under a name that says it is damaged, starts a fresh, empty report state, "
+            "and prints both paths.",
+            "Call again once it is repaired. Nothing was started, so there is nothing to recover first. The last "
+            "report and failure recorded before the damage are not carried over; the per-run reports are untouched.",
+        ),
+        do_not=(
+            "Do not delete or edit the report state to get past this. The repair keeps the damaged copy as this "
+            "project's record of what ran; a deletion throws it away.",
+            "Do not change the Agentic HIL configuration for this. It is not the file that is damaged.",
         ),
     ),
     "report_write_failed": ErrorRemedy(
@@ -4346,8 +4619,13 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Read `configured_debuggers`.",
-            "If it is empty, the configuration has no debugger: `project_config_create` generates one from the "
-            "attached hardware (it needs `permissions.allow_config_write`), or the operator runs `{reopen_command}`.",
+            "If it is empty, the configuration has no debugger. `project_config_set` writes an entry "
+            "(`debuggers.<name>.type`, `.executable`, and for OpenOCD `.interface_cfg` and `.target_cfg`; it needs "
+            "`permissions.allow_config_description_write`) and `project_config_reload_description` binds it, because a "
+            "server with no debugger binds the only one; `project_config_create` generates a configuration with one "
+            "from the attached hardware (it needs `permissions.allow_config_write`); without either grant the operator "
+            "runs `{reopen_command}`. An entry written this way has every grant closed: the next call's "
+            "`permission_denied` names the key the operator opens.",
             "If it names several, drive them through `test_reactor_run` with a test plan that names the device of "
             "each step (`{test_plan_reference}`). Keeping only one entry is the operator's decision.",
         ),
@@ -4576,7 +4854,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "This bench runs `type: pyocd`. The typed-debug family is served here: the session tools run through "
             "`pyocd gdbserver` with the GDB `debug.gdb_executable` names (#624), and `debug_symbol_value` and "
             "`debug_dump_symbol_ihex` also read the target with no session open, through pyOCD's own `savemem` on "
-            "`--connect attach`, the one of pyOCD's connect modes that neither halts nor resets the core.\n\n"
+            "`--connect attach`, the one of pyOCD's connect modes that neither halts nor resets the core, with the target "
+            "pack's DebugCoreStart sequence disabled so that the connect does not let a halted core run either.\n\n"
             "What pyOCD refuses is `reset_target` with mode `init`. On OpenOCD that mode halts the core and then runs "
             "the target's reset-init event script, which is where a board's clock tree, wait states and watchdog are "
             "set up; pyOCD's commander has no equivalent, and sending its plain `reset halt` under that name would "
@@ -4835,29 +5114,6 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "does not see that run.",
         ),
     ),
-    "config_file_not_found:openocd": ErrorRemedy(
-        meaning=(
-            "OpenOCD, started as a debug session's server, exited because it could not find a file it was told to "
-            "read, and that file is neither of the two scripts the entry names: most often a script `interface_cfg` or "
-            "`target_cfg` pulls in with `source [find ...]`, missing from this OpenOCD's script tree. This is "
-            "OpenOCD's script, not the Agentic HIL configuration file. The server stopped before the target was "
-            "reached."
-        ),
-        remediation=(
-            "Read the server output in the log at `log_path` (`server_stderr_tail`): OpenOCD names the file it could "
-            "not find.",
-            "Check that the OpenOCD this entry runs has a complete script tree. The file has to resolve wherever "
-            "`interface_cfg` and `target_cfg` resolve, and `agentic-hil doctor` says of each whether it is a search "
-            "name or a path, and for a path whether the file is there.",
-            "Install the missing scripts or a complete OpenOCD, or point `OPENOCD_SCRIPTS` at the tree that has them, "
-            "then start the session again with debug_start_session.",
-        ),
-        do_not=(
-            "Do not copy OpenOCD scripts into the repository to supply the missing file. A script inside the "
-            "workspace is repository-controlled Tcl running in the debugger.",
-            "Do not run `openocd` directly to get past it.",
-        ),
-    ),
     "not_supported:openocd": ErrorRemedy(
         meaning=(
             "debugger_probes_list has no enumeration for this entry's adapter. OpenOCD has no command that lists "
@@ -4951,28 +5207,6 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not expect hardware_recover to settle it. A broken audit is the operator's own route.",
         ),
     ),
-    "adapter_access_denied": ErrorRemedy(
-        meaning=(
-            "OpenOCD reached the probe on USB and was refused opening it: libusb answered `LIBUSB_ERROR_ACCESS`. The "
-            "probe is attached, and this user may not open its USB device. The debug session start reports it under "
-            "this name; probe_target, flash_firmware and reset_target report it as `adapter_not_found` with this "
-            "`backend_error_type`. It is read only off Windows: there the same libusb error can also mean that another "
-            "program holds the device. "
-            "The target was not reached."
-        ),
-        remediation=(
-            "Have the operator give this user access to the probe's USB device: install the udev rule for the probe "
-            "(OpenOCD ships one as `60-openocd.rules`) and add this user to the group the rule gives the device to, "
-            "plugdev on Debian and Ubuntu, then log in again so the new group applies.",
-            "`ls -l /dev/bus/usb/<bus>/<device>`, with the bus and device numbers lsusb prints for the probe, shows the "
-            "owner, group and mode the device node has.",
-            "Start the session again with debug_start_session once the user is in that group.",
-        ),
-        do_not=(
-            "Do not run the server or OpenOCD as root, or through sudo, to get past it. The debugger would then run "
-            "with every right on the host, and the next start as this user fails the same way.",
-        ),
-    ),
     "breakpoint_reconciliation_failed": ErrorRemedy(
         meaning=(
             "debug_clear_breakpoints could not prove that the backend holds no breakpoints: GDB's breakpoint list "
@@ -5050,50 +5284,6 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not repeat debug_start_session with the same GDB. It refuses the setting the same way every time.",
             "Do not run a session in synchronous MI by hand. A timeout in it cannot interrupt the target, and the "
             "board keeps running with nobody watching it.",
-        ),
-    ),
-    "interface_config_not_found": ErrorRemedy(
-        meaning=(
-            "OpenOCD, started as a debug session's server, exited because it could not find the script "
-            "`debuggers.<name>.interface_cfg` names. The debug session start reports it under this name; probe_target, "
-            "flash_firmware and reset_target report the same failure as `debugger_config_not_found`. The server stopped "
-            "before the target was reached."
-        ),
-        remediation=(
-            "Read the server output in the log at `log_path`: OpenOCD names what it looked for.",
-            "Check `debuggers.<name>.interface_cfg` with project_config_describe or `agentic-hil doctor`. A search "
-            "name such as `interface/stlink.cfg` has to resolve in this OpenOCD's script tree, and a path has to be "
-            "absolute, exist and lie outside the workspace.",
-            "Correct it with project_config_set behind `allow_config_description_write`, with the operator's word, or "
-            "install the OpenOCD scripts the search name expects, then start the session again with "
-            "debug_start_session.",
-        ),
-        do_not=(
-            "Do not copy OpenOCD scripts into the repository and point the configuration at them. A script inside the "
-            "workspace is repository-controlled Tcl running in the debugger.",
-            "Do not run `openocd` directly to get past it.",
-        ),
-    ),
-    "target_config_not_found": ErrorRemedy(
-        meaning=(
-            "OpenOCD, started as a debug session's server, exited because it could not find the script "
-            "`debuggers.<name>.target_cfg` names. The debug session start reports it under this name; probe_target, "
-            "flash_firmware and reset_target report the same failure as `debugger_config_not_found`. The server stopped "
-            "before the target was reached."
-        ),
-        remediation=(
-            "Read the server output in the log at `log_path`: OpenOCD names what it looked for.",
-            "Check `debuggers.<name>.target_cfg` with project_config_describe or `agentic-hil doctor`. It has to match "
-            "the MCU family; a search name such as `target/stm32f4x.cfg` has to resolve in this OpenOCD's script tree, "
-            "and a path has to be absolute, exist and lie outside the workspace.",
-            "Correct it with project_config_set behind `allow_config_description_write`, with the operator's word, or "
-            "install the OpenOCD scripts the search name expects, then start the session again with "
-            "debug_start_session.",
-        ),
-        do_not=(
-            "Do not copy OpenOCD scripts into the repository and point the configuration at them. A script inside the "
-            "workspace is repository-controlled Tcl running in the debugger.",
-            "Do not run `openocd` directly to get past it.",
         ),
     ),
     "session_already_active": ErrorRemedy(
@@ -5382,8 +5572,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not call debug_stop_session again while `halt_not_confirmed` is true or `breakpoints_removed_confirmed` "
-            "or `detach_resume_guard_confirmed` is false. Over an unconfirmed target state a repeated stop forces every "
-            "proof false and settles nothing.",
+            "or `detach_resume_guard_confirmed` is false. Over an unconfirmed target state a repeated stop repeats the "
+            "first stop's answer and settles nothing.",
             "Do not start a new debug session over it. debug_start_session is refused as `session_already_active` "
             "until this one ends.",
         ),
@@ -5403,7 +5593,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not call debug_stop_session again for this. A stop after an unconfirmed halt brings no new evidence: "
-            "every proof is forced false and the incident stays where it is.",
+            "it repeats the answer the first stop gave, and the incident stays where it is.",
             "Do not start a new debug session to get a fresh halt. debug_start_session is refused as "
             "`session_already_active` until this one ends.",
         ),
@@ -5429,7 +5619,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not call debug_stop_session again for this. A stop after an unconfirmed removal brings no new evidence: "
-            "every proof is forced false and the incident stays where it is.",
+            "it repeats the answer the first stop gave, and the incident stays where it is.",
             "Do not start a new debug session to clear them. debug_start_session is refused as "
             "`session_already_active` until this one ends.",
         ),
@@ -5450,7 +5640,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not call debug_stop_session again for this. A stop after an unconfirmed detach brings no new evidence: "
-            "every proof is forced false and the incident stays where it is.",
+            "it repeats the answer the first stop gave, and the incident stays where it is.",
             "Do not start a new debug session to get a fresh halt. debug_start_session is refused as "
             "`session_already_active` until this one ends.",
         ),
@@ -5909,25 +6099,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Found under `cleanup_error` of a `can_session_start` refusal, and in words as the `backend_error` of "
             "`can_adapter_close_failed`. A CAN process bridge was asked to put its controller in a safe state and "
             "close, never confirmed that it had, and this server then ended its process anyway. Only the bridge can "
-            "confirm a safe state, so once its process has ended there is nothing left to confirm it with, and the "
-            "bus stays held."
+            "confirm a safe state, so once its process has ended there is nothing left to confirm it with: the "
+            "unconfirmed close is recorded under `cleanup_reasons`, and the bus is given back."
         ),
         remediation=(
             "Read `close_response`, the bridge's answer to the close: `can_adapter_timeout` means it did not answer "
             "in time, `can_adapter_process_exited` that it was already gone, `can_adapter_close_interrupted` that "
             "sending the close raised, and an answer without `safe_state_confirmed: true` that it replied without "
             "confirming.",
-            "`safe_state_confirmed` stays false from here on. Every later `can_session_stop` and `can_session_start` "
-            "on this bus finds the process ended and answers `can_adapter_close_failed`, for as long as this server "
-            "runs.",
-            "Check the bench by hand (the controller off the bus, the target in a known state), then restart the MCP "
-            "server. The new server may find the bus `resource_quarantined`, and that entry names the sign-off.",
+            "`safe_state_confirmed` stays false for that session. The `can_session_stop` or `can_session_start` "
+            "that met the ended process answers `can_adapter_close_failed` once, ends the session and gives the bus "
+            "back; the next `can_session_start` opens a fresh bridge.",
+            "Check the bench by hand (the controller off the bus, the target in a known state) before that "
+            "`can_session_start` puts the bus back to work.",
         ),
         do_not=(
             "Do not make a bridge answer `safe_state_confirmed: true` without having put its controller in a safe "
             "state. That field is the only evidence this server has about the bus.",
-            "Do not call `can_session_stop` in a loop waiting for this to clear. Nothing over MCP can confirm a safe "
-            "state for a process that has ended.",
+            "Do not take the next session's frames as a continuation of the old one. What the ended bridge last did "
+            "on the bus is unknown.",
         ),
     ),
     "can_adapter_close_failed": ErrorRemedy(
@@ -5935,23 +6125,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "A CAN session could not be closed. `can_session_stop` was closing it, or `can_session_start` was "
             "replacing a session still registered on the bus or closing the one a failed receive-queue clear left. "
             "Either the adapter's close raised and the session stays registered on this server for a cleanup retry, "
-            "or the adapter closed and the lease on the bus would not release."
+            "or the adapter closed and the lease on the bus would not release, or a process bridge ended without "
+            "confirming its close, which is final: then the summary says so, the session is ended and the bus given "
+            "back, and the unconfirmed close is recorded under `cleanup_reasons`."
         ),
         remediation=(
             "Read `backend_error`. Present, it is what the adapter's close raised; absent, the adapter closed and the "
             "lease would not release, which `cleanup_reasons` and `quarantine_id` explain.",
             "On a direct adapter (`socketcan`, `peak`) whose close raised, `can_session_stop` called again runs the "
             "driver's shutdown again, and a shutdown that completes ends the session and frees the bus.",
-            "A process bridge that ended without confirming a safe state cannot confirm it afterwards: every "
-            "`can_session_stop` and `can_session_start` on this bus answers this refusal again, with the same "
-            "`backend_error`, for as long as this server runs.",
-            "In that case, and whenever the lease is quarantined, check the bench by hand and restart the MCP "
-            "server. The new server may find the bus `resource_quarantined`, and that entry names the sign-off.",
+            "A process bridge that ended without confirming a safe state cannot confirm it afterwards, so this is "
+            "answered once: the bus is already given back. Check the bench by hand, then `can_session_start` opens "
+            "a fresh bridge.",
+            "Whenever the lease is quarantined, `quarantine_id` names the incident and `resource_quarantined` names "
+            "the sign-off.",
             "`can_buses_list` shows the session still registered on the bus, with its `adapter_status`.",
         ),
         do_not=(
-            "Do not call `can_session_stop` or `can_session_start` over and over on a process bus. Once the bridge "
-            "has ended unconfirmed, every call answers the same, and nothing over MCP changes that.",
+            "Do not call `can_session_stop` or `can_session_start` over and over while the driver's shutdown keeps "
+            "raising. Each call retries the same close; fix what `backend_error` names first.",
             "Do not open the adapter or its channel from another program while the session is registered: an adapter "
             "whose close failed may still have the channel open.",
         ),
@@ -6036,14 +6228,14 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         remediation=(
             "Read `stderr_tail`: the bridge's last output usually says why it exited, an exception, a driver error or "
             "a device that went away.",
-            "A bridge that has exited cannot confirm a safe state any more, so from here `can_session_stop` answers "
-            "`can_adapter_close_failed` every time it is called, for as long as this server runs.",
-            "Fix what made it exit, check the bench by hand, then restart the MCP server; the new server may answer "
-            "`resource_quarantined` for this bus first, and that entry names the sign-off.",
+            "A bridge that has exited cannot confirm a safe state any more, so `can_session_stop` answers "
+            "`can_adapter_close_failed` once, records the unconfirmed close and gives the bus back.",
+            "Fix what made it exit and check the bench by hand, then `can_session_start` opens a fresh bridge.",
         ),
         do_not=(
-            "Do not start the bridge by hand to take the bus back. This server still holds the bus for the session "
-            "it lost, and a second bridge on the channel is outside every record.",
+            "Do not start the bridge by hand to take the bus back. Until `can_session_stop` ends the session this "
+            "server still holds the bus for it, and a bridge on the channel outside a session is outside every "
+            "record.",
         ),
     ),
     "can_adapter_process_start_failed": ErrorRemedy(
@@ -6140,14 +6332,40 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "counter the others are waiting on.",
         ),
     ),
+    "can_broker_disconnected": ErrorRemedy(
+        meaning=(
+            "The connection between this participant and the broker for this shared CAN bus ended in the middle of a "
+            "request: the broker process has exited, or it closed this participant's connection. It is a connection "
+            "failure and nothing else; no audit record failed, because the trail is not written through that pipe."
+        ),
+        remediation=(
+            "Read `backend_error`, the pipe's own error, and `side_effect_status`: `unknown` on `can_send` means the "
+            "request may have reached the broker before it ended, so the frame may be on the bus; `not_started` on "
+            "`can_read` means the read put nothing on the bus.",
+            "After an unknown send the lease is quarantined, so the next call on this participant answers "
+            "`resource_quarantined`; check the bus from the target's side and follow that entry.",
+            "This session puts no further request to the broker: until it is stopped, a later `can_send` or "
+            "`can_read` on it answers this failure, or `resource_quarantined` after an unknown send. Stop it with "
+            "`can_session_stop` and start it again with `can_session_start`, which starts a fresh broker when the old "
+            "one has exited.",
+        ),
+        do_not=(
+            "Do not send the frame again to find out whether the first one went out. A duplicate stimulus on a live "
+            "bus is the outcome the unknown status exists to prevent.",
+        ),
+    ),
     "can_broker_invalid_message": ErrorRemedy(
         meaning=(
             "The broker for this shared CAN bus and this client could not read each other: the broker received a "
-            "message it cannot parse, or it answered the attach with something that is not an answer. Both ends are "
-            "code from this package, so this is a fault in the broker connection rather than on the bus."
+            "message it cannot parse, or it answered the attach, a send or a read with something that is not an "
+            "answer. Both ends are code from this package, so this is a fault in the broker connection rather than "
+            "on the bus."
         ),
         remediation=(
             "Read `summary`: it says which end could not read the other.",
+            "On `can_send`, `side_effect_status` is `unknown`: the broker had the request, so the frame may be on the "
+            "bus, and the lease is quarantined. On `can_read` it is `not_started`. Either way this session puts no "
+            "further request to the broker until it is stopped.",
             "The broker keeps running while any participant is attached, so it is replaced only after every "
             "participant has detached and it exits; stop the others with `can_session_stop`, then call "
             "`can_session_start` again.",
@@ -6213,6 +6431,28 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not end the stopping broker by hand. It is closing the adapter, and cutting that short leaves the "
             "bus in whatever state the close had reached.",
+        ),
+    ),
+    "can_broker_timeout": ErrorRemedy(
+        meaning=(
+            "The broker for this shared CAN bus did not answer a request of this participant within the client's "
+            "request timeout of 30 seconds. The request had been written, so whether the broker acted on it is "
+            "unknown, and on a send whether the frame reached the bus is unknown too. A late answer would be read as "
+            "the answer to the next request, so this session puts no further request to the broker."
+        ),
+        remediation=(
+            "Read `side_effect_status`: `unknown` on `can_send` means the frame may be on the bus and the lease is "
+            "quarantined, so the next call on this participant answers `resource_quarantined`; `not_started` on "
+            "`can_read` means the read put nothing on the bus.",
+            "Until the session is stopped, a later `can_send` or `can_read` on it answers this failure, or "
+            "`resource_quarantined` after an unknown send. Stop it with `can_session_stop` and start it again with "
+            "`can_session_start`.",
+            "A read waits in the broker for the shorter of its `wait_timeout_s`, `can_buses.<id>.timeout_s` and 60 "
+            "seconds, so a read asked to wait 30 seconds or longer can outlast the client; keep the wait shorter.",
+        ),
+        do_not=(
+            "Do not send the frame again to find out whether the first one went out. A duplicate stimulus on a live "
+            "bus is the outcome the unknown status exists to prevent.",
         ),
     ),
     "can_broker_unavailable": ErrorRemedy(
@@ -6447,6 +6687,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Pick a name from `configured_participants`, the shares declared on this bus.",
+            "An empty `configured_participants` means the bus declares no `shares:` and has one owner: call the tool "
+            "again without `participant`.",
             "If the name should exist, declare it under `can_buses.<id>.shares`. A running broker keeps the "
             "configuration it started with, so a new share is seen once every participant has detached and a fresh "
             "broker starts.",
@@ -6952,6 +7194,12 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
         unknown="How many of the requested bytes reached the wire: the target may have received a truncated command.",
         physical_check="Check the device console/behavior for a partially applied command, bring the device to a known state by its own controls, then sign.",
     ),
+    "serial_write_incomplete": QuarantineReasonGuide(
+        attempted="com_write sent a payload of `bytes_requested` bytes, and the line took fewer of them.",
+        confirmed="`bytes_written` bytes reached the line and the rest never left the host: every write returned normally, and the COM log records exactly the bytes that were sent. Nothing is quarantined and the session stays usable.",
+        unknown="What the target made of a partial message: whether it ignored it, is waiting for the rest, or acted on what arrived.",
+        physical_check="No signature is owed and `agentic-hil recover` has nothing to settle. Call `com_read` to see how the target took the partial message, then send the missing bytes or bring the target to a known state by its own protocol before the next command.",
+    ),
     "com_buffer_clear_unconfirmed": QuarantineReasonGuide(
         attempted="Clearing the port's receive buffer failed after the OS-level clear had started.",
         confirmed="No stimulus was written; only received bytes were being discarded.",
@@ -7090,7 +7338,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "interface_cfg": {"status": "required", "default": "interface/stlink.cfg", "note": "OpenOCD script, passed as `-f`. Either an OpenOCD search name such as `interface/stlink.cfg`, which OpenOCD resolves against its own script path and which therefore does not have to exist on this host, or an absolute path to an existing file outside the workspace. A path under the system temporary directory is refused: it is cleared without warning and the configuration would stop describing this bench."},
         "target_cfg": {"status": "required", "default": "target/stm32f4x.cfg", "note": "OpenOCD script, passed as `-f`, a search name or an absolute path outside the workspace like interface_cfg. Must match the MCU family."},
         "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "OpenOCD reaches the target through the scripts named above, and connecting under reset is a `reset_config` decision inside them that depends on how SRST is wired for this adapter and this part. `under_reset` is therefore refused at load here rather than accepted and ignored; ask for the same effect in interface_cfg or target_cfg."},
-        "flash_address": {"status": "ignored", "note": "OpenOCD takes the load address from the image."},
+        "flash_address": {"status": "conditional", "note": "Required to flash a .bin, which carries no load address; passed as the offset of `program`, which otherwise writes the image from address 0. Not read for .elf or .hex."},
     },
     "stlink": {
         "tool": "STM32_Programmer_CLI (STM32CubeProgrammer)",
@@ -7115,7 +7363,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "interface": {"status": "ignored"},
         "interface_cfg": {"status": "ignored"},
         "target_cfg": {"status": "ignored"},
-        "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "Nothing this key could say reaches pyOCD, so `under_reset` is refused at load rather than accepted and ignored. A bench that needs the flash to connect under reset runs it on `type: stlink`. The one connect option this server does pass to pyOCD is not this key's: the typed-debug memory reads with no session open send `--connect attach`, fixed, because it is the only mode pyOCD documents as reaching a running core without halting or resetting it. A typed debug session does not read this key either: whether it resets or attaches is the `mode` of `debug_start_session`, carried out by GDB against `pyocd gdbserver`."},
+        "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "Nothing this key could say reaches pyOCD, so `under_reset` is refused at load rather than accepted and ignored. A bench that needs the flash to connect under reset runs it on `type: stlink`. The one connect option this server does pass to pyOCD is not this key's: the typed-debug memory reads with no session open send `--connect attach`, fixed, because it is the only mode pyOCD documents as reaching a running core without halting or resetting it, together with the target pack's DebugCoreStart sequence disabled, because that sequence lets a halted core run at the connect. `probe_target` keeps pyOCD's default connect, attach as well, and disables the same sequence. A typed debug session does not read this key either: whether it resets or attaches is the `mode` of `debug_start_session`, carried out by GDB against `pyocd gdbserver`."},
         "flash_address": {"status": "conditional", "note": "Required to flash a .bin, which carries no load address; passed as `--base-address`. Not read for .elf or .hex."},
     },
 }
@@ -7132,7 +7380,7 @@ MULTI_PROBE_RULE = {
 }
 
 FLASH_ADDRESS_RULE = {
-    "rule": "flash_address is required only for a .bin artifact on backends stlink and pyocd.",
+    "rule": "flash_address is required only for a .bin artifact, on every backend (openocd, stlink and pyocd).",
     "why": ".bin carries no load address. .elf and .hex do, and the field is not read for them.",
     "failure_when_missing": "error_type `invalid_argument` from flash_firmware, before anything reaches the target.",
     "example": "0x08000000 for STM32 internal flash.",
@@ -7387,8 +7635,9 @@ CONFIG_RIGHTS: dict[str, str] = {
 def permissions_frozen_notice(closed_key: str, frozen: JsonObject, path: str) -> JsonObject:
     """What the call that closes the permissions grant has to say for itself.
 
-    Said here, in the result of that call, and nowhere else. A reference an agent
-    could have read beforehand is not where this belongs: whoever writes
+    Said in full here, in the result of that call. The `project_config_set`
+    description names the freeze beforehand, but a reference an agent could have
+    read is not enough on its own: whoever writes
     ``allow_config_permissions_write: false`` loses the way back in the same
     instant, and if the result does not say so, an agent nails the bench shut in
     passing and the operator is in front of a file they have to open by hand:
@@ -8409,7 +8658,7 @@ interface: SWD
 
 The two OpenOCD values above are search names: OpenOCD resolves them against its own script path, so they name no file on this host and the configuration accepts them without one. Give an absolute path instead when this bench should run exactly the script files it names; a path is then checked as a path, and must exist, live outside the workspace, and not be under the system temporary directory.
 
-`flash_address: "0x08000000"` is required only to flash a `.bin` on `stlink` or `pyocd`.
+`flash_address: "0x08000000"` is required only to flash a `.bin`, on every backend.
 
 ## pyOCD target types mostly come from CMSIS packs
 

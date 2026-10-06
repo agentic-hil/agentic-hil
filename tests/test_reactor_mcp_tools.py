@@ -86,7 +86,7 @@ def test_a_plan_run_over_mcp_answers_with_the_reactor_result_and_its_report(tmp_
     result = call(workspace, "test_reactor_run", {"test_config_path": str(plan)})
 
     assert result["ok"] is True, result
-    assert result["tool"] == "test_reactor"
+    assert result["tool"] == "test_reactor_run"
     assert [(step["index"], step["route"], step["action"]) for step in result["steps"]] == [(1, "dut", "reset")]
     assert result["steps"][0]["result"]["ok"] is True
     assert result["cleanup_ok"] is True
@@ -116,7 +116,7 @@ def test_a_detached_plan_started_over_mcp_answers_with_a_handle_and_then_finishe
 
     detached_runs.append((config, result.get("run")))
     assert result["ok"] is True, result.get("worker_output") or result
-    assert result["tool"] == "test_reactor_start"
+    assert result["tool"] == "test_reactor_run"
     assert result["detached"] is True
     assert result["state"] in {"running", "finished"}, (
         f"a run this call had just launched answered {result.get('state')!r}: {result.get('summary')!r}"

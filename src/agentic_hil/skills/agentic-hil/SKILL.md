@@ -147,8 +147,9 @@ different board; the check at open time compares the entry's `serial_number` (or
 the probe serial it shares a `resource_id` with) against what is actually behind
 that name and refuses rather than connecting. Nothing was opened. Report
 `expected_serial_number` and `found_serial_number`, and read `expected_device`:
-present, it names where the configured board is now, and
-`agentic-hil adopt-hardware` rewrites the entry from the attached hardware;
+present, it names where the configured board is now, and setting the entry's
+`device` to it (`project_config_set`, then `project_config_reload_description`)
+is the repair, since adoption keeps a `device` that is set;
 absent, the configured board is not attached and the operator has to plug it in.
 When the entry also names `vid`/`pid`, the same refusal carries
 `expected_vid`/`expected_pid` and `found_vid`/`found_pid`, and report those too:

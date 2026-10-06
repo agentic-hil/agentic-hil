@@ -331,6 +331,55 @@ def test_the_stlink_sessions_module_carries_the_stm32cubeclt_mark() -> None:
     assert CUBECLT in [mark.name for mark in test_bench_stlink_sessions.pytestmark]
 
 
+# -- the test that can make the probe re-enumerate its serial port (#620) ----
+
+
+def test_on_a_bench_a_test_that_can_reenumerate_the_probe_runs_after_every_other(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing after it shares the node its container was started with, so a
+    re-enumeration fails that test alone and never the modules behind it. The
+    rest keep the order they were collected in."""
+    from tests.bench import conftest
+
+    monkeypatch.setenv(conftest.BENCH_ENV, "1")
+    monkeypatch.delenv(conftest.DEVICE_GROUPS_ENV, raising=False)
+    killed = "tests/bench/test_bench_faults.py::test_a_flash_killed_mid_write"
+    items = [the_items()[0], AnItem(killed, "bench", conftest.REENUMERATES_THE_PROBE), *the_items()[1:]]
+    config = AConfig()
+
+    conftest.pytest_collection_modifyitems(config, items)
+
+    assert [item.nodeid for item in items] == ["tests/bench/test_bench_serial.py::test_echo", "tests/test_config.py::test_load", killed]
+
+
+def test_off_a_bench_a_test_that_can_reenumerate_the_probe_keeps_its_place(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.bench import conftest
+
+    monkeypatch.delenv(conftest.BENCH_ENV, raising=False)
+    killed = "tests/bench/test_bench_faults.py::test_a_flash_killed_mid_write"
+    items = [the_items()[0], AnItem(killed, "bench", conftest.REENUMERATES_THE_PROBE), *the_items()[1:]]
+    before = [item.nodeid for item in items]
+
+    conftest.pytest_collection_modifyitems(AConfig(), items)
+
+    assert [item.nodeid for item in items] == before
+
+
+def test_the_reenumeration_mark_is_declared_where_strict_markers_look(pytestconfig: pytest.Config) -> None:
+    from tests.bench.conftest import REENUMERATES_THE_PROBE
+
+    declared = pytestconfig.getini("markers")
+
+    assert [line for line in declared if line.startswith(f"{REENUMERATES_THE_PROBE}:")], declared
+
+
+def test_the_killed_flash_carries_the_reenumeration_mark() -> None:
+    from tests.bench import test_bench_faults
+    from tests.bench.conftest import REENUMERATES_THE_PROBE
+
+    killed = test_bench_faults.test_a_flash_killed_mid_write_is_recovered_by_the_product_and_a_second_flash_brings_the_demo_back
+    assert REENUMERATES_THE_PROBE in [mark.name for mark in getattr(killed, "pytestmark", [])]
+
+
 # -- the account those tests install into, and the images it cannot install on --
 
 STAGE = "tests/bench/test_bench_without_device_group.py::test_probe"

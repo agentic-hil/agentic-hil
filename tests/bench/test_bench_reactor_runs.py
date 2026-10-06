@@ -458,7 +458,7 @@ def test_a_run_started_over_mcp_is_watched_and_stopped_between_two_steps_and_the
     try:
         started = server.call("test_reactor_run", {"test_config_path": plan, "detach": True})
         assert started["ok"] is True, started
-        assert started["tool"] == "test_reactor_start", started
+        assert started["tool"] == "test_reactor_run", started
         handle = started["run"]
         assert isinstance(handle, str) and RUN_HANDLE.match(handle), started
         # A start answers once the run holds its devices, so a printed handle is
@@ -470,8 +470,8 @@ def test_a_run_started_over_mcp_is_watched_and_stopped_between_two_steps_and_the
         assert isinstance(started["report_path"], str) and started["report_path"], started
         assert isinstance(started["started_at"], str) and started["started_at"], started
         assert started["summary"] == (
-            f"The run is detached under handle {handle}; ask `agentic-hil test-reactor-status --run {handle}` what it is doing "
-            f"and `agentic-hil test-reactor-stop --run {handle}` to end it early."
+            f"The run is detached under handle {handle}; call `test_reactor_status` with `run` set to it to see what it is "
+            "doing, and `test_reactor_stop` with the same `run` to end it early."
         ), started["summary"]
 
         def status() -> dict:
@@ -584,7 +584,7 @@ def test_a_run_started_over_mcp_is_watched_and_stopped_between_two_steps_and_the
         states = {entry["run"]: entry["state"] for entry in listing["runs"]}
         assert (states[handle], states[following]) == ("stopped", "finished"), states
         assert handle not in listing["active_runs"] and following not in listing["active_runs"], listing
-        assert listing["summary"] == f"This bench has records of {len(handles)} test run(s); name one with --run to see what it is doing.", listing["summary"]
+        assert listing["summary"] == f"This bench has records of {len(handles)} test run(s); call `test_reactor_status` with one of them as `run` to see what it is doing.", listing["summary"]
     finally:
         with suppress(*TEARDOWN_FAULTS):
             server.shut_down()
@@ -671,7 +671,7 @@ def test_a_run_detached_from_the_command_line_is_stopped_inside_a_long_delay_and
     status, started = bench.document("test-reactor", "--test-config", plan, "--detach")
     assert status == 0, started
     assert started["ok"] is True, started
-    assert started["tool"] == "test_reactor_start", started
+    assert started["tool"] == "test_reactor_run", started
     handle = started["run"]
     assert isinstance(handle, str) and RUN_HANDLE.match(handle), started
     assert started["state"] == "running", started
@@ -1037,7 +1037,7 @@ def test_a_red_plan_leaves_a_junit_document_with_its_failure_its_skipped_steps_a
     assert status == 1, refused
     assert refused == {
         "ok": False,
-        "tool": "test_reactor_start",
+        "tool": "test_reactor_run",
         "error_type": "junit_xml_requires_synchronous_run",
         "summary": (
             "--junit-xml writes the report of a run this command waited for, and --detach returns before the run "

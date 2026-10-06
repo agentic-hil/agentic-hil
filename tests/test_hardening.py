@@ -4737,6 +4737,57 @@ def test_zero_debugger_refusal_does_not_claim_several_are_configured(tmp_path: P
     assert result["retry_safe"] is False
 
 
+def _no_debugger_config(tmp_path: Path, *, description_write: bool, config_write: bool):
+    config_path = write_config(tmp_path)
+    text = re.sub(r"(?ms)^debuggers:\n(?:  .*\n)+", "debuggers: {}\n", config_path.read_text(encoding="utf-8"))
+    assert not re.search(r"(?m)^permissions:", text)
+    text += f"permissions:\n  allow_config_write: {str(config_write).lower()}\n  allow_config_description_write: {str(description_write).lower()}\n"
+    config_path.write_text(text, encoding="utf-8")
+    config = load_config(str(config_path))
+    assert config.debuggers == {}
+    return config
+
+
+@pytest.mark.parametrize(("description_write", "config_write"), [(True, True), (True, False), (False, True)])
+def test_zero_debugger_refusal_names_the_config_tools_that_can_add_one(tmp_path: Path, description_write: bool, config_write: bool) -> None:
+    # #691: the configuration tools this server holds can add and bind a
+    # debugger, so the summary must not hand the caller to the operator.
+    service = AgenticHILToolService(_no_debugger_config(tmp_path, description_write=description_write, config_write=config_write))
+    try:
+        result = service.call("debugger_info")
+    finally:
+        service.close()
+
+    summary = result["summary"]
+    assert "only the operator" not in summary.lower(), summary
+    assert ("project_config_set" in summary and "project_config_reload_description" in summary) is description_write, summary
+    assert ("project_config_create" in summary) is config_write, summary
+    assert any("project_config_set" in step and "project_config_reload_description" in step for step in result["remediation"]), result["remediation"]
+
+
+def test_zero_debugger_refusal_names_the_operator_only_without_config_rights(tmp_path: Path) -> None:
+    service = AgenticHILToolService(_no_debugger_config(tmp_path, description_write=False, config_write=False))
+    try:
+        result = service.call("debugger_info")
+    finally:
+        service.close()
+
+    assert "operator" in result["summary"], result["summary"]
+    assert "project_config_set" not in result["summary"], result["summary"]
+
+
+def test_several_debugger_refusal_names_the_mcp_tool_for_a_multi_board_run(tmp_path: Path) -> None:
+    config = load_config(str(write_config(tmp_path, debuggers_yaml='debuggers:\n  spare:\n    type: "openocd"\n')))
+    assert config.debugger is None
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("debugger_info")
+    finally:
+        service.close()
+
+    assert "test_reactor_run" in result["summary"], result["summary"]
+
+
 def test_staging_refusal_before_any_backend_call_does_not_quarantine_the_lease(tmp_path: Path) -> None:
     # require_existing_file: false lets validation pass on a file that is not
     # there yet, so nothing about those bytes was checked. Staging must refuse,

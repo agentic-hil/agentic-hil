@@ -4,7 +4,8 @@ import json
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -289,6 +290,34 @@ def _last_written_line(output: str) -> str:
     return lines[-1] if lines else ""
 
 
+# What the adapter driver answers while the in-circuit debugger is still
+# re-enumerating, as it is for a moment after an OpenOCD was killed in the middle
+# of a flash (#621). Both lines are written while `init` opens the probe, before
+# any target is addressed, so a call refused with one of them never reached the
+# board.
+OPENOCD_PROBE_REENUMERATING_LINES = (
+    "Error: mode (transport) not supported by device",
+    "Error: init mode failed (unable to connect to the target)",
+)
+
+
+def openocd_probe_reenumerating_line(result: JsonObject) -> str | None:
+    """The line of a failed OpenOCD call saying the probe was still coming back, or None.
+
+    Only an OpenOCD result that did not succeed, and only one of the two lines
+    above as a whole line of its own capture: a line that quotes the words inside
+    another report is that other report."""
+    if result.get("backend") != "openocd" or result.get("ok") is True:
+        return None
+    output = result.get("programmer_output")
+    if not isinstance(output, dict):
+        return None
+    for line in f"{output.get('stdout') or ''}\n{output.get('stderr') or ''}".splitlines():
+        if line.strip() in OPENOCD_PROBE_REENUMERATING_LINES:
+            return line.strip()
+    return None
+
+
 def read_failure_reason(completed: CompletedCommand, what: str, timeout_s: float, expected: str) -> str:
     """Why one configuration-stage read of an OpenOCD answered nothing, in its own words where it wrote any.
 
@@ -456,6 +485,8 @@ class OpenOCDBackend:
 
     def __init__(self, config: AgenticHILConfig):
         self.config = config
+        # Set while the recovery resets into halt (`recovery_reset`), and only then.
+        self._recovery_reset = False
         # The release each OpenOCD file this backend has run says it is, by path,
         # modification time and size, so a file replaced in place is asked again.
         # Only answers are kept: an OpenOCD that did not say is asked next time.
@@ -685,6 +716,18 @@ class OpenOCDBackend:
         if self.config.debugger.permissions.allow_mass_erase:
             return self._exclusive_permission_denied("flash_firmware", "Flashing", "allow_mass_erase")
 
+        # A raw binary carries no load address, and `program` writes one from
+        # address 0 unless it is given the address as its offset argument, which
+        # `help program` lists right after the file. An ELF or a HEX file names
+        # its own addresses, and an offset would move them, so the field is read
+        # for a .bin alone, and a .bin without it is refused before OpenOCD runs,
+        # as pyOCD and STM32CubeProgrammer refuse it. The config schema holds the
+        # field to a hex or decimal number, so it is a safe Tcl word as it is.
+        offset = ""
+        if Path(str(artifact["resolved_path"])).suffix.lower() == ".bin":
+            if self.config.debugger.flash_address is None:
+                return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with OpenOCD requires debuggers.<name>.flash_address.", "artifact": {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}}
+            offset = f" {self.config.debugger.flash_address}"
         command_path = escape_tcl_double_quoted_word(openocd_path_for_command(str(artifact["resolved_path"])))
         marker = OPENOCD_SUCCESS_MARKERS["flash_firmware"]
         reset_command = " reset" if reset_after_flash else ""
@@ -694,7 +737,7 @@ class OpenOCDBackend:
         # stopped before adapter_init opened the probe, which is what lets a
         # missing config script or an absent adapter refuse instead of
         # quarantining the bench (see _failure_result).
-        result = self._run_openocd("flash_firmware", f'{OPENOCD_INIT_PREFIX}program "{command_path}" verify{reset_command}; echo "{marker}"; shutdown', marker)
+        result = self._run_openocd("flash_firmware", f'{OPENOCD_INIT_PREFIX}program "{command_path}"{offset} verify{reset_command}; echo "{marker}"; shutdown', marker)
         result["artifact"] = {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
         result["verify"] = True
         result["reset_after_flash"] = reset_after_flash
@@ -702,12 +745,22 @@ class OpenOCDBackend:
             result["summary"] = summary_with_carried_warnings(result, "Firmware flashed, verified, and target reset." if reset_after_flash else "Firmware flashed and verified. Target was not reset.")
         return self._write_action_report(result)
 
+    @contextmanager
+    def recovery_reset(self) -> Iterator[None]:
+        """Inside, `reset_target("halt")` is the recovery's: it runs the reconnecting reset ahead of the halt (#621)."""
+        self._recovery_reset = True
+        try:
+            yield
+        finally:
+            self._recovery_reset = False
+
     def reset_target(self, mode: str = "run") -> JsonObject:
         allowed_modes = ["run", "halt", "init"]
         if mode not in allowed_modes:
             return {"ok": False, "tool": "reset_target", "error_type": "invalid_argument", "summary": "Invalid reset mode.", "allowed_values": allowed_modes}
         marker = OPENOCD_SUCCESS_MARKERS["reset_target"]
-        result = self._run_openocd("reset_target", openocd_reset_command(mode, marker), marker)
+        command = openocd_recovery_reset_halt_command(marker) if mode == "halt" and self._recovery_reset else openocd_reset_command(mode, marker)
+        result = self._run_openocd("reset_target", command, marker)
         result["mode"] = mode
         if result.get("ok"):
             result["summary"] = summary_with_carried_warnings(result, f"Target reset with mode '{mode}'.")
@@ -850,11 +903,9 @@ class OpenOCDBackend:
         because it is not a reading of the output.
         """
         values = [server_args[index + 1] for index, item in enumerate(server_args) if item == "-c" and index + 1 < len(server_args)]
-        if not values:
-            return None
-        rejected = rejected_openocd_commands(values[-1], output, tuple(values[:-1]))
+        rejected = rejected_openocd_commands(values[-1], output, tuple(values[:-1])) if values else []
         if not rejected:
-            return None
+            return self._debug_start_public_error(output)
         backend_error_type = "command_rejected_before_init"
         error_type = self._public_error_type(backend_error_type)
         return {
@@ -862,6 +913,29 @@ class OpenOCDBackend:
             "backend_error_type": backend_error_type,
             "summary": f"Debug server exited before the GDB port became ready: {self._failure_summary(backend_error_type, error_type)}",
             "rejected_commands": rejected,
+        }
+
+    def _debug_start_public_error(self, output: str) -> JsonObject | None:
+        """The public name for what a dead debug server's output classifies as, where it has one, or None.
+
+        `gdbdebug` publishes the classifier's own word as `error_type`, and the
+        command path publishes `BACKEND_ERROR_TO_PUBLIC_ERROR`'s: a missing
+        `target_cfg` was `target_config_not_found` from debug_start_session and
+        `debugger_config_not_found` from probe_target. A caller that branches on
+        `error_type` had two words for one missing script, so the start maps
+        through the same table the command path does, keeps the classifier's
+        word in `backend_error_type`, and says what the command path says about
+        it, which names the configured field the script came from (#654).
+        `unknown_debugger_error` is left to `gdbdebug`, which already publishes
+        it as `debugger_error` with its own sentence."""
+        backend_error_type = self._classify_output(output)
+        error_type = self._public_error_type(backend_error_type)
+        if error_type == backend_error_type or backend_error_type == "unknown_debugger_error":
+            return None
+        return {
+            "error_type": error_type,
+            "backend_error_type": backend_error_type,
+            "summary": f"Debug server exited before the GDB port became ready: {self._failure_summary(backend_error_type, error_type)}",
         }
 
     def _debug_start_context(self, classified: JsonObject) -> JsonObject | None:
@@ -1407,6 +1481,28 @@ def openocd_reset_command(mode: str, marker: str) -> str:
     writes flash (src/flash/startup.tcl), which is why flashing works today
     without a prefix and a bare `reset` does not."""
     return f'{OPENOCD_INIT_PREFIX}reset {mode}; echo "{marker}"; shutdown'
+
+
+# Run ahead of the recovery's `reset halt`, with its failure caught (#621).
+# Recorded on the bench after a flash killed mid-write: the next OpenOCD finds
+# the in-circuit debugger answering USB but every debug-port access failing, and
+# waiting does not clear it. A `reset halt` sent then writes its halt request and
+# vector catch through that connection, the writes fail silently, and the
+# adapter's own reset that follows brings the connection back with the core
+# running, so the reset times out waiting for a halt. The reset run first is the
+# one that brings the connection back, and the `reset halt` after it sets its
+# vector catch and halts. It runs every time, because whether `init` examined
+# the target does not tell the state apart: OpenOCD 0.12.0 examined nothing,
+# 0.11.0 counted the target as examined while every access still failed. On a
+# healthy connection it is one more reset into halt, so the target never runs
+# between the two, and nothing in it assumes a reset line is wired: it is the
+# reset the configuration already does.
+OPENOCD_RECONNECTING_RESET = "catch {reset halt}; "
+
+
+def openocd_recovery_reset_halt_command(marker: str) -> str:
+    """The recovery's reset into halt: `openocd_reset_command("halt")` with the reconnecting reset ahead of it."""
+    return f'{OPENOCD_INIT_PREFIX}{OPENOCD_RECONNECTING_RESET}reset halt; echo "{marker}"; shutdown'
 
 
 def rejected_openocd_commands(openocd_command: str, output: str, configuration_commands: tuple[str, ...] = ()) -> list[str]:

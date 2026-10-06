@@ -46,6 +46,7 @@ on a version-1 configuration whose ports do not allow reading
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from collections.abc import Callable
@@ -367,8 +368,8 @@ def port_id_not_device_path(text: str) -> bool:
 
 
 def host_ports_withheld_without_a_readable_port(text: str) -> bool:
-    """comports.py:959-967: host discovery runs only if a configured port may be read, so with
-    none configured, or none readable on a version-1 file, `available_com_ports` is `permission_denied`."""
+    """comports.py `list_ports`: on a version-1 file host discovery runs only if a configured port may be
+    read, so with none configured or none readable `available_com_ports` is `permission_denied`."""
     return stated(text, field("permission_denied"), r"\b(no|none|unless|without)\b", r"\bconfigured\b|`com_ports`", unless=r"\b(always listed|whatever)\b")
 
 
@@ -1012,22 +1013,44 @@ def test_can_buses_list_opens_no_adapter_and_answers_without_a_session(tmp_path:
     assert len(opened) == 1 and opened[0].sent == []
 
 
-def test_com_ports_list_withholds_host_ports_when_no_port_is_configured_even_on_version_2(tmp_path: Path) -> None:
-    """Host discovery needs a configured port that may be read
-    (comports.py:959-967). With no port configured there is none, so
-    `available_com_ports` is `permission_denied` on version 2 as well, where
-    reading needs no grant (types.py:591-606), and the call stays ok."""
-    for version in (None, 2):
-        service = AgenticHILToolService(load_config(str(write_config(tmp_path / f"v{version}", config_version=version))))
-        try:
-            listed_ports = service.call(PORTS, {})
-        finally:
-            service.close()
+def test_com_ports_list_lists_host_ports_on_version_2_with_no_port_configured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On version 2 reading needs no grant (types.py `read_free`), so host
+    discovery is not withheld for want of a readable configured port. A new
+    project without a `com_ports` entry lists the host's serial ports to find
+    the board's adapter (#656), and nothing names `permissions.allow_read`, a
+    key version 2 refuses to load."""
+    import serial.tools.list_ports
 
-        assert listed_ports["ok"] is True, listed_ports
-        assert listed_ports["ports"] == {}, listed_ports
-        assert listed_ports["available_com_ports"]["ok"] is False, listed_ports
-        assert listed_ports["available_com_ports"]["error_type"] == "permission_denied", listed_ports
+    monkeypatch.setattr(serial.tools.list_ports, "comports", lambda: [SimpleNamespace(device="COM42", description="adapter", vid=0x0403, pid=0x6001, serial_number="TD4NEW")])
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path, config_version=2))))
+    try:
+        listed_ports = service.call(PORTS, {})
+    finally:
+        service.close()
+
+    assert listed_ports["ok"] is True, listed_ports
+    assert listed_ports["ports"] == {}, listed_ports
+    available = listed_ports["available_com_ports"]
+    assert available["ok"] is True, available
+    assert [port["device"] for port in available["ports"]] == ["COM42"], available
+    assert "allow_read" not in json.dumps(listed_ports), listed_ports
+
+
+def test_com_ports_list_withholds_host_ports_on_version_1_and_names_the_missing_entry(tmp_path: Path) -> None:
+    """A file without a version still needs a configured port that may be
+    read. With no `com_ports` entry at all, the refusal says that the entry is
+    what is missing, not only the grant on it (#656)."""
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        listed_ports = service.call(PORTS, {})
+    finally:
+        service.close()
+
+    assert listed_ports["ok"] is True, listed_ports
+    assert listed_ports["ports"] == {}, listed_ports
+    available = listed_ports["available_com_ports"]
+    assert available["ok"] is False and available["error_type"] == "permission_denied", available
+    assert "`com_ports` entry" in available["summary"], available
 
 
 def test_com_ports_list_names_host_ports_and_opens_none_when_a_configured_port_may_be_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

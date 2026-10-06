@@ -1,5 +1,5 @@
 {
-  "version_digest": "ec4e12cc4ccde7751e62de74bc4000427eba5f73422d5f2dde49dceff6176da7",
+  "version_digest": "9144e709dcc928b2cbea59e27c374b0118c9ca7cd631d17916fb90b8b5f4bae9",
   "registry": {
     "source": "https://glama.ai/mcp/servers/agentic-hil/agentic-hil",
     "release": "0.22.1-dev.0",
@@ -553,141 +553,210 @@
     }
   },
   "evaluated": {
-    "commit": "5762f9b0208a5a24acfd0c1860984463dd859a40",
+    "commit": "b0518e9d0e824074888b88f3c59f66dd9dd92e29",
     "setHash": "fdf39a3b6cbd3294cfe5d678a67c8f0efbf4aa6cde5466c8b4188748601a1a5c",
     "toolCount": 44,
-    "commitSetHash": "65143297b47328a368cf2a01dbc6993855d2124e6c90bb8213c76e5aa40e6c44",
+    "commitSetHash": "86a9083577d0f504c59d31fa81142346057f7bee643721f353f47d17122eed99",
     "definitionDifferences": {
       "artifact_upload": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "bench_run_start": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "bench_run_status": [
+        "description",
         "annotations.title"
       ],
       "bench_run_stop": [
+        "description",
         "annotations.title"
       ],
       "can_buses_list": [
+        "description",
         "annotations.title"
       ],
       "can_read": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "can_send": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "can_session_start": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "can_session_stop": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "classify_last_error": [
+        "description",
         "annotations.title"
       ],
       "com_ports_list": [
+        "description",
         "annotations.title"
       ],
       "com_read": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "com_session_start": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "com_session_stop": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "com_write": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "debug_clear_breakpoints": [
+        "description",
         "annotations.title"
       ],
       "debug_continue": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "debug_dump_symbol_ihex": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "debugger_info": [
+        "description",
         "annotations.title"
       ],
       "debugger_probes_list": [
+        "description",
         "annotations.title"
       ],
       "debug_get_session_status": [
+        "description",
         "annotations.title"
       ],
       "debug_get_stop_reason": [
+        "description",
         "annotations.title"
       ],
       "debug_halt": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "debug_list_breakpoints": [
+        "description",
         "annotations.title"
       ],
       "debug_set_breakpoint": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "debug_start_session": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "debug_stop_session": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "debug_symbol_info": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "debug_symbol_value": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "flash_firmware": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "get_last_report": [
+        "description",
         "annotations.title"
       ],
       "hardware_lease_status": [
+        "description",
         "annotations.title"
       ],
       "hardware_recover": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "probe_target": [
+        "description",
         "annotations.title"
       ],
       "project_config_adopt_hardware": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "project_config_create": [
         "annotations.title"
       ],
       "project_config_describe": [
+        "description",
         "annotations.title"
       ],
       "project_config_reload_description": [
+        "description",
         "annotations.title"
       ],
       "project_config_set": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "reset_target": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "server_upgrade": [
+        "description",
         "annotations.title"
       ],
       "test_reactor_run": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "test_reactor_status": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ],
       "test_reactor_stop": [
+        "description",
+        "inputSchema.properties",
         "annotations.title"
       ]
     }
@@ -699,67 +768,67 @@
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 4,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
-            "contextual_completeness": 2
+            "contextual_completeness": 3
           },
-          "tdqs": 4.1
+          "tdqs": 3.8
         },
         "debugger_probes_list": {
           "scores": {
             "purpose_clarity": 5,
-            "usage_guidelines": 5,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
-            "contextual_completeness": 4
-          },
-          "tdqs": 4.7
-        },
-        "probe_target": {
-          "scores": {
-            "purpose_clarity": 3,
             "usage_guidelines": 4,
             "behavioral_transparency": 3,
-            "parameter_semantics": 5,
-            "conciseness_structure": 4,
-            "contextual_completeness": 2
-          },
-          "tdqs": 3.5
-        },
-        "artifact_upload": {
-          "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 2,
-            "conciseness_structure": 4,
-            "contextual_completeness": 2
-          },
-          "tdqs": 3.3
-        },
-        "flash_firmware": {
-          "scores": {
-            "purpose_clarity": 5,
-            "usage_guidelines": 5,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 2,
-            "conciseness_structure": 4,
+            "parameter_semantics": 4,
+            "conciseness_structure": 5,
             "contextual_completeness": 3
           },
           "tdqs": 4.1
         },
-        "reset_target": {
+        "probe_target": {
+          "scores": {
+            "purpose_clarity": 3,
+            "usage_guidelines": 3,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
+            "contextual_completeness": 2
+          },
+          "tdqs": 3.0
+        },
+        "artifact_upload": {
           "scores": {
             "purpose_clarity": 4,
-            "usage_guidelines": 5,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 2,
+            "conciseness_structure": 4,
+            "contextual_completeness": 2
+          },
+          "tdqs": 2.7
+        },
+        "flash_firmware": {
+          "scores": {
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 3,
             "conciseness_structure": 5,
             "contextual_completeness": 3
           },
-          "tdqs": 4.4
+          "tdqs": 3.7
+        },
+        "reset_target": {
+          "scores": {
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 3,
+            "conciseness_structure": 5,
+            "contextual_completeness": 3
+          },
+          "tdqs": 3.7
         },
         "debug_start_session": {
           "scores": {
@@ -774,64 +843,64 @@
         },
         "debug_stop_session": {
           "scores": {
-            "purpose_clarity": 4,
+            "purpose_clarity": 3,
             "usage_guidelines": 2,
-            "behavioral_transparency": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 1,
-            "conciseness_structure": 5,
+            "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 2.9
+          "tdqs": 2.2
         },
         "debug_get_session_status": {
           "scores": {
-            "purpose_clarity": 4,
+            "purpose_clarity": 3,
             "usage_guidelines": 2,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 3.7
+          "tdqs": 2.7
         },
         "debug_set_breakpoint": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 2,
             "behavioral_transparency": 2,
-            "parameter_semantics": 2,
+            "parameter_semantics": 3,
             "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 2.7
+          "tdqs": 2.9
         },
         "debug_list_breakpoints": {
           "scores": {
-            "purpose_clarity": 5,
-            "usage_guidelines": 4,
-            "behavioral_transparency": 5,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
+            "purpose_clarity": 4,
+            "usage_guidelines": 3,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
             "contextual_completeness": 3
           },
-          "tdqs": 4.6
+          "tdqs": 3.5
         },
         "debug_clear_breakpoints": {
           "scores": {
-            "purpose_clarity": 5,
-            "usage_guidelines": 4,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "purpose_clarity": 4,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
-            "contextual_completeness": 4
+            "contextual_completeness": 3
           },
-          "tdqs": 4.5
+          "tdqs": 3.4
         },
         "debug_continue": {
           "scores": {
-            "purpose_clarity": 3,
+            "purpose_clarity": 4,
             "usage_guidelines": 2,
-            "behavioral_transparency": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 4,
             "contextual_completeness": 2
@@ -841,114 +910,48 @@
         "debug_halt": {
           "scores": {
             "purpose_clarity": 4,
-            "usage_guidelines": 3,
+            "usage_guidelines": 2,
             "behavioral_transparency": 2,
-            "parameter_semantics": 2,
+            "parameter_semantics": 1,
             "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 2.9
+          "tdqs": 2.6
         },
         "debug_get_stop_reason": {
           "scores": {
             "purpose_clarity": 3,
             "usage_guidelines": 2,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 4,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 3.3
+          "tdqs": 2.7
         },
         "debug_symbol_info": {
           "scores": {
             "purpose_clarity": 2,
             "usage_guidelines": 1,
-            "behavioral_transparency": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 2,
-            "conciseness_structure": 4,
+            "conciseness_structure": 2,
             "contextual_completeness": 1
           },
-          "tdqs": 2.1
+          "tdqs": 1.7
         },
         "debug_symbol_value": {
           "scores": {
             "purpose_clarity": 4,
-            "usage_guidelines": 4,
+            "usage_guidelines": 3,
             "behavioral_transparency": 3,
             "parameter_semantics": 2,
             "conciseness_structure": 5,
-            "contextual_completeness": 2
+            "contextual_completeness": 3
           },
-          "tdqs": 3.4
+          "tdqs": 3.3
         },
         "debug_dump_symbol_ihex": {
-          "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 2,
-            "parameter_semantics": 2,
-            "conciseness_structure": 4,
-            "contextual_completeness": 1
-          },
-          "tdqs": 2.4
-        },
-        "get_last_report": {
-          "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
-            "contextual_completeness": 2
-          },
-          "tdqs": 3.7
-        },
-        "classify_last_error": {
-          "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 3,
-            "parameter_semantics": 5,
-            "conciseness_structure": 4,
-            "contextual_completeness": 2
-          },
-          "tdqs": 3.1
-        },
-        "com_ports_list": {
-          "scores": {
-            "purpose_clarity": 5,
-            "usage_guidelines": 5,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
-            "contextual_completeness": 4
-          },
-          "tdqs": 4.7
-        },
-        "com_session_start": {
-          "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 2,
-            "parameter_semantics": 2,
-            "conciseness_structure": 4,
-            "contextual_completeness": 2
-          },
-          "tdqs": 2.5
-        },
-        "com_session_stop": {
-          "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 3,
-            "parameter_semantics": 2,
-            "conciseness_structure": 4,
-            "contextual_completeness": 2
-          },
-          "tdqs": 2.9
-        },
-        "com_write": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 2,
@@ -959,126 +962,192 @@
           },
           "tdqs": 2.7
         },
-        "com_read": {
+        "get_last_report": {
+          "scores": {
+            "purpose_clarity": 3,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
+            "contextual_completeness": 2
+          },
+          "tdqs": 2.8
+        },
+        "classify_last_error": {
+          "scores": {
+            "purpose_clarity": 3,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
+            "contextual_completeness": 2
+          },
+          "tdqs": 2.8
+        },
+        "com_ports_list": {
           "scores": {
             "purpose_clarity": 5,
             "usage_guidelines": 4,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 2,
-            "conciseness_structure": 4,
-            "contextual_completeness": 3
-          },
-          "tdqs": 3.9
-        },
-        "can_buses_list": {
-          "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 4,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
-            "contextual_completeness": 2
+            "contextual_completeness": 3
           },
           "tdqs": 4.1
         },
-        "can_session_start": {
+        "com_session_start": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 2,
-            "behavioral_transparency": 3,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 2,
+            "conciseness_structure": 4,
+            "contextual_completeness": 2
+          },
+          "tdqs": 2.7
+        },
+        "com_session_stop": {
+          "scores": {
+            "purpose_clarity": 3,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 1,
+            "conciseness_structure": 3,
+            "contextual_completeness": 2
+          },
+          "tdqs": 2.2
+        },
+        "com_write": {
+          "scores": {
+            "purpose_clarity": 4,
+            "usage_guidelines": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 4,
             "contextual_completeness": 2
           },
           "tdqs": 2.9
         },
-        "can_session_stop": {
+        "com_read": {
           "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 3,
+            "purpose_clarity": 5,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 4,
             "parameter_semantics": 3,
             "conciseness_structure": 5,
+            "contextual_completeness": 3
+          },
+          "tdqs": 4.1
+        },
+        "can_buses_list": {
+          "scores": {
+            "purpose_clarity": 5,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
+            "conciseness_structure": 5,
+            "contextual_completeness": 4
+          },
+          "tdqs": 4.2
+        },
+        "can_session_start": {
+          "scores": {
+            "purpose_clarity": 4,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 2,
+            "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 3.4
+          "tdqs": 2.6
+        },
+        "can_session_stop": {
+          "scores": {
+            "purpose_clarity": 3,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 2,
+            "conciseness_structure": 3,
+            "contextual_completeness": 2
+          },
+          "tdqs": 2.4
         },
         "can_send": {
           "scores": {
             "purpose_clarity": 4,
-            "usage_guidelines": 4,
-            "behavioral_transparency": 2,
-            "parameter_semantics": 2,
-            "conciseness_structure": 5,
-            "contextual_completeness": 2
-          },
-          "tdqs": 3.2
-        },
-        "can_read": {
-          "scores": {
-            "purpose_clarity": 4,
             "usage_guidelines": 3,
-            "behavioral_transparency": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 3.1
+          "tdqs": 2.9
+        },
+        "can_read": {
+          "scores": {
+            "purpose_clarity": 5,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 2,
+            "conciseness_structure": 5,
+            "contextual_completeness": 3
+          },
+          "tdqs": 3.8
         },
         "bench_run_start": {
           "scores": {
             "purpose_clarity": 4,
-            "usage_guidelines": 4,
-            "behavioral_transparency": 2,
+            "usage_guidelines": 5,
+            "behavioral_transparency": 3,
             "parameter_semantics": 2,
-            "conciseness_structure": 3,
-            "contextual_completeness": 2
+            "conciseness_structure": 4,
+            "contextual_completeness": 3
           },
-          "tdqs": 3.0
+          "tdqs": 3.6
         },
         "bench_run_stop": {
           "scores": {
-            "purpose_clarity": 5,
-            "usage_guidelines": 5,
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
             "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
             "contextual_completeness": 4
           },
-          "tdqs": 4.7
+          "tdqs": 4.1
         },
         "bench_run_status": {
           "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 2,
-            "contextual_completeness": 2
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
+            "conciseness_structure": 5,
+            "contextual_completeness": 3
           },
-          "tdqs": 3.1
+          "tdqs": 3.8
         },
         "test_reactor_run": {
           "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 2,
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
             "behavioral_transparency": 2,
-            "parameter_semantics": 1,
-            "conciseness_structure": 2,
-            "contextual_completeness": 1
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
+            "contextual_completeness": 3
           },
-          "tdqs": 2.0
+          "tdqs": 3.5
         },
         "test_reactor_status": {
           "scores": {
-            "purpose_clarity": 2,
+            "purpose_clarity": 3,
             "usage_guidelines": 3,
-            "behavioral_transparency": 3,
-            "parameter_semantics": 2,
-            "conciseness_structure": 3,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 3,
+            "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 2.5
+          "tdqs": 2.8
         },
         "test_reactor_stop": {
           "scores": {
@@ -1093,96 +1162,96 @@
         },
         "hardware_recover": {
           "scores": {
-            "purpose_clarity": 2,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 2,
-            "parameter_semantics": 2,
-            "conciseness_structure": 1,
-            "contextual_completeness": 1
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 4,
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
+            "contextual_completeness": 3
           },
-          "tdqs": 1.8
+          "tdqs": 3.9
         },
         "hardware_lease_status": {
           "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 2,
-            "contextual_completeness": 2
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
+            "conciseness_structure": 5,
+            "contextual_completeness": 4
           },
-          "tdqs": 3.1
+          "tdqs": 3.9
         },
         "project_config_create": {
           "scores": {
             "purpose_clarity": 4,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 2,
-            "parameter_semantics": 5,
-            "conciseness_structure": 3,
-            "contextual_completeness": 2
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
+            "contextual_completeness": 3
           },
-          "tdqs": 3.3
+          "tdqs": 3.7
         },
         "project_config_describe": {
           "scores": {
             "purpose_clarity": 5,
-            "usage_guidelines": 5,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
             "contextual_completeness": 4
           },
-          "tdqs": 4.7
+          "tdqs": 4.2
         },
         "project_config_set": {
           "scores": {
             "purpose_clarity": 4,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 2,
+            "usage_guidelines": 3,
+            "behavioral_transparency": 3,
             "parameter_semantics": 3,
             "conciseness_structure": 3,
-            "contextual_completeness": 2
+            "contextual_completeness": 3
           },
-          "tdqs": 2.8
+          "tdqs": 3.3
         },
         "project_config_adopt_hardware": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 3,
             "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "parameter_semantics": 3,
             "conciseness_structure": 5,
             "contextual_completeness": 3
           },
-          "tdqs": 4.0
+          "tdqs": 3.7
         },
         "project_config_reload_description": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 4,
-            "behavioral_transparency": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
+            "conciseness_structure": 5,
+            "contextual_completeness": 3
+          },
+          "tdqs": 3.8
+        },
+        "server_upgrade": {
+          "scores": {
+            "purpose_clarity": 5,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
             "parameter_semantics": 5,
             "conciseness_structure": 5,
             "contextual_completeness": 3
           },
           "tdqs": 4.2
-        },
-        "server_upgrade": {
-          "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
-            "contextual_completeness": 3
-          },
-          "tdqs": 4.0
         }
       },
       "coherence": {
-        "disambiguation": 3,
-        "naming_consistency": 4,
+        "disambiguation": 4,
+        "naming_consistency": 3,
         "tool_count_appropriateness": 2,
         "completeness": 4,
         "coherenceScore": 3.3
@@ -1190,14 +1259,14 @@
       "rollups": {
         "toolCount": 44,
         "scoredToolCount": 44,
-        "meanTdqs": 3.4,
-        "minTdqs": 1.8,
-        "minTool": "hardware_recover",
-        "descriptionQualityScore": 2.7,
+        "meanTdqs": 3.2,
+        "minTdqs": 1.7,
+        "minTool": "debug_symbol_info",
+        "descriptionQualityScore": 2.6,
         "descriptionQualityTier": "C",
         "coherenceScore": 3.3,
         "coherenceTier": "B",
-        "overallScore": 2.9,
+        "overallScore": 2.8,
         "overallTier": "C"
       }
     },
@@ -1205,142 +1274,142 @@
       "tools": {
         "debugger_info": {
           "scores": {
-            "purpose_clarity": 5,
-            "usage_guidelines": 5,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
             "contextual_completeness": 3
           },
-          "tdqs": 4.6
+          "tdqs": 3.8
         },
         "debugger_probes_list": {
           "scores": {
             "purpose_clarity": 5,
-            "usage_guidelines": 5,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
-            "contextual_completeness": 3
+            "contextual_completeness": 4
           },
-          "tdqs": 4.6
+          "tdqs": 4.2
         },
         "probe_target": {
           "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 4,
-            "behavioral_transparency": 3,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
+            "purpose_clarity": 3,
+            "usage_guidelines": 3,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 3.9
+          "tdqs": 3.0
         },
         "artifact_upload": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 2,
-            "behavioral_transparency": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 2.9
+          "tdqs": 2.7
         },
         "flash_firmware": {
-          "scores": {
-            "purpose_clarity": 5,
-            "usage_guidelines": 5,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 3,
-            "conciseness_structure": 4,
-            "contextual_completeness": 3
-          },
-          "tdqs": 4.2
-        },
-        "reset_target": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 4,
             "behavioral_transparency": 3,
-            "parameter_semantics": 4,
-            "conciseness_structure": 4,
+            "parameter_semantics": 3,
+            "conciseness_structure": 5,
             "contextual_completeness": 3
           },
           "tdqs": 3.7
+        },
+        "reset_target": {
+          "scores": {
+            "purpose_clarity": 4,
+            "usage_guidelines": 3,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 3,
+            "conciseness_structure": 4,
+            "contextual_completeness": 2
+          },
+          "tdqs": 3.1
         },
         "debug_start_session": {
           "scores": {
             "purpose_clarity": 3,
             "usage_guidelines": 2,
             "behavioral_transparency": 2,
-            "parameter_semantics": 2,
-            "conciseness_structure": 4,
-            "contextual_completeness": 1
+            "parameter_semantics": 1,
+            "conciseness_structure": 3,
+            "contextual_completeness": 2
           },
-          "tdqs": 2.4
+          "tdqs": 2.2
         },
         "debug_stop_session": {
           "scores": {
-            "purpose_clarity": 4,
+            "purpose_clarity": 3,
             "usage_guidelines": 2,
-            "behavioral_transparency": 3,
-            "parameter_semantics": 2,
-            "conciseness_structure": 5,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 1,
+            "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 3.0
+          "tdqs": 2.2
         },
         "debug_get_session_status": {
           "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
+            "purpose_clarity": 3,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 3.9
+          "tdqs": 2.7
         },
         "debug_set_breakpoint": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 2,
             "behavioral_transparency": 2,
-            "parameter_semantics": 2,
+            "parameter_semantics": 3,
             "conciseness_structure": 4,
-            "contextual_completeness": 1
+            "contextual_completeness": 2
           },
-          "tdqs": 2.6
+          "tdqs": 2.9
         },
         "debug_list_breakpoints": {
           "scores": {
-            "purpose_clarity": 5,
-            "usage_guidelines": 4,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
+            "purpose_clarity": 4,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
             "contextual_completeness": 3
           },
-          "tdqs": 4.4
+          "tdqs": 3.1
         },
         "debug_clear_breakpoints": {
           "scores": {
-            "purpose_clarity": 5,
-            "usage_guidelines": 4,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "purpose_clarity": 4,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
-            "contextual_completeness": 4
+            "contextual_completeness": 3
           },
-          "tdqs": 4.5
+          "tdqs": 3.4
         },
         "debug_continue": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 2,
-            "behavioral_transparency": 2,
-            "parameter_semantics": 3,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 2,
             "conciseness_structure": 4,
             "contextual_completeness": 2
           },
@@ -1352,115 +1421,115 @@
             "usage_guidelines": 2,
             "behavioral_transparency": 2,
             "parameter_semantics": 1,
-            "conciseness_structure": 4,
+            "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 2.6
+          "tdqs": 2.5
         },
         "debug_get_stop_reason": {
           "scores": {
             "purpose_clarity": 3,
             "usage_guidelines": 2,
-            "behavioral_transparency": 3,
-            "parameter_semantics": 5,
-            "conciseness_structure": 4,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 3.1
+          "tdqs": 2.7
         },
         "debug_symbol_info": {
           "scores": {
             "purpose_clarity": 2,
-            "usage_guidelines": 1,
+            "usage_guidelines": 2,
             "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 3,
-            "contextual_completeness": 1
+            "contextual_completeness": 2
           },
-          "tdqs": 1.8
+          "tdqs": 2.1
         },
         "debug_symbol_value": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 3,
-            "behavioral_transparency": 4,
+            "behavioral_transparency": 3,
             "parameter_semantics": 2,
-            "conciseness_structure": 4,
-            "contextual_completeness": 2
+            "conciseness_structure": 5,
+            "contextual_completeness": 3
           },
           "tdqs": 3.3
         },
         "debug_dump_symbol_ihex": {
           "scores": {
-            "purpose_clarity": 3,
+            "purpose_clarity": 4,
             "usage_guidelines": 2,
             "behavioral_transparency": 2,
-            "parameter_semantics": 1,
+            "parameter_semantics": 2,
             "conciseness_structure": 4,
-            "contextual_completeness": 1
+            "contextual_completeness": 2
           },
-          "tdqs": 2.2
+          "tdqs": 2.7
         },
         "get_last_report": {
           "scores": {
-            "purpose_clarity": 4,
+            "purpose_clarity": 3,
             "usage_guidelines": 2,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 3.7
+          "tdqs": 2.8
         },
         "classify_last_error": {
           "scores": {
             "purpose_clarity": 3,
             "usage_guidelines": 2,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 4,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 3.3
+          "tdqs": 2.7
         },
         "com_ports_list": {
           "scores": {
             "purpose_clarity": 5,
-            "usage_guidelines": 5,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
-            "contextual_completeness": 3
+            "contextual_completeness": 4
           },
-          "tdqs": 4.6
+          "tdqs": 4.2
         },
         "com_session_start": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 2,
-            "behavioral_transparency": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 4,
-            "contextual_completeness": 1
+            "contextual_completeness": 2
           },
-          "tdqs": 2.8
+          "tdqs": 2.7
         },
         "com_session_stop": {
           "scores": {
-            "purpose_clarity": 4,
+            "purpose_clarity": 3,
             "usage_guidelines": 2,
-            "behavioral_transparency": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 2,
-            "conciseness_structure": 5,
+            "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 3.0
+          "tdqs": 2.4
         },
         "com_write": {
           "scores": {
             "purpose_clarity": 4,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 3,
+            "usage_guidelines": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 4,
             "contextual_completeness": 2
@@ -1471,122 +1540,122 @@
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 4,
-            "behavioral_transparency": 4,
+            "behavioral_transparency": 3,
             "parameter_semantics": 2,
-            "conciseness_structure": 4,
-            "contextual_completeness": 2
+            "conciseness_structure": 5,
+            "contextual_completeness": 3
           },
           "tdqs": 3.5
         },
         "can_buses_list": {
           "scores": {
-            "purpose_clarity": 4,
+            "purpose_clarity": 5,
             "usage_guidelines": 4,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
-            "contextual_completeness": 3
+            "contextual_completeness": 4
           },
           "tdqs": 4.2
         },
         "can_session_start": {
           "scores": {
-            "purpose_clarity": 4,
+            "purpose_clarity": 3,
             "usage_guidelines": 2,
-            "behavioral_transparency": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 2.9
+          "tdqs": 2.5
         },
         "can_session_stop": {
           "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 3,
-            "parameter_semantics": 3,
-            "conciseness_structure": 5,
+            "purpose_clarity": 3,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 2,
+            "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 3.4
+          "tdqs": 2.4
         },
         "can_send": {
           "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 3,
+            "purpose_clarity": 5,
+            "usage_guidelines": 4,
             "behavioral_transparency": 2,
             "parameter_semantics": 2,
-            "conciseness_structure": 5,
+            "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 3.0
+          "tdqs": 3.4
         },
         "can_read": {
           "scores": {
             "purpose_clarity": 5,
             "usage_guidelines": 4,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 3,
-            "conciseness_structure": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 2,
+            "conciseness_structure": 5,
             "contextual_completeness": 3
           },
-          "tdqs": 4.0
+          "tdqs": 3.8
         },
         "bench_run_start": {
           "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 2,
+            "purpose_clarity": 4,
+            "usage_guidelines": 5,
+            "behavioral_transparency": 3,
             "parameter_semantics": 2,
-            "conciseness_structure": 2,
-            "contextual_completeness": 2
+            "conciseness_structure": 4,
+            "contextual_completeness": 3
           },
-          "tdqs": 2.5
+          "tdqs": 3.6
         },
         "bench_run_stop": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 4,
-            "behavioral_transparency": 5,
-            "parameter_semantics": 5,
+            "behavioral_transparency": 4,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
-            "contextual_completeness": 5
+            "contextual_completeness": 4
           },
-          "tdqs": 4.6
+          "tdqs": 4.1
         },
         "bench_run_status": {
           "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 4,
-            "contextual_completeness": 2
+            "contextual_completeness": 3
           },
-          "tdqs": 3.3
+          "tdqs": 3.7
         },
         "test_reactor_run": {
           "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 2,
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
             "behavioral_transparency": 2,
-            "parameter_semantics": 1,
-            "conciseness_structure": 2,
-            "contextual_completeness": 2
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
+            "contextual_completeness": 3
           },
-          "tdqs": 2.1
+          "tdqs": 3.5
         },
         "test_reactor_status": {
           "scores": {
-            "purpose_clarity": 2,
+            "purpose_clarity": 3,
             "usage_guidelines": 2,
             "behavioral_transparency": 3,
-            "parameter_semantics": 1,
-            "conciseness_structure": 2,
+            "parameter_semantics": 3,
+            "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 2.1
+          "tdqs": 2.8
         },
         "test_reactor_stop": {
           "scores": {
@@ -1601,111 +1670,111 @@
         },
         "hardware_recover": {
           "scores": {
-            "purpose_clarity": 2,
-            "usage_guidelines": 1,
-            "behavioral_transparency": 2,
-            "parameter_semantics": 2,
-            "conciseness_structure": 1,
-            "contextual_completeness": 1
-          },
-          "tdqs": 1.6
-        },
-        "hardware_lease_status": {
-          "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 4,
             "contextual_completeness": 3
           },
-          "tdqs": 3.6
+          "tdqs": 3.7
+        },
+        "hardware_lease_status": {
+          "scores": {
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
+            "conciseness_structure": 5,
+            "contextual_completeness": 3
+          },
+          "tdqs": 3.8
         },
         "project_config_create": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 3,
             "behavioral_transparency": 3,
-            "parameter_semantics": 5,
+            "parameter_semantics": 4,
             "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 3.5
+          "tdqs": 3.3
         },
         "project_config_describe": {
           "scores": {
             "purpose_clarity": 5,
-            "usage_guidelines": 5,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
             "contextual_completeness": 4
           },
-          "tdqs": 4.7
+          "tdqs": 4.2
         },
         "project_config_set": {
           "scores": {
             "purpose_clarity": 4,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 2,
+            "usage_guidelines": 3,
+            "behavioral_transparency": 3,
             "parameter_semantics": 3,
             "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 2.8
+          "tdqs": 3.2
         },
         "project_config_adopt_hardware": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 3,
+            "behavioral_transparency": 4,
+            "parameter_semantics": 3,
+            "conciseness_structure": 5,
+            "contextual_completeness": 3
+          },
+          "tdqs": 3.7
+        },
+        "project_config_reload_description": {
+          "scores": {
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
             "behavioral_transparency": 3,
-            "parameter_semantics": 5,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
             "contextual_completeness": 3
           },
           "tdqs": 3.8
         },
-        "project_config_reload_description": {
-          "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
-            "contextual_completeness": 3
-          },
-          "tdqs": 4.0
-        },
         "server_upgrade": {
           "scores": {
-            "purpose_clarity": 4,
+            "purpose_clarity": 5,
             "usage_guidelines": 4,
             "behavioral_transparency": 3,
-            "parameter_semantics": 5,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
             "contextual_completeness": 3
           },
-          "tdqs": 4.0
+          "tdqs": 4.1
         }
       },
       "coherence": {
         "disambiguation": 4,
-        "naming_consistency": 5,
-        "tool_count_appropriateness": 3,
+        "naming_consistency": 3,
+        "tool_count_appropriateness": 2,
         "completeness": 4,
-        "coherenceScore": 4.0
+        "coherenceScore": 3.3
       },
       "rollups": {
         "toolCount": 44,
         "scoredToolCount": 44,
-        "meanTdqs": 3.4,
-        "minTdqs": 1.6,
-        "minTool": "hardware_recover",
-        "descriptionQualityScore": 2.7,
+        "meanTdqs": 3.2,
+        "minTdqs": 2.1,
+        "minTool": "debug_symbol_info",
+        "descriptionQualityScore": 2.8,
         "descriptionQualityTier": "C",
-        "coherenceScore": 4.0,
-        "coherenceTier": "A",
-        "overallScore": 3.1,
+        "coherenceScore": 3.3,
+        "coherenceTier": "B",
+        "overallScore": 3.0,
         "overallTier": "B"
       }
     },
@@ -1715,53 +1784,53 @@
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 4,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
             "contextual_completeness": 3
           },
-          "tdqs": 4.2
+          "tdqs": 3.8
         },
         "debugger_probes_list": {
           "scores": {
             "purpose_clarity": 5,
-            "usage_guidelines": 5,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
-            "contextual_completeness": 3
-          },
-          "tdqs": 4.6
-        },
-        "probe_target": {
-          "scores": {
-            "purpose_clarity": 3,
             "usage_guidelines": 4,
             "behavioral_transparency": 3,
             "parameter_semantics": 4,
             "conciseness_structure": 5,
+            "contextual_completeness": 4
+          },
+          "tdqs": 4.2
+        },
+        "probe_target": {
+          "scores": {
+            "purpose_clarity": 3,
+            "usage_guidelines": 3,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 3.5
+          "tdqs": 3.0
         },
         "artifact_upload": {
           "scores": {
             "purpose_clarity": 4,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 4,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 3.3
+          "tdqs": 2.7
         },
         "flash_firmware": {
           "scores": {
-            "purpose_clarity": 5,
-            "usage_guidelines": 4,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 2,
-            "conciseness_structure": 4,
+            "purpose_clarity": 4,
+            "usage_guidelines": 5,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 3,
+            "conciseness_structure": 5,
             "contextual_completeness": 3
           },
           "tdqs": 3.9
@@ -1769,134 +1838,134 @@
         "reset_target": {
           "scores": {
             "purpose_clarity": 4,
-            "usage_guidelines": 5,
-            "behavioral_transparency": 3,
-            "parameter_semantics": 4,
-            "conciseness_structure": 5,
-            "contextual_completeness": 2
+            "usage_guidelines": 3,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 3,
+            "conciseness_structure": 4,
+            "contextual_completeness": 3
           },
-          "tdqs": 3.9
+          "tdqs": 3.2
         },
         "debug_start_session": {
           "scores": {
             "purpose_clarity": 3,
             "usage_guidelines": 2,
             "behavioral_transparency": 2,
-            "parameter_semantics": 2,
-            "conciseness_structure": 4,
+            "parameter_semantics": 1,
+            "conciseness_structure": 3,
             "contextual_completeness": 1
           },
-          "tdqs": 2.4
+          "tdqs": 2.1
         },
         "debug_stop_session": {
           "scores": {
-            "purpose_clarity": 4,
+            "purpose_clarity": 3,
             "usage_guidelines": 2,
-            "behavioral_transparency": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 1,
-            "conciseness_structure": 4,
+            "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 2.8
+          "tdqs": 2.2
         },
         "debug_get_session_status": {
           "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
-            "contextual_completeness": 3
+            "purpose_clarity": 3,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 3,
+            "contextual_completeness": 2
           },
-          "tdqs": 4.0
+          "tdqs": 2.7
         },
         "debug_set_breakpoint": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 2,
             "behavioral_transparency": 2,
-            "parameter_semantics": 2,
+            "parameter_semantics": 3,
             "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 2.7
+          "tdqs": 2.9
         },
         "debug_list_breakpoints": {
           "scores": {
-            "purpose_clarity": 5,
+            "purpose_clarity": 4,
             "usage_guidelines": 3,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
             "contextual_completeness": 3
           },
-          "tdqs": 4.2
+          "tdqs": 3.3
         },
         "debug_clear_breakpoints": {
           "scores": {
-            "purpose_clarity": 5,
-            "usage_guidelines": 4,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "purpose_clarity": 4,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
             "contextual_completeness": 3
           },
-          "tdqs": 4.4
+          "tdqs": 3.4
         },
         "debug_continue": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 2,
             "behavioral_transparency": 2,
-            "parameter_semantics": 3,
-            "conciseness_structure": 5,
-            "contextual_completeness": 2
-          },
-          "tdqs": 3.0
-        },
-        "debug_halt": {
-          "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 4,
             "contextual_completeness": 2
           },
           "tdqs": 2.7
         },
+        "debug_halt": {
+          "scores": {
+            "purpose_clarity": 4,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 1,
+            "conciseness_structure": 3,
+            "contextual_completeness": 2
+          },
+          "tdqs": 2.5
+        },
         "debug_get_stop_reason": {
           "scores": {
-            "purpose_clarity": 2,
-            "usage_guidelines": 1,
-            "behavioral_transparency": 3,
-            "parameter_semantics": 5,
-            "conciseness_structure": 4,
-            "contextual_completeness": 1
+            "purpose_clarity": 3,
+            "usage_guidelines": 2,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 3,
+            "contextual_completeness": 2
           },
-          "tdqs": 2.6
+          "tdqs": 2.7
         },
         "debug_symbol_info": {
           "scores": {
             "purpose_clarity": 2,
             "usage_guidelines": 1,
-            "behavioral_transparency": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 2,
-            "conciseness_structure": 4,
-            "contextual_completeness": 1
+            "conciseness_structure": 2,
+            "contextual_completeness": 2
           },
-          "tdqs": 2.1
+          "tdqs": 1.8
         },
         "debug_symbol_value": {
           "scores": {
             "purpose_clarity": 4,
-            "usage_guidelines": 4,
+            "usage_guidelines": 3,
             "behavioral_transparency": 3,
             "parameter_semantics": 2,
-            "conciseness_structure": 5,
+            "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 3.4
+          "tdqs": 3.1
         },
         "debug_dump_symbol_ihex": {
           "scores": {
@@ -1905,42 +1974,42 @@
             "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 4,
-            "contextual_completeness": 1
+            "contextual_completeness": 2
           },
-          "tdqs": 2.6
+          "tdqs": 2.7
         },
         "get_last_report": {
           "scores": {
-            "purpose_clarity": 4,
+            "purpose_clarity": 3,
             "usage_guidelines": 2,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 5,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 3.7
+          "tdqs": 2.8
         },
         "classify_last_error": {
           "scores": {
             "purpose_clarity": 3,
             "usage_guidelines": 2,
-            "behavioral_transparency": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 4,
             "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 3.0
+          "tdqs": 2.8
         },
         "com_ports_list": {
           "scores": {
             "purpose_clarity": 5,
-            "usage_guidelines": 5,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
             "contextual_completeness": 3
           },
-          "tdqs": 4.6
+          "tdqs": 4.1
         },
         "com_session_start": {
           "scores": {
@@ -1949,26 +2018,26 @@
             "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 4,
-            "contextual_completeness": 1
+            "contextual_completeness": 2
           },
-          "tdqs": 2.6
+          "tdqs": 2.7
         },
         "com_session_stop": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 2,
-            "behavioral_transparency": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 2,
-            "conciseness_structure": 5,
+            "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 3.0
+          "tdqs": 2.6
         },
         "com_write": {
           "scores": {
             "purpose_clarity": 4,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 3,
+            "usage_guidelines": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 4,
             "contextual_completeness": 2
@@ -1977,124 +2046,124 @@
         },
         "com_read": {
           "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 4,
-            "behavioral_transparency": 3,
-            "parameter_semantics": 2,
-            "conciseness_structure": 4,
-            "contextual_completeness": 2
-          },
-          "tdqs": 3.3
-        },
-        "can_buses_list": {
-          "scores": {
-            "purpose_clarity": 4,
+            "purpose_clarity": 5,
             "usage_guidelines": 4,
             "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "parameter_semantics": 3,
             "conciseness_structure": 5,
             "contextual_completeness": 3
           },
-          "tdqs": 4.2
+          "tdqs": 4.1
+        },
+        "can_buses_list": {
+          "scores": {
+            "purpose_clarity": 5,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
+            "conciseness_structure": 5,
+            "contextual_completeness": 3
+          },
+          "tdqs": 4.1
         },
         "can_session_start": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 2,
-            "behavioral_transparency": 3,
+            "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 2.9
+          "tdqs": 2.7
         },
         "can_session_stop": {
           "scores": {
-            "purpose_clarity": 4,
+            "purpose_clarity": 3,
             "usage_guidelines": 2,
-            "behavioral_transparency": 3,
-            "parameter_semantics": 3,
-            "conciseness_structure": 4,
+            "behavioral_transparency": 2,
+            "parameter_semantics": 2,
+            "conciseness_structure": 3,
             "contextual_completeness": 2
           },
-          "tdqs": 3.1
+          "tdqs": 2.4
         },
         "can_send": {
           "scores": {
-            "purpose_clarity": 4,
+            "purpose_clarity": 5,
             "usage_guidelines": 3,
             "behavioral_transparency": 2,
             "parameter_semantics": 2,
             "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 2.9
+          "tdqs": 3.2
         },
         "can_read": {
           "scores": {
             "purpose_clarity": 5,
             "usage_guidelines": 4,
-            "behavioral_transparency": 4,
+            "behavioral_transparency": 3,
             "parameter_semantics": 3,
-            "conciseness_structure": 4,
+            "conciseness_structure": 5,
             "contextual_completeness": 3
           },
-          "tdqs": 4.0
+          "tdqs": 3.9
         },
         "bench_run_start": {
           "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 2,
+            "purpose_clarity": 4,
+            "usage_guidelines": 5,
+            "behavioral_transparency": 4,
             "parameter_semantics": 2,
-            "conciseness_structure": 2,
-            "contextual_completeness": 2
+            "conciseness_structure": 4,
+            "contextual_completeness": 3
           },
-          "tdqs": 2.5
+          "tdqs": 3.8
         },
         "bench_run_stop": {
           "scores": {
-            "purpose_clarity": 5,
-            "usage_guidelines": 5,
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
             "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
-            "contextual_completeness": 5
+            "contextual_completeness": 4
           },
-          "tdqs": 4.8
+          "tdqs": 4.1
         },
         "bench_run_status": {
           "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 3,
-            "contextual_completeness": 2
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
+            "conciseness_structure": 5,
+            "contextual_completeness": 3
           },
-          "tdqs": 3.4
+          "tdqs": 3.8
         },
         "test_reactor_run": {
           "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 2,
-            "parameter_semantics": 1,
-            "conciseness_structure": 1,
-            "contextual_completeness": 1
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
+            "conciseness_structure": 4,
+            "contextual_completeness": 3
           },
-          "tdqs": 1.9
+          "tdqs": 3.7
         },
         "test_reactor_status": {
           "scores": {
-            "purpose_clarity": 2,
-            "usage_guidelines": 2,
+            "purpose_clarity": 3,
+            "usage_guidelines": 3,
             "behavioral_transparency": 3,
-            "parameter_semantics": 2,
-            "conciseness_structure": 2,
+            "parameter_semantics": 3,
+            "conciseness_structure": 4,
             "contextual_completeness": 2
           },
-          "tdqs": 2.2
+          "tdqs": 3.0
         },
         "test_reactor_stop": {
           "scores": {
@@ -2109,112 +2178,112 @@
         },
         "hardware_recover": {
           "scores": {
-            "purpose_clarity": 2,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 2,
-            "parameter_semantics": 1,
-            "conciseness_structure": 2,
-            "contextual_completeness": 1
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 3,
+            "conciseness_structure": 4,
+            "contextual_completeness": 3
           },
-          "tdqs": 1.8
+          "tdqs": 3.6
         },
         "hardware_lease_status": {
           "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 3,
-            "contextual_completeness": 2
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
+            "conciseness_structure": 5,
+            "contextual_completeness": 3
           },
-          "tdqs": 3.2
+          "tdqs": 3.8
         },
         "project_config_create": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 3,
             "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "parameter_semantics": 4,
             "conciseness_structure": 4,
             "contextual_completeness": 3
           },
-          "tdqs": 3.9
+          "tdqs": 3.7
         },
         "project_config_describe": {
           "scores": {
             "purpose_clarity": 5,
             "usage_guidelines": 5,
-            "behavioral_transparency": 5,
-            "parameter_semantics": 5,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
             "conciseness_structure": 5,
-            "contextual_completeness": 5
+            "contextual_completeness": 4
           },
-          "tdqs": 5.0
+          "tdqs": 4.4
         },
         "project_config_set": {
           "scores": {
-            "purpose_clarity": 3,
-            "usage_guidelines": 2,
-            "behavioral_transparency": 2,
-            "parameter_semantics": 2,
-            "conciseness_structure": 2,
-            "contextual_completeness": 2
+            "purpose_clarity": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 3,
+            "conciseness_structure": 4,
+            "contextual_completeness": 3
           },
-          "tdqs": 2.3
+          "tdqs": 3.6
         },
         "project_config_adopt_hardware": {
           "scores": {
             "purpose_clarity": 4,
             "usage_guidelines": 3,
             "behavioral_transparency": 4,
-            "parameter_semantics": 5,
+            "parameter_semantics": 3,
             "conciseness_structure": 5,
             "contextual_completeness": 3
           },
-          "tdqs": 4.0
+          "tdqs": 3.7
         },
         "project_config_reload_description": {
           "scores": {
             "purpose_clarity": 4,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 4,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
+            "conciseness_structure": 5,
             "contextual_completeness": 3
           },
-          "tdqs": 3.9
+          "tdqs": 3.8
         },
         "server_upgrade": {
           "scores": {
-            "purpose_clarity": 4,
-            "usage_guidelines": 3,
-            "behavioral_transparency": 4,
-            "parameter_semantics": 5,
-            "conciseness_structure": 4,
+            "purpose_clarity": 5,
+            "usage_guidelines": 4,
+            "behavioral_transparency": 3,
+            "parameter_semantics": 4,
+            "conciseness_structure": 5,
             "contextual_completeness": 3
           },
-          "tdqs": 3.9
+          "tdqs": 4.1
         }
       },
       "coherence": {
         "disambiguation": 4,
-        "naming_consistency": 4,
-        "tool_count_appropriateness": 3,
+        "naming_consistency": 3,
+        "tool_count_appropriateness": 2,
         "completeness": 4,
-        "coherenceScore": 3.8
+        "coherenceScore": 3.3
       },
       "rollups": {
         "toolCount": 44,
         "scoredToolCount": 44,
         "meanTdqs": 3.3,
         "minTdqs": 1.8,
-        "minTool": "hardware_recover",
+        "minTool": "debug_symbol_info",
         "descriptionQualityScore": 2.7,
         "descriptionQualityTier": "C",
-        "coherenceScore": 3.8,
-        "coherenceTier": "A",
-        "overallScore": 3.0,
-        "overallTier": "B"
+        "coherenceScore": 3.3,
+        "coherenceTier": "B",
+        "overallScore": 2.9,
+        "overallTier": "C"
       }
     }
   ],
@@ -2232,21 +2301,21 @@
         },
         "gate": {
           "purpose_clarity": 4.0,
-          "usage_guidelines": 3.0,
-          "behavioral_transparency": 4.0,
+          "usage_guidelines": 2.0,
+          "behavioral_transparency": 2.0,
           "parameter_semantics": 2.0,
           "conciseness_structure": 4.0,
           "contextual_completeness": 2.0,
-          "tdqs": 3.3
+          "tdqs": 2.7
         },
         "difference": {
           "purpose_clarity": 0.0,
-          "usage_guidelines": 1.0,
-          "behavioral_transparency": 1.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": -1.0,
           "parameter_semantics": -1.0,
           "conciseness_structure": -1.0,
           "contextual_completeness": -1.0,
-          "tdqs": 0.0
+          "tdqs": -0.6
         }
       },
       "bench_run_start": {
@@ -2260,22 +2329,22 @@
           "tdqs": 4.4
         },
         "gate": {
-          "purpose_clarity": 3.0,
-          "usage_guidelines": 3.0,
-          "behavioral_transparency": 2.0,
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 5.0,
+          "behavioral_transparency": 3.0,
           "parameter_semantics": 2.0,
-          "conciseness_structure": 2.0,
-          "contextual_completeness": 2.0,
-          "tdqs": 2.5
+          "conciseness_structure": 4.0,
+          "contextual_completeness": 3.0,
+          "tdqs": 3.6
         },
         "difference": {
-          "purpose_clarity": -2.0,
-          "usage_guidelines": -2.0,
-          "behavioral_transparency": -2.0,
+          "purpose_clarity": -1.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": -1.0,
           "parameter_semantics": -1.0,
-          "conciseness_structure": -3.0,
-          "contextual_completeness": -2.0,
-          "tdqs": -1.9
+          "conciseness_structure": -1.0,
+          "contextual_completeness": -1.0,
+          "tdqs": -0.8
         }
       },
       "bench_run_status": {
@@ -2289,22 +2358,22 @@
           "tdqs": 3.9
         },
         "gate": {
-          "purpose_clarity": 3.0,
-          "usage_guidelines": 2.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
-          "conciseness_structure": 3.0,
-          "contextual_completeness": 2.0,
-          "tdqs": 3.3
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 4.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 5.0,
+          "contextual_completeness": 3.0,
+          "tdqs": 3.8
         },
         "difference": {
-          "purpose_clarity": -1.0,
-          "usage_guidelines": -2.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": -2.0,
-          "contextual_completeness": -2.0,
-          "tdqs": -0.6
+          "purpose_clarity": 0.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": 0.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": 0.0,
+          "contextual_completeness": -1.0,
+          "tdqs": -0.1
         }
       },
       "bench_run_stop": {
@@ -2318,22 +2387,22 @@
           "tdqs": 4.2
         },
         "gate": {
-          "purpose_clarity": 5.0,
-          "usage_guidelines": 5.0,
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 4.0,
           "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
+          "parameter_semantics": 4.0,
           "conciseness_structure": 5.0,
-          "contextual_completeness": 5.0,
-          "tdqs": 4.7
+          "contextual_completeness": 4.0,
+          "tdqs": 4.1
         },
         "difference": {
-          "purpose_clarity": 1.0,
-          "usage_guidelines": 1.0,
+          "purpose_clarity": 0.0,
+          "usage_guidelines": 0.0,
           "behavioral_transparency": 0.0,
-          "parameter_semantics": 1.0,
+          "parameter_semantics": 0.0,
           "conciseness_structure": 0.0,
-          "contextual_completeness": 0.0,
-          "tdqs": 0.5
+          "contextual_completeness": -1.0,
+          "tdqs": -0.1
         }
       },
       "can_buses_list": {
@@ -2347,21 +2416,21 @@
           "tdqs": 4.4
         },
         "gate": {
-          "purpose_clarity": 4.0,
+          "purpose_clarity": 5.0,
           "usage_guidelines": 4.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 4.0,
           "conciseness_structure": 5.0,
-          "contextual_completeness": 3.0,
+          "contextual_completeness": 4.0,
           "tdqs": 4.2
         },
         "difference": {
-          "purpose_clarity": -1.0,
+          "purpose_clarity": 0.0,
           "usage_guidelines": 0.0,
-          "behavioral_transparency": 0.0,
-          "parameter_semantics": 1.0,
+          "behavioral_transparency": -1.0,
+          "parameter_semantics": 0.0,
           "conciseness_structure": 0.0,
-          "contextual_completeness": -1.0,
+          "contextual_completeness": 0.0,
           "tdqs": -0.2
         }
       },
@@ -2378,20 +2447,20 @@
         "gate": {
           "purpose_clarity": 5.0,
           "usage_guidelines": 4.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 3.0,
-          "conciseness_structure": 4.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 2.0,
+          "conciseness_structure": 5.0,
           "contextual_completeness": 3.0,
-          "tdqs": 4.0
+          "tdqs": 3.8
         },
         "difference": {
           "purpose_clarity": 1.0,
           "usage_guidelines": 0.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": -1.0,
+          "behavioral_transparency": 0.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": 0.0,
           "contextual_completeness": 0.0,
-          "tdqs": 0.5
+          "tdqs": 0.3
         }
       },
       "can_send": {
@@ -2405,22 +2474,22 @@
           "tdqs": 3.2
         },
         "gate": {
-          "purpose_clarity": 4.0,
+          "purpose_clarity": 5.0,
           "usage_guidelines": 3.0,
           "behavioral_transparency": 2.0,
           "parameter_semantics": 2.0,
-          "conciseness_structure": 5.0,
+          "conciseness_structure": 4.0,
           "contextual_completeness": 2.0,
-          "tdqs": 3.0
+          "tdqs": 3.2
         },
         "difference": {
-          "purpose_clarity": 0.0,
+          "purpose_clarity": 1.0,
           "usage_guidelines": 0.0,
           "behavioral_transparency": -1.0,
           "parameter_semantics": 0.0,
-          "conciseness_structure": 0.0,
+          "conciseness_structure": -1.0,
           "contextual_completeness": 0.0,
-          "tdqs": -0.2
+          "tdqs": 0.0
         }
       },
       "can_session_start": {
@@ -2436,20 +2505,20 @@
         "gate": {
           "purpose_clarity": 4.0,
           "usage_guidelines": 2.0,
-          "behavioral_transparency": 3.0,
+          "behavioral_transparency": 2.0,
           "parameter_semantics": 2.0,
           "conciseness_structure": 4.0,
           "contextual_completeness": 2.0,
-          "tdqs": 2.9
+          "tdqs": 2.6
         },
         "difference": {
           "purpose_clarity": 0.0,
           "usage_guidelines": 0.0,
-          "behavioral_transparency": 0.0,
+          "behavioral_transparency": -1.0,
           "parameter_semantics": 0.0,
           "conciseness_structure": 0.0,
           "contextual_completeness": 0.0,
-          "tdqs": 0.0
+          "tdqs": -0.3
         }
       },
       "can_session_stop": {
@@ -2463,22 +2532,22 @@
           "tdqs": 2.7
         },
         "gate": {
-          "purpose_clarity": 4.0,
-          "usage_guidelines": 3.0,
-          "behavioral_transparency": 3.0,
-          "parameter_semantics": 3.0,
-          "conciseness_structure": 5.0,
+          "purpose_clarity": 3.0,
+          "usage_guidelines": 2.0,
+          "behavioral_transparency": 2.0,
+          "parameter_semantics": 2.0,
+          "conciseness_structure": 3.0,
           "contextual_completeness": 2.0,
-          "tdqs": 3.4
+          "tdqs": 2.4
         },
         "difference": {
-          "purpose_clarity": 0.0,
-          "usage_guidelines": 1.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": 1.0,
+          "purpose_clarity": -1.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": 0.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": -1.0,
           "contextual_completeness": 0.0,
-          "tdqs": 0.7
+          "tdqs": -0.3
         }
       },
       "classify_last_error": {
@@ -2494,20 +2563,20 @@
         "gate": {
           "purpose_clarity": 3.0,
           "usage_guidelines": 2.0,
-          "behavioral_transparency": 3.0,
-          "parameter_semantics": 5.0,
+          "behavioral_transparency": 2.0,
+          "parameter_semantics": 4.0,
           "conciseness_structure": 4.0,
           "contextual_completeness": 2.0,
-          "tdqs": 3.1
+          "tdqs": 2.8
         },
         "difference": {
           "purpose_clarity": -1.0,
           "usage_guidelines": 0.0,
-          "behavioral_transparency": 0.0,
-          "parameter_semantics": 1.0,
+          "behavioral_transparency": -1.0,
+          "parameter_semantics": 0.0,
           "conciseness_structure": -1.0,
           "contextual_completeness": -1.0,
-          "tdqs": -0.3
+          "tdqs": -0.6
         }
       },
       "com_ports_list": {
@@ -2522,21 +2591,21 @@
         },
         "gate": {
           "purpose_clarity": 5.0,
-          "usage_guidelines": 5.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
+          "usage_guidelines": 4.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 4.0,
           "conciseness_structure": 5.0,
           "contextual_completeness": 3.0,
-          "tdqs": 4.6
+          "tdqs": 4.1
         },
         "difference": {
           "purpose_clarity": 0.0,
-          "usage_guidelines": 0.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
+          "usage_guidelines": -1.0,
+          "behavioral_transparency": 0.0,
+          "parameter_semantics": 0.0,
           "conciseness_structure": 0.0,
           "contextual_completeness": -1.0,
-          "tdqs": 0.2
+          "tdqs": -0.3
         }
       },
       "com_read": {
@@ -2550,22 +2619,22 @@
           "tdqs": 3.8
         },
         "gate": {
-          "purpose_clarity": 4.0,
+          "purpose_clarity": 5.0,
           "usage_guidelines": 4.0,
           "behavioral_transparency": 4.0,
-          "parameter_semantics": 2.0,
-          "conciseness_structure": 4.0,
-          "contextual_completeness": 2.0,
-          "tdqs": 3.5
+          "parameter_semantics": 3.0,
+          "conciseness_structure": 5.0,
+          "contextual_completeness": 3.0,
+          "tdqs": 4.1
         },
         "difference": {
-          "purpose_clarity": -1.0,
+          "purpose_clarity": 0.0,
           "usage_guidelines": 0.0,
           "behavioral_transparency": 1.0,
-          "parameter_semantics": 0.0,
-          "conciseness_structure": -1.0,
-          "contextual_completeness": -1.0,
-          "tdqs": -0.3
+          "parameter_semantics": 1.0,
+          "conciseness_structure": 0.0,
+          "contextual_completeness": 0.0,
+          "tdqs": 0.3
         }
       },
       "com_session_start": {
@@ -2584,8 +2653,8 @@
           "behavioral_transparency": 2.0,
           "parameter_semantics": 2.0,
           "conciseness_structure": 4.0,
-          "contextual_completeness": 1.0,
-          "tdqs": 2.6
+          "contextual_completeness": 2.0,
+          "tdqs": 2.7
         },
         "difference": {
           "purpose_clarity": 0.0,
@@ -2593,8 +2662,8 @@
           "behavioral_transparency": -1.0,
           "parameter_semantics": 0.0,
           "conciseness_structure": 0.0,
-          "contextual_completeness": -1.0,
-          "tdqs": -0.3
+          "contextual_completeness": 0.0,
+          "tdqs": -0.2
         }
       },
       "com_session_stop": {
@@ -2608,22 +2677,22 @@
           "tdqs": 2.6
         },
         "gate": {
-          "purpose_clarity": 4.0,
+          "purpose_clarity": 3.0,
           "usage_guidelines": 2.0,
-          "behavioral_transparency": 3.0,
+          "behavioral_transparency": 2.0,
           "parameter_semantics": 2.0,
-          "conciseness_structure": 5.0,
+          "conciseness_structure": 3.0,
           "contextual_completeness": 2.0,
-          "tdqs": 3.0
+          "tdqs": 2.4
         },
         "difference": {
-          "purpose_clarity": 0.0,
+          "purpose_clarity": -1.0,
           "usage_guidelines": 0.0,
-          "behavioral_transparency": 1.0,
+          "behavioral_transparency": 0.0,
           "parameter_semantics": 0.0,
-          "conciseness_structure": 2.0,
+          "conciseness_structure": 0.0,
           "contextual_completeness": 0.0,
-          "tdqs": 0.4
+          "tdqs": -0.2
         }
       },
       "com_write": {
@@ -2638,8 +2707,8 @@
         },
         "gate": {
           "purpose_clarity": 4.0,
-          "usage_guidelines": 2.0,
-          "behavioral_transparency": 3.0,
+          "usage_guidelines": 3.0,
+          "behavioral_transparency": 2.0,
           "parameter_semantics": 2.0,
           "conciseness_structure": 4.0,
           "contextual_completeness": 2.0,
@@ -2647,8 +2716,8 @@
         },
         "difference": {
           "purpose_clarity": 0.0,
-          "usage_guidelines": -1.0,
-          "behavioral_transparency": 1.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": 0.0,
           "parameter_semantics": 0.0,
           "conciseness_structure": 0.0,
           "contextual_completeness": 0.0,
@@ -2666,22 +2735,22 @@
           "tdqs": 3.8
         },
         "gate": {
-          "purpose_clarity": 5.0,
-          "usage_guidelines": 4.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 2.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 4.0,
           "conciseness_structure": 5.0,
-          "contextual_completeness": 4.0,
-          "tdqs": 4.5
+          "contextual_completeness": 3.0,
+          "tdqs": 3.4
         },
         "difference": {
-          "purpose_clarity": 0.0,
-          "usage_guidelines": 2.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
+          "purpose_clarity": -1.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": 0.0,
+          "parameter_semantics": 0.0,
           "conciseness_structure": 0.0,
-          "contextual_completeness": 0.0,
-          "tdqs": 0.7
+          "contextual_completeness": -1.0,
+          "tdqs": -0.4
         }
       },
       "debug_continue": {
@@ -2698,19 +2767,19 @@
           "purpose_clarity": 4.0,
           "usage_guidelines": 2.0,
           "behavioral_transparency": 2.0,
-          "parameter_semantics": 3.0,
+          "parameter_semantics": 2.0,
           "conciseness_structure": 4.0,
           "contextual_completeness": 2.0,
-          "tdqs": 2.9
+          "tdqs": 2.7
         },
         "difference": {
           "purpose_clarity": 0.0,
           "usage_guidelines": -1.0,
           "behavioral_transparency": -1.0,
-          "parameter_semantics": 1.0,
+          "parameter_semantics": 0.0,
           "conciseness_structure": -1.0,
           "contextual_completeness": -1.0,
-          "tdqs": -0.4
+          "tdqs": -0.6
         }
       },
       "debug_dump_symbol_ihex": {
@@ -2724,22 +2793,22 @@
           "tdqs": 3.0
         },
         "gate": {
-          "purpose_clarity": 3.0,
+          "purpose_clarity": 4.0,
           "usage_guidelines": 2.0,
           "behavioral_transparency": 2.0,
           "parameter_semantics": 2.0,
           "conciseness_structure": 4.0,
-          "contextual_completeness": 1.0,
-          "tdqs": 2.4
+          "contextual_completeness": 2.0,
+          "tdqs": 2.7
         },
         "difference": {
-          "purpose_clarity": -1.0,
+          "purpose_clarity": 0.0,
           "usage_guidelines": 0.0,
           "behavioral_transparency": -1.0,
           "parameter_semantics": 0.0,
           "conciseness_structure": -1.0,
-          "contextual_completeness": -1.0,
-          "tdqs": -0.6
+          "contextual_completeness": 0.0,
+          "tdqs": -0.3
         }
       },
       "debug_get_session_status": {
@@ -2753,22 +2822,22 @@
           "tdqs": 3.2
         },
         "gate": {
-          "purpose_clarity": 4.0,
-          "usage_guidelines": 3.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
-          "conciseness_structure": 5.0,
+          "purpose_clarity": 3.0,
+          "usage_guidelines": 2.0,
+          "behavioral_transparency": 2.0,
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 3.0,
           "contextual_completeness": 2.0,
-          "tdqs": 3.9
+          "tdqs": 2.7
         },
         "difference": {
-          "purpose_clarity": 0.0,
-          "usage_guidelines": 1.0,
-          "behavioral_transparency": 2.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": 0.0,
+          "purpose_clarity": -1.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": 0.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": -2.0,
           "contextual_completeness": -1.0,
-          "tdqs": 0.7
+          "tdqs": -0.5
         }
       },
       "debug_get_stop_reason": {
@@ -2784,20 +2853,20 @@
         "gate": {
           "purpose_clarity": 3.0,
           "usage_guidelines": 2.0,
-          "behavioral_transparency": 3.0,
-          "parameter_semantics": 5.0,
-          "conciseness_structure": 4.0,
+          "behavioral_transparency": 2.0,
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 3.0,
           "contextual_completeness": 2.0,
-          "tdqs": 3.1
+          "tdqs": 2.7
         },
         "difference": {
           "purpose_clarity": -1.0,
           "usage_guidelines": 0.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": 0.0,
+          "behavioral_transparency": 0.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": -1.0,
           "contextual_completeness": -1.0,
-          "tdqs": 0.0
+          "tdqs": -0.4
         }
       },
       "debug_halt": {
@@ -2814,19 +2883,19 @@
           "purpose_clarity": 4.0,
           "usage_guidelines": 2.0,
           "behavioral_transparency": 2.0,
-          "parameter_semantics": 2.0,
-          "conciseness_structure": 4.0,
+          "parameter_semantics": 1.0,
+          "conciseness_structure": 3.0,
           "contextual_completeness": 2.0,
-          "tdqs": 2.7
+          "tdqs": 2.5
         },
         "difference": {
           "purpose_clarity": 0.0,
           "usage_guidelines": 0.0,
           "behavioral_transparency": -1.0,
-          "parameter_semantics": 0.0,
-          "conciseness_structure": 0.0,
+          "parameter_semantics": -1.0,
+          "conciseness_structure": -1.0,
           "contextual_completeness": -1.0,
-          "tdqs": -0.3
+          "tdqs": -0.5
         }
       },
       "debug_list_breakpoints": {
@@ -2840,22 +2909,22 @@
           "tdqs": 3.7
         },
         "gate": {
-          "purpose_clarity": 5.0,
-          "usage_guidelines": 4.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
-          "conciseness_structure": 5.0,
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 3.0,
+          "behavioral_transparency": 2.0,
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 4.0,
           "contextual_completeness": 3.0,
-          "tdqs": 4.4
+          "tdqs": 3.3
         },
         "difference": {
-          "purpose_clarity": 1.0,
-          "usage_guidelines": 1.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": 0.0,
+          "purpose_clarity": 0.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": -1.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": -1.0,
           "contextual_completeness": -1.0,
-          "tdqs": 0.7
+          "tdqs": -0.4
         }
       },
       "debug_set_breakpoint": {
@@ -2872,19 +2941,19 @@
           "purpose_clarity": 4.0,
           "usage_guidelines": 2.0,
           "behavioral_transparency": 2.0,
-          "parameter_semantics": 2.0,
+          "parameter_semantics": 3.0,
           "conciseness_structure": 4.0,
           "contextual_completeness": 2.0,
-          "tdqs": 2.7
+          "tdqs": 2.9
         },
         "difference": {
           "purpose_clarity": 0.0,
           "usage_guidelines": 0.0,
           "behavioral_transparency": -1.0,
-          "parameter_semantics": -2.0,
+          "parameter_semantics": -1.0,
           "conciseness_structure": -1.0,
           "contextual_completeness": -1.0,
-          "tdqs": -0.7
+          "tdqs": -0.5
         }
       },
       "debug_start_session": {
@@ -2901,19 +2970,19 @@
           "purpose_clarity": 3.0,
           "usage_guidelines": 2.0,
           "behavioral_transparency": 2.0,
-          "parameter_semantics": 2.0,
-          "conciseness_structure": 4.0,
+          "parameter_semantics": 1.0,
+          "conciseness_structure": 3.0,
           "contextual_completeness": 1.0,
-          "tdqs": 2.4
+          "tdqs": 2.1
         },
         "difference": {
           "purpose_clarity": -1.0,
           "usage_guidelines": 0.0,
           "behavioral_transparency": -1.0,
-          "parameter_semantics": 0.0,
-          "conciseness_structure": 0.0,
+          "parameter_semantics": -1.0,
+          "conciseness_structure": -1.0,
           "contextual_completeness": -1.0,
-          "tdqs": -0.5
+          "tdqs": -0.8
         }
       },
       "debug_stop_session": {
@@ -2927,22 +2996,22 @@
           "tdqs": 2.8
         },
         "gate": {
-          "purpose_clarity": 4.0,
+          "purpose_clarity": 3.0,
           "usage_guidelines": 2.0,
-          "behavioral_transparency": 3.0,
+          "behavioral_transparency": 2.0,
           "parameter_semantics": 1.0,
-          "conciseness_structure": 5.0,
+          "conciseness_structure": 3.0,
           "contextual_completeness": 2.0,
-          "tdqs": 2.9
+          "tdqs": 2.2
         },
         "difference": {
-          "purpose_clarity": 0.0,
+          "purpose_clarity": -1.0,
           "usage_guidelines": 0.0,
-          "behavioral_transparency": 1.0,
+          "behavioral_transparency": 0.0,
           "parameter_semantics": -1.0,
-          "conciseness_structure": 1.0,
+          "conciseness_structure": -1.0,
           "contextual_completeness": -1.0,
-          "tdqs": 0.1
+          "tdqs": -0.6
         }
       },
       "debug_symbol_info": {
@@ -2958,20 +3027,20 @@
         "gate": {
           "purpose_clarity": 2.0,
           "usage_guidelines": 1.0,
-          "behavioral_transparency": 3.0,
+          "behavioral_transparency": 2.0,
           "parameter_semantics": 2.0,
-          "conciseness_structure": 4.0,
-          "contextual_completeness": 1.0,
-          "tdqs": 2.1
+          "conciseness_structure": 2.0,
+          "contextual_completeness": 2.0,
+          "tdqs": 1.8
         },
         "difference": {
           "purpose_clarity": 0.0,
           "usage_guidelines": 0.0,
-          "behavioral_transparency": 1.0,
+          "behavioral_transparency": 0.0,
           "parameter_semantics": 1.0,
-          "conciseness_structure": 2.0,
-          "contextual_completeness": -1.0,
-          "tdqs": 0.4
+          "conciseness_structure": 0.0,
+          "contextual_completeness": 0.0,
+          "tdqs": 0.1
         }
       },
       "debug_symbol_value": {
@@ -2986,21 +3055,21 @@
         },
         "gate": {
           "purpose_clarity": 4.0,
-          "usage_guidelines": 4.0,
+          "usage_guidelines": 3.0,
           "behavioral_transparency": 3.0,
           "parameter_semantics": 2.0,
           "conciseness_structure": 5.0,
-          "contextual_completeness": 2.0,
-          "tdqs": 3.4
+          "contextual_completeness": 3.0,
+          "tdqs": 3.3
         },
         "difference": {
           "purpose_clarity": 0.0,
-          "usage_guidelines": 1.0,
+          "usage_guidelines": 0.0,
           "behavioral_transparency": -1.0,
           "parameter_semantics": -1.0,
           "conciseness_structure": 0.0,
-          "contextual_completeness": -2.0,
-          "tdqs": -0.4
+          "contextual_completeness": -1.0,
+          "tdqs": -0.5
         }
       },
       "debugger_info": {
@@ -3016,20 +3085,20 @@
         "gate": {
           "purpose_clarity": 4.0,
           "usage_guidelines": 4.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 4.0,
           "conciseness_structure": 5.0,
           "contextual_completeness": 3.0,
-          "tdqs": 4.2
+          "tdqs": 3.8
         },
         "difference": {
           "purpose_clarity": 0.0,
           "usage_guidelines": 0.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
+          "behavioral_transparency": 0.0,
+          "parameter_semantics": 0.0,
           "conciseness_structure": 0.0,
           "contextual_completeness": -1.0,
-          "tdqs": 0.3
+          "tdqs": -0.1
         }
       },
       "debugger_probes_list": {
@@ -3044,21 +3113,21 @@
         },
         "gate": {
           "purpose_clarity": 5.0,
-          "usage_guidelines": 5.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
+          "usage_guidelines": 4.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 4.0,
           "conciseness_structure": 5.0,
-          "contextual_completeness": 3.0,
-          "tdqs": 4.6
+          "contextual_completeness": 4.0,
+          "tdqs": 4.2
         },
         "difference": {
           "purpose_clarity": 0.0,
-          "usage_guidelines": 0.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
+          "usage_guidelines": -1.0,
+          "behavioral_transparency": 0.0,
+          "parameter_semantics": 0.0,
           "conciseness_structure": 0.0,
-          "contextual_completeness": -1.0,
-          "tdqs": 0.2
+          "contextual_completeness": 0.0,
+          "tdqs": -0.2
         }
       },
       "flash_firmware": {
@@ -3072,22 +3141,22 @@
           "tdqs": 4.5
         },
         "gate": {
-          "purpose_clarity": 5.0,
-          "usage_guidelines": 5.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 2.0,
-          "conciseness_structure": 4.0,
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 4.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 3.0,
+          "conciseness_structure": 5.0,
           "contextual_completeness": 3.0,
-          "tdqs": 4.1
+          "tdqs": 3.7
         },
         "difference": {
-          "purpose_clarity": 0.0,
-          "usage_guidelines": 0.0,
-          "behavioral_transparency": 0.0,
-          "parameter_semantics": -2.0,
-          "conciseness_structure": 0.0,
+          "purpose_clarity": -1.0,
+          "usage_guidelines": -1.0,
+          "behavioral_transparency": -1.0,
+          "parameter_semantics": -1.0,
+          "conciseness_structure": 1.0,
           "contextual_completeness": -1.0,
-          "tdqs": -0.4
+          "tdqs": -0.8
         }
       },
       "get_last_report": {
@@ -3101,22 +3170,22 @@
           "tdqs": 3.4
         },
         "gate": {
-          "purpose_clarity": 4.0,
+          "purpose_clarity": 3.0,
           "usage_guidelines": 2.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
-          "conciseness_structure": 5.0,
+          "behavioral_transparency": 2.0,
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 4.0,
           "contextual_completeness": 2.0,
-          "tdqs": 3.7
+          "tdqs": 2.8
         },
         "difference": {
-          "purpose_clarity": 0.0,
+          "purpose_clarity": -1.0,
           "usage_guidelines": 0.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": 0.0,
+          "behavioral_transparency": -1.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": -1.0,
           "contextual_completeness": -1.0,
-          "tdqs": 0.3
+          "tdqs": -0.6
         }
       },
       "hardware_lease_status": {
@@ -3130,22 +3199,22 @@
           "tdqs": 3.9
         },
         "gate": {
-          "purpose_clarity": 3.0,
-          "usage_guidelines": 2.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
-          "conciseness_structure": 3.0,
-          "contextual_completeness": 2.0,
-          "tdqs": 3.2
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 4.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 5.0,
+          "contextual_completeness": 3.0,
+          "tdqs": 3.8
         },
         "difference": {
-          "purpose_clarity": -1.0,
-          "usage_guidelines": -2.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": -2.0,
-          "contextual_completeness": -2.0,
-          "tdqs": -0.7
+          "purpose_clarity": 0.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": 0.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": 0.0,
+          "contextual_completeness": -1.0,
+          "tdqs": -0.1
         }
       },
       "hardware_recover": {
@@ -3159,22 +3228,22 @@
           "tdqs": 3.3
         },
         "gate": {
-          "purpose_clarity": 2.0,
-          "usage_guidelines": 2.0,
-          "behavioral_transparency": 2.0,
-          "parameter_semantics": 2.0,
-          "conciseness_structure": 1.0,
-          "contextual_completeness": 1.0,
-          "tdqs": 1.8
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 4.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 4.0,
+          "contextual_completeness": 3.0,
+          "tdqs": 3.7
         },
         "difference": {
-          "purpose_clarity": -1.0,
-          "usage_guidelines": -1.0,
-          "behavioral_transparency": -1.0,
-          "parameter_semantics": -2.0,
-          "conciseness_structure": -3.0,
-          "contextual_completeness": -2.0,
-          "tdqs": -1.5
+          "purpose_clarity": 1.0,
+          "usage_guidelines": 1.0,
+          "behavioral_transparency": 0.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": 0.0,
+          "contextual_completeness": 0.0,
+          "tdqs": 0.4
         }
       },
       "probe_target": {
@@ -3189,21 +3258,21 @@
         },
         "gate": {
           "purpose_clarity": 3.0,
-          "usage_guidelines": 4.0,
-          "behavioral_transparency": 3.0,
-          "parameter_semantics": 5.0,
-          "conciseness_structure": 5.0,
+          "usage_guidelines": 3.0,
+          "behavioral_transparency": 2.0,
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 4.0,
           "contextual_completeness": 2.0,
-          "tdqs": 3.5
+          "tdqs": 3.0
         },
         "difference": {
           "purpose_clarity": -1.0,
-          "usage_guidelines": 1.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": 0.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": 0.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": -1.0,
           "contextual_completeness": -1.0,
-          "tdqs": 0.1
+          "tdqs": -0.4
         }
       },
       "project_config_adopt_hardware": {
@@ -3220,19 +3289,19 @@
           "purpose_clarity": 4.0,
           "usage_guidelines": 3.0,
           "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
+          "parameter_semantics": 3.0,
           "conciseness_structure": 5.0,
           "contextual_completeness": 3.0,
-          "tdqs": 4.0
+          "tdqs": 3.7
         },
         "difference": {
           "purpose_clarity": -1.0,
           "usage_guidelines": -1.0,
           "behavioral_transparency": 0.0,
-          "parameter_semantics": 2.0,
+          "parameter_semantics": 0.0,
           "conciseness_structure": 1.0,
           "contextual_completeness": -1.0,
-          "tdqs": -0.1
+          "tdqs": -0.4
         }
       },
       "project_config_create": {
@@ -3249,19 +3318,19 @@
           "purpose_clarity": 4.0,
           "usage_guidelines": 3.0,
           "behavioral_transparency": 3.0,
-          "parameter_semantics": 5.0,
-          "conciseness_structure": 3.0,
-          "contextual_completeness": 2.0,
-          "tdqs": 3.5
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 4.0,
+          "contextual_completeness": 3.0,
+          "tdqs": 3.7
         },
         "difference": {
           "purpose_clarity": -1.0,
           "usage_guidelines": -1.0,
           "behavioral_transparency": -1.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": -1.0,
-          "contextual_completeness": -2.0,
-          "tdqs": -0.8
+          "parameter_semantics": 0.0,
+          "conciseness_structure": 0.0,
+          "contextual_completeness": -1.0,
+          "tdqs": -0.6
         }
       },
       "project_config_describe": {
@@ -3276,21 +3345,21 @@
         },
         "gate": {
           "purpose_clarity": 5.0,
-          "usage_guidelines": 5.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
+          "usage_guidelines": 4.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 4.0,
           "conciseness_structure": 5.0,
           "contextual_completeness": 4.0,
-          "tdqs": 4.7
+          "tdqs": 4.2
         },
         "difference": {
           "purpose_clarity": 0.0,
-          "usage_guidelines": 0.0,
-          "behavioral_transparency": 0.0,
-          "parameter_semantics": 1.0,
+          "usage_guidelines": -1.0,
+          "behavioral_transparency": -1.0,
+          "parameter_semantics": 0.0,
           "conciseness_structure": 0.0,
           "contextual_completeness": 0.0,
-          "tdqs": 0.1
+          "tdqs": -0.4
         }
       },
       "project_config_reload_description": {
@@ -3305,21 +3374,21 @@
         },
         "gate": {
           "purpose_clarity": 4.0,
-          "usage_guidelines": 3.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
+          "usage_guidelines": 4.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 4.0,
           "conciseness_structure": 5.0,
           "contextual_completeness": 3.0,
-          "tdqs": 4.0
+          "tdqs": 3.8
         },
         "difference": {
           "purpose_clarity": -1.0,
-          "usage_guidelines": -1.0,
-          "behavioral_transparency": 0.0,
-          "parameter_semantics": 1.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": -1.0,
+          "parameter_semantics": 0.0,
           "conciseness_structure": 0.0,
           "contextual_completeness": -1.0,
-          "tdqs": -0.4
+          "tdqs": -0.6
         }
       },
       "project_config_set": {
@@ -3334,21 +3403,21 @@
         },
         "gate": {
           "purpose_clarity": 4.0,
-          "usage_guidelines": 2.0,
-          "behavioral_transparency": 2.0,
+          "usage_guidelines": 3.0,
+          "behavioral_transparency": 3.0,
           "parameter_semantics": 3.0,
           "conciseness_structure": 3.0,
-          "contextual_completeness": 2.0,
-          "tdqs": 2.8
+          "contextual_completeness": 3.0,
+          "tdqs": 3.3
         },
         "difference": {
           "purpose_clarity": 0.0,
-          "usage_guidelines": -2.0,
-          "behavioral_transparency": -2.0,
+          "usage_guidelines": -1.0,
+          "behavioral_transparency": -1.0,
           "parameter_semantics": -1.0,
           "conciseness_structure": -1.0,
-          "contextual_completeness": -2.0,
-          "tdqs": -1.2
+          "contextual_completeness": -1.0,
+          "tdqs": -0.7
         }
       },
       "reset_target": {
@@ -3363,21 +3432,21 @@
         },
         "gate": {
           "purpose_clarity": 4.0,
-          "usage_guidelines": 5.0,
-          "behavioral_transparency": 3.0,
-          "parameter_semantics": 4.0,
-          "conciseness_structure": 5.0,
+          "usage_guidelines": 3.0,
+          "behavioral_transparency": 2.0,
+          "parameter_semantics": 3.0,
+          "conciseness_structure": 4.0,
           "contextual_completeness": 3.0,
-          "tdqs": 3.9
+          "tdqs": 3.2
         },
         "difference": {
           "purpose_clarity": 0.0,
-          "usage_guidelines": 2.0,
-          "behavioral_transparency": 0.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": 0.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": -1.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": -1.0,
           "contextual_completeness": -1.0,
-          "tdqs": 0.3
+          "tdqs": -0.4
         }
       },
       "server_upgrade": {
@@ -3391,22 +3460,22 @@
           "tdqs": 4.1
         },
         "gate": {
-          "purpose_clarity": 4.0,
-          "usage_guidelines": 3.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
+          "purpose_clarity": 5.0,
+          "usage_guidelines": 4.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 4.0,
           "conciseness_structure": 5.0,
           "contextual_completeness": 3.0,
-          "tdqs": 4.0
+          "tdqs": 4.1
         },
         "difference": {
-          "purpose_clarity": 0.0,
-          "usage_guidelines": -1.0,
-          "behavioral_transparency": 0.0,
-          "parameter_semantics": 1.0,
+          "purpose_clarity": 1.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": -1.0,
+          "parameter_semantics": 0.0,
           "conciseness_structure": 0.0,
           "contextual_completeness": -1.0,
-          "tdqs": -0.1
+          "tdqs": 0.0
         }
       },
       "test_reactor_run": {
@@ -3420,22 +3489,22 @@
           "tdqs": 4.3
         },
         "gate": {
-          "purpose_clarity": 3.0,
-          "usage_guidelines": 2.0,
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 4.0,
           "behavioral_transparency": 2.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": 2.0,
-          "contextual_completeness": 1.0,
-          "tdqs": 2.0
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 4.0,
+          "contextual_completeness": 3.0,
+          "tdqs": 3.5
         },
         "difference": {
-          "purpose_clarity": -2.0,
-          "usage_guidelines": -2.0,
+          "purpose_clarity": -1.0,
+          "usage_guidelines": 0.0,
           "behavioral_transparency": -2.0,
-          "parameter_semantics": -3.0,
-          "conciseness_structure": -2.0,
-          "contextual_completeness": -3.0,
-          "tdqs": -2.3
+          "parameter_semantics": 0.0,
+          "conciseness_structure": 0.0,
+          "contextual_completeness": -1.0,
+          "tdqs": -0.8
         }
       },
       "test_reactor_status": {
@@ -3449,22 +3518,22 @@
           "tdqs": 3.4
         },
         "gate": {
-          "purpose_clarity": 2.0,
-          "usage_guidelines": 2.0,
+          "purpose_clarity": 3.0,
+          "usage_guidelines": 3.0,
           "behavioral_transparency": 3.0,
-          "parameter_semantics": 2.0,
-          "conciseness_structure": 2.0,
+          "parameter_semantics": 3.0,
+          "conciseness_structure": 4.0,
           "contextual_completeness": 2.0,
-          "tdqs": 2.2
+          "tdqs": 2.8
         },
         "difference": {
-          "purpose_clarity": -2.0,
-          "usage_guidelines": -1.0,
+          "purpose_clarity": -1.0,
+          "usage_guidelines": 0.0,
           "behavioral_transparency": 0.0,
-          "parameter_semantics": -1.0,
-          "conciseness_structure": -2.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": 0.0,
           "contextual_completeness": -1.0,
-          "tdqs": -1.2
+          "tdqs": -0.6
         }
       },
       "test_reactor_stop": {
@@ -3498,45 +3567,15 @@
       }
     },
     "meanAbsoluteDifference": {
-      "tdqs": 0.5045454545454545,
-      "purpose_clarity": 0.5,
-      "usage_guidelines": 0.6818181818181818,
-      "behavioral_transparency": 0.8409090909090909,
-      "parameter_semantics": 0.9090909090909091,
-      "conciseness_structure": 0.7045454545454546,
-      "contextual_completeness": 1.0
+      "tdqs": 0.4,
+      "purpose_clarity": 0.4772727272727273,
+      "usage_guidelines": 0.22727272727272727,
+      "behavioral_transparency": 0.5909090909090909,
+      "parameter_semantics": 0.25,
+      "conciseness_structure": 0.5,
+      "contextual_completeness": 0.6818181818181818
     },
     "largestDifferences": [
-      {
-        "tool": "test_reactor_run",
-        "registry": {
-          "purpose_clarity": 5.0,
-          "usage_guidelines": 4.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 4.0,
-          "conciseness_structure": 4.0,
-          "contextual_completeness": 4.0,
-          "tdqs": 4.3
-        },
-        "gate": {
-          "purpose_clarity": 3.0,
-          "usage_guidelines": 2.0,
-          "behavioral_transparency": 2.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": 2.0,
-          "contextual_completeness": 1.0,
-          "tdqs": 2.0
-        },
-        "difference": {
-          "purpose_clarity": -2.0,
-          "usage_guidelines": -2.0,
-          "behavioral_transparency": -2.0,
-          "parameter_semantics": -3.0,
-          "conciseness_structure": -2.0,
-          "contextual_completeness": -3.0,
-          "tdqs": -2.3
-        }
-      },
       {
         "tool": "bench_run_start",
         "registry": {
@@ -3549,52 +3588,112 @@
           "tdqs": 4.4
         },
         "gate": {
-          "purpose_clarity": 3.0,
-          "usage_guidelines": 3.0,
-          "behavioral_transparency": 2.0,
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 5.0,
+          "behavioral_transparency": 3.0,
           "parameter_semantics": 2.0,
-          "conciseness_structure": 2.0,
-          "contextual_completeness": 2.0,
-          "tdqs": 2.5
+          "conciseness_structure": 4.0,
+          "contextual_completeness": 3.0,
+          "tdqs": 3.6
         },
         "difference": {
-          "purpose_clarity": -2.0,
-          "usage_guidelines": -2.0,
-          "behavioral_transparency": -2.0,
+          "purpose_clarity": -1.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": -1.0,
           "parameter_semantics": -1.0,
-          "conciseness_structure": -3.0,
-          "contextual_completeness": -2.0,
-          "tdqs": -1.9
+          "conciseness_structure": -1.0,
+          "contextual_completeness": -1.0,
+          "tdqs": -0.8
         }
       },
       {
-        "tool": "hardware_recover",
+        "tool": "debug_start_session",
         "registry": {
-          "purpose_clarity": 3.0,
-          "usage_guidelines": 3.0,
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 2.0,
           "behavioral_transparency": 3.0,
-          "parameter_semantics": 4.0,
+          "parameter_semantics": 2.0,
           "conciseness_structure": 4.0,
-          "contextual_completeness": 3.0,
-          "tdqs": 3.3
+          "contextual_completeness": 2.0,
+          "tdqs": 2.9
         },
         "gate": {
-          "purpose_clarity": 2.0,
+          "purpose_clarity": 3.0,
           "usage_guidelines": 2.0,
           "behavioral_transparency": 2.0,
-          "parameter_semantics": 2.0,
-          "conciseness_structure": 1.0,
+          "parameter_semantics": 1.0,
+          "conciseness_structure": 3.0,
           "contextual_completeness": 1.0,
-          "tdqs": 1.8
+          "tdqs": 2.1
+        },
+        "difference": {
+          "purpose_clarity": -1.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": -1.0,
+          "parameter_semantics": -1.0,
+          "conciseness_structure": -1.0,
+          "contextual_completeness": -1.0,
+          "tdqs": -0.8
+        }
+      },
+      {
+        "tool": "flash_firmware",
+        "registry": {
+          "purpose_clarity": 5.0,
+          "usage_guidelines": 5.0,
+          "behavioral_transparency": 4.0,
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 4.0,
+          "contextual_completeness": 4.0,
+          "tdqs": 4.5
+        },
+        "gate": {
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 4.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 3.0,
+          "conciseness_structure": 5.0,
+          "contextual_completeness": 3.0,
+          "tdqs": 3.7
         },
         "difference": {
           "purpose_clarity": -1.0,
           "usage_guidelines": -1.0,
           "behavioral_transparency": -1.0,
-          "parameter_semantics": -2.0,
-          "conciseness_structure": -3.0,
-          "contextual_completeness": -2.0,
-          "tdqs": -1.5
+          "parameter_semantics": -1.0,
+          "conciseness_structure": 1.0,
+          "contextual_completeness": -1.0,
+          "tdqs": -0.8
+        }
+      },
+      {
+        "tool": "test_reactor_run",
+        "registry": {
+          "purpose_clarity": 5.0,
+          "usage_guidelines": 4.0,
+          "behavioral_transparency": 4.0,
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 4.0,
+          "contextual_completeness": 4.0,
+          "tdqs": 4.3
+        },
+        "gate": {
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 4.0,
+          "behavioral_transparency": 2.0,
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 4.0,
+          "contextual_completeness": 3.0,
+          "tdqs": 3.5
+        },
+        "difference": {
+          "purpose_clarity": -1.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": -2.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": 0.0,
+          "contextual_completeness": -1.0,
+          "tdqs": -0.8
         }
       },
       {
@@ -3610,86 +3709,35 @@
         },
         "gate": {
           "purpose_clarity": 4.0,
-          "usage_guidelines": 2.0,
-          "behavioral_transparency": 2.0,
+          "usage_guidelines": 3.0,
+          "behavioral_transparency": 3.0,
           "parameter_semantics": 3.0,
           "conciseness_structure": 3.0,
-          "contextual_completeness": 2.0,
-          "tdqs": 2.8
+          "contextual_completeness": 3.0,
+          "tdqs": 3.3
         },
         "difference": {
           "purpose_clarity": 0.0,
-          "usage_guidelines": -2.0,
-          "behavioral_transparency": -2.0,
-          "parameter_semantics": -1.0,
-          "conciseness_structure": -1.0,
-          "contextual_completeness": -2.0,
-          "tdqs": -1.2
-        }
-      },
-      {
-        "tool": "test_reactor_status",
-        "registry": {
-          "purpose_clarity": 4.0,
-          "usage_guidelines": 3.0,
-          "behavioral_transparency": 3.0,
-          "parameter_semantics": 3.0,
-          "conciseness_structure": 4.0,
-          "contextual_completeness": 3.0,
-          "tdqs": 3.4
-        },
-        "gate": {
-          "purpose_clarity": 2.0,
-          "usage_guidelines": 2.0,
-          "behavioral_transparency": 3.0,
-          "parameter_semantics": 2.0,
-          "conciseness_structure": 2.0,
-          "contextual_completeness": 2.0,
-          "tdqs": 2.2
-        },
-        "difference": {
-          "purpose_clarity": -2.0,
-          "usage_guidelines": -1.0,
-          "behavioral_transparency": 0.0,
-          "parameter_semantics": -1.0,
-          "conciseness_structure": -2.0,
-          "contextual_completeness": -1.0,
-          "tdqs": -1.2
-        }
-      },
-      {
-        "tool": "project_config_create",
-        "registry": {
-          "purpose_clarity": 5.0,
-          "usage_guidelines": 4.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 4.0,
-          "conciseness_structure": 4.0,
-          "contextual_completeness": 4.0,
-          "tdqs": 4.3
-        },
-        "gate": {
-          "purpose_clarity": 4.0,
-          "usage_guidelines": 3.0,
-          "behavioral_transparency": 3.0,
-          "parameter_semantics": 5.0,
-          "conciseness_structure": 3.0,
-          "contextual_completeness": 2.0,
-          "tdqs": 3.5
-        },
-        "difference": {
-          "purpose_clarity": -1.0,
           "usage_guidelines": -1.0,
           "behavioral_transparency": -1.0,
-          "parameter_semantics": 1.0,
+          "parameter_semantics": -1.0,
           "conciseness_structure": -1.0,
-          "contextual_completeness": -2.0,
-          "tdqs": -0.8
+          "contextual_completeness": -1.0,
+          "tdqs": -0.7
         }
       },
       {
-        "tool": "can_session_stop",
+        "tool": "artifact_upload",
         "registry": {
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 2.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 3.0,
+          "conciseness_structure": 5.0,
+          "contextual_completeness": 3.0,
+          "tdqs": 3.3
+        },
+        "gate": {
           "purpose_clarity": 4.0,
           "usage_guidelines": 2.0,
           "behavioral_transparency": 2.0,
@@ -3698,113 +3746,134 @@
           "contextual_completeness": 2.0,
           "tdqs": 2.7
         },
-        "gate": {
+        "difference": {
+          "purpose_clarity": 0.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": -1.0,
+          "parameter_semantics": -1.0,
+          "conciseness_structure": -1.0,
+          "contextual_completeness": -1.0,
+          "tdqs": -0.6
+        }
+      },
+      {
+        "tool": "classify_last_error",
+        "registry": {
           "purpose_clarity": 4.0,
-          "usage_guidelines": 3.0,
+          "usage_guidelines": 2.0,
           "behavioral_transparency": 3.0,
-          "parameter_semantics": 3.0,
+          "parameter_semantics": 4.0,
           "conciseness_structure": 5.0,
-          "contextual_completeness": 2.0,
+          "contextual_completeness": 3.0,
           "tdqs": 3.4
         },
-        "difference": {
-          "purpose_clarity": 0.0,
-          "usage_guidelines": 1.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": 1.0,
-          "contextual_completeness": 0.0,
-          "tdqs": 0.7
-        }
-      },
-      {
-        "tool": "debug_clear_breakpoints",
-        "registry": {
-          "purpose_clarity": 5.0,
-          "usage_guidelines": 2.0,
-          "behavioral_transparency": 3.0,
-          "parameter_semantics": 4.0,
-          "conciseness_structure": 5.0,
-          "contextual_completeness": 4.0,
-          "tdqs": 3.8
-        },
         "gate": {
-          "purpose_clarity": 5.0,
-          "usage_guidelines": 4.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
-          "conciseness_structure": 5.0,
-          "contextual_completeness": 4.0,
-          "tdqs": 4.5
-        },
-        "difference": {
-          "purpose_clarity": 0.0,
-          "usage_guidelines": 2.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": 0.0,
-          "contextual_completeness": 0.0,
-          "tdqs": 0.7
-        }
-      },
-      {
-        "tool": "debug_get_session_status",
-        "registry": {
-          "purpose_clarity": 4.0,
+          "purpose_clarity": 3.0,
           "usage_guidelines": 2.0,
           "behavioral_transparency": 2.0,
           "parameter_semantics": 4.0,
-          "conciseness_structure": 5.0,
-          "contextual_completeness": 3.0,
-          "tdqs": 3.2
-        },
-        "gate": {
-          "purpose_clarity": 4.0,
-          "usage_guidelines": 3.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
-          "conciseness_structure": 5.0,
+          "conciseness_structure": 4.0,
           "contextual_completeness": 2.0,
-          "tdqs": 3.9
+          "tdqs": 2.8
         },
         "difference": {
-          "purpose_clarity": 0.0,
-          "usage_guidelines": 1.0,
-          "behavioral_transparency": 2.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": 0.0,
+          "purpose_clarity": -1.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": -1.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": -1.0,
           "contextual_completeness": -1.0,
-          "tdqs": 0.7
+          "tdqs": -0.6
         }
       },
       {
-        "tool": "debug_list_breakpoints",
+        "tool": "debug_continue",
         "registry": {
           "purpose_clarity": 4.0,
           "usage_guidelines": 3.0,
           "behavioral_transparency": 3.0,
-          "parameter_semantics": 4.0,
-          "conciseness_structure": 5.0,
-          "contextual_completeness": 4.0,
-          "tdqs": 3.7
-        },
-        "gate": {
-          "purpose_clarity": 5.0,
-          "usage_guidelines": 4.0,
-          "behavioral_transparency": 4.0,
-          "parameter_semantics": 5.0,
+          "parameter_semantics": 2.0,
           "conciseness_structure": 5.0,
           "contextual_completeness": 3.0,
-          "tdqs": 4.4
+          "tdqs": 3.3
+        },
+        "gate": {
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 2.0,
+          "behavioral_transparency": 2.0,
+          "parameter_semantics": 2.0,
+          "conciseness_structure": 4.0,
+          "contextual_completeness": 2.0,
+          "tdqs": 2.7
         },
         "difference": {
-          "purpose_clarity": 1.0,
-          "usage_guidelines": 1.0,
-          "behavioral_transparency": 1.0,
-          "parameter_semantics": 1.0,
-          "conciseness_structure": 0.0,
+          "purpose_clarity": 0.0,
+          "usage_guidelines": -1.0,
+          "behavioral_transparency": -1.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": -1.0,
           "contextual_completeness": -1.0,
-          "tdqs": 0.7
+          "tdqs": -0.6
+        }
+      },
+      {
+        "tool": "debug_stop_session",
+        "registry": {
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 2.0,
+          "behavioral_transparency": 2.0,
+          "parameter_semantics": 2.0,
+          "conciseness_structure": 4.0,
+          "contextual_completeness": 3.0,
+          "tdqs": 2.8
+        },
+        "gate": {
+          "purpose_clarity": 3.0,
+          "usage_guidelines": 2.0,
+          "behavioral_transparency": 2.0,
+          "parameter_semantics": 1.0,
+          "conciseness_structure": 3.0,
+          "contextual_completeness": 2.0,
+          "tdqs": 2.2
+        },
+        "difference": {
+          "purpose_clarity": -1.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": 0.0,
+          "parameter_semantics": -1.0,
+          "conciseness_structure": -1.0,
+          "contextual_completeness": -1.0,
+          "tdqs": -0.6
+        }
+      },
+      {
+        "tool": "get_last_report",
+        "registry": {
+          "purpose_clarity": 4.0,
+          "usage_guidelines": 2.0,
+          "behavioral_transparency": 3.0,
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 5.0,
+          "contextual_completeness": 3.0,
+          "tdqs": 3.4
+        },
+        "gate": {
+          "purpose_clarity": 3.0,
+          "usage_guidelines": 2.0,
+          "behavioral_transparency": 2.0,
+          "parameter_semantics": 4.0,
+          "conciseness_structure": 4.0,
+          "contextual_completeness": 2.0,
+          "tdqs": 2.8
+        },
+        "difference": {
+          "purpose_clarity": -1.0,
+          "usage_guidelines": 0.0,
+          "behavioral_transparency": -1.0,
+          "parameter_semantics": 0.0,
+          "conciseness_structure": -1.0,
+          "contextual_completeness": -1.0,
+          "tdqs": -0.6
         }
       }
     ]

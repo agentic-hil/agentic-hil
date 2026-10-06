@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import replace
@@ -21,6 +22,8 @@ from agentic_hil.adopt import (
     project_config_adopt_hardware,
 )
 from agentic_hil.artifacts import ArtifactManager
+from agentic_hil.backends.common import failure_text_lines
+from agentic_hil.backends.openocd import OpenOCDBackend, openocd_probe_reenumerating_line
 from agentic_hil.bench import BenchMutex, DeviceBusyError, validated_wait
 from agentic_hil.bootstrap import (
     DEFAULT_PROJECT_PROFILE,
@@ -83,10 +86,15 @@ from agentic_hil.coordination import (
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.devices import DeviceError, can_device, resolve_devices, uart_device
 from agentic_hil.knowledge import (
+    AUDIT_BROKEN_SCOPE,
+    ERROR_CATALOGUE,
+    FLASH_CAPTURE_SCOPE,
     RECOVERY_PHYSICAL_CHECK_ERROR,
     UNBOUND_DEBUGGER_SCOPE,
     UNNAMED_PROBE_SCOPE,
     attach_quarantine_guidance,
+    exclusive_permission_fields,
+    exclusive_permission_summary,
     permission_denied_next_step,
     permission_denied_summary,
     permission_key,
@@ -158,6 +166,51 @@ def recovery_check_clause(check: str) -> str:
     tables together, so the fallback stays a safety net rather than the thing an
     operator reads."""
     return RECOVERY_CHECK_CLAUSES.get(check, f"the result failed its {check} check")
+
+
+# The waits between the recovery's attempts at a reset into halt that OpenOCD
+# refused while the in-circuit debugger was still re-enumerating (#621): ten
+# seconds in all, six attempts. Only the reset is tried again, never anything
+# that writes flash, and only on the two lines
+# `openocd_probe_reenumerating_line` names.
+RECOVERY_RESET_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 3.0, 3.5)
+
+
+def recovery_reset_halt(backend: DebuggerBackend) -> JsonObject:
+    """The recovery's reset into halt on `backend`.
+
+    OpenOCD's runs one reset into halt ahead of it, which reaches the target again
+    when a killed flash left the in-circuit debugger unable to (#621,
+    `OPENOCD_RECONNECTING_RESET`); every other backend gets its plain
+    `reset_target("halt")`."""
+    if isinstance(backend, OpenOCDBackend):
+        with backend.recovery_reset():
+            return backend.reset_target("halt")
+    return backend.reset_target("halt")
+
+
+def recovery_reset_retry_sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def backend_error_line(result: JsonObject) -> str | None:
+    """The backend's own line a failed action stopped on, or None when it wrote none.
+
+    The probe's re-enumeration line when the result carries one, else the first
+    line of the capture that reports an error, else the first that reports a
+    failure: a debugger tool stops at the first command that fails, so the lines
+    after it follow from it, and a warning ahead of it (OpenOCD's `Warn : target
+    ... examination failed`, recorded on the bench right after a killed flash)
+    is not what the call failed on."""
+    reenumerating = openocd_probe_reenumerating_line(result)
+    if reenumerating is not None:
+        return reenumerating
+    output = result.get("programmer_output")
+    if not isinstance(output, dict):
+        return None
+    lines = [line.strip() for line in failure_text_lines(f"{output.get('stdout') or ''}\n{output.get('stderr') or ''}")]
+    errors = [line for line in lines if line.lower().startswith("error")]
+    return (errors or lines or [None])[0]
 
 
 class AgenticHILToolService:
@@ -293,6 +346,14 @@ class AgenticHILToolService:
         payload = payload or {}
         if not self.debugger_permissions.allow_flash:
             return tool_error("flash_firmware", "permission_denied", "Flashing is disabled by the authoritative config.", self.debugger_permission_key("allow_flash"))
+        # The two grants flashing is interlocked against refuse here, before the
+        # probe is leased and before a capture opens its port, as allow_flash
+        # does and as `debug_start_session` refuses them: a refusal that needs
+        # no board leaves no report, whichever permission gave it (#679). The
+        # backends keep their own check behind this one.
+        for blocking in ("allow_raw_debugger_commands", "allow_mass_erase"):
+            if getattr(self.debugger_permissions, blocking):
+                return {"ok": False, "tool": "flash_firmware", "error_type": "permission_denied", "summary": exclusive_permission_summary("Flashing", blocking, self.config.debugger_id), **exclusive_permission_fields(blocking, self.config.debugger_id)}
         image_path = payload.get("image_path")
         artifact_id = payload.get("artifact_id")
         if bool(image_path) == bool(artifact_id):
@@ -407,7 +468,7 @@ class AgenticHILToolService:
             refusal = {key: value for key, value in opened.items() if key not in _CAPTURE_SESSION_FIELDS}
             if opened.get("ok") is True:
                 refusal.update({"error_type": "audit_unavailable", "summary": "The flash was not started: the capture's COM port session opened, but it could not be audited.", **remediation_fields("audit_unavailable")})
-            return {**refusal, "ok": False, "tool": "flash_firmware", **NOT_STARTED}
+            return {**_flash_capture_advice(refusal), "ok": False, "tool": "flash_firmware", **NOT_STARTED}
         try:
             result = self.backend.flash_firmware(artifact, True)
         except BaseException:
@@ -459,6 +520,11 @@ class AgenticHILToolService:
         if failure is not None:
             answer.update({"ok": False, "error_type": failure["error_type"], "summary": failure["summary"]})
             answer.setdefault("backend_error", failure["backend_error"])
+            # The flash succeeded, so whatever advice it carried is not about
+            # this failure; the capture's own takes its place.
+            answer.pop("remediation", None)
+            answer.pop("do_not", None)
+            answer = _flash_capture_advice(answer, fallback=True)
         if stop_error is not None:
             answer["cleanup_error"] = stop_error
         return answer
@@ -943,6 +1009,10 @@ class AgenticHILToolService:
             # and does not cover.
             if name in probe_addressing_tools() and len(self.config.debuggers) > 1 and self.config.debugger is not None and self.config.debugger.probe_id is None:
                 return unnamed_probe_error(name, self.config)
+            # An operator's `recover` in another process may have signed an
+            # incident this owner handed its locks into; learn it before the
+            # incident is read below.
+            self.coordinator.settle_external_recovery()
             blocked_before = self.coordinator.blocked
             if blocked_before and name in audited_hardware_tools() and name not in containment_tools():
                 try:
@@ -983,6 +1053,7 @@ class AgenticHILToolService:
                         refusal["auto_recovery_attempted"] = True
                     refusal["cleanup_reasons"] = sorted({reason for lease in self.coordinator.leases.values() for reason in lease.cleanup_reasons()})
                     refusal["quarantine_id"] = self.coordinator.quarantine_id
+                    refusal.update(remediation_fields("resource_quarantined"))
                     return refusal
             if name in audit_gated_tools():
                 try:
@@ -1204,7 +1275,16 @@ class AgenticHILToolService:
         self.can_buses.reconfigure(config)
 
     def hardware_lease_status(self) -> JsonObject:
-        return self.coordinator.status()
+        # A record this version cannot trust is answered with its own refusal,
+        # the way every other tool that meets it answers, and not as a protocol
+        # error a caller cannot tell from a broken server.
+        #
+        # A pure read, as its annotation says: a dead owner's record is reported
+        # as found and settled by the next acquire, never here (#670).
+        try:
+            return self.coordinator.status(settle_dead_owner=False)
+        except CoordinationError as error:
+            return {"tool": "hardware_lease_status", "side_effect_committed": False, **error.result}
 
     def hardware_recover(self, operator_statement: str | None = None, accept_config_change: bool = False) -> JsonObject:
         """Clear this bench's quarantine, on its own or on a relayed statement.
@@ -1273,7 +1353,10 @@ class AgenticHILToolService:
         # the incident would send the operator hunting for an id, on a host that
         # has no shell to run `lease-status` in, which is the situation this tool
         # exists for.
-        status = self.coordinator.status()
+        try:
+            status = self.coordinator.status()
+        except CoordinationError as error:
+            return {"tool": "hardware_recover", "side_effect_committed": False, **error.result}
         quarantine_id = status.get("quarantine_id")
         reasons = [reason for reason in status.get("cleanup_reasons", []) if isinstance(reason, str)]
         # Asked before the grant, because `allow_recover` gates the operator
@@ -1309,7 +1392,34 @@ class AgenticHILToolService:
         # attestation into the very file whose failure raised the incident,
         # so this one family keeps the operator's own route, as it did before.
         audit_broken = sorted(reason for reason in reasons if "audit_broken" in reason)
-        if physical and operator_statement and not audit_broken:
+        if audit_broken:
+            # Answered the same with or without a statement, and never as a
+            # missing one: a caller told to fetch a sentence that cannot help
+            # asks the operator again and meets this refusal again. What clears
+            # it is the operator's own command, so that is what the answer relays.
+            command = recovery_operator_command(quarantine_id)
+            return {
+                "ok": False,
+                "tool": "hardware_recover",
+                "error_type": RECOVERY_PHYSICAL_CHECK_ERROR,
+                "summary": (
+                    "This quarantine names a broken audit trail, and no statement clears that: the attestation would go into "
+                    "the very ledger whose failure raised it. The operator clears it by running operator_command at a shell."
+                ),
+                "next_step": f"Hand the operator this command to run at the bench, after they have checked the board: {command}",
+                "quarantine_id": quarantine_id,
+                "cleanup_reasons": reasons,
+                "physical_check_reasons": physical,
+                "audit_broken_reasons": audit_broken,
+                "agent_clearable_reasons": sorted(allowed),
+                "operator_command": command,
+                "cleanup_required": True,
+                "quarantined": True,
+                "retry_safe": False,
+                "side_effect_committed": False,
+                **remediation_fields(RECOVERY_PHYSICAL_CHECK_ERROR, AUDIT_BROKEN_SCOPE),
+            }
+        if physical and operator_statement:
             # The operator answered, and the agent is relaying what they said.
             # This is not the agent attesting anything: it holds no opinion
             # about the board and the ledger does not record one. It records a
@@ -1788,7 +1898,7 @@ class AgenticHILToolService:
             self._machine_recovery_ran = True
             try:
                 if needs_reset:
-                    reset = self._invoke_dispatch(lambda: backend.reset_target("halt"))
+                    reset = self._invoke_dispatch(lambda: recovery_reset_halt(backend))
                     if not overall_success(reset):
                         return None
                 verification = self._invoke_dispatch(backend.probe_target)
@@ -1965,10 +2075,14 @@ class AgenticHILToolService:
         reset_halt = self.config.recovery.auto_recover == "reset_halt"
         if reset_halt:
             actions.append("reset_halt")
-            reset = self._invoke_dispatch(lambda: self.backend.reset_target("halt"))
+            reset, retried_on = self._reset_halt_for_recovery()
+            attempts = len(retried_on) + 1
+            result["reset_halt_attempts"] = attempts
+            if retried_on:
+                result["reset_halt_retried_on"] = retried_on
             failed_check = failed_success_check(reset)
             if failed_check is not None:
-                return self._recovery_action_failed(
+                failure = self._recovery_action_failed(
                     result,
                     "reset_halt",
                     failed_check,
@@ -1984,6 +2098,7 @@ class AgenticHILToolService:
                     else f"The target confirmed the reset into halt, but {recovery_check_clause(failed_check)}, so the incident stands even though the target is halted.",
                     reset,
                 )
+                return self._with_reset_halt_evidence(failure, reset, attempts)
         actions.append("probe_target")
         verification = self._invoke_dispatch(self.backend.probe_target)
         detected = verification.get("target_detected") is True
@@ -2005,6 +2120,40 @@ class AgenticHILToolService:
             )
         result["safe_state_predicate"] = "reset_halt" if reset_halt else "readonly_probe"
         return {**result, "outcome": "recovered"}
+
+    def _reset_halt_for_recovery(self) -> tuple[JsonObject, list[str]]:
+        """The recovery's reset into halt, tried again while the probe re-enumerates (#621).
+
+        Killing OpenOCD in the middle of a flash leaves the in-circuit debugger
+        coming back for a moment, and a reset sent into that moment is refused by
+        the adapter driver before any target is addressed. Only those refusals
+        (`openocd_probe_reenumerating_line`) are tried again, on the bounded
+        backoff of `RECOVERY_RESET_RETRY_DELAYS_S`; any other answer is the
+        answer. Returns the last result and the line of every attempt that was
+        tried again."""
+        reset = self._invoke_dispatch(lambda: recovery_reset_halt(self.backend))
+        retried_on: list[str] = []
+        for delay in RECOVERY_RESET_RETRY_DELAYS_S:
+            line = openocd_probe_reenumerating_line(reset)
+            if line is None:
+                break
+            retried_on.append(line)
+            recovery_reset_retry_sleep(delay)
+            reset = self._invoke_dispatch(lambda: recovery_reset_halt(self.backend))
+        return reset, retried_on
+
+    @staticmethod
+    def _with_reset_halt_evidence(failure: JsonObject, reset: JsonObject, attempts: int) -> JsonObject:
+        """A failed reset into halt, with the attempts made and the backend's own line in its summary."""
+        summary = str(failure.get("summary") or "")
+        if attempts > 1:
+            summary += f" It made {attempts} attempts while the in-circuit debugger was re-enumerating."
+        line = backend_error_line(reset)
+        if line is not None:
+            failure["backend_error_line"] = line
+            summary += f" The backend's line: {line}"
+        failure["summary"] = summary
+        return failure
 
     @staticmethod
     def _recovery_action_failed(result: JsonObject, action: str, failed_check: str | None, summary: str, source: JsonObject) -> JsonObject:
@@ -2223,7 +2372,8 @@ class AgenticHILToolService:
 
     def _debug_permission_failure(self, name: str, args: JsonObject) -> JsonObject | None:
         if name == "flash_firmware":
-            if not self.debugger_permissions.allow_flash:
+            permissions = self.debugger_permissions
+            if not permissions.allow_flash or permissions.allow_raw_debugger_commands or permissions.allow_mass_erase:
                 return self._invoke_dispatch(lambda: self.flash_firmware(args))
             if args.get("reset_after_flash") is True and not self.debugger_permissions.allow_reset:
                 return self._invoke_dispatch(lambda: self.flash_firmware(args))
@@ -2364,6 +2514,13 @@ class AgenticHILToolService:
                 lease.quarantine("debugger_call_exception", error)
                 if starts_session:
                     self._debug_lease = lease
+                elif one_shot and lease is not self._debug_lease and lease.state != "released":
+                    # Kept like a one-shot whose result quarantined it, so the
+                    # recovery-class call the incident allows runs on this hold.
+                    # Dropped, the locks stayed held by nothing anyone could
+                    # reach, and the next probe_target was refused as owned by
+                    # another process (#677).
+                    self._quarantined_lease = lease
             raise
         if lease is None:
             return result
@@ -2434,7 +2591,7 @@ class AgenticHILToolService:
                     self._debug_lease = None
                     return self._recommit_lease_report(written, lease)
                 if lease.state != "active":
-                    written = self._lease_result({**result, "ok": False, "error_type": "cleanup_required", "summary": "Debug process cleanup completed, but prior target state remains unconfirmed.", **remediation_fields("cleanup_required")}, lease)
+                    written = self._lease_result({**result, "ok": False, "error_type": "cleanup_required", "summary": f"The debug session is over, but {_unsettled_debug_release(lease)}.", **remediation_fields("cleanup_required")}, lease)
                 return self._recommit_lease_report(written, lease)
             else:
                 lease.quarantine("debug_session_cleanup_unconfirmed", audit_broken=result.get("audit_ok") is False)
@@ -2583,7 +2740,7 @@ class AgenticHILToolService:
                         # by a prior release-persist fault; a genuine quarantine
                         # returns False and stays unconfirmed for operator recovery.
                         if not lease.release():
-                            raise RuntimeError("Debug shutdown completed, but prior target state remains unconfirmed.")
+                            raise RuntimeError(f"Debug shutdown ended the session, but {_unsettled_debug_release(lease)}.")
                     except BaseException as error:
                         try:
                             lease.quarantine("debug_shutdown_reporting_failed", error, audit_broken=bool(shutdown_result and shutdown_result.get("audit_ok") is False))
@@ -2719,6 +2876,27 @@ _SESSION_START_TOOLS = frozenset({"com_session_start", "can_session_start", "deb
 # debugger lease reports under the same names; the session's are merged into the
 # answer only after that lease has written its own.
 _CAPTURE_SESSION_FIELDS = frozenset({"lease_id", "resources", "lease_state", "safe_state_confirmed", "processes_reaped", "audit_ok", "audit_error", "audit_errors", "cleanup_required", "quarantined", "cleanup_reasons", "quarantine_id", "report_path", CONTACT_MARKER_KEY, CONTACT_MARKER_SOURCE_KEY})
+
+
+def _flash_capture_advice(answer: JsonObject, *, fallback: bool = False) -> JsonObject:
+    """`answer` with the advice for a `flash_firmware` capture's COM error.
+
+    The COM session answers with the advice for a session the caller opened
+    with `com_session_start`; the capture's session is the flash's own, so that
+    advice names a tool the caller never called, or a session that is already
+    stopped. The scoped entry replaces it where there is one. With `fallback`,
+    an error with no scoped entry takes its bare entry, for an answer that
+    carries no advice of its own (#663)."""
+    error_type = answer.get("error_type")
+    if not isinstance(error_type, str):
+        return answer
+    if f"{error_type}:{FLASH_CAPTURE_SCOPE}" not in ERROR_CATALOGUE and not fallback:
+        return answer
+    advice = remediation_fields(error_type, FLASH_CAPTURE_SCOPE)
+    if not advice:
+        return answer
+    rest = {key: value for key, value in answer.items() if key not in ("remediation", "do_not")}
+    return {**rest, **advice}
 
 
 def debugger_one_shot_tools() -> set[str]:
@@ -2926,6 +3104,23 @@ def ended_incident_next_step(result: JsonObject) -> str:
     return f"The incident this result reported has ended, and nothing holds the bench. This call is not safe to repeat as it stands{why}, so confirm the board's state before calling it again."
 
 
+def _unsettled_debug_release(lease: HardwareLease) -> str:
+    """What is left unsettled when a debug session ended and its lease could not be given back (#676).
+
+    The session's own teardown succeeded, so the target state it proved is not
+    what is open: the lease's reasons say what is. A release whose record could
+    not be written, and a stop whose report could not be, are named as such; any
+    other reason is the incident the lease is held under, named by its reasons."""
+    reasons = lease.cleanup_reasons()
+    if reasons and all(reason == "lease_release_unconfirmed" for reason in reasons):
+        return "the probe lease's release could not be recorded"
+    if any(reason.endswith("audit_broken") for reason in reasons):
+        return "the stop's report could not be written, so the probe lease stays held"
+    if reasons:
+        return f"the probe lease stays held under {', '.join(reasons)}"
+    return "the probe lease could not be handed back"
+
+
 def unbound_debugger_error(tool: str, config: AgenticHILConfig) -> JsonObject:
     """Refuse a debugger call that has no probe to run on.
 
@@ -2937,15 +3132,28 @@ def unbound_debugger_error(tool: str, config: AgenticHILConfig) -> JsonObject:
     which route exists, and mark the call unretryable so nobody loops on it."""
     configured = sorted(config.debuggers)
     if not configured:
-        summary = (
-            "No debugger is configured in the authoritative config, so this tool has no probe to act on. "
-            "Only the operator can add one."
+        # The configuration tools can add one in place (#691): an entry written
+        # with project_config_set is bound by project_config_reload_description,
+        # since a server with no debugger binds the only one, and
+        # project_config_create generates a configuration with one. Only where
+        # this configuration grants neither is it the operator's to add.
+        routes = []
+        if config.permissions.allow_config_description_write:
+            routes.append("write an entry with `project_config_set` and bind it with `project_config_reload_description`")
+        if config.permissions.allow_config_write:
+            routes.append("generate a configuration with one from the attached hardware with `project_config_create`")
+        how = (
+            f"One can be added here: {' or '.join(routes)}."
+            if routes
+            else "This configuration grants no configuration writes, so adding one is the operator's to do."
         )
+        summary = f"No debugger is configured in the authoritative config, so this tool has no probe to act on. {how}"
     else:
         summary = (
             f"This MCP surface drives a single debug probe, and the authoritative config declares {len(configured)}, "
             "so none is bound. Debugger tools are unavailable here until the project configures exactly one probe. "
-            "A multi-board run goes through `agentic-hil test-reactor` with a plan whose steps name their probe."
+            "A multi-board run goes through `test_reactor_run` (`agentic-hil test-reactor` on the command line) with "
+            "a plan whose steps name their probe."
         )
     return {
         "ok": False,
@@ -3687,7 +3895,7 @@ def generation_audit_barrier(current: AgenticHILConfig) -> ConfigError | None:
     what a regeneration replaces, because `provisionable_state_root` chooses a
     root that passes the same check. Every other failure is about content under a
     `state_root` that is otherwise fine: a corrupt `report-state.json` is
-    `config_invalid`, a full disk or a vanished mount is an `OSError`. A
+    `report_state_damaged`, a full disk or a vanished mount is an `OSError`. A
     regeneration does not touch those, so reading the board around them would
     bypass the audit gate for a failure it does not repair and then report a
     repair that never happened, the next hardware call would meet the very same

@@ -104,7 +104,7 @@ def attached(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict:
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
         "cleanup_required": False,
-        "summary": "One attached STM32 target was identified through ST-Link HOTPLUG discovery.",
+        "summary": "One attached board was identified through STM32CubeProgrammer HOTPLUG discovery.",
     }
     discovery.update(overrides)
     seen: dict[str, Any] = {}

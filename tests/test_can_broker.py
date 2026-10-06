@@ -849,6 +849,37 @@ def test_legacy_shared_read_denial_remains_enforced(tmp_path: Path, monkeypatch:
     assert denied["error_type"] == "permission_denied", denied
 
 
+def test_broker_permission_refusals_name_the_participant_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broker refusal names the grant it read, as the server's refusal does (#657).
+
+    The broker loads the file when it is spawned and the server at its own start,
+    so the broker can refuse a grant the server still believes open; its answer
+    is what the caller reads, and it has to say which key is closed."""
+    shares = (
+        "      alpha:\n"
+        "        permissions:\n"
+        "          allow_read: false\n"
+        "          allow_write: false\n"
+        "      beta:\n"
+        "        permissions:\n"
+        "          allow_read: true\n"
+        "          allow_write: true\n"
+    )
+    # A legacy file, where reading is a grant of its own rather than free.
+    config = shared_config(tmp_path, monkeypatch, config_version=1, shares=shares)
+    broker, seated = _inprocess_broker(tmp_path, config)
+
+    sent = broker._handle_send(seated["alpha"], {"frame": canbroker.frame_to_wire(0x201, b"\x01")})
+    read = broker._handle_read(seated["alpha"], {"max_frames": 1, "wait_timeout_s": 0.0})
+
+    assert sent["error_type"] == "permission_denied", sent
+    assert sent["permission"] == "can_buses.bench.shares.alpha.permissions.allow_write", sent
+    assert "can_buses.bench.shares.alpha.permissions.allow_write" in sent["summary"], sent
+    assert read["error_type"] == "permission_denied", read
+    assert read["permission"] == "can_buses.bench.shares.alpha.permissions.allow_read", read
+    assert "can_buses.bench.shares.alpha.permissions.allow_read" in read["summary"], read
+
+
 def test_shared_broker_disables_adapter_own_message_reception_without_changing_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = shared_config(tmp_path, monkeypatch)
     bus = dataclasses.replace(config.can_buses["bench"], receive_own_messages=True)

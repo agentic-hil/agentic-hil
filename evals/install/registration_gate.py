@@ -264,7 +264,7 @@ class Case:
                 self.seed(conflict=True)
             before = self.config.read_bytes()
             result = self.integrate(success=False)
-            expected = "config_invalid" if scenario == "invalid-config" else "mcp_config_conflict"
+            expected = "agent_mcp_config_invalid" if scenario == "invalid-config" else "mcp_config_conflict"
             require(result["steps"]["mcp_config"]["error_type"] == expected, f"wrong refusal: {result}")
             require(result["rollback"]["attempted"] is True and result["rollback"]["ok"] is True, f"rollback failed: {result}")
             require(self.config.read_bytes() == before and not self.skill.exists(), "refusal modified operator config or left a partial skill")

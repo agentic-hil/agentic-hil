@@ -27,6 +27,7 @@ import yaml
 from conftest import FAKE_GDB, FAKE_OPENOCD, FAKE_STLINK, write_authoritative_config
 
 from agentic_hil.config import SURVIVING_SECTION_KEYS, config_schema, load_authoritative_config
+from agentic_hil.configreload import PROJECT_CONFIG_RELOAD
 from agentic_hil.configwrite import (
     PROJECT_CONFIG_DESCRIBE,
     PROJECT_CONFIG_SET,
@@ -1167,6 +1168,40 @@ def rewrite_debugger(path: Path, *, drop: tuple[str, ...] = (), **fields: Any) -
         entry.pop(field, None)
     entry.update(fields)
     path.write_text("# A person wrote this bench.\n" + yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+
+def test_a_bench_with_no_debugger_takes_one_through_the_config_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#691: the route the no-debugger refusal names is one the server can take itself.
+
+    `project_config_set` writes the entry under the description grant and
+    `project_config_reload_description` binds it, because a server that had no
+    debugger binds the only one the file then declares."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    document = document_of(path)
+    document["debuggers"] = {}
+    path.write_text("# A person wrote this bench.\n" + yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    tools = service(workspace)
+    try:
+        refused = tools.call("debugger_info")
+        written = tools.call(
+            PROJECT_CONFIG_SET,
+            changes(
+                ("debuggers.dut.type", "openocd"),
+                ("debuggers.dut.executable", FAKE_OPENOCD.as_posix()),
+                ("debuggers.dut.interface_cfg", "interface/stlink.cfg"),
+                ("debuggers.dut.target_cfg", "target/stm32f4x.cfg"),
+            ),
+        )
+        reloaded = tools.call(PROJECT_CONFIG_RELOAD)
+        bound = tools.config.debugger_id
+    finally:
+        tools.close()
+    assert refused["error_type"] == "not_supported", refused
+    assert "project_config_set" in refused["summary"] and "project_config_reload_description" in refused["summary"], refused["summary"]
+    assert written["ok"] is True, written
+    assert reloaded["ok"] is True, reloaded
+    assert any(change.startswith("debuggers.dut.") for change in reloaded["description_changes"]), reloaded
+    assert bound == "dut"
 
 
 def test_the_debug_stack_is_opened_by_the_description_grant_and_reaches_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

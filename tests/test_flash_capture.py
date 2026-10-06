@@ -680,6 +680,49 @@ def test_the_flash_and_reset_permissions_still_gate_a_flash_with_capture(tmp_pat
         service.close()
 
 
+@pytest.mark.parametrize("key", ["allow_mass_erase", "allow_raw_debugger_commands"])
+def test_the_flash_interlock_refuses_a_flash_with_capture_before_the_port_is_touched(tmp_path: Path, board: Board, key: str) -> None:
+    """A permission flashing is interlocked against refuses the flash before the
+    probe is leased, and so before the capture's port is opened: a port opened
+    for a flash that was never going to run is a session nobody asked for, and a
+    report written for a refusal no other permission writes one for (#679)."""
+    config = config_for(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, key: True})
+    service, backend = service_for(config, board)
+    try:
+        result = service.call("flash_firmware", flash_args(tmp_path, until=READY))
+
+        assert result["ok"] is False, result
+        assert result["error_type"] == "permission_denied", result
+        assert result["permission"] == service.debugger_permission_key(key), result
+        assert "report_path" not in result, result
+        assert backend.calls == [], backend.calls
+        assert board.constructed == 0
+        assert_bench_free(service)
+    finally:
+        service.close()
+
+
+def test_a_port_open_refused_before_the_flash_advises_the_flash_not_a_session(tmp_path: Path, board: Board) -> None:
+    """The open is the capture's, so its refusal is answered for the call that
+    was made: nothing was flashed, and the retry is `flash_firmware` with the
+    same capture, not `com_session_start`, which the caller never called (#663)."""
+    config = config_for(tmp_path)
+    service, backend = service_for(config, board)
+    board.busy = True
+    try:
+        result = service.call("flash_firmware", flash_args(tmp_path, until=READY))
+
+        assert result["ok"] is False, result
+        assert backend.calls == [], backend.calls
+        advice = " ".join(result.get("remediation") or [])
+        assert advice, result
+        assert "flash_firmware" in advice, advice
+        assert "com_session_start` again" not in advice, advice
+        assert "Call `com_session_start`" not in advice, advice
+    finally:
+        service.close()
+
+
 def test_the_capture_needs_the_port_read_permission_and_no_other_grant(tmp_path: Path, board: Board) -> None:
     """No new permission key: the default grants carry none, and a port that may
     be read but not written is enough."""
@@ -1268,6 +1311,47 @@ def test_a_session_stop_that_fails_is_reported_as_com_session_stop_reports_it(tm
         assert service.coordinator.status()["blocked"] is False
         assert service.call("com_session_stop", {"port_id": PORT_ID})["ok"] is True
         assert_bench_free(service)
+    finally:
+        service.close()
+
+
+def test_a_read_that_fails_after_the_flash_advises_for_the_flash_that_happened(tmp_path: Path, board: Board) -> None:
+    """The capture's session is already stopped when the answer comes back, so
+    advice to `com_read` what it buffered would send the caller to a session
+    that does not exist. The advice says what the call left: the image written,
+    what was read in `capture`, and the two ways to read the boot output again
+    (#663)."""
+    config = config_for(tmp_path)
+    service, backend = service_for(config, board, banner=b"\r\nboot: demo firmware 1.0\r\n", die_after_banner=True)
+    try:
+        result = service.call("flash_firmware", flash_args(tmp_path, until=READY, wait_timeout_s=12))
+
+        assert result["error_type"] == "serial_read_failed", result
+        advice = " ".join(result.get("remediation") or [])
+        assert advice, result
+        assert "capture" in advice, advice
+        assert "flash_firmware" in advice, advice
+        assert "Call `com_read`" not in advice, advice
+        assert "replaces the failed session" not in advice, advice
+    finally:
+        service.close()
+
+
+def test_a_stop_that_fails_after_the_flash_advises_for_the_flash_that_happened(tmp_path: Path, board: Board) -> None:
+    """A port that will not close is still registered, so the stop is the thing
+    to retry; the flash is not, because it happened (#663)."""
+    config = config_for(tmp_path)
+    service, backend = service_for(config, board)
+    board.close_failures = 1
+    try:
+        result = service.call("flash_firmware", flash_args(tmp_path, until=READY))
+
+        assert result["error_type"] == "com_port_close_failed", result
+        advice = " ".join(result.get("remediation") or [])
+        assert advice, result
+        assert "com_session_stop" in advice, advice
+        assert "flash_firmware" in advice, advice
+        assert service.call("com_session_stop", {"port_id": PORT_ID})["ok"] is True
     finally:
         service.close()
 

@@ -110,26 +110,51 @@ _TARGET_TYPE_NAME_CHARS = frozenset(string.ascii_letters + string.digits + "_")
 TARGET_TYPE_INVALID_PHRASES = ("unknown target type", "no target type", "target type is not")
 TARGET_TYPE_INVALID_DOC = "target_support.html"
 
-# pyOCD's own words for an erase that did not take: the FlashEraseFailure its
-# flash sequencer raises reaches the log as `Failed to erase sector at 0x...`, with
-# the `[flash]` logger name after it. One measured phrase, for the same reason
-# the ST-Link and OpenOCD marker lists hold one each: pyOCD is the backend
-# likeliest to print `Resetting target` beside a flash failure, so the phrase has
-# to be the erase line itself and not a family somebody assumed.
-PYOCD_ERASE_FAILURE_MARKERS = ["failed to erase sector", "flash erase sector failure"]
+# pyOCD's own words for an erase that did not take: every FlashEraseFailure
+# pyOCD 0.45.1 raises (pyocd/flash/flash.py:364-385, pyocd/flash/flash_dsq.py:141-164),
+# which `pyocd flash` logs as a critical line from `[__main__]`
+# (pyocd/__main__.py:170), e.g. `flash erase sector failure (address 0x08004000;
+# result code 0x1)`. The erase line itself and not a family somebody assumed:
+# pyOCD is the backend likeliest to print `Resetting target` beside a flash
+# failure. `Failed to erase sector at` is in no file of the package (#561).
+PYOCD_ERASE_FAILURE_MARKERS = ["flash erase sector", "flash erase chip", "flash erase all", "address is not within any sector"]
 
 # pyOCD 0.45.x programmer messages do not consistently use "failed" or
 # "error". These are operation failures when emitted by `pyocd flash`, so
 # classify them from command context instead of relying on generic words.
 PYOCD_FLASH_FAILURE_MARKERS = [
     "attempt to program invalid flash address",
-    "flash uninit",
+    # The flash algorithm's uninit step failing or timing out
+    # (pyocd/flash/flash.py:303-305, FlashFailure.__str__ in
+    # pyocd/core/exceptions.py:140 appending the result code). Each whole,
+    # because pyOCD warns `flash uninit sequence not available`
+    # (pyocd/flash/flash_dsq.py:133) on runs that succeed (#704).
+    "flash uninit (result code",
+    "flash uninit timed out",
     "target was not halted as expected",
     "flash algorithm overflowed stack",
     "program page sequence not available",
     "delegate is not available",
     "flash program page failure",
+    # The rest of pyOCD 0.45.1's flash failures, none of which says "failed" or
+    # "error" (#561): the load refusing an address no memory region decodes
+    # (pyocd/flash/loader.py:237, recorded on the reference bench for a `.bin`
+    # based past the end of flash), and the flash algorithm's init and program
+    # steps failing or timing out (pyocd/flash/flash.py:262-264 and 408,
+    # pyocd/flash/builder.py:931). Each whole, because pyOCD warns `flash init
+    # sequence not available` on runs that succeed.
+    "no memory region defined for address",
+    "flash program page timeout",
+    "flash program page timed out",
+    "flash init failure",
+    "flash init timed out",
 ]
+
+# The words the operation-anchored rules read a failure out of: the shared two,
+# and pyOCD's own, which words its flash and link failures "failure"
+# (`FlashFailure`, pyocd/core/exceptions.py:140; `SWD/JTAG communication
+# failure`, pyocd/probe/pydapaccess/dap_access_cmsis_dap.py:372) (#561).
+PYOCD_FAILURE_WORDS = [*FAILURE_WORDS, "failure"]
 
 # The format `pyocd flash --format` is told to read an image as, by its extension
 # compared without case, the way validation compares it (#580). Given no format,
@@ -193,8 +218,52 @@ PYOCD_FLASH_FORMATS = {".axf": "elf", ".bin": "bin", ".elf": "elf", ".hex": "hex
 # this connect, a reset control the counter detected, and a halted-session
 # control in which the same counter froze, which is what makes it a witness.
 # Ten read logs carry this argv with --connect attach and nothing that halts.
+#
+# Attach alone does not leave a halted core halted, though (#631). Every
+# commander connect starts core debug, and where the target's CMSIS pack
+# defines a DebugCoreStart sequence pyOCD runs it in place of its own write
+# (`pyocd/coresight/cortex_m.py`, 0.45.1, lines 394-396 and 436-441):
+#
+#     # Enable debug, preserving any current debug state.
+#     if not self.start_debug_core_hook():
+#         self.write32(self.DHCSR, (self.read32(self.DHCSR) & 0xffff) | self.DBGKEY | self.C_DEBUGEN)
+#
+# pyOCD's own write keeps C_HALT. The reference board's pack (Keil.STM32F4xx_DFP
+# 3.1.1) carries the CMSIS default sequence, `Write32(0xE000EDF0, 0xA05F0001)`,
+# which sets C_DEBUGEN without C_HALT and so lets a halted core run. A
+# `reset_target` into halt therefore held until the next read connected: the
+# reads after it returned 39 and then 2827, and the read's own process already
+# read DHCSR 0x01010001 right after its connect, while OpenOCD, an observer
+# shown to neither halt nor resume, read the core halted after the reset and
+# running after the read (tests/fixtures/pyocd_0_45_1_halt_recordings.json).
+#
+# So the read names that sequence in `pack.debug_sequences.disabled_sequences`
+# (`pyocd/core/options.py:107`; the command line splits the value on commas,
+# `pyocd/utility/cmdline.py:133-150`). `run_sequence` returns without running a
+# sequence named there (`pyocd/target/pack/pack_target.py:287-289`), the hook
+# still answers that it started the core (line 441 above), and the connect
+# writes nothing to DHCSR at all: in the same recording a halted core stayed
+# halted through it and a running core kept running. The read needs nothing
+# the sequence does, because `savemem` goes through the memory access port,
+# which reads with core debug off. On a target without the sequence, builtin
+# or from a pack, the option names nothing and pyOCD's own write already keeps
+# the halt. The disconnect resumes nothing either: the commander sets
+# `resume_on_disconnect` to false (`pyocd/commands/commander.py:220`), which the
+# board hands to the core's disconnect (`pyocd/board/board.py:163`,
+# `pyocd/coresight/cortex_m.py:424`).
+#
+# `probe_target` passes the same option. Its `status` runs behind the
+# commander's default connect, which is attach (`pyocd/commands/commander.py`,
+# 0.45.1, lines 184-192) and so runs the same sequence: on the reference board
+# a probe of a core `reset_target` had halted let it run from its reset vector
+# and printed `Running`, and with the sequence disabled the same connect and
+# `status` left a halted core halted and a running core running
+# (tests/fixtures/pyocd_0_45_1_probe_target_halt_recordings.json). `status`
+# reads the core's state through the access port and needs nothing the
+# sequence does either.
 PYOCD_READ_CONNECT_MODE = "attach"
-PYOCD_READ_CONNECT_ARGS = ["--connect", PYOCD_READ_CONNECT_MODE]
+PYOCD_READ_KEEPS_THE_RUN_STATE = ["-O", "pack.debug_sequences.disabled_sequences=DebugCoreStart"]
+PYOCD_READ_CONNECT_ARGS = ["--connect", PYOCD_READ_CONNECT_MODE, *PYOCD_READ_KEEPS_THE_RUN_STATE]
 # The typed-debug reads this backend answers with no session behind them, and so
 # the ones the coordination layer must lease as one-shots rather than run on a
 # session lease that does not exist here. `debug_symbol_info` is deliberately not
@@ -416,7 +485,8 @@ class PyOCDBackend:
         selected = self._resolve_probe_selector("probe_target")
         if not overall_success(selected):
             return selected
-        result = self._run_pyocd("probe_target", ["commander", "--command", "status", "-O", "debug.traceback=true", *self._connection_args()])
+        # The probe only looks, so its connect leaves the run state as the reads' does (#631).
+        result = self._run_pyocd("probe_target", ["commander", "--command", "status", "-O", "debug.traceback=true", *PYOCD_READ_KEEPS_THE_RUN_STATE, *self._connection_args()])
         if result.get("ok"):
             result["target_detected"] = True
             result["summary"] = "Target detected through pyOCD."
@@ -459,16 +529,26 @@ class PyOCDBackend:
             result["summary"] = "Firmware flashed. Target was not reset."
             return self._write_action_report(result)
 
-        reset = self._run_pyocd("flash_firmware", ["commander", "--command", "reset", *self._connection_args()])
+        # Classified as the reset it is: the commander reports a failed reset as
+        # `Error: memory transfer failed` (pyocd/commands/commander.py:125), which
+        # names no reset, and read as a flash it would carry the flash's steps.
+        reset = self._run_pyocd("flash_firmware", ["commander", "--command", "reset", *self._connection_args()], classify_as="reset_target")
         if not reset.get("ok"):
+            reset_timed_out = reset.get("error_type") == "timeout"
             reset["artifact"] = self._artifact_summary(artifact)
-            reset["verify"] = True
             reset["reset_after_flash"] = False
             reset["side_effect_committed"] = True
             reset["side_effect_status"] = "partial"
             reset["retry_safe"] = False
             reset["error_type"] = "reset_failed"
             reset["summary"] = "Firmware flashed, but the post-flash reset failed."
+            if reset_timed_out:
+                # The reset's own error, kept where a refused reset keeps its
+                # classification (#655): a reset that hung is told apart from one
+                # the target refused, and the causes and steps are the timeout's.
+                reset["backend_error_type"] = "timeout"
+                reset["summary"] = "Firmware flashed, but the post-flash reset timed out."
+                reset.update(remediation_fields("timeout", self.backend_name))
             reset["verify"] = False
             reset["target_contacted"] = result.get("target_contacted", True)
             reset["hardware_state"] = "changed"
@@ -572,7 +652,9 @@ class PyOCDBackend:
         reading: pyOCD's own documentation of it is "Save a range of memory to a
         binary file", it is served with no gdbserver in the picture, and it
         connects with `--connect attach`, the one mode pyOCD documents as
-        leaving a running core alone. The file it writes is this call's own
+        leaving a running core alone, and with the target pack's DebugCoreStart
+        sequence disabled, whose DHCSR write would let a halted core run (#631).
+        The file it writes is this call's own
         business, created in a private directory, read back and deleted before
         the result is built, and named nowhere in it.
 
@@ -866,7 +948,7 @@ class PyOCDBackend:
             return dict(PYOCD_NOT_FOUND)
         return {"ok": True, "executable": found, "executable_path": found}
 
-    def _run_pyocd(self, tool: str, action_args: list[str]) -> JsonObject:
+    def _run_pyocd(self, tool: str, action_args: list[str], classify_as: str | None = None) -> JsonObject:
         started_at = utc_now_iso()
         start = time.perf_counter()
         resolved = self._resolve_executable()
@@ -895,11 +977,11 @@ class PyOCDBackend:
             return self._finish_log_audit({"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}, audit_error)
         output = f"{completed.stdout}{completed.stderr}"
         if completed.returncode == 0:
-            backend_error_type = self._backend_error_from_output(output, tool)
+            backend_error_type = self._backend_error_from_output(output, classify_as or tool)
             if backend_error_type is not None:
                 return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path, completed), audit_error)
             return self._finish_log_audit({"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "pyOCD command completed successfully.", "log_path": display_path(self.config, log_path)}, audit_error)
-        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._confirm_target_support(self._classify_output(output, tool)), log_path, completed), audit_error)
+        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._confirm_target_support(self._classify_output(output, classify_as or tool)), log_path, completed), audit_error)
 
     def _prepare_symbol_read(self, tool: str, symbol: str, symbol_elf: JsonObject | None) -> JsonObject:
         """Everything both memory reads settle before a probe is opened.
@@ -1329,7 +1411,7 @@ class PyOCDBackend:
             return "verify_failed"
         if reports_reset_failure(output):
             return "reset_failed"
-        if tool == "flash_firmware" and contains_any(lower, FAILURE_WORDS):
+        if tool == "flash_firmware" and contains_any(lower, PYOCD_FAILURE_WORDS):
             return "flash_failed"
         # The twin of the flash bucket above, anchored on the operation rather
         # than on a word: when the tool is `reset_target`, the operation that
@@ -1337,7 +1419,7 @@ class PyOCDBackend:
         # it. That is what keeps a genuine reset failure classified without the
         # rule above having to guess from a stray "reset" somewhere in a
         # transcript, which is what it used to do (#333).
-        if tool == "reset_target" and contains_any(lower, FAILURE_WORDS):
+        if tool == "reset_target" and contains_any(lower, PYOCD_FAILURE_WORDS):
             return "reset_failed"
         # The same rule once more, anchored on the operation rather than on a
         # word: when the tool is one of the memory reads, the operation that
@@ -1345,7 +1427,7 @@ class PyOCDBackend:
         # it. Without it a `savemem` that could not reach the address would land
         # in the unknown bucket and answer "Debugger failed with an unknown
         # error", which tells a caller nothing about what was being attempted.
-        if tool in SESSIONLESS_DEBUG_READS and contains_any(lower, FAILURE_WORDS):
+        if tool in SESSIONLESS_DEBUG_READS and contains_any(lower, PYOCD_FAILURE_WORDS):
             return "memory_read_failed"
         return "unknown_debugger_error"
 

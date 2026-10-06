@@ -187,6 +187,7 @@ CAN_ERROR_TYPES = CAN_ERROR_TYPES_FROM_517 + CAN_ERROR_TYPES_FROM_523 + CAN_ERRO
 BROKER_ONLY_ERROR_TYPES = [
     "can_broker_authentication_failed",
     "can_broker_counter_mismatch",
+    "can_broker_disconnected",
     "can_broker_invalid_message",
     "can_broker_not_attached",
     "can_broker_not_bus_owner",

@@ -403,8 +403,10 @@ def _identity_unverified(tool: str, port_id: str, port: ComPortConfig, expectati
 
     Retry-safe and no-contact by construction: the port was never touched, so
     restoring the check (installing the serial backend, plugging the board in,
-    a host that reports the adapter's serial) or running `adopt-hardware` to
-    rewrite the entry, then calling again, is the whole repair."""
+    a host that reports the adapter's serial) or setting `device` explicitly to
+    the name the host lists for the board, then calling again, is the whole
+    repair. Not adoption: the entry's `device` is set, or this would be
+    `com_port_not_bound`, and adoption keeps a `device` that is set (#658)."""
     return {
         "ok": False,
         "tool": tool,
@@ -420,8 +422,9 @@ def _identity_unverified(tool: str, port_id: str, port: ComPortConfig, expectati
         "next_step": (
             "This entry names a board on purpose, so it is opened only once the host confirms the name still leads to it. "
             "Restore the check (install the serial backend, plug the board in, or use a host that reports the adapter's "
-            "serial) or run `agentic-hil adopt-hardware` to rewrite the entry for the board that is attached. Drop the "
-            "entry's `serial_number`/`vid`/`pid`/`resource_id` only if it genuinely names no fixed board."
+            "serial), or set `device` explicitly to the name this host lists for the board (`agentic-hil com-ports` "
+            "shows it) and call `project_config_reload_description`. Drop the entry's "
+            "`serial_number`/`vid`/`pid`/`resource_id` only if it genuinely names no fixed board."
         ),
         # Nothing was reached, so the bench stays in service and this is not an
         # incident: restore the check and call again.
@@ -466,8 +469,8 @@ def _identity_mismatch(
         **{name: identity[name] for name in ("found_serial_number", "found_vid", "found_pid") if name in identity},
         "likely_causes": likely_causes,
         # Nothing was reached, so the bench stays in service and this is not an
-        # incident: fix the named cause (plug the board in, or let
-        # `adopt-hardware` rewrite the entry) and call again.
+        # incident: fix the named cause (plug the board in, or set `device` to
+        # `expected_device` where the board moved) and call again.
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
@@ -494,7 +497,7 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
     reach its board before use, and "the check could not run" does not prove it;
     reporting the gap in a result the caller reads *after* it has already written
     to whatever the name now reaches is no protection at all. Every one is
-    retry-safe and no-contact: restore the check, or `adopt-hardware` the entry,
+    retry-safe and no-contact: restore the check, or set `device` explicitly,
     and call again.
 
     An entry that declares no hardware costs nothing here: the host is not
@@ -588,6 +591,12 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
                 moved = str(elsewhere.get("stable_device") or elsewhere.get("device") or "")
                 result["expected_device"] = moved
                 result["summary"] += f" The hardware it names is attached as '{moved}'."
+                # The key and its value, because adoption keeps a `device` that
+                # is set and would leave this refusal standing (#658).
+                result["next_step"] = (
+                    f"Set `com_ports.{port_id}.device` to '{moved}' with `project_config_set`, or have the operator edit "
+                    "the configuration, then call `project_config_reload_description` and `com_session_start` again."
+                )
             return result
 
     # The type check. It runs after the serial and never instead of it: a serial
@@ -745,6 +754,9 @@ class ComPortSession:
         self.read_failure: JsonObject | None = None
         self.reader: threading.Thread | None = None
         self.audit_broken = False
+        # Set once the handle is closed and the reader joined, so a stop that is
+        # retried for the lease alone does not close and log the port again.
+        self.handle_closed = False
         self.lease = lease or DetachedHardwareLease()
         if start_reader:
             self.start_reader()
@@ -1038,16 +1050,24 @@ class ComPortService:
         ports: JsonObject = {}
         for port_id, port_config in self.config.com_ports.items():
             ports[port_id] = self._port_status(port_id, port_config, self.sessions.get(port_id))
-        # Host discovery is not scoped to one configured port, so it needs at
-        # least one port the operator allowed reading from.
-        if any(self.config.com_read_allowed(port_config) for port_config in self.config.com_ports.values()):
+        # Host discovery is not scoped to one configured port. Where reading
+        # needs no grant (version 2) it runs with or without an entry, because
+        # listing the host's ports is how a new project finds the adapter its
+        # first entry will name (#656). A version 1 file still needs at least
+        # one port the operator allowed reading from.
+        if self.config.read_free or any(self.config.com_read_allowed(port_config) for port_config in self.config.com_ports.values()):
             available = list_available_com_ports()
         else:
             available = {
                 "ok": False,
                 "tool": "com_ports_available",
                 "error_type": "permission_denied",
-                "summary": "Host COM port discovery is disabled by the authoritative config; no configured COM port has permissions.allow_read.",
+                "summary": (
+                    "Host COM port discovery is disabled by the authoritative config; no configured COM port has permissions.allow_read."
+                    if self.config.com_ports
+                    else "Host COM port discovery is disabled by the authoritative config: a version 1 configuration lists host ports only "
+                    "once a `com_ports` entry with permissions.allow_read is configured, and none is."
+                ),
             }
         available_count = len(available.get("ports", [])) if available.get("ok") else 0
         return {
@@ -1093,10 +1113,16 @@ class ComPortService:
                     return self._write_report(cleared)
             return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": True, "session": self._session_status(existing), "identity": identity_status, "summary": "COM port session is already active."})
         if existing:
+            # Deferred as on the stop path: a close that raised leaves the session
+            # registered with its lease, so the retried stop finds both. Nothing
+            # of this start reached the port, so its refusal commits no effect.
             try:
-                self._stop_session(existing, "replaced")
+                self._stop_session(existing, "replaced", defer_release=True)
             except Exception as error:
-                return self._write_report(self._close_failure("com_session_start", port_id, error))
+                return self._audit_broken_close({**self._close_failure("com_session_start", port_id, error), "side_effect_committed": False}, existing)
+            held = self._end_session_lease(existing, "com_session_start")
+            if held is not None:
+                return held
             self.sessions.pop(port_id, None)
 
         try:
@@ -1160,7 +1186,10 @@ class ComPortService:
                 if written.get("audit_ok") is not False:
                     session.lease.resolve_retryable_cleanup("com_buffer_clear_unconfirmed")
                     if not session.lease.release():
-                        return recommit_report_with_status(self.config, written, session.lease.status())
+                        # The handle is closed and the lease is still held: the
+                        # cleanup this answer can confirm stops at the handle.
+                        held = {**written, "cleanup_confirmed": False, "next_step": self.coordinator.held_lease_next_step("com_session_stop")}
+                        return recommit_report_with_status(self.config, held, session.lease.status())
                     self.sessions.pop(port_id, None)
                 return recommit_report_with_status(self.config, written, session.lease.status())
         try:
@@ -1202,13 +1231,19 @@ class ComPortService:
         try:
             audit_error = self._stop_session(session, "requested", defer_release=True)
         except Exception as error:
-            return self._write_report(self._close_failure("com_session_stop", port_id, error))
+            return self._audit_broken_close(self._close_failure("com_session_stop", port_id, error), session)
         result = {"ok": True, "tool": "com_session_stop", "port_id": port_id, "was_active": True, "session": self._session_status(session), "summary": "COM port session stopped."}
         written = self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
         if written.get("audit_ok") is False:
+            # The handle is closed and the ledger is broken. The lease goes into
+            # the standing incident, so the operator's `recover` can sign it
+            # while this server runs, and the session has nothing left to stop.
+            if self.coordinator.hand_over_to_incident(session.lease):
+                self.sessions.pop(port_id, None)
             return {**written, "cleanup_required": True, "quarantined": True}
-        if not session.lease.release():
-            return self._write_report(self._close_failure("com_session_stop", port_id, RuntimeError("Lease release remained unconfirmed.")))
+        held = self._end_session_lease(session, "com_session_stop")
+        if held is not None:
+            return held
         self.sessions.pop(port_id, None)
         return recommit_report_with_status(self.config, written, session.lease.status())
 
@@ -1532,7 +1567,10 @@ class ComPortService:
         for port_id in list(self.sessions):
             try:
                 result = self.session_stop(port_id)
-                if not overall_success(result):
+                # A session whose lease went into the standing incident is not
+                # a cleanup failure: its handle is closed and the incident
+                # records the rest for the operator.
+                if not overall_success(result) and port_id in self.sessions:
                     raise RuntimeError(str(result.get("summary", "COM port cleanup failed.")))
             except BaseException as error:
                 errors.append((port_id, error))
@@ -1716,7 +1754,7 @@ class ComPortService:
         if session is None or self.coordinator.incident_stands or session.audit_broken or session.lease.state != "active" or not self._session_is_active(session):
             result: JsonObject = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "session_not_active", "summary": "COM port session is not active. Start it with com_session_start first."}
             if session is not None and (self.coordinator.incident_stands or session.audit_broken or session.lease.state != "active"):
-                result.update({"error_type": "resource_quarantined", "summary": "COM port requires cleanup or audit recovery before further actions.", "cleanup_required": True, "quarantined": True})
+                result.update({"error_type": "resource_quarantined", "summary": "COM port requires cleanup or audit recovery before further actions.", "cleanup_required": True, "quarantined": True, **remediation_fields("resource_quarantined")})
             else:
                 result.update(remediation_fields("session_not_active"))
             if session is not None and session.reader_error:
@@ -1771,6 +1809,12 @@ class ComPortService:
 
     def _stop_session(self, session: ComPortSession, reason: str, *, defer_release: bool = False) -> Exception | None:
         session.active = False
+        if session.handle_closed:
+            # Closed and joined by an earlier stop; what is left is the lease,
+            # which the caller gives back, or the broken ledger, which stays.
+            if session.audit_broken:
+                raise RuntimeError("COM audit state is broken; resource remains quarantined.")
+            return None
         errors: list[tuple[str, BaseException]] = []
         interrupt: BaseException | None = None
         cancel_read = getattr(session.serial_handle, "cancel_read", None)
@@ -1796,6 +1840,7 @@ class ComPortService:
                 errors.append(("reader", error))
                 if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                     interrupt = error
+        session.handle_closed = not errors
         # After the reader has been joined above, so the stop entry is the last
         # line rather than one racing whatever the reader had left to write.
         audit_error = session.append_audit({"event": "stop", "reason": reason}, self.config)
@@ -1826,6 +1871,36 @@ class ComPortService:
             raise RuntimeError("COM resource release remains unconfirmed.")
         return audit_error
 
+    def _audit_broken_close(self, failure: JsonObject, session: ComPortSession) -> JsonObject:
+        """Answer a close failure, handing the lease over when only the ledger is left.
+
+        A handle that is closed beside a broken audit log has nothing a later
+        call can retry. Its lease goes into the standing incident, so the
+        operator's `recover` signs it while this server runs, and the session
+        is dropped; the answer still says the close is unconfirmed and
+        quarantined."""
+        if not (session.handle_closed and session.audit_broken and self.coordinator.hand_over_to_incident(session.lease)):
+            return self._write_report(failure)
+        self.sessions.pop(session.port_id, None)
+        failure = {**failure, "summary": "COM port handle is closed, but its audit log broke; the port stays with the incident until an operator recovers it."}
+        # The session is gone, so the lease's status is merged in here: the
+        # incident's reasons and id are what the operator signs.
+        return recommit_report_with_status(self.config, self._write_report(failure), session.lease.status())
+
+    def _end_session_lease(self, session: ComPortSession, tool: str) -> JsonObject | None:
+        """Give back the lease of a session whose handle is closed.
+
+        None once the lease is released, or handed into a standing incident;
+        the caller then drops the session. Otherwise the answer to return, and
+        the session stays registered: `session_lease_held` while an incident
+        this call may not end holds the lease, naming the call that ends it,
+        and the close failure for a release that did not confirm."""
+        if session.lease.release() or self.coordinator.hand_over_to_incident(session.lease):
+            return None
+        if session.lease.state in {"cleanup_required", "quarantined"}:
+            return self._write_report({"ok": False, "tool": tool, "port_id": session.port_id, "error_type": "session_lease_held", "summary": "COM port handle is closed; its lease stays held under an open incident this call may not end.", "side_effect_committed": False, "next_step": self.coordinator.held_lease_next_step("com_session_stop"), **remediation_fields("session_lease_held")})
+        return self._write_report(self._close_failure(tool, session.port_id, RuntimeError("Lease release remained unconfirmed.")))
+
     def _close_failure(self, tool: str, port_id: str, error: Exception) -> JsonObject:
         return {
             "ok": False,
@@ -1842,7 +1917,9 @@ class ComPortService:
         port_id = prepared.get("port_id")
         session = self.sessions.get(port_id) if isinstance(port_id, str) else None
         unsafe_effect = prepared.get("side_effect_status") in {"unknown", "partial"}
-        if session is not None and unsafe_effect:
+        # A failure whose handle this call closed again leaves nothing on the
+        # port to be unsure about, as on the CAN path.
+        if session is not None and unsafe_effect and prepared.get("cleanup_confirmed") is not True:
             # Nothing consults the marker here, and that is the intended
             # asymmetry: a registered session exists only downstream of a
             # successful open, so every failure that reaches this line is an
@@ -1895,6 +1972,17 @@ class ComPortService:
 
 
 def payload_bytes(port_config: ComPortConfig, payload: JsonObject) -> JsonObject:
+    encoded = _payload_bytes(port_config, payload)
+    if encoded["ok"] and not encoded["data"]:
+        # A payload that encodes to no byte is a caller's mistake, such as an
+        # unfilled template, not a stimulus: answering it "written" would send
+        # the caller to wait on a reply to a command the line never carried,
+        # and the session log would record a transmission of nothing (#634).
+        return {"ok": False, "tool": "com_write", "error_type": "invalid_argument", "summary": "The payload is empty: text or hex must encode to at least one byte."}
+    return encoded
+
+
+def _payload_bytes(port_config: ComPortConfig, payload: JsonObject) -> JsonObject:
     if set(payload) - {"text", "hex"}:
         return {"ok": False, "tool": "com_write", "error_type": "invalid_argument", "summary": "COM write payload contains unsupported fields."}
     has_text = payload.get("text") is not None

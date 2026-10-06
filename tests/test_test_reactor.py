@@ -3343,7 +3343,7 @@ def test_version_2_demo_plan_runs_to_exactly_the_result_it_always_did(tmp_path: 
     ]
     assert result["steps"][3]["result"] == {
         "ok": True,
-        "tool": "test_reactor",
+        "tool": "test_reactor_run",
         "summary": "Expected text appeared on the COM port.",
         "port_id": "dut_uart",
         "expected_text": "Hello World",
@@ -4530,7 +4530,7 @@ steps:
     assert [step["route"] for step in result["steps"]] == ["dut", "dut", "dut_uart", "dut_uart"]
     assert result["steps"][1]["result"] == {
         "ok": True,
-        "tool": "test_reactor",
+        "tool": "test_reactor_run",
         "summary": "Test plan waited.",
         "debugger": "dut",
         "action": "delay",

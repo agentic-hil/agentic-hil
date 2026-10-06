@@ -68,7 +68,10 @@ OPENOCD_RESET_WARNING = (
 PYOCD_RESET_LINE = "0000684 I Resetting target with default reset type [board]\n"
 
 OPENOCD_ERASE_REFUSAL = "Error: failed erasing sectors 0 to 5\n"
-PYOCD_ERASE_REFUSAL = "0000902 E Failed to erase sector at 0x08000000 [flash]\n"
+# The FlashEraseFailure pyOCD 0.45.1 raises for an erase the flash algorithm
+# reports it could not do (pyocd/flash/flash.py:385), as `pyocd flash` logs it
+# (pyocd/__main__.py:170): tests/fixtures/pyocd_failure_recordings.json.
+PYOCD_ERASE_REFUSAL = "0000902 C flash erase sector failure (address 0x08000000; result code 0x1) [__main__]\n"
 
 # The measured table from #333, row for row, in the order the issue lists it. The
 # third column is what each row classified as before the fix; the fourth is the

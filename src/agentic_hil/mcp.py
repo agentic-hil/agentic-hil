@@ -12,7 +12,7 @@ from agentic_hil.knowledge import ERROR_CATALOGUE, ERROR_URI_PREFIX, read_resour
 from agentic_hil.knowledge import MCP_RESOURCE_TEMPLATES as MCP_RESOURCE_TEMPLATES
 from agentic_hil.knowledge import MCP_RESOURCES as MCP_RESOURCES
 from agentic_hil.redact import redact_sensitive, redact_stream_text
-from agentic_hil.report import overall_success
+from agentic_hil.report import conclusive_success
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 from agentic_hil.types import JsonObject
 
@@ -394,9 +394,10 @@ def call_tool(params: Any, tools: AgenticHILToolService) -> JsonObject:
     result = tools.call(name, arguments)
     # Defense-in-depth: strip any secret-named field before the result is
     # serialized into the MCP content text and structuredContent. isError is
-    # computed from the raw result (redaction touches no success field).
+    # computed from the raw result (redaction touches no success field), with
+    # the same verdict the command line's exit status takes.
     safe_result = redact_sensitive(result)
-    return {"content": [{"type": "text", "text": tool_result_text(safe_result, sent)}], "structuredContent": safe_result, "isError": not overall_success(result)}
+    return {"content": [{"type": "text", "text": tool_result_text(safe_result, sent)}], "structuredContent": safe_result, "isError": not conclusive_success(result)}
 
 
 def get_prompt(params: Any) -> JsonObject:

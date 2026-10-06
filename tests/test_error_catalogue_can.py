@@ -44,8 +44,8 @@ Kept out of the required set, each for a reason stated where it is listed:
   its one bare entry is written with the COM refusals of #635. The CAN refusal
   is required to carry whatever that entry says, and the tests that hold it stay
   red until that entry exists.
-* `can_broker_timeout` and `can_broker_not_attached` are spelled in the broker
-  and returned by no CAN tool.
+* `can_broker_not_attached` is spelled in the broker and returned by no CAN
+  tool.
 * Two configuration types the broker can forward have no bare entry, and one
   configuration type is raised only on a path no CAN tool reaches.
 * The types every hardware tool shares (`audit_unavailable`,
@@ -62,8 +62,9 @@ holds that true and drives the real bridge into each of them.
 What an entry says is checked as well as that it exists. Each new entry has a
 specification of the fields and tools its steps must name and of the relations
 its sentences must state, and of the claims it must never make: above all, that
-a retried stop settles a bridge close that was never confirmed, which #633 makes
-false for the life of the server. Generic advice fails every specification, and
+a retried stop settles a bridge close that was never confirmed: since #633 the
+first call that meets the ended bridge answers once and gives the bus back, and
+a retry finds nothing left to settle. Generic advice fails every specification, and
 an entry that makes one of the forbidden claims fails its own.
 
 No hardware and no CAN interface. The behavioural tests drive the real tool
@@ -309,6 +310,7 @@ PINNED_INVENTORY: dict[str, frozenset[str]] = {
             "invalid_argument",
             "permission_denied",
             "resource_quarantined",
+            "session_lease_held",
             "session_not_active",
         }
     ),
@@ -327,6 +329,7 @@ PINNED_INVENTORY: dict[str, frozenset[str]] = {
         {
             "can_broker_authentication_failed",
             "can_broker_counter_mismatch",
+            "can_broker_disconnected",
             "can_broker_invalid_message",
             "can_broker_not_attached",
             "can_broker_not_bus_owner",
@@ -417,15 +420,12 @@ FORWARDED_FROM_COORDINATION: dict[str, str] = {
 # `test_a_can_call_without_a_session_carries_the_shared_entry` holds.
 OWNED_BY_THE_COM_REFUSALS: dict[str, str] = {
     "session_not_active": "one bare entry, written with the COM refusals of #635, true for COM, CAN and debug sessions",
+    "session_lease_held": "one bare entry, written with the COM stop of #660, true for COM and CAN sessions; tests/test_close_failure_state.py holds the CAN refusal carrying it",
 }
 
 # Spelled on the CAN path and returned by no CAN tool, so an entry for them would
 # describe an answer nobody reads.
 NOT_RETURNED_BY_A_TOOL: dict[str, str] = {
-    "can_broker_timeout": (
-        "raised as a ParticipantError out of Participant._request; can_send and can_read re-raise it and the caller"
-        " reads hardware_action_exception, which #645 owns"
-    ),
     "can_broker_not_attached": (
         "the broker answers it only to a connection whose first message is not an attach, and _attach_once always"
         " sends the attach first"
@@ -478,10 +478,12 @@ NEW_ENTRIES = frozenset(
         "can_backend_not_available",
         "can_broker_authentication_failed",
         "can_broker_counter_mismatch",
+        "can_broker_disconnected",
         "can_broker_invalid_message",
         "can_broker_not_bus_owner",
         "can_broker_protocol_mismatch",
         "can_broker_stopping",
+        "can_broker_timeout",
         "can_broker_unavailable",
         "can_broker_wrong_bus",
         "can_bus_gated",
@@ -822,8 +824,8 @@ def any_of(*words: str) -> str:
 # safe") do not count against it.
 #
 # That a retried stop or start settles a bridge close that was never confirmed:
-# after it, every stop and start on the bus answers the same refusal for the life
-# of the server (#633).
+# the first call that meets the ended bridge answers once and gives the bus back,
+# so a retry has nothing left to settle (#633).
 RETRY_SETTLES = r"^(?!.*\b(?:not|never|nothing|cannot|no longer|keeps? (?:answering|failing|refusing)|fails? again)\b)(?=.*\b(?:bridge|safe state)\b)(?=.*\b(?:again|retry|retries|retried|retrying|second|repeat\w*)\b)(?=.*\b(?:clears?|releases?|closes?|settles?|succeeds?|frees?|confirms?|recovers?)\b)"
 # That sending again is safe, said without the condition that makes it so.
 RESEND_IS_SAFE = r"^(?!.*\b(?:not|never|unless|only|when|if|after)\b)(?=.*\b(?:send|sending|resend|resending|retry|retrying|repeat|again)\b)(?=.*\bsafe\b)"
@@ -863,15 +865,15 @@ CONTENT: dict[str, dict] = {
     "bridge_safe_state_unconfirmed": spec(
         first="close_response",
         names=("close_response", "safe_state_confirmed", "can_session_stop", "can_session_start"),
-        says=((any_of("ended", "terminated", "reaped", "gone"), any_of("nothing")), (any_of("restart"), any_of("server"))),
+        says=((any_of("ended", "terminated", "reaped", "gone"), any_of("nothing")), (any_of("given", "gives"), any_of("back"))),
         never=(RETRY_SETTLES,),
     ),
     "can_adapter_close_failed": spec(
         first="backend_error",
         names=("backend_error", "can_session_stop", "can_session_start", "can_buses_list", "adapter_status"),
         says=(
-            (any_of("bridge"), any_of("every", "each", "keeps"), any_of("can_session_stop"), any_of("can_session_start")),
-            (any_of("restart"), any_of("server")),
+            (any_of("bridge"), any_of("once"), any_of("back")),
+            (any_of("check"), any_of("bench"), any_of("can_session_start")),
             (any_of("socketcan", "peak", "direct"), any_of("can_session_stop"), any_of("again", r"retr\w*")),
         ),
         never=(RETRY_SETTLES,),
@@ -901,7 +903,7 @@ CONTENT: dict[str, dict] = {
     "can_adapter_process_exited": spec(
         first="stderr_tail",
         names=("stderr_tail", "can_session_stop", "can_adapter_close_failed"),
-        says=((any_of("can_session_stop"), any_of("can_adapter_close_failed")), (any_of("restart"), any_of("server"))),
+        says=((any_of("can_session_stop"), any_of("can_adapter_close_failed"), any_of("once"), any_of("back")),),
         never=(RETRY_SETTLES,),
     ),
     "can_adapter_process_start_failed": spec(
@@ -927,6 +929,12 @@ CONTENT: dict[str, dict] = {
         names=("broker_counter", "client_counter", "retry_safe"),
         says=((any_of("already", "retried"), any_of("deadline")),),
     ),
+    "can_broker_disconnected": spec(
+        first="backend_error",
+        names=("side_effect_status", "resource_quarantined", "can_session_stop", "can_session_start"),
+        says=((any_of("exited", "closed"), any_of("broker")), (any_of("audit"), any_of("no", "not"))),
+        never=(RESEND_IS_SAFE,),
+    ),
     "can_broker_invalid_message": spec(
         first="summary",
         says=((any_of("every", "all"), any_of("participant", "participants"), r"\bexit\w*"),),
@@ -944,6 +952,12 @@ CONTENT: dict[str, dict] = {
     "can_broker_stopping": spec(
         names=("retry_safe", "can_session_start"),
         says=((any_of("fresh"), any_of("broker")),),
+    ),
+    "can_broker_timeout": spec(
+        first="side_effect_status",
+        names=("side_effect_status", "resource_quarantined", "can_session_stop", "wait_timeout_s"),
+        says=((any_of("late"), any_of("next")), (any_of("unknown"), any_of("bus"))),
+        never=(RESEND_IS_SAFE,),
     ),
     "can_broker_unavailable": spec(
         first="summary",
@@ -1099,8 +1113,8 @@ VALID_CLOSE_FAILED = ErrorRemedy(
     meaning="The adapter of a CAN session did not close.",
     remediation=(
         "Read `backend_error`.",
-        "A bridge that did not confirm safe state cannot confirm it later: every `can_session_stop` and `can_session_start` on that bus answers this refusal again.",
-        "Restart the MCP server once the bench is checked.",
+        "A bridge that did not confirm safe state cannot confirm it later, so this is answered once and the bus is given back.",
+        "Check the bench, then call `can_session_start`.",
         "On a direct adapter (`socketcan`, `peak`), call `can_session_stop` again.",
         "`can_buses_list` shows the session and its `adapter_status`.",
     ),
@@ -1478,6 +1492,9 @@ ATTACH_REFUSALS = (
 # What the broker answers a participant's send and read with.
 SEND_REFUSALS = ("can_participant_filter_violation", "can_participant_frame_budget_exhausted", "can_participant_incident", "can_bus_incident", "can_send_failed")
 READ_REFUSALS = ("can_participant_incident", "can_bus_incident")
+# What a send or read meets when the request to the broker fails in transport:
+# `Participant._request` raises them, and the broker session answers them (#664).
+TRANSPORT_FAILURES = ("can_broker_timeout", "can_broker_invalid_message", "can_broker_disconnected")
 
 
 def test_every_broker_refusal_has_a_behavioural_carrier() -> None:
@@ -1485,7 +1502,8 @@ def test_every_broker_refusal_has_a_behavioural_carrier() -> None:
     of them can have an entry that no refusal carries."""
     broker_types = {error_type for error_type in PINNED_INVENTORY["canbroker.py"] if error_type.startswith("can_") and error_type in REQUIRED}
 
-    assert broker_types <= {*ATTACH_REFUSALS, *SEND_REFUSALS, *READ_REFUSALS}, sorted(broker_types - {*ATTACH_REFUSALS, *SEND_REFUSALS, *READ_REFUSALS})
+    carried = {*ATTACH_REFUSALS, *SEND_REFUSALS, *READ_REFUSALS, *TRANSPORT_FAILURES}
+    assert broker_types <= carried, sorted(broker_types - carried)
 
 
 @pytest.mark.parametrize("error_type", ATTACH_REFUSALS)
@@ -1702,16 +1720,16 @@ def test_a_stop_whose_lease_will_not_release_carries_its_entry(tmp_path: Path) -
     assert_carries_its_entry(result, "can_adapter_close_failed")
 
 
-def test_a_bridge_that_never_confirmed_its_close_keeps_refusing_with_the_entry_that_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_bridge_that_never_confirmed_its_close_is_answered_once_and_gives_the_bus_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """#633, through the real bridge close.
 
     The child is gone, so the close request finds no process, safe state is
-    never confirmed, and the reap of a process that already ended succeeds.
-    From then on every `can_session_stop` and every `can_session_start` on the
-    bus answers `can_adapter_close_failed` with the same reason, and nothing a
-    caller can do over MCP changes that. The entry they carry is the one whose
-    specification forbids promising otherwise
-    (`test_every_new_entry_says_what_its_refusal_means`)."""
+    never confirmed, and the reap of a process that already ended succeeds. A
+    retried close could only ask the same ended process, so the first stop is
+    final: it answers `can_adapter_close_failed` with the entry that says so,
+    records the unconfirmed close and gives the bus back, and the next stop
+    finds nothing to stop. This replaces the earlier pin, under which every
+    later stop and start answered the same refusal for the life of the server."""
     monkeypatch.setattr(bridge_module_under_test, "terminate_process_tree", end_child)
     config = can_config(tmp_path)
     service = can_module_under_test.CanBusService(config)
@@ -1719,17 +1737,17 @@ def test_a_bridge_that_never_confirmed_its_close_keeps_refusing_with_the_entry_t
     adapter = can_module_under_test.ProcessCanAdapterSession(child, 0.05)
     service.sessions[(PROCESS_BUS, None)] = can_module_under_test.CanBusSession(PROCESS_BUS, config.can_buses[PROCESS_BUS], adapter, str(tmp_path / "can-633.jsonl"))
     try:
-        answers = [service.session_stop(PROCESS_BUS), service.session_stop(PROCESS_BUS), service.session_start(PROCESS_BUS, False), service.session_start(PROCESS_BUS, False)]
+        answers = [service.session_stop(PROCESS_BUS), service.session_stop(PROCESS_BUS)]
     finally:
         service.sessions.pop((PROCESS_BUS, None), None)
         service.close()
 
-    assert [answer.get("tool") for answer in answers] == ["can_session_stop", "can_session_stop", "can_session_start", "can_session_start"], answers
     assert adapter.process_reaped is True and adapter.safe_state_confirmed is False
-    for answer in answers:
-        assert answer.get("backend_error") == "Bridge did not confirm physical safe state before process cleanup.", answer
-    for answer in answers:
-        assert_carries_its_entry(answer, "can_adapter_close_failed")
+    first, again = answers
+    assert first.get("backend_error") == "Bridge did not confirm physical safe state before process cleanup.", first
+    assert first.get("cleanup_confirmed") is not True, first
+    assert_carries_its_entry(first, "can_adapter_close_failed")
+    assert again["ok"] is True and again["was_active"] is False, again
 
 
 # --- can_send ---------------------------------------------------------------
@@ -1896,6 +1914,35 @@ def test_a_read_the_broker_refuses_carries_its_entry(tmp_path: Path, monkeypatch
         assert service.call("can_session_start", {"bus_id": SHARED_BUS, "participant": "ecu_a", "clear_rx_queue": False})["ok"] is True
 
         result = service.call("can_read", {"bus_id": SHARED_BUS, "participant": "ecu_a"})
+    finally:
+        service.close()
+
+    assert_carries_its_entry(result, error_type)
+
+
+@pytest.mark.parametrize("error_type", TRANSPORT_FAILURES)
+@pytest.mark.parametrize("tool", ["can_send", "can_read"])
+def test_a_broker_request_that_fails_in_transport_carries_its_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str, error_type: str) -> None:
+    """A slow, garbled or ended broker, met by a send or a read (#664)."""
+
+    def failure() -> BaseException:
+        if error_type == "can_broker_disconnected":
+            return BrokenPipeError(32, "The pipe has been ended")
+        return ParticipantError(broker_refusal(error_type, "ecu_a"))
+
+    class Failing(RefusingParticipant):
+        def send(self, frame_id: int, data: bytes, *, extended: bool = False, rtr: bool = False) -> dict:
+            raise failure()
+
+        def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+            raise failure()
+
+    monkeypatch.setattr(canbroker_module_under_test, "attach_participant", lambda config, bus_id, participant, **kwargs: Failing(participant))
+    service = AgenticHILToolService(can_config(tmp_path))
+    try:
+        assert service.call("can_session_start", {"bus_id": SHARED_BUS, "participant": "ecu_a", "clear_rx_queue": False})["ok"] is True
+        arguments = {"frame_id": 0x123, "data_hex": "01"} if tool == "can_send" else {}
+        result = service.call(tool, {"bus_id": SHARED_BUS, "participant": "ecu_a", **arguments})
     finally:
         service.close()
 

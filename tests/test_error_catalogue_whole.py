@@ -64,7 +64,6 @@ from test_error_catalogue_ec1_debug import (
     error_type_expressions,
 )
 from test_error_catalogue_ec2_artifacts_reports import DYNAMIC_SITES as ARTIFACT_DYNAMIC_SITES
-from test_error_catalogue_ec2_artifacts_reports import EXCLUDED_SITES as ARTIFACT_EXCLUDED_SITES
 from test_error_catalogue_ec2_artifacts_reports import clauses
 from test_error_catalogue_ec3_run_coordination import CONSUMERS, NEGATION
 from test_error_catalogue_ec3_run_coordination import EXCLUDED as RUN_EXCLUDED
@@ -638,7 +637,8 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # What the pins hold.
 
 SCANNED_MODULE_COUNT = 48
-COLLECTED_TYPE_COUNT = 218
+# `can_broker_disconnected`, a broker connection that ended (#664), is the 219th.
+COLLECTED_TYPE_COUNT = 219
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -649,7 +649,32 @@ COLLECTED_TYPE_COUNT = 218
 # one new type. The integrated debugger fix also adds the `debugger_error`
 # producer in `GdbDebugSessions.continue_execution`; the joint host scan finds
 # two additional producers, with every previous producer still present.
-PRODUCER_COUNT = 644
+# `CanBusService.session_stop` writes `can_participant_not_configured` (#632).
+# The broker's two `permission_denied` refusals are written by one function,
+# `CanBroker._permission_refusal`, which names the key (#657).
+# `canbroker.broker_request_failure` writes `can_broker_disconnected` (#664).
+# `session_lease_held` (#660) is one new type, written by the COM and the CAN
+# `_end_session_lease`; the CAN close helpers `_retire_session`,
+# `_end_unconfirmed_close` and `_end_session_lease` add three more producers
+# of `can_adapter_close_failed` (#633, #665).
+# The empty-payload refusal adds `invalid_argument` in `comports.payload_bytes`
+# (#634).
+# `HardwareCoordinator.retire_records` adds six: it answers the refusals
+# `recover` answers, for the operator's way out of a damaged record (#669).
+# A debug start on OpenOCD names a dead server's output by the public name the
+# command path uses (#654): `OpenOCDBackend._debug_start_public_error` adds
+# eight producers, the names `_public_error_type` can answer, and the four
+# script and access words `GdbDebugSessions._start_failure` no longer writes
+# for OpenOCD go, three of them out of the types altogether.
+# Two types follow: `agent_mcp_config_invalid` (#693), which the three agent
+# MCP registrations write in place of the `config_invalid` they wrote, and
+# `report_state_damaged` (#689), written by `report._report_state_damaged`
+# for a report state that reads and is damaged.
+# `OpenOCDBackend.flash_firmware` now writes `invalid_argument` for a .bin with
+# no `flash_address` (#680).
+# no `flash_address` (#680). Deleting `report.read_report_file` and
+# `DebuggerDevice.routing_refusal`, which nothing called, takes five away (#682).
+PRODUCER_COUNT = 658
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
@@ -720,69 +745,6 @@ def check_silent(pair: Pair) -> Callable[[Path], None]:
     return check
 
 
-def _participant_requests() -> frozenset[str]:
-    """Participant's methods that put a request to the broker, `_request` itself included."""
-    (participant,) = [node for node in package_sources()["canbroker"].tree.body if isinstance(node, ast.ClassDef) and node.name == "Participant"]
-    return frozenset(
-        method.name for method in participant.body if isinstance(method, ast.FunctionDef) and any(isinstance(node, ast.Call) and _callee(node) == "_request" for node in ast.walk(method))
-    ) | {"_request"}
-
-
-def module_functions_reached(module: str, start: str) -> dict[str, ast.FunctionDef]:
-    """`start` and every module function of `module` it reaches by name."""
-    top = {node.name: node for node in package_sources()[module].tree.body if isinstance(node, ast.FunctionDef)}
-    reached: dict[str, ast.FunctionDef] = {}
-    pending = [start]
-    while pending:
-        name = pending.pop()
-        if name in reached:
-            continue
-        reached[name] = top[name]
-        pending.extend(node.func.id for node in ast.walk(top[name]) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in top)
-    return reached
-
-
-def check_broker_timeout(_tmp_path: Path) -> None:
-    """Only the attach is answered from a ParticipantError, and the attach puts no request."""
-    catching = set()
-    for module, source in package_sources().items():
-        for node in ast.walk(source.tree):
-            if isinstance(node, ast.Name) and node.id == "ParticipantError" and not any(isinstance(parent, ast.Raise) for parent in _ancestors(source, node)):
-                catching.add((module, written_in(source, node)))
-    assert catching == {("can", "CanBusService._participant_session_start"), ("canbroker", "Participant.detach")}
-    function = definition("can", "CanBusService._participant_session_start")
-    (attach,) = [node for node in ast.walk(function) if isinstance(node, ast.Try) and any("ParticipantError" in ast.unparse(handler) for handler in node.handlers)]
-    assert {_callee(node) for statement in attach.body for node in ast.walk(statement) if isinstance(node, ast.Call)} == {"attach_participant"}
-    # The attach puts no request: a Participant is built only to be returned,
-    # what holds one only hands it on, and building one asks the broker nothing.
-    source = package_sources()["canbroker"]
-    requests = _participant_requests()
-    assert requests >= {"_request", "send", "read", "status", "detach"}
-    chain = module_functions_reached("canbroker", "attach_participant")
-    assert "_attach_once" in chain
-    for function in chain.values():
-        held = {
-            target.id
-            for node in ast.walk(function)
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and _callee(node.value) in {"Participant", *chain}
-            for target in node.targets
-            if isinstance(target, ast.Name)
-        }
-        for node in ast.walk(function):
-            if isinstance(node, ast.Call) and _callee(node) == "Participant":
-                assert isinstance(source.parents[node], ast.Return), f"{function.name}: {ast.unparse(node)}"
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id in held:
-                assert node.func.attr not in requests, f"{function.name}: {ast.unparse(node)}"
-    built = definition("canbroker", "Participant.__init__")
-    assert not [ast.unparse(node) for node in ast.walk(built) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and ast.unparse(node.func.value) == "self" and node.func.attr in requests]
-
-
-def _ancestors(source: Source, node: ast.AST) -> Iterator[ast.AST]:
-    while node in source.parents:
-        node = source.parents[node]
-        yield node
-
-
 def check_broker_not_attached(_tmp_path: Path) -> None:
     """Every connection to a broker either sends the attach first or is closed unused."""
     assert callers("Client") == {("canbroker", "CanBroker._finish_stop"), ("canbroker", "_attach_once")}
@@ -819,7 +781,6 @@ def check_every_step_runs_on_a_kind_that_serves_it(_tmp_path: Path) -> None:
     assert any(isinstance(node, ast.Assign) and same(node.value, "(device_class.kind, config_id)") for node in ast.walk(builder))
     assert any(isinstance(node, ast.Call) and _callee(node) == "device_class" for node in ast.walk(builder))
     assert callers("execute") == {("test_reactor", "TestReactor.execute_step")}
-    assert callers("routing_refusal") == {("devices", "Device.execute")}
 
 
 def check_preflight_refuses_a_step_no_kind_serves(tmp_path: Path) -> None:
@@ -1004,20 +965,23 @@ EXCLUDED: dict[Pair, Exclusion] = {
     ),
     ("verify_failed", "openocd"): Exclusion(
         SILENT_REASON,
-        frozenset({("backends.gdbdebug", "GdbDebugSessions._start_failure"), ("backends.openocd", "OpenOCDBackend._failure_result"), ("backends.openocd", "OpenOCDBackend.info")}),
+        frozenset(
+            {
+                ("backends.gdbdebug", "GdbDebugSessions._start_failure"),
+                ("backends.openocd", "OpenOCDBackend._debug_start_public_error"),
+                ("backends.openocd", "OpenOCDBackend._failure_result"),
+                ("backends.openocd", "OpenOCDBackend.info"),
+            }
+        ),
         check_silent(("verify_failed", "openocd")),
-    ),
-    ("can_broker_timeout", None): Exclusion(
-        NOT_RETURNED_BY_A_TOOL["can_broker_timeout"], frozenset({("canbroker", "Participant._request")}), check_broker_timeout
     ),
     ("can_broker_not_attached", None): Exclusion(
         NOT_RETURNED_BY_A_TOOL["can_broker_not_attached"], frozenset({("canbroker", "CanBroker._serve_connection")}), check_broker_not_attached
     ),
     ("not_supported", None): Exclusion(
         "a step runs only on a device of a kind STEP_DEVICE_CLASSES_BY_ACTION lists for its action, and every kind listed serves it, "
-        "so StepDevice.execute never meets an action its kind does not serve; and DebuggerDevice.routing_refusal: "
-        + ARTIFACT_EXCLUDED_SITES[("devices", "DebuggerDevice.routing_refusal")],
-        frozenset({("devices", "DebuggerDevice.routing_refusal"), ("test_reactor", "StepDevice.execute")}),
+        "so StepDevice.execute never meets an action its kind does not serve",
+        frozenset({("test_reactor", "StepDevice.execute")}),
         check_every_step_runs_on_a_kind_that_serves_it,
     ),
     ("unknown_action", None): Exclusion(
