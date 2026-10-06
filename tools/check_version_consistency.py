@@ -175,6 +175,9 @@ MAX_SWEPT_BYTES = 4_000_000
 # here, with the reason. An entry is a claim someone can argue with; a file
 # quietly left out of the list is how this failed the first time.
 UNTRACKED_MENTIONS: dict[str, str] = {
+    # The comparison preregistration freezes the release selected for its trials.
+    # Updating it with each release would change the declared study conditions.
+    "docs/comparison-protocol.md": "preregistered comparison version, deliberately frozen",
     # AI_AGENT_QUICKSTART.md pins ">=0.4.0" as the release that first shipped
     # `setup`. It is a capability floor and must not follow the release: raising
     # it would reject installations that are new enough.
