@@ -184,16 +184,20 @@ def backend_error_line(result: JsonObject) -> str | None:
     """The backend's own line a failed action stopped on, or None when it wrote none.
 
     The probe's re-enumeration line when the result carries one, else the first
-    line of the capture that reports a failure: a debugger tool stops at the
-    first command that fails, so the lines after it follow from it."""
+    line of the capture that reports an error, else the first that reports a
+    failure: a debugger tool stops at the first command that fails, so the lines
+    after it follow from it, and a warning ahead of it (OpenOCD's `Warn : target
+    ... examination failed`, recorded on the bench right after a killed flash)
+    is not what the call failed on."""
     reenumerating = openocd_probe_reenumerating_line(result)
     if reenumerating is not None:
         return reenumerating
     output = result.get("programmer_output")
     if not isinstance(output, dict):
         return None
-    lines = failure_text_lines(f"{output.get('stdout') or ''}\n{output.get('stderr') or ''}")
-    return lines[0].strip() if lines else None
+    lines = [line.strip() for line in failure_text_lines(f"{output.get('stdout') or ''}\n{output.get('stderr') or ''}")]
+    errors = [line for line in lines if line.lower().startswith("error")]
+    return (errors or lines or [None])[0]
 
 
 class AgenticHILToolService:
