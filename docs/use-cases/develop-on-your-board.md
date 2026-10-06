@@ -55,6 +55,19 @@ found, manual setup and the checksummed installer route. The
 has the setup fallback path. [Configuration](../configuration.md) explains
 how to bind a bench that automatic discovery cannot resolve.
 
+## Share your own-board result
+
+Try one observable check in your existing firmware project, then share a
+[first run report](https://github.com/agentic-hil/agentic-hil/issues/new?template=first-run.yml).
+A green run, a failing check, or a stop during installation or setup is welcome.
+Name your coding agent, board with its probe/backend, host OS and version, and
+how you flashed firmware before. Optionally describe the last real firmware bug
+you wanted the agent to investigate.
+
+If the run produced a report, the form explains how to prepare an evidence
+bundle. Review it and remove secrets and private paths before attaching it or
+linking it. If no report was produced, say where setup stopped instead.
+
 ## Check your probe and backend
 
 Support depends on the debug probe, backend and configured target, rather

@@ -61,6 +61,20 @@ body:
     validations:
       required: true
   - type: textarea
+    id: evidence
+    attributes:
+      label: Reviewed evidence bundle (optional)
+      description: |
+        If a test plan produced a run report, prepare its evidence with
+        `agentic-hil run-evidence --report <run report> --out <directory>`.
+        Attach the bundle or link to it only after reviewing its files and removing
+        secrets, local user names and private paths. Preparation does not upload it.
+        If installation or setup stopped before a report was produced, say so;
+        no evidence bundle is required.
+      placeholder: "Attachment or link, or: no run report produced; setup stopped at ..."
+    validations:
+      required: false
+  - type: textarea
     id: last_real_bug
     attributes:
       label: The last real firmware bug an agent should have caught here
