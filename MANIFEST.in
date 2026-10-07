@@ -69,6 +69,10 @@ exclude tests/test_install_scripts.py
 exclude tests/test_process_table_grouping.py
 # This test reads a workflow and imports the repository-only capture utility.
 exclude tests/test_macos_installer_recording.py
+# The build of the old documentation address is `tools/readthedocs_moved.py`,
+# and its test imports it and reads `.readthedocs.yaml`, `mkdocs.yml` and
+# docs/release-strategy.md, none of which ships.
+exclude tests/test_readthedocs_moved.py
 recursive-include examples *.py *.md *.yaml *.yml
 # The firmware demo is repository content, not package content.
 prune examples/nucleo-f446re_demo

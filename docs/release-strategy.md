@@ -46,6 +46,38 @@ Naming is part of the release contract: the Python distribution/install target, 
 
 Later packaging candidates are Homebrew, Scoop or WinGet, and conda-forge; add them only when they are reproducible and built by CI.
 
+## The Documentation Site
+
+The documentation is `docs/` and `mkdocs.yml`. It is published at <https://agentic-hil.github.io/docs/> by the workflow of the [agentic-hil.github.io](https://github.com/agentic-hil/agentic-hil.github.io) repository, which builds `master` with that address as `site_url`, so every page names its address there as canonical.
+
+It was first published at `https://agentic-hil.readthedocs.io/`. Read the Docs keeps serving the last build of every active version for as long as the project exists, so the project stays, and every page it served points at the page that replaced it:
+
+| Old page, below `/en/latest/` and `/en/stable/` | Current page |
+| --- | --- |
+| `/` | <https://agentic-hil.github.io/docs/> |
+| `/installation/` | <https://agentic-hil.github.io/docs/installation/> |
+| `/configuration/` | <https://agentic-hil.github.io/docs/configuration/> |
+| `/mcp-hosts/` | <https://agentic-hil.github.io/docs/mcp-hosts/> |
+| `/mcp-tools/` | <https://agentic-hil.github.io/docs/mcp-tools/> |
+| `/testing/` | <https://agentic-hil.github.io/docs/testing/> |
+| `/test-plan-contract/` | <https://agentic-hil.github.io/docs/test-plan-contract/> |
+| `/safety-model/` | <https://agentic-hil.github.io/docs/safety-model/> |
+| `/security-design/` | <https://agentic-hil.github.io/docs/security-design/> |
+| `/can-service-design/` | <https://agentic-hil.github.io/docs/can-service-design/> |
+| `/github-action-design/` | <https://agentic-hil.github.io/docs/github-action-design/> |
+| `/release-strategy/` | <https://agentic-hil.github.io/docs/release-strategy/> |
+| `/repository-security/` | <https://agentic-hil.github.io/docs/repository-security/> |
+
+Each old page kept its source file, its title and every heading anchor, so each maps to the page of the same name and a link with a fragment still lands on its section. The same paths without the language and version, which the old pages named as canonical, map the same way. An address the old site never served has no counterpart: nothing sends it to the home page.
+
+One redirect rule in the Read the Docs project settings carries the table, with a permanent HTTP redirect. It lives in the dashboard, not in this source tree: type Page Redirect, From URL `/*`, To URL `https://agentic-hil.github.io/docs/:splat`, HTTP status 301, Force Redirect on. A page redirect matches the path below the language and version, so the one rule covers `latest`, `stable` and the unversioned paths, and Force Redirect applies it to pages a build still holds ([Read the Docs: redirects](https://docs.readthedocs.com/platform/stable/user-defined-redirects.html)). An address with no page sent there gets the 404 of the new site.
+
+Read the Docs builds no copy of the documentation any more. `.readthedocs.yaml` runs `tools/readthedocs_moved.py` instead of MkDocs, which writes a notice at every old path of `latest`: the current page as canonical, a zero-second meta refresh, which Google Search treats as a permanent redirect ([Google Search Central: redirects](https://developers.google.com/search/docs/crawling-indexing/301-redirects)), a script that keeps the fragment, and the link. That is what `latest` shows wherever the rule is not forced, and its 404 page links the new site without redirecting. `tests/test_readthedocs_moved.py` holds every target to a page of the `mkdocs.yml` navigation and this table to the script's. A change to the table reaches the old address the next time `latest` is built there.
+
+A notice is served with status 200, so a client that follows neither a meta refresh nor a script sees the notice and its link; only the rule answers with a redirect status. Read the Docs answers `/` and `/en/` itself with a temporary redirect to the default version before any rule of the project applies, so those two take one 302 before the permanent redirect. `/robots.txt` and `/sitemap.xml` are served for the whole domain and are not redirected; the moved-notice build has neither, so Read the Docs generates both.
+
+No versioned documentation is kept. Read the Docs only ever built `latest`, from the default branch, and `stable`, its automatic alias of the newest tag it had seen (v0.11.0); no tag version was activated. Neither was history chosen for publication, and both named the old host as canonical, so both point at the current pages. Deactivate `stable` rather than build it: a build of `latest` moves `stable` to the newest tag and builds it while it is active, and a tag cut before the moved-notice build carries a `.readthedocs.yaml` that builds its full site. The changes between releases are in `CHANGELOG.md` and on the GitHub Releases page.
+
 ## Verifying the CI example pin after publication
 
 The shipped CI examples pin `AGENTIC_HIL_VERSION` to the newest published release. `tests/test_ci_examples.py` proves that the pin equals the newest release `CHANGELOG.md` dates and that the examples invoke only commands a committed recording of that release's command surface defines, `tests/fixtures/published_cli_surface.json`. Between releases that recording is taken from the distribution the index serves, with `python tools/record_cli_surface.py`. A release commit moves the pin to the release being cut, which the index does not carry yet, so the release stamp records the surface again from the stamped tree with `--from-tree`. That is everything a pull request can establish: it has no network, so on a release commit the recording of the tree stands in for the artifact.

@@ -4,6 +4,16 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
+## [Unreleased]
+
+### Changed
+
+- The Develop on your board page (`docs/use-cases/develop-on-your-board.md`) now walks through one recorded run on a real board in order: the task, the failing report, the one-line firmware fix and the rerun in which all three plans passed. Three excerpts of the 2026-09-15 starter record are shown as images, every report is linked, the versions the record used are named, the errors on the way are kept apart from the planted defect, and the page leads on to installation, your own first run and how to share its result. The `llms.txt` entry describes the walkthrough.
+
+### Fixed
+
+- The Read the Docs build of the old documentation address, `https://agentic-hil.readthedocs.io/`, no longer builds a second copy of the documentation whose pages name that address as canonical. It writes a notice at every path the old site served instead: each names the matching page under `https://agentic-hil.github.io/docs/` as canonical, sends the browser there with the fragment kept, and links it, and an address the old site never served gets a 404 page that links the new site. `docs/release-strategy.md` maps every old page to its current page and gives the redirect rule that answers the same addresses with a 301.
+
 ## [0.24.0] - 2026-10-06
 
 ### Added
