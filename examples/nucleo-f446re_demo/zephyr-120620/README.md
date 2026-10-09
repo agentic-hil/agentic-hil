@@ -258,6 +258,18 @@ arm-none-eabi-strip --strip-all -o firmware/pr-180.elf build/pr-180/zephyr/zephy
 `clock-168.overlay`, the base checkout and `-DZ120620_ZEPHYR=9f0253dcc66c`.
 Byte-for-byte reproducibility of a rebuild has not been checked.
 
+## How this was made
+
+This validation is part of the Agentic HIL project's upstream work, and we
+maintain Agentic HIL. An AI coding agent wrote the validation firmware, the
+plans, the workflow steps, this README and the report on the pull request, and
+built the images. Agentic HIL carried out every step on the board: it flashed
+each image, reset the board and judged the firmware's answers on the serial
+port against the plans, and no step reached the board any other way. Before the
+report was posted, a maintainer checked that the run passed and that the
+report's register rows match the results above. No person has reviewed the
+firmware, the plans or the analysis beyond that.
+
 ## Licensing
 
 The test firmware sources and the plans are Apache-2.0, like this repository.
