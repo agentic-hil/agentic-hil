@@ -34,6 +34,8 @@
 #define EDGE_TIMEOUT_CYCLES  2000000U
 #define VREFINT_SAMPLES      16U
 #define RTC_ALARM_EXTI_LINE  17U
+/* IPSR while the RTC alarm interrupt runs: its IRQ number plus 16 */
+#define RTC_ALARM_EXCEPTION  ((uint32_t)RTC_Alarm_IRQn + 16U)
 
 /* IWDG on LSI (about 32 kHz): prescaler /64, reload 3000, about 6 s. */
 #define IWDG_PR_DIV64 4U
@@ -66,15 +68,21 @@ struct stop_cycle {
 	uint32_t entry_rtc_cr;
 	uint32_t entry_rtc_alarm_nvic;
 	uint32_t entry_dbgmcu_cr;
-	/* RTC alarm interrupt, seen through stm32_exti_clear_pending(17) */
-	uint32_t rtc_irqs;
-	uint32_t irq_exti_pr;
-	uint32_t irq_rcc_cfgr;
-	/* stm32_clock_control_init() called from pm_state_exit_post_ops() */
+	/* stm32_clock_control_init() called from pm_state_exit_post_ops(), inside
+	 * the RTC alarm interrupt and before the alarm's handler
+	 */
 	uint32_t restores;
+	uint32_t restore_ipsr;
+	uint32_t restore_exti_pr;
+	uint32_t restore_rtc_irqs; /* alarm handlers run since the Stop entry */
 	int restore_ret;
 	struct clock_regs exit;  /* as Stop mode left them, before the restore */
 	struct clock_regs after; /* right after the restore */
+	/* the RTC alarm handler, seen through stm32_exti_clear_pending(17) */
+	uint32_t rtc_irqs;
+	uint32_t irq_restores; /* restores run since the Stop entry */
+	uint32_t irq_exti_pr;
+	uint32_t irq_rcc_cfgr;
 	/* main thread, once it runs again */
 	struct clock_regs main;
 	struct clock_sample clock;
@@ -83,7 +91,9 @@ struct stop_cycle {
 /* Index 0 collects anything that happens outside the Stop cycles. */
 static struct stop_cycle cycles[STOP_CYCLES + 1U];
 static volatile uint32_t cycle_index;
-static volatile bool rtc_irq_since_entry;
+/* Since the last Stop entry */
+static volatile uint32_t restores_since_entry;
+static volatile uint32_t rtc_irqs_since_entry;
 
 /* Over every Stop exit since boot */
 static uint32_t entries_total;
@@ -94,12 +104,13 @@ static uint32_t exit_od_or;
 static uint32_t after_od_and = 0xFU;
 static uint32_t after_od_or;
 static bool every_exit_on_hsi = true;
-static bool every_exit_after_rtc_irq = true;
+static bool every_restore_in_alarm_irq = true;
 static bool every_after_on_pll = true;
-/* Over every Stop entry and every RTC alarm interrupt since boot */
+/* Over every RTC alarm handler since boot */
+static bool every_alarm_handler_after_restore = true;
+/* Over every Stop entry since boot */
 static bool every_entry_wake_rtc_alarm_only = true;
 static bool every_entry_debug_stop_off = true;
-static bool every_rtc_irq_pr17_on_hsi = true;
 
 static struct clock_regs boot_regs;
 static struct clock_sample boot_clock;
@@ -185,6 +196,12 @@ static void print_regs(const struct clock_regs *r)
 
 /* Linked with --wrap: only pm_state_exit_post_ops() reaches this, the boot
  * time call is made from inside the clock driver's own translation unit.
+ *
+ * STM32F4 selects PM_STATE_SET_IRQ_UNLOCKED, so _kernel.idle is still set
+ * while pm_state_set() sleeps, and k_cpu_idle() unmasks interrupts as soon as
+ * the core is awake. The RTC alarm that woke it is taken at once, and
+ * _isr_wrapper() calls pm_system_resume(), and with it this restore, before
+ * the alarm's own handler: the restore runs inside that interrupt, on HSI.
  */
 int __real_stm32_clock_control_init(const struct device *dev);
 int __wrap_stm32_clock_control_init(const struct device *dev);
@@ -192,6 +209,8 @@ int __wrap_stm32_clock_control_init(const struct device *dev);
 int __wrap_stm32_clock_control_init(const struct device *dev)
 {
 	struct stop_cycle *c = &cycles[cycle_index];
+	uint32_t ipsr = __get_IPSR();
+	uint32_t exti_pr = EXTI->PR;
 	struct clock_regs exit;
 	int ret;
 
@@ -201,7 +220,11 @@ int __wrap_stm32_clock_control_init(const struct device *dev)
 
 	c->exit = exit;
 	c->restores++;
+	c->restore_ipsr = ipsr;
+	c->restore_exti_pr = exti_pr;
+	c->restore_rtc_irqs = rtc_irqs_since_entry;
 	c->restore_ret = ret;
+	restores_since_entry++;
 
 	exits_total++;
 	exit_od_or |= od_bits(&exit);
@@ -210,8 +233,9 @@ int __wrap_stm32_clock_control_init(const struct device *dev)
 	if (sws(&exit) != SWS_HSI || bit(exit.rcc_cr, RCC_CR_PLLRDY) != 0U) {
 		every_exit_on_hsi = false;
 	}
-	if (!rtc_irq_since_entry) {
-		every_exit_after_rtc_irq = false;
+	if (ipsr != RTC_ALARM_EXCEPTION || bit(exti_pr, BIT(RTC_ALARM_EXTI_LINE)) == 0U ||
+	    c->restore_rtc_irqs != 0U) {
+		every_restore_in_alarm_irq = false;
 	}
 	if (ret != 0 || sws(&c->after) != SWS_PLL || bit(c->after.rcc_cr, RCC_CR_PLLRDY) == 0U) {
 		every_after_on_pll = false;
@@ -219,8 +243,8 @@ int __wrap_stm32_clock_control_init(const struct device *dev)
 	return ret;
 }
 
-/* Called by the RTC alarm interrupt, which runs right after the wake-up and
- * before the clock restore, while the core is still on HSI.
+/* Called by the RTC alarm's handler, which runs after the restore, inside the
+ * same interrupt, with the core back on the PLL.
  */
 int __real_stm32_exti_clear_pending(uint32_t line_num);
 int __wrap_stm32_exti_clear_pending(uint32_t line_num);
@@ -232,12 +256,13 @@ int __wrap_stm32_exti_clear_pending(uint32_t line_num)
 
 		c->irq_exti_pr = EXTI->PR;
 		c->irq_rcc_cfgr = RCC->CFGR;
+		c->irq_restores = restores_since_entry;
 		c->rtc_irqs++;
 		rtc_irqs_total++;
-		rtc_irq_since_entry = true;
-		if (bit(c->irq_exti_pr, BIT(RTC_ALARM_EXTI_LINE)) == 0U ||
-		    field(c->irq_rcc_cfgr, RCC_CFGR_SWS, RCC_CFGR_SWS_Pos) != SWS_HSI) {
-			every_rtc_irq_pr17_on_hsi = false;
+		rtc_irqs_since_entry++;
+		if (bit(c->irq_exti_pr, BIT(RTC_ALARM_EXTI_LINE)) == 0U || c->irq_restores != 1U ||
+		    field(c->irq_rcc_cfgr, RCC_CFGR_SWS, RCC_CFGR_SWS_Pos) != SWS_PLL) {
+			every_alarm_handler_after_restore = false;
 		}
 	}
 	return __real_stm32_exti_clear_pending(line_num);
@@ -258,7 +283,8 @@ static void on_state_entry(enum pm_state state)
 	c->entry_rtc_cr = RTC->CR;
 	c->entry_rtc_alarm_nvic = NVIC_GetEnableIRQ(RTC_Alarm_IRQn) != 0U ? 1U : 0U;
 	c->entry_dbgmcu_cr = DBGMCU->CR;
-	rtc_irq_since_entry = false;
+	restores_since_entry = 0U;
+	rtc_irqs_since_entry = 0U;
 
 	/* Stop mode wakes on EXTI lines only: line 17 alone, with alarm A armed. */
 	if (c->entry_exti_imr != BIT(RTC_ALARM_EXTI_LINE) || c->entry_exti_emr != 0U ||
@@ -485,14 +511,16 @@ static void answer_cycle(uint32_t k)
 
 	printk("Z120620 cycle=%u entries=%u restores=%u rtc_irqs=%u entry_exti_imr=0x%08x "
 	       "entry_exti_emr=0x%08x entry_alarm_a=%u entry_rtc_alarm_nvic=%u "
-	       "entry_dbgmcu=0x%08x irq_exti_pr17=%u irq_SWS=%u restore_ret=%d main_od=0x%x "
+	       "entry_dbgmcu=0x%08x restore_ipsr=%u restore_exti_pr17=%u restore_rtc_irqs=%u "
+	       "restore_ret=%d irq_restores=%u irq_exti_pr17=%u irq_SWS=%u main_od=0x%x "
 	       "main_SWS=%u end\n",
 	       k, c->entries, c->restores, c->rtc_irqs, c->entry_exti_imr, c->entry_exti_emr,
 	       bit(c->entry_rtc_cr, RTC_CR_ALRAE) & bit(c->entry_rtc_cr, RTC_CR_ALRAIE),
-	       c->entry_rtc_alarm_nvic, c->entry_dbgmcu_cr,
-	       bit(c->irq_exti_pr, BIT(RTC_ALARM_EXTI_LINE)),
-	       field(c->irq_rcc_cfgr, RCC_CFGR_SWS, RCC_CFGR_SWS_Pos), c->restore_ret,
-	       od_bits(&c->main), sws(&c->main));
+	       c->entry_rtc_alarm_nvic, c->entry_dbgmcu_cr, c->restore_ipsr,
+	       bit(c->restore_exti_pr, BIT(RTC_ALARM_EXTI_LINE)), c->restore_rtc_irqs,
+	       c->restore_ret, c->irq_restores, bit(c->irq_exti_pr, BIT(RTC_ALARM_EXTI_LINE)),
+	       field(c->irq_rcc_cfgr, RCC_CFGR_SWS, RCC_CFGR_SWS_Pos), od_bits(&c->main),
+	       sws(&c->main));
 }
 
 static void answer_regs(const char *kind, uint32_t k, const struct clock_regs *r)
@@ -538,16 +566,17 @@ static void answer(const char *line)
 	} else if (strcmp(line, "done") == 0) {
 		printk("Z120620 done variant=%s cycles=%u entries=%u exits=%u rtc_irqs=%u "
 		       "other_entries=%u outside_cycles=%u exit_od_or=0x%x after_od_and=0x%x "
-		       "after_od_or=0x%x every_exit_on_hsi=%u every_exit_after_rtc_irq=%u "
-		       "every_after_on_pll=%u every_entry_wake_rtc_alarm_only=%u "
-		       "every_entry_debug_stop_off=%u every_rtc_irq_pr17_on_hsi=%u watchdog=%s end\n",
+		       "after_od_or=0x%x every_entry_wake_rtc_alarm_only=%u "
+		       "every_entry_debug_stop_off=%u every_exit_on_hsi=%u "
+		       "every_restore_in_alarm_irq=%u every_after_on_pll=%u "
+		       "every_alarm_handler_after_restore=%u watchdog=%s end\n",
 		       Z120620_VARIANT, cycles_done, entries_total, exits_total, rtc_irqs_total,
 		       other_entries, cycles[0].entries + cycles[0].restores + cycles[0].rtc_irqs,
-		       exit_od_or, after_od_and, after_od_or, every_exit_on_hsi ? 1U : 0U,
-		       every_exit_after_rtc_irq ? 1U : 0U, every_after_on_pll ? 1U : 0U,
+		       exit_od_or, after_od_and, after_od_or,
 		       every_entry_wake_rtc_alarm_only ? 1U : 0U,
-		       every_entry_debug_stop_off ? 1U : 0U, every_rtc_irq_pr17_on_hsi ? 1U : 0U,
-		       watchdog_running ? "on" : "off");
+		       every_entry_debug_stop_off ? 1U : 0U, every_exit_on_hsi ? 1U : 0U,
+		       every_restore_in_alarm_irq ? 1U : 0U, every_after_on_pll ? 1U : 0U,
+		       every_alarm_handler_after_restore ? 1U : 0U, watchdog_running ? "on" : "off");
 	} else {
 		printk("Z120620 unknown end\n");
 	}

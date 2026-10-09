@@ -26,6 +26,8 @@ CYCLES_WORD = "six"
 # Bounds for the clocks counted against the LSE crystal, either side of nominal.
 PPM = 500
 READ_TIMEOUT_S = 5
+# IPSR inside the RTC alarm interrupt: RTC_Alarm_IRQn, 41 on the F446, plus 16.
+RTC_ALARM_EXCEPTION = 57
 # The firmware says `ready` about sixteen seconds after the reset.
 READY_TIMEOUT_S = 60
 # VDDA bounds, in millivolts: the supply range five flash wait states assume.
@@ -125,16 +127,18 @@ def plan(variant: str) -> list[Any]:
         judged += request(f"after {k}", f"Z120620 after={k} {running} end")
     judged.append(
         "each cycle: entered Stop mode with RTC alarm A as the only wake-up source and "
-        "the debug Stop clock off, woken by that alarm while still on HSI, restored "
-        "without an error, and the main thread back on the PLL"
+        "the debug Stop clock off; restored without an error inside that alarm's "
+        "interrupt, with line 17 pending and before the alarm's handler; the handler "
+        "after that one restore, on the PLL; and the main thread back on the PLL"
     )
     for k in ks:
         judged += request(
             f"cycle {k}",
             rf"Z120620 cycle={k} entries=([1-9]) restores=\1 rtc_irqs=\1 entry_exti_imr=0x00020000 "
             r"entry_exti_emr=0x00000000 entry_alarm_a=1 entry_rtc_alarm_nvic=1 "
-            r"entry_dbgmcu=0x[0-9a-f]{7}[0189] irq_exti_pr17=1 irq_SWS=0 restore_ret=0 "
-            rf"main_od={od_hex} main_SWS=2 end",
+            rf"entry_dbgmcu=0x[0-9a-f]{{7}}[0189] restore_ipsr={RTC_ALARM_EXCEPTION} "
+            r"restore_exti_pr17=1 restore_rtc_irqs=0 restore_ret=0 irq_restores=1 "
+            rf"irq_exti_pr17=1 irq_SWS=2 main_od={od_hex} main_SWS=2 end",
         )
     judged.append("the state each Stop exit left, before the clock driver ran: ODEN and ODSWEN cleared, HSI, PLL off")
     for k in ks:
@@ -144,9 +148,9 @@ def plan(variant: str) -> list[Any]:
         "done",
         rf"Z120620 done variant={variant} cycles={CYCLES} entries=([6-9]|[1-9][0-9]+) exits=\1 "
         r"rtc_irqs=\1 other_entries=0 outside_cycles=0 exit_od_or=0x[048c] "
-        rf"after_od_and={od_hex} after_od_or={od_hex} every_exit_on_hsi=1 "
-        r"every_exit_after_rtc_irq=1 every_after_on_pll=1 every_entry_wake_rtc_alarm_only=1 "
-        r"every_entry_debug_stop_off=1 every_rtc_irq_pr17_on_hsi=1 watchdog=on end",
+        rf"after_od_and={od_hex} after_od_or={od_hex} every_entry_wake_rtc_alarm_only=1 "
+        r"every_entry_debug_stop_off=1 every_exit_on_hsi=1 every_restore_in_alarm_irq=1 "
+        r"every_after_on_pll=1 every_alarm_handler_after_restore=1 watchdog=on end",
     )
     judged.append("VDDA, from the internal reference and its factory calibration")
     judged += request(
@@ -298,8 +302,9 @@ def header(variant: str) -> list[str]:
         f"HSE bypass at M 4, N {mhz}, P 2, five flash wait states, AHB /1, APB1 /4 and "
         "APB2 /2. At every Stop exit, before the clock driver runs, ODEN and ODSWEN "
         "are clear and the core runs on HSI with the PLL off. Every Stop entry has "
-        "RTC alarm A armed as the only wake-up source and the debug Stop clock off, "
-        "and every exit follows that alarm's interrupt. VDDA is between 2.7 and 3.6 V. "
+        "RTC alarm A armed as the only wake-up source and the debug Stop clock off. "
+        "Every restore runs inside that alarm's interrupt, before the alarm's handler, "
+        "which then finds the core on the PLL. VDDA is between 2.7 and 3.6 V. "
         f"The core clock is within {PPM} ppm of {mhz} MHz and TIM5 within {PPM} ppm of "
         f"{mhz // 2} MHz, after boot and after every cycle, both counted against the "
         "board's 32.768 kHz LSE crystal: a second crystal on the same board, not an "

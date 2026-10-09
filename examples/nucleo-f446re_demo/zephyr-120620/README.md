@@ -91,9 +91,21 @@ registers and calls the real function:
 - `stm32_clock_control_init()`: only the call from `pm_state_exit_post_ops()`
   reaches the wrapper, since the boot-time call is made inside the driver's own
   translation unit. It records the registers as Stop mode left them and right
-  after the restore.
-- `stm32_exti_clear_pending()`: called by the RTC alarm interrupt, which runs
-  after the wake-up and before the restore, while the core is still on HSI.
+  after the restore, the exception it runs in (`IPSR`), whether EXTI line 17 is
+  still pending, and how many RTC alarm handlers ran since the Stop entry.
+- `stm32_exti_clear_pending()`: called by the RTC alarm's handler for EXTI
+  line 17. It records whether the line is pending, the system clock source and
+  how many restores ran since the Stop entry.
+
+The order of the two is Zephyr's. STM32F4 selects
+`CONFIG_PM_STATE_SET_IRQ_UNLOCKED`, so `_kernel.idle` is still set while
+`pm_state_set()` sleeps, and `k_cpu_idle()` unmasks interrupts as soon as the
+core is awake. The RTC alarm interrupt that woke it is taken at once, and
+`_isr_wrapper()` calls `pm_system_resume()` before the alarm's handler: the
+restore runs inside that interrupt, on HSI, and the handler after it, on the
+PLL. The plans judge that order at every exit: the restore with `IPSR` 57
+(`RTC_Alarm_IRQn` 41 plus 16), line 17 pending and no handler run yet, and the
+handler with line 17 pending, one restore run and the PLL as system clock.
 
 A `pm_notifier` records the wake-up configuration at each Stop entry, and the
 main thread records the registers again once it runs. The registers recorded
@@ -109,7 +121,7 @@ port, 115200 baud), so a plan reads every value without racing the output:
 |---|---|
 | `hello` | variant, Zephyr commit, devicetree SYSCLK, reset flags, DBGMCU at `main()`, LSE state |
 | `boot` | registers at the start of `main()`, after the clock driver configured the clocks |
-| `cycle k` | Stop entry checks, the RTC alarm interrupt, the restore's return value and the main thread's state for cycle `k` |
+| `cycle k` | Stop entry checks, the exception the restore ran in and its return value, the RTC alarm handler after it, and the main thread's state for cycle `k` |
 | `exit k` | registers as Stop exit `k` left them, before the driver ran |
 | `after k` | registers right after the driver restored the clocks at exit `k` |
 | `done` | totals and every-cycle checks since boot |
