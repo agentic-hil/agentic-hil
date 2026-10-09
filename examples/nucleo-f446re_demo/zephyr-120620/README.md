@@ -145,6 +145,55 @@ The plans judge two separate things, and a report keeps them separate:
   it is a second crystal on the same board, not an independent instrument. No
   external frequency measurement was made.
 
+## Results
+
+[Run 37982035259](https://github.com/agentic-hil/agentic-hil/actions/runs/37982035259)
+of this branch's workflow, on commit `577b338f`, passed all three plans on the
+Agentic HIL project's NUCLEO-F446RE, with Agentic HIL 0.21.4 and the bench
+configuration `sha256:9e0b4615276e15b64107b9a0e09044c5c202265bbe5e337424c9b915ae67652c`.
+Its evidence is in [results/run-37982035259/](results/run-37982035259/), as the
+run uploaded it (artifact `zephyr-120620-f446re-evidence`,
+`sha256:8f62ddc966677f2817cb5cb5a9371f297f6f98fb606efe970f31599fb619609c`), with
+the probe's serial number and the machine's names withheld:
+`reports/<image>.json` is the plan's report, every step with what the board
+answered, and `evidence/<image>/` holds the `run-evidence` summary and the
+OpenOCD and serial logs the report names. `demo` is the demo firmware put back
+afterwards.
+
+**Registers**, as the firmware read them back:
+
+| | `pr-180` | `pr-168` | `base-168` |
+|---|---|---|---|
+| ODEN, ODSWEN, ODRDY, ODSWRDY at boot | 1, 1, 1, 1 | 0, 0, 0, 0 | 0, 0, 0, 0 |
+| The same right after each of the six restores | 1, 1, 1, 1 | 0, 0, 0, 0 | 0, 0, 0, 0 |
+| ODEN, ODSWEN as each Stop exit left them | 0, 0 | 0, 0 | 0, 0 |
+| VOS, VOSRDY with the PLL running | 3, 1 | 3, 1 | 3, 1 |
+| PLL N, system clock | 180, PLL | 168, PLL | 168, PLL |
+| `FLASH_ACR.LATENCY` | 5 | 5 | 5 |
+| APB1, APB2 prescaler | /4, /2 | /4, /2 | /4, /2 |
+| Stop entries, exits, RTC alarm wake-ups | 6, 6, 6 | 6, 6, 6 | 6, 6, 6 |
+
+In every image, each exit left the core on HSI with the PLL off, and the
+restore returned 0 inside the RTC alarm interrupt (`IPSR` 57) with EXTI line 17
+pending; the alarm's handler ran after it with the PLL as system clock. At
+every entry line 17 was the only EXTI line unmasked, no event line was, and
+`DBG_STOP` was off. VDDA measured 3322 to 3324 mV, and no watchdog reset
+occurred.
+
+**Frequency**, counted against the LSE crystal: the core clock and TIM5 lay
+within 500 ppm of nominal after boot and after every cycle, in all three
+images. Every reading lies 32 to 36 ppm below nominal, for both PLL settings
+alike, which is the difference between the board's two crystals and says no
+more than that. No external frequency measurement was made.
+
+A first run,
+[37979331198](https://github.com/agentic-hil/agentic-hil/actions/runs/37979331198)
+on commit `06c707fe`, failed every image at the first cycle the plans judged.
+That firmware expected the RTC alarm handler to run before the restore, on HSI,
+and found it on the PLL: the expectation was the test firmware's mistake, not
+the pull request's (see above). Its register readings at boot, at every exit
+and after every restore are identical to this run's.
+
 ## The test plans
 
 [plans/generate.py](plans/generate.py) writes all three plans from one

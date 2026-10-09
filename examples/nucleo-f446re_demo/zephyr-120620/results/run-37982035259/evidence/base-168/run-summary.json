@@ -1,0 +1,37 @@
+{
+  "outcome": "success",
+  "plan": {
+    "name": "zephyr-120620-base-168",
+    "path": "zephyr-120620/plans/base-168.testconfig.yaml",
+    "sha256": "d141aaf7236f0d6c847f30bc2e77762278fa58ac9c191b08ca31516d20a8be6b"
+  },
+  "firmware": {
+    "repository": "agentic-hil/agentic-hil",
+    "commit": "577b338f3adfb0335f4490d44d0eed2b06c03d63",
+    "ref": "refs/heads/bench/zephyr-120620-f446re"
+  },
+  "tools": {
+    "agentic_hil": "0.21.4",
+    "python": "3.12.3"
+  },
+  "bench": {
+    "config_digest": "sha256:9e0b4615276e15b64107b9a0e09044c5c202265bbe5e337424c9b915ae67652c",
+    "digest_algorithm": "sha256",
+    "diverged_from_file": false,
+    "runner": {
+      "name": "[withheld]"
+    },
+    "devices": {
+      "debuggers": [
+        "dut"
+      ],
+      "com_ports": [
+        "dut_uart"
+      ]
+    }
+  },
+  "run": {
+    "cleanup_ok": true,
+    "audit_ok": true
+  }
+}

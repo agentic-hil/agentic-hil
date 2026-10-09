@@ -1,0 +1,4 @@
+{"event": "start", "port_id": "dut_uart", "device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_[withheld]-if02", "time": "2026-10-09T19:43:56.362Z"}
+{"direction": "rx", "bytes": 1, "hex": "48", "text": "H", "time": "2026-10-09T19:43:56.635Z"}
+{"direction": "rx", "bytes": 11, "hex": "656c6c6f20576f726c640a", "text": "ello World\n", "time": "2026-10-09T19:43:56.640Z"}
+{"event": "stop", "reason": "requested", "time": "2026-10-09T19:43:56.801Z"}
