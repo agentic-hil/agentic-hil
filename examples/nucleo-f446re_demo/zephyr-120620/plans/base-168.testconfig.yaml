@@ -1,0 +1,556 @@
+# zephyrproject-rtos/zephyr#120620 on a NUCLEO-F446RE: the pull request's base at 168 MHz,
+# without the change (control).
+#
+# Written by generate.py beside this file, which describes all three plans; change that and run
+# it again rather than editing this file.
+#
+# The image boots at the clock configuration of its overlay and records the over-drive,
+# regulator and clock tree state. It then enters Stop mode six times, woken each time by the RTC
+# alarm, and records the same state when the core leaves Stop mode, right after the clock driver
+# restored the clocks, and once the main thread runs again. Then it says `ready` and answers one
+# line per request; Stop mode stays locked from there on.
+#
+# Every value is asked for twice. The first block puts every answer on record with a lenient
+# pattern, so the report quotes what the board said whatever the second block then finds. The
+# second block judges the same answers against what this image must show and stops at the first
+# that does not. The format caps a list of steps at 128, so each pass is a `repeat` block that
+# runs once: nothing is reset or run again between them.
+#
+# What this image must show: after boot and after every Stop exit, over-drive off (all four bits
+# 0), regulator Scale 1 (VOS 3, VOSRDY 1), the PLL as system clock from the 8 MHz HSE bypass at
+# M 4, N 168, P 2, five flash wait states, AHB /1, APB1 /4 and APB2 /2. At every Stop exit,
+# before the clock driver runs, ODEN and ODSWEN are clear and the core runs on HSI with the PLL
+# off. Every Stop entry has RTC alarm A armed as the only wake-up source and the debug Stop
+# clock off, and every exit follows that alarm's interrupt. VDDA is between 2.7 and 3.6 V. The
+# core clock is within 500 ppm of 168 MHz and TIM5 within 500 ppm of 84 MHz, after boot and
+# after every cycle, both counted against the board's 32.768 kHz LSE crystal: a second crystal
+# on the same board, not an independent instrument.
+#
+# The change only acts above 168 MHz, and at 168 MHz the pull request's image and its base's run
+# the same instructions: they differ only in the variant and commit strings they report, and the
+# longer variant name moves the constants after it by two bytes.
+version: 4
+name: zephyr-120620-base-168
+steps:
+  # Flashed without a reset, so the port is open before the image starts.
+  - device: dut
+    action: flash
+    image_path: build/zephyr-120620/base-168.elf
+    reset_after_flash: false
+  # The cleared buffer makes every answer below one from this boot.
+  - device: dut_uart
+    action: uart_open
+    clear_buffer: true
+  - device: dut
+    action: reset
+    mode: run
+  # Five seconds after the reset the image starts its Stop cycles, 1.5 s asleep each, and says
+  # `ready` once they are done. An image the watchdog reset skips them and says `cycles=0
+  # iwdg_reset=1`, which fails here.
+  - device: dut_uart
+    action: uart_read
+    timeout_s: 60
+    comparator:
+      pattern: 'Z120620 ready variant=base-168 cycles=6 iwdg_reset=0 end'
+  # Block 1, on record: every answer once, with any one whole line accepted.
+  - action: repeat
+    count: 1
+    steps:
+      # hello, boot, supply, and the clocks measured after boot
+      - {device: dut_uart, action: uart_write, text: "hello\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 hello [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "boot\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 boot [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "supply\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 supply [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "clock 0\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=0 [^\r\n]* end'
+      # Stop cycle 1
+      - {device: dut_uart, action: uart_write, text: "cycle 1\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 cycle=1 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "exit 1\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 exit=1 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "after 1\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 after=1 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "clock 1\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=1 [^\r\n]* end'
+      # Stop cycle 2
+      - {device: dut_uart, action: uart_write, text: "cycle 2\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 cycle=2 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "exit 2\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 exit=2 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "after 2\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 after=2 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "clock 2\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=2 [^\r\n]* end'
+      # Stop cycle 3
+      - {device: dut_uart, action: uart_write, text: "cycle 3\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 cycle=3 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "exit 3\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 exit=3 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "after 3\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 after=3 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "clock 3\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=3 [^\r\n]* end'
+      # Stop cycle 4
+      - {device: dut_uart, action: uart_write, text: "cycle 4\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 cycle=4 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "exit 4\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 exit=4 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "after 4\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 after=4 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "clock 4\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=4 [^\r\n]* end'
+      # Stop cycle 5
+      - {device: dut_uart, action: uart_write, text: "cycle 5\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 cycle=5 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "exit 5\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 exit=5 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "after 5\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 after=5 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "clock 5\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=5 [^\r\n]* end'
+      # Stop cycle 6
+      - {device: dut_uart, action: uart_write, text: "cycle 6\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 cycle=6 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "exit 6\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 exit=6 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "after 6\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 after=6 [^\r\n]* end'
+      - {device: dut_uart, action: uart_write, text: "clock 6\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=6 [^\r\n]* end'
+      # the summary over every Stop entry and exit since boot
+      - {device: dut_uart, action: uart_write, text: "done\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 done [^\r\n]* end'
+  # Block 2, judged: the same answers against what this image must show.
+  - action: repeat
+    count: 1
+    steps:
+      # the image, its build and a clean boot
+      - {device: dut_uart, action: uart_write, text: "hello\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 hello variant=base-168 zephyr=9f0253dcc66c board=nucleo_f446re
+            sysclk_dt_hz=168000000 rcc_csr=0x[0-9a-f]{8} iwdg_reset=0
+            dbgmcu_at_main=0x[0-9a-f]{8} lse=[a-z-]+ end'
+      # the state after boot
+      - {device: dut_uart, action: uart_write, text: "boot\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 boot ODEN=0 ODSWEN=0 ODRDY=0 ODSWRDY=0 VOS=3 VOSRDY=1 SWS=2 PLLRDY=1
+            HSEBYP=1 PLLSRC=1 PLLM=4 PLLN=168 PLLP=2 LATENCY=5 AHB_DIV=1 APB1_DIV=4 APB2_DIV=2
+            PWR_CR=0x[0-9a-f]{8} PWR_CSR=0x[0-9a-f]{8} RCC_CR=0x[0-9a-f]{8}
+            RCC_PLLCFGR=0x[0-9a-f]{8} RCC_CFGR=0x[0-9a-f]{8} FLASH_ACR=0x[0-9a-f]{8} end'
+      # the state right after the clock driver restored the clocks, at each Stop exit
+      - {device: dut_uart, action: uart_write, text: "after 1\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 after=1 ODEN=0 ODSWEN=0 ODRDY=0 ODSWRDY=0 VOS=3 VOSRDY=1 SWS=2
+            PLLRDY=1 HSEBYP=1 PLLSRC=1 PLLM=4 PLLN=168 PLLP=2 LATENCY=5 AHB_DIV=1 APB1_DIV=4
+            APB2_DIV=2 PWR_CR=0x[0-9a-f]{8} PWR_CSR=0x[0-9a-f]{8} RCC_CR=0x[0-9a-f]{8}
+            RCC_PLLCFGR=0x[0-9a-f]{8} RCC_CFGR=0x[0-9a-f]{8} FLASH_ACR=0x[0-9a-f]{8} end'
+      - {device: dut_uart, action: uart_write, text: "after 2\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 after=2 ODEN=0 ODSWEN=0 ODRDY=0 ODSWRDY=0 VOS=3 VOSRDY=1 SWS=2
+            PLLRDY=1 HSEBYP=1 PLLSRC=1 PLLM=4 PLLN=168 PLLP=2 LATENCY=5 AHB_DIV=1 APB1_DIV=4
+            APB2_DIV=2 PWR_CR=0x[0-9a-f]{8} PWR_CSR=0x[0-9a-f]{8} RCC_CR=0x[0-9a-f]{8}
+            RCC_PLLCFGR=0x[0-9a-f]{8} RCC_CFGR=0x[0-9a-f]{8} FLASH_ACR=0x[0-9a-f]{8} end'
+      - {device: dut_uart, action: uart_write, text: "after 3\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 after=3 ODEN=0 ODSWEN=0 ODRDY=0 ODSWRDY=0 VOS=3 VOSRDY=1 SWS=2
+            PLLRDY=1 HSEBYP=1 PLLSRC=1 PLLM=4 PLLN=168 PLLP=2 LATENCY=5 AHB_DIV=1 APB1_DIV=4
+            APB2_DIV=2 PWR_CR=0x[0-9a-f]{8} PWR_CSR=0x[0-9a-f]{8} RCC_CR=0x[0-9a-f]{8}
+            RCC_PLLCFGR=0x[0-9a-f]{8} RCC_CFGR=0x[0-9a-f]{8} FLASH_ACR=0x[0-9a-f]{8} end'
+      - {device: dut_uart, action: uart_write, text: "after 4\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 after=4 ODEN=0 ODSWEN=0 ODRDY=0 ODSWRDY=0 VOS=3 VOSRDY=1 SWS=2
+            PLLRDY=1 HSEBYP=1 PLLSRC=1 PLLM=4 PLLN=168 PLLP=2 LATENCY=5 AHB_DIV=1 APB1_DIV=4
+            APB2_DIV=2 PWR_CR=0x[0-9a-f]{8} PWR_CSR=0x[0-9a-f]{8} RCC_CR=0x[0-9a-f]{8}
+            RCC_PLLCFGR=0x[0-9a-f]{8} RCC_CFGR=0x[0-9a-f]{8} FLASH_ACR=0x[0-9a-f]{8} end'
+      - {device: dut_uart, action: uart_write, text: "after 5\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 after=5 ODEN=0 ODSWEN=0 ODRDY=0 ODSWRDY=0 VOS=3 VOSRDY=1 SWS=2
+            PLLRDY=1 HSEBYP=1 PLLSRC=1 PLLM=4 PLLN=168 PLLP=2 LATENCY=5 AHB_DIV=1 APB1_DIV=4
+            APB2_DIV=2 PWR_CR=0x[0-9a-f]{8} PWR_CSR=0x[0-9a-f]{8} RCC_CR=0x[0-9a-f]{8}
+            RCC_PLLCFGR=0x[0-9a-f]{8} RCC_CFGR=0x[0-9a-f]{8} FLASH_ACR=0x[0-9a-f]{8} end'
+      - {device: dut_uart, action: uart_write, text: "after 6\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 after=6 ODEN=0 ODSWEN=0 ODRDY=0 ODSWRDY=0 VOS=3 VOSRDY=1 SWS=2
+            PLLRDY=1 HSEBYP=1 PLLSRC=1 PLLM=4 PLLN=168 PLLP=2 LATENCY=5 AHB_DIV=1 APB1_DIV=4
+            APB2_DIV=2 PWR_CR=0x[0-9a-f]{8} PWR_CSR=0x[0-9a-f]{8} RCC_CR=0x[0-9a-f]{8}
+            RCC_PLLCFGR=0x[0-9a-f]{8} RCC_CFGR=0x[0-9a-f]{8} FLASH_ACR=0x[0-9a-f]{8} end'
+      # each cycle: entered Stop mode with RTC alarm A as the only wake-up source and the debug
+      # Stop clock off, woken by that alarm while still on HSI, restored without an error, and
+      # the main thread back on the PLL
+      - {device: dut_uart, action: uart_write, text: "cycle 1\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 cycle=1 entries=([1-9]) restores=\1 rtc_irqs=\1
+            entry_exti_imr=0x00020000 entry_exti_emr=0x00000000 entry_alarm_a=1
+            entry_rtc_alarm_nvic=1 entry_dbgmcu=0x[0-9a-f]{7}[0189] irq_exti_pr17=1 irq_SWS=0
+            restore_ret=0 main_od=0x0 main_SWS=2 end'
+      - {device: dut_uart, action: uart_write, text: "cycle 2\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 cycle=2 entries=([1-9]) restores=\1 rtc_irqs=\1
+            entry_exti_imr=0x00020000 entry_exti_emr=0x00000000 entry_alarm_a=1
+            entry_rtc_alarm_nvic=1 entry_dbgmcu=0x[0-9a-f]{7}[0189] irq_exti_pr17=1 irq_SWS=0
+            restore_ret=0 main_od=0x0 main_SWS=2 end'
+      - {device: dut_uart, action: uart_write, text: "cycle 3\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 cycle=3 entries=([1-9]) restores=\1 rtc_irqs=\1
+            entry_exti_imr=0x00020000 entry_exti_emr=0x00000000 entry_alarm_a=1
+            entry_rtc_alarm_nvic=1 entry_dbgmcu=0x[0-9a-f]{7}[0189] irq_exti_pr17=1 irq_SWS=0
+            restore_ret=0 main_od=0x0 main_SWS=2 end'
+      - {device: dut_uart, action: uart_write, text: "cycle 4\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 cycle=4 entries=([1-9]) restores=\1 rtc_irqs=\1
+            entry_exti_imr=0x00020000 entry_exti_emr=0x00000000 entry_alarm_a=1
+            entry_rtc_alarm_nvic=1 entry_dbgmcu=0x[0-9a-f]{7}[0189] irq_exti_pr17=1 irq_SWS=0
+            restore_ret=0 main_od=0x0 main_SWS=2 end'
+      - {device: dut_uart, action: uart_write, text: "cycle 5\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 cycle=5 entries=([1-9]) restores=\1 rtc_irqs=\1
+            entry_exti_imr=0x00020000 entry_exti_emr=0x00000000 entry_alarm_a=1
+            entry_rtc_alarm_nvic=1 entry_dbgmcu=0x[0-9a-f]{7}[0189] irq_exti_pr17=1 irq_SWS=0
+            restore_ret=0 main_od=0x0 main_SWS=2 end'
+      - {device: dut_uart, action: uart_write, text: "cycle 6\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 cycle=6 entries=([1-9]) restores=\1 rtc_irqs=\1
+            entry_exti_imr=0x00020000 entry_exti_emr=0x00000000 entry_alarm_a=1
+            entry_rtc_alarm_nvic=1 entry_dbgmcu=0x[0-9a-f]{7}[0189] irq_exti_pr17=1 irq_SWS=0
+            restore_ret=0 main_od=0x0 main_SWS=2 end'
+      # the state each Stop exit left, before the clock driver ran: ODEN and ODSWEN cleared,
+      # HSI, PLL off
+      - {device: dut_uart, action: uart_write, text: "exit 1\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 exit=1 ODEN=0 ODSWEN=0 ODRDY=[01] ODSWRDY=[01] VOS=\d+ VOSRDY=[01]
+            SWS=0 PLLRDY=0 HSEBYP=[01] PLLSRC=[01] PLLM=\d+ PLLN=\d+ PLLP=\d+ LATENCY=\d+
+            AHB_DIV=\d+ APB1_DIV=\d+ APB2_DIV=\d+ PWR_CR=0x[0-9a-f]{8} PWR_CSR=0x[0-9a-f]{8}
+            RCC_CR=0x[0-9a-f]{8} RCC_PLLCFGR=0x[0-9a-f]{8} RCC_CFGR=0x[0-9a-f]{8}
+            FLASH_ACR=0x[0-9a-f]{8} end'
+      - {device: dut_uart, action: uart_write, text: "exit 2\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 exit=2 ODEN=0 ODSWEN=0 ODRDY=[01] ODSWRDY=[01] VOS=\d+ VOSRDY=[01]
+            SWS=0 PLLRDY=0 HSEBYP=[01] PLLSRC=[01] PLLM=\d+ PLLN=\d+ PLLP=\d+ LATENCY=\d+
+            AHB_DIV=\d+ APB1_DIV=\d+ APB2_DIV=\d+ PWR_CR=0x[0-9a-f]{8} PWR_CSR=0x[0-9a-f]{8}
+            RCC_CR=0x[0-9a-f]{8} RCC_PLLCFGR=0x[0-9a-f]{8} RCC_CFGR=0x[0-9a-f]{8}
+            FLASH_ACR=0x[0-9a-f]{8} end'
+      - {device: dut_uart, action: uart_write, text: "exit 3\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 exit=3 ODEN=0 ODSWEN=0 ODRDY=[01] ODSWRDY=[01] VOS=\d+ VOSRDY=[01]
+            SWS=0 PLLRDY=0 HSEBYP=[01] PLLSRC=[01] PLLM=\d+ PLLN=\d+ PLLP=\d+ LATENCY=\d+
+            AHB_DIV=\d+ APB1_DIV=\d+ APB2_DIV=\d+ PWR_CR=0x[0-9a-f]{8} PWR_CSR=0x[0-9a-f]{8}
+            RCC_CR=0x[0-9a-f]{8} RCC_PLLCFGR=0x[0-9a-f]{8} RCC_CFGR=0x[0-9a-f]{8}
+            FLASH_ACR=0x[0-9a-f]{8} end'
+      - {device: dut_uart, action: uart_write, text: "exit 4\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 exit=4 ODEN=0 ODSWEN=0 ODRDY=[01] ODSWRDY=[01] VOS=\d+ VOSRDY=[01]
+            SWS=0 PLLRDY=0 HSEBYP=[01] PLLSRC=[01] PLLM=\d+ PLLN=\d+ PLLP=\d+ LATENCY=\d+
+            AHB_DIV=\d+ APB1_DIV=\d+ APB2_DIV=\d+ PWR_CR=0x[0-9a-f]{8} PWR_CSR=0x[0-9a-f]{8}
+            RCC_CR=0x[0-9a-f]{8} RCC_PLLCFGR=0x[0-9a-f]{8} RCC_CFGR=0x[0-9a-f]{8}
+            FLASH_ACR=0x[0-9a-f]{8} end'
+      - {device: dut_uart, action: uart_write, text: "exit 5\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 exit=5 ODEN=0 ODSWEN=0 ODRDY=[01] ODSWRDY=[01] VOS=\d+ VOSRDY=[01]
+            SWS=0 PLLRDY=0 HSEBYP=[01] PLLSRC=[01] PLLM=\d+ PLLN=\d+ PLLP=\d+ LATENCY=\d+
+            AHB_DIV=\d+ APB1_DIV=\d+ APB2_DIV=\d+ PWR_CR=0x[0-9a-f]{8} PWR_CSR=0x[0-9a-f]{8}
+            RCC_CR=0x[0-9a-f]{8} RCC_PLLCFGR=0x[0-9a-f]{8} RCC_CFGR=0x[0-9a-f]{8}
+            FLASH_ACR=0x[0-9a-f]{8} end'
+      - {device: dut_uart, action: uart_write, text: "exit 6\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 exit=6 ODEN=0 ODSWEN=0 ODRDY=[01] ODSWRDY=[01] VOS=\d+ VOSRDY=[01]
+            SWS=0 PLLRDY=0 HSEBYP=[01] PLLSRC=[01] PLLM=\d+ PLLN=\d+ PLLP=\d+ LATENCY=\d+
+            AHB_DIV=\d+ APB1_DIV=\d+ APB2_DIV=\d+ PWR_CR=0x[0-9a-f]{8} PWR_CSR=0x[0-9a-f]{8}
+            RCC_CR=0x[0-9a-f]{8} RCC_PLLCFGR=0x[0-9a-f]{8} RCC_CFGR=0x[0-9a-f]{8}
+            FLASH_ACR=0x[0-9a-f]{8} end'
+      # the same over every Stop entry and exit since boot, and none outside the cycles
+      - {device: dut_uart, action: uart_write, text: "done\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 done variant=base-168 cycles=6 entries=([6-9]|[1-9][0-9]+) exits=\1
+            rtc_irqs=\1 other_entries=0 outside_cycles=0 exit_od_or=0x[048c] after_od_and=0x0
+            after_od_or=0x0 every_exit_on_hsi=1 every_exit_after_rtc_irq=1 every_after_on_pll=1
+            every_entry_wake_rtc_alarm_only=1 every_entry_debug_stop_off=1
+            every_rtc_irq_pr17_on_hsi=1 watchdog=on end'
+      # VDDA, from the internal reference and its factory calibration
+      - {device: dut_uart, action: uart_write, text: "supply\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 supply vdda_mv=(\d+) vrefint_cal=\d+ vrefint_avg=\d+ end'
+          range: {min: 2700, max: 3600}
+      # the core clock after boot and after every cycle, within 500 ppm of 168 MHz
+      - {device: dut_uart, action: uart_write, text: "clock 0\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=0 core_hz=(\d+) tim5_hz=\d+ status=0 end'
+          range: {min: 167916000, max: 168084000}
+      - {device: dut_uart, action: uart_write, text: "clock 1\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=1 core_hz=(\d+) tim5_hz=\d+ status=0 end'
+          range: {min: 167916000, max: 168084000}
+      - {device: dut_uart, action: uart_write, text: "clock 2\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=2 core_hz=(\d+) tim5_hz=\d+ status=0 end'
+          range: {min: 167916000, max: 168084000}
+      - {device: dut_uart, action: uart_write, text: "clock 3\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=3 core_hz=(\d+) tim5_hz=\d+ status=0 end'
+          range: {min: 167916000, max: 168084000}
+      - {device: dut_uart, action: uart_write, text: "clock 4\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=4 core_hz=(\d+) tim5_hz=\d+ status=0 end'
+          range: {min: 167916000, max: 168084000}
+      - {device: dut_uart, action: uart_write, text: "clock 5\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=5 core_hz=(\d+) tim5_hz=\d+ status=0 end'
+          range: {min: 167916000, max: 168084000}
+      - {device: dut_uart, action: uart_write, text: "clock 6\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=6 core_hz=(\d+) tim5_hz=\d+ status=0 end'
+          range: {min: 167916000, max: 168084000}
+      # TIM5, twice the APB1 clock, within 500 ppm of 84 MHz
+      - {device: dut_uart, action: uart_write, text: "clock 0\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=0 core_hz=\d+ tim5_hz=(\d+) status=0 end'
+          range: {min: 83958000, max: 84042000}
+      - {device: dut_uart, action: uart_write, text: "clock 1\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=1 core_hz=\d+ tim5_hz=(\d+) status=0 end'
+          range: {min: 83958000, max: 84042000}
+      - {device: dut_uart, action: uart_write, text: "clock 2\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=2 core_hz=\d+ tim5_hz=(\d+) status=0 end'
+          range: {min: 83958000, max: 84042000}
+      - {device: dut_uart, action: uart_write, text: "clock 3\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=3 core_hz=\d+ tim5_hz=(\d+) status=0 end'
+          range: {min: 83958000, max: 84042000}
+      - {device: dut_uart, action: uart_write, text: "clock 4\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=4 core_hz=\d+ tim5_hz=(\d+) status=0 end'
+          range: {min: 83958000, max: 84042000}
+      - {device: dut_uart, action: uart_write, text: "clock 5\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=5 core_hz=\d+ tim5_hz=(\d+) status=0 end'
+          range: {min: 83958000, max: 84042000}
+      - {device: dut_uart, action: uart_write, text: "clock 6\n"}
+      - device: dut_uart
+        action: uart_read
+        timeout_s: 5
+        comparator:
+          pattern: 'Z120620 clock=6 core_hz=\d+ tim5_hz=(\d+) status=0 end'
+          range: {min: 83958000, max: 84042000}

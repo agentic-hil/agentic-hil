@@ -1,0 +1,21 @@
+/*
+ * 168 MHz from the 8 MHz ST-LINK clock (HSE bypass): VCO input 2 MHz,
+ * VCO 336 MHz, SYSCLK 168 MHz, the highest frequency without over-drive.
+ * APB1 42 MHz and APB2 84 MHz are the limits without over-drive.
+ */
+&pll {
+	div-m = <4>;
+	mul-n = <168>;
+	div-p = <2>;
+	div-q = <7>;
+	clocks = <&clk_hse>;
+	status = "okay";
+};
+
+&rcc {
+	clocks = <&pll>;
+	clock-frequency = <DT_FREQ_M(168)>;
+	ahb-prescaler = <1>;
+	apb1-prescaler = <4>;
+	apb2-prescaler = <2>;
+};

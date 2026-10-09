@@ -1,0 +1,21 @@
+/*
+ * 180 MHz from the 8 MHz ST-LINK clock (HSE bypass): VCO input 2 MHz,
+ * VCO 360 MHz, SYSCLK 180 MHz. Needs over-drive and voltage scale 1.
+ * APB1 45 MHz and APB2 90 MHz are the limits with over-drive.
+ */
+&pll {
+	div-m = <4>;
+	mul-n = <180>;
+	div-p = <2>;
+	div-q = <8>;
+	clocks = <&clk_hse>;
+	status = "okay";
+};
+
+&rcc {
+	clocks = <&pll>;
+	clock-frequency = <DT_FREQ_M(180)>;
+	ahb-prescaler = <1>;
+	apb1-prescaler = <4>;
+	apb2-prescaler = <2>;
+};

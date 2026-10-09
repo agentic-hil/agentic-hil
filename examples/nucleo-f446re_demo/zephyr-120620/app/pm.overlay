@@ -1,0 +1,6 @@
+/* The board already enables the RTC on LSI as a wake-up source. */
+/ {
+	chosen {
+		zephyr,system-timer-companion = &rtc;
+	};
+};
