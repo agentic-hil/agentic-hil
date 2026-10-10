@@ -258,6 +258,10 @@ def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
     debuggers = {name: named_debugger_config(name, value, target) for name, value in mapping(raw.get("debuggers"), "debuggers").items()}
     com_ports = {name: com_port_config(name, value) for name, value in mapping(raw.get("com_ports"), "com_ports").items()}
     can_buses = {name: can_bus_config(name, value) for name, value in mapping(raw.get("can_buses"), "can_buses").items()}
+    # An esptool debugger is identified by the `com_ports` entry it names, so the
+    # port is attached to it here, once both sections are parsed and before any
+    # check below reads its identity off it.
+    debuggers = resolve_esptool_ports(debuggers, com_ports)
     # Before validate_debuggers, so a pair of debuggers differing only in the
     # case of their resource_id is named as the case collision it is instead of
     # as two probes that happen to resolve to one resource.
@@ -606,9 +610,16 @@ def validate_debuggers(debuggers: dict[str, DebuggerConfig], *, after_pinning: b
         identity = debugger_resource_identity(debugger)
         if identity in resource_owner:
             stage = " after executable pinning" if after_pinning else ""
+            # An esptool entry has no probe_id to give: the port it names is its
+            # identity, so two of them on one line are told to name two lines.
+            remedy = (
+                "give each esptool debugger a com_ports entry of its own, because the serial line is the only thing that says which board esptool reaches"
+                if "esptool" in {debugger.type, debuggers[resource_owner[identity]].type}
+                else "give each debugger the probe_id of its own probe so boards cannot silently share a probe"
+            )
             raise ConfigError(
                 "config_invalid",
-                f"Two configured debuggers resolve to the same coordination resource{stage}; give each debugger the probe_id of its own probe so boards cannot silently share a probe.",
+                f"Two configured debuggers resolve to the same coordination resource{stage}; {remedy}.",
                 {"field": f"debuggers.{name}", "resource": identity, "other_debugger": resource_owner[identity]},
             )
         resource_owner[identity] = name
@@ -865,6 +876,10 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
             "openocd": ["openocd"],
             "stlink": ["STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"],
             "pyocd": ["pyocd"],
+            # The console script esptool 5 installs. Never `esptool.py`: that
+            # name is the deprecated shim of the same package, and on PATH it is
+            # just as likely to be a stray copy of the 4.x script.
+            "esptool": ["esptool"],
         }[debugger.type]
     )
     configured = debugger.executable
@@ -872,6 +887,10 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
         from agentic_hil.backends.common import find_stm32_programmer_cli
 
         configured = find_stm32_programmer_cli()
+    if configured is None and not starter and debugger.type == "esptool":
+        from agentic_hil.backends.common import find_esptool
+
+        configured = find_esptool()
     # Everything else resolves as it always did, including the entry an operator
     # has typed but not yet given an executable: that is the documented first
     # edit of `init`, plug the board in, adopt. What changed is when the answer
@@ -3349,6 +3368,8 @@ def debugger_resource_identity(debugger: DebuggerConfig) -> str:
     # It stays a mirror rather than a call because devices.py sits above this
     # module in the import graph; tests/test_devices.py asserts the two agree,
     # case included, so they cannot drift.
+    if debugger.type == "esptool" and debugger.com_port is not None and debugger.com_port_config is not None:
+        return com_port_resource_identity(debugger.com_port, debugger.com_port_config)
     if debugger.resource_id:
         return f"physical:{fold_hardware_id(debugger.resource_id)}"
     if debugger.probe_id:
@@ -3361,15 +3382,63 @@ def debugger_resource_identity(debugger: DebuggerConfig) -> str:
     return f"probe:{fold_hardware_id(debugger.type)}"
 
 
+def com_port_resource_identity(name: str, port: ComPortConfig) -> str:
+    # Mirror devices.UartDevice.lock_key, for the one debugger whose identity is a
+    # port's: an esptool entry holds exactly the keys of the `com_ports` entry it
+    # names (devices.DebuggerDevice._port_device). The same parity test holds it.
+    if port.resource_id:
+        return f"physical:{fold_hardware_id(port.resource_id)}"
+    if port.serial_number:
+        return f"com:serial:{fold_hardware_id(port.serial_number)}"
+    if com_port_is_unbound(port):
+        return f"com:unbound:{fold_hardware_id(name)}"
+    return f"com:{fold_device_path(port.device)}"
+
+
+def resolve_esptool_ports(debuggers: dict[str, DebuggerConfig], com_ports: dict[str, ComPortConfig]) -> dict[str, DebuggerConfig]:
+    """Every debugger, with each esptool entry carrying the port it names.
+
+    An ESP32 board has no debug probe between the host and the chip. esptool
+    opens the board's USB-UART bridge and talks to the ROM bootloader through
+    it, so which board a flash reaches is decided by which serial line it
+    opens, and the `com_ports` entry is where this configuration already says
+    that: its `serial_number`, `vid` and `pid` are checked against the adapter
+    behind the device name before anything is opened. Attaching that entry to
+    the debugger keeps the board's identity in one place instead of a device
+    path copied into a second section that would drift from the first.
+
+    A name that matches no entry is a configuration that cannot say which board
+    it flashes, and it is refused here rather than at the first flash."""
+    resolved: dict[str, DebuggerConfig] = {}
+    for name, debugger in debuggers.items():
+        if debugger.type != "esptool":
+            resolved[name] = debugger
+            continue
+        port = com_ports.get(debugger.com_port or "")
+        if port is None:
+            raise ConfigError(
+                "config_invalid",
+                f"debuggers.{name}.com_port names '{debugger.com_port}', and com_ports declares no entry of that name. "
+                "An esptool debugger reaches its board through the serial line of a configured com_ports entry, whose "
+                "serial_number, vid and pid say which board a flash reaches.",
+                {"field": f"debuggers.{name}.com_port", "value": debugger.com_port, "allowed_values": sorted(com_ports)},
+            )
+        resolved[name] = replace(debugger, com_port_config=port)
+    return resolved
+
+
+DEBUGGER_TYPES = ("openocd", "stlink", "pyocd", "esptool")
+
+
 def named_debugger_config(name: str, value: Any, default_target: TargetConfig) -> DebuggerConfig:
     field = f"debuggers.{name}"
     raw = mapping(value, field)
     debugger_type = str(raw.get("type", "openocd"))
-    if debugger_type not in {"openocd", "stlink", "pyocd"}:
+    if debugger_type not in DEBUGGER_TYPES:
         raise ConfigError(
             "config_invalid",
             "Unsupported debugger type.",
-            {"field": f"{field}.type", "value": debugger_type, "allowed_values": ["openocd", "stlink", "pyocd"]},
+            {"field": f"{field}.type", "value": debugger_type, "allowed_values": list(DEBUGGER_TYPES)},
         )
     target: TargetConfig | None = None
     if raw.get("target") is not None:
@@ -3382,11 +3451,24 @@ def named_debugger_config(name: str, value: Any, default_target: TargetConfig) -
 
 
 def debugger_config(raw: JsonObject, debugger_type: str, field: str = "debugger", target: TargetConfig | None = None) -> DebuggerConfig:
+    if debugger_type == "esptool":
+        reject_esptool_probe_identity(raw, field)
+    elif raw.get("com_port") is not None:
+        # Refused rather than ignored: an entry that names a port and is driven
+        # through a probe says two different things about which board it reaches,
+        # and the one this server would act on is the one nobody reads.
+        raise ConfigError(
+            "config_invalid",
+            f"{field}.com_port is set on a {debugger_type} debugger. Only an esptool debugger reaches its board "
+            "through a com_ports entry; every other type is identified by its probe, so remove the key or set the "
+            "type to esptool.",
+            {"field": f"{field}.com_port", "value": str(raw.get("com_port"))[:128]},
+        )
     return DebuggerConfig(
         type=debugger_type,  # type: ignore[arg-type]
         executable=optional_string(raw.get("executable")),
         probe_id=optional_string(raw.get("probe_id")),
-        target_type=optional_string(raw.get("target_type")),
+        target_type=esptool_chip(raw.get("target_type"), f"{field}.target_type") if debugger_type == "esptool" else optional_string(raw.get("target_type")),
         interface=str(raw.get("interface", "SWD")),
         interface_cfg=str(raw.get("interface_cfg", "interface/stlink.cfg")),
         target_cfg=str(raw.get("target_cfg", "target/stm32f4x.cfg")),
@@ -3397,12 +3479,75 @@ def debugger_config(raw: JsonObject, debugger_type: str, field: str = "debugger"
         permissions=debugger_permissions(mapping(raw.get("permissions"), f"{field}.permissions")),
         target=target,
         gdb_server_executable=optional_string(raw.get("gdb_server_executable")) if debugger_type == "stlink" else None,
+        # Read by esptool alone; the other backends reach the board through a
+        # probe of their own and never open the serial line for it.
+        com_port=esptool_com_port(raw.get("com_port"), f"{field}.com_port") if debugger_type == "esptool" else None,
     )
+
+
+# esptool's `--chip` names are lowercase letters and digits (`esp32`,
+# `esp32s3`, `esp32c3`). Held to that shape at load rather than handed through:
+# the value lands on esptool's command line, where a leading `@` names a file
+# whose lines esptool splices into its arguments and a leading `-` is an option.
+ESPTOOL_CHIP_PATTERN = re.compile(r"[a-z0-9]{1,32}")
+
+
+def esptool_chip(value: object, field: str) -> str | None:
+    """An esptool entry's `target_type`, as the chip name esptool's `--chip` takes.
+
+    Unset leaves the choice to esptool (`--chip auto`), which reads the chip off
+    the ROM bootloader; naming it makes a flash of the wrong family fail before
+    anything is written instead of after."""
+    if value is None:
+        return None
+    chip = str(value).lower()
+    if ESPTOOL_CHIP_PATTERN.fullmatch(chip) is None:
+        raise ConfigError(
+            "config_invalid",
+            f"{field} is '{str(value)[:64]}', which is not an esptool chip name. esptool names chips in lowercase "
+            "letters and digits without separators (esp32, esp32s3, esp32c3); leave the key unset to let esptool "
+            "detect the chip.",
+            {"field": field, "value": str(value)[:128]},
+        )
+    return chip
+
+
+def esptool_com_port(value: object, field: str) -> str:
+    """The `com_ports` entry an esptool debugger names, which it cannot do without."""
+    if value is None or not str(value):
+        raise ConfigError(
+            "config_invalid",
+            f"{field} is required on an esptool debugger. esptool reaches the board through its USB-UART bridge, so "
+            "the entry names the com_ports entry for that bridge, and that entry's serial_number, vid and pid say "
+            "which board a flash reaches.",
+            {"field": field},
+        )
+    return str(value)
+
+
+def reject_esptool_probe_identity(raw: JsonObject, field: str) -> None:
+    """Refuse the two identity keys an esptool entry takes from its port instead.
+
+    There is no probe between the host and an ESP32, so a `probe_id` would name
+    nothing esptool could be checked against, and a `resource_id` here would
+    give the debugger a lock of its own beside the port's, which is exactly the
+    pair that must stay one lock. Both belong on the `com_ports` entry."""
+    for key in ("probe_id", "resource_id"):
+        if raw.get(key) is not None:
+            raise ConfigError(
+                "config_invalid",
+                f"{field}.{key} is set on an esptool debugger, which takes its identity from the com_ports entry it "
+                "names. Remove it here; a serial number belongs in that entry's serial_number, and a shared "
+                "resource_id in that entry's resource_id.",
+                {"field": f"{field}.{key}", "debugger_type": "esptool"},
+            )
 
 
 # Which connect modes each backend can actually carry out, as opposed to which
 # ones the schema spells. Every backend has `hotplug`, because that is the name
-# for what all three of them have always done: connect to the target as it is.
+# for what each of them has always done: connect to the target as it is. For
+# esptool that already includes a reset, because the ROM bootloader is entered
+# through the board's DTR and RTS lines on every call.
 # `under_reset` is on the one backend that has a documented option for it and is
 # refused on the other two, so a value that would be silently ignored is a
 # refusal at load instead. That is the same rule `target_type` is *not* held to,
@@ -3413,6 +3558,7 @@ DEBUGGER_CONNECT_MODES: dict[str, tuple[str, ...]] = {
     "stlink": ("hotplug", "under_reset"),
     "openocd": ("hotplug",),
     "pyocd": ("hotplug",),
+    "esptool": ("hotplug",),
 }
 DEFAULT_DEBUGGER_CONNECT_MODE = "hotplug"
 
@@ -3436,8 +3582,9 @@ def debugger_connect_mode(value: object, debugger_type: str, field: str) -> str:
             "config_invalid",
             f"{field} is '{mode[:64]}', which the {debugger_type} backend cannot carry out, and a value it would ignore "
             "is refused rather than accepted. Connecting under reset is carried by STM32CubeProgrammer, so it needs "
-            "`type: stlink`; OpenOCD takes the same effect from the scripts named by interface_cfg and target_cfg, and "
-            "this server sets nothing of the kind for pyOCD.",
+            "`type: stlink`; OpenOCD takes the same effect from the scripts named by interface_cfg and target_cfg, "
+            "this server sets nothing of the kind for pyOCD, and esptool resets the chip into its bootloader on every "
+            "call already.",
             {"field": field, "value": mode[:128], "debugger_type": debugger_type, "allowed_values": list(allowed)},
         )
     return mode

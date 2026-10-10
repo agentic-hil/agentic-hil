@@ -196,13 +196,22 @@ class CompletedCommand:
         return self.not_executable_reason is not None
 
 
-def spawn_command(command: list[str], cwd: str, timeout_seconds: float) -> CompletedCommand:
+def spawn_command(command: list[str], cwd: str, timeout_seconds: float, env: dict[str, str] | None = None) -> CompletedCommand:
+    """Run `command` to completion and hand back what it printed.
+
+    `env` replaces the child's environment when it is given and inherits this
+    server's when it is not, which is what every backend but one wants. The one
+    is esptool, which reads its chip, port, baud rate and a configuration file
+    from variables of its own, so a variable left in the operator's shell would
+    otherwise decide which port a flash opens.
+    """
     try:
         child = spawn_managed_process(
             command,
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
         )
     except FileNotFoundError:
         return CompletedCommand(stdout="", stderr="", returncode=None, timed_out=False, not_found=True)
@@ -419,6 +428,34 @@ def programmer_output_fields(completed: CompletedCommand) -> JsonObject:
     in the log, and leave nobody able to tell which one was short.
     """
     return {"programmer_output": {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}}
+
+
+def find_esptool() -> str | None:
+    """The esptool console script installed beside this interpreter, else the one on PATH.
+
+    `pip install agentic-hil[esptool]`, `pipx install agentic-hil[esptool]` and
+    `uv tool install agentic-hil[esptool]` all put esptool's console script into
+    the same environment as this package, and only the first of the three puts
+    that environment on PATH: an MCP server started by an agent through the
+    absolute path its registration names runs with a PATH that has never heard of
+    the tool environment it lives in. So the environment this interpreter runs in
+    is asked first, and PATH after it.
+
+    `sys.executable` is deliberately not resolved: inside a virtual environment it
+    is a link to the base interpreter, whose own scripts directory is exactly the
+    one that does not hold this environment's esptool. Two places, because the
+    interpreter sits in the scripts directory of a virtual environment on both
+    platforms but beside it, in the prefix, on a Windows installation that is not
+    one.
+    """
+    names = ["esptool.exe", "esptool"] if os.name == "nt" else ["esptool"]
+    scripts = [Path(sys.executable).parent, Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")]
+    for directory in dict.fromkeys(scripts):
+        for name in names:
+            candidate = directory / name
+            if candidate.is_file():
+                return str(candidate)
+    return which("esptool")
 
 
 def find_stm32_programmer_cli() -> str | None:

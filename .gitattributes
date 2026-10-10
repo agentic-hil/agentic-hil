@@ -5,3 +5,6 @@
 *.png binary
 *.webp binary
 *.ico binary
+# The bench's ESP32 images are committed as built and held against their
+# manifest's SHA-256, so no checkout may touch a byte of them.
+*.bin binary

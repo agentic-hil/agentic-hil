@@ -89,6 +89,8 @@ from agentic_hil.knowledge import (
     CONFIG_DESCRIPTION_RIGHT,
     CONFIG_NAMED_SECTIONS,
     CONFIG_SHAPE_URI,
+    DEBUGGER_BACKENDS_URI,
+    TARGET_SUPPORT_URI,
     permission_key,
     remediation_fields,
 )
@@ -196,10 +198,10 @@ def _choose_debugger(document: JsonObject, requested: str | None) -> tuple[str, 
                 "error_type": "unknown_device",
                 **remediation_fields("unknown_device"),
             }
-        return requested, entries[requested]
+        return _adoptable(requested, entries[requested])
     if len(entries) == 1:
         name = next(iter(entries))
-        return name, entries[name]
+        return _adoptable(name, entries[name])
     if not entries:
         return _invalid("debugger_id", "This configuration declares no debugger at all, so there is no entry to carry a probe into.", configured_debuggers=[])
     return _invalid(
@@ -207,6 +209,33 @@ def _choose_debugger(document: JsonObject, requested: str | None) -> tuple[str, 
         f"This configuration declares {len(entries)} debuggers and the call named none, so there is no entry this probe belongs to.",
         configured_debuggers=sorted(entries),
         next_step="Ask which configured probe the attached board is, then name it as debugger_id.",
+    )
+
+
+def _adoptable(name: str, entry: JsonObject) -> tuple[str, JsonObject] | JsonObject:
+    """The chosen entry, unless adoption has nothing to read for it.
+
+    An esptool entry names no probe: the board is identified by the `com_ports`
+    entry its `com_port` names, which the operator writes into the file.
+    Discovery enumerates probes, so for this entry it would read whichever other
+    probe happens to be attached (and an SWD attach halts that board's core),
+    then offer that probe's serial to an entry the loader refuses one. So it is
+    refused here, before anything is said to a board."""
+    if entry.get("type") != "esptool":
+        return name, entry
+    return _invalid(
+        "debugger_id",
+        f"`debuggers.{name}` is an esptool entry, and an ESP32 has no probe for adoption to read: the board is "
+        "identified by the com_ports entry its com_port names, which the operator writes into the file. Nothing "
+        "was read and nothing was written.",
+        debugger_id=name,
+        debugger_type="esptool",
+        next_step=(
+            "There is nothing to carry into this entry. If its com_ports entry does not say which adapter it is, the "
+            f"operator adds that entry's serial_number, or its vid and pid, in the file; {TARGET_SUPPORT_URI} shows a "
+            "known-good esptool entry. To adopt another debugger's probe, name that entry as debugger_id."
+        ),
+        reference=DEBUGGER_BACKENDS_URI,
     )
 
 
@@ -254,6 +283,18 @@ def _stabilises_device(current: object, device: str, port_names: tuple[str, ...]
     return is_stable_device_name(device) and not is_stable_device_name(current) and _names_discovered_port(current, port_names)
 
 
+def esptool_ports(document: JsonObject) -> dict[str, str]:
+    """The com_ports entries an esptool debugger reaches its board through, each with that debugger's name.
+
+    Such an entry is the ESP32's identity, written by the operator, so no other
+    probe's discovered port is ever carried into it."""
+    return {
+        str(entry["com_port"]): name
+        for name, entry in _entries(document, "debuggers").items()
+        if entry.get("type") == "esptool" and isinstance(entry.get("com_port"), str) and entry["com_port"]
+    }
+
+
 def _choose_com_port(document: JsonObject, requested: str | None, port_names: tuple[str, ...]) -> tuple[str | None, JsonObject | None]:
     """Which COM port entry receives the discovered device, if any.
 
@@ -262,18 +303,25 @@ def _choose_com_port(document: JsonObject, requested: str | None, port_names: tu
     device" means any of the port's spellings, so the entry is still recognised
     on the run that upgrades its kernel name to the stable one. Otherwise: the
     named one, the only one, or a new one when there is none. Several ports and
-    no name is not resolved here: the caller is told to choose."""
+    no name is not resolved here: the caller is told to choose.
+
+    An entry an esptool debugger names is never chosen unless the call names it
+    (and the plan then carries nothing into it): it belongs to the ESP32's
+    USB-UART bridge, and "the only one" must not make it the home of another
+    probe's port."""
     entries = _entries(document, "com_ports")
     if requested is not None:
         return requested, entries.get(requested)
+    claimed = esptool_ports(document)
+    free = {name: entry for name, entry in entries.items() if name not in claimed}
     if port_names:
-        matched = [name for name, entry in entries.items() if _names_discovered_port(entry.get("device"), port_names)]
+        matched = [name for name, entry in free.items() if _names_discovered_port(entry.get("device"), port_names)]
         if len(matched) == 1:
-            return matched[0], entries[matched[0]]
-    if len(entries) == 1:
-        name = next(iter(entries))
-        return name, entries[name]
-    if not entries:
+            return matched[0], free[matched[0]]
+    if len(free) == 1:
+        name = next(iter(free))
+        return name, free[name]
+    if not free and DEFAULT_COM_PORT_ID not in entries:
         return DEFAULT_COM_PORT_ID, None
     return None, None
 
@@ -652,6 +700,19 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
                 "reason": f"This configuration declares {len(_entries(document, 'com_ports'))} COM ports, none of them naming {device}, and the call named none. Adoption does not choose one.",
                 "configured_com_ports": sorted(_entries(document, "com_ports")),
                 "next_step": "Name the entry this device belongs to as com_port_id.",
+            }
+        )
+    elif port_name in esptool_ports(document):
+        unavailable.append(
+            {
+                "key": f"com_ports.{port_name}.device",
+                "discovered_value": device,
+                "reason": (
+                    f"`com_ports.{port_name}` is the serial line the esptool debugger "
+                    f"`{esptool_ports(document)[port_name]}` reaches its board through, and its keys identify that "
+                    "board's USB-UART bridge. Adoption does not carry another probe's port into it."
+                ),
+                "next_step": "Name a COM port entry of this probe's own as com_port_id, or a new name to have one created.",
             }
         )
     else:

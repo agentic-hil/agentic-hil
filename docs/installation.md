@@ -189,11 +189,15 @@ agentic-hil --version` is a diagnostic only.
 ## Optional extras
 
 For direct PEAK/SocketCAN adapters add the CAN extra (`uv tool install
-'agentic-hil[can]'`), and for the pyOCD backend `agentic-hil[pyocd]`. Both are
-optional because they carry platform-specific drivers that flashing and UART do
+'agentic-hil[can]'`), for the pyOCD backend `agentic-hil[pyocd]`, and for an
+ESP32 through esptool `agentic-hil[esptool]`. They are optional because they
+carry platform-specific drivers or tools that flashing an ARM target and UART do
 not need; without them those tools refuse by name rather than failing at
-import: the CAN tools with `can_backend_not_available`, and a pyOCD probe
-with `debugger_not_found` carrying `backend_error_type: pyocd_not_found`.
+import: the CAN tools with `can_backend_not_available`, a pyOCD probe
+with `debugger_not_found` carrying `backend_error_type: pyocd_not_found`, and
+an esptool entry with the same error carrying `esptool_not_found`. esptool is
+GPLv2+ and runs only as a subprocess, so the extra adds a program beside
+Agentic HIL rather than code inside it.
 
 Adding one of them to an installation that already exists means rewriting that
 environment, so stop the agent host first (it runs the MCP server out of that
@@ -250,7 +254,7 @@ shell is one copy away once you have read what is in them.
 
 ## Platforms and debugger backends
 
-Linux, macOS, and Windows (CI-tested on Python 3.10 to 3.13). Debugger backends: OpenOCD (debug sessions need 0.11.0 or newer; flashing, reset and memory reads need no particular release), pyOCD (`agentic-hil[pyocd]`: covers most ARM Cortex-M targets via CMSIS packs and the in-circuit debuggers or programmers pyOCD itself supports, set `debuggers.<name>.target_type`; debug sessions run through `pyocd gdbserver` from the same install), and STM32CubeProgrammer CLI (auto-discovered on Windows; debug sessions run through the ST-LINK_gdbserver STM32CubeCLT installs, found beside the CLI of the same STM32CubeCLT or named as `debuggers.<name>.gdb_server_executable`). Direct CAN requires `agentic-hil[can]` (python-can); CAN also supports a configured `process` bridge backend.
+Linux, macOS, and Windows (CI-tested on Python 3.10 to 3.13). Debugger backends: OpenOCD (debug sessions need 0.11.0 or newer; flashing, reset and memory reads need no particular release), pyOCD (`agentic-hil[pyocd]`: covers most ARM Cortex-M targets via CMSIS packs and the in-circuit debuggers or programmers pyOCD itself supports, set `debuggers.<name>.target_type`; debug sessions run through `pyocd gdbserver` from the same install), and STM32CubeProgrammer CLI (auto-discovered on Windows; debug sessions run through the ST-LINK_gdbserver STM32CubeCLT installs, found beside the CLI of the same STM32CubeCLT or named as `debuggers.<name>.gdb_server_executable`), and esptool (`agentic-hil[esptool]`: ESP32-family chips through the USB-UART bridge on the board, esptool 5.x only; flashing, reset and probing, no debug sessions). An esptool entry remembers that it left the chip in its ROM bootloader, after `reset_target` mode `halt` or a flash without a reset, only for the life of the server process: a server started fresh resets the chip into its application on its first `probe_target`. Direct CAN requires `agentic-hil[can]` (python-can); CAN also supports a configured `process` bridge backend.
 
 Installing pyOCD is not enough to reach an STM32 part. Most vendor target types, the whole STM32F4 family included, come from a CMSIS device-family pack rather than pyOCD's built-in list, so they need a second, deliberate step:
 

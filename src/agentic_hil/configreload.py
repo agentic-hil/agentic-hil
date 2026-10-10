@@ -147,12 +147,21 @@ def description_view(config: AgenticHILConfig) -> JsonObject:
         "target": asdict(config.target),
         **{
             section: {
-                name: {field: value for field, value in asdict(entry).items() if field != "permissions"}
+                name: {field: value for field, value in asdict(entry).items() if field not in DERIVED_FIELDS}
                 for name, entry in getattr(config, section).items()
             }
             for section in ("debuggers", "com_ports", "can_buses")
         },
     }
+
+
+# Fields a view leaves out of every entry. ``permissions`` is the authority half
+# and has a view of its own. ``com_port_config`` is the ``com_ports`` entry an
+# esptool debugger names, attached to it at parse time: it is the same
+# description the view already holds under ``com_ports``, so a second copy says
+# nothing new, and that copy would carry the port's grants into a view that is
+# supposed to hold none.
+DERIVED_FIELDS = frozenset({"permissions", "com_port_config"})
 
 
 def permission_view(config: AgenticHILConfig) -> JsonObject:
@@ -314,13 +323,21 @@ def merged_description(loaded: AgenticHILConfig, disk: AgenticHILConfig) -> Agen
     startup grants put a real probe behind exactly those unchecked scripts. The
     check is re-asked here, on the object that would be enforced.
     """
-    debuggers = {
-        name: replace(entry, permissions=_carried_permissions(loaded.debuggers, name, DebuggerPermissions()))
-        for name, entry in disk.debuggers.items()
-    }
     com_ports = {
         name: replace(entry, permissions=_carried_permissions(loaded.com_ports, name, IoPermissions()))
         for name, entry in disk.com_ports.items()
+    }
+    # An esptool debugger carries the `com_ports` entry it names, attached while the
+    # file was parsed, so that copy holds the grants the file wrote. It is pointed
+    # at the merged entry instead: the two then cannot drift, and nothing reachable
+    # from the enforced object holds a grant this server did not start with.
+    debuggers = {
+        name: replace(
+            entry,
+            permissions=_carried_permissions(loaded.debuggers, name, DebuggerPermissions()),
+            com_port_config=com_ports[entry.com_port] if entry.com_port_config is not None and entry.com_port is not None else None,
+        )
+        for name, entry in disk.debuggers.items()
     }
     can_buses = {
         name: replace(entry, permissions=_carried_permissions(loaded.can_buses, name, IoPermissions()))

@@ -324,7 +324,7 @@ jobs:
       # of this job's installs used to do (code scanning alerts 77 and 78). The
       # auditor comes from its own hash-pinned lock, and the audited set is not
       # installed at all: `requirements/production.txt` is what
-      # `pip install 'agentic-hil[can,pyocd]'` resolves to, compiled from
+      # `pip install 'agentic-hil[can,esptool,pyocd]'` resolves to, compiled from
       # pyproject.toml the way requirements/dev.txt is, and with hashes required
       # pip-audit audits its pins as written instead of resolving anything
       # through pip.

@@ -28,6 +28,9 @@ The supported unit is a debug probe with its backend, not a board:
   CLI (`type: stlink`).
 - CMSIS-DAP probes through pyOCD (`type: pyocd`), which reaches most Arm
   Cortex-M targets through CMSIS packs.
+- An ESP32 board's own USB-UART bridge through esptool (`type: esptool`),
+  which flashes, resets and probes the chip through its ROM bootloader and
+  opens no debug session.
 
 Any board behind such a probe runs the same software. Both runs below used an
 STM32F446 behind its onboard ST-LINK, the reference board of the
@@ -177,15 +180,15 @@ of debugger output to interpret.
 ## Limits
 
 - Reset modes `run` and `halt` work on every backend. `init`, which also runs
-  the target's reset-init event script, is OpenOCD-only: the stlink and pyocd
-  backends refuse it with `not_supported` rather than halting instead.
+  the target's reset-init event script, is OpenOCD-only: the stlink, pyocd and
+  esptool backends refuse it with `not_supported` rather than halting instead.
 - A typed debug session (breakpoints, running to a breakpoint, symbol reads in a
   halted session) needs a probe of type `openocd`. The two memory reads,
   `read_symbol` and `dump_memory`, also run without a session on stlink and
   pyocd.
 - There is no tool for a raw debugger command or a mass erase.
-- The two records cover one board family and two of the three backends; pyOCD
-  has no record here. Both were made on 0.21 releases. The project's own bench
+- The two records cover one board family and two of the four backends; pyOCD
+  and esptool have no record here. Both were made on 0.21 releases. The project's own bench
   repeats a flash, a reset and a serial read of its demo every night on the
   current tree, and [CI examples](../ci-examples.md#the-bench-this-project-runs-itself)
   says what a green night claims and what it does not.

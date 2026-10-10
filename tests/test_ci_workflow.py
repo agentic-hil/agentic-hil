@@ -351,7 +351,7 @@ def test_a_bare_pytest_in_a_checkout_is_still_one_process(pytestconfig: pytest.C
     assert worker_setting(addopts) is None, addopts
 
 
-# The production dependency audit: what `pip install 'agentic-hil[can,pyocd]'`
+# The production dependency audit: what `pip install 'agentic-hil[can,esptool,pyocd]'`
 # resolves to, locked with hashes so the audit reads pins rather than whatever
 # the index served that minute, and the auditor's own lock beside it.
 PRODUCTION_LOCK = REPOSITORY_ROOT / "requirements" / "production.txt"
@@ -419,9 +419,9 @@ def test_the_auditor_is_installed_from_its_own_lock() -> None:
 def test_the_audit_reads_the_locked_production_dependency_set() -> None:
     """What is audited is what a bench's install resolves to, pinned.
 
-    `requirements/production.txt` is compiled from `pyproject.toml` with the two
+    `requirements/production.txt` is compiled from `pyproject.toml` with the three
     optional extras a bench installs and without the dev extra, so a pytest
-    advisory does not turn the production audit red and a python-can or pyOCD
+    advisory does not turn the production audit red and a python-can, esptool or pyOCD
     one does. pip-audit reads it with `--require-hashes`, which is the mode in
     which it audits the pins as written instead of resolving through pip, and
     every pin carries its hash so that mode has nothing to fall back to. Every
@@ -441,7 +441,7 @@ def test_the_audit_reads_the_locked_production_dependency_set() -> None:
     assert "--generate-hashes" in command and "--universal" in command, command
     assert "pyproject.toml" in command, command
     extras = [command[index + 1] for index, word in enumerate(command) if word == "--extra"]
-    assert sorted(extras) == ["can", "pyocd"], extras
+    assert sorted(extras) == ["can", "esptool", "pyocd"], extras
 
     project = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     extras_declared = project["optional-dependencies"]
@@ -1084,6 +1084,7 @@ def gate_run_steps() -> list[dict]:
         and "pyocd_recordings.py" not in step.get("run", "")
         and "cubeprogrammer_recordings.py" not in step.get("run", "")
         and "usb_reset_reenumeration.py" not in step.get("run", "")
+        and "esp32_recordings.py" not in step.get("run", "")
     ]
     assert len(running) == 2, running
     return running
@@ -1107,7 +1108,7 @@ def test_the_gate_is_started_by_hand_and_by_nothing_else() -> None:
 def test_the_gate_asks_which_commit_to_run() -> None:
     inputs = triggers(workflow_document(GATE_WORKFLOW))["workflow_dispatch"]["inputs"]
 
-    assert set(inputs) == {"ref", "diagnose_only", "run_recovery_check", "cubeprogrammer_asset_id", "run_pyocd_recordings", "run_cubeprogrammer_recordings", "run_usb_reset_reenumeration"}, inputs
+    assert set(inputs) == {"ref", "diagnose_only", "run_recovery_check", "cubeprogrammer_asset_id", "run_pyocd_recordings", "run_cubeprogrammer_recordings", "run_usb_reset_reenumeration", "run_esp32"}, inputs
     assert inputs["ref"]["required"] is True
     assert inputs["ref"]["type"] == "string"
     assert inputs["diagnose_only"]["default"] is False
@@ -1121,6 +1122,8 @@ def test_the_gate_asks_which_commit_to_run() -> None:
     assert inputs["run_cubeprogrammer_recordings"]["type"] == "boolean"
     assert inputs["run_usb_reset_reenumeration"]["default"] is False
     assert inputs["run_usb_reset_reenumeration"]["type"] == "boolean"
+    assert inputs["run_esp32"]["default"] is False
+    assert inputs["run_esp32"]["type"] == "boolean"
 
 
 def test_the_gate_runs_on_the_nightlys_board_and_queues_with_it() -> None:
@@ -1282,6 +1285,7 @@ def test_every_gate_stage_writes_under_the_one_run_scoped_upload_root() -> None:
         "Run pyOCD hardware recordings": f"{GATE_RESULTS}/pyocd",
         "Run CubeProgrammer hardware recordings": f"{GATE_RESULTS}/cubeprogrammer",
         "Run USB reset and re-enumeration recording": f"{GATE_RESULTS}/usb-reset",
+        "Run ESP32 hardware recordings": f"{GATE_RESULTS}/esp32",
     }
     runner_steps = [
         step for step in gate_job()["steps"] if "bench_in_container.py" in step.get("run", "")
@@ -1305,12 +1309,13 @@ def test_pyocd_recording_stage_gets_live_device_tree_for_bounded_usb_reset_diagn
     usb_reset = runner_steps["Run USB reset and re-enumeration recording"]
     default_tier = runner_steps["Run the bench tier in its container"]
     cube = runner_steps["Run CubeProgrammer hardware recordings"]
+    esp32 = runner_steps["Run ESP32 hardware recordings"]
 
     for step in (pyocd, usb_reset, recovery):
         command = shlex.split(run_lines({"steps": [step]})[0])
         assert command[command.index("--runtime") + 1] == "podman", command
         assert "--live-device-tree" in command, command
-    for step in (default_tier, cube):
+    for step in (default_tier, cube, esp32):
         command = shlex.split(run_lines({"steps": [step]})[0])
         assert "--live-device-tree" not in command, command
 

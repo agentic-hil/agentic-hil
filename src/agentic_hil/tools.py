@@ -80,6 +80,7 @@ from agentic_hil.coordination import (
     HardwareCoordinator,
     HardwareLease,
     RecoveryHold,
+    debugger_effect_devices,
     debugger_effect_resources,
     nothing_standing_result,
 )
@@ -187,6 +188,19 @@ def recovery_reset_halt(backend: DebuggerBackend) -> JsonObject:
         with backend.recovery_reset():
             return backend.reset_target("halt")
     return backend.reset_target("halt")
+
+
+def probe_resets_target(config: AgenticHILConfig | None) -> bool:
+    """Whether `probe_target` on the entry ``config`` binds resets the target to read it.
+
+    Only esptool's does. It reaches an ESP32 through the chip's ROM bootloader
+    alone, and gets there through the board's auto-reset circuit
+    (`--before=default-reset`), so every probe is a reset that needs
+    `allow_reset` and starts the application again unless the chip was held in
+    its bootloader. OpenOCD `init; targets`, pyOCD `status` and the
+    STM32CubeProgrammer CLI `mode=HOTPLUG` connect without one, which is what
+    makes their re-read a read-only predicate for the recovery."""
+    return _backend_kind(config) == "esptool"
 
 
 def recovery_reset_retry_sleep(seconds: float) -> None:
@@ -435,11 +449,25 @@ class AgenticHILToolService:
         prints after it: without one, the port would open onto a board still
         running whatever it ran before. The port's own refusals are the ones
         `com_session_start` and `com_read` give. Every refusal says the flash
-        never started, because it did not."""
+        never started, because it did not.
+
+        An esptool entry flashes through a serial port, and a capture on that
+        same port would hold it open while esptool needs it: the capture's
+        session would be refused for the port the flash already leases, after
+        the artifact had been staged for nothing. So that one is refused here,
+        with the order that works instead."""
         if not isinstance(capture, dict):
             refusal = invalid_argument("flash_firmware", "capture", "type", "capture must be an object.")
         elif reset_after_flash is not True:
             refusal = invalid_argument("flash_firmware", "capture", "dependentSchemas", "capture needs reset_after_flash: true, because the boot output it reads is printed after that reset. Set reset_after_flash to true or leave capture out.")
+        elif self.config.debugger is not None and self.config.debugger.type == "esptool" and capture.get("port_id") == self.config.debugger.com_port:
+            refusal = invalid_argument(
+                "flash_firmware",
+                "capture.port_id",
+                "not",
+                "capture.port_id names the serial port esptool flashes through, and esptool needs that port to itself until the flash and its reset are done. "
+                "Flash with reset_after_flash: true and no capture, then open the port with com_session_start to read what the board prints.",
+            )
         else:
             refusal = self.com_ports.capture_check(capture, "flash_firmware")
             if refusal["ok"]:
@@ -681,6 +709,8 @@ class AgenticHILToolService:
                 # reads the same record with no seam at all.
                 if name != "hardware_lease_status":
                     result = self._stand_down_after_call(result)
+                if name in ESPTOOL_PORT_TOOLS:
+                    result = self._name_the_session_holding_the_port(name, result)
                 if name == "bench_run_stop":
                     # Only once the stand-down has run is the run's teardown
                     # over, so this is where what is still held can be read.
@@ -713,6 +743,32 @@ class AgenticHILToolService:
             if "config_status" in result:
                 return result
             return with_config_status(result, config_status(self.config), prominent=name in prominent_config_status_tools())
+
+    def _name_the_session_holding_the_port(self, name: str, result: JsonObject) -> JsonObject:
+        """Name this server's own COM session where it is what refused an esptool call.
+
+        An esptool entry reaches its board through the serial port its com_port
+        names, so the call holds what that port holds, and a COM session this
+        server keeps on the port refuses it with `device_busy`. That refusal's
+        steps are about a hold somebody else has, and its holder record can even
+        name the refused call's own run, which borrowed the session's hold. Here
+        nobody else has it: the session is the caller's own, and the way through
+        is to stop it, so the refusal says which session and the order that
+        works."""
+        debugger = self.config.debugger
+        if not isinstance(result, dict) or result.get("error_type") != "device_busy" or debugger is None or debugger.type != "esptool" or debugger.com_port_config is None:
+            return result
+        device = debugger.com_port_config.device
+        holding = sorted(
+            port_id for port_id in self.com_ports.sessions if port_id == debugger.com_port or (port_id in self.config.com_ports and self.config.com_ports[port_id].device == device)
+        )
+        if not holding:
+            return result
+        return {
+            **result,
+            "held_by_com_session": holding[0],
+            "next_step": f"Stop the COM session on {holding[0]} with com_session_stop, call {name} again, then start the session again to read what the board prints.",
+        }
 
     def _stand_down_after_call(self, result: JsonObject) -> JsonObject:
         """End an incident this call left open that owes nobody a gate.
@@ -1006,8 +1062,18 @@ class AgenticHILToolService:
             # that ambiguity, and the bound one is refused until its own
             # probe_id says which physical probe it is. See
             # unnamed_probe_error for what the single-debugger exemption does
-            # and does not cover.
-            if name in probe_addressing_tools() and len(self.config.debuggers) > 1 and self.config.debugger is not None and self.config.debugger.probe_id is None:
+            # and does not cover. An esptool entry has no probe to name: it
+            # reaches its board through the serial port its com_port names,
+            # which is a device path rather than a first-found probe, and whose
+            # identity is checked against the attached adapter before every
+            # call, as com_session_start checks it.
+            if (
+                name in probe_addressing_tools()
+                and len(self.config.debuggers) > 1
+                and self.config.debugger is not None
+                and self.config.debugger.type != "esptool"
+                and self.config.debugger.probe_id is None
+            ):
                 return unnamed_probe_error(name, self.config)
             # An operator's `recover` in another process may have signed an
             # incident this owner handed its locks into; learn it before the
@@ -1836,9 +1902,12 @@ class AgenticHILToolService:
         Two safe-state predicates, and the weakest one that can settle the open
         reason is the one that runs. Both first reap this owner's leftover
         debugger processes. `readonly_probe` then re-reads the probe through
-        probe_target, which connects without resetting on every backend (OpenOCD
-        `init; targets`, pyOCD `status`, ST-Link `-HOTPLUG`), so it cannot change
-        the state it is attesting to. `reset_halt` additionally drives the target
+        probe_target, which connects without resetting on every backend but
+        esptool (OpenOCD `init; targets`, pyOCD `status`, ST-Link `-HOTPLUG`),
+        so it cannot change the state it is attesting to. esptool reads an ESP32
+        only by resetting it into its ROM bootloader (`probe_resets_target`), so
+        that board has no read-only predicate, and a reason only a re-read was
+        to settle is left to stand down. `reset_halt` additionally drives the target
         into a defined halted state first, which is what settles an unconfirmed
         flash, reset, or session start: a physical act, gated on the bench's
         recovery.auto_recover policy and on the allow_reset of the entry it will
@@ -1875,6 +1944,15 @@ class AgenticHILToolService:
         reason = self.coordinator.retryable_incident(allowed) if allowed else None
         if reason is None or not authority.probe_allowed():
             return None
+        # Never drive the board for a reason a re-read already settles: the
+        # stronger predicate is a physical act, not a default.
+        needs_reset = reason not in RETRYABLE_CLEANUP_REASONS
+        if not needs_reset and probe_resets_target(authority):
+            # Nor call a reset a re-read. A probe through esptool resets the
+            # chip, so nothing here can settle a reason that asked for no
+            # physical act. Nothing is held, counted or driven for it, and the
+            # incident stands down when the call ends.
+            return None
         # The probe is held before anything is counted, reaped or driven. A probe
         # another workspace holds refuses the recovery the way it refuses a call,
         # and that refusal is no attempt: the bound on attempts is for a
@@ -1887,9 +1965,6 @@ class AgenticHILToolService:
         with hold:
             if not self._machine_recovery_attempt_allowed():
                 return None
-            # Never drive the board for a reason a re-read already settles: the
-            # stronger predicate is a physical act, not a default.
-            needs_reset = reason not in RETRYABLE_CLEANUP_REASONS
             if cleanup_registered_processes(owner_marker=self.coordinator.owner_marker):
                 return None
             backend, owns_backend = self._recovery_backend(recovery_config)
@@ -2047,6 +2122,16 @@ class AgenticHILToolService:
                 "allow_reset_missing",
                 "recovery.auto_recover asks for reset_halt but this probe does not grant allow_reset, so the target "
                 "was left in whatever state the failed run put it in.",
+            )
+        if policy.auto_recover != "reset_halt" and probe_resets_target(self.config):
+            # The re-read a readonly policy allows is a reset on this board, and
+            # a policy that drives nothing physical is not overridden by a probe
+            # that would.
+            return (
+                "probe_resets_target",
+                f"recovery.auto_recover is {policy.auto_recover}, which drives nothing physical, and esptool reads an "
+                "ESP32 only by resetting it into its ROM bootloader, so the target was not re-read and was left in "
+                "whatever state the failed run put it in.",
             )
         return None
 
@@ -2503,7 +2588,7 @@ class AgenticHILToolService:
                 }
             else:
                 try:
-                    resources = (DEBUGGER_DISCOVERY_RESOURCE,) if name == "debugger_probes_list" else debugger_effect_resources(self.config)
+                    resources = (DEBUGGER_DISCOVERY_RESOURCE,) if name == "debugger_probes_list" else debugger_effect_devices(self.config)
                     lease = self.coordinator.acquire(*resources, for_recovery=for_recovery)
                 except CoordinationError as error:
                     return {"tool": name, "side_effect_committed": False, **error.result}
@@ -2876,6 +2961,9 @@ _SESSION_START_TOOLS = frozenset({"com_session_start", "can_session_start", "deb
 # debugger lease reports under the same names; the session's are merged into the
 # answer only after that lease has written its own.
 _CAPTURE_SESSION_FIELDS = frozenset({"lease_id", "resources", "lease_state", "safe_state_confirmed", "processes_reaped", "audit_ok", "audit_error", "audit_errors", "cleanup_required", "quarantined", "cleanup_reasons", "quarantine_id", "report_path", CONTACT_MARKER_KEY, CONTACT_MARKER_SOURCE_KEY})
+# The calls an esptool entry makes over its serial port, which a COM session of
+# this server on that port refuses (`_name_the_session_holding_the_port`).
+ESPTOOL_PORT_TOOLS = frozenset({"probe_target", "flash_firmware", "reset_target"})
 
 
 def _flash_capture_advice(answer: JsonObject, *, fallback: bool = False) -> JsonObject:

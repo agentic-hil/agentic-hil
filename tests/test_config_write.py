@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 import yaml
-from conftest import FAKE_GDB, FAKE_OPENOCD, FAKE_STLINK, write_authoritative_config
+from conftest import FAKE_ESPTOOL, FAKE_GDB, FAKE_OPENOCD, FAKE_STLINK, write_authoritative_config
 
 from agentic_hil.config import SURVIVING_SECTION_KEYS, config_schema, load_authoritative_config
 from agentic_hil.configreload import PROJECT_CONFIG_RELOAD
@@ -1236,7 +1236,7 @@ def test_the_debug_stack_is_opened_by_the_description_grant_and_reaches_the_file
 
     assert "debuggers.dut.type" in writable
     assert writable["debuggers.dut.type"]["right"] == CONFIG_DESCRIPTION_RIGHT
-    assert writable["debuggers.dut.type"]["value_schema"]["enum"] == ["openocd", "stlink", "pyocd"]
+    assert writable["debuggers.dut.type"]["value_schema"]["enum"] == ["openocd", "stlink", "pyocd", "esptool"]
     assert writable["debuggers.dut.type"]["current_value"] == "stlink"
     assert written["ok"] is True, written
     assert written["permissions_changed"] == [], "a debug stack grants nothing"
@@ -1442,14 +1442,120 @@ def test_the_switch_demands_only_the_fields_this_surface_could_have_supplied() -
     doing real work: `interface` and `target_type` are required by their
     backends and are out of reach here, so a rule that demanded them would have
     made those two switches impossible rather than atomic. If either ever
-    becomes settable, this test is where that decision has to be taken again."""
+    becomes settable, this test is where that decision has to be taken again.
+
+    esptool's `com_port` is out of reach as well, and it is the one with no
+    unset behaviour at all, which the matrix says with `"unset": "refused"`.
+    That switch is not demanded but refused outright, as the operator's edit,
+    and the tests below pin it in both directions."""
     settable = set(config_rule_fields(_rule("debuggers", under_permissions=False)))
     required = {backend: {name for name, node in fields.items() if isinstance(node, dict) and node.get("status") == "required"} for backend, fields in DEBUGGER_FIELD_MATRIX.items()}
+    unset_refused = {backend: {name for name, node in fields.items() if isinstance(node, dict) and node.get("unset") == "refused"} for backend, fields in DEBUGGER_FIELD_MATRIX.items()}
 
     assert "type" in settable, "the key this whole group is about"
     assert required["openocd"] & settable == {"interface_cfg", "target_cfg"}
     assert required["stlink"] - settable == {"interface"}
     assert required["pyocd"] - settable == {"target_type"}
+    assert required["esptool"] - settable == {"com_port"}
+    assert unset_refused == {"openocd": set(), "stlink": set(), "pyocd": set(), "esptool": {"com_port"}}
+
+
+def esptool_entry(path: Path) -> None:
+    """The bench's entry rewritten onto esptool, as the operator writes one into the file.
+
+    No probe identity, because an esptool entry is refused one, and `com_port`
+    naming the bench's own `dut_uart` entry, whose line esptool would reach."""
+    rewrite_debugger(
+        path,
+        drop=("probe_id", "interface", "interface_cfg", "target_cfg", "target_type", "connect_mode", "resource_id"),
+        type="esptool",
+        com_port="dut_uart",
+        executable=FAKE_ESPTOOL.as_posix(),
+    )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param((), id="type-only"),
+        pytest.param((("debuggers.dut.executable", None),), id="with-a-fresh-executable"),
+    ],
+)
+def test_a_switch_onto_esptool_is_refused_as_the_operators_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: tuple) -> None:
+    """esptool cannot do without `com_port`, and this surface does not write it.
+
+    So no call here can land the switch, and naming `com_port` under
+    `missing_keys` would send the caller round a loop it cannot leave: the
+    refusal says the switch is the operator's edit in the file, and it comes
+    before the executable the old backend chose is even asked about."""
+    workspace, path = bench(tmp_path, monkeypatch, debugger_type="stlink", **{CONFIG_DESCRIPTION_RIGHT: True})
+    before = path.read_bytes()
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.type", "esptool"), *extra))
+    finally:
+        tools.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "invalid_argument"
+    assert refused["field"] == "debuggers.dut.com_port"
+    assert refused["rejected_key"] == "debuggers.dut.type"
+    assert refused["debugger_type"] == "esptool"
+    assert refused["operator_keys"] == ["debuggers.dut.com_port"]
+    assert "missing_keys" not in refused, "nothing a call could send would complete it"
+    assert "esptool cannot do without `com_port`" in refused["summary"], refused["summary"]
+    assert "operator" in refused["next_step"] and "project_config_reload_description" in refused["next_step"]
+    assert path.read_bytes() == before, "nothing was written"
+
+
+def test_a_switch_off_esptool_is_refused_as_the_operators_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other direction: the entry carries a `com_port` the new backend refuses.
+
+    The call carries everything openocd needs, so it is past the request-side
+    demands, and the loader would still refuse the result for `com_port`. This
+    surface cannot remove that key, so the refusal is the same operator's edit,
+    named before anything is applied."""
+    workspace, path = bench(tmp_path, monkeypatch, debugger_type="stlink", **{CONFIG_DESCRIPTION_RIGHT: True})
+    esptool_entry(path)
+    assert load_authoritative_config(workspace).debuggers["dut"].type == "esptool", "an entry the operator wrote, and it loads"
+    before = path.read_bytes()
+    tools = service(workspace)
+    try:
+        refused = tools.call(
+            PROJECT_CONFIG_SET,
+            changes(
+                ("debuggers.dut.type", "openocd"),
+                ("debuggers.dut.executable", FAKE_OPENOCD.as_posix()),
+                ("debuggers.dut.interface_cfg", "interface/stlink.cfg"),
+                ("debuggers.dut.target_cfg", "target/stm32f4x.cfg"),
+            ),
+        )
+    finally:
+        tools.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "invalid_argument"
+    assert refused["field"] == "debuggers.dut.com_port"
+    assert refused["debugger_type"] == "openocd"
+    assert refused["operator_keys"] == ["debuggers.dut.com_port"]
+    assert "the entry carries `com_port`, which openocd refuses" in refused["summary"], refused["summary"]
+    assert path.read_bytes() == before, "nothing was written"
+
+
+def test_an_esptool_entry_takes_the_keys_it_shares_with_every_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refusing the switch is not refusing the entry: `executable` still lands on it."""
+    workspace, path = bench(tmp_path, monkeypatch, debugger_type="stlink", **{CONFIG_DESCRIPTION_RIGHT: True})
+    esptool_entry(path)
+    tools = service(workspace)
+    try:
+        written = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.executable", None)))
+    finally:
+        tools.close()
+
+    assert written["ok"] is True, written
+    entry = document_of(path)["debuggers"]["dut"]
+    assert (entry["type"], entry["com_port"], entry["executable"]) == ("esptool", "dut_uart", None)
+    assert load_authoritative_config(workspace).debuggers["dut"].type == "esptool"
 
 
 def test_a_debug_stack_the_schema_does_not_spell_never_reaches_the_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1468,7 +1574,7 @@ def test_a_debug_stack_the_schema_does_not_spell_never_reaches_the_document(tmp_
 
     assert refused["error_type"] == "invalid_argument"
     assert refused["field"] == "changes.0.value"
-    assert refused["value_schema"]["enum"] == ["openocd", "stlink", "pyocd"]
+    assert refused["value_schema"]["enum"] == ["openocd", "stlink", "pyocd", "esptool"]
     assert path.read_bytes() == before, "nothing changed"
 
 

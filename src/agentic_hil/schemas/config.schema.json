@@ -189,7 +189,7 @@
     },
     "debuggers": {
       "type": "object",
-      "description": "Named debug probes. The name is the routing key: test plan steps address a probe by it, and each probe carries its own permissions. Once several are configured every entry needs its own probe_id: it is the only field that selects a physical probe, and resource_id merely aliases the coordination lease, so it never substitutes for one.",
+      "description": "Named debug probes. The name is the routing key: test plan steps address a probe by it, and each probe carries its own permissions. Once several are configured every entry needs its own probe_id: it is the only field that selects a physical probe, and resource_id merely aliases the coordination lease, so it never substitutes for one. An esptool entry is the exception: it has no probe, reaches its board through the USB-UART bridge named by com_port, and is identified by that com_ports entry instead.",
       "propertyNames": {
         "pattern": "^[A-Za-z0-9_.-]+$"
       },
@@ -203,9 +203,10 @@
             "enum": [
               "openocd",
               "stlink",
-              "pyocd"
+              "pyocd",
+              "esptool"
             ],
-            "description": "Which debug stack drives this probe. It is part of the bench description and is settable behind allow_config_description_write, beside executable, interface_cfg and target_cfg, which already decide which binary runs with which scripts. A change to it is refused unless the entry that comes out of the call carries what the named backend requires and this surface can write: switching to openocd needs interface_cfg and target_cfg, so a backend switch lands whole or not at all. Send executable in the same call too, or null to have the new backend's binary discovered, because an executable already in the entry was chosen for the backend the entry is leaving."
+            "description": "Which debug stack drives this probe. It is part of the bench description and is settable behind allow_config_description_write, beside executable, interface_cfg and target_cfg, which already decide which binary runs with which scripts. A change to it is refused unless the entry that comes out of the call carries what the named backend requires and this surface can write: switching to openocd needs interface_cfg and target_cfg, so a backend switch lands whole or not at all. Send executable in the same call too, or null to have the new backend's binary discovered, because an executable already in the entry was chosen for the backend the entry is leaving. esptool flashes Espressif chips through their ROM bootloader over a serial line; it needs com_port, which this surface cannot write, so an entry becomes esptool only through the file."
           },
           "executable": {
             "type": [
@@ -220,7 +221,7 @@
               "null"
             ],
             "default": null,
-            "description": "The GDB server typed debug sessions run on under type stlink: ST-LINK_gdbserver, which STM32CubeCLT installs beside STM32_Programmer_CLI, because the CLI has no GDB server of its own. Unset, it is looked for in the same STM32CubeCLT tree as the configured CLI (STLink-gdb-server/bin beside STM32CubeProgrammer/bin), then on PATH and in the STM32CubeCLT installations of this host. Held to the rules executable is held to: outside the workspace, an existing single-link regular file. Without one, flashing, probing and reading work as before and debug_start_session is refused naming this key. Ignored by openocd and pyocd, which run their sessions on executable."
+            "description": "The GDB server typed debug sessions run on under type stlink: ST-LINK_gdbserver, which STM32CubeCLT installs beside STM32_Programmer_CLI, because the CLI has no GDB server of its own. Unset, it is looked for in the same STM32CubeCLT tree as the configured CLI (STLink-gdb-server/bin beside STM32CubeProgrammer/bin), then on PATH and in the STM32CubeCLT installations of this host. Held to the rules executable is held to: outside the workspace, an existing single-link regular file. Without one, flashing, probing and reading work as before and debug_start_session is refused naming this key. Ignored by openocd and pyocd, which run their sessions on executable, and by esptool, which has no debug sessions."
           },
           "probe_id": {
             "type": [
@@ -273,7 +274,7 @@
               "hotplug",
               "under_reset"
             ],
-            "description": "How the probe attaches to the target for a flash. hotplug connects to the running core, which is what every configuration written before this key existed does and what the default keeps doing. under_reset holds the target in reset while the connection is made, which is the remedy for a core that runs from flash and defeats the erase; it needs the probe's reset line wired to the target's NRST (an on-board ST-Link has it). Read by the stlink backend only, where it selects STM32CubeProgrammer's mode=HOTPLUG or mode=UR for the flash command; probe_target keeps connecting hot plug so it stays the least intrusive call, and reset_target keeps its own NORMAL connect. openocd and pyocd refuse under_reset at load rather than ignoring it."
+            "description": "How the probe attaches to the target for a flash. hotplug connects to the running core, which is what every configuration written before this key existed does and what the default keeps doing. under_reset holds the target in reset while the connection is made, which is the remedy for a core that runs from flash and defeats the erase; it needs the probe's reset line wired to the target's NRST (an on-board ST-Link has it). Read by the stlink backend only, where it selects STM32CubeProgrammer's mode=HOTPLUG or mode=UR for the flash command; probe_target keeps connecting hot plug so it stays the least intrusive call, and reset_target keeps its own NORMAL connect. openocd, pyocd and esptool refuse under_reset at load rather than ignoring it; esptool resets the chip into its bootloader on every call already."
           },
           "interface_cfg": {
             "type": "string",
@@ -298,6 +299,11 @@
             ],
             "pattern": "^[A-Za-z0-9_.:-]+$",
             "default": null
+          },
+          "com_port": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+$",
+            "description": "The com_ports entry whose serial line an esptool debugger flashes through, and required on one. esptool has no probe: it resets the chip into its ROM bootloader over the USB-UART bridge's DTR and RTS lines and writes flash over the same line, so that entry's device, serial_number, vid and pid say which board a call reaches, and its device lock is this debugger's lock. A flash and a COM session on the same port therefore exclude each other. Refused on every other type, and probe_id and resource_id are refused on an esptool entry, because the identity belongs on the com_ports entry."
           },
           "timeout_s": {
             "type": "number",

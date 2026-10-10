@@ -2670,9 +2670,18 @@ class DebuggerRunner(StepDevice):
         backend, the step and the step number, and both end at the configuration
         change that would work, taken from the same table the tools' own
         `not_supported` refusals quote so a plan author and a tool caller are
-        never sent two different ways out."""
+        never sent two different ways out.
+
+        A backend that table has no way out for (esptool, which reaches an ESP32
+        through its ROM bootloader and nothing else) has no configuration change
+        to name, so the refusal names the claim the plan can still make there:
+        what the firmware prints, read on its console."""
         way_out = DEBUG_SESSION_WAY_OUT.get(debugger.type)
         reach = f" To run it on this bench, {way_out}." if way_out else ""
+        next_step = (
+            f"The '{debugger.type}' backend has no debug route on this entry. Make the claim through what the firmware "
+            "prints instead, with a `uart_read` step and a `comparator:` on the board's console, or remove the step."
+        )
         served = sorted(configured_sessionless_debug_reads(config, debugger_id))
         if cls.step_action_specs[step.action].tool in sessionless_capable_debug_tools():
             summary = (
@@ -2693,7 +2702,7 @@ class DebuggerRunner(StepDevice):
                 "debugger": debugger_id,
                 "debugger_type": debugger.type,
                 "sessionless_debug_reads": served,
-                **({"way_out": way_out} if way_out else {}),
+                **({"way_out": way_out} if way_out else {"next_step": next_step}),
             },
         )
 
