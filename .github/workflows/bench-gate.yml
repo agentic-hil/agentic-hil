@@ -24,7 +24,8 @@
 # nodes, the machine's device-lock directory and a directory of the run's own,
 # out of which the report alone is copied. The opt-in pyOCD discovery and USB
 # reset stages instead get the host /dev tree read only so a recreated node is
-# visible. Their code never runs on the machine itself, beside the runner's own files, which is what
+# visible, and the opt-in ESP32 stage gets the ESP32 board's USB-UART bridge
+# node beside the probe's. Their code never runs on the machine itself, beside the runner's own files, which is what
 # lets a maintainer name the head of a pull request from a fork: that head is
 # served from this repository too. The board and its probe are that commit's to
 # drive for the length of the run, which is the decision a dispatch makes.
@@ -73,6 +74,11 @@ on:
         type: boolean
       run_usb_reset_reenumeration:
         description: Run the opt-in USBDEVFS_RESET and USB re-enumeration observation
+        required: false
+        default: false
+        type: boolean
+      run_esp32:
+        description: Run the ESP32 flash, reset and console recordings on the bench's ESP32 board after the standard bench gates
         required: false
         default: false
         type: boolean
@@ -201,6 +207,18 @@ jobs:
         if: ${{ success() && !inputs.diagnose_only && inputs.run_usb_reset_reenumeration }}
         working-directory: under-test
         run: exec python3 ../harness/tools/bench_in_container.py --runtime podman --live-device-tree --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS/usb-reset" -- tests/bench/usb_reset_reenumeration.py
+
+      # Kept separate from the standard tier like the recordings above, and
+      # opt-in because the ESP32 board is a second board on the bench, beside
+      # the one the tier drives. `--esp32` hands the container that board's
+      # USB-UART bridge beside the probe and refuses the run before anything is
+      # built unless exactly one such bridge is attached. esptool flashes and
+      # resets the board through Agentic HIL over the bridge, and the board's
+      # console is read on the same line.
+      - name: Run ESP32 hardware recordings
+        if: ${{ success() && !inputs.diagnose_only && inputs.run_esp32 }}
+        working-directory: under-test
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --esp32 --output "$BENCH_RESULTS/esp32" -- tests/bench/esp32_recordings.py
 
       # `if: always()` because a red or cancelled run's report is the one worth
       # reading, and `warn` because a run that never reached pytest has already
