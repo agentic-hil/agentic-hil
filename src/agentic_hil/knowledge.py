@@ -5355,13 +5355,23 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "esptool opened the serial port and the ESP32's ROM bootloader did not answer. esptool pulls the chip into "
             "that bootloader through the bridge's DTR and RTS lines, which the board's auto-reset circuit wires to EN "
             "and IO0, and the run ended on `Failed to connect to`, `Wrong boot mode detected` or `No serial data "
-            "received.` The control lines were driven, so the chip may have been reset; nothing was written."
+            "received.` The control lines were driven, so the chip may have been reset; nothing was written. "
+            "`Wrong boot mode detected` is a chip that restarted and printed its boot line but did not start its "
+            "bootloader: the lines reach EN and not IO0. `No serial data received.` is no boot line after esptool's "
+            "last reset and no byte in answer to its last sync: the lines reached neither, the chip has no power, or "
+            "its TX does not reach the bridge. A board without an auto-reset circuit, whose bootloader is entered by "
+            "holding a FLASH or BOOT button while RST is pressed, ends every attempt that way, or on `Invalid head of "
+            "packet` while its application is printing."
         ),
         remediation=(
             "Confirm with com_ports_list that `com_ports.<name>.device` is still the ESP32 board's bridge: a device "
             "name is an enumeration order, and a CH340 bridge publishes no serial number to tell boards apart by.",
-            "Some boards' auto-reset circuit does not get the chip into its bootloader on its own. Ask the operator to "
-            "hold BOOT (IO0) while the call runs, pressing EN once, or to tie IO0 to ground for one attempt.",
+            "On `Wrong boot mode detected`, the board's circuit restarts the chip without holding IO0 low. Ask the "
+            "operator to hold BOOT (IO0) while the call runs, pressing EN once, or to tie IO0 to ground for one attempt.",
+            "On `No serial data received.` or `Invalid head of packet`, ask the operator whether the board's "
+            "bootloader is entered with a FLASH or BOOT button. Such a board can be flashed only while somebody does "
+            "that for each call, and no reset from here starts its application either, so an unattended bench needs a "
+            "board whose bridge drives EN and IO0, as Espressif's ESP32-DevKitC does.",
             "Check that the board is powered and that the USB cable carries data.",
             "Then call probe_target, which writes nothing, to see whether the change helped.",
         ),
@@ -9028,6 +9038,8 @@ debuggers:
 `flash_address` is the flash offset a `.bin` is written at and has to start a 4 KiB sector. A `.hex` carries its addresses; an `.elf` is refused, because esptool writes images: `esptool elf2image` makes one. `agentic-hil adopt-hardware` and `project_config_create` never write these entries, because finding the board would mean opening serial ports, and opening an ESP32 board's bridge resets the chip. The operator writes them into the file. Adoption refuses an esptool entry before it reads any probe, and a regeneration does not carry one over: `project_config_create` lists it under `dropped_entries`, `agentic-hil init --force` rewrites the whole file without it, and either way it is written again by hand.
 
 The bridge's serial line is the board's console as well. esptool and a COM session on it take turns: a flash or a reset while this server holds a session on the port is refused with `device_busy` and `held_by_com_session`, and `com_session_stop` clears the way. Keep `assert_dtr` and `assert_rts` false on that entry: a session then leaves the lines released and the application running, where a session that asserts them can reset the chip on open or hold it in its bootloader, depending on the order the driver moves the two lines in.
+
+Those lines have to reach the chip's EN and IO0 through an auto-reset circuit, as the two transistors on Espressif's ESP32-DevKitC wire them. A board whose bootloader is entered by holding a FLASH or BOOT button while RST is pressed answers every call with `target_not_detected` and esptool's `No serial data received.`, or `Invalid head of packet` while its application is printing: it can be flashed only while somebody presses the buttons, and no reset from here starts its application.
 
 ## pyOCD target types mostly come from CMSIS packs
 
