@@ -1225,6 +1225,14 @@ def _incomplete_backend_switch(original: JsonObject, requested: list[tuple[Resol
     not repeated here. The loader already refuses it, and validate-before-replace
     below turns that refusal into the same "nothing was written" with the
     per-backend rule stated in exactly one place.
+
+    Both halves have one case no call here can settle, and that one is refused
+    first, under ``operator_keys`` rather than ``missing_keys``: a required field
+    the matrix marks ``"unset": "refused"`` that this surface does not write
+    (``com_port`` onto esptool), or a field the entry carries that the new
+    backend refuses and this surface cannot remove (``com_port`` off esptool).
+    Naming such a key as missing would send the caller round a loop it cannot
+    leave, so the refusal says the switch is the operator's edit in the file.
     """
     switches = _backend_switches(requested)
     if not switches:
@@ -1240,6 +1248,7 @@ def _incomplete_backend_switch(original: JsonObject, requested: list[tuple[Resol
         if resolved.section == DEBUGGERS_SECTION and not resolved.under_permissions and resolved.entry is not None:
             supplied.setdefault(resolved.entry, set()).add(resolved.field)
     incomplete: list[tuple[str, str, list[str], bool]] = []
+    operator_only: list[tuple[str, str, list[str], list[str]]] = []
     for resolved, backend in switches:
         old_entry = original_section.get(resolved.entry)
         old_type = _effective_debugger_type(old_entry) if isinstance(old_entry, dict) else None
@@ -1248,11 +1257,21 @@ def _incomplete_backend_switch(original: JsonObject, requested: list[tuple[Resol
             # names it, or it omits the optional field and defaults to openocd,
             # so nothing it carries was chosen for a backend it is leaving.
             continue
+        fields = {name: node for name, node in (DEBUGGER_FIELD_MATRIX.get(backend) or {}).items() if isinstance(node, dict)}
+        # Out of this surface's reach either way: a field the new backend cannot
+        # do without, or one the entry carries that the new backend refuses.
+        lacking = sorted(name for name, node in fields.items() if node.get("status") == "required" and node.get("unset") == "refused" and name not in settable)
+        carried = sorted(
+            name
+            for name, node in fields.items()
+            if node.get("status") == "refused" and name not in settable and isinstance(old_entry, dict) and _entry_carries(old_entry, name)
+        )
+        if lacking or carried:
+            operator_only.append((resolved.key, backend, lacking, carried))
+            continue
         here = supplied.get(resolved.entry, set())
         required = sorted(
-            name
-            for name, node in (DEBUGGER_FIELD_MATRIX.get(backend) or {}).items()
-            if isinstance(node, dict) and node.get("status") == "required" and name != DEBUGGER_TYPE_FIELD and name in settable
+            name for name, node in fields.items() if node.get("status") == "required" and name != DEBUGGER_TYPE_FIELD and name in settable
         )
         missing = [f"{DEBUGGERS_SECTION}.{resolved.entry}.{name}" for name in required if name not in here]
         # The old backend's binary is the other half a type-only switch keeps: an
@@ -1266,6 +1285,27 @@ def _incomplete_backend_switch(original: JsonObject, requested: list[tuple[Resol
         )
         if missing or stale_executable:
             incomplete.append((resolved.key, backend, missing, stale_executable))
+    if operator_only:
+        key, backend, lacking, carried = operator_only[0]
+        entry_path = key.rsplit(".", 1)[0]
+        names = [*lacking, *carried]
+        reasons = [f"{backend} cannot do without `{name}`" for name in lacking]
+        reasons += [f"the entry carries `{name}`, which {backend} refuses" for name in carried]
+        return _invalid(
+            f"{entry_path}.{names[0]}",
+            f"`{key}` would put this entry on the {backend} backend, and "
+            + " and ".join(reasons)
+            + f". `project_config_set` does not write {', '.join('`' + name + '`' for name in names)}, so no call here lands "
+            "this switch, whatever else it carries. Nothing was written.",
+            rejected_key=key,
+            debugger_type=backend,
+            operator_keys=[f"{entry_path}.{name}" for name in names],
+            next_step=(
+                "Leave the entry on the backend it has. This switch is the operator's edit in the configuration file, "
+                f"with every key in `operator_keys` settled there; {DEBUGGER_BACKENDS_URI} says what a {backend} entry "
+                "takes, and `project_config_reload_description` reads the edited file afterwards."
+            ),
+        )
     if not incomplete:
         return None
     first_key, first_backend, first_missing, first_stale = incomplete[0]

@@ -37,7 +37,8 @@ target:
 # work through `agentic-hil test-reactor`.
 debuggers:
   dut:
-    type: "openocd"          # or "pyocd" (most Cortex-M targets), or "stlink" (STM32CubeProgrammer CLI)
+    type: "openocd"          # or "pyocd" (most Cortex-M targets), "stlink" (STM32CubeProgrammer CLI),
+                             # or "esptool" (an ESP32 through its USB-UART bridge; see below)
     probe_id: "0668FF383036" # required once several probes are configured: it is
                              # the only field that selects a physical probe
     # OpenOCD search names: OpenOCD resolves them against its own script path,
@@ -147,6 +148,42 @@ Three things bound it:
 
 `connect_mode` sits with the other things the bench *is*, under `allow_config_description_write`: it grants nothing, and both of its values are a flash the configuration already allows.
 
+## An ESP32 through esptool
+
+An ESP32 development board has no debug probe. `type: esptool` reaches the chip the way esptool always does: it pulls the chip into its ROM bootloader through the DTR and RTS lines of the board's USB-UART bridge (a CP210x, CH340 or FTDI part), flashes it over the same serial line, and lets it go again. So the entry names the `com_ports` entry of that bridge where other entries name a probe, and that entry says which board it is:
+
+```yaml
+com_ports:
+  esp:
+    device: /dev/ttyUSB0        # COM5 on Windows
+    vid: "1a86"                 # a CH340 bridge, which publishes no serial number
+    pid: "7523"
+    identity_source: vid_pid
+    baudrate: 115200
+    assert_dtr: false           # DTR and RTS drive the chip's reset and boot pins:
+    assert_rts: false           # released, the application runs while a session listens
+debuggers:
+  esp32:
+    type: esptool
+    com_port: esp               # the com_ports entry above, by name
+    target_type: esp32          # optional; unset, esptool detects the chip
+    flash_address: "0x10000"    # where an ESP-IDF application goes
+    permissions:
+      allow_flash: true
+      allow_reset: true         # probe_target resets the chip as well
+```
+
+What follows from there being no probe:
+
+- **The port is the identity and the lock.** `com_port` names the `com_ports` entry, not a device path, and that entry's `device` is passed to esptool as `--port` on every call, so esptool never scans the host's serial ports: its scan resets every board it reaches. The entry's `serial_number`, or `vid`/`pid` for a bridge that publishes no serial number, is checked against the adapter behind the name before esptool starts, as `com_session_start` checks it. `probe_id` and `resource_id` are refused on the debugger entry, and two esptool entries naming one `com_ports` entry are refused at load.
+- **Flash, reset and probe; no debug session.** `flash_firmware` writes a `.bin` at `flash_address`, which has to start a 4 KiB sector, or a `.hex` at the addresses its records carry, and esptool verifies every write against the image. An `.elf` is refused: `esptool elf2image` turns one into an image, and `esptool merge-bin` combines bootloader, partition table and application into one. A flash without `reset_after_flash` leaves the chip in its ROM bootloader until `reset_target` runs it. `reset_target` mode `run` resets into the application, mode `halt` holds the chip in its ROM bootloader, the nearest thing to a halted core this interface has, and mode `init` is refused. `probe_target` resets the chip into its bootloader to read it, so it needs `allow_reset` as well. Every typed debug tool and `debugger_probes_list` answer `not_supported`, because esptool has no debug interface to the CPU.
+- **Recovery resets only under `reset_halt`.** The default `recovery.auto_recover: reset_halt` settles an unconfirmed flash or reset as it does on a probe: a reset into the ROM bootloader, read back by a probe that leaves the chip there. Reading the chip is a reset here, so nothing is settled by a re-read alone: under `readonly` a failed run's `recovery` block names `probe_resets_target` and nothing reaches the chip, and under either policy an incident only a re-read would settle stands down when its call ends.
+- **The console shares the line.** The bridge's serial line is the board's console too, so esptool and a COM session take turns on it: a flash or a reset while this server holds a session on the port is refused with `device_busy` and `held_by_com_session`, and `com_session_stop` clears the way. With `assert_dtr` and `assert_rts` false the application keeps running while a session listens. An entry that omits them asserts both, and depending on the order the driver moves the lines in, the auto-reset circuit can then reset the chip on open or hold it in its bootloader.
+- **esptool 5 only.** The executable is found beside the Python this server runs on, which is where `pip install agentic-hil[esptool]` puts it, then on PATH; `executable` names another one. `esptool version`, which opens no port, is read first, and an esptool other than 5.x is refused as `debugger_not_found` with `backend_error_type: esptool_version_unsupported`. Each run gets a private working directory, an empty esptool configuration file and none of the `ESPTOOL_*`, `ESP_*` or `IDF_*` variables of the server's environment, so nothing left in an operator's shell adds a port, a chip or an option. esptool prints the chip's MAC address on every connect; reports and logs carry it redacted.
+- **Written by hand.** Neither `project_config_create` nor `agentic-hil adopt-hardware` writes these entries: finding the board would mean opening serial ports, and opening an ESP32 board's bridge can reset the chip. Adoption refuses an esptool entry before it reads anything, and a regeneration does not carry one over: `project_config_create` lists it under `dropped_entries`, and `agentic-hil init --force` rewrites the whole file without it. `project_config_set` does not write `com_port`, so it cannot move an entry onto esptool or off it; such a switch is refused with the key under `operator_keys`, and it is an edit in the file.
+
+`agentic-hil doctor` checks `target_type` without opening the port: it puts the name to esptool as `--chip=<name> version`, and a family this esptool does not know is red, with the close matches and the list esptool accepts. The MCP resource `agentic-hil://reference/debugger-backends/esptool` has the field matrix.
+
 ## Artifact Roots
 
 `artifacts.allowed_roots` lists the directories under `workspace_root` that firmware may be flashed from and debug dumps written to, each including its subdirectories. There is exactly one spelling for the whole project:
@@ -212,6 +249,7 @@ Three notes on that call:
 - **Send `executable` too.** It is not demanded, because an entry may legitimately have none and let the backend be discovered, but an executable *already* in the entry was chosen for the backend the entry is leaving. `null` is how you ask for the new backend's binary to be found on PATH.
 - **Only what this surface can write is demanded.** `interface` on stlink and `target_type` on pyocd are required by those backends and are not keys `project_config_set` sets; demanding them would make a switch impossible rather than atomic. Both work unset, and the MCP resource `agentic-hil://reference/debugger-backends` states per backend what it requires, discovers, ignores or refuses.
 - **A field the new backend refuses is caught by the loader.** Nothing on this surface knows what OpenOCD can carry out; what it knows is that the changed file has to load as authoritative before it may replace the one that did. So switching an entry that carries `connect_mode: under_reset` to `openocd` is refused as `config_invalid` naming `debuggers.<name>.connect_mode`, and the file that was there stands untouched. Send `connect_mode: hotplug` in the same call to make that switch land.
+- **esptool is the one switch no call lands.** An esptool entry needs `com_port`, and every other backend refuses it, and `project_config_set` writes it in neither direction. A switch onto esptool or off it is refused with `operator_keys` naming that key, rather than `missing_keys` sending you round a loop: it is the operator's edit in the file. [An ESP32 through esptool](#an-esp32-through-esptool) has the entry.
 
 A changed `type` is a device description like any other, so the running server keeps answering out of the configuration it loaded until `project_config_reload_description` or a restart.
 

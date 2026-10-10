@@ -5358,7 +5358,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         "ok": True,
         "tool": "debugger_info",
         "skipped": True,
-        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. A generated configuration already grants every permission it can, so what is missing is the toolchain, not a grant: set `debuggers.<name>.executable` to your OpenOCD, STM32CubeProgrammer or pyOCD binary. For OpenOCD its two scripts are either OpenOCD's own script names, which it resolves itself, or absolute paths outside the workspace.",
+        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. A generated configuration already grants every permission it can, so what is missing is the toolchain, not a grant: set `debuggers.<name>.executable` to your OpenOCD, STM32CubeProgrammer or pyOCD binary, and for an esptool entry install the `esptool` extra beside Agentic HIL, which that entry finds by itself. For OpenOCD its two scripts are either OpenOCD's own script names, which it resolves itself, or absolute paths outside the workspace.",
     }
     # Only a definite negative is a failure. A target-support check that could
     # not run said nothing about this configuration, and reporting it as broken

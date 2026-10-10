@@ -23,11 +23,15 @@ not a board:
 |---|---|
 | ST-Link | OpenOCD, or the STM32CubeProgrammer CLI |
 | CMSIS-DAP probes | pyOCD |
+| an ESP32 board's USB-UART bridge (CP210x, CH340, FTDI) | esptool 5: flashing, reset and probing, no debug sessions |
 
-All three backends are supported. Your board is reached through one of them, so
+All four backends are supported. Your board is reached through one of them, so
 what decides whether a bench works is the probe on it, the backend behind that
 probe, and the target script or controller name your configuration binds to it,
-which [Configuration](configuration.md) describes. The Nucleo-F446RE is the
+which [Configuration](configuration.md) describes. An ESP32 board has no probe:
+esptool reaches the chip through the serial bridge on the board, and
+[An ESP32 through esptool](configuration.md#an-esp32-through-esptool) says what
+that changes. The Nucleo-F446RE is the
 reference this is proven on: it is the board in
 [the STM32 starter](https://github.com/agentic-hil/stm32-starter) and in the
 worked example in this repository. It is the reference, not the requirement.

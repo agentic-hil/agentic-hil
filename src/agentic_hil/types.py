@@ -253,7 +253,7 @@ class ProjectPermissions:
 
 @dataclass(frozen=True)
 class DebuggerConfig:
-    type: Literal["openocd", "stlink", "pyocd"]
+    type: Literal["openocd", "stlink", "pyocd", "esptool"]
     executable: str | None
     probe_id: str | None
     target_type: str | None
@@ -285,6 +285,18 @@ class DebuggerConfig:
     gdb_server_executable: str | None = None
     # Unset means the project target; a named probe on a second board overrides it.
     target: TargetConfig | None = None
+    # The `com_ports` entry an esptool debugger reaches its board through, by
+    # name, and that entry itself once the document is loaded. An ESP32 has no
+    # debug probe between the host and the chip: esptool talks to the ROM
+    # bootloader over the board's USB-UART bridge, so the port *is* the probe,
+    # and its identity (serial number, VID and PID) is the only thing that says
+    # which board a flash reaches. Naming the entry rather than repeating a
+    # device path keeps that identity in one place, where the COM tools already
+    # verify it, and lets the flash and a COM session on the same board share
+    # one lock. Only `type: esptool` reads either; every other backend has a
+    # probe of its own and leaves both unset.
+    com_port: str | None = None
+    com_port_config: ComPortConfig | None = None
 
 
 @dataclass(frozen=True)

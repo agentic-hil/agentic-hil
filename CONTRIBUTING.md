@@ -7,7 +7,7 @@ Thanks for helping improve Agentic Hardware-in-the-Loop (Agentic HIL). This proj
 Use the Python toolchain from the repository root (Python 3.10+):
 
 ```bash
-python -m pip install -e '.[dev,can,pyocd]'
+python -m pip install -e '.[dev,can,esptool,pyocd]'
 ruff check src tests examples
 pytest
 ```

@@ -8701,7 +8701,7 @@ def test_initialize_carries_the_one_thing_said_before_the_agent_decides(tmp_path
     )
     instructions = response["result"]["instructions"]
 
-    for raw in ("openocd", "pyocd", "st-flash", "st-info", "st-util", "JLinkExe", "gdb", "screen", "minicom", "picocom", "cansend", "candump", "Makefile", "/dev/tty*", "COM*", "SocketCAN"):
+    for raw in ("openocd", "pyocd", "esptool", "st-flash", "st-info", "st-util", "JLinkExe", "gdb", "screen", "minicom", "picocom", "cansend", "candump", "Makefile", "/dev/tty*", "COM*", "SocketCAN"):
         assert raw in instructions, raw
     assert "permission_denied" in instructions
     assert "before reaching for a shell" in instructions
@@ -8748,7 +8748,7 @@ def test_the_instructions_say_what_precedes_the_first_call_in_that_order(tmp_pat
         assert touches in part["a"], touches
     assert "before reaching for a shell" in part["a"]
     # b. What never stands in for them, and why.
-    for raw in ("openocd", "pyocd", "st-flash", "st-info", "st-util", "JLinkExe", "gdb", "screen", "minicom", "picocom", "cansend", "candump", "Makefile", "/dev/tty*", "COM*", "SocketCAN"):
+    for raw in ("openocd", "pyocd", "esptool", "st-flash", "st-info", "st-util", "JLinkExe", "gdb", "screen", "minicom", "picocom", "cansend", "candump", "Makefile", "/dev/tty*", "COM*", "SocketCAN"):
         assert raw in part["b"], raw
     says_in_order(part["b"], "bypass the policy", "audit")
     # c. A refusal is the answer, and the file that grants is the operator's.
