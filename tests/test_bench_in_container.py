@@ -19,7 +19,9 @@ Four things are held:
   two probes, a node this user cannot open, a machine that is not Linux, root;
   and the USB-UART adapter beside it, handed in where there is exactly one this
   user can open, said so where there is not, and refused for that only where
-  the run states one must be there;
+  the run states one must be there; and the ESP32 board's bridge, handed in only
+  where the run asks for it and refused there unless there is exactly one this
+  user can open;
 * the verdict, which is pytest's summary line or nothing: a run with no summary,
   without the image's marker, with a skip or with nothing passed is not green;
 * the queue and the teardown: the machine's run lock held for the whole run, a
@@ -86,6 +88,15 @@ SECOND_ADAPTER_SERIAL = "ADAPTERSERIAL02"
 ADAPTER_NODE = "/dev/ttyUSB0"
 ADAPTER_GROUP = 25
 ADAPTER_BY_ID = f"usb-FTDI_FT232R_USB_UART_{ADAPTER_SERIAL}-if00-port0"
+
+# The ESP32 board's bridge: a WCH CH340, which publishes no serial number, so
+# its link under /dev/serial/by-id is named by its vendor id and product string
+# alone. Its node and the group the node is given are made up like the
+# adapter's; a CP210x bridge, which does publish one, carries the serial.
+ESP32_NODE = "/dev/ttyUSB2"
+ESP32_GROUP = 27
+ESP32_BY_ID = "usb-1a86_USB_Serial-if00-port0"
+BRIDGE_SERIAL = "BRIDGESERIAL001"
 
 MARKED = f"{bench_in_container.MARKER_TEXT}\n"
 PASSING_TIER = (
@@ -183,6 +194,46 @@ def a_usb_uart(
         (port / "tty" / tty).mkdir(parents=True)
         (port / "power").mkdir()
         (port / "latency_timer").write_text("16\n", encoding="utf-8")
+        (port / "port_number").write_text("0\n", encoding="utf-8")
+    return directory
+
+
+def an_esp32_bridge(
+    sysfs: Path,
+    name: str,
+    *,
+    vendor: str = "1a86",
+    product: str = "7523",
+    bus: int = 1,
+    device: int = 8,
+    serial: str | None = None,
+    ttys: tuple[str, ...] = ("ttyUSB2",),
+) -> Path:
+    """The USB-UART bridge of an ESP32 board the way /sys/bus/usb/devices shows it.
+
+    A CH340 by default, under the kernel's ch341 driver: the usb-serial layout
+    `a_usb_uart` describes, with the interface's three endpoints and without
+    the GPIO chip and the latency timer FTDI's driver adds, and no serial
+    number, which a CH340 does not publish. One interface per tty.
+    """
+    directory = sysfs / "bus" / "usb" / "devices" / name
+    directory.mkdir(parents=True)
+    attributes = (("idVendor", vendor), ("idProduct", product), ("bcdDevice", "0254"), ("busnum", str(bus)), ("devnum", str(device)), ("speed", "12"))
+    for attribute, value in attributes:
+        (directory / attribute).write_text(f"{value}\n", encoding="utf-8")
+    if serial is not None:
+        (directory / "serial").write_text(f"{serial}\n", encoding="utf-8")
+    for subdirectory in ("ep_00", "power"):
+        (directory / subdirectory).mkdir()
+    for number, tty in enumerate(ttys):
+        interface = directory / f"{name}_1.{number}"
+        interface.mkdir()
+        (interface / "bInterfaceNumber").write_text(f"{number:02d}\n", encoding="utf-8")
+        for subdirectory in ("ep_02", "ep_81", "ep_82", "power"):
+            (interface / subdirectory).mkdir()
+        port = interface / tty
+        (port / "tty" / tty).mkdir(parents=True)
+        (port / "power").mkdir()
         (port / "port_number").write_text("0\n", encoding="utf-8")
     return directory
 
@@ -1262,6 +1313,234 @@ def test_every_adapters_serial_is_withheld_from_the_output_the_log_and_the_repor
         for serial in serials:
             assert serial not in text
     assert f"usb-FTDI_FT232R_USB_UART_{bench_in_container.WITHHELD}-if00-port0" in printed.out
+
+
+# The ESP32 board.
+
+
+@pytest.fixture
+def esp32(machine: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """The machine with an ESP32 board's CH340 attached beside the probe, its node in a group this user has."""
+    an_esp32_bridge(machine.sysfs, "1-6")
+    machine.statuses[ESP32_NODE] = a_node(gid=ESP32_GROUP)
+    machine.openable.add(ESP32_NODE)
+    monkeypatch.setattr(bench_in_container, "user_groups", lambda: {GID, SERIAL_GROUP, USB_GROUP, ESP32_GROUP})
+    return machine
+
+
+def board_handed_in(command: list[str]) -> list[str]:
+    """What the tier is told about the ESP32 board: the values of its variable."""
+    prefix = f"{bench_in_container.ESP32_ENV}="
+    return [value[len(prefix) :] for value in option_values(command, "-e") if value.startswith(prefix)]
+
+
+def test_an_esp32_bridge_is_found_by_its_public_usb_identity_in_the_usb_serial_layout(tmp_path: Path) -> None:
+    """The vendor and product ids of the bridges ESP32 boards carry, and the
+    tty under the interface's port device. A CH341 in its parallel mode, another
+    vendor's usb-serial port, the FTDI adapter, the probe and the hubs are
+    passed over, and a bridge with no serial number is found all the same."""
+    sysfs = tmp_path / "sys"
+    a_usb_device(sysfs, "1-1")
+    a_usb_device(sysfs, "usb1", vendor="1d6b", product="0002", bus=1, device=1, serial="0000:00:07.0", ttys=())
+    a_usb_uart(sysfs, "1-3")
+    an_esp32_bridge(sysfs, "1-6")
+    an_esp32_bridge(sysfs, "1-7", product="5512", device=9, ttys=("ttyUSB3",))
+    an_esp32_bridge(sysfs, "1-8", vendor="067b", product="2303", device=10, ttys=("ttyUSB4",))
+    (sysfs / "bus" / "usb" / "devices" / "1-6_1.0").mkdir()
+
+    bridges = bench_in_container.discover_esp32_bridges(sysfs)
+
+    assert bridges == [bench_in_container.UsbUart(where="bus 1 device 8 (sysfs 1-6)", serial_ports=(ESP32_NODE,), serial_numbers=())]
+    assert [adapter.serial_ports for adapter in bench_in_container.discover_usb_uarts(sysfs)] == [(ADAPTER_NODE,)]
+
+
+@pytest.mark.parametrize(("vendor", "product"), [("1a86", "7523"), ("1a86", "55d4"), ("10c4", "ea60")], ids=["CH340", "CH9102", "CP210x"])
+def test_every_bridge_the_runner_names_is_found(tmp_path: Path, vendor: str, product: str) -> None:
+    sysfs = tmp_path / "sys"
+    an_esp32_bridge(sysfs, "2-1", vendor=vendor, product=product)
+
+    assert [bridge.serial_ports for bridge in bench_in_container.discover_esp32_bridges(sysfs)] == [(ESP32_NODE,)]
+    assert (int(vendor, 16), int(product, 16)) in bench_in_container.ESP32_BRIDGE_IDS
+
+
+def test_the_esp32_board_is_named_in_the_words_and_by_the_identities_the_tier_reads() -> None:
+    """Copies, for the adapter's reason. This keeps them one."""
+    from tests.bench.conftest import ESP32_BRIDGE_IDS, ESP32_ENV
+
+    assert bench_in_container.ESP32_ENV == ESP32_ENV
+    assert bench_in_container.ESP32_BRIDGE_IDS == ESP32_BRIDGE_IDS
+
+
+@pytest.mark.parametrize("runtime", ["podman", "docker"])
+def test_the_esp32_board_goes_in_beside_the_probe_and_the_tier_is_told_its_node(esp32: SimpleNamespace, runtime: str) -> None:
+    """Its node with the probe's, and under Docker its node's group with theirs."""
+    assert run(esp32, "--runtime", runtime, "--esp32") == 0
+
+    command = esp32.runtime.tier
+    assert option_values(command, "--device") == [USB_NODE, TTY_NODE, ESP32_NODE]
+    assert board_handed_in(command) == [ESP32_NODE]
+    assert handed_in(command) == []
+    if runtime == "docker":
+        assert option_values(command, "--group-add") == [str(SERIAL_GROUP), str(ESP32_GROUP), str(USB_GROUP)]
+
+
+def test_with_the_live_device_tree_the_tier_is_still_told_the_boards_node(esp32: SimpleNamespace) -> None:
+    assert run(esp32, "--esp32", "--live-device-tree") == 0
+
+    command = esp32.runtime.tier
+    assert option_values(command, "--device") == []
+    assert board_handed_in(command) == [ESP32_NODE]
+
+
+def test_the_esp32_board_and_the_adapter_go_in_together(esp32: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bench that has both: each is found by its own identity and named to
+    the tier by its own variable, so neither is taken for the other."""
+    a_usb_uart(esp32.sysfs, "1-3")
+    esp32.statuses[ADAPTER_NODE] = a_node(gid=ADAPTER_GROUP)
+    esp32.openable.add(ADAPTER_NODE)
+    monkeypatch.setattr(bench_in_container, "user_groups", lambda: {GID, SERIAL_GROUP, USB_GROUP, ADAPTER_GROUP, ESP32_GROUP})
+
+    assert run(esp32, "--esp32", "--require-usb-uart") == 0
+
+    command = esp32.runtime.tier
+    assert option_values(command, "--device") == [USB_NODE, TTY_NODE, ADAPTER_NODE, ESP32_NODE]
+    assert handed_in(command) == [ADAPTER_NODE]
+    assert board_handed_in(command) == [ESP32_NODE]
+
+
+def test_without_esp32_no_bridge_is_handed_in_and_nothing_is_said_of_one(esp32: SimpleNamespace, capsys: pytest.CaptureFixture) -> None:
+    """The board is handed in for the stage that asks for it and for no other,
+    and a bench that has one is an ordinary bench otherwise."""
+    assert run(esp32) == 0
+
+    command = esp32.runtime.tier
+    assert board_handed_in(command) == []
+    assert ESP32_NODE not in option_values(command, "--device")
+    assert "ESP32" not in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the links under /dev/serial/by-id are symbolic links, a POSIX layout")
+def test_the_boards_stable_name_comes_along_with_the_probes(esp32: SimpleNamespace) -> None:
+    ours = f"usb-Vendor_Probe_{PROBE_SERIAL}-if02"
+    (esp32.by_id / ours).symlink_to(TTY_NODE)
+    (esp32.by_id / ESP32_BY_ID).symlink_to(ESP32_NODE)
+    (esp32.by_id / "usb-Other_Adapter_OTHERSERIAL-if00-port0").symlink_to("/dev/ttyUSB7")
+    staged: dict[str, str] = {}
+
+    def look(command: list[str]) -> None:
+        directory = Path(mounted_at(command, "/dev/serial/by-id"))
+        staged.update({entry.name: os.readlink(entry) for entry in directory.iterdir()})
+
+    esp32.runtime.during_run = look
+
+    assert run(esp32, "--esp32") == 0
+
+    assert staged == {ours: TTY_NODE, ESP32_BY_ID: ESP32_NODE}
+
+
+def test_esp32_refuses_a_machine_without_a_bridge_before_anything_is_built(machine: SimpleNamespace, capsys: pytest.CaptureFixture) -> None:
+    """The stage is asked for by name, so a run without the board is refused
+    rather than passing with nothing flashed."""
+    assert run(machine, "--esp32") == bench_in_container.EXIT_NO_PROBE
+
+    assert machine.runtime.commands == []
+    err = capsys.readouterr().err
+    assert "CH340" in err
+    assert "--esp32" in err
+
+
+def test_two_esp32_bridges_are_not_chosen_between(esp32: SimpleNamespace, capsys: pytest.CaptureFixture) -> None:
+    """Choosing would be choosing a board. Each is named by where it sits,
+    never by its serial."""
+    an_esp32_bridge(esp32.sysfs, "1-7", vendor="10c4", product="ea60", device=9, serial=BRIDGE_SERIAL, ttys=("ttyUSB3",))
+
+    assert run(esp32, "--esp32") == bench_in_container.EXIT_NO_PROBE
+
+    assert esp32.runtime.commands == []
+    err = capsys.readouterr().err
+    assert "bus 1 device 8" in err and "bus 1 device 9" in err
+    assert BRIDGE_SERIAL not in err
+
+
+@pytest.mark.parametrize("ttys", [(), ("ttyUSB2", "ttyUSB3")], ids=["no-port", "two-ports"])
+def test_an_esp32_bridge_with_other_than_one_port_is_refused(machine: SimpleNamespace, capsys: pytest.CaptureFixture, ttys: tuple[str, ...]) -> None:
+    an_esp32_bridge(machine.sysfs, "1-6", ttys=ttys)
+
+    assert run(machine, "--esp32") == bench_in_container.EXIT_NO_PROBE
+
+    assert machine.runtime.commands == []
+    assert "bus 1 device 8" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("runtime", ["podman", "docker"])
+def test_an_esp32_bridge_this_user_cannot_open_is_refused(esp32: SimpleNamespace, capsys: pytest.CaptureFixture, runtime: str) -> None:
+    esp32.openable.discard(ESP32_NODE)
+    esp32.statuses[ESP32_NODE] = a_node(gid=0)
+
+    assert run(esp32, "--runtime", runtime, "--esp32") == bench_in_container.EXIT_NO_PROBE
+
+    assert esp32.runtime.commands == []
+    err = capsys.readouterr().err
+    assert ESP32_NODE in err
+    assert "--esp32" in err
+
+
+def test_an_esp32_bridge_without_a_node_is_refused(esp32: SimpleNamespace, capsys: pytest.CaptureFixture) -> None:
+    """sysfs shows the port, but the node is not there: a refusal like every
+    other, with the stage's own words on it."""
+    del esp32.statuses[ESP32_NODE]
+
+    assert run(esp32, "--esp32") == bench_in_container.EXIT_NO_PROBE
+
+    err = capsys.readouterr().err
+    assert f"{ESP32_NODE}: no such device node" in err
+    assert "--esp32" in err
+
+
+def test_an_esp32_bridge_gone_while_the_run_waited_is_refused(esp32: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Looked for again after the wait and the build, as the probe is, and
+    nothing runs without it."""
+    built = bench_in_container.build_image
+
+    def build_and_unplug(*args: object, **kwargs: object) -> str:
+        image = built(*args, **kwargs)
+        shutil.rmtree(esp32.sysfs / "bus" / "usb" / "devices" / "1-6")
+        return image
+
+    monkeypatch.setattr(bench_in_container, "build_image", build_and_unplug)
+
+    assert run(esp32, "--esp32") == bench_in_container.EXIT_NO_PROBE
+
+    assert len(esp32.runtime.issued("build")) == 1
+    assert esp32.runtime.issued("run") == []
+
+
+def test_a_bridges_serial_is_withheld_from_the_output_the_log_and_the_report(
+    machine: SimpleNamespace, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A CP210x publishes a serial number, and the product's port inventory
+    lists it, so it is withheld like the adapter's."""
+    an_esp32_bridge(machine.sysfs, "1-6", vendor="10c4", product="ea60", serial=BRIDGE_SERIAL)
+    machine.statuses[ESP32_NODE] = a_node(gid=ESP32_GROUP)
+    machine.openable.add(ESP32_NODE)
+    monkeypatch.setattr(bench_in_container, "user_groups", lambda: {GID, SERIAL_GROUP, USB_GROUP, ESP32_GROUP})
+    machine.runtime.tier_output = MARKED + f'"serial_number": "{BRIDGE_SERIAL}"\n' + "== 9 passed in 61.20s ==\n"
+
+    def report(command: list[str]) -> None:
+        results = Path(mounted_at(command, bench_in_container.RESULTS))
+        (results / bench_in_container.REPORT_NAME).write_text(
+            f'<testsuites><testcase name="t"><failure message="{BRIDGE_SERIAL}"/></testcase></testsuites>', encoding="utf-8"
+        )
+
+    machine.runtime.during_run = report
+
+    assert run(machine, "--esp32") == 0
+
+    printed = capsys.readouterr()
+    log = (machine.output / bench_in_container.LOG_NAME).read_text(encoding="utf-8")
+    junit = (machine.output / bench_in_container.REPORT_NAME).read_text(encoding="utf-8")
+    for text in (printed.out, printed.err, log, junit):
+        assert BRIDGE_SERIAL not in text
 
 
 # Refusals about this machine.

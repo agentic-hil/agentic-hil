@@ -57,6 +57,9 @@ exclude tests/test_bench_battery.py
 # `tests/bench/firmware/`, which is repository content like the demo and never
 # ships, and the test reads it at module scope.
 exclude tests/test_bench_can_peer_statistics.py
+# The bench's ESP32 images and their manifest are under the same directory, and
+# their test imports `tools/build_esp32_bench_images.py` as well.
+exclude tests/test_bench_esp32_images.py
 # The container test of the install eval's startup arm imports the verifier out
 # of evals/, which never ships, so it cannot collect from a distribution either.
 exclude tests/container/test_protocol_startup_refusal.py

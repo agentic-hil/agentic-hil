@@ -1,0 +1,39 @@
+{
+  "chip": "esp32",
+  "esptool": "5.5.0",
+  "flash_address": "0x1000",
+  "images": {
+    "banner_a.bin": {
+      "image": "A",
+      "sha256": "abd237e85ffdafa0c354b4a3cefa1a3ccb4d1fb9d78d5c93485d72d9ecff8e54",
+      "size": 240
+    },
+    "banner_b.bin": {
+      "image": "B",
+      "sha256": "5f57ad1bbdfb0936e12a9eaabd0cbbdaad3c3263f24ebcebb8588074e850658b",
+      "size": 240
+    }
+  },
+  "sources": {
+    "banner.c": "ed6476beefa1fd6c42c64bef41d983c2ec243030c331b37af8cc1ff041a7fac3",
+    "esp32_ram.ld": "4e27df44af584192e379895041eda289a9a14b38b2b39729e1f13f98dfea7874"
+  },
+  "toolchain": {
+    "cflags": [
+      "-std=c11",
+      "-Os",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-ffreestanding",
+      "-fno-builtin",
+      "-nostdlib",
+      "-mlongcalls",
+      "-ffunction-sections",
+      "-fdata-sections",
+      "-Wl,--gc-sections"
+    ],
+    "gcc": "16.1.0",
+    "release": "esp-16.1.0_20260609"
+  }
+}

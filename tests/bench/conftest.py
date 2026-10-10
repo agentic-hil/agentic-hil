@@ -61,6 +61,12 @@ How a run reaches the bench:
   ``tools/bench_in_container.py`` sets when it hands one in. The tests marked
   ``usb_uart`` drive the board over it; a bench run without it deselects them,
   with one line saying so, like the tests the package index leaves out.
+* ``AGENTIC_HIL_BENCH_ESP32=<node>`` says an ESP32 development board is attached
+  through its own USB-UART bridge, and names the bridge's node, which
+  ``tools/bench_in_container.py --esp32`` sets when it hands one in. Only the
+  ESP32 stage, ``esp32_recordings.py``, reads it. That stage is a module of its
+  own, collected only where a run names it, and it fails rather than skips on a
+  run that was handed no board.
 * HOME is deliberately *not* redirected for the commands this tier runs. The
   machine-wide device locks live under it, and they are what keeps this run off
   a board another run is holding. A tier that isolated HOME would be a tier that
@@ -159,6 +165,14 @@ OVER_BOTH_LINES = [
     pytest.param(PROBE_PORT, id=PROBE_PORT),
     pytest.param(USB_UART, id=USB_UART, marks=getattr(pytest.mark, USB_UART)),
 ]
+# What names the USB-UART bridge of the ESP32 board the ESP32 stage flashes and
+# resets through esptool, and the public USB identities the runner hands one in
+# by: WCH's CH340 and CH9102 and Silicon Labs' CP210x. Set by
+# `tools/bench_in_container.py --esp32`, which copies both; a test keeps the
+# copies one. The stage declares the board's debugger and port under the name.
+ESP32_ENV = "AGENTIC_HIL_BENCH_ESP32"
+ESP32_BRIDGE_IDS = frozenset({(0x1A86, 0x7523), (0x1A86, 0x55D4), (0x10C4, 0xEA60)})
+ESP32 = "esp32"
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CHECKOUT_SOURCES = REPOSITORY_ROOT / "src"
