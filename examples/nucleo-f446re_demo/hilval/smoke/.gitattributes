@@ -1,0 +1,2 @@
+# The images are committed exactly as built, and SHA256SUMS checks them.
+*.elf binary
