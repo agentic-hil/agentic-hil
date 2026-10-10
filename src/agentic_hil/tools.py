@@ -80,6 +80,7 @@ from agentic_hil.coordination import (
     HardwareCoordinator,
     HardwareLease,
     RecoveryHold,
+    debugger_effect_devices,
     debugger_effect_resources,
     nothing_standing_result,
 )
@@ -2587,7 +2588,7 @@ class AgenticHILToolService:
                 }
             else:
                 try:
-                    resources = (DEBUGGER_DISCOVERY_RESOURCE,) if name == "debugger_probes_list" else debugger_effect_resources(self.config)
+                    resources = (DEBUGGER_DISCOVERY_RESOURCE,) if name == "debugger_probes_list" else debugger_effect_devices(self.config)
                     lease = self.coordinator.acquire(*resources, for_recovery=for_recovery)
                 except CoordinationError as error:
                     return {"tool": name, "side_effect_committed": False, **error.result}

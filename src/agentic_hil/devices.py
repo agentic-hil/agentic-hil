@@ -130,8 +130,9 @@ class Device:
     def lock_keys(self) -> tuple[str, ...]:
         """Every machine-wide name that must be held to hold this unit.
 
-        ``lock_key`` is the one canonical identity: what a set dedups on, what a
-        call inside a run is checked against, what config validation mirrors.
+        ``lock_key`` is the one canonical identity: what a set dedups on and
+        what config validation mirrors; a call inside a run is checked against
+        ``declared_keys``, which always holds it.
         This is the set the mutex actually takes, and for most devices it is just
         that one key; a `device_busy` refusal names whichever of them collided.
         It is more than one only where a single physical unit answers to two
@@ -158,7 +159,8 @@ class Device:
 
     @property
     def declared_keys(self) -> tuple[str, ...]:
-        """The names a run holding this device declares.
+        """The names a run holding this device declares, and the ones a call
+        reaching for it inside a run is checked against.
 
         Every lock key but one the device reads from the host each time it is
         asked; see ``lock_keys``."""

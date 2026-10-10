@@ -8,6 +8,7 @@ never send (no `--port`, an erase, a forced write, no private configuration).
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,8 +21,10 @@ from test_implicit_single_action_run import install_fake_serial
 from test_serial_port_identity import CH340_PID, CH340_VID, STLINK_PID, STLINK_VID, fake_host, host_port, inventory
 
 from agentic_hil.backends.esptool import REDACTED_MAC, REDACTED_WORKDIR, EsptoolBackend
+from agentic_hil.bench import BenchMutex, DeviceBusyError
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.coordination import DEBUGGER_READONLY_RESULT_REASON, debugger_effect_resources
+from agentic_hil.devices import debugger_device
 from agentic_hil.report import logs_directory, reports_directory
 from agentic_hil.test_reactor import TestReactor, load_test_config
 from agentic_hil.tools import AgenticHILToolService
@@ -361,6 +364,61 @@ def test_a_run_holding_the_debugger_and_the_port_still_keeps_esptool_off_its_own
         assert service.call("com_session_stop", {"port_id": "esp"})["ok"] is True
         assert service.call(tool, arguments)["ok"] is True
         assert service.call("bench_run_stop")["ok"] is True
+    finally:
+        service.close()
+
+
+def port_known_by_a_second_name(tmp_path: Path) -> str:
+    """A device name the host also gives the port under another spelling.
+
+    The bench stage names the board's bridge by its `/dev/serial/by-id` link,
+    which the host resolves to the kernel node behind it; Windows has the same
+    pair in a port's device namespace spelling."""
+    if os.name == "nt":
+        return "\\\\.\\" + ESPTOOL_TEST_PORT
+    node = tmp_path / "dev" / "ttyUSB0"
+    link = tmp_path / "dev" / "serial" / "by-id" / "usb-1a86_USB_Serial-if00-port0"
+    link.parent.mkdir(parents=True)
+    node.write_text("", encoding="utf-8")
+    link.symlink_to(node)
+    return str(link)
+
+
+@pytest.mark.parametrize("in_a_run", [True, False], ids=["declared-run", "bare-call"])
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        pytest.param("probe_target", {}, id="probe"),
+        pytest.param("flash_firmware", FLASHED_APPLICATION, id="flash"),
+        pytest.param("reset_target", {"mode": "run"}, id="reset"),
+    ],
+)
+def test_a_port_named_by_a_link_is_held_under_both_names_and_declared_under_its_own(
+    tmp_path: Path, esptool_log: Path, tool: str, arguments: dict, in_a_run: bool
+) -> None:
+    """The bench's first run: inside a run that declared the line, the flash was
+    refused as `undeclared_device` over the node the link leads to. That name is
+    held with the line and never declared, so it is not what a call is checked
+    against, and a run holding the line still keeps everybody else off it."""
+    write_application(tmp_path)
+    config = esptool_config(tmp_path, com_ports_yaml=f"com_ports:\n  esp:\n    device: {json.dumps(port_known_by_a_second_name(tmp_path))}\n    baudrate: 115200\n")
+    held, declared = debugger_device(config).lock_keys, debugger_device(config).declared_keys
+    assert len(held) == 2 and declared == held[:1], (held, declared)
+    service = AgenticHILToolService(config)
+    try:
+        if in_a_run:
+            started = service.call("bench_run_start", {"devices": [{"kind": "debugger", "id": "dut"}, {"kind": "uart", "id": "esp"}]})
+            assert started["ok"] is True, started
+            assert started["declared_devices"] == list(declared), started
+            with pytest.raises(DeviceBusyError):
+                BenchMutex(frontend="stranger").acquire([held[1]])
+
+        result = service.call(tool, arguments)
+
+        assert result["ok"] is True, result
+        assert len(port_runs(esptool_log)) == 1
+        if in_a_run:
+            assert service.call("bench_run_stop")["ok"] is True
     finally:
         service.close()
 
