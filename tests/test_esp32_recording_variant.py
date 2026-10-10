@@ -4,14 +4,16 @@ The stage runs only on the bench, where a configuration it could not write, or
 a pattern that never matches what the ROM prints, fails the session after a
 board was handed in. Whether each control-line setting's variant is a
 configuration the product loads, with one esptool debugger and the bridge's
-port it names, and whether the stage tells the line the ROM prints on a reset
-from an image's, are questions this host answers without one. The pattern for
+port it names, whether the stage tells the line the ROM prints on a reset
+from an image's, and whether a failure keeps what esptool said about it and no
+port it named, are questions this host answers without one. The pattern for
 the images' own lines is held against the images in
 ``test_bench_esp32_images.py``, which reads them and so does not ship.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -26,6 +28,7 @@ from tests.bench.esp32_recordings import (
     ROM_RESET,
     TICK_LINE,
     esp32_variant,
+    evidence_of,
 )
 
 CH340 = {"vid": 0x1A86, "pid": 0x7523}
@@ -89,3 +92,34 @@ def test_the_stage_tells_a_reset_from_the_line_the_rom_prints_on_one() -> None:
     assert [match["reason"] for match in ROM_RESET.finditer(printed)] == [b"POWERON_RESET"]
     assert TICK_LINE.search(printed) is None
     assert ROM_RESET.search(b"agentic-hil esp32 image A tick 3\r\n") is None
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "said"),
+    [
+        pytest.param(
+            "esptool v5.5.0\nSerial port /dev/serial/by-id/usb-Silicon_Labs_CP2102_0001-if00-port0:\nConnecting......\n",
+            "ERROR: A fatal error occurred: Failed to connect to ESP32: Wrong boot mode detected (0x13)! The chip needs to be in download mode.\n"
+            "For troubleshooting steps visit: https://docs.espressif.com/projects/esptool/en/latest/troubleshooting.html\n",
+            [
+                "Connecting......",
+                "ERROR: A fatal error occurred: Failed to connect to ESP32: Wrong boot mode detected (0x13)! The chip needs to be in download mode.",
+            ],
+            id="wrong-boot-mode",
+        ),
+        pytest.param(
+            "esptool v5.5.0\n",
+            "ERROR: A fatal error occurred: Could not open /dev/serial/by-id/usb-Silicon_Labs_CP2102_0001-if00-port0, the port is busy or doesn't exist.\n",
+            ["ERROR: A fatal error occurred: Could not open <port>, the port is busy or doesn't exist."],
+            id="port-open",
+        ),
+    ],
+)
+def test_a_failure_keeps_what_esptool_said_and_no_port_it_named(stdout: str, stderr: str, said: list[str]) -> None:
+    result = {"ok": False, "error_type": "target_not_detected", "programmer_output": {"returncode": 2, "stdout": stdout, "stderr": stderr}}
+
+    kept = evidence_of(result)
+
+    assert kept["esptool_said"] == said
+    assert "0001" not in json.dumps(kept) and "/dev/" not in json.dumps(kept)
+    assert "esptool_said" not in evidence_of({"ok": True, "backend": "esptool"})

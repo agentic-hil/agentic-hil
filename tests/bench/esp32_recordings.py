@@ -121,6 +121,15 @@ RESULT_EVIDENCE_FIELDS = (
     "quarantined",
     "held_by_com_session",
 )
+# The lines of esptool's own transcript that say why a call failed, and the one
+# that says how far its connect got. Only these are kept, and a device path is
+# taken out even of them: the rest of the transcript names the port, and a
+# /dev/serial/by-id link carries the adapter's serial number where it has one.
+ESPTOOL_SAID = re.compile(
+    r"^.*(?:connecting|fatal error|failed to connect|wrong boot mode|no serial data|invalid head of packet|could not open|warning).*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+DEVICE_PATH = re.compile(r"/dev/[^\s,]+")
 
 
 # -- The configuration --------------------------------------------------------
@@ -296,12 +305,24 @@ def served(bench: Bench, stderr_path: Path) -> Iterator[Server]:
             pytest.fail(left, pytrace=False)
 
 
+def esptool_said(result: dict) -> list[str]:
+    """esptool's own lines on why a call failed, with no device path in them."""
+    output = result.get("programmer_output")
+    if not isinstance(output, dict):
+        return []
+    text = "\n".join(str(output.get(stream) or "") for stream in ("stdout", "stderr"))
+    return [DEVICE_PATH.sub("<port>", line.group(0).strip())[:160] for line in ESPTOOL_SAID.finditer(text)][:8]
+
+
 def evidence_of(result: dict) -> dict:
     """What a tool's answer says was done, without anything that says where."""
     kept = {key: result[key] for key in RESULT_EVIDENCE_FIELDS if key in result}
     artifact = result.get("artifact")
     if isinstance(artifact, dict) and isinstance(artifact.get("sha256"), str):
         kept["artifact_sha256"] = artifact["sha256"]
+    said = esptool_said(result)
+    if said:
+        kept["esptool_said"] = said
     return kept
 
 
