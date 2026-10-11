@@ -52,9 +52,9 @@ prints the numbers.
 The effect is not a simple sag. On the bench board, code 3000 with the buffer
 on read 3019.8 on PA4 and 3147.5 on PA5, so the loaded channel sat about 128
 LSB, roughly 0.1 V, *above* the unloaded one; PA5's eight conversions spanned
-2 LSB and PA4's 8 LSB, and two further runs of the same image on the same board
-read 3146.6 against 3018.8 and 3146.0 against 3020.4, so these are the board's
-figures and not noise. One code lower, at 2500, just under the LED's forward
+2 LSB and PA4's 8 LSB, and three further runs of the same image on the same
+board read 3146.6 against 3018.8, 3146.0 against 3020.4 and 3147.9 against
+3019.9, so these are the board's figures and not noise. One code lower, at 2500, just under the LED's forward
 voltage, the two pins still agreed inside two channel error budgets, and every
 channel 2 level the DMA run uses, all at or below 1800, was within 40 LSB of
 its own code. The deviation follows the LED's current.
