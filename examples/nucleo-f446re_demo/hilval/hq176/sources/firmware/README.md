@@ -99,13 +99,13 @@ start, data and parity bits only (9, 10, 9).
 The board confirmed hypothesis B: the break is low for 10, 11 and 10 bit times at
 8N1, 8E1 and 8N2, in both images and in every repetition.
 
-| Baud | Format | Break, bit times | Break, us calculated from the run's BRR and PCLK1 |
-|---|---|---|---|
-| 1200 | 8N1 | 10 | 8333.3 |
-| 9600 | 8N1 | 10 | 1041.7 |
-| 19200 | 8N1 | 10 | 520.7 |
-| 9600 | 8E1 | 11 | 1145.8 |
-| 9600 | 8N2 | 10 | 1041.7 |
+| Baud | Format | Break, bit times | Break, us calculated from the run's BRR and PCLK1 | Break, us: the band every repetition's samples fell in |
+|---|---|---|---|---|
+| 1200 | 8N1 | 10 | 8333.3 | 8171 to 8495 |
+| 9600 | 8N1 | 10 | 1041.7 | 1021 to 1062 |
+| 19200 | 8N1 | 10 | 520.7 | 510 to 531 |
+| 9600 | 8E1 | 11 | 1145.8 | 1124 to 1168 |
+| 9600 | 8N2 | 10 | 1041.7 | 1021 to 1062 |
 
 The 8N2 row is what decides between the three readings: a second stop bit leaves
 the break at 10 bit times, so the break frame carries one stop bit and not all
@@ -116,25 +116,36 @@ The fourth column is calculated and is not a reading: it is the bit count times
 the bit time that the run's own BRR and APB1 clock give, which is why 19200 baud
 shows 520.7 and not 520.8, the divider the HAL programs producing 19204.4 baud.
 
-What the samples measured against that calculation: in every repetition of every
-configuration, in both images, the low run of the break came out within three
-samples of the bit count times that repetition's own measured bit time, and that
-bit time came out within one per cent of the figure BRR and PCLK1 give. Three
-samples are 78.1 us at 1200 baud, 9.8 us at 9600 and 4.9 us at 19200, because a
-sample is 4375, 547 and 273 cycles of the 168 MHz timer clock there. Those are
-the bounds the tests hold every single repetition to, not an average over them:
-a break outside them would have left its bit count ambiguous and failed the run
-instead of being averaged into it. One sample of each bound is the resolution of
-a single edge index, so no number of repetitions can place the break more
-sharply than the two edges that delimit it.
+The fifth column is the measured side of the same quantity, and it is a band
+rather than one figure because a band is what this measurement establishes. Two
+comparisons compose it, and the tests hold every one of the 290 repetitions
+(29 per configuration in each of the two images) to both: the low run of the
+break came out within three samples of the bit count times that repetition's own
+measured bit time, and that bit time came out within one per cent of the figure
+BRR and PCLK1 give. Three samples are 78.1 us at 1200 baud, 9.8 us at 9600 and
+4.9 us at 19200, because a sample is 4375, 547 and 273 cycles of the 168 MHz
+timer clock there; one per cent of the calculated low time is 83.3, 10.4, 5.2,
+11.5 and 10.4 us down the rows. The band of a row is its calculated figure plus
+and minus the sum of those two, about two per cent either way, rounded outward
+to whole microseconds; every repetition of every configuration, in both images,
+fell inside the band of its own row, and one outside it would have left its bit
+count ambiguous and failed the run instead of being averaged into it. One sample
+of the first comparison is the resolution of a single edge index, so no number of
+repetitions can place the break more sharply than the two edges that delimit it.
 
-The per-repetition microsecond values themselves are not fixed in this file.
-They are quantised to the sample period and so differ in their last digits
-between runs of the same firmware, which is why the tests judge the bit count
-and the bounds above and not a microsecond mean. Those values are in the serial
-log of the run, in the `rep` and `edges` records described at the end of this
-file, and the tests print each configuration's min, mean and max low time in
-microseconds whenever they reject a run.
+What this file does not carry is each configuration's observed mean in
+microseconds. The per-repetition figures are in the serial log of the run, which
+is part of the evidence the bench run kept and not of this repository, and the
+tests print each configuration's min, mean and max low time in microseconds only
+when they reject a run. A reader who has that log needs none of our tools to
+obtain them: in a `phase=main` repetition the break is the 13th and 14th edge
+index of that repetition's `edges` records (the 11th and 12th in a `phase=sbk`
+one, which sends no `0x00` frame), the difference between the two is the low run
+in samples, and the `period` and `timclk` of that configuration's `cfg` record
+turn it into microseconds as `samples * period / timclk * 1e6`. Those figures are
+quantised to the sample period and so differ in their last digits between runs of
+the same firmware, which is why the tests judge the bit count and the band above
+and not a mean.
 
 Two further facts the same records carry: `sendbreak()` returned while the line
 was still low, tens of microseconds after the call and a whole break before the
