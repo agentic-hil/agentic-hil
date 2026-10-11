@@ -253,6 +253,10 @@ Stated because they are not verifiable from this directory:
 
 * The workspace trees are git checkouts, which is what makes Zephyr's
   `BUILD_VERSION` the `git describe` of the tree built.
+* `git` is on `PATH` when the gate runs, which is what lets it read
+  `git rev-parse HEAD` and `git status --porcelain` in the two trees and the
+  three module checkouts described above. Without it the gate fails and names
+  that check instead of assuming the revisions.
 * `CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC` is 96 000 000 and `k_cycle_get_32()`
   counts those cycles monotonically; `CONFIG_SYS_CLOCK_TICKS_PER_SEC` is 10 000.
   The build record prints both so that a drift fails loudly instead of quietly
