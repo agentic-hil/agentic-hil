@@ -47,6 +47,20 @@
 #define PERIOD 64u /* cell period in ticks */
 #define CELLS  8u  /* cells per frame */
 
+/* The port is left idle for this long after every record line.
+ *
+ * The two starts print some 300 kB in all, which at 115200 baud is around 26
+ * seconds of traffic with no gap in it, and a reader that stops reading for a
+ * moment loses whatever the port sent meanwhile. Two bench runs of this image
+ * lost a few kilobytes in the middle of a case that way: once a line arrived
+ * cut in two, once whole repetitions were missing between two intact lines.
+ * These gaps hold the port at about a quarter of its capacity, so a reader that
+ * stalls for a whole second has under 3 kB to catch up with instead of 11 kB,
+ * and they still leave the image printing its done line after about 110 of the
+ * 180 seconds the plan waits for it.
+ */
+#define PACE_MS 75
+
 /* The resolutions measured. Each one divides 96 MHz exactly, so the API's
  * "nearest achievable" tick rate is the requested rate.
  */
@@ -233,6 +247,11 @@ static void print_case(const char *kind, uint32_t phase, const struct rec *r)
 	       r->last_len, r->pwm_edges, r->pwm_first, r->pwm_last, r->pwm_hi_min, r->pwm_hi_max,
 	       r->pwm_lo_min, r->pwm_lo_max, r->pwm_per_min, r->pwm_per_max, r->pc0_set,
 	       r->pc0_rst);
+	/* printk returned once the last character reached the transmitter, so this
+	 * is a gap on the wire (PACE_MS above). No window is armed while a record
+	 * is printed, so nothing being measured waits for it.
+	 */
+	k_msleep(PACE_MS);
 
 	/* The inner run lengths, in order, 16 to a record: a record value holds
 	 * at most 128 characters and a run length at most five digits.
@@ -249,6 +268,7 @@ static void print_case(const char *kind, uint32_t phase, const struct rec *r)
 		}
 		printk(TAG " runs phase=%u rep=%u name=%s win=%u part=%u v=%s\n", phase, r->rep,
 		       r->name, r->win, part, values);
+		k_msleep(PACE_MS);
 	}
 }
 

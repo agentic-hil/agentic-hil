@@ -266,7 +266,16 @@ console line that never reached the reader is the same kind of failure: the
 images number every repetition and the tests require all 20 of them, so a
 reading that lost one is refused instead of being judged as if it were the whole
 set. The images themselves cannot lose a line — `printk` here waits for the
-transmitter on every character.
+transmitter on every character — but the link to the reader can, and in two
+earlier runs of these images it did: a few kilobytes vanished in the middle of a
+case while the port was carrying its ~300 kB with no gap in it, once leaving a
+line cut in two and once whole repetitions missing between two intact lines.
+Every record line is therefore followed by 75 ms of silence (`PACE_MS` in
+`src/main.c`), which holds the port at about a quarter of its capacity: a reader
+that stalls for a whole second then has under 3 kB to catch up with instead of
+11 kB. The images still print their done line after about 110 seconds, and no
+measurement waits for those gaps, because no sampling window is armed while a
+record is printed.
 
 ## Coverage
 
