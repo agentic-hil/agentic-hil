@@ -1,0 +1,51 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+#include <zephyr/dt-bindings/dma/stm32_dma.h>
+
+/ {
+	/* Channel under test: TIM1 update -> DMA2 stream 5 channel 6 -> GPIOC BSRR, PC0. */
+	pulseio0: pulse-io-0 {
+		compatible = "st,stm32-timer-pulse-io";
+		#pulse-io-cells = <1>;
+		timer = <&timers1>;
+		dmas = <&dma2 5 6
+			(STM32_DMA_MEMORY_TO_PERIPH |
+			 STM32_DMA_MEM_INC |
+			 STM32_DMA_PERIPH_32BITS |
+			 STM32_DMA_MEM_32BITS |
+			 STM32_DMA_PRIORITY_HIGH)
+			0>;
+		dma-names = "tx";
+		gpios = <&gpioc 0 GPIO_ACTIVE_HIGH>;
+		st,prescaler = <0>;
+		buffer-size = <512>;
+		status = "okay";
+	};
+
+	/* Same timer and stream, PC1, no buffer-size: what the binding's default
+	 * gives the driver. Never used while pulse-io-0 is busy. */
+	pulseio1: pulse-io-1 {
+		compatible = "st,stm32-timer-pulse-io";
+		#pulse-io-cells = <1>;
+		timer = <&timers1>;
+		dmas = <&dma2 5 6
+			(STM32_DMA_MEMORY_TO_PERIPH |
+			 STM32_DMA_MEM_INC |
+			 STM32_DMA_PERIPH_32BITS |
+			 STM32_DMA_MEM_32BITS |
+			 STM32_DMA_PRIORITY_HIGH)
+			0>;
+		dma-names = "tx";
+		gpios = <&gpioc 1 GPIO_ACTIVE_HIGH>;
+		st,prescaler = <0>;
+		status = "okay";
+	};
+};
+
+&timers1 {
+	st,prescaler = <0>;
+	status = "okay";
+};
+
+&dma2 {
+	status = "okay";
+};

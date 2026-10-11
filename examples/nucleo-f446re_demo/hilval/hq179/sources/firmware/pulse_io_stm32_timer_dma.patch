@@ -1,0 +1,120 @@
+diff --git a/drivers/pulse_io/pulse_io_stm32_timer_dma.c b/drivers/pulse_io/pulse_io_stm32_timer_dma.c
+--- a/drivers/pulse_io/pulse_io_stm32_timer_dma.c
++++ b/drivers/pulse_io/pulse_io_stm32_timer_dma.c
+@@ -69,5 +69,20 @@
+ 	struct dma_block_config block;
+ 	struct dma_config dma_cfg;
+ };
++
++/* Drive the line to the level the API documents it rests at between and after
++ * frames.
++ */
++static void pulse_io_stm32_set_idle(const struct device *dev)
++{
++	const struct pulse_io_stm32_config *config = dev->config;
++	struct pulse_io_stm32_data *data = dev->data;
++
++	if (data->idle_high) {
++		*config->bsrr = set_mask(config);
++	} else {
++		*config->bsrr = reset_mask(config);
++	}
++}
+
+ static int pulse_io_stm32_get_capabilities(const struct device *dev,
+@@ -190,9 +205,14 @@
+ 	 */
+ 	uint64_t tick_freq = (uint64_t)tim_clk /
+ 			     (uint64_t)(config->prescaler + 1U);
+-	arr = (uint32_t)(tick_freq / cfg->resolution_hz);
+-
+-	if (arr == 0U) {
+-		arr = 1U;
+-	}
++	uint32_t period = (uint32_t)(tick_freq / cfg->resolution_hz);
++
++	/* One tick is one whole update period, so the reload value is one less
++	 * than the number of clocks in a tick. Two clocks is the shortest
++	 * period this can program, the same floor the old lower clamp gave.
++	 */
++	if (period < 2U) {
++		period = 2U;
++	}
++	arr = period - 1U;
+ 	if (arr > 0xFFFFU) {
+@@ -219,9 +239,16 @@
+ 	LL_TIM_GenerateEvent_UPDATE(timer);
+
+ 	data->cell_period_ticks = cfg->cell_period_ticks;
+-	data->resolution_hz = (uint32_t)(tick_freq / arr);
++	data->resolution_hz = (uint32_t)(tick_freq / period);
+ 	data->idle_high = cfg->idle_high;
+ 	data->dir = cfg->dir;
+ 	data->configured = true;
++
++	/* The line rests at the configured idle level from here on, not only
++	 * once a first frame has been sent.
++	 */
++	if (!data->busy) {
++		pulse_io_stm32_set_idle(dev);
++	}
+
+ 	LOG_DBG("configured: tim_clk=%u presc=%u arr=%u -> %u Hz",
+@@ -299,5 +326,13 @@
+ 			buf[n++] = rst;
+ 		}
+ 	}
++
++	/* One more word, one tick after the last cell word, so the last cell
++	 * lasts a whole tick and the line reaches the idle level on a timer
++	 * event instead of in the transfer-complete interrupt. The buffer holds
++	 * one word more than buffer-size for it, so the capacity check above
++	 * and the documented meaning of buffer-size are unchanged.
++	 */
++	buf[n++] = data->idle_high ? set : rst;
+
+ 	return n;
+@@ -380,5 +415,7 @@
+ 		LL_TIM_DisableDMAReq_UPDATE(config->timer);
+ 		LL_TIM_DisableCounter(config->timer);
+ 		data->busy = false;
++		/* Not left at the last word that went out. */
++		pulse_io_stm32_set_idle(dev);
+ 		return -ETIMEDOUT;
+ 	}
+@@ -413,5 +450,9 @@
+ 		LL_TIM_DisableDMAReq_UPDATE(config->timer);
+ 		LL_TIM_DisableCounter(config->timer);
+ 		data->busy = false;
++		/* Before the semaphore reset wakes a waiter, so no caller can
++		 * see the line still at the last word.
++		 */
++		pulse_io_stm32_set_idle(dev);
+ 		k_sem_reset(&data->done);
+ 	}
+@@ -484,3 +525,14 @@
+ 	return 0;
+ }
++
++/* The devicetree binding gives buffer-size a default of 0, so the property
++ * always has a value and DT_INST_PROP_OR never reaches its fallback: a node
++ * that leaves buffer-size out gets a zero-length buffer and every request
++ * fails with -ENOMEM. A 0 now selects the build-time default, as the binding
++ * describes it. The array holds one word more, for the trailing idle word
++ * encode() appends; buffer-size keeps meaning the words one submission carries.
++ */
++#define PULSE_IO_STM32_BUFSZ(inst)                                                  \
++	(DT_INST_PROP_OR(inst, buffer_size, 0) > 0 ?                                \
++	 DT_INST_PROP_OR(inst, buffer_size, 0) : PULSE_IO_STM32_DEFAULT_BUFSZ)
+
+@@ -493,3 +545,3 @@
+ 	static uint32_t pulse_io_stm32_buf_##inst                                   \
+-		[DT_INST_PROP_OR(inst, buffer_size, PULSE_IO_STM32_DEFAULT_BUFSZ)]; \
++		[PULSE_IO_STM32_BUFSZ(inst) + 1];                                   \
+                                                                                     \
+@@ -513,4 +565,3 @@
+ 		.mask = BIT(DT_GPIO_PIN(DT_DRV_INST(inst), gpios)),                 \
+-		.buf_size = DT_INST_PROP_OR(inst, buffer_size,                      \
+-					    PULSE_IO_STM32_DEFAULT_BUFSZ),          \
++		.buf_size = PULSE_IO_STM32_BUFSZ(inst),                             \
+ 	};                                                                          \
