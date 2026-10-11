@@ -1,0 +1,43 @@
+# The two hq175 images for the NUCLEO-F446RE, built by toolchain.cargo_image
+# (reference/templates/README.md holds the call). @EMBASSY@ and @STM32_DATA@ are
+# replaced by the checkouts the build names: for `baseline` the unmodified Embassy
+# checkout of the source cache, for `patched` a copy of it with
+# ../embassy-independent-outputs.patch applied.
+#
+# One crate, one shared library and two binaries. `cargo build --bin baseline`
+# never compiles src/bin/patched.rs, which is what lets the baseline image build
+# against the untouched upstream revision while the patched image calls the four
+# methods the patch adds.
+[package]
+name = "hq175"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "hq175"
+path = "src/lib.rs"
+
+[[bin]]
+name = "baseline"
+path = "src/bin/baseline.rs"
+
+[[bin]]
+name = "patched"
+path = "src/bin/patched.rs"
+
+[dependencies]
+embassy-stm32 = { path = "@EMBASSY@/embassy-stm32", features = ["stm32f446re", "unstable-pac", "memory-x", "time-driver-tim4", "exti", "rt"] }
+embassy-executor = { path = "@EMBASSY@/embassy-executor", features = ["platform-cortex-m", "executor-thread"] }
+embassy-time = { path = "@EMBASSY@/embassy-time", features = ["tick-hz-32_768"] }
+cortex-m = { version = "0.7.6", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = "0.7.0"
+
+# embassy-stm32 takes its register definitions from this git repository; the
+# source cache holds the matching checkout, so the build stays offline.
+[patch."https://github.com/embassy-rs/stm32-data-generated"]
+stm32-metapac = { path = "@STM32_DATA@/stm32-metapac" }
+
+[profile.release]
+debug = 2
+opt-level = "s"
