@@ -82,11 +82,19 @@ struct hq179_pwm {
 /** Clocks, the control PWM on PC6 and the pad slew rates; once per start. */
 void hq179_sampler_setup(void);
 
-/** Point the stream at a fresh window and shift the sampling grid by rep % 8. */
+/** Point the stream at a fresh window and put the sampling grid at this
+ *  repetition's phase (the compare value of the sampling timer).
+ */
 void hq179_sampler_arm(uint32_t rep);
 
 /** Start the sampling timer and take the window's time origin. */
 void hq179_sampler_start(void);
+
+/** Hold the next frame back until the sampling counter reaches this
+ *  repetition's phase of the grid; see sampler.c for why the phase must move
+ *  from repetition to repetition and why two mechanisms carry it.
+ */
+void hq179_grid_align(uint32_t rep);
 
 /** Timer clocks since that origin. */
 uint32_t hq179_elapsed(void);

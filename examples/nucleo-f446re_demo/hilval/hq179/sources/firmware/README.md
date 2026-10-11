@@ -240,10 +240,17 @@ Two resolutions are stated, because they answer different questions:
   plus one sample for the arbitration delay of an edge. At 6 and 8 MHz one tick
   (16 or 12 clocks) is inside that, so a single repetition cannot resolve a
   one-tick error there.
-* **±4 clocks for the mean of the 20 repetitions**: the sampling timer's counter
-  is preset to `rep % 8` before each window, so the sampling grid moves by one
-  clock per repetition and sweeps all eight phases. That is what resolves a
-  one-clock-per-tick error at every rate measured.
+* **±4 clocks for the mean of the 20 repetitions**: every window measures the
+  frame at its own phase of the 8-clock sampling grid, so the quantisation of a
+  run averages out over the repetitions. That is what resolves a
+  one-clock-per-tick error at every rate measured. Two independent mechanisms
+  carry that phase and the image relies on neither alone: the compare value the
+  samples are taken at puts the grid `1 + rep % 7` clocks after the sampling
+  timer starts, and the frame is held back until the sampling counter shows
+  `2 * rep % 8`. The two shifts differ in size, so they cannot cancel. An
+  earlier version of this image carried the phase in the sampling counter alone
+  and measured every one-tick pulse at 8 MHz as exactly one sample in all 20
+  repetitions of both reset phases, which is what a grid that never moves does.
 
 For `before`, the shortfall of the last run is reported as
 `measured − (n − 1) × (tick + 1)`, which is the transfer-complete interrupt's
@@ -254,7 +261,12 @@ equal, so the last cell is reported there but the deviation is only asserted at
 A measurement that lost samples shows up in the sampling stream's own flags (a
 FIFO-error overrun in direct mode), in a non-zero `ndtr`, or in the control's
 high, low and period lengths and the span its rising edges cover. All of those
-are the measurement path's failure, not the driver's, and the tests say so.
+are the measurement path's failure, not the driver's, and the tests say so. A
+console line that never reached the reader is the same kind of failure: the
+images number every repetition and the tests require all 20 of them, so a
+reading that lost one is refused instead of being judged as if it were the whole
+set. The images themselves cannot lose a line — `printk` here waits for the
+transmitter on every character.
 
 ## Coverage
 

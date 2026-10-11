@@ -295,6 +295,12 @@ static void window_begin(uint32_t rep)
 {
 	hq179_sampler_arm(rep);
 	hq179_sampler_start();
+	/* The frame this window is opened for starts at this repetition's phase
+	 * of the sampling grid: without that the 8-clock samples would measure
+	 * the same pulse the same way in every repetition and their mean could
+	 * not resolve below one sample (sampler.c).
+	 */
+	hq179_grid_align(rep);
 }
 
 /* Read while the streams are still armed, so the levels are the ones the window
