@@ -36,6 +36,10 @@ REPS_SBK = const(5)  # repetitions of the CR1.SBK poll phase
 CONTROLS = const(16)  # iterations of each overhead control
 MAX_EDGES = const(64)  # indices the edge buffer holds; a repetition needs 24
 EDGES_PER_LINE = const(16)
+# What `emit()` waits after a line, per character of it: one character is ten bit
+# times, 87 us at the REPL's 115200 baud, and four of those per character sent
+# hold this image at a fifth of the line rate. `emit()` says why.
+PACE_US = const(4 * 87)
 # Last-resort bound on the register polls below, so a sampler that never
 # advances cannot hang the image. It is far more iterations than the
 # sample-count bound needs, so that bound is the one that normally ends a poll.
@@ -161,6 +165,32 @@ def wait_zero(reg: ptr32, mask: int, ndtr: ptr32, span: int, spins: int) -> int:
     return (seen << 16) | (ndtr[0] & 0xFFFF)
 
 
+def emit(line):
+    """Print one record line, then hold the serial line idle four times as long.
+
+    The recording is this image's only output and nothing in its path can ask the
+    board to slow down: USART2 reaches the recorder through the ST-LINK's
+    USB-serial bridge, which drops whatever its buffer cannot hold while the host
+    is not reading it, and the port is opened without flow control. One bench run
+    of these images lost about three kilobytes in the middle of one
+    configuration's output (the tail of a `rep` line and the eight repetitions
+    after it), which is a third of a second of uninterrupted output at 115200
+    baud, and a single lost byte fails the whole image. Printing at a fifth of
+    the line rate cannot make that path lossless, but the rate is the only lever
+    an image has: the buffer in the middle then has to absorb more than a second
+    of host silence instead of a third of one. The wait costs about 18 seconds
+    per image, against the 180 seconds the plan waits for the done line.
+
+    Nothing measured passes through here: a record is printed once its window has
+    been sampled and the sampler stopped.
+    """
+    print(line)
+    # `+ 2` for the carriage return and newline `print` adds, and the wait rounded
+    # up to the next whole millisecond of `sleep_ms`, the call the rest of this
+    # script already uses.
+    time.sleep_ms((PACE_US * (len(line) + 2) + 999) // 1000)
+
+
 def clean(text):
     """`text` cut and mapped to what a record value may hold: printable ASCII, no space, no '='."""
     out = ""
@@ -176,7 +206,7 @@ def clean(text):
 
 
 def fault(text):
-    print(TAG, "fault", "err=" + clean(text))
+    emit("%s fault err=%s" % (TAG, clean(text)))
 
 
 def arm(period, idr):
@@ -238,7 +268,7 @@ def print_edges(cfg, number, phase, found):
         while position < last:
             parts.append("%d" % marks[position])
             position += 1
-        print(
+        emit(
             "%s edges id=%d rep=%d phase=%s seq=%d i=%s"
             % (TAG, cfg, number, phase, sequence, ",".join(parts))
         )
@@ -328,7 +358,7 @@ def main_rep(u, cfg, number, period, limit_us, pins):
     afr = (m32[afr_address] >> afr_shift) & 0xF
     found = edges_of(samples, NS, mask, marks, MAX_EDGES)
     first = 1 if (samples[0] | (samples[1] << 8)) & mask else 0
-    print(
+    emit(
         "%s rep id=%d rep=%d phase=main t0=%d tc=%d tr=%d tb=%d low=%d te=%d cyc=%d cyc_all=%d"
         " w1=%s w2=%s w3=%s flags=0x%02x rem=%d n=%d first=%d moder=%d afr=%d ahb1enr=0x%08x"
         % (
@@ -369,7 +399,7 @@ def sbk_rep(u, cfg, number, period, limit_us, pins, cr1_address):
     afr = (m32[afr_address] >> afr_shift) & 0xF
     found = edges_of(samples, NS, mask, marks, MAX_EDGES)
     first = 1 if (samples[0] | (samples[1] << 8)) & mask else 0
-    print(
+    emit(
         "%s rep id=%d rep=%d phase=sbk t0=%d tc=%d tr=%d tsbk=%d sbk=%d cyc=%d w1=%s"
         " flags=0x%02x rem=%d n=%d first=%d moder=%d afr=%d ahb1enr=0x%08x"
         % (
@@ -444,7 +474,7 @@ def run():
     )
     time.sleep_ms(5)
 
-    print(
+    emit(
         "%s boot mpy=%s sysclk=%d hclk=%d pclk1=%d pclk2=%d cfgr=0x%08x ahb1enr=0x%08x"
         " apb2enr=0x%08x uart=%d port=%s pin=%d ns=%d spb=%d"
         % (
@@ -461,7 +491,7 @@ def run():
         period = (timclk + ticks // 2) // ticks
         limit_us = 2 * (NS * period // (timclk // 1000000)) + 50000
         read, call, read_cycles, call_cycles = controls(u, period, pins)
-        print(
+        emit(
             "%s cfg id=%d baud=%d bits=8 parity=%s stop=%d brr=0x%04x cr1=0x%08x cr2=0x%08x"
             " cr3=0x%08x period=%d timclk=%d moder=%d afr=%d rd=%d cl=%d rd_cyc=%d cl_cyc=%d"
             % (

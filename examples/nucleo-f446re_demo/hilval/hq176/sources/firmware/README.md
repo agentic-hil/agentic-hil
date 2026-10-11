@@ -235,6 +235,18 @@ A `rep` line and its `edges` lines are one repetition; `phase=main` is the
 24-repetition sequence with a byte written during the break, `phase=sbk` the
 5-repetition sequence that polls `CR1.SBK` instead.
 
+After every line it prints, the script waits four character times per character
+sent, so that the recording keeps up. USART2 reaches the recorder through the
+ST-LINK's USB-serial bridge, which drops whatever its buffer cannot hold while
+the host is not reading it, and nothing in that path can ask the board to slow
+down; one run of these images lost about three kilobytes in the middle of one
+configuration's output, and a single lost byte fails the whole image. Holding
+the output to a fifth of the line rate does not make that path lossless, but the
+rate is the only lever an image has, and it makes an image take about half a
+minute instead of ten seconds, against the three minutes the plan allows it.
+Nothing that is measured goes through that wait: every record is printed once
+its window has been sampled and the sampler stopped.
+
 ## Files
 
 * `README.md`, this file.
