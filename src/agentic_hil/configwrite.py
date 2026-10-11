@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Sequence
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1235,7 +1236,7 @@ def _incomplete_backend_switch(original: JsonObject, requested: list[tuple[Resol
     settable = set(config_rule_fields(_rule_for(switches[0][0])))
     # Which fields the call itself carries for each entry, so a required field or
     # a fresh executable counts toward the switch only when the request sent it.
-    supplied: dict[str, set[str]] = {}
+    supplied: dict[str | None, set[str]] = {}
     for resolved, _ in requested:
         if resolved.section == DEBUGGERS_SECTION and not resolved.under_permissions and resolved.entry is not None:
             supplied.setdefault(resolved.entry, set()).add(resolved.field)
@@ -1864,7 +1865,7 @@ def _concrete_keys(document: JsonObject) -> list[JsonObject]:
     """Every settable key of this document, resolved against what is in it."""
     keys: list[JsonObject] = []
     for rule in CONFIG_KEY_RULES:
-        entries: list[str | None]
+        entries: Sequence[str | None]
         if rule.named:
             section = document.get(rule.section)
             entries = sorted(str(name) for name in section) if isinstance(section, dict) else []

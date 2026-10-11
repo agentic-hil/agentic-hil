@@ -34,6 +34,7 @@ started redacting ``resource_key``-shaped fields that are not credentials.
 from __future__ import annotations
 
 import re
+from typing import Any, overload
 
 _REDACTION_MARKER = "[redacted]"
 
@@ -228,6 +229,14 @@ def redact_stream_text(text: str) -> str:
     for pattern, replace in _CONTENT_PATTERNS:
         text = pattern.sub(replace, text)
     return text
+
+
+@overload
+def redact_sensitive(value: dict[str, Any]) -> dict[str, Any]: ...
+
+
+@overload
+def redact_sensitive(value: object) -> object: ...
 
 
 def redact_sensitive(value: object) -> object:
