@@ -93,7 +93,7 @@ before the run, as bit times at 8N1, 8E1 and 8N2: A, one frame including all sto
 bits (10, 11, 11); B, one frame including one stop bit (10, 11, 10); C, the
 start, data and parity bits only (9, 10, 9).
 
-The board confirmed hypothesis A: the break is low for 10, 11 and 11 bit times at
+The board confirmed hypothesis B: the break is low for 10, 11 and 10 bit times at
 8N1, 8E1 and 8N2, in both images and in every repetition.
 
 | Baud | Format | Break, bit times | Break, us at the nominal baud |
@@ -102,7 +102,12 @@ The board confirmed hypothesis A: the break is low for 10, 11 and 11 bit times a
 | 9600 | 8N1 | 10 | 1041.7 |
 | 19200 | 8N1 | 10 | 520.7 |
 | 9600 | 8E1 | 11 | 1145.8 |
-| 9600 | 8N2 | 11 | 1145.8 |
+| 9600 | 8N2 | 10 | 1041.7 |
+
+The 8N2 row is what decides between the three readings: a second stop bit leaves
+the break at 10 bit times, so the break frame carries one stop bit and not all
+the configured ones. The parity bit does lengthen it, because the port counts
+parity in the USART word length, which is why 8E1 shows 11.
 
 The microsecond column is the bit count times the bit time that the run's own
 BRR and APB1 clock give, which is why 19200 baud shows 520.7 and not 520.8: the
@@ -116,10 +121,11 @@ line went high again (8.3 ms of it at 1200 baud); and the byte written during
 the break came out whole and in the configured format afterwards, with the pin
 still in its alternate function.
 
-So the break is one character frame of logic 0, not 13 bit times, and it is not
-"longer than required for a normal transmission of a character" either: a normal
-8N1 character occupies 10 bit times from the start bit to the end of the stop
-bit, exactly as much as the break.
+So the break is one character frame with a single stop bit of logic 0, not 13
+bit times, and it is not "longer than required for a normal transmission of a
+character" either: a normal 8N1 character occupies 10 bit times from the start
+bit to the end of the stop bit, exactly as much as the break, and at 8N2 a
+normal character takes 11 bit times while the break still takes 10.
 
 ## The change
 
@@ -136,11 +142,11 @@ The new entry of `docs/library/pyb.UART.rst` reads:
 ```rst
    Send a break condition on the bus.  On STM32F4 MCUs the method returns at
    once, before the break has been sent, and the break drives the bus low for
-   the duration of one character frame (start bit, data bits, parity bit if
-   any and stop bits), followed by at least one bit time of logic 1 before the
-   next character: with 8 data bits the bus is low for 10 bit times with no
-   parity and 1 stop bit, and for 11 bit times with a parity bit and 1 stop
-   bit or with no parity and 2 stop bits.
+   the duration of one character frame with a single stop bit (start bit, data
+   bits, parity bit if any and one stop bit), followed by at least one bit
+   time of logic 1 before the next character: with 8 data bits the bus is low
+   for 10 bit times with no parity and 1 or 2 stop bits, and for 11 bit times
+   with a parity bit and 1 stop bit.
    Return value: ``None``.
 ```
 
@@ -156,11 +162,11 @@ The new entry of `docs/library/machine.UART.rst` reads:
 
        On the stm32 port with an STM32F4 MCU the method returns at once, before
        the break has been sent, and the break drives the bus low for the
-       duration of one character frame (start bit, data bits, parity bit if any
-       and stop bits), followed by at least one bit time of logic 1 before the
-       next character: with 8 data bits the bus is low for 10 bit times with no
-       parity and 1 stop bit, and for 11 bit times with a parity bit and 1 stop
-       bit or with no parity and 2 stop bits.
+       duration of one character frame with a single stop bit (start bit, data
+       bits, parity bit if any and one stop bit), followed by at least one bit
+       time of logic 1 before the next character: with 8 data bits the bus is
+       low for 10 bit times with no parity and 1 or 2 stop bits, and for 11 bit
+       times with a parity bit and 1 stop bit.
 ```
 
 Every clause of those texts is held against the board: the numbers and the

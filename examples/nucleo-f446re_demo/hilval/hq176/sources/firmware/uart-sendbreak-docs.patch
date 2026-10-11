@@ -4,18 +4,21 @@ pyb.UART.sendbreak() is documented as driving the bus low "for a duration of
 13 bits" and machine.UART.sendbreak() as driving it low "longer than required
 for a normal transmission of a character". Neither describes the stm32 port on
 an STM32F4, where mp_machine_uart_sendbreak() sets USART_CR1_SBK and returns
-at once, and the USART then sends one character frame of logic 0 followed by
-the inserted logic 1 (MicroPython #8794, #8646). The "13 bits" appear to come
-from the timeout_char floor a few lines further down in machine_uart.c, not
-from the peripheral, which has no break-length field outside LIN mode.
+at once, and the USART then holds the line low for one character frame with a
+single stop bit, followed by the inserted logic 1 (MicroPython #8794, #8646).
+The "13 bits" appear to come from the timeout_char floor a few lines further
+down in machine_uart.c, not from the peripheral, which has no break-length
+field outside LIN mode.
 
 Measured on a NUCLEO-F446RE at 168 MHz with the TX pin's own GPIO input data
 register sampled by DMA2 on TIM8 updates at 32 samples per bit, 24 repetitions
 per configuration: the bus is low for 10 bit times with 8 data bits, no parity
-and 1 stop bit, and for 11 bit times with a parity bit or with 2 stop bits; the
-method returns while the line is still low. Both entries now state that, scoped
-to the STM32F4 CR1.SBK path that was measured. The RQR/SBKRQ families that
-machine_uart.c handles separately were not measured and are not described.
+and 1 or 2 stop bits, and for 11 bit times with a parity bit and 1 stop bit, so
+a second stop bit does not lengthen the break, while the parity bit does because
+the port counts it in the USART word length; the method returns while the line
+is still low. Both entries now state that, scoped to the STM32F4 CR1.SBK path
+that was measured. The RQR/SBKRQ families that machine_uart.c handles
+separately were not measured and are not described.
 
 Each hunk is anchored on the directive above the entry and on the next
 directive or heading below it. The blank line that separates the entry from
@@ -36,11 +39,11 @@ diff --git a/docs/library/pyb.UART.rst b/docs/library/pyb.UART.rst
 +
 +   Send a break condition on the bus.  On STM32F4 MCUs the method returns at
 +   once, before the break has been sent, and the break drives the bus low for
-+   the duration of one character frame (start bit, data bits, parity bit if
-+   any and stop bits), followed by at least one bit time of logic 1 before the
-+   next character: with 8 data bits the bus is low for 10 bit times with no
-+   parity and 1 stop bit, and for 11 bit times with a parity bit and 1 stop
-+   bit or with no parity and 2 stop bits.
++   the duration of one character frame with a single stop bit (start bit, data
++   bits, parity bit if any and one stop bit), followed by at least one bit
++   time of logic 1 before the next character: with 8 data bits the bus is low
++   for 10 bit times with no parity and 1 or 2 stop bits, and for 11 bit times
++   with a parity bit and 1 stop bit.
 +   Return value: ``None``.
 +
  Constants
@@ -60,10 +63,10 @@ diff --git a/docs/library/machine.UART.rst b/docs/library/machine.UART.rst
 +
 +       On the stm32 port with an STM32F4 MCU the method returns at once, before
 +       the break has been sent, and the break drives the bus low for the
-+       duration of one character frame (start bit, data bits, parity bit if any
-+       and stop bits), followed by at least one bit time of logic 1 before the
-+       next character: with 8 data bits the bus is low for 10 bit times with no
-+       parity and 1 stop bit, and for 11 bit times with a parity bit and 1 stop
-+       bit or with no parity and 2 stop bits.
++       duration of one character frame with a single stop bit (start bit, data
++       bits, parity bit if any and one stop bit), followed by at least one bit
++       time of logic 1 before the next character: with 8 data bits the bus is
++       low for 10 bit times with no parity and 1 or 2 stop bits, and for 11 bit
++       times with a parity bit and 1 stop bit.
 +
  .. method:: UART.flush()
