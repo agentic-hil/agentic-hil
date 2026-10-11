@@ -83,18 +83,19 @@ struct hq179_pwm {
 void hq179_sampler_setup(void);
 
 /** Point the stream at a fresh window and put the sampling grid at this
- *  repetition's phase (the compare value of the sampling timer).
+ *  repetition's phase (the compare value of the sampling timer, which is the
+ *  grid's offset from the start of a frame; see sampler.c for why the phase
+ *  must move from repetition to repetition and why it is tied to the frame).
  */
 void hq179_sampler_arm(uint32_t rep);
 
 /** Start the sampling timer and take the window's time origin. */
 void hq179_sampler_start(void);
 
-/** Hold the next frame back until the sampling counter reaches this
- *  repetition's phase of the grid; see sampler.c for why the phase must move
- *  from repetition to repetition and why two mechanisms carry it.
+/** The two registers the grid's phase rests on, read back: the trigger output
+ *  of the driver's timer and the slave mode of the sampling timer.
  */
-void hq179_grid_align(uint32_t rep);
+void hq179_grid_trigger_regs(uint32_t *driver_cr2, uint32_t *sampler_smcr);
 
 /** Timer clocks since that origin. */
 uint32_t hq179_elapsed(void);

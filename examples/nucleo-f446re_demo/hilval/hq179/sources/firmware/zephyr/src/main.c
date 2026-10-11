@@ -313,14 +313,16 @@ static void read_timer(struct rec *r, uint32_t resolution)
 
 static void window_begin(uint32_t rep)
 {
+	/* The frame this window is opened for begins at this repetition's phase
+	 * of the sampling grid, because the driver's own counter enable
+	 * reinitialises the sampling counter. Nothing here times that: a wait
+	 * before the frame cannot carry the phase, and sampler.c says why.
+	 * Without a phase that moves, the 8-clock samples would measure the same
+	 * pulse the same way in every repetition and their mean could not
+	 * resolve below one sample.
+	 */
 	hq179_sampler_arm(rep);
 	hq179_sampler_start();
-	/* The frame this window is opened for starts at this repetition's phase
-	 * of the sampling grid: without that the 8-clock samples would measure
-	 * the same pulse the same way in every repetition and their mean could
-	 * not resolve below one sample (sampler.c).
-	 */
-	hq179_grid_align(rep);
 }
 
 /* Read while the streams are still armed, so the levels are the ones the window
@@ -661,6 +663,8 @@ int main(void)
 	bool ready1;
 	uint32_t idr0;
 	uint32_t idr1;
+	uint32_t driver_cr2;
+	uint32_t sampler_smcr;
 	int chan_rc;
 	uint32_t start;
 
@@ -697,11 +701,19 @@ int main(void)
 	(void)pulse_io_get_capabilities(dev0, &caps);
 	chan_rc = pulse_io_channel_get(dev0, 0, &chan0);
 
+	/* The two registers the sampling grid's phase rests on, as the hardware
+	 * reports them: the trigger output of the driver's timer and the slave
+	 * mode of the sampling timer (sampler.c).
+	 */
+	hq179_grid_trigger_regs(&driver_cr2, &sampler_smcr);
+
 	printk(TAG " init phase=%u ready0=%d ready1=%d idr0=%u idr1=%u modes=%u min_tick_ns=%u "
-	       "max_ticks=%u loop_max=%u channels=%u pc0_mode=%u pc0_ospeed=%u chan_rc=%d\n",
+	       "max_ticks=%u loop_max=%u channels=%u pc0_mode=%u pc0_ospeed=%u chan_rc=%d "
+	       "tim1_cr2=0x%x tim8_smcr=0x%x\n",
 	       phase, (int)ready0, (int)ready1, idr0, idr1, caps.modes, caps.min_tick_ns,
 	       caps.max_duration_ticks, caps.tx_loop_max, (unsigned int)caps.num_channels,
-	       hq179_moder(HQ179_BIT_PC0), hq179_ospeedr(HQ179_BIT_PC0), chan_rc);
+	       hq179_moder(HQ179_BIT_PC0), hq179_ospeedr(HQ179_BIT_PC0), chan_rc,
+	       (unsigned int)driver_cr2, (unsigned int)sampler_smcr);
 
 	run_cases(phase);
 

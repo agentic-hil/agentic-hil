@@ -45,6 +45,15 @@
 #define HQ_TIM_DIER_CC4DE BIT(12)
 /* PWM mode 1 on channel 1 (OC1M = 110) with its preload enabled (OC1PE). */
 #define HQ_TIM_CCMR1_PWM1 ((6u << 4) | BIT(3))
+/* MMS = 001: the timer's counter-enable signal is what its trigger output
+ * carries. Nothing else of CR2 is used by either timer here.
+ */
+#define HQ_TIM_CR2_MMS_ENABLE (1u << 4)
+/* SMS = 100 (reset mode) with TS = 000 (internal trigger 0, which is TIM1 for
+ * TIM8 in RM0390's internal trigger connection table): a rising edge of that
+ * trigger reinitialises the counter, and the counter keeps its own clock.
+ */
+#define HQ_TIM_SMCR_RESET_ITR0 4u
 
 /* DMA stream bits (RM0390 9.5). Peripheral to memory, 16-bit both sides,
  * memory incrementing, channel 7 (TIM8_CH4/TRIG/COM on stream 7), priority
@@ -67,13 +76,6 @@
  * short enough that a stream which never completes does not stall the image.
  */
 #define HQ_WAIT_CLOCKS (3u * HQ179_SAMPLES * HQ179_SAMPLE_CLOCKS)
-
-/* How many reads of the sampling counter hq179_grid_align() gives itself before
- * it goes on regardless: its own loop steps the counter by a few clocks per
- * read and could step it by a whole grid, never seeing the value it waits for.
- * Four grids are a few hundred clocks of a 160000-clock window.
- */
-#define HQ_ALIGN_READS (4u * HQ179_SAMPLE_CLOCKS)
 
 static uint16_t samples[HQ179_SAMPLES];
 static uint32_t window_t0;
@@ -123,6 +125,48 @@ uint32_t hq179_ospeedr(uint32_t pin)
 	return field(GPIOC->OSPEEDR, pin, 2u);
 }
 
+/* Tie the sampling grid to the frame: the driver's counter-enable signal
+ * reinitialises the sampling counter.
+ *
+ * One sample every 8 clocks measures a pulse of 12 or 13 clocks as one or two
+ * samples, depending only on where the pulse falls between two samples, so the
+ * mean over the 20 repetitions resolves below one sample only while that phase
+ * moves from repetition to repetition.
+ *
+ * Two earlier versions of this image moved the phase before the frame started -
+ * the first in the sampling counter, the second in the compare value plus a
+ * wait on the sampling counter - and both measured every run of a frame as the
+ * same number of samples in all 20 repetitions of both reset phases, which is
+ * what a grid that never moves relative to the frame does. Anything that ties
+ * the processor's timing to the sampling stream between such a shift and the
+ * frame takes the shift back: the stream writes its samples into the same SRAM
+ * that the driver's encoder writes its 512 words into, and a loop that is held
+ * up by one clock whenever the two coincide settles at a fixed position in the
+ * grid and carries the frame start with it.
+ *
+ * So the phase is taken from the driver's own timer, after any such loop has
+ * run. TIM1's trigger output carries its counter-enable signal and TIM8 runs in
+ * reset mode on that trigger, so every frame begins at count 0 of the sampling
+ * counter and the first sample of it falls CCR4 clocks later, which is where
+ * hq179_sampler_arm() puts this repetition's phase.
+ *
+ * Writing MMS selects what the driver's timer puts on its trigger output and
+ * nothing else: no count, no update event, no DMA request and nothing on the
+ * pin changes, and the driver itself never writes CR2 (the reference copy of
+ * the driver under reference/hq179/ writes CR1, PSC, ARR, RCR, DIER and EGR).
+ */
+static void grid_trigger(void)
+{
+	TIM1->CR2 = HQ_TIM_CR2_MMS_ENABLE;
+	TIM8->SMCR = HQ_TIM_SMCR_RESET_ITR0;
+}
+
+void hq179_grid_trigger_regs(uint32_t *driver_cr2, uint32_t *sampler_smcr)
+{
+	*driver_cr2 = TIM1->CR2;
+	*sampler_smcr = TIM8->SMCR;
+}
+
 void hq179_sampler_setup(void)
 {
 	RCC->AHB1ENR |= HQ_AHB1_GPIOC | HQ_AHB1_DMA2;
@@ -152,6 +196,11 @@ void hq179_sampler_setup(void)
 	TIM3->EGR = HQ_TIM_EGR_UG;
 	TIM3->SR = 0u;
 	TIM3->CR1 = HQ_TIM_CR1_CEN;
+
+	/* Set here as well as in every window, so the start can print the two
+	 * registers the grid's phase rests on.
+	 */
+	grid_trigger();
 }
 
 void hq179_sampler_arm(uint32_t rep)
@@ -174,14 +223,16 @@ void hq179_sampler_arm(uint32_t rep)
 	DMA2_Stream7->CR = HQ_SAMPLER_CR;
 	DMA2_Stream7->CR |= HQ_DMA_CR_EN;
 
-	/* One CC4 event every HQ179_SAMPLE_CLOCKS clocks, the first of them
-	 * CCR4 clocks after the counter starts, so the compare value carries the
-	 * grid's phase (hq179_grid_align() below says why the phase has to move
-	 * from repetition to repetition). It stays between 1 and ARR: 0 would
-	 * leave it to the silicon whether a match at the counter's reload is an
-	 * event at all, and a value above ARR would be no event ever. CR2 keeps
-	 * CCDS at 0, so the request follows the compare event and not the update
-	 * event.
+	/* One CC4 event every HQ179_SAMPLE_CLOCKS clocks, the first of them CCR4
+	 * clocks after the counter is reinitialised, which grid_trigger() above
+	 * has the driver's counter enable do at the start of every frame. So
+	 * CCR4 is this repetition's phase of the grid: seven values for eight
+	 * phases, three repetitions each and two for the seventh, which holds
+	 * the quantisation left in the mean of 20 repetitions under 1.5 clocks.
+	 * It stays between 1 and ARR: 0 would leave it to the silicon whether a
+	 * match at the counter's reload is an event at all, and a value above
+	 * ARR would be no event ever. CR2 keeps CCDS at 0, so the request
+	 * follows the compare event and not the update event.
 	 */
 	TIM8->CR1 = 0u;
 	TIM8->DIER = 0u;
@@ -191,8 +242,18 @@ void hq179_sampler_arm(uint32_t rep)
 	TIM8->CCR4 = 1u + rep % (HQ179_SAMPLE_CLOCKS - 1u);
 	TIM8->CCMR2 = 0u; /* channel 4 an output, compare mode frozen */
 	TIM8->CCER = 0u;  /* the pin is not driven; only the compare event is wanted */
+	/* The trigger again in every window: the driver reconfigures its timer
+	 * before each one, and this image does not depend on what that leaves
+	 * in the two registers the grid's phase rests on.
+	 */
+	grid_trigger();
 	TIM8->EGR = HQ_TIM_EGR_UG; /* reloads the prescaler and the counter */
-	TIM8->CNT = 0u;            /* the grid's phase is in CCR4, not here */
+	/* The preset the first version of this image relied on. It moves the
+	 * whole grid rather than its offset from a frame, so it cannot cancel
+	 * CCR4, and in a window no frame runs in (the qual case, where the
+	 * counter is never reinitialised) it is the only phase there is.
+	 */
+	TIM8->CNT = (2u * rep) % HQ179_SAMPLE_CLOCKS;
 	TIM8->SR = 0u;
 	TIM8->DIER = HQ_TIM_DIER_CC4DE;
 }
@@ -201,37 +262,6 @@ void hq179_sampler_start(void)
 {
 	window_t0 = k_cycle_get_32();
 	TIM8->CR1 = HQ_TIM_CR1_CEN;
-}
-
-/* Hold the caller back until the sampling counter shows this repetition's
- * target, so the frame it is about to send starts at a known phase of the
- * sampling grid.
- *
- * One sample every 8 clocks measures a pulse of 12 or 13 clocks as one or two
- * samples, depending only on where the pulse falls between two samples, so the
- * mean over the 20 repetitions resolves below one sample only while that phase
- * moves from repetition to repetition. Two independent things move it here and
- * the image relies on neither alone: the compare value in hq179_sampler_arm()
- * puts the grid at 1 + rep % 7 clocks after the sampling timer starts, and this
- * wait puts the frame at 2 * rep % 8 clocks of that same counter. The two
- * shifts differ in size, so they cannot cancel; whichever of them the hardware
- * honours, the phase still moves, and when both do it sweeps all eight phases
- * over 20 repetitions.
- *
- * This is not theory: the first version of this image put the phase in the
- * sampling counter alone and measured every one-tick pulse at 8 MHz as exactly
- * one sample in all 20 repetitions of both reset phases, which is what a grid
- * that never moved does.
- */
-void hq179_grid_align(uint32_t rep)
-{
-	uint32_t target = (2u * rep) % HQ179_SAMPLE_CLOCKS;
-
-	for (uint32_t read = 0u; read < HQ_ALIGN_READS; read++) {
-		if (TIM8->CNT == target) {
-			return;
-		}
-	}
 }
 
 uint32_t hq179_elapsed(void)

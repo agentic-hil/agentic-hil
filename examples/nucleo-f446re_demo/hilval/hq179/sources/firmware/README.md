@@ -113,6 +113,14 @@ external measurement is made or claimed.
   than 60000 clocks. TIM8 has no devicetree node on the F446 under Zephyr, so it
   is driven through its registers; the stream raises no interrupt, so Zephyr's
   own DMA driver never sees an interrupt for a stream it did not configure.
+  TIM8's counter is reinitialised by TIM1's trigger output, which carries the
+  driver's counter-enable signal (`MMS = 001` in TIM1, reset mode on internal
+  trigger 0 in TIM8), so every frame starts at count 0 of the sampling counter
+  and the samples fall `CCR4` clocks after it. That is where the per-repetition
+  phase of the grid sits (see the tolerances below). Selecting a trigger output
+  changes no count, no update event, no DMA request and nothing on the pin, the
+  driver never writes that register, and both images print the two registers
+  back in their `init` record.
 * **The control.** TIM3 channel 1 drives **PC6**, a pin of the same port, with a
   PWM of 159 timer clocks per period (`ARR = 158`), 40 of them high
   (`CCR1 = 40`). 159 is prime, so the 8-clock samples sweep every phase of it.
@@ -160,7 +168,7 @@ start prints an empty line first, then:
 HQ179 boot  phase rcc_csr marker zephyr sysclk ticks enomem etimedout enotsup
             einval samples sample_clocks pwm_arr pwm_ccr nrep
 HQ179 init  phase ready0 ready1 idr0 idr1 modes min_tick_ns max_ticks loop_max
-            channels pc0_mode pc0_ospeed chan_rc
+            channels pc0_mode pc0_ospeed chan_rc tim1_cr2 tim8_smcr
 HQ179 case  phase rep name res psc arr rc rc2 rc_cfg ret done_rc idle_cfg
             idle_end idle_stop stop_at s5_pl s7_pl flags ndtr dur nruns first
             first_len last last_len pwm_edges pwm_first pwm_last pwm_hi_min
@@ -185,6 +193,10 @@ HQ179 done
   in **samples** of 8 clocks each, 16 to a line.
 * `flags` and `ndtr` are the sampling stream's own report, and `s5_pl`/`s7_pl`
   the two priority fields.
+* `tim1_cr2` and `tim8_smcr` are read back out of the two timers: the trigger
+  output the driver's timer carries (`0x10` is its counter-enable signal) and
+  the slave mode of the sampling timer (`0x4` is reset on internal trigger 0).
+  Together they are what puts every frame at count 0 of the sampling counter.
 * A value of `-1` means the case has no such measurement.
 
 ## The cases
@@ -243,14 +255,26 @@ Two resolutions are stated, because they answer different questions:
 * **±4 clocks for the mean of the 20 repetitions**: every window measures the
   frame at its own phase of the 8-clock sampling grid, so the quantisation of a
   run averages out over the repetitions. That is what resolves a
-  one-clock-per-tick error at every rate measured. Two independent mechanisms
-  carry that phase and the image relies on neither alone: the compare value the
-  samples are taken at puts the grid `1 + rep % 7` clocks after the sampling
-  timer starts, and the frame is held back until the sampling counter shows
-  `2 * rep % 8`. The two shifts differ in size, so they cannot cancel. An
-  earlier version of this image carried the phase in the sampling counter alone
-  and measured every one-tick pulse at 8 MHz as exactly one sample in all 20
-  repetitions of both reset phases, which is what a grid that never moves does.
+  one-clock-per-tick error at every rate measured. The phase is the compare
+  value the samples are taken at, `1 + rep % 7` clocks after the sampling
+  counter is reinitialised, and the driver's own counter enable reinitialises it
+  at the start of every frame. Seven values cover seven of the eight phases,
+  three repetitions each and two for the seventh, which leaves at most 1.5
+  clocks of quantisation in the mean.
+
+  The phase has to be tied to the frame by the hardware, because a shift
+  applied before the frame does not survive. Two earlier versions of this image
+  shifted the sampling counter before it started, and then its compare value
+  plus a wait on that counter, and both measured every run of a frame as the
+  same number of samples in all 20 repetitions of both reset phases - a grid
+  that never moves relative to the frame. The sampling stream writes into the
+  same SRAM that the driver's encoder writes its 512 words into, and a loop
+  that is held up by one clock whenever the two coincide settles at a fixed
+  position in the grid and takes the frame start with it. The counter is still
+  preset to `2 * rep % 8` before it starts: that shift moves the whole grid
+  rather than its offset from a frame, so it cannot cancel the compare value,
+  and in the qualification window, where no frame runs and the counter is never
+  reinitialised, it is the only phase there is.
 
 For `before`, the shortfall of the last run is reported as
 `measured − (n − 1) × (tick + 1)`, which is the transfer-complete interrupt's
