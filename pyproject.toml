@@ -140,3 +140,40 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501"]
+
+# The type check covers the modules the safety boundary is made of
+# (docs/security-design.md): the configuration and its writes, the contracts,
+# artifact staging, the tool dispatch and its coordination, device access,
+# redaction, the reports, and the MCP and stdio transports. The rest of the
+# package is read for the types these modules import from it and is not
+# reported on. CI runs a bare `mypy` from requirements/typecheck.txt.
+#
+# These modules switch between POSIX and Windows code on `os.name`, which mypy
+# does not narrow on, so the check is pinned to one platform: Linux, where CI
+# runs it. The POSIX branches are checked as written; the few Windows-only
+# calls carry `type: ignore[attr-defined]` on their own line, and
+# `warn_unused_ignores` reports one that is no longer needed.
+[tool.mypy]
+python_version = "3.10"
+platform = "linux"
+mypy_path = "src"
+files = [
+  "src/agentic_hil/artifacts.py",
+  "src/agentic_hil/bench.py",
+  "src/agentic_hil/config.py",
+  "src/agentic_hil/configstate.py",
+  "src/agentic_hil/configwrite.py",
+  "src/agentic_hil/contracts.py",
+  "src/agentic_hil/coordination.py",
+  "src/agentic_hil/device_access.py",
+  "src/agentic_hil/mcp.py",
+  "src/agentic_hil/redact.py",
+  "src/agentic_hil/report.py",
+  "src/agentic_hil/stdio.py",
+  "src/agentic_hil/tools.py",
+  "src/agentic_hil/types.py"
+]
+follow_imports = "silent"
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true

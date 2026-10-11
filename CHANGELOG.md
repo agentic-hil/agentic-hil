@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- CI type-checks the modules the safety boundary is made of (configuration and its writes, contracts, artifact staging, tool dispatch and coordination, device access, redaction, reports, and the MCP and stdio transports) with mypy, and the required check waits for the result. mypy and the stubs it reads are installed from their own hash-pinned lock, `requirements/typecheck.txt`; the modules and settings are `[tool.mypy]` in `pyproject.toml`. The changes it asked for in those modules are annotations and equivalent rewrites; no behavior changes.
+
 ### Changed
 
 - The Develop on your board page (`docs/use-cases/develop-on-your-board.md`) now walks through one recorded run on a real board in order: the task, the failing report, the one-line firmware fix and the rerun in which all three plans passed. Three excerpts of the 2026-09-15 starter record are shown as images, every report is linked, the versions the record used are named, the errors on the way are kept apart from the planted defect, and the page leads on to installation, your own first run and how to share its result. The `llms.txt` entry describes the walkthrough.

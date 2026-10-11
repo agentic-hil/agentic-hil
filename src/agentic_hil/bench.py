@@ -33,7 +33,7 @@ import socket
 import stat
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -105,7 +105,7 @@ class _LifetimeLock:
                 os.lseek(self.descriptor, 0, os.SEEK_SET)
                 import msvcrt
 
-                msvcrt.locking(self.descriptor, msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(self.descriptor, msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
                 self.locked = True
             else:
                 import fcntl
@@ -125,7 +125,7 @@ class _LifetimeLock:
                     import msvcrt
 
                     os.lseek(descriptor, 0, os.SEEK_SET)
-                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
                 elif self.locked:
                     import fcntl
 
@@ -271,7 +271,7 @@ def _is_executable_path(value: str) -> bool:
     return os.path.isabs(value) or value[:1] in ("/", "\\")
 
 
-def physical_resources(resources: object) -> list[str]:
+def physical_resources(resources: str | Iterable[object] | None) -> list[str]:
     if isinstance(resources, str):
         candidates: list[str] = [resources]
     else:
