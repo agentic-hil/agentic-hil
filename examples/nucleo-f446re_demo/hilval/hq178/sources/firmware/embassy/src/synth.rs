@@ -1,0 +1,477 @@
+//! Frames synthesized on the undriven RX pin, and the register-level control.
+//!
+//! There is no wiring on this bench, so a frame reaches the receiver in one of
+//! two in-chip ways. The USART's own half-duplex readback carries the
+//! correct-parity values (see `readers.rs`). Everything else is made here: PA10
+//! stays an alternate-function input and its pull bits in `GPIOA_PUPDR` are
+//! written by DMA2 on every TIM8 update, one word per bit of the frame, so the
+//! ~40 kOhm internal pull drives the line. 19200 baud leaves the pull about 2 %
+//! of a bit to settle in. DMA2 is the only controller whose peripheral port
+//! reaches the AHB1 GPIO ports, and TIM8_UP is its stream 1, channel 7.
+//!
+//! Neither frame source has run on this board before, so both prove themselves:
+//! `measure_frame()` reads one frame straight out of `USART_DR` through its
+//! address, bypassing every Embassy reader, shows where RM0390 puts the parity
+//! bit and stamps when the hardware raises PE relative to RXNE.
+//!
+//! Registers are addressed directly rather than through the PAC: the layout is
+//! RM0390's and the same addresses the repository's C images use, so nothing
+//! here depends on a generated field name.
+
+use crate::console::Static;
+
+// ---- registers (RM0390) ----------------------------------------------------
+
+const RCC_BASE: u32 = 0x4002_3800;
+pub const RCC_CFGR: u32 = RCC_BASE + 0x08;
+const RCC_PLLCFGR: u32 = RCC_BASE + 0x04;
+const RCC_AHB1ENR: u32 = RCC_BASE + 0x30;
+const RCC_APB2ENR: u32 = RCC_BASE + 0x44;
+pub const RCC_CSR: u32 = RCC_BASE + 0x74;
+pub const RCC_CSR_RMVF: u32 = 1 << 24;
+
+const GPIOA_BASE: u32 = 0x4002_0000;
+const GPIOA_PUPDR: u32 = GPIOA_BASE + 0x0C;
+/// PA10 is USART1_RX; its two pull bits sit at 21:20.
+const PA10_SHIFT: u32 = 20;
+
+pub const USART1_BASE: u32 = 0x4001_1000;
+pub const USART1_SR: u32 = USART1_BASE + 0x00;
+pub const USART1_DR: u32 = USART1_BASE + 0x04;
+pub const USART1_BRR: u32 = USART1_BASE + 0x08;
+pub const USART1_CR1: u32 = USART1_BASE + 0x0C;
+
+pub const SR_PE: u32 = 1 << 0;
+pub const SR_FE: u32 = 1 << 1;
+pub const SR_NF: u32 = 1 << 2;
+pub const SR_ORE: u32 = 1 << 3;
+pub const SR_RXNE: u32 = 1 << 5;
+/// Anything that lets a blocking read return, so a poll before it can time out.
+pub const SR_READABLE: u32 = SR_PE | SR_FE | SR_NF | SR_ORE | SR_RXNE;
+
+const CR1_RE: u32 = 1 << 2;
+const CR1_PS: u32 = 1 << 9;
+const CR1_PCE: u32 = 1 << 10;
+const CR1_M: u32 = 1 << 12;
+const CR1_UE: u32 = 1 << 13;
+
+const TIM8_BASE: u32 = 0x4001_0400;
+const TIM8_CR1: u32 = TIM8_BASE + 0x00;
+const TIM8_DIER: u32 = TIM8_BASE + 0x0C;
+const TIM8_SR: u32 = TIM8_BASE + 0x10;
+const TIM8_EGR: u32 = TIM8_BASE + 0x14;
+const TIM8_CNT: u32 = TIM8_BASE + 0x24;
+const TIM8_PSC: u32 = TIM8_BASE + 0x28;
+const TIM8_ARR: u32 = TIM8_BASE + 0x2C;
+const TIM_CR1_CEN: u32 = 1 << 0;
+const TIM_CR1_URS: u32 = 1 << 2;
+const TIM_EGR_UG: u32 = 1 << 0;
+const TIM_DIER_UDE: u32 = 1 << 8;
+
+const DMA2_BASE: u32 = 0x4002_6400;
+const DMA2_LISR: u32 = DMA2_BASE + 0x00;
+const DMA2_LIFCR: u32 = DMA2_BASE + 0x08;
+/// Stream 1: the register block at 0x10 + 0x18 * 1.
+const DMA2_S1: u32 = DMA2_BASE + 0x10 + 0x18;
+const DMA2_S1_CR: u32 = DMA2_S1 + 0x00;
+const DMA2_S1_NDTR: u32 = DMA2_S1 + 0x04;
+const DMA2_S1_PAR: u32 = DMA2_S1 + 0x08;
+const DMA2_S1_M0AR: u32 = DMA2_S1 + 0x0C;
+const DMA2_S1_FCR: u32 = DMA2_S1 + 0x14;
+/// Stream 1's five interrupt flags in LISR and LIFCR start at bit 6.
+const TCIF1: u32 = 1 << 11;
+const TEIF1: u32 = 1 << 9;
+const DMEIF1: u32 = 1 << 8;
+const FLAGS1: u32 = (1 << 6) | DMEIF1 | TEIF1 | (1 << 10) | TCIF1;
+
+const DEMCR: u32 = 0xE000_EDFC;
+const DWT_CTRL: u32 = 0xE000_1000;
+const DWT_CYCCNT: u32 = 0xE000_1004;
+
+/// 16 MHz / 19200 = 833.33 core cycles per bit; 833 is +0.04 %, which is 0.5 %
+/// of a bit over the longest frame and far inside the receiver's tolerance.
+pub const BIT_CYCLES: u32 = 833;
+const CYCLES_PER_MS: u32 = 16_000;
+
+#[inline]
+pub fn rd(address: u32) -> u32 {
+    // SAFETY: every address above is a memory-mapped register of this part.
+    unsafe { core::ptr::read_volatile(address as *const u32) }
+}
+
+#[inline]
+pub fn wr(address: u32, value: u32) {
+    // SAFETY: as above.
+    unsafe { core::ptr::write_volatile(address as *mut u32, value) }
+}
+
+// ---- time measured in the MCU ----------------------------------------------
+
+pub fn enable_cycle_counter() {
+    wr(DEMCR, rd(DEMCR) | (1 << 24));
+    wr(DWT_CYCCNT, 0);
+    wr(DWT_CTRL, rd(DWT_CTRL) | 1);
+}
+
+#[inline]
+pub fn cyccnt() -> u32 {
+    rd(DWT_CYCCNT)
+}
+
+pub fn wait_cycles(count: u32) {
+    let start = cyccnt();
+    while cyccnt().wrapping_sub(start) < count {}
+}
+
+// ---- the clock configuration the image measures with -----------------------
+
+const HSI_HZ: u32 = 16_000_000;
+/// The ST-LINK/V2-1 feeds 8 MHz into HSE in bypass mode on this board.
+const HSE_HZ: u32 = 8_000_000;
+
+pub fn sysclk_hz() -> u32 {
+    let cfgr = rd(RCC_CFGR);
+    match (cfgr >> 2) & 3 {
+        0 => HSI_HZ,
+        1 => HSE_HZ,
+        2 => {
+            let pll = rd(RCC_PLLCFGR);
+            let m = pll & 0x3F;
+            let n = (pll >> 6) & 0x1FF;
+            let p = 2 * (((pll >> 16) & 3) + 1);
+            let source = if pll & (1 << 22) != 0 { HSE_HZ } else { HSI_HZ };
+            if m == 0 {
+                0
+            } else {
+                ((source as u64 * n as u64) / (m as u64 * p as u64)) as u32
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn ahb_divider(cfgr: u32) -> u32 {
+    // HPRE: 0xxx is /1, then /2 /4 /8 /16 /64 /128 /256 /512 (no /32).
+    const DIVIDERS: [u32; 8] = [2, 4, 8, 16, 64, 128, 256, 512];
+    let bits = (cfgr >> 4) & 0xF;
+    if bits < 8 { 1 } else { DIVIDERS[(bits - 8) as usize] }
+}
+
+fn apb_divider(bits: u32) -> u32 {
+    // PPRE: 0xx is /1, then /2 /4 /8 /16.
+    if bits < 4 { 1 } else { 1 << (bits - 3) }
+}
+
+/// USART2's kernel clock.
+pub fn pclk1_hz() -> u32 {
+    let cfgr = rd(RCC_CFGR);
+    sysclk_hz() / ahb_divider(cfgr) / apb_divider((cfgr >> 10) & 7)
+}
+
+/// USART1's kernel clock.
+pub fn pclk2_hz() -> u32 {
+    let cfgr = rd(RCC_CFGR);
+    sysclk_hz() / ahb_divider(cfgr) / apb_divider((cfgr >> 13) & 7)
+}
+
+/// TIM8's counter clock: PCLK2 when the APB2 prescaler is 1, twice it otherwise
+/// (DCKCFGR.TIMPRE is left at its reset value).
+pub fn tim8_hz() -> u32 {
+    let cfgr = rd(RCC_CFGR);
+    let pclk = pclk2_hz();
+    if apb_divider((cfgr >> 13) & 7) == 1 { pclk } else { pclk * 2 }
+}
+
+// ---- the configurations under test -----------------------------------------
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum Par {
+    None,
+    Even,
+    Odd,
+}
+
+impl Par {
+    pub fn name(self) -> &'static str {
+        match self {
+            Par::None => "none",
+            Par::Even => "even",
+            Par::Odd => "odd",
+        }
+    }
+}
+
+/// One line configuration, as `configure()` maps it on this part: 7 data bits
+/// with parity is the 8-bit word (parity in bit 7), 8 data bits with parity the
+/// 9-bit word (parity in bit 8).
+#[derive(Copy, Clone)]
+pub struct Shape {
+    pub name: &'static str,
+    pub data_bits: u8,
+    pub parity: Par,
+}
+
+pub const SHAPES: [Shape; 4] = [
+    Shape { name: "7e1", data_bits: 7, parity: Par::Even },
+    Shape { name: "7o1", data_bits: 7, parity: Par::Odd },
+    Shape { name: "8e1", data_bits: 8, parity: Par::Even },
+    Shape { name: "8n1", data_bits: 8, parity: Par::None },
+];
+
+impl Shape {
+    /// The parity bit a transmitter computes over the data bits.
+    pub fn parity_bit(&self, value: u8) -> u8 {
+        let data = value & (((1u16 << self.data_bits) - 1) as u8);
+        let ones = (data.count_ones() & 1) as u8;
+        match self.parity {
+            Par::None => 0,
+            Par::Even => ones,
+            Par::Odd => 1 - ones,
+        }
+    }
+}
+
+// ---- the synthesizer -------------------------------------------------------
+
+pub const MAX_FRAMES: usize = 258;
+const MAX_WORDS: usize = 2 + MAX_FRAMES * 13;
+
+static WORDS: Static<[u32; MAX_WORDS]> = Static::new([0; MAX_WORDS]);
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum Synthesis {
+    /// A readback sequence: nothing was synthesized.
+    NotUsed,
+    Complete,
+    Failed,
+}
+
+impl Synthesis {
+    pub fn name(self) -> &'static str {
+        match self {
+            Synthesis::NotUsed => "na",
+            Synthesis::Complete => "ok",
+            Synthesis::Failed => "err",
+        }
+    }
+}
+
+pub struct Synth {
+    /// The whole `GPIOA_PUPDR` word with PA10 pulled up: the idle line, and
+    /// what the register must read once the last word has been written.
+    idle: u32,
+    limit_cycles: u32,
+    running: bool,
+}
+
+impl Synth {
+    pub const fn new() -> Self {
+        Self { idle: 0, limit_cycles: 0, running: false }
+    }
+
+    /// DMA2 and TIM8; every other clock belongs to an Embassy driver.
+    pub fn clocks_on() {
+        wr(RCC_AHB1ENR, rd(RCC_AHB1ENR) | (1 << 22));
+        wr(RCC_APB2ENR, rd(RCC_APB2ENR) | (1 << 1));
+        let _ = rd(RCC_APB2ENR);
+    }
+
+    /// Build the word list of `values` and arm DMA2 and TIM8 without starting them.
+    ///
+    /// `bad` names the one frame whose parity bit is inverted. The snapshot of
+    /// `GPIOA_PUPDR` is taken here, so every other pin of the port keeps its
+    /// pull setting through the whole sequence.
+    pub fn prepare(&mut self, shape: &Shape, values: &[u8], bad: Option<usize>) {
+        let kept = rd(GPIOA_PUPDR) & !(3 << PA10_SHIFT);
+        let up = kept | (1 << PA10_SHIFT);
+        let down = kept | (2 << PA10_SHIFT);
+        self.idle = up;
+        let words = WORDS.get();
+        let mut at = 0usize;
+        words[at] = up; // one idle word, so the line is at mark before the first start bit
+        at += 1;
+        for (index, value) in values.iter().enumerate() {
+            let value = *value;
+            words[at] = down; // start bit
+            at += 1;
+            for bit in 0..shape.data_bits {
+                // Least significant data bit first, as the USART shifts it out.
+                words[at] = if (value >> bit) & 1 != 0 { up } else { down };
+                at += 1;
+            }
+            if shape.parity != Par::None {
+                let mut parity = shape.parity_bit(value);
+                if bad == Some(index) {
+                    parity ^= 1;
+                }
+                words[at] = if parity != 0 { up } else { down };
+                at += 1;
+            }
+            words[at] = up; // stop bit
+            at += 1;
+            words[at] = up; // two idle bits: more than a reader needs to take the
+            at += 1; // word or to re-arm after an error, less than a frame, so
+            words[at] = up; // no overrun can hide a parity error and IDLE does not
+            at += 1; // fall between two frames
+        }
+        words[at] = up;
+        at += 1;
+        self.limit_cycles = at as u32 * 2 * BIT_CYCLES + 20 * CYCLES_PER_MS;
+        self.arm(words.as_ptr() as usize as u32, at as u32);
+    }
+
+    fn arm(&mut self, source: u32, count: u32) {
+        wr(DMA2_S1_CR, 0);
+        while rd(DMA2_S1_CR) & 1 != 0 {}
+        wr(DMA2_LIFCR, FLAGS1);
+        wr(DMA2_S1_PAR, GPIOA_PUPDR);
+        wr(DMA2_S1_M0AR, source);
+        wr(DMA2_S1_NDTR, count);
+        wr(DMA2_S1_FCR, 0); // direct mode: one 32-bit word per request
+        wr(
+            DMA2_S1_CR,
+            (7 << 25)      // channel 7 of stream 1: TIM8_UP
+                | (2 << 16) // high priority
+                | (2 << 13) // MSIZE 32 bit
+                | (2 << 11) // PSIZE 32 bit
+                | (1 << 10) // MINC: walk the word list
+                | (1 << 6), // memory to peripheral
+        );
+        wr(DMA2_S1_CR, rd(DMA2_S1_CR) | 1);
+        wr(TIM8_CR1, TIM_CR1_URS);
+        wr(TIM8_DIER, 0);
+        wr(TIM8_PSC, 0);
+        wr(TIM8_ARR, BIT_CYCLES - 1);
+        wr(TIM8_CNT, 0);
+        wr(TIM8_EGR, TIM_EGR_UG); // load PSC and ARR; URS keeps it from requesting
+        wr(TIM8_SR, 0);
+        wr(TIM8_DIER, TIM_DIER_UDE);
+        self.running = false;
+    }
+
+    /// Let the first bit out; the sequence runs on its own from here.
+    pub fn start(&mut self) {
+        wr(TIM8_CR1, TIM_CR1_URS | TIM_CR1_CEN);
+        self.running = true;
+    }
+
+    /// Wait for the word list to run out, stop everything and say whether the
+    /// line was driven exactly as asked.
+    pub fn finish(&mut self) -> Synthesis {
+        let mut complete = false;
+        if self.running {
+            let begin = cyccnt();
+            loop {
+                if rd(DMA2_LISR) & TCIF1 != 0 {
+                    complete = true;
+                    break;
+                }
+                if cyccnt().wrapping_sub(begin) > self.limit_cycles {
+                    break;
+                }
+            }
+        }
+        wr(TIM8_CR1, 0);
+        wr(TIM8_DIER, 0);
+        let flags = rd(DMA2_LISR);
+        wr(DMA2_S1_CR, 0);
+        while rd(DMA2_S1_CR) & 1 != 0 {}
+        let left = rd(DMA2_S1_NDTR);
+        wr(DMA2_LIFCR, FLAGS1);
+        self.running = false;
+        let clean = complete && flags & (TEIF1 | DMEIF1) == 0 && left == 0 && rd(GPIOA_PUPDR) == self.idle;
+        if clean { Synthesis::Complete } else { Synthesis::Failed }
+    }
+}
+
+// ---- the register-level control --------------------------------------------
+
+/// What one frame looked like in `USART_SR` and `USART_DR` themselves.
+pub struct Control {
+    pub sr: u32,
+    pub dr: u32,
+    /// Core cycles from the first read of SR that showed PE to the first that
+    /// showed RXNE, or -1 when PE never appeared.
+    pub pe_lead: i32,
+    /// The longest single iteration of that poll, so the gate can tell a PE
+    /// raised with RXNE from one raised a part of a bit earlier.
+    pub poll: u32,
+    pub timeout: u32,
+}
+
+/// Write `CR1` from RM0390 rather than from `configure()`, so the control does
+/// not inherit an assumption from the code it measures. `BRR`, `CR2` and `CR3`
+/// stay as the constructor left them.
+pub fn configure_by_hand(shape: &Shape) {
+    wr(USART1_CR1, rd(USART1_CR1) & !CR1_UE);
+    let mut cr1 = CR1_RE; // receive only: the frame comes from the pull bits
+    if shape.parity != Par::None {
+        cr1 |= CR1_PCE;
+        if shape.data_bits == 8 {
+            cr1 |= CR1_M; // 8 data bits and parity is the 9-bit word
+        }
+        if shape.parity == Par::Odd {
+            cr1 |= CR1_PS;
+        }
+    }
+    wr(USART1_CR1, cr1);
+    wr(USART1_CR1, cr1 | CR1_UE);
+    let _ = rd(USART1_SR);
+    let _ = rd(USART1_DR);
+}
+
+/// One synthesized frame, read straight out of `USART_DR`.
+pub fn measure_frame(synth: &mut Synth, shape: &Shape, value: u8, bad: bool) -> Control {
+    let _ = rd(USART1_SR);
+    let _ = rd(USART1_DR); // SR then DR clears every flag on usart_v2
+    synth.prepare(shape, &[value], if bad { Some(0) } else { None });
+    // No interrupt may stretch one iteration of the poll, or the lead could not
+    // be told from the poll's own resolution. The frame takes at most 13 bit
+    // times and the poll gives up after 50 ms, far less than the second between
+    // two interrupts of the time driver.
+    let primask = cortex_m::register::primask::read();
+    cortex_m::interrupt::disable();
+    synth.start();
+    let (pe_lead, poll, timeout) = poll_until_rxne();
+    if primask.is_active() {
+        // SAFETY: interrupts were enabled when this section began, so enabling
+        // them again restores the state the caller had.
+        unsafe { cortex_m::interrupt::enable() };
+    }
+    // SR before DR: reading DR would clear PE before it was recorded.
+    let sr = rd(USART1_SR);
+    let dr = rd(USART1_DR) & 0x1FF;
+    synth.finish();
+    Control { sr, dr, pe_lead, poll, timeout }
+}
+
+fn poll_until_rxne() -> (i32, u32, u32) {
+    // The longest frame takes 13 bit times, about 11 000 cycles; 800 000 is
+    // 50 ms, so a frame that never comes is a timeout and not a hang.
+    const LIMIT: u32 = 800_000;
+    let start = cyccnt();
+    let mut previous = start;
+    let mut worst = 0u32;
+    let mut parity_at = 0u32;
+    let mut seen_parity = false;
+    loop {
+        let sr = rd(USART1_SR);
+        let now = cyccnt();
+        let step = now.wrapping_sub(previous);
+        if step > worst {
+            worst = step;
+        }
+        previous = now;
+        if !seen_parity && sr & SR_PE != 0 {
+            parity_at = now;
+            seen_parity = true;
+        }
+        if sr & SR_RXNE != 0 {
+            let lead = if seen_parity { now.wrapping_sub(parity_at) as i32 } else { -1 };
+            return (lead, worst, 0);
+        }
+        if now.wrapping_sub(start) > LIMIT {
+            return (if seen_parity { 0 } else { -1 }, worst, 1);
+        }
+    }
+}
