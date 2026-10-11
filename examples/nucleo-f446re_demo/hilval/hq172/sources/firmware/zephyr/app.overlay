@@ -1,0 +1,8 @@
+&usart1 {
+	pinctrl-0 = <&usart1_tx_pb6 &usart1_rx_pb7 &usart1_cts_pa11 &usart1_rts_pa12>;
+	pinctrl-names = "default";
+	hw-flow-control;
+	status = "okay";
+};
+/* PB7 has no bias upstream; an idle-high RX keeps a floating header pin from producing noise frames. */
+&usart1_rx_pb7 { bias-pull-up; };
