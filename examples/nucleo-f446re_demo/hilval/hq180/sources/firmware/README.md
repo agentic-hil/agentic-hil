@@ -97,6 +97,15 @@ Data lines start with `d ` and never with the tag. Each is
 `abcdefghijklmnopqrstuvwxyz` at index `(5*case + 3*rep + 7*half + i) % 26` and
 then CR LF, 32 bytes per line for a `write` case and 20 otherwise.
 
+A record is only a record where a line begins, so a record is never appended to
+a half-sent data line. Where a `flush(timeout)` dropped a data line's remainder
+-- the only case in which the data stops mid-line -- the image prints one CR LF
+of its own before the `post` record that follows, and nowhere else. The ring is
+empty and idle at that point, so the last byte that left the chip is the one
+before the index the transfers ended at, and the image compares exactly that
+byte against a line feed; it reports what happened either way and judges
+nothing.
+
 ### Recomputing a verdict by hand
 
 * One frame is 10 bits. `BRR` holds `USARTDIV` as mantissa times 16 plus
@@ -110,7 +119,10 @@ then CR LF, 32 bytes per line for a `write` case and 20 otherwise.
 * A `flush(timeout)` that fires may send between 1 and 14 of the 40 bytes: 1 ms
   is 11 frames, plus the two-byte pipeline of data and shift register.
   `(tail1 - hp) mod 64` is how many bytes it reported as sent, and the capture
-  between the `pre` and `post` lines must be exactly those bytes.
+  between the `pre` and `post` lines must be exactly those bytes, followed by
+  the single CR LF with which the image closes the data line the drop cut in
+  half (see above). Nothing else may follow them: what was dropped must appear
+  nowhere later in the capture.
 * On the unmodified core a `flush(timeout)` that fires sends, after whatever
   chunks completed before it, the whole 64-byte ring from `tail1` on: the 40
   payload bytes and then the last 24 bytes of the `pre` line again.

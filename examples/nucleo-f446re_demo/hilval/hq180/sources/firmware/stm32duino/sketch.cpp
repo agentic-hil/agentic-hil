@@ -394,6 +394,21 @@ static void run_repetition(void)
   }
   Serial.flush();
 
+  // C5: after data, the next record starts on a fresh line. A record is read
+  // only where a line begins, so the post line may not be appended to a data
+  // line that a flush timeout cut in half. The ring is empty and idle here, so
+  // every byte it still held has gone out and the last byte that left the chip
+  // is the one before the tail those transfers ended at: where that is not a
+  // line feed, this closes the line the drop left open. Nothing is printed
+  // where the payload went out whole, which is every step but a flush timeout
+  // that really dropped something, nor where a stale re-send of the whole ring
+  // ended on the pre line's own line feed.
+  if (serial->tx_buff[(serial->tx_tail + SERIAL_TX_BUFFER_SIZE - 1U)
+                      % SERIAL_TX_BUFFER_SIZE] != '\n') {
+    Serial.write((const uint8_t *)"\r\n", 2);
+    Serial.flush();
+  }
+
   IWatchdog.reload();
   emit(snprintf(text, sizeof(text),
                 "%s post case=%lu rep=%lu ret=1 cycles=%lu acc1=%lu acc2=%lu "
