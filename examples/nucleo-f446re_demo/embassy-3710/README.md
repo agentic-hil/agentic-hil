@@ -3,9 +3,10 @@
 A hardware report on the open Embassy issue
 [embassy-rs/embassy#3710](https://github.com/embassy-rs/embassy/issues/3710),
 "Add granular control for ComplementaryPwm (independent enable/disable of main
-and complementary outputs)". It measures the change that the accompanying pull
-request to embassy-rs/embassy proposes, as a patch on the Embassy revision the
-images are built from, against the unmodified crate; and it measures what the
+and complementary outputs)". It measures the change that
+[embassy-rs/embassy#7239](https://github.com/embassy-rs/embassy/pull/7239)
+proposes, as a patch on the Embassy revision the images are built from, against
+the unmodified crate; and it measures what the
 timer itself does when a channel's two enable bits are written one at a time,
 which is what the patch's doc comments claim.
 
