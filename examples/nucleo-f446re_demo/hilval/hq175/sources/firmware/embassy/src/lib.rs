@@ -10,8 +10,9 @@
 //!
 //! Nothing here calls the API this job proposes; the two binaries differ only in
 //! which calls they make between the register readback and the measurement. The
-//! sampler, the pins' pulls and the register readback go through raw register
-//! addresses, so what is measured cannot be changed by the driver under test.
+//! sampler, the pins' pulls, the register readback and the console all go through
+//! raw register addresses, so neither what is measured nor what is printed can be
+//! changed or swallowed by a driver.
 //!
 //! Every record is a line `HQ175 <kind> key=value ...` on USART2 (PA2/PA3, 115200
 //! baud 8N1); the tests in tests/hq175/ judge the values. The record schema is
@@ -52,6 +53,18 @@ pub const LEGACY: [&str; 2] = ["enable", "disable"];
 /// periods at 16 MHz, and far longer than the ~0.4 us a released pin needs to reach
 /// its pull's level.
 const SETTLE_CYCLES: u32 = 2000;
+
+/// Silence after every line, so nothing in the serial path has to hold more than the
+/// one line the host has not fetched yet (see `Console::end_line`).
+///
+/// The budget is the 120 s the gate waits for the `done` line. A `pwm` line is about
+/// 215 bytes, 19 ms on the wire at 115200 baud, and measuring one state costs about
+/// 6 ms, so the 1149 lines of the longer image (1000 `pwm`, 144 `trace`, `boot`,
+/// three `setup` and `done`) are about 230 KB and need some 26 s by themselves. 30 ms
+/// of silence per line adds about 35 s, which leaves that image finishing in about
+/// 61 s, half of the wait, and lowers the share of the run with bytes on the wire
+/// from about 80 % to about 33 %.
+const PACE_MS: u32 = 30;
 
 /// 4 samples per byte: 477 bytes, sent as 8 `trace` records of at most 64 bytes.
 const TRACE_PARTS: usize = 8;
@@ -131,6 +144,8 @@ const DWT_LAR: u32 = 0xE000_1FB0;
 const USART2_SR: u32 = 0x4000_4400;
 const USART2_DR: u32 = 0x4000_4404;
 const USART_SR_TXE: u32 = 1 << 7;
+/// Transmission complete: the last bit of the last byte has left the pin.
+const USART_SR_TC: u32 = 1 << 6;
 
 #[inline]
 fn read(address: u32) -> u32 {
@@ -412,13 +427,79 @@ fn trace_byte(index: usize) -> u8 {
 
 // ---- the console -----------------------------------------------------------
 
-/// USART2 (PA2 TX, PA3 RX, 115200 8N1) is the ST-LINK's virtual COM port, which the
-/// bench reads.
-struct Serial<'d>(Uart<'d, Blocking>);
+/// Where the records leave the chip: USART2 (PA2 TX, PA3 RX, 115200 8N1), the
+/// ST-LINK's virtual COM port the bench reads.
+///
+/// The `Uart` the image hands over configures the port (the baud rate for whatever
+/// clock tree embassy set up, PA2 and PA3 on alternate function 7) and is held for as
+/// long as the console prints, because dropping it would take USART2's clock away.
+/// The bytes themselves go to the data register, one TXE poll each, rather than
+/// through the driver.
+///
+/// Why: in one bench run of the revision that printed through the driver, about 834
+/// bytes went missing in the middle of a record, and the host read the surviving head
+/// of one record and tail of another as a single line, which the reader refuses. Both
+/// ends of the gap fell exactly between two `write!` fragments. A driver write hands
+/// back a `Result` that a `core::fmt::Write` implementation can only turn into an
+/// error the formatting machinery swallows, so a run of writes failing that way would
+/// leave exactly such a gap with nothing in the image noticing. A write to the data
+/// register after TXE cannot fail, so here a formatted byte either reaches the wire or
+/// the image stops printing altogether, which the gate reports as a run that never
+/// finished. What the serial path itself may drop is a separate matter, and
+/// `end_line` is what addresses that.
+struct Console<'d> {
+    /// Kept for USART2's set-up and clock; every byte goes out through the registers.
+    _uart: Uart<'d, Blocking>,
+    /// Idle HCLK cycles after each line: `PACE_MS` in the clock the image measured.
+    pace: u32,
+}
 
-impl core::fmt::Write for Serial<'_> {
+impl<'d> Console<'d> {
+    fn new(mut uart: Uart<'d, Blocking>, hclk_hz: u32) -> Self {
+        // The only write that goes through the driver. It ends whatever partial line
+        // the reset left on the host's side, and it leaves nothing of the port's
+        // set-up for a first write to do by the time the raw writes begin.
+        let _ = uart.blocking_write(b"\r\n");
+        Console {
+            _uart: uart,
+            pace: ((hclk_hz as u64 * PACE_MS as u64) / 1000) as u32,
+        }
+    }
+
+    /// One byte, as soon as the data register is free to take it.
+    ///
+    /// The wait is deliberately unbounded: a USART2 that stopped transmitting leaves
+    /// the image without its `done` line, which the gate reports as a run that never
+    /// finished, and that is a better answer than a line with bytes missing from its
+    /// middle, which would read as a measurement that came out wrong.
+    fn byte(&mut self, value: u8) {
+        while read(USART2_SR) & USART_SR_TXE == 0 {}
+        write(USART2_DR, value as u32);
+    }
+
+    /// Ends the line, waits until the port has shifted its last bit out, and then
+    /// keeps quiet for `PACE_MS`.
+    ///
+    /// The bytes of one line go out back to back, so without the gap the serial path
+    /// carries an unbroken stream for the whole run and whatever the host fails to
+    /// fetch in time goes missing from the middle of a record. With it, the path never
+    /// holds more than the line just sent, and a host that stops fetching for up to
+    /// the length of the gap loses nothing.
+    fn end_line(&mut self) {
+        self.byte(b'\r');
+        self.byte(b'\n');
+        while read(USART2_SR) & USART_SR_TC == 0 {}
+        delay_cycles(self.pace);
+    }
+}
+
+impl core::fmt::Write for Console<'_> {
     fn write_str(&mut self, text: &str) -> core::fmt::Result {
-        self.0.blocking_write(text.as_bytes()).map_err(|_| core::fmt::Error)
+        for byte in text.as_bytes() {
+            self.byte(*byte);
+        }
+        // Nothing above this line can fail, so no caller has an error to drop.
+        Ok(())
     }
 }
 
@@ -441,7 +522,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 /// The console and the measurement hardware of one image.
 pub struct Rig<'d> {
-    serial: Serial<'d>,
+    console: Console<'d>,
 }
 
 impl<'d> Rig<'d> {
@@ -456,9 +537,9 @@ impl<'d> Rig<'d> {
         let hclk_hz = measure_hclk(tim_hz);
         sampler_init();
         set_pull(false);
-        let mut rig = Rig { serial: Serial(uart) };
-        // Ends whatever partial line the reset left on the host's side.
-        let _ = write!(rig.serial, "\r\n");
+        // HCLK is what the console's own pacing is counted in, so it is measured
+        // before the first line goes out.
+        let mut rig = Rig { console: Console::new(uart, hclk_hz) };
         rig.line("boot");
         rig.s("image", image);
         rig.u("tim_hz", tim_hz);
@@ -471,24 +552,26 @@ impl<'d> Rig<'d> {
         rig
     }
 
+    // The console's writes cannot fail (see `Console`), so the `Result` the
+    // formatting machinery hands back here is always `Ok` and carries nothing.
     fn line(&mut self, kind: &str) {
-        let _ = write!(self.serial, "{} {}", TAG, kind);
+        let _ = write!(self.console, "{} {}", TAG, kind);
     }
 
     fn u(&mut self, key: &str, value: u32) {
-        let _ = write!(self.serial, " {}={}", key, value);
+        let _ = write!(self.console, " {}={}", key, value);
     }
 
     fn x(&mut self, key: &str, value: u32) {
-        let _ = write!(self.serial, " {}={:#x}", key, value);
+        let _ = write!(self.console, " {}={:#x}", key, value);
     }
 
     fn s(&mut self, key: &str, value: &str) {
-        let _ = write!(self.serial, " {}={}", key, value);
+        let _ = write!(self.console, " {}={}", key, value);
     }
 
     fn end(&mut self) {
-        let _ = write!(self.serial, "\r\n");
+        self.console.end_line();
     }
 
     /// The `setup` record of one sequence: every number the gate's expectations use,
@@ -539,9 +622,9 @@ impl<'d> Rig<'d> {
             self.u("rep", rep);
             self.s("step", step);
             self.u("part", part as u32);
-            let _ = write!(self.serial, " data=");
+            let _ = write!(self.console, " data=");
             for index in first..last {
-                let _ = write!(self.serial, "{:02x}", trace_byte(index));
+                let _ = write!(self.console, "{:02x}", trace_byte(index));
             }
             self.end();
         }
@@ -592,11 +675,10 @@ impl<'d> Rig<'d> {
         self.end();
     }
 
-    /// Prints `HQ175 done` and waits until the last byte has left the port.
+    /// Prints `HQ175 done`; `end` does not return until the last bit has left PA2.
     pub fn finish(&mut self) {
         self.line("done");
         self.end();
-        let _ = self.serial.0.blocking_flush();
     }
 }
 

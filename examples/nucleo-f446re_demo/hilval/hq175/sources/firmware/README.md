@@ -139,6 +139,17 @@ samples show them, and what the registers read back.
 Every line is `HQ175 <kind> key=value ...` on USART2 (PA2/PA3, 115200 baud 8N1),
 and the last line is `HQ175 done`. Untagged lines are ignored by the reader.
 
+Each image prints about 1100 such lines, some 230 KB in all, and a reader that
+loses bytes in the middle of one of them sees the halves of two records as a
+single line it has to refuse. Two things in the images are there for that reason.
+Formatted bytes go to `USART2_DR` one at a time, each after the port's own `TXE`
+flag, rather than through the UART driver, whose write hands back an error that a
+`core::fmt::Write` implementation can only swallow; and after each line the image
+waits for the port to shift the last bit out (`TC`) and then stays quiet for
+30 ms, so nothing in the serial path has to hold more than the one line just sent.
+The silence is why an image takes about a minute rather than the 26 s its lines
+and measurements need.
+
 | Kind | When | Fields |
 |---|---|---|
 | `boot` | once, first | `image`, `tim_hz`, `hclk_hz`, `rcc_cfgr`, `reps`, `n`, `tick` |
@@ -186,7 +197,7 @@ checkouts and keeps the output out of the repository.
    `cargo build --release --target thumbv7em-none-eabihf --bin patched`.
 
 Flash either ELF to a NUCLEO-F446RE and read USART2 at 115200 baud 8N1 (the
-ST-LINK's virtual COM port). The image prints its records and ends with
+ST-LINK's virtual COM port). The image prints for about a minute and ends with
 `HQ175 done`; it needs nothing from the host and no pin connected.
 
 ## Licences
