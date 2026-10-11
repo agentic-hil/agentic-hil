@@ -1,0 +1,10 @@
+# The type checker the type check job runs (.github/workflows/ci.yml), and the
+# stubs for the two third-party libraries the checked modules import, PyYAML
+# and jsonschema. Which modules it checks, and how, is `[tool.mypy]` in
+# pyproject.toml.
+#
+# Regenerate the hash-pinned lock file after editing:
+#   uv pip compile --generate-hashes --universal --python-version 3.10 requirements/typecheck.in -o requirements/typecheck.txt
+mypy
+types-PyYAML
+types-jsonschema

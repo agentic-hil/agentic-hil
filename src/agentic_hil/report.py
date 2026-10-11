@@ -471,7 +471,9 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
                     state["last_report"] = enriched
                     state["last_failure"] = enriched
                     write_report_state(config, state)
-            if promoting:
+            # `promoting` is true only with a staged copy, so the second test
+            # never decides anything; it tells the type checker the path is set.
+            if promoting and committed_canonical is not None:
                 # `atomic_write_bytes` renames the finished document into place and
                 # only then fsyncs the parent directory, so a failure raised here
                 # may already have committed the green document: the rename landed

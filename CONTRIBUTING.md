@@ -124,6 +124,21 @@ waits out the bound fails naming the PID and the test holding the lock; the file
 lies in the running account's home, so two accounts on one machine do not share
 it.
 
+### Type check
+
+CI runs mypy over the modules the safety boundary is made of; the list and the
+settings are `[tool.mypy]` in `pyproject.toml`. The same check locally, best in a
+virtual environment of its own so its pins stay apart from the development ones:
+
+```bash
+python -m pip install --require-hashes -r requirements/typecheck.txt
+mypy
+```
+
+The check is pinned to Linux (`platform = "linux"`), so it answers the same on
+every host. A Windows-only call in one of those modules takes a
+`# type: ignore[attr-defined]` on its own line.
+
 ### Working on Windows
 
 Part of this suite only runs on POSIX, and that part is where the platform bugs
@@ -205,7 +220,7 @@ request is opened.
 ## Pull Requests
 
 - Keep changes focused and describe the user-facing behavior they affect.
-- Run `ruff check src tests examples` and `pytest` before opening a pull request.
+- Run `ruff check src tests examples` and `pytest` before opening a pull request, and `mypy` (see [Type check](#type-check)) when the change touches a module listed under `[tool.mypy]`.
 - Run `python -m build` and inspect the sdist/wheel when package contents, bundled data files (schemas, templates, skills), or release files change.
 - Add or update tests when changing behavior.
 - Do not bypass Agentic HIL safety boundaries with raw debugger, flashing, reset, COM-port, or CAN access.

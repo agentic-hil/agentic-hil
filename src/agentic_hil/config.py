@@ -2672,7 +2672,7 @@ def safe_file_lock(file_path: str | Path, *, workspace: str | Path | None = None
             while True:
                 os.lseek(descriptor, 0, os.SEEK_SET)
                 try:
-                    msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+                    msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
                     break
                 except OSError as error:
                     if error.errno not in {errno.EACCES, errno.EDEADLK}:
@@ -2681,7 +2681,7 @@ def safe_file_lock(file_path: str | Path, *, workspace: str | Path | None = None
                 yield
             finally:
                 os.lseek(descriptor, 0, os.SEEK_SET)
-                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
@@ -2706,7 +2706,7 @@ def _windows_hold_directory_chain(directory: Path, *, create: bool = False) -> l
             ("nFileIndexLow", wintypes.DWORD),
         ]
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     create_file = kernel32.CreateFileW
     create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
     create_file.restype = wintypes.HANDLE
@@ -2748,9 +2748,9 @@ def _windows_hold_directory_chain(directory: Path, *, create: bool = False) -> l
                 None,
             )
             if handle == invalid_handle:
-                error_code = ctypes.get_last_error()
+                error_code = ctypes.get_last_error()  # type: ignore[attr-defined]
                 if error_code != 5:
-                    raise ctypes.WinError(error_code)
+                    raise ctypes.WinError(error_code)  # type: ignore[attr-defined]
                 handle = create_file(
                     str(component),
                     file_read_attributes,
@@ -2761,12 +2761,12 @@ def _windows_hold_directory_chain(directory: Path, *, create: bool = False) -> l
                     None,
                 )
                 if handle == invalid_handle:
-                    raise ctypes.WinError(ctypes.get_last_error())
+                    raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
             numeric_handle = int(handle)
             handles.append(numeric_handle)
             info = ByHandleFileInformation()
             if not get_info(handle, ctypes.byref(info)):
-                raise ctypes.WinError(ctypes.get_last_error())
+                raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
             if info.dwFileAttributes & file_attribute_reparse_point or not info.dwFileAttributes & file_attribute_directory:
                 raise ConfigError("unsafe_configured_path", "Configured path contains a Windows reparse point.", {"path": str(component)})
         return handles
@@ -2781,7 +2781,7 @@ def _close_windows_handles(handles: list[int]) -> None:
     import ctypes
     from ctypes import wintypes
 
-    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle  # type: ignore[attr-defined]
     close_handle.argtypes = [wintypes.HANDLE]
     close_handle.restype = wintypes.BOOL
     for handle in reversed(handles):
@@ -2814,7 +2814,7 @@ def _windows_open_regular_file(
             ("nFileIndexLow", wintypes.DWORD),
         ]
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     create_file = kernel32.CreateFileW
     create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
     create_file.restype = wintypes.HANDLE
@@ -2840,7 +2840,7 @@ def _windows_open_regular_file(
     )
     invalid_handle = ctypes.c_void_p(-1).value
     if handle == invalid_handle:
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
     try:
         information = ByHandleFileInformation()
         if get_file_type(handle) != 0x1 or not get_info(handle, ctypes.byref(information)):
@@ -2851,7 +2851,7 @@ def _windows_open_regular_file(
         descriptor_flags |= os.O_RDWR if read and write else os.O_WRONLY if write else os.O_RDONLY
         if append:
             descriptor_flags |= os.O_APPEND
-        descriptor = msvcrt.open_osfhandle(int(handle), descriptor_flags)
+        descriptor = msvcrt.open_osfhandle(int(handle), descriptor_flags)  # type: ignore[attr-defined]
         handle = invalid_handle
         return descriptor
     finally:
@@ -3070,7 +3070,7 @@ def safe_append_text(file_path: str | Path, text: str, *, encoding: str = "utf-8
                 os.lseek(lock_descriptor, 0, os.SEEK_SET)
                 import msvcrt
 
-                msvcrt.locking(lock_descriptor, msvcrt.LK_LOCK, 1)
+                msvcrt.locking(lock_descriptor, msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
                 descriptor = _windows_open_regular_file(path, write=True, create=True, append=True)
                 try:
                     opened = _validate_open_file(descriptor, path)
@@ -3082,7 +3082,7 @@ def safe_append_text(file_path: str | Path, text: str, *, encoding: str = "utf-8
                 finally:
                     os.close(descriptor)
                     os.lseek(lock_descriptor, 0, os.SEEK_SET)
-                    msvcrt.locking(lock_descriptor, msvcrt.LK_UNLCK, 1)
+                    msvcrt.locking(lock_descriptor, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
             finally:
                 os.close(lock_descriptor)
         finally:

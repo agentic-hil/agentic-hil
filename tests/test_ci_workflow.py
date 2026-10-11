@@ -356,6 +356,8 @@ def test_a_bare_pytest_in_a_checkout_is_still_one_process(pytestconfig: pytest.C
 # the index served that minute, and the auditor's own lock beside it.
 PRODUCTION_LOCK = REPOSITORY_ROOT / "requirements" / "production.txt"
 AUDIT_LOCK = REPOSITORY_ROOT / "requirements" / "audit.txt"
+# The type checker's own lock, held to the auditor's rule.
+TYPECHECK_LOCK = REPOSITORY_ROOT / "requirements" / "typecheck.txt"
 
 
 def hosted_installs() -> list[str]:
@@ -414,6 +416,31 @@ def test_the_auditor_is_installed_from_its_own_lock() -> None:
     assert "pip-audit" in pins, sorted(pins)
     for name, tail in pins.items():
         assert any("--hash=sha256:" in line for line in tail), name
+
+
+def test_the_type_check_is_installed_from_its_own_lock_and_blocks_the_merge() -> None:
+    """mypy reads the modules the safety boundary is made of (`[tool.mypy]`).
+
+    It comes from `requirements/typecheck.txt` with `--require-hashes`, with
+    the stubs for the two libraries those modules import, like the auditor
+    does, and the required check waits for its result: a check that runs and
+    blocks nothing is a report nobody has to read.
+    """
+    workflow = workflow_document(WORKFLOW)
+    typecheck = workflow["jobs"]["typecheck"]
+    installs = [line for line in run_lines(typecheck) if re.search(r"\bpip install\b", line)]
+
+    assert installs == ["python -m pip install --require-hashes -r requirements/typecheck.txt"], installs
+    assert "mypy" in run_lines(typecheck), run_lines(typecheck)
+    pins = locked_pins(TYPECHECK_LOCK)
+    for name in ("mypy", "types-pyyaml", "types-jsonschema"):
+        assert name in pins, sorted(pins)
+    for name, tail in pins.items():
+        assert any("--hash=sha256:" in line for line in tail), name
+
+    required = workflow["jobs"]["required-ci"]
+    assert "typecheck" in required["needs"]
+    assert "needs.typecheck.result" in "\n".join(step.get("run", "") for step in required["steps"])
 
 
 def test_the_audit_reads_the_locked_production_dependency_set() -> None:

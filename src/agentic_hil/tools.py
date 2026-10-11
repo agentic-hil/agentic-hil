@@ -85,7 +85,7 @@ from agentic_hil.coordination import (
     nothing_standing_result,
 )
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
-from agentic_hil.devices import DeviceError, can_device, resolve_devices, uart_device
+from agentic_hil.devices import Device, DeviceError, can_device, resolve_devices, uart_device
 from agentic_hil.knowledge import (
     AUDIT_BROKEN_SCOPE,
     ERROR_CATALOGUE,
@@ -224,7 +224,9 @@ def backend_error_line(result: JsonObject) -> str | None:
         return None
     lines = [line.strip() for line in failure_text_lines(f"{output.get('stdout') or ''}\n{output.get('stderr') or ''}")]
     errors = [line for line in lines if line.lower().startswith("error")]
-    return (errors or lines or [None])[0]
+    if errors:
+        return errors[0]
+    return lines[0] if lines else None
 
 
 class AgenticHILToolService:
@@ -1692,7 +1694,8 @@ class AgenticHILToolService:
         incident leaves `active` that nothing here may give back: the session is
         still there, still usable, and still the thing that gives its device
         back."""
-        leases = [session.lease for session in (*self.com_ports.sessions.values(), *self.can_buses.sessions.values())]
+        leases: list[object] = [session.lease for session in self.com_ports.sessions.values()]
+        leases.extend(session.lease for session in self.can_buses.sessions.values())
         if self._debug_lease is not None:
             leases.append(self._debug_lease)
         return frozenset(lease.lease_id for lease in leases if isinstance(lease, HardwareLease))
@@ -1850,6 +1853,7 @@ class AgenticHILToolService:
         if selected_debugger is None or selected_debugger not in self.config.debuggers:
             return None
         bound = bind_debugger(self.config, selected_debugger)
+        assert bound.debugger is not None  # bind_debugger sets it or raises
         recovery_config = replace(bound, debugger=replace(bound.debugger, probe_id=selected_probe))
         copy_pending_description_restarts(bound, recovery_config)
         return recovery_config
@@ -2199,7 +2203,7 @@ class AgenticHILToolService:
                 # an operator to the wiring for an audit that could not be
                 # written.
                 "The probe did not report a detected target after the recovery action."
-                if not detected or failed_check == "ok"
+                if not detected or failed_check is None or failed_check == "ok"
                 else f"The probe detected the target after the recovery action, but {recovery_check_clause(failed_check)}, so the incident stands.",
                 verification,
             )
@@ -2784,12 +2788,13 @@ class AgenticHILToolService:
     def _close_unlocked(self) -> None:
         errors: list[tuple[str, BaseException]] = []
         interrupt: BaseException | None = None
-        for name, resource in [
+        resources: list[tuple[str, DebuggerBackend | ArtifactManager | ComPortService | CanBusService]] = [
             ("backend", self.backend),
             ("artifacts", self.artifacts),
             ("com_ports", self.com_ports),
             ("can_buses", self.can_buses),
-        ]:
+        ]
+        for name, resource in resources:
             try:
                 resource.close()
             except BaseException as error:
@@ -2857,7 +2862,7 @@ def number_argument(value: object) -> float | None:
     if value is None:
         return None
     try:
-        parsed = float(value)
+        parsed = float(value)  # type: ignore[arg-type]  # whatever float() refuses is caught here
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
@@ -3101,7 +3106,7 @@ def implicit_run_tools() -> set[str]:
     }
 
 
-def implicit_run_resources(config: AgenticHILConfig, name: str, args: JsonObject) -> list[object]:
+def implicit_run_resources(config: AgenticHILConfig, name: str, args: JsonObject) -> list[Device | str]:
     """What a bare effect call is about to lease, for its own run to declare.
 
     Exactly the resources the call itself takes, and derived the same way it

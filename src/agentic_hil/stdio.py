@@ -58,7 +58,7 @@ def run_stdio_server(
             raw_line = input_stream.readline(limit)
             if not raw_line:
                 break
-            if len(raw_line) >= limit and not raw_line.endswith(line_terminator(raw_line)):
+            if len(raw_line) >= limit and not ends_with_newline(raw_line):
                 drain_oversized_line(input_stream, limit)
                 write_message(output_stream, oversized_message_response(limit))
                 continue
@@ -251,15 +251,15 @@ def utf8_reply_stream() -> TextIO:
     return stdout
 
 
-def line_terminator(raw_line: str | bytes) -> str | bytes:
-    """The newline of whichever stream the line came off."""
-    return b"\n" if isinstance(raw_line, bytes) else "\n"
+def ends_with_newline(raw_line: str | bytes) -> bool:
+    """Whether the line ends in the newline of whichever stream it came off."""
+    return raw_line.endswith(b"\n") if isinstance(raw_line, bytes) else raw_line.endswith("\n")
 
 
 def drain_oversized_line(input_stream: TextIO | BinaryIO, limit: int) -> None:
     while True:
         chunk = input_stream.readline(limit)
-        if not chunk or chunk.endswith(line_terminator(chunk)):
+        if not chunk or ends_with_newline(chunk):
             return
 
 
