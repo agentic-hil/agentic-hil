@@ -70,6 +70,33 @@ pattern: every value of the configuration's width (`0x00`..`0x7F` for 7 data
 bits, `0x00`..`0xFF` for 8) followed by `0x01` and `0x03`, the two values the
 pull request's own test uses.
 
+How the word reaches that transmitter matters only for the time the sequence
+takes, and for one reader it had to change. `blocking_read` reads one word per
+call, so its sequence alternates a write with a read, and a half-duplex
+`blocking_write()` flushes and clears `TE` at the end of every call while the
+reader clears it again on every call of its own. Each time `TE` goes from 0 to
+1, the transmitter sends a whole idle frame before the word (RM0390 26.3.2), so
+one word read cost two frames of line time instead of one. In that sequence the transmitter
+is therefore enabled once and the word is written into `USART_DR` itself, and
+half-duplex mode is switched off for the few cycles the read call takes so that
+the reader leaves `TE` alone; the word is already in the data register then and
+the next frame cannot start until the next write, so nothing can arrive in that
+window, and the pin the receiver listens to meanwhile is the PA10 this board
+holds at mark. The parity bit is still the one the USART computes from its own
+`CR1`, the frame still travels the single wire, and the reader under test still
+takes the word out of the data register through its own mask.
+
+RM0390 asks for `CR1.UE` to be clear when `CR3.HDSEL` is written, and
+`configure()` writes it that way, so the image does not assume that the bit can
+be written while the USART runs: it reads the bit back after writing it. Where
+it did not take, the read clears `TE` as it always would and the transmitter is
+enabled again for the next word, so that word costs the idle frame as well; the
+values are the same either way, and only the time the sequence takes differs.
+The `ticks` field of a `blk`/`rb` sequence says which of the two happened: about
+one frame of line time per word, or about two. The other three readback
+sequences write through Embassy's own call, because one call carries their whole
+pattern.
+
 The second source is needed because a transmitter cannot send a frame with the
 wrong parity bit, and because `RingBufferedUartRx::read()` switches the
 transmitter off in half-duplex mode and so can never read anything back. Its
@@ -164,7 +191,7 @@ for `RXNE` before it clears `PE`, which only matters if `PE` can be set first,
 so both orders are allowed and the control of each run measures which one this
 part has from its `pe_lead` field.
 
-Measured PE timing: early
+Measured PE timing: together
 
 That line is the class the control of this run measured, and it is checked:
 `tests/hq178` derives the class from the `ctl` records of both images and fails
@@ -181,8 +208,9 @@ Read with that answer, the two code-derived outcomes are:
 * `UartRx::read` on one word returns `Error::Parity` under the early timing: the
   handler clears the DMA request before the word arrives, the read's abort
   future reports the error and the buffer still holds the sentinel the image put
-  there. Under the other timing the DMA has already moved the word when the task
-  runs, so the read returns it as `Ok` and no error is reported at all.
+  there. Under the together timing this part has, the DMA has already moved the
+  word when the task runs, so the read returns it as `Ok` and no error is
+  reported at all.
 * `read_until_idle` always reports `Error::Parity` first, because its transfer
   cannot complete at the third of six frames. `inner_read` masks only on
   success, so the prefix the DMA had already written is raw in both images: the
@@ -193,7 +221,12 @@ Read with that answer, the two code-derived outcomes are:
   `read()` stops the background reception. Nothing can wake that reader earlier:
   `start()` enables no `RXNE` interrupt without `eager_reads`, six words cannot
   half-fill a ring of 1024, and there is no idle line before the first
-  character.
+  character. One thing could, and the image takes it away first: that reader
+  reports the transmitter's `TC` flag to the transmit waker on every poll of its
+  own future, and `TC` is set out of reset, so a waker left registered by an
+  earlier sequence of the same task would re-poll the reader and it would hand
+  over the words that had arrived so far. The image clears `TC` before every
+  synthesized sequence, and nothing in one transmits, so it stays clear.
 
 Three of those findings a reader cannot derive from the records alone, so each
 stands here as its own statement.

@@ -30,9 +30,12 @@ mod synth;
 
 /// Repetitions per configuration, reader and phase.
 const REPS: u32 = 20;
-/// Words of one `val` record: 24 four-digit words stay inside the 128
-/// characters a field may carry.
-const PART: usize = 24;
+/// Words of one `val` record, by word width: 120 characters of hex stay inside
+/// the 128 a field may carry, and the longer the record the fewer of them the
+/// console has to carry for one pattern.
+fn part_words(width: usize) -> usize {
+    if width == 4 { 30 } else { 60 }
+}
 /// The frame of a wrong-parity sequence whose parity bit is inverted.
 const BAD_INDEX: usize = 2;
 
@@ -253,8 +256,9 @@ fn print_run(console: &mut Console<'_>, at: &Where, shape: &Shape, step: &Step, 
         // A full sequence: the word list, split over as many records as it needs.
         let mut part = 0u32;
         let mut from = 0usize;
+        let per_record = part_words(state.width);
         while from < state.values_len {
-            let to = (from + PART).min(state.values_len);
+            let to = (from + per_record).min(state.values_len);
             console.begin("val");
             sequence_fields(console, at, shape, step);
             console.u("part", part);

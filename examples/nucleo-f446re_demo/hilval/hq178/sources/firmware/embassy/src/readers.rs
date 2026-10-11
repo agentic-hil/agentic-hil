@@ -469,14 +469,45 @@ pub async fn blk_readback(bus: &mut Bus, shape: &Shape, pattern: &[u8], state: &
     )
     .unwrap();
     let shown = SHOWN.get();
+    // The transmitter is this sequence's stimulus and is enabled here rather
+    // than by every write (see the register section of `synth.rs`), so a word
+    // costs one frame of line time where it stays enabled over the read below
+    // and two where the read clears it. The receiver stays enabled with it,
+    // which is the readback: the frame the transmitter shifts out on the single
+    // wire is the frame the reader under test reads back.
+    synth::enable_transmitter();
     let start = Instant::now();
     let mut last = start;
     for value in pattern {
-        // One word out, the same word back: with Readback the receiver stays
-        // enabled while the transmitter shifts the frame out.
-        let _ = uart.blocking_write(&[*value]);
+        // One word out, the same word back.
+        if !synth::send_word(*value) {
+            state.record(Res::Timeout, &shown[..0]);
+            break;
+        }
         let res = if readable(WORD_MS) {
-            read_one_blocking(&mut uart, use_u16, &mut shown[..])
+            // `blocking_read_helper()` flushes and clears `TE` whenever
+            // `CR3.HDSEL` and `TE` are both set (`mod.rs:1527-1538`), and the
+            // word after it would then cost the idle frame that enabling `TE`
+            // again sends. The word is in the data register and no frame can
+            // start before the write above, so half-duplex mode is switched off
+            // for the call and on again at once; what the receiver listens to
+            // meanwhile, PA10, is held at mark on this board. Nothing else of
+            // the read changes: the word still comes out of the data register
+            // through the reader's own mask, which is the code the pull request
+            // touches.
+            let off = synth::set_hdsel(false);
+            let res = read_one_blocking(&mut uart, use_u16, &mut shown[..]);
+            if off {
+                synth::set_hdsel(true);
+            } else {
+                // The bit did not take while the USART was running, which
+                // RM0390 allows, so the call cleared `TE` after all and the
+                // transmitter has to be enabled again for the next word. Every
+                // word then costs the idle frame of that enable beside its own
+                // frame, which is what this sequence's `ticks` shows.
+                synth::enable_transmitter();
+            }
+            res
         } else {
             Res::Timeout
         };

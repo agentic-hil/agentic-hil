@@ -60,20 +60,27 @@ pub const USART1_SR: u32 = USART1_BASE + 0x00;
 pub const USART1_DR: u32 = USART1_BASE + 0x04;
 pub const USART1_BRR: u32 = USART1_BASE + 0x08;
 pub const USART1_CR1: u32 = USART1_BASE + 0x0C;
+pub const USART1_CR3: u32 = USART1_BASE + 0x14;
 
 pub const SR_PE: u32 = 1 << 0;
 pub const SR_FE: u32 = 1 << 1;
 pub const SR_NF: u32 = 1 << 2;
 pub const SR_ORE: u32 = 1 << 3;
 pub const SR_RXNE: u32 = 1 << 5;
+const SR_TC: u32 = 1 << 6;
+const SR_TXE: u32 = 1 << 7;
 /// Anything that lets a blocking read return, so a poll before it can time out.
 pub const SR_READABLE: u32 = SR_PE | SR_FE | SR_NF | SR_ORE | SR_RXNE;
 
 const CR1_RE: u32 = 1 << 2;
+const CR1_TE: u32 = 1 << 3;
 const CR1_PS: u32 = 1 << 9;
 const CR1_PCE: u32 = 1 << 10;
 const CR1_M: u32 = 1 << 12;
 const CR1_UE: u32 = 1 << 13;
+/// Single-wire half-duplex mode, which is what routes the receiver to the
+/// transmit pin instead of to the receive pin.
+const CR3_HDSEL: u32 = 1 << 3;
 
 const TIM8_BASE: u32 = 0x4001_0400;
 const TIM8_CR1: u32 = TIM8_BASE + 0x00;
@@ -141,6 +148,61 @@ pub fn cyccnt() -> u32 {
 pub fn wait_cycles(count: u32) {
     let start = cyccnt();
     while cyccnt().wrapping_sub(start) < count {}
+}
+
+// ---- the transmitter as the stimulus of a readback sequence ----------------
+//
+// The readback sequences take their frames from the USART's own transmission on
+// the single wire of half-duplex mode, and the transmitter is their stimulus,
+// not the code under test. It is driven through the registers for one reason:
+// `blocking_write()` flushes and clears `TE` at the end of every half-duplex
+// call (`mod.rs:845-853`), and `TE` going from 0 to 1 again makes the
+// transmitter send a whole idle frame before the next word (RM0390 26.3.2), so
+// a word written through that call costs two frames of line time instead of
+// one. The word itself still leaves through `USART_DR` with the parity bit the
+// USART computes from its own `CR1`, and the reader under test is untouched.
+
+/// Enable the transmitter beside the receiver, once per readback sequence.
+///
+/// One idle frame follows, which carries no start bit and so reaches no reader.
+pub fn enable_transmitter() {
+    wr(USART1_CR1, rd(USART1_CR1) | CR1_TE | CR1_RE);
+}
+
+/// Hand one word to the transmitter. False when it never became free, which
+/// ends the sequence with a result the gate reads as a read that found nothing.
+pub fn send_word(value: u8) -> bool {
+    let start = cyccnt();
+    while rd(USART1_SR) & SR_TXE == 0 {
+        if cyccnt().wrapping_sub(start) > 200 * CYCLES_PER_MS {
+            return false;
+        }
+    }
+    wr(USART1_DR, u32::from(value));
+    true
+}
+
+/// Switch single-wire half-duplex mode off or on, leaving the rest of `CR3`
+/// (the error interrupt and the DMA request an Embassy reader owns) alone.
+///
+/// True when the bit then reads as asked. `configure()` writes `HDSEL` only
+/// between clearing and setting `CR1.UE` (`mod.rs:2648-2698`), as RM0390 asks,
+/// so whether the bit can be written while the USART runs is a property of this
+/// part and is measured here instead of assumed; the one caller that needs it
+/// has a second way of doing its work when it cannot. Whether the receiver's
+/// input multiplexer follows the bit at once does not matter to that caller:
+/// the word it is about to read is already in the data register, and no frame
+/// can start before its next write.
+pub fn set_hdsel(on: bool) -> bool {
+    let cr3 = rd(USART1_CR3);
+    wr(USART1_CR3, if on { cr3 | CR3_HDSEL } else { cr3 & !CR3_HDSEL });
+    (rd(USART1_CR3) & CR3_HDSEL != 0) == on
+}
+
+/// Clear the transmitter's `TC` flag, which a zero written to it does on this
+/// part while every other flag of the status register keeps its value.
+fn clear_tc() {
+    wr(USART1_SR, !SR_TC);
 }
 
 // ---- the clock configuration the image measures with -----------------------
@@ -531,6 +593,15 @@ impl Synth {
         self.apply();
         let _ = rd(USART1_SR);
         let _ = rd(USART1_DR);
+        // `TC` is set out of reset and a sequence that only receives never
+        // clears it, while `RingBufferedUartRx`'s wait hands it to the transmit
+        // waker on every poll of its own future (`ringbuffered.rs:308-312`).
+        // A waker an earlier sequence of this task left registered turns that
+        // into a wake of the task, and the reader then hands over the words
+        // that have arrived so far instead of waiting for the frame that
+        // carries the inverted parity bit. Cleared here, it stays clear for the
+        // whole sequence, because nothing in a synthesized one transmits.
+        clear_tc();
         let up = self.mark;
         let down = self.space;
         let words = WORDS.get();
