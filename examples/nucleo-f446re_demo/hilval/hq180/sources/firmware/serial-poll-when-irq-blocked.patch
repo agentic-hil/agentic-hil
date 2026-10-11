@@ -1,0 +1,267 @@
+diff --git a/cores/arduino/Serial.cpp b/cores/arduino/Serial.cpp
+--- a/cores/arduino/Serial.cpp
++++ b/cores/arduino/Serial.cpp
+@@ -566,16 +566,42 @@ void Uart::flush(uint32_t timeout)
+   // case is needed since there is no way to force the TXC (transmit
+   // complete) bit to 1 during initialization
+   if (_written) {
+-    uint32_t tickstart = HAL_GetTick();
+-    while ((_serial.tx_head != _serial.tx_tail)) {
+-      // the interrupt handler will free up space for us
+-      // Only manage timeout if any
+-      if ((timeout != 0) && ((HAL_GetTick() - tickstart) >= timeout)) {
+-        // clear any transmit data
+-        _serial.tx_head = _serial.tx_tail;
+-        break;
+-      }
+-    }
++    // When the interrupt that empties the buffer cannot run from here --
++    // interrupts are masked, or an interrupt of equal or higher priority is
++    // executing -- waiting for it would never end, so run its handler by
++    // hand, the way the AVR core polls UDRE in the same situation.
++    bool blocked = uart_irq_blocked(&_serial);
++    uint32_t tickstart = HAL_GetTick();
++    uint32_t elapsed = 0;
++    if (blocked) {
++      // HAL_GetTick() stands still while the SysTick exception is held off,
++      // but the SysTick counter keeps reloading: count those reloads here,
++      // and drop one that happened before this wait began.
++      (void)uart_tick_elapsed();
++    }
++    while ((_serial.tx_head != _serial.tx_tail)) {
++      // the interrupt handler will free up space for us, or we do its work
++      if (blocked) {
++        uart_poll_irq(&_serial);
++        elapsed += uart_tick_elapsed();
++      } else {
++        elapsed = HAL_GetTick() - tickstart;
++      }
++      // Only manage timeout if any
++      if ((timeout != 0) && (elapsed >= timeout)) {
++        // Stop the transfer the hardware is still running and drop what has
++        // not reached it. Bytes already in the data register are sent
++        // whatever happens next, so the tail moves past them: otherwise the
++        // next transfer-complete interrupt would carry the tail beyond the
++        // head and send the rest of the buffer a second time.
++        size_t written = uart_abort_tx(&_serial);
++        _serial.tx_tail = (uint16_t)((_serial.tx_tail + written) % SERIAL_TX_BUFFER_SIZE);
++        // clear any transmit data
++        _serial.tx_head = _serial.tx_tail;
++        _serial.tx_size = 0;
++        break;
++      }
++    }
+     // If we get here, nothing is queued anymore (DRIE is disabled) and
+     // the hardware finished transmission (TXC is set).
+   }
+@@ -602,13 +602,22 @@ size_t Uart::write(const uint8_t *buffer, size_t size)
+         uart_enable_tx(&_serial);
+       }
+     }
+-
+-    // If the output buffer is full, there's nothing for it other than to
+-    // wait for the interrupt handler to free space
+-    while (!availableForWrite()) {
+-      // nop, the interrupt handler will free up space for us
+-    }
+-
++
++    // If the output buffer is full, there's nothing for it other than to
++    // wait for the interrupt handler to free space. When that interrupt
++    // cannot run from here -- interrupts are masked, or an interrupt of
++    // equal or higher priority is executing -- run its handler by hand, the
++    // way the AVR core polls UDRE in the same situation.
++    if (!availableForWrite()) {
++      bool blocked = uart_irq_blocked(&_serial);
++      while (!availableForWrite()) {
++        // nop, unless the interrupt cannot free up space for us by itself
++        if (blocked) {
++          uart_poll_irq(&_serial);
++        }
++      }
++    }
++
+     // HAL doesn't manage rollover, so split transfer till end of TX buffer
+     // Also, split transfer according to available space in buffer
+     while ((size > available_till_buffer_end) || (size > available)) {
+diff --git a/libraries/SrcWrapper/inc/uart.h b/libraries/SrcWrapper/inc/uart.h
+--- a/libraries/SrcWrapper/inc/uart.h
++++ b/libraries/SrcWrapper/inc/uart.h
+@@ -272,9 +272,19 @@ int uart_getc(serial_t *obj, unsigned char *c);
+ int uart_getc(serial_t *obj, unsigned char *c);
+ void uart_attach_rx_callback(serial_t *obj, void (*callback)(serial_t *));
+ void uart_attach_tx_callback(serial_t *obj, int (*callback)(serial_t *), size_t size);
+-
+-uint8_t serial_tx_active(serial_t *obj);
+-uint8_t serial_rx_active(serial_t *obj);
+-
++
++uint8_t serial_tx_active(serial_t *obj);
++uint8_t serial_rx_active(serial_t *obj);
++
++/* For a caller that waits for the UART interrupt in a context that interrupt
++ * cannot run in: whether that is the case, how to run its handler by hand,
++ * how to stop a transfer and learn how much of it reached the hardware, and
++ * how to measure milliseconds while HAL_GetTick() stands still. The callers
++ * are Uart::write() and Uart::flush() in cores/arduino/Serial.cpp. */
++bool uart_irq_blocked(serial_t *obj);
++void uart_poll_irq(serial_t *obj);
++size_t uart_abort_tx(serial_t *obj);
++uint32_t uart_tick_elapsed(void);
++
+ void uart_enable_tx(serial_t *obj);
+ void uart_enable_rx(serial_t *obj);
+diff --git a/libraries/SrcWrapper/src/stm32/uart.c b/libraries/SrcWrapper/src/stm32/uart.c
+--- a/libraries/SrcWrapper/src/stm32/uart.c
++++ b/libraries/SrcWrapper/src/stm32/uart.c
+@@ -1048,7 +1048,149 @@ uint8_t serial_tx_active(serial_t *obj)
+   return ((HAL_UART_GetState(uart_handlers[obj->index]) & HAL_UART_STATE_BUSY_TX) == HAL_UART_STATE_BUSY_TX);
+ #endif
+ }
+-
++
++/* The guard CMSIS puts on __get_BASEPRI() and __get_FAULTMASK(). */
++#if ((defined (__ARM_ARCH_7M__)        && (__ARM_ARCH_7M__        == 1)) || \
++     (defined (__ARM_ARCH_7EM__)       && (__ARM_ARCH_7EM__       == 1)) || \
++     (defined (__ARM_ARCH_8M_MAIN__)   && (__ARM_ARCH_8M_MAIN__   == 1)) || \
++     (defined (__ARM_ARCH_8_1M_MAIN__) && (__ARM_ARCH_8_1M_MAIN__ == 1)))
++#define UART_HAS_BASEPRI  1
++#else
++#define UART_HAS_BASEPRI  0
++#endif
++
++/**
++ * Whether the UART interrupt cannot run in the caller's context, so that a
++ * caller waiting for it has to run the handler itself
++ *
++ * An exception is taken only when its group priority is numerically lower than
++ * the priority the processor executes at, so an interrupt of equal priority
++ * does not preempt. PRIMASK, FAULTMASK and BASEPRI hold interrupts off as the
++ * architecture defines them, and a line the NVIC has not enabled is never
++ * taken at all.
++ *
++ * @param obj The serial object
++ * @return true when the interrupt cannot run from here, false when it can
++ */
++bool uart_irq_blocked(serial_t *obj)
++{
++  uint32_t group, ipsr, uart_preempt, uart_sub;
++
++  if (obj == NULL) {
++    return false;
++  }
++  if (__get_PRIMASK() != 0U) {
++    return true;
++  }
++#if UART_HAS_BASEPRI
++  if (__get_FAULTMASK() != 0U) {
++    return true;
++  }
++#endif
++  if (NVIC_GetEnableIRQ(obj->irq) == 0U) {
++    return true;
++  }
++  group = NVIC_GetPriorityGrouping();
++  NVIC_DecodePriority(NVIC_GetPriority(obj->irq), group, &uart_preempt, &uart_sub);
++#if UART_HAS_BASEPRI
++  {
++    uint32_t basepri = __get_BASEPRI();
++    /* BASEPRI masks every priority numerically at or above its value. */
++    if ((basepri != 0U)
++        && ((NVIC_GetPriority(obj->irq) << (8U - __NVIC_PRIO_BITS)) >= basepri)) {
++      return true;
++    }
++  }
++#endif
++  ipsr = __get_IPSR();
++  if (ipsr != 0U) {
++    uint32_t active_preempt, active_sub;
++    if (ipsr < 4U) {
++      /* Reset, NMI and HardFault run above anything the NVIC can mask. */
++      return true;
++    }
++    NVIC_DecodePriority(NVIC_GetPriority((IRQn_Type)((int32_t)ipsr - 16)), group,
++                        &active_preempt, &active_sub);
++    if (uart_preempt >= active_preempt) {
++      return true;
++    }
++  }
++  return false;
++}
++
++/**
++ * Run the UART interrupt handler for a caller the interrupt cannot serve
++ *
++ * The caller has established that the interrupt cannot be taken here, so the
++ * handler cannot run concurrently with itself. The pending bit the hardware
++ * sets meanwhile makes the real handler run once the context unblocks, where
++ * it finds no enabled flag left to serve.
++ *
++ * @param obj The serial object
++ * @retval none
++ */
++void uart_poll_irq(serial_t *obj)
++{
++  if ((obj == NULL) || (obj->index >= UART_NUM) || (uart_handlers[obj->index] == NULL)) {
++    return;
++  }
++  HAL_UART_IRQHandler(uart_handlers[obj->index]);
++}
++
++/**
++ * Stop the transfer the hardware is running and report how much of it is gone
++ *
++ * Every byte the handler has written to the data register is sent whatever
++ * happens next, so those are the bytes the caller must count as sent.
++ *
++ * @param obj The serial object
++ * @return bytes of the stopped transfer that reached the hardware, 0 if none
++ *         was running
++ */
++size_t uart_abort_tx(serial_t *obj)
++{
++  size_t written = 0;
++
++  if ((obj == NULL) || (obj->index >= UART_NUM) || (uart_handlers[obj->index] == NULL)) {
++    return written;
++  }
++#if defined(USE_HALV2_DRIVER)
++  /* No HAL v2 series was available to check an abort against. Reporting that
++   * nothing left the buffer makes the caller drop nothing, which leaves a
++   * flush timeout behaving as it does without this function. */
++#else
++  /* Must disable interrupt to prevent handle lock contention */
++  HAL_NVIC_DisableIRQ(obj->irq);
++  if (serial_tx_active(obj)) {
++    UART_HandleTypeDef *handle = uart_handlers[obj->index];
++    written = (size_t)(handle->TxXferSize - handle->TxXferCount);
++    HAL_UART_AbortTransmit(handle);
++  }
++  /* Enable interrupt */
++  HAL_NVIC_EnableIRQ(obj->irq);
++#endif
++  return written;
++}
++
++/**
++ * The milliseconds that have passed since the previous call
++ *
++ * Counted from the SysTick counter, not from HAL_GetTick(), which stands still
++ * whenever the SysTick exception is held off. The counter keeps reloading and
++ * COUNTFLAG stays set until it is read, so one call per wait iteration counts
++ * every reload once. HAL_IncTick() does not read CTRL, so this does not
++ * disturb the HAL's own tick where the exception does run.
++ *
++ * @return the milliseconds counted since the previous call: 0 or one tick
++ */
++uint32_t uart_tick_elapsed(void)
++{
++  if ((SysTick->CTRL & SysTick_CTRL_COUNTFLAG_Msk) != 0U) {
++    return (uint32_t)HAL_GetTickFreq();
++  }
++  return 0U;
++}
++
+ /**
+   * @brief  Read receive byte from uart
+   * @param  obj : pointer to serial_t structure
