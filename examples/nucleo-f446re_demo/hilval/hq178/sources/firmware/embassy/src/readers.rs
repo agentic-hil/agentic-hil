@@ -22,7 +22,8 @@ use embassy_stm32::gpio::Pull;
 use embassy_stm32::mode::{Async, Blocking};
 use embassy_stm32::peripherals;
 use embassy_stm32::usart::{
-    BufferedUart, Config, DataBits, Error, HalfDuplexReadback, Parity, StopBits, Uart, UartRx,
+    BufferedUart, Config, DataBits, Error, HalfDuplexReadback, OutputConfig, Parity, StopBits, Uart,
+    UartRx,
 };
 use embassy_stm32::{Peri, bind_interrupts, usart};
 use embassy_time::{Duration, Instant, with_timeout};
@@ -281,6 +282,14 @@ pub fn line(shape: &Shape, rx_pull: Pull) -> Config {
     // A synthesized frame is made by switching this pin's pull bits, so the
     // line idles at mark through the pull-up while nothing drives it.
     config.rx_pull = rx_pull;
+    // The half-duplex pin is released whenever the transmitter is switched off,
+    // which every read does, and the receiver stays enabled on it. Push-pull
+    // alone leaves it floating there (`OutputConfig::PushPull` is "no internal
+    // pullup"), and a floating line is noise the receiver reads as start bits.
+    // The internal pull-up holds it at mark instead, which is what
+    // `new_half_duplex` asks an external pull-up for; the driven edges stay
+    // push-pull.
+    config.tx_config = OutputConfig::PushPullPullUp;
     config
 }
 

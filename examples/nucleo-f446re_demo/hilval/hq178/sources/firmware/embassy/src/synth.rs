@@ -31,9 +31,16 @@ pub const RCC_CSR: u32 = RCC_BASE + 0x74;
 pub const RCC_CSR_RMVF: u32 = 1 << 24;
 
 const GPIOA_BASE: u32 = 0x4002_0000;
+const GPIOA_MODER: u32 = GPIOA_BASE + 0x00;
 const GPIOA_PUPDR: u32 = GPIOA_BASE + 0x0C;
+const GPIOA_IDR: u32 = GPIOA_BASE + 0x10;
+const GPIOA_AFRH: u32 = GPIOA_BASE + 0x24;
 /// PA10 is USART1_RX; its two pull bits sit at 21:20.
 const PA10_SHIFT: u32 = 20;
+/// Its four alternate-function bits sit at 11:8 of AFRH (pin 10 is the third of
+/// the high half), and its input level is bit 10 of IDR.
+const PA10_AF_SHIFT: u32 = 8;
+const PA10_BIT: u32 = 1 << 10;
 
 pub const USART1_BASE: u32 = 0x4001_1000;
 pub const USART1_SR: u32 = USART1_BASE + 0x00;
@@ -256,17 +263,110 @@ impl Synthesis {
     }
 }
 
+/// What the stimulus itself does, measured with the receiver switched off.
+///
+/// `finish()` can only see that the word list ran out and that the register
+/// ended where it started, which says nothing about whether the pull bits ever
+/// moved the pin or at what rate they moved it. These are those two facts,
+/// measured in the same image before the frames the readers judge: the pin's
+/// own input level under each pull, PA10's mode and alternate function as the
+/// constructor left them, and the core cycles DMA2 took for a known number of
+/// TIM8 updates.
+#[derive(Copy, Clone)]
+pub struct PinProbe {
+    /// `GPIOA_IDR` bit 10 with PA10 pulled down: a working pull reads 0.
+    pub low: u32,
+    /// The same bit with PA10 pulled up: a working pull reads 1.
+    pub high: u32,
+    /// PA10's two `MODER` bits; 2 is alternate function.
+    pub moder: u32,
+    /// PA10's four `AFRH` bits; 7 is USART1_RX.
+    pub af: u32,
+    /// Core cycles DMA2 took for `PROBE_WORDS` words, so one word per bit time
+    /// can be told from a stream that ran at the bus rate.
+    pub rate: u32,
+    /// Words that run; the gate needs no constant of its own to read `rate`.
+    pub words: u32,
+}
+
+/// Enough updates to time the stimulus without producing a start bit (every
+/// word is the idle level), and short enough to cost under a millisecond.
+const PROBE_WORDS: u32 = 16;
+
 pub struct Synth {
     /// The whole `GPIOA_PUPDR` word with PA10 pulled up: the idle line, and
     /// what the register must read once the last word has been written.
     idle: u32,
     limit_cycles: u32,
     running: bool,
+    /// Whether the last `probe()` found a pin the pull bits move and a word
+    /// rate that is the bit rate. Until it has, no sequence may call itself
+    /// complete, because nothing would have driven the line.
+    proven: bool,
 }
 
 impl Synth {
     pub const fn new() -> Self {
-        Self { idle: 0, limit_cycles: 0, running: false }
+        Self { idle: 0, limit_cycles: 0, running: false, proven: false }
+    }
+
+    /// Measure the stimulus itself. The caller must have switched the receiver
+    /// off (`CR1.UE` clear), because this drives a level the receiver would
+    /// otherwise read as a start bit and a frame of its own.
+    pub fn probe(&mut self) -> PinProbe {
+        let kept = rd(GPIOA_PUPDR) & !(3 << PA10_SHIFT);
+        let up = kept | (1 << PA10_SHIFT);
+        let down = kept | (2 << PA10_SHIFT);
+
+        // One bit time is about eighty times the 40 kOhm pull's time constant
+        // against the pin's own capacitance, so a pin the pull can move has
+        // settled long before a receiver would sample it.
+        wr(GPIOA_PUPDR, down);
+        wait_cycles(BIT_CYCLES);
+        let low = rd(GPIOA_IDR) & PA10_BIT;
+        wr(GPIOA_PUPDR, up);
+        wait_cycles(BIT_CYCLES);
+        let high = rd(GPIOA_IDR) & PA10_BIT;
+
+        let moder = (rd(GPIOA_MODER) >> PA10_SHIFT) & 3;
+        let af = (rd(GPIOA_AFRH) >> PA10_AF_SHIFT) & 0xF;
+
+        // The same DMA2 stream and timer the frames use, on a word list that
+        // holds the line at mark: what is timed is the stimulus's clock, not
+        // anything the USART does with it.
+        let words = WORDS.get();
+        for slot in words[..PROBE_WORDS as usize].iter_mut() {
+            *slot = up;
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        self.idle = up;
+        self.limit_cycles = PROBE_WORDS * 4 * BIT_CYCLES + CYCLES_PER_MS;
+        self.arm(words.as_ptr() as usize as u32, PROBE_WORDS);
+        let begin = cyccnt();
+        self.start();
+        let mut rate = 0;
+        loop {
+            if rd(DMA2_LISR) & TCIF1 != 0 {
+                rate = cyccnt().wrapping_sub(begin);
+                break;
+            }
+            if cyccnt().wrapping_sub(begin) > self.limit_cycles {
+                break;
+            }
+        }
+        let stopped = self.finish_words();
+
+        // A pull that cannot move the pin, or a word rate that is not the bit
+        // rate, means no frame was ever on the line.
+        let ideal = PROBE_WORDS * BIT_CYCLES;
+        self.proven = stopped == Synthesis::Complete
+            && low == 0
+            && high != 0
+            && moder == 2
+            && af == 7
+            && rate > ideal - ideal / 4
+            && rate < 2 * ideal;
+        PinProbe { low, high, moder, af, rate, words: PROBE_WORDS }
     }
 
     /// DMA2 and TIM8; every other clock belongs to an Embassy driver.
@@ -316,6 +416,10 @@ impl Synth {
         }
         words[at] = up;
         at += 1;
+        // The word list is ordinary memory; only DMA2 reads it. The fence keeps
+        // the stores above from being moved past the register writes that hand
+        // the list to the controller.
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
         self.limit_cycles = at as u32 * 2 * BIT_CYCLES + 20 * CYCLES_PER_MS;
         self.arm(words.as_ptr() as usize as u32, at as u32);
     }
@@ -357,7 +461,17 @@ impl Synth {
 
     /// Wait for the word list to run out, stop everything and say whether the
     /// line was driven exactly as asked.
+    ///
+    /// The word list running out and the register ending where it started are
+    /// necessary and not sufficient: they read the same whether or not the pull
+    /// bits ever moved the pin, which is what `probe()` measures. A sequence is
+    /// complete only when both hold.
     pub fn finish(&mut self) -> Synthesis {
+        let list = self.finish_words();
+        if self.proven { list } else { Synthesis::Failed }
+    }
+
+    fn finish_words(&mut self) -> Synthesis {
         let mut complete = false;
         if self.running {
             let begin = cyccnt();
@@ -402,8 +516,12 @@ pub struct Control {
 /// Write `CR1` from RM0390 rather than from `configure()`, so the control does
 /// not inherit an assumption from the code it measures. `BRR`, `CR2` and `CR3`
 /// stay as the constructor left them.
-pub fn configure_by_hand(shape: &Shape) {
+///
+/// The stimulus is measured here, between clearing `UE` and setting it again:
+/// with the receiver off the probe's levels cannot be mistaken for a frame.
+pub fn configure_by_hand(shape: &Shape, synth: &mut Synth) -> PinProbe {
     wr(USART1_CR1, rd(USART1_CR1) & !CR1_UE);
+    let probe = synth.probe();
     let mut cr1 = CR1_RE; // receive only: the frame comes from the pull bits
     if shape.parity != Par::None {
         cr1 |= CR1_PCE;
@@ -418,6 +536,7 @@ pub fn configure_by_hand(shape: &Shape) {
     wr(USART1_CR1, cr1 | CR1_UE);
     let _ = rd(USART1_SR);
     let _ = rd(USART1_DR);
+    probe
 }
 
 /// One synthesized frame, read straight out of `USART_DR`.

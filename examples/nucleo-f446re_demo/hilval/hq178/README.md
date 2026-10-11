@@ -10,8 +10,8 @@ Run by [Agentic Hardware-in-the-Loop (Agentic HIL)](https://github.com/agentic-h
 
 | Image | SHA-256 | Bytes |
 |---|---|---|
-| `base` | `2b1122f61aa8fb3b72d09b68a701a972a6f8b638856632fa11f491eb1b9f5983` | 153316 |
-| `head` | `16c58fd8d5e6abcb08a408aff18a34da7261bd6df1c84b0acac5e3e06c893614` | 154176 |
+| `base` | `6ca24b859a04df4f0d73d1055d5c408f5f807436ec65501262f000cca0190cbd` | 154636 |
+| `head` | `50ff0395f835b990ee1952a55bba8ec914a89f68647e717e9cfccaea21ac882b` | 155588 |
 
 Each image prints lines `HQ178 <kind> key=value ...` on USART2 (the ST-LINK virtual COM port, PA2/PA3, 115200 baud) and ends with `HQ178 done`; each plan in [plans/](plans/) waits up to 600 s for every line it waits for. The tests that sent the images judge the values in the serial log; the images print measurements, not verdicts.
 

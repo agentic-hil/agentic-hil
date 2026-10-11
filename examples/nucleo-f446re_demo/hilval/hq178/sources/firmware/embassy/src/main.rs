@@ -280,7 +280,7 @@ fn register_controls(console: &mut Console<'_>, bus: &mut Bus, synth: &mut Synth
             readers::line(shape, embassy_stm32::gpio::Pull::Up),
         )
         .unwrap();
-        synth::configure_by_hand(shape);
+        let probe = synth::configure_by_hand(shape, synth);
         for (kind, value) in CTL_FRAMES {
             let control = synth::measure_frame(synth, shape, value, kind == "bad");
             console.begin("ctl");
@@ -293,6 +293,16 @@ fn register_controls(console: &mut Console<'_>, bus: &mut Bus, synth: &mut Synth
             console.i("pe_lead", control.pe_lead);
             console.u("poll", control.poll);
             console.u("timeout", control.timeout);
+            // What the stimulus itself did, with the receiver off: the pin's
+            // level under each pull, PA10's mode and alternate function as the
+            // constructor left them, and the cycles DMA2 took for `pwords`
+            // updates. A frame the readers never see is one of these.
+            console.x("pin_lo", probe.low);
+            console.x("pin_hi", probe.high);
+            console.u("pin_mode", probe.moder);
+            console.u("pin_af", probe.af);
+            console.u("pwords", probe.words);
+            console.u("prate", probe.rate);
             console.end();
         }
         drop(uart);

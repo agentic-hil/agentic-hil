@@ -216,7 +216,17 @@ The record kinds are:
 * `ctl`: one register-level control frame. `kind` is `ok` or `bad`, `val` what
   was sent, `sr` and `dr` the status and data registers as they were read, and
   `pe_lead` the cycles between `PE` and `RXNE` (`-1` when `PE` never appeared)
-  beside `poll`, the longest single iteration of that measurement.
+  beside `poll`, the longest single iteration of that measurement. The same
+  record carries the control of the stimulus itself, taken with the receiver
+  switched off so no level of it can be mistaken for a frame: `pin_lo` and
+  `pin_hi` are PA10's own input level with its pull bits set to pull-down and to
+  pull-up (a pin the pull can move reads `0x0` and then `0x400`), `pin_mode` and
+  `pin_af` are its mode and alternate function as the driver left them (`2` and
+  `7` are alternate function and USART1_RX), and `prate` is the core cycles DMA2
+  took for `pwords` timer updates, which is one bit time per word when the
+  stimulus runs at the baud rate. A sequence reports `synth=ok` only when all of
+  them hold, because a word list that ran out and a register that ended where it
+  started read the same whether or not the line ever moved.
 * `cfg`: the line settings of one repetition and configuration, with `CR1` and
   `BRR` as the driver left them.
 * `run`: one sequence. `rd` is the reader, `src` is `rb` for the half-duplex
