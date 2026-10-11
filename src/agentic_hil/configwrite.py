@@ -1290,12 +1290,12 @@ def _incomplete_backend_switch(original: JsonObject, requested: list[tuple[Resol
         key, backend, lacking, carried = operator_only[0]
         entry_path = key.rsplit(".", 1)[0]
         names = [*lacking, *carried]
-        reasons = [f"{backend} cannot do without `{name}`" for name in lacking]
-        reasons += [f"the entry carries `{name}`, which {backend} refuses" for name in carried]
+        refusals = [f"{backend} cannot do without `{name}`" for name in lacking]
+        refusals += [f"the entry carries `{name}`, which {backend} refuses" for name in carried]
         return _invalid(
             f"{entry_path}.{names[0]}",
             f"`{key}` would put this entry on the {backend} backend, and "
-            + " and ".join(reasons)
+            + " and ".join(refusals)
             + f". `project_config_set` does not write {', '.join('`' + name + '`' for name in names)}, so no call here lands "
             "this switch, whatever else it carries. Nothing was written.",
             rejected_key=key,
