@@ -63,19 +63,45 @@ pull request's own test uses.
 
 The second source is needed because a transmitter cannot send a frame with the
 wrong parity bit, and because `RingBufferedUartRx::read()` switches the
-transmitter off in half-duplex mode and so can never read anything back. PA10
-stays an alternate-function input and its two pull bits in `GPIOA_PUPDR` are
-rewritten by DMA2 on every TIM8 update, one word per bit of the frame, so the
-internal pull of about 40 kOhm drives the line while every other pin of the port
-keeps its own pull setting. TIM8_UP is DMA2 stream 1, channel 7, and DMA2 is the
+transmitter off in half-duplex mode and so can never read anything back. Its
+frames are written bit by bit, one word per bit, by DMA2 on every TIM8 update
+into one register of GPIOA. TIM8_UP is DMA2 stream 1, channel 7, and DMA2 is the
 only controller whose peripheral port reaches the AHB1 GPIO ports; neither the
 transmit DMA (stream 7) nor the receive DMA (stream 2) of USART1 uses stream 1.
-At 19200 baud one bit is 52 microseconds and the pull needs about one, so the
-edge has settled long before the receiver's three samples in the middle of the
-bit. Frames are separated by two idle bits beyond the stop bit: more than any
-reader needs to take a word or to re-arm after an error, and less than the full
-frame of idle that the hardware needs to report an idle line, so no overrun can
-hide a parity error and no idle line falls between two frames.
+
+Which register that is was the one thing these images had to find out on the
+board, because the answer this job assumed does not hold here. There are three
+ways to put a level on a pin the receiver is listening to:
+
+| `drive` | The register and the pin | What it needs |
+|---|---|---|
+| `pull` | PA10's two pull bits in `GPIOA_PUPDR`, the pin left an alternate-function input | a pin the internal pull of about 40 kOhm can move |
+| `peer` | PA9's two bits in `GPIOA_BSRR`, PA9 a push-pull output, PA10 still the alternate-function input | the two pins connected to each other on the board |
+| `pin` | PA10's two bits in `GPIOA_BSRR`, PA10 a push-pull output while `AFRH` keeps USART1_RX selected on it | a pin whose input path still reaches the receiver in output mode |
+
+Every image measures the first two in every `ctl` record: `pin_lo` and `pin_hi`
+are PA10's own input level with its pull bits set to pull-down and to pull-up,
+and `tie` is its level while PA9 is a push-pull output driven low. On this board
+`pin_lo` reads `0x400`, so the pin stays high under its own pull-down and the
+pull bits never put a start bit on the line; the first run of these images
+measured nothing at all on the synthesized path for that reason. Each image
+therefore sends one trial frame per drive before its controls, reads it straight
+out of `USART_DR`, and keeps the first drive whose frame arrives as RM0390 lays
+it out. Those trial frames are not printed: the `drive` field of every `ctl`
+record names the drive the whole phase then used, and the nine control frames
+that follow are the measurement of it. A sequence reports `synth=ok` only when
+that selection had succeeded and its own word list ran out with the line back at
+mark. Only the two bits of the driven pin are ever written in `GPIOA_BSRR`, and
+the pull-bit word keeps every other pin's pull setting, so no other pin of the
+port changes either way.
+
+At 19200 baud one bit is 52 microseconds; an output driver settles in far less
+than one microsecond and the internal pull in about one, so an edge has settled
+long before the receiver's three samples in the middle of the bit. Frames are
+separated by two idle bits beyond the stop bit: more than any reader needs to
+take a word or to re-arm after an error, and less than the full frame of idle
+that the hardware needs to report an idle line, so no overrun can hide a parity
+error and no idle line falls between two frames.
 
 The third thing in every image is a register-level control that shares no code
 with the readers: it writes `CR1` straight from RM0390, reads one synthesized
@@ -220,13 +246,16 @@ The record kinds are:
   record carries the control of the stimulus itself, taken with the receiver
   switched off so no level of it can be mistaken for a frame: `pin_lo` and
   `pin_hi` are PA10's own input level with its pull bits set to pull-down and to
-  pull-up (a pin the pull can move reads `0x0` and then `0x400`), `pin_mode` and
-  `pin_af` are its mode and alternate function as the driver left them (`2` and
-  `7` are alternate function and USART1_RX), and `prate` is the core cycles DMA2
-  took for `pwords` timer updates, which is one bit time per word when the
-  stimulus runs at the baud rate. A sequence reports `synth=ok` only when all of
-  them hold, because a word list that ran out and a register that ended where it
-  started read the same whether or not the line ever moved.
+  pull-up (a pin the pull can move reads `0x0` and then `0x400`), `tie` is that
+  level while PA9 is driven low (`0x0` only where the two pins are connected on
+  the board), `pin_mode` and `pin_af` are PA10's mode and alternate function as
+  the driver left them (`2` and `7` are alternate function and USART1_RX),
+  `prate` is the core cycles DMA2 took for `pwords` timer updates, which is one
+  bit time per word when the stimulus runs at the baud rate, and `drive` names
+  which of the three ways of driving the line this phase used. A sequence
+  reports `synth=ok` only when a trial frame had arrived through that drive,
+  because a word list that ran out and a register that ended where it started
+  read the same whether or not the line ever moved.
 * `cfg`: the line settings of one repetition and configuration, with `CR1` and
   `BRR` as the driver left them.
 * `run`: one sequence. `rd` is the reader, `src` is `rb` for the half-duplex

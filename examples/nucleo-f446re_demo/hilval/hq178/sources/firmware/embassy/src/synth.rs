@@ -2,12 +2,16 @@
 //!
 //! There is no wiring on this bench, so a frame reaches the receiver in one of
 //! two in-chip ways. The USART's own half-duplex readback carries the
-//! correct-parity values (see `readers.rs`). Everything else is made here: PA10
-//! stays an alternate-function input and its pull bits in `GPIOA_PUPDR` are
-//! written by DMA2 on every TIM8 update, one word per bit of the frame, so the
-//! ~40 kOhm internal pull drives the line. 19200 baud leaves the pull about 2 %
-//! of a bit to settle in. DMA2 is the only controller whose peripheral port
-//! reaches the AHB1 GPIO ports, and TIM8_UP is its stream 1, channel 7.
+//! correct-parity values (see `readers.rs`). Everything else is made here:
+//! DMA2 writes one word per bit of the frame into a register of GPIOA on every
+//! TIM8 update, so the line follows the word list at 19200 baud. DMA2 is the
+//! only controller whose peripheral port reaches the AHB1 GPIO ports, and
+//! TIM8_UP is its stream 1, channel 7.
+//!
+//! Which register that is, and so what drives the line, is the one thing this
+//! board had to answer: the pull bits in `GPIOA_PUPDR` that this job names do
+//! not move PA10 here (see `Drive` and `select_drive()`), so each way of
+//! driving the line sends a trial frame and the first that arrives is kept.
 //!
 //! Neither frame source has run on this board before, so both prove themselves:
 //! `measure_frame()` reads one frame straight out of `USART_DR` through its
@@ -32,15 +36,22 @@ pub const RCC_CSR_RMVF: u32 = 1 << 24;
 
 const GPIOA_BASE: u32 = 0x4002_0000;
 const GPIOA_MODER: u32 = GPIOA_BASE + 0x00;
+const GPIOA_OTYPER: u32 = GPIOA_BASE + 0x04;
 const GPIOA_PUPDR: u32 = GPIOA_BASE + 0x0C;
 const GPIOA_IDR: u32 = GPIOA_BASE + 0x10;
+const GPIOA_ODR: u32 = GPIOA_BASE + 0x14;
+const GPIOA_BSRR: u32 = GPIOA_BASE + 0x18;
 const GPIOA_AFRH: u32 = GPIOA_BASE + 0x24;
 /// PA10 is USART1_RX; its two pull bits sit at 21:20.
 const PA10_SHIFT: u32 = 20;
 /// Its four alternate-function bits sit at 11:8 of AFRH (pin 10 is the third of
 /// the high half), and its input level is bit 10 of IDR.
 const PA10_AF_SHIFT: u32 = 8;
+const PA10_PIN: u32 = 10;
 const PA10_BIT: u32 = 1 << 10;
+/// PA9 is USART1_TX, the pin the half-duplex readback uses.
+const PA9_PIN: u32 = 9;
+const PA9_BIT: u32 = 1 << 9;
 
 pub const USART1_BASE: u32 = 0x4001_1000;
 pub const USART1_SR: u32 = USART1_BASE + 0x00;
@@ -236,6 +247,23 @@ impl Shape {
             Par::Odd => 1 - ones,
         }
     }
+
+    /// The word the hardware builds from `value`: the data bits with the parity
+    /// bit above them, where RM0390 puts it (bit 7 of the 8-bit word, bit 8 of
+    /// the 9-bit one).
+    ///
+    /// Only `select_drive()` uses this, to tell a frame that arrived from one
+    /// that did not. Every value a record carries is printed as it was read.
+    pub fn raw_word(&self, value: u8, invert: bool) -> u32 {
+        let data = u32::from(value) & ((1u32 << self.data_bits) - 1);
+        match self.parity {
+            Par::None => u32::from(value),
+            _ => {
+                let parity = u32::from(self.parity_bit(value) ^ u8::from(invert));
+                data | (parity << self.data_bits)
+            }
+        }
+    }
 }
 
 // ---- the synthesizer -------------------------------------------------------
@@ -265,19 +293,19 @@ impl Synthesis {
 
 /// What the stimulus itself does, measured with the receiver switched off.
 ///
-/// `finish()` can only see that the word list ran out and that the register
-/// ended where it started, which says nothing about whether the pull bits ever
-/// moved the pin or at what rate they moved it. These are those two facts,
-/// measured in the same image before the frames the readers judge: the pin's
-/// own input level under each pull, PA10's mode and alternate function as the
-/// constructor left them, and the core cycles DMA2 took for a known number of
-/// TIM8 updates.
+/// `finish()` can only see that the word list ran out and that the line ended
+/// where it started, which reads the same whether or not anything ever moved
+/// the pin. These are the facts that say what did, measured in the same image
+/// before the frames the readers judge.
 #[derive(Copy, Clone)]
 pub struct PinProbe {
-    /// `GPIOA_IDR` bit 10 with PA10 pulled down: a working pull reads 0.
+    /// `GPIOA_IDR` bit 10 with PA10 pulled down: a pin the pull can move reads 0.
     pub low: u32,
     /// The same bit with PA10 pulled up: a working pull reads 1.
     pub high: u32,
+    /// The same bit while PA9 is a push-pull output driven low, so `0x0` here
+    /// means the two pins are connected to each other on this board.
+    pub tie: u32,
     /// PA10's two `MODER` bits; 2 is alternate function.
     pub moder: u32,
     /// PA10's four `AFRH` bits; 7 is USART1_RX.
@@ -287,6 +315,67 @@ pub struct PinProbe {
     pub rate: u32,
     /// Words that run; the gate needs no constant of its own to read `rate`.
     pub words: u32,
+    /// Which register the word list writes, and so what drove these frames.
+    pub drive: &'static str,
+}
+
+/// How the line is driven, that is which register the word list writes.
+///
+/// The pull bits are what this job asks for, and on this board they do not move
+/// PA10: with the pin an alternate-function input and nothing else on it, its
+/// own input level stays high under a pull-down (`pin_lo` in every `ctl`
+/// record). `select_drive()` therefore tries each of these in turn and keeps
+/// the first whose frame reaches `USART_DR`; every `ctl` record names it.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum Drive {
+    /// PA10 stays an alternate-function input and DMA2 writes its two pull bits
+    /// in `GPIOA_PUPDR`, so the ~40 kOhm internal pull drives the line.
+    Pull,
+    /// PA10 stays an alternate-function input held at mark by its pull-up, PA9
+    /// becomes a push-pull output, and DMA2 writes PA9's two bits in
+    /// `GPIOA_BSRR`. This carries a frame only where the two pins are connected
+    /// on the board, which `tie` measures.
+    Peer,
+    /// PA10 becomes a push-pull output while `AFRH` keeps USART1_RX selected on
+    /// it, and DMA2 writes PA10's two bits in `GPIOA_BSRR`. The input path of a
+    /// pin is active in output mode too, so the receiver reads what the output
+    /// driver puts on it.
+    Pin,
+}
+
+impl Drive {
+    pub fn name(self) -> &'static str {
+        match self {
+            Drive::Pull => "pull",
+            Drive::Peer => "peer",
+            Drive::Pin => "pin",
+        }
+    }
+}
+
+/// Every way of driving the line, in the order `select_drive()` tries them: the
+/// pull bits the job asks for first, then the two that drive the line with an
+/// output driver.
+const DRIVES: [Drive; 3] = [Drive::Pull, Drive::Peer, Drive::Pin];
+
+/// `BSRR` writes only the bits named in the word, so the other fifteen pins of
+/// the port keep their output state whichever drive is in effect.
+fn as_output(pin: u32, bit: u32) {
+    wr(GPIOA_BSRR, bit); // mark first: the pin takes over a line already at rest
+    wr(GPIOA_OTYPER, rd(GPIOA_OTYPER) & !bit); // push-pull
+    let shift = pin * 2;
+    wr(GPIOA_MODER, (rd(GPIOA_MODER) & !(3 << shift)) | (1 << shift));
+}
+
+/// Give the pin back to its alternate function, leaving `AFRH` alone.
+fn as_alternate(pin: u32) {
+    let shift = pin * 2;
+    wr(GPIOA_MODER, (rd(GPIOA_MODER) & !(3 << shift)) | (2 << shift));
+}
+
+fn pull_up(pin: u32) {
+    let shift = pin * 2;
+    wr(GPIOA_PUPDR, (rd(GPIOA_PUPDR) & !(3 << shift)) | (1 << shift));
 }
 
 /// Enough updates to time the stimulus without producing a start bit (every
@@ -294,25 +383,85 @@ pub struct PinProbe {
 const PROBE_WORDS: u32 = 16;
 
 pub struct Synth {
-    /// The whole `GPIOA_PUPDR` word with PA10 pulled up: the idle line, and
-    /// what the register must read once the last word has been written.
-    idle: u32,
+    drive: Drive,
+    /// The register DMA2 writes: `GPIOA_PUPDR` or `GPIOA_BSRR`.
+    reg: u32,
+    /// The word that puts the line at mark, and the one that puts it at space.
+    mark: u32,
+    space: u32,
+    /// The driven pin's bit in `ODR`, where an output driver is the stimulus.
+    bit: u32,
     limit_cycles: u32,
     running: bool,
-    /// Whether the last `probe()` found a pin the pull bits move and a word
-    /// rate that is the bit rate. Until it has, no sequence may call itself
-    /// complete, because nothing would have driven the line.
+    /// Whether a known frame has reached `USART_DR` through the drive in
+    /// effect, which `select_drive()` measures once per phase. Until one has,
+    /// no sequence may call itself complete, because nothing would have driven
+    /// the line.
     proven: bool,
 }
 
 impl Synth {
     pub const fn new() -> Self {
-        Self { idle: 0, limit_cycles: 0, running: false, proven: false }
+        Self {
+            drive: Drive::Pull,
+            reg: GPIOA_PUPDR,
+            mark: 0,
+            space: 0,
+            bit: 0,
+            limit_cycles: 0,
+            running: false,
+            proven: false,
+        }
+    }
+
+    pub fn drive(&self) -> Drive {
+        self.drive
+    }
+
+    /// Configure the pins for the drive in effect and compute its two words.
+    ///
+    /// Every Embassy constructor configures both pins again, so this runs at
+    /// the start of every sequence rather than once.
+    fn apply(&mut self) {
+        match self.drive {
+            Drive::Pull => {
+                // The snapshot keeps every other pin's pull setting, since the
+                // whole register is written on every bit.
+                let kept = rd(GPIOA_PUPDR) & !(3 << PA10_SHIFT);
+                self.reg = GPIOA_PUPDR;
+                self.mark = kept | (1 << PA10_SHIFT);
+                self.space = kept | (2 << PA10_SHIFT);
+                self.bit = 0;
+            }
+            Drive::Peer => {
+                pull_up(PA10_PIN); // the receiving pin idles at mark on its own
+                as_output(PA9_PIN, PA9_BIT);
+                self.reg = GPIOA_BSRR;
+                self.mark = PA9_BIT;
+                self.space = PA9_BIT << 16;
+                self.bit = PA9_BIT;
+            }
+            Drive::Pin => {
+                as_output(PA10_PIN, PA10_BIT);
+                self.reg = GPIOA_BSRR;
+                self.mark = PA10_BIT;
+                self.space = PA10_BIT << 16;
+                self.bit = PA10_BIT;
+            }
+        }
+    }
+
+    /// Whether the line is where the last word of a sequence left it.
+    fn at_mark(&self) -> bool {
+        match self.drive {
+            Drive::Pull => rd(GPIOA_PUPDR) == self.mark,
+            _ => rd(GPIOA_ODR) & self.bit != 0,
+        }
     }
 
     /// Measure the stimulus itself. The caller must have switched the receiver
-    /// off (`CR1.UE` clear), because this drives a level the receiver would
-    /// otherwise read as a start bit and a frame of its own.
+    /// off (`CR1.UE` clear), because this drives levels the receiver would
+    /// otherwise read as start bits and frames of its own.
     pub fn probe(&mut self) -> PinProbe {
         let kept = rd(GPIOA_PUPDR) & !(3 << PA10_SHIFT);
         let up = kept | (1 << PA10_SHIFT);
@@ -320,7 +469,8 @@ impl Synth {
 
         // One bit time is about eighty times the 40 kOhm pull's time constant
         // against the pin's own capacitance, so a pin the pull can move has
-        // settled long before a receiver would sample it.
+        // settled long before a receiver would sample it. Measured before any
+        // output driver is switched on, which would overrule the pull.
         wr(GPIOA_PUPDR, down);
         wait_cycles(BIT_CYCLES);
         let low = rd(GPIOA_IDR) & PA10_BIT;
@@ -328,18 +478,26 @@ impl Synth {
         wait_cycles(BIT_CYCLES);
         let high = rd(GPIOA_IDR) & PA10_BIT;
 
+        // What PA9 does to PA10: `0x0` only where the two are connected.
+        as_output(PA9_PIN, PA9_BIT);
+        wr(GPIOA_BSRR, PA9_BIT << 16);
+        wait_cycles(BIT_CYCLES);
+        let tie = rd(GPIOA_IDR) & PA10_BIT;
+        wr(GPIOA_BSRR, PA9_BIT);
+        as_alternate(PA9_PIN);
+
         let moder = (rd(GPIOA_MODER) >> PA10_SHIFT) & 3;
         let af = (rd(GPIOA_AFRH) >> PA10_AF_SHIFT) & 0xF;
 
         // The same DMA2 stream and timer the frames use, on a word list that
         // holds the line at mark: what is timed is the stimulus's clock, not
         // anything the USART does with it.
+        self.apply();
         let words = WORDS.get();
         for slot in words[..PROBE_WORDS as usize].iter_mut() {
-            *slot = up;
+            *slot = self.mark;
         }
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-        self.idle = up;
         self.limit_cycles = PROBE_WORDS * 4 * BIT_CYCLES + CYCLES_PER_MS;
         self.arm(words.as_ptr() as usize as u32, PROBE_WORDS);
         let begin = cyccnt();
@@ -354,19 +512,8 @@ impl Synth {
                 break;
             }
         }
-        let stopped = self.finish_words();
-
-        // A pull that cannot move the pin, or a word rate that is not the bit
-        // rate, means no frame was ever on the line.
-        let ideal = PROBE_WORDS * BIT_CYCLES;
-        self.proven = stopped == Synthesis::Complete
-            && low == 0
-            && high != 0
-            && moder == 2
-            && af == 7
-            && rate > ideal - ideal / 4
-            && rate < 2 * ideal;
-        PinProbe { low, high, moder, af, rate, words: PROBE_WORDS }
+        let _ = self.finish_words();
+        PinProbe { low, high, tie, moder, af, rate, words: PROBE_WORDS, drive: self.drive.name() }
     }
 
     /// DMA2 and TIM8; every other clock belongs to an Embassy driver.
@@ -378,14 +525,19 @@ impl Synth {
 
     /// Build the word list of `values` and arm DMA2 and TIM8 without starting them.
     ///
-    /// `bad` names the one frame whose parity bit is inverted. The snapshot of
-    /// `GPIOA_PUPDR` is taken here, so every other pin of the port keeps its
-    /// pull setting through the whole sequence.
+    /// `bad` names the one frame whose parity bit is inverted. `apply()` runs
+    /// first, so the words are the ones the drive in effect needs and, with the
+    /// pull bits, carry every other pin's own setting through the sequence.
     pub fn prepare(&mut self, shape: &Shape, values: &[u8], bad: Option<usize>) {
-        let kept = rd(GPIOA_PUPDR) & !(3 << PA10_SHIFT);
-        let up = kept | (1 << PA10_SHIFT);
-        let down = kept | (2 << PA10_SHIFT);
-        self.idle = up;
+        // The constructor of this sequence's reader has just configured both
+        // pins, so the drive is applied again here, and whatever the line did
+        // while it did so is not part of this sequence: SR and then DR clears
+        // every receive flag on usart_v2.
+        self.apply();
+        let _ = rd(USART1_SR);
+        let _ = rd(USART1_DR);
+        let up = self.mark;
+        let down = self.space;
         let words = WORDS.get();
         let mut at = 0usize;
         words[at] = up; // one idle word, so the line is at mark before the first start bit
@@ -428,7 +580,7 @@ impl Synth {
         wr(DMA2_S1_CR, 0);
         while rd(DMA2_S1_CR) & 1 != 0 {}
         wr(DMA2_LIFCR, FLAGS1);
-        wr(DMA2_S1_PAR, GPIOA_PUPDR);
+        wr(DMA2_S1_PAR, self.reg);
         wr(DMA2_S1_M0AR, source);
         wr(DMA2_S1_NDTR, count);
         wr(DMA2_S1_FCR, 0); // direct mode: one 32-bit word per request
@@ -462,10 +614,10 @@ impl Synth {
     /// Wait for the word list to run out, stop everything and say whether the
     /// line was driven exactly as asked.
     ///
-    /// The word list running out and the register ending where it started are
-    /// necessary and not sufficient: they read the same whether or not the pull
-    /// bits ever moved the pin, which is what `probe()` measures. A sequence is
-    /// complete only when both hold.
+    /// The word list running out and the line ending where it started are
+    /// necessary and not sufficient: they read the same whether or not anything
+    /// ever moved the pin, which is what `select_drive()` measures with a frame
+    /// of its own. A sequence is complete only when both hold.
     pub fn finish(&mut self) -> Synthesis {
         let list = self.finish_words();
         if self.proven { list } else { Synthesis::Failed }
@@ -493,7 +645,7 @@ impl Synth {
         let left = rd(DMA2_S1_NDTR);
         wr(DMA2_LIFCR, FLAGS1);
         self.running = false;
-        let clean = complete && flags & (TEIF1 | DMEIF1) == 0 && left == 0 && rd(GPIOA_PUPDR) == self.idle;
+        let clean = complete && flags & (TEIF1 | DMEIF1) == 0 && left == 0 && self.at_mark();
         if clean { Synthesis::Complete } else { Synthesis::Failed }
     }
 }
@@ -522,7 +674,7 @@ pub struct Control {
 pub fn configure_by_hand(shape: &Shape, synth: &mut Synth) -> PinProbe {
     wr(USART1_CR1, rd(USART1_CR1) & !CR1_UE);
     let probe = synth.probe();
-    let mut cr1 = CR1_RE; // receive only: the frame comes from the pull bits
+    let mut cr1 = CR1_RE; // receive only: the frame comes from the drive below
     if shape.parity != Par::None {
         cr1 |= CR1_PCE;
         if shape.data_bits == 8 {
@@ -536,7 +688,40 @@ pub fn configure_by_hand(shape: &Shape, synth: &mut Synth) -> PinProbe {
     wr(USART1_CR1, cr1 | CR1_UE);
     let _ = rd(USART1_SR);
     let _ = rd(USART1_DR);
-    probe
+    select_drive(synth, shape);
+    PinProbe { drive: synth.drive().name(), ..probe }
+}
+
+/// Keep the first way of driving the line whose frame reaches `USART_DR`.
+///
+/// Neither in-chip frame source has run on this board before, and the one this
+/// job names does not work here: PA10 does not follow its own pull bits (every
+/// `ctl` record carries that measurement as `pin_lo` and `pin_hi`). So each
+/// drive of `DRIVES` sends one frame, read through the same register path the
+/// controls use, and the first that arrives as RM0390 lays it out is kept for
+/// the whole phase. These trial frames are not printed: they choose the
+/// stimulus, and the nine `ctl` records that follow are the measurement.
+///
+/// If none of them arrives, the last stays in effect, every synthesized
+/// sequence reports `synth=err` and the gate fails with the control's own
+/// message, which says the measurement path and not Embassy is wrong.
+pub fn select_drive(synth: &mut Synth, shape: &Shape) {
+    // Alternating bits, so a line stuck at either level cannot pass as this.
+    const TRIAL: u8 = 0x55;
+    if synth.proven {
+        return;
+    }
+    for drive in DRIVES {
+        synth.drive = drive;
+        let control = measure_frame(synth, shape, TRIAL, false);
+        if control.timeout == 0
+            && control.dr == shape.raw_word(TRIAL, false)
+            && control.sr & (SR_PE | SR_FE | SR_NF | SR_ORE) == 0
+        {
+            synth.proven = true;
+            return;
+        }
+    }
 }
 
 /// One synthesized frame, read straight out of `USART_DR`.
@@ -560,7 +745,9 @@ pub fn measure_frame(synth: &mut Synth, shape: &Shape, value: u8, bad: bool) -> 
     // SR before DR: reading DR would clear PE before it was recorded.
     let sr = rd(USART1_SR);
     let dr = rd(USART1_DR) & 0x1FF;
-    synth.finish();
+    // The word list only: this frame is its own control, so it does not depend
+    // on a drive having proved itself, which is what it is measuring.
+    let _ = synth.finish_words();
     Control { sr, dr, pe_lead, poll, timeout }
 }
 

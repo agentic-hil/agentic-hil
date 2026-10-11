@@ -26,7 +26,7 @@ use embassy_stm32::usart::{
     UartRx,
 };
 use embassy_stm32::{Peri, bind_interrupts, usart};
-use embassy_time::{Duration, Instant, with_timeout};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 
 use crate::console::{ResString, Static};
 use crate::synth::{self, Par, Shape, Synth, Synthesis};
@@ -374,6 +374,24 @@ async fn with_stimulus<F: Future>(future: F, synth: &mut Synth, armed: &mut bool
     *armed = true;
     let (outcome, ()) = join(future, async { synth.start() }).await;
     outcome
+}
+
+/// Let the stimulus run out before the rest of a full sequence is read.
+///
+/// `RingBufferedUartRx::read()` hands over whatever the ring holds, which while
+/// the frames are still arriving is one word per call, and a sequence may make
+/// at most `MAX_CHUNK_CALLS` of them. The longest pattern is 258 words and the
+/// ring holds 1024, so a full sequence makes one call (which starts the
+/// background reception before the first start bit), waits here for the last
+/// frame, and then reads the pattern in chunks. A wrong-parity sequence waits
+/// for nothing: what its reader does while the frames arrive is the
+/// measurement.
+fn settle(synth: &mut Synth, state: &mut RunState, detail: bool, settled: bool) -> bool {
+    if detail || settled {
+        return settled;
+    }
+    state.synth = synth.finish();
+    true
 }
 
 fn widen(source: &[u8], target: &mut [u16]) {
@@ -803,8 +821,8 @@ pub async fn buf_readback(bus: &mut Bus, shape: &Shape, pattern: &[u8], state: &
     let chunk = CHUNK8.get();
     let start = Instant::now();
     let mut last = start;
-    // The whole pattern fits the transmit ring, so this returns at once and
-    // the reads below run while the frames are on the line.
+    // The whole pattern fits the transmit ring, so this returns at once and the
+    // handler shifts the frames out and stores every one it reads back.
     let mut sent = 0usize;
     while sent < pattern.len() {
         let outcome = with_timeout(Duration::from_millis(FULL_MS), tx.write(&pattern[sent..])).await;
@@ -813,6 +831,16 @@ pub async fn buf_readback(bus: &mut Bus, shape: &Shape, pattern: &[u8], state: &
             _ => break,
         }
     }
+    // The frames are all on the line before the first read. `read()` hands over
+    // whatever the ring holds, which while the transmission runs is one byte per
+    // call, and a sequence may make at most `MAX_CHUNK_CALLS` of them. The
+    // receive ring is larger than the longest pattern, so nothing is lost by
+    // waiting out the transmission first. The wait is counted from the frame
+    // count and the baud rate at twelve bit times per frame, which is longer
+    // than the ten or eleven a frame of these configurations takes, and it is
+    // measured by embassy-time against the same clock the `clk` record shows.
+    let airtime = (pattern.len() as u64 * 12_000) / u64::from(BAUD) + 3;
+    Timer::after_millis(airtime).await;
     let mut got = 0usize;
     while got < pattern.len() && state.res.calls() < MAX_CHUNK_CALLS {
         let outcome = with_timeout(Duration::from_millis(FULL_MS), rx.read(&mut chunk[..])).await;
@@ -918,6 +946,10 @@ pub async fn rng_synth(
     let mut last = start;
     let mut armed = false;
     let mut got = 0usize;
+    // Whether `synth.finish()` has already run, which a full sequence does
+    // after its first call: the stimulus is over by then and the rest of the
+    // pattern waits in the ring, so the chunks that follow are full ones.
+    let mut settled = false;
     if wide(shape, Reader::Rng) {
         let mut ring = rx.into_ring_buffered(&mut ring16[..]);
         let chunk = CHUNK16.get();
@@ -928,6 +960,7 @@ pub async fn rng_synth(
             shown[..count].copy_from_slice(&chunk[..count]);
             state.record(res, &shown[..count]);
             got += count;
+            settled = settle(synth, state, detail, settled);
             if res != Res::Timeout {
                 last = Instant::now();
             }
@@ -957,6 +990,7 @@ pub async fn rng_synth(
             widen(&chunk[..count], &mut shown[..]);
             state.record(res, &shown[..count]);
             got += count;
+            settled = settle(synth, state, detail, settled);
             if res != Res::Timeout {
                 last = Instant::now();
             }
@@ -977,6 +1011,8 @@ pub async fn rng_synth(
             }
         }
     }
-    state.synth = synth.finish();
+    if !settled {
+        state.synth = synth.finish();
+    }
     state.ticks = (last - start).as_ticks() as u32;
 }
