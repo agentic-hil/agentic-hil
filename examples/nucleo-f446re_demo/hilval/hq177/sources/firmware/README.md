@@ -42,10 +42,27 @@ anything outside the chip.
 
 On a NUCLEO-F446RE, PA5 carries the user LED LD2 through a series resistor to
 ground as well as `DAC_OUT2`. Once PA5's level nears the green LED's forward
-voltage the LED starts to sink current and loads that output; PA4 has no such
-load. A resistor to ground can only pull a pin down, never up, which is the one
-thing this image claims about it: at the same code, PA5 may read below PA4 but
-not above it by more than the two channels' own errors.
+voltage, about 2 V, the LED starts to conduct, and from there `DAC_OUT2` drives
+a load far below the 5 kiloohm minimum the F446 datasheet gives for the output
+buffer; PA4 carries no load at all. Outside that specified load the datasheet
+promises nothing about the buffered level, and neither does this image: it
+writes the same code to both channels, reads each pin back eight times and
+prints the numbers.
+
+The effect is not a simple sag. On the bench board, code 3000 with the buffer
+on read 3019.8 on PA4 and 3147.5 on PA5, so the loaded channel sat about 128
+LSB, roughly 0.1 V, *above* the unloaded one, with all eight conversions of
+each pin within 2 LSB of their own mean. The two pins part company around the
+LED's forward voltage, so the load is what causes it; but while the buffer is
+on it is the buffer, not the LED, that sets the level, and where a buffer
+settles under a load it was never specified for is a property of that buffer
+rather than of the resistor hanging off it. With the buffer off the output
+impedance is tens of kiloohms, the LED does dominate and the output is pulled
+down, which is what code 4000 is measured unbuffered for. The gate in
+`tests/hq177/` expects the loaded pin never to read more than two channel error
+budgets above the unloaded one; the measurement above contradicts that
+expectation at code 3000, and it is an expectation about a loaded output buffer,
+not about the DMA path this example documents.
 
 Two consequences for the design:
 
