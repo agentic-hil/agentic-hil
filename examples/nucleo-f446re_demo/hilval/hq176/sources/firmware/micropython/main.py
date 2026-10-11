@@ -293,29 +293,36 @@ def controls(u, period, pins):
     gc.collect()
     arm(period, idr)
     state = machine.disable_irq()
-    for _ in range(CONTROLS):
-        before = NS - m32[ndtr]
-        after = NS - m32[ndtr]
-        if after - before > read:
-            read = after - before
-        cycles0 = time.ticks_cpu()
-        marked = NS - m32[ndtr]  # the mark being timed; its value is not used
-        cycles1 = time.ticks_cpu()
-        spent = time.ticks_diff(cycles1, cycles0)
-        if spent > read_cycles:
-            read_cycles = spent
-        before = NS - m32[ndtr]
-        u.any()
-        after = NS - m32[ndtr]
-        if after - before > call:
-            call = after - before
-        cycles0 = time.ticks_cpu()
-        u.any()
-        cycles1 = time.ticks_cpu()
-        spent = time.ticks_diff(cycles1, cycles0)
-        if spent > call_cycles:
-            call_cycles = spent
-    machine.enable_irq(state)
+    # The handler is set up before the first mark, so no interval measured below
+    # contains it. Interrupts come back even if one of the calls raises: the
+    # fault record the outer handler then prints waits on SysTick, which cannot
+    # advance while they are masked, so the image would hang before `H176 done`
+    # instead of saying what went wrong.
+    try:
+        for _ in range(CONTROLS):
+            before = NS - m32[ndtr]
+            after = NS - m32[ndtr]
+            if after - before > read:
+                read = after - before
+            cycles0 = time.ticks_cpu()
+            marked = NS - m32[ndtr]  # the mark being timed; its value is not used
+            cycles1 = time.ticks_cpu()
+            spent = time.ticks_diff(cycles1, cycles0)
+            if spent > read_cycles:
+                read_cycles = spent
+            before = NS - m32[ndtr]
+            u.any()
+            after = NS - m32[ndtr]
+            if after - before > call:
+                call = after - before
+            cycles0 = time.ticks_cpu()
+            u.any()
+            cycles1 = time.ticks_cpu()
+            spent = time.ticks_diff(cycles1, cycles0)
+            if spent > call_cycles:
+                call_cycles = spent
+    finally:
+        machine.enable_irq(state)
     stop_sampler()
     return read, call, read_cycles, call_cycles
 
@@ -334,15 +341,17 @@ def main_rep(u, cfg, number, period, limit_us, pins):
     # Interrupts off so neither the 1 ms SysTick nor the REPL's UART can land
     # between the call and the marks that place it on the sample axis.
     state = machine.disable_irq()
-    cycles0 = time.ticks_cpu()
-    tc = NS - m32[ndtr]
-    u.sendbreak()
-    tr = NS - m32[ndtr]
-    cycles1 = time.ticks_cpu()
-    # Wait, bounded by 3 bit times, until the line is actually low, so the byte
-    # below is written during the break and never races its start.
-    reply = wait_zero(idr, mask, ndtr, 3 * SPB, SPINS)
-    machine.enable_irq(state)
+    try:  # as in controls(): a raise here must not leave interrupts masked
+        cycles0 = time.ticks_cpu()
+        tc = NS - m32[ndtr]
+        u.sendbreak()
+        tr = NS - m32[ndtr]
+        cycles1 = time.ticks_cpu()
+        # Wait, bounded by 3 bit times, until the line is actually low, so the
+        # byte below is written during the break and never races its start.
+        reply = wait_zero(idr, mask, ndtr, 3 * SPB, SPINS)
+    finally:
+        machine.enable_irq(state)
     w3 = u.write(BYTE55)
     te = NS - m32[ndtr]
     cycles_end = time.ticks_cpu()
@@ -379,15 +388,17 @@ def sbk_rep(u, cfg, number, period, limit_us, pins, cr1_address):
     t0 = NS - m32[ndtr]
     w1 = u.write(BYTE55)
     state = machine.disable_irq()
-    cycles0 = time.ticks_cpu()
-    tc = NS - m32[ndtr]
-    u.sendbreak()
-    tr = NS - m32[ndtr]
-    cycles1 = time.ticks_cpu()
-    # 16 bit times is longer than any break the frame format admits, plus the
-    # delay before the USART starts it.
-    reply = wait_zero(cr1_address, USART_SBK, ndtr, 16 * SPB, SPINS)
-    machine.enable_irq(state)
+    try:  # as in controls(): a raise here must not leave interrupts masked
+        cycles0 = time.ticks_cpu()
+        tc = NS - m32[ndtr]
+        u.sendbreak()
+        tr = NS - m32[ndtr]
+        cycles1 = time.ticks_cpu()
+        # 16 bit times is longer than any break the frame format admits, plus
+        # the delay before the USART starts it.
+        reply = wait_zero(cr1_address, USART_SBK, ndtr, 16 * SPB, SPINS)
+    finally:
+        machine.enable_irq(state)
     cyc = time.ticks_diff(cycles1, cycles0)
     tsbk = NS - (reply & 0xFFFF)
     sbk = reply >> 16

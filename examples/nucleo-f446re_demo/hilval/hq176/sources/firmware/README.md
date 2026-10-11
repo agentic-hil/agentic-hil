@@ -51,8 +51,11 @@ In detail, as the frozen `main.py` does it:
   which is what lets them reach 1200 baud at this board's clocks (on APB2 at
   84 MHz the 12-bit BRR mantissa stops at about 1282 baud). The `boot` record
   names the UART, the GPIO port and the pin that were used.
-* An STM32F4 GPIO updates its input data register every AHB cycle whatever the
-  pin's mode, so the register shows what the UART drives out of the pin.
+* An STM32F4 GPIO updates its input data register every AHB cycle in every pin
+  mode except analog, so with the pin in its alternate function the register
+  shows what the UART drives out of it. The pin's mode and alternate function
+  are read back with every record, and the tests require the alternate
+  function, which is the only mode this measurement is claimed for.
 * TIM8 raises an update event every `period` cycles and DMA2 stream 1, channel 7
   (TIM8_UP) copies the 16 low bits of that GPIO input data register into a
   4096-entry buffer, once per update. 4096 samples at 32 samples per bit are 128
@@ -96,7 +99,7 @@ start, data and parity bits only (9, 10, 9).
 The board confirmed hypothesis B: the break is low for 10, 11 and 10 bit times at
 8N1, 8E1 and 8N2, in both images and in every repetition.
 
-| Baud | Format | Break, bit times | Break, us at the nominal baud |
+| Baud | Format | Break, bit times | Break, us calculated from the run's BRR and PCLK1 |
 |---|---|---|---|
 | 1200 | 8N1 | 10 | 8333.3 |
 | 9600 | 8N1 | 10 | 1041.7 |
@@ -109,11 +112,29 @@ the break at 10 bit times, so the break frame carries one stop bit and not all
 the configured ones. The parity bit does lengthen it, because the port counts
 parity in the USART word length, which is why 8E1 shows 11.
 
-The microsecond column is the bit count times the bit time that the run's own
-BRR and APB1 clock give, which is why 19200 baud shows 520.7 and not 520.8: the
-divider the HAL programs produces 19204.4 baud. The per-repetition low times,
-the marks and the raw edge indices are in the serial log of the run; the figures
-above are recomputed from those registers rather than reported by the image.
+The fourth column is calculated and is not a reading: it is the bit count times
+the bit time that the run's own BRR and APB1 clock give, which is why 19200 baud
+shows 520.7 and not 520.8, the divider the HAL programs producing 19204.4 baud.
+
+What the samples measured against that calculation: in every repetition of every
+configuration, in both images, the low run of the break came out within three
+samples of the bit count times that repetition's own measured bit time, and that
+bit time came out within one per cent of the figure BRR and PCLK1 give. Three
+samples are 78.1 us at 1200 baud, 9.8 us at 9600 and 4.9 us at 19200, because a
+sample is 4375, 547 and 273 cycles of the 168 MHz timer clock there. Those are
+the bounds the tests hold every single repetition to, not an average over them:
+a break outside them would have left its bit count ambiguous and failed the run
+instead of being averaged into it. One sample of each bound is the resolution of
+a single edge index, so no number of repetitions can place the break more
+sharply than the two edges that delimit it.
+
+The per-repetition microsecond values themselves are not fixed in this file.
+They are quantised to the sample period and so differ in their last digits
+between runs of the same firmware, which is why the tests judge the bit count
+and the bounds above and not a microsecond mean. Those values are in the serial
+log of the run, in the `rep` and `edges` records described at the end of this
+file, and the tests print each configuration's min, mean and max low time in
+microseconds whenever they reject a run.
 
 Two further facts the same records carry: `sendbreak()` returned while the line
 was still low, tens of microseconds after the call and a whole break before the
@@ -249,10 +270,27 @@ its window has been sampled and the sampler stopped.
 
 ## Files
 
+Six files of this repository were published beside the two ELFs: everything
+under `firmware/hq176/` and `hilval/hq176/`, and `hilval/toolchain.py`. Three
+of them are in this directory:
+
 * `README.md`, this file.
 * `uart-sendbreak-docs.patch`, the change, against the commit named above.
 * `micropython/main.py`, the measurement script, frozen into both images as
   source text and run at boot. Its `print` output is the serial log above.
 
-The build that produced the two ELFs and the tests that judge these records live
-outside this directory, in `hilval/hq176/build.py` and `tests/hq176/`.
+Three are the build that produced the ELFs, which lives outside this directory
+because it is Python the host runs and not firmware:
+
+* `hilval/hq176/build.py`, which builds `baseline` from the source cache and
+  `patched` from a copy of it with this directory's patch applied.
+* `hilval/hq176/__init__.py`, the one-line docstring that makes that a package.
+* `hilval/toolchain.py`, the helpers it calls: the patched copy, the frozen
+  manifest and the MicroPython build.
+
+The tests that judge these records, `tests/hq176/`, are not among them: they are
+the verdict side of the job and stay in the repository the patch is submitted
+from. No published file names this machine or a directory of a user, which is a
+condition of sending anything to the bench: every source file is scanned for
+that before the run, and the two ELFs are built with their build paths remapped,
+so neither the firmware nor its sources carries one.
