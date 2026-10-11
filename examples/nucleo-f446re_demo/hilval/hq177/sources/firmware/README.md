@@ -52,12 +52,12 @@ prints the numbers.
 The effect is not a simple sag. On the bench board, code 3000 with the buffer
 on read 3019.8 on PA4 and 3147.5 on PA5, so the loaded channel sat about 128
 LSB, roughly 0.1 V, *above* the unloaded one; PA5's eight conversions spanned
-2 LSB and PA4's 8 LSB, and a second run on the same board read 3146.6 against
-3018.8, so these are the board's figures and not noise. One code lower, at
-2500, just under the LED's forward voltage, the two pins still agreed inside
-two channel error budgets, and every channel 2 level the DMA run uses, all at
-or below 1800, was within 40 LSB of its own code. The deviation follows the
-LED's current.
+2 LSB and PA4's 8 LSB, and two further runs of the same image on the same board
+read 3146.6 against 3018.8 and 3146.0 against 3020.4, so these are the board's
+figures and not noise. One code lower, at 2500, just under the LED's forward
+voltage, the two pins still agreed inside two channel error budgets, and every
+channel 2 level the DMA run uses, all at or below 1800, was within 40 LSB of
+its own code. The deviation follows the LED's current.
 
 Three controls in the same run say the readback itself is sound, so those
 figures are the board's behaviour and not the measurement's: the internal
@@ -72,8 +72,11 @@ it. While the buffer is on, it is the buffer that sets the level at the pin, and
 this load is far below the 5 kiloohm minimum the datasheet specifies for it;
 what a buffer does outside its specified load is not something this image
 measures, and the datasheet does not promise it either. With the buffer off the
-output impedance is tens of kiloohms, the LED does dominate and the output is
-pulled down, which is what code 4000 is measured unbuffered for. The gate in
+output is driven through the DAC's own resistor string, tens of kiloohms against
+the LED's few hundred ohms, so there the LED has to dominate and pull the pin
+down; that is what the `static buf=0` codes 500, 1500, 2500, 3500 and 4000 are
+measured for, and their numbers are in the evidence of every run, although the
+gate stops at the buffered comparison before it reaches them. The gate in
 `tests/hq177/` expects the loaded pin never to read more than two channel error
 budgets above the unloaded one; the measurement above contradicts that
 expectation at code 3000, and it is an expectation about a loaded output buffer,
