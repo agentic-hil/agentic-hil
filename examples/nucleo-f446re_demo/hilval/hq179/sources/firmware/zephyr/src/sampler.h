@@ -53,6 +53,12 @@ struct hq179_window {
 	uint32_t flags;
 	uint32_t ndtr; /* transfers left; 0 when the whole window was recorded */
 	uint32_t dur;  /* timer clocks from the window's start to transfer complete */
+	/* 0 when the frame's own counter enable started the sampling counter, 1
+	 * when no frame did and the image started it itself. A framed window
+	 * reporting 1 is a measurement that missed its frame, not a driver that
+	 * put nothing on the line.
+	 */
+	uint32_t self_started;
 };
 
 /** One bit of the port, run-length encoded over the whole window. */
@@ -89,7 +95,12 @@ void hq179_sampler_setup(void);
  */
 void hq179_sampler_arm(uint32_t rep);
 
-/** Start the sampling timer and take the window's time origin. */
+/** Open the window: take its time origin, taken before the call under test.
+ *  The sampling counter is started by the driver's own counter enable, at the
+ *  start of the frame, and never reinitialised after that, so one window is one
+ *  uninterrupted 8-clock cadence; a window no frame begins in is started by
+ *  hq179_sampler_wait().
+ */
 void hq179_sampler_start(void);
 
 /** The two registers the grid's phase rests on, read back: the trigger output
@@ -103,7 +114,10 @@ uint32_t hq179_elapsed(void);
 /** The DMA2 priority level fields of the driver's stream 5 and the sampler's 7. */
 void hq179_sampler_priorities(uint32_t *driver_pl, uint32_t *sampler_pl);
 
-/** Wait for the window to complete, then stop sampling. */
+/** Wait for the window to complete - asleep, so the processor takes no bus
+ *  access between two samples - then stop sampling. Starts the grid first if no
+ *  frame did.
+ */
 void hq179_sampler_wait(struct hq179_window *out);
 
 /** Reduce the recorded window: one bit, run-length encoded. */

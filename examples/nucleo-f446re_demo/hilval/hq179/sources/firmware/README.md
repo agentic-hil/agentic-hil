@@ -113,14 +113,22 @@ external measurement is made or claimed.
   than 60000 clocks. TIM8 has no devicetree node on the F446 under Zephyr, so it
   is driven through its registers; the stream raises no interrupt, so Zephyr's
   own DMA driver never sees an interrupt for a stream it did not configure.
-  TIM8's counter is reinitialised by TIM1's trigger output, which carries the
-  driver's counter-enable signal (`MMS = 001` in TIM1, reset mode on internal
-  trigger 0 in TIM8), so every frame starts at count 0 of the sampling counter
-  and the samples fall `CCR4` clocks after it. That is where the per-repetition
-  phase of the grid sits (see the tolerances below). Selecting a trigger output
+  TIM8's counter is **started** by TIM1's trigger output, which carries the
+  driver's counter-enable signal (`MMS = 001` in TIM1, trigger mode on internal
+  trigger 0 in TIM8), so a frame starts at count 0 of the sampling counter and
+  the samples fall `CCR4` clocks after it. That is where the per-repetition
+  phase of the grid sits (see the tolerances below). The trigger starts that
+  counter and never reinitialises it, so one window is one uninterrupted 8-clock
+  cadence from its first sample to its last. A window no frame begins in — the
+  qualification case, which makes no transfer, and a request the driver refuses
+  before it reaches its timer — is started by the image itself once the call has
+  returned, and records the resting level of the line and the control.
+  Selecting a trigger output
   changes no count, no update event, no DMA request and nothing on the pin, the
   driver never writes that register, and both images print the two registers
-  back in their `init` record.
+  back in their `init` record. While a window is being sampled the processor
+  waits asleep and reads nothing, so the only bus accesses between two samples
+  are the driver's own (see the note on sample loss below).
 * **The control.** TIM3 channel 1 drives **PC6**, a pin of the same port, with a
   PWM of 159 timer clocks per period (`ARR = 158`), 40 of them high
   (`CCR1 = 40`). 159 is prime, so the 8-clock samples sweep every phase of it.
@@ -170,7 +178,7 @@ HQ179 boot  phase rcc_csr marker zephyr sysclk ticks enomem etimedout enotsup
 HQ179 init  phase ready0 ready1 idr0 idr1 modes min_tick_ns max_ticks loop_max
             channels pc0_mode pc0_ospeed chan_rc tim1_cr2 tim8_smcr
 HQ179 case  phase rep name res psc arr rc rc2 rc_cfg ret done_rc idle_cfg
-            idle_end idle_stop stop_at s5_pl s7_pl flags ndtr dur nruns first
+            idle_end idle_stop stop_at s5_pl s7_pl flags ndtr dur grid_self nruns first
             first_len last last_len pwm_edges pwm_first pwm_last pwm_hi_min
             pwm_hi_max pwm_lo_min pwm_lo_max pwm_per_min pwm_per_max pc0_set
             pc0_rst
@@ -183,6 +191,9 @@ HQ179 done
   has no such call.
 * `ret`, `stop_at` and `dur` are cycle counts taken in the MCU, measured from
   the moment the window's sampling started. No host clock is used anywhere.
+  `dur` is read after the image has slept the window out, so it is that sleep's
+  length and not a measurement of how fast the stream ran; what says that the
+  window was recorded whole is `ndtr` and the stream's flags.
 * `idle_cfg`, `idle_end` and `idle_stop` are the pin's level read out of the
   input register after configuring, after the transmit returned and right after
   `stop()` returned.
@@ -190,13 +201,22 @@ HQ179 done
 * `nruns` is the number of runs of the measured bit over the whole window,
   `first`/`last` their levels at the two ends and `first_len`/`last_len` their
   lengths; the `runs` lines carry the lengths of the runs in between, in order,
-  in **samples** of 8 clocks each, 16 to a line.
+  in **samples** of 8 clocks each, 16 to a line. A window begins where its frame
+  does, so `first` is the level the line rested at going into the frame and
+  `first_len` is the part of one tick that precedes the frame's first word; what
+  the line rested at before that is `idle_cfg`, read out of the port.
 * `flags` and `ndtr` are the sampling stream's own report, and `s5_pl`/`s7_pl`
   the two priority fields.
+* `grid_self` is `0` when the frame's own counter enable started the sampling
+  counter and `1` when no frame did and the image started it itself. It is `1`
+  for the qualification case and for a request the driver refuses before it
+  reaches its timer; a `1` on a window that should carry a frame would mean the
+  measurement missed that frame, not that the driver put nothing on the line.
 * `tim1_cr2` and `tim8_smcr` are read back out of the two timers: the trigger
   output the driver's timer carries (`0x10` is its counter-enable signal) and
-  the slave mode of the sampling timer (`0x4` is reset on internal trigger 0).
-  Together they are what puts every frame at count 0 of the sampling counter.
+  the slave mode of the sampling timer (`0x6` is trigger mode on internal
+  trigger 0). Together they are what starts the sampling counter at a frame's
+  own start, at count 0.
 * A value of `-1` means the case has no such measurement.
 
 ## The cases
@@ -224,8 +244,10 @@ buffer) and `0, 32, 1, 63, 56, 8, 80, 0` (high resting level).
 frame has finished; it first sends a short frame whose own resting level is low,
 so both images start it from a line that rests low.
 
-In `stop`, a second thread of lower priority waits 300 µs from the moment the
-main thread blocks inside the transmit, then stamps the time, calls `stop()` and
+In `stop`, a second thread of lower priority sleeps from the moment the main
+thread blocks inside the transmit — 300 µs asked for, 300 to 400 µs slept,
+because one kernel tick is 100 µs and the core must stay off the buses while the
+window is sampled — then stamps the time, calls `stop()` and
 reads the pin, all with the scheduler locked, so the level it reports is the one
 `stop()` alone left on the line and not what the transmit's own cleanup did
 afterwards.
@@ -257,10 +279,10 @@ Two resolutions are stated, because they answer different questions:
   run averages out over the repetitions. That is what resolves a
   one-clock-per-tick error at every rate measured. The phase is the compare
   value the samples are taken at, `1 + rep % 7` clocks after the sampling
-  counter is reinitialised, and the driver's own counter enable reinitialises it
-  at the start of every frame. Seven values cover seven of the eight phases,
-  three repetitions each and two for the seventh, which leaves at most 1.5
-  clocks of quantisation in the mean.
+  counter starts, and the driver's own counter enable starts it at the frame's
+  own start. Seven values cover seven of the eight phases, three repetitions
+  each and two for the seventh, which leaves at most 1.5 clocks of quantisation
+  in the mean.
 
   The phase has to be tied to the frame by the hardware, because a shift
   applied before the frame does not survive. Two earlier versions of this image
@@ -270,17 +292,40 @@ Two resolutions are stated, because they answer different questions:
   that never moves relative to the frame. The sampling stream writes into the
   same SRAM that the driver's encoder writes its 512 words into, and a loop
   that is held up by one clock whenever the two coincide settles at a fixed
-  position in the grid and takes the frame start with it. The counter is still
-  preset to `2 * rep % 8` before it starts: that shift moves the whole grid
-  rather than its offset from a frame, so it cannot cancel the compare value,
-  and in the qualification window, where no frame runs and the counter is never
-  reinitialised, it is the only phase there is.
+  position in the grid and takes the frame start with it.
+
+  The frame therefore has to **start** the sampling counter, and must not
+  reinitialise one that is already running. A third version of this image used
+  reset mode, where the trigger reinitialises the counter, and that moves the
+  grid's phase in the middle of the window: the one interval across the step is
+  shorter than 8 clocks whenever the new phase precedes the old one, and a short
+  interval fits a sample into a run of the control that the control cannot have
+  — 40 clocks of high time hold five samples of an 8-clock grid, and a sixth
+  only because a sample may be read late. Two bench runs reported 7 samples of
+  high time and 17 of low that way. In trigger mode the step falls before the
+  first sample of the window, where nothing is measured yet, and every sample
+  after it is 8 clocks from the one before.
 
 For `before`, the shortfall of the last run is reported as
 `measured − (n − 1) × (tick + 1)`, which is the transfer-complete interrupt's
 latency. At 0.5 MHz one tick is 192 clocks, which that latency could plausibly
 equal, so the last cell is reported there but the deviation is only asserted at
 2, 6 and 8 MHz, where one tick is 48 clocks or less.
+
+A sample read late is the other way this measurement can be wrong, and it is why
+the processor sleeps through every window. One sample is due every 8 clocks and
+the transfer needs only part of that, so a single short bus access between two
+samples is absorbed; a longer one, or several in a row, delays the next read of
+the port, and a sample read late crosses whatever edge fell in between and is
+counted in the next run instead of in its own. The control's 40 clocks high and
+119 low are 5 and 15 samples, so one late sample is already one sample of error,
+and the grid's phase step at the start of a frame is another. Two earlier bench
+runs of these images waited for the window in a loop that read the stream's
+flags and the system timer, and in a few of their ~480 windows that loop turned
+the control's high time into 7 samples and its low time into 17 — the
+measurement, not the driver. Both waits are sleeps now, the one that waits a
+window out and the one before `stop()`, and the idle thread halts the core while
+they last.
 
 A measurement that lost samples shows up in the sampling stream's own flags (a
 FIFO-error overrun in direct mode), in a non-zero `ndtr`, or in the control's

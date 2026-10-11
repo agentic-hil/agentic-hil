@@ -153,6 +153,7 @@ struct rec {
 	int32_t flags;
 	int32_t ndtr;
 	int32_t dur;
+	int32_t grid_self;
 	int32_t nruns;
 	int32_t first;
 	int32_t first_len;
@@ -205,6 +206,7 @@ static struct rec rec_init(const char *name, uint32_t rep, uint32_t win)
 		.flags = -1,
 		.ndtr = -1,
 		.dur = -1,
+		.grid_self = -1,
 		.nruns = -1,
 		.first = -1,
 		.first_len = -1,
@@ -237,16 +239,16 @@ static void print_case(const char *kind, uint32_t phase, const struct rec *r)
 	}
 	printk(TAG " %s phase=%u rep=%u name=%s res=%d psc=%d arr=%d rc=%d rc2=%d rc_cfg=%d "
 	       "ret=%d done_rc=%d idle_cfg=%d idle_end=%d idle_stop=%d stop_at=%d s5_pl=%d "
-	       "s7_pl=%d flags=%s ndtr=%d dur=%d nruns=%d first=%d first_len=%d last=%d "
-	       "last_len=%d pwm_edges=%d pwm_first=%d pwm_last=%d pwm_hi_min=%d pwm_hi_max=%d "
-	       "pwm_lo_min=%d pwm_lo_max=%d pwm_per_min=%d pwm_per_max=%d pc0_set=%d "
-	       "pc0_rst=%d\n",
+	       "s7_pl=%d flags=%s ndtr=%d dur=%d grid_self=%d nruns=%d first=%d first_len=%d "
+	       "last=%d last_len=%d pwm_edges=%d pwm_first=%d pwm_last=%d pwm_hi_min=%d "
+	       "pwm_hi_max=%d pwm_lo_min=%d pwm_lo_max=%d pwm_per_min=%d pwm_per_max=%d "
+	       "pc0_set=%d pc0_rst=%d\n",
 	       kind, phase, r->rep, r->name, r->res, r->psc, r->arr, r->rc, r->rc2, r->rc_cfg,
 	       r->ret, r->done_rc, r->idle_cfg, r->idle_end, r->idle_stop, r->stop_at, r->s5_pl,
-	       r->s7_pl, flags_text, r->ndtr, r->dur, r->nruns, r->first, r->first_len, r->last,
-	       r->last_len, r->pwm_edges, r->pwm_first, r->pwm_last, r->pwm_hi_min, r->pwm_hi_max,
-	       r->pwm_lo_min, r->pwm_lo_max, r->pwm_per_min, r->pwm_per_max, r->pc0_set,
-	       r->pc0_rst);
+	       r->s7_pl, flags_text, r->ndtr, r->dur, r->grid_self, r->nruns, r->first,
+	       r->first_len, r->last, r->last_len, r->pwm_edges, r->pwm_first, r->pwm_last,
+	       r->pwm_hi_min, r->pwm_hi_max, r->pwm_lo_min, r->pwm_lo_max, r->pwm_per_min,
+	       r->pwm_per_max, r->pc0_set, r->pc0_rst);
 	/* printk returned once the last character reached the transmitter, so this
 	 * is a gap on the wire (PACE_MS above). No window is armed while a record
 	 * is printed, so nothing being measured waits for it.
@@ -314,9 +316,10 @@ static void read_timer(struct rec *r, uint32_t resolution)
 static void window_begin(uint32_t rep)
 {
 	/* The frame this window is opened for begins at this repetition's phase
-	 * of the sampling grid, because the driver's own counter enable
-	 * reinitialises the sampling counter. Nothing here times that: a wait
-	 * before the frame cannot carry the phase, and sampler.c says why.
+	 * of the sampling grid, because the driver's own counter enable starts
+	 * the sampling counter - and starts it only, so every sample of the
+	 * window is 8 clocks from the one before it. Nothing here times that: a
+	 * wait before the frame cannot carry the phase, and sampler.c says why.
 	 * Without a phase that moves, the 8-clock samples would measure the same
 	 * pulse the same way in every repetition and their mean could not
 	 * resolve below one sample.
@@ -351,6 +354,7 @@ static void window_finish(struct rec *r, uint32_t bit)
 	r->flags = (int32_t)win.flags;
 	r->ndtr = (int32_t)win.ndtr;
 	r->dur = (int32_t)win.dur;
+	r->grid_self = (int32_t)win.self_started;
 	r->nruns = (int32_t)runs.nruns;
 	r->first = (int32_t)runs.first;
 	r->first_len = (int32_t)runs.first_len;
@@ -592,9 +596,15 @@ static void stopper(void *a, void *b, void *c)
 	for (;;) {
 		(void)k_sem_take(&stopper_go, K_FOREVER);
 		/* This wait begins when main blocks inside the transmit, because
-		 * main runs at a higher priority than this thread.
+		 * main runs at a higher priority than this thread. It is a sleep
+		 * and not a busy wait: a window is being sampled, and sampler.c
+		 * says what a processor access between two samples costs the
+		 * measurement. One kernel tick is 100 us and a sleep may round up
+		 * by one, so the stop falls 300 to 400 us after main blocked, far
+		 * inside the driver's own 3 ms timeout and far beyond the 200 us
+		 * of frame the window has to show before it.
 		 */
-		k_busy_wait(300);
+		k_sleep(K_USEC(300));
 		/* With the scheduler locked, the semaphore reset inside stop()
 		 * wakes main but does not switch to it, so the level read below
 		 * is the one stop() alone left on the line.

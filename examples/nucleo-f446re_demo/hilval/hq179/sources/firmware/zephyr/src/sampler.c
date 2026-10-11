@@ -18,7 +18,9 @@
  * The stream raises no interrupt (no enable bit is set in its control register
  * and the FIFO error interrupt stays off), so Zephyr's DMA driver never sees an
  * interrupt for a stream it did not configure and cannot clear the flags this
- * window is judged by. The flags still latch in DMA2_HISR, which is polled.
+ * window is judged by. The flags still latch in DMA2_HISR, and the image reads
+ * them once the window must be over: while it is being sampled the processor
+ * waits asleep and makes no bus access of its own (hq179_sampler_wait).
  */
 
 #include <zephyr/kernel.h>
@@ -49,11 +51,13 @@
  * carries. Nothing else of CR2 is used by either timer here.
  */
 #define HQ_TIM_CR2_MMS_ENABLE (1u << 4)
-/* SMS = 100 (reset mode) with TS = 000 (internal trigger 0, which is TIM1 for
+/* SMS = 110 (trigger mode) with TS = 000 (internal trigger 0, which is TIM1 for
  * TIM8 in RM0390's internal trigger connection table): a rising edge of that
- * trigger reinitialises the counter, and the counter keeps its own clock.
+ * trigger starts the counter and only starts it. The counter is not
+ * reinitialised, by that edge or by any later one, and it keeps its own clock,
+ * so one window is sampled on one uninterrupted cadence.
  */
-#define HQ_TIM_SMCR_RESET_ITR0 4u
+#define HQ_TIM_SMCR_TRIGGER_ITR0 6u
 
 /* DMA stream bits (RM0390 9.5). Peripheral to memory, 16-bit both sides,
  * memory incrementing, channel 7 (TIM8_CH4/TRIG/COM on stream 7), priority
@@ -72,10 +76,22 @@
 #define HQ_DMA_FLAGS       0x3Du
 #define HQ_DMA_TCIF        0x20u
 #define HQ_STREAM7_SHIFT   22u
+/* The window's own length in timer clocks, and the clocks per microsecond of
+ * the 96 MHz the image prints as sysclk.
+ */
+#define HQ_WINDOW_CLOCKS (HQ179_SAMPLES * HQ179_SAMPLE_CLOCKS)
+#define HQ_CLOCKS_PER_US 96u
+/* Added to the sleep that waits a window out: one kernel tick of 100 us, which
+ * a sleep of a given length may round up by, and the time between the window's
+ * origin and its first sample - the transmit's own setup, 512 encoded words and
+ * one DMA configuration, before the frame starts the sampling counter. A sleep
+ * that still ends early only costs another one in the loop below.
+ */
+#define HQ_SLEEP_SLACK_US 300u
 /* Three window lengths: long enough that a completed transfer is never missed,
  * short enough that a stream which never completes does not stall the image.
  */
-#define HQ_WAIT_CLOCKS (3u * HQ179_SAMPLES * HQ179_SAMPLE_CLOCKS)
+#define HQ_WAIT_CLOCKS (3u * HQ_WINDOW_CLOCKS)
 
 static uint16_t samples[HQ179_SAMPLES];
 static uint32_t window_t0;
@@ -125,8 +141,8 @@ uint32_t hq179_ospeedr(uint32_t pin)
 	return field(GPIOC->OSPEEDR, pin, 2u);
 }
 
-/* Tie the sampling grid to the frame: the driver's counter-enable signal
- * reinitialises the sampling counter.
+/* Tie the sampling grid to the frame: the driver's counter-enable signal starts
+ * the sampling counter.
  *
  * One sample every 8 clocks measures a pulse of 12 or 13 clocks as one or two
  * samples, depending only on where the pulse falls between two samples, so the
@@ -145,10 +161,23 @@ uint32_t hq179_ospeedr(uint32_t pin)
  * grid and carries the frame start with it.
  *
  * So the phase is taken from the driver's own timer, after any such loop has
- * run. TIM1's trigger output carries its counter-enable signal and TIM8 runs in
- * reset mode on that trigger, so every frame begins at count 0 of the sampling
- * counter and the first sample of it falls CCR4 clocks later, which is where
- * hq179_sampler_arm() puts this repetition's phase.
+ * run. TIM1's trigger output carries its counter-enable signal and that trigger
+ * starts TIM8, from the count of 0 that arming leaves it at, so a frame begins
+ * at count 0 of the sampling counter and the window's first sample falls CCR4
+ * clocks later, which is where hq179_sampler_arm() puts this repetition's phase.
+ *
+ * The trigger starts the counter and never reinitialises it, and that is what
+ * keeps every sample of a window exactly 8 clocks from the one before it. A
+ * counter the trigger reinitialises - reset mode, which an earlier version of
+ * this image used - moves the grid's phase in the middle of the window instead,
+ * and the single interval across that step is shorter than 8 clocks whenever
+ * the new phase precedes the old one. A short interval fits one more sample
+ * into whichever run of the control PWM it falls in, and that is a sample the
+ * control cannot have: 40 clocks of high time hold five samples of an 8-clock
+ * grid, and a sixth only because a sample may be read late. Two bench runs of
+ * these images reported 7 samples of high time and 17 of low that way, which is
+ * the measurement and not the driver. Starting the counter leaves the step
+ * before the first sample of the window, where there is nothing measured yet.
  *
  * Writing MMS selects what the driver's timer puts on its trigger output and
  * nothing else: no count, no update event, no DMA request and nothing on the
@@ -158,7 +187,7 @@ uint32_t hq179_ospeedr(uint32_t pin)
 static void grid_trigger(void)
 {
 	TIM1->CR2 = HQ_TIM_CR2_MMS_ENABLE;
-	TIM8->SMCR = HQ_TIM_SMCR_RESET_ITR0;
+	TIM8->SMCR = HQ_TIM_SMCR_TRIGGER_ITR0;
 }
 
 void hq179_grid_trigger_regs(uint32_t *driver_cr2, uint32_t *sampler_smcr)
@@ -224,15 +253,15 @@ void hq179_sampler_arm(uint32_t rep)
 	DMA2_Stream7->CR |= HQ_DMA_CR_EN;
 
 	/* One CC4 event every HQ179_SAMPLE_CLOCKS clocks, the first of them CCR4
-	 * clocks after the counter is reinitialised, which grid_trigger() above
-	 * has the driver's counter enable do at the start of every frame. So
-	 * CCR4 is this repetition's phase of the grid: seven values for eight
-	 * phases, three repetitions each and two for the seventh, which holds
-	 * the quantisation left in the mean of 20 repetitions under 1.5 clocks.
-	 * It stays between 1 and ARR: 0 would leave it to the silicon whether a
-	 * match at the counter's reload is an event at all, and a value above
-	 * ARR would be no event ever. CR2 keeps CCDS at 0, so the request
-	 * follows the compare event and not the update event.
+	 * clocks after the counter starts, which grid_trigger() above has the
+	 * driver's counter enable do at the start of a frame. So CCR4 is this
+	 * repetition's phase of the grid: seven values for eight phases, three
+	 * repetitions each and two for the seventh, which holds the quantisation
+	 * left in the mean of 20 repetitions under 1.5 clocks. It stays between 1
+	 * and ARR: 0 would leave it to the silicon whether a match at the
+	 * counter's reload is an event at all, and a value above ARR would be no
+	 * event ever. CR2 keeps CCDS at 0, so the request follows the compare
+	 * event and not the update event.
 	 */
 	TIM8->CR1 = 0u;
 	TIM8->DIER = 0u;
@@ -247,21 +276,25 @@ void hq179_sampler_arm(uint32_t rep)
 	 * in the two registers the grid's phase rests on.
 	 */
 	grid_trigger();
-	TIM8->EGR = HQ_TIM_EGR_UG; /* reloads the prescaler and the counter */
-	/* The preset the first version of this image relied on. It moves the
-	 * whole grid rather than its offset from a frame, so it cannot cancel
-	 * CCR4, and in a window no frame runs in (the qual case, where the
-	 * counter is never reinitialised) it is the only phase there is.
+	/* Reloads the prescaler and leaves the counter at 0, so the first sample
+	 * of the window falls CCR4 clocks after the trigger starts it. The
+	 * counter is left stopped here: CR1 above cleared its enable, and a
+	 * trigger edge from a transfer that runs between two windows can start it
+	 * again, which is why arming clears it rather than assuming it.
 	 */
-	TIM8->CNT = (2u * rep) % HQ179_SAMPLE_CLOCKS;
+	TIM8->EGR = HQ_TIM_EGR_UG;
 	TIM8->SR = 0u;
 	TIM8->DIER = HQ_TIM_DIER_CC4DE;
 }
 
 void hq179_sampler_start(void)
 {
+	/* The window's time origin, taken before the call under test. The
+	 * sampling counter is not enabled here: the driver's own counter enable
+	 * starts it at the frame's start (grid_trigger above), and
+	 * hq179_sampler_wait() starts it for a window no frame ever began in.
+	 */
 	window_t0 = k_cycle_get_32();
-	TIM8->CR1 = HQ_TIM_CR1_CEN;
 }
 
 uint32_t hq179_elapsed(void)
@@ -278,7 +311,53 @@ void hq179_sampler_priorities(uint32_t *driver_pl, uint32_t *sampler_pl)
 void hq179_sampler_wait(struct hq179_window *out)
 {
 	uint32_t flags;
+	uint32_t elapsed = hq179_elapsed();
+	uint32_t left = HQ_WINDOW_CLOCKS;
 
+	/* A window no frame ever began in: no counter-enable edge came, so
+	 * nothing started the sampling counter, and the grid starts here instead.
+	 * The qualification case makes no transfer at all, and a request the
+	 * driver refuses before it reaches its timer - the instance without a
+	 * buffer-size, on the driver as the PR has it - never enables that
+	 * counter either. Such a window records the resting level of the line and
+	 * the control PWM, which is exactly what those two cases are read for.
+	 *
+	 * There is no frame for the grid to be tied to here, so the counter is
+	 * taken out of slave mode before it is started: a counter started by
+	 * software while a trigger may still set the same bit is one more thing
+	 * to reason about, and the phase of a window with no frame in it is of no
+	 * consequence. The cadence is the same 8 clocks either way.
+	 */
+	out->self_started = 0u;
+	if ((TIM8->CR1 & HQ_TIM_CR1_CEN) == 0u) {
+		TIM8->SMCR = 0u;
+		TIM8->CR1 = HQ_TIM_CR1_CEN;
+		out->self_started = 1u;
+	} else {
+		left = elapsed < HQ_WINDOW_CLOCKS ? HQ_WINDOW_CLOCKS - elapsed : 0u;
+	}
+
+	/* Wait the window out asleep, and only then read the stream.
+	 *
+	 * Nothing the processor does can make the window shorter: it is
+	 * HQ_WINDOW_CLOCKS long by construction. A loop that polls the stream's
+	 * flags or the system timer meanwhile puts a processor access between two
+	 * samples every few clocks, and an access that outlasts the slack one
+	 * sample leaves on the buses delays the next sample's read of the port. A
+	 * sample read late crosses whatever edge fell in between and is counted in
+	 * the next run instead of its own, which is a whole sample of error in a
+	 * control whose 40-clock high time is five samples. The window has room for
+	 * one such sample and no more, and that room belongs to the driver's own
+	 * traffic, which a window must tolerate because it is the thing being
+	 * measured.
+	 *
+	 * Asleep there is no such access: Zephyr's idle thread halts the core, and
+	 * the only accesses left in a window are the driver's own and the interrupt
+	 * its transfer completes in.
+	 */
+	if (left != 0u) {
+		k_sleep(K_USEC(left / HQ_CLOCKS_PER_US + HQ_SLEEP_SLACK_US));
+	}
 	for (;;) {
 		flags = (DMA2->HISR >> HQ_STREAM7_SHIFT) & HQ_DMA_FLAGS;
 		if ((flags & HQ_DMA_TCIF) != 0u) {
@@ -287,10 +366,10 @@ void hq179_sampler_wait(struct hq179_window *out)
 		if (hq179_elapsed() >= HQ_WAIT_CLOCKS) {
 			break;
 		}
-		/* Reading the system timer costs the AHB1 bus nothing, so the
-		 * stream keeps the bus to itself between two polls.
+		/* The window is over by now; a stream that has not finished is
+		 * waited for in whole kernel ticks, asleep as well.
 		 */
-		k_busy_wait(10);
+		k_msleep(1);
 	}
 	out->dur = hq179_elapsed();
 	out->flags = (DMA2->HISR >> HQ_STREAM7_SHIFT) & HQ_DMA_FLAGS;
