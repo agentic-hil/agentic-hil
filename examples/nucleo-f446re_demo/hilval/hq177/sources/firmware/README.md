@@ -51,14 +51,29 @@ prints the numbers.
 
 The effect is not a simple sag. On the bench board, code 3000 with the buffer
 on read 3019.8 on PA4 and 3147.5 on PA5, so the loaded channel sat about 128
-LSB, roughly 0.1 V, *above* the unloaded one, with all eight conversions of
-each pin within 2 LSB of their own mean. The two pins part company around the
-LED's forward voltage, so the load is what causes it; but while the buffer is
-on it is the buffer, not the LED, that sets the level, and where a buffer
-settles under a load it was never specified for is a property of that buffer
-rather than of the resistor hanging off it. With the buffer off the output
-impedance is tens of kiloohms, the LED does dominate and the output is pulled
-down, which is what code 4000 is measured unbuffered for. The gate in
+LSB, roughly 0.1 V, *above* the unloaded one; PA5's eight conversions spanned
+2 LSB and PA4's 8 LSB, and a second run on the same board read 3146.6 against
+3018.8, so these are the board's figures and not noise. One code lower, at
+2500, just under the LED's forward voltage, the two pins still agreed inside
+two channel error budgets, and every channel 2 level the DMA run uses, all at
+or below 1800, was within 40 LSB of its own code. The deviation follows the
+LED's current.
+
+Three controls in the same run say the readback itself is sound, so those
+figures are the board's behaviour and not the measurement's: the internal
+reference against its factory calibration word puts VDDA between 3.0 V and
+3.6 V; PA4 is within 40 LSB of every code it is given, buffered and unbuffered
+up to 4000; and PA5 is within 40 LSB of every code below the LED's forward
+voltage, through the same ADC channel that reads 3147 at code 3000.
+
+What the sign rules out is a passive load. A resistor and an LED to ground can
+only take current out of the pin, and taking current out of a node cannot raise
+it. While the buffer is on, it is the buffer that sets the level at the pin, and
+this load is far below the 5 kiloohm minimum the datasheet specifies for it;
+what a buffer does outside its specified load is not something this image
+measures, and the datasheet does not promise it either. With the buffer off the
+output impedance is tens of kiloohms, the LED does dominate and the output is
+pulled down, which is what code 4000 is measured unbuffered for. The gate in
 `tests/hq177/` expects the loaded pin never to read more than two channel error
 budgets above the unloaded one; the measurement above contradicts that
 expectation at code 3000, and it is an expectation about a loaded output buffer,
@@ -104,7 +119,10 @@ Phases, in order:
 3. **static, buffered.** Both channels are enabled with no trigger and no DMA
    request, so a write to a holding register reaches the output register one
    APB cycle later. Each of the twenty codes is written to both channels and
-   read back eight times on each pin.
+   read back eight times on each pin: both output registers are read 200 us
+   after the write, then PA4's eight conversions and then PA5's, about 62 us
+   each, so a record's `min` and `max` show whether its own pin held still over
+   the half millisecond its mean comes from.
 4. **static, unbuffered.** The same with `BOFF1` and `BOFF2` set, for the five
    codes that include the rail.
 5. **dma.** `DAC_CR` is cleared, then `dual_dac_dma_start()` arms everything
