@@ -17,7 +17,7 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_stm32::usart::{Config, Uart};
+use embassy_stm32::usart::{Config, HalfDuplexReadback, Uart};
 use embassy_time::Timer;
 
 use crate::console::{Console, Static};
@@ -270,14 +270,15 @@ fn print_run(console: &mut Console<'_>, at: &Where, shape: &Shape, step: &Step, 
 
 fn register_controls(console: &mut Console<'_>, bus: &mut Bus, synth: &mut Synth, phase: u32) {
     for shape in SHAPES.iter().filter(|shape| shape.parity != Par::None) {
-        // The instance clocks the peripheral and configures the pins; CR1 is
-        // then written from RM0390 and every frame read straight out of DR, so
-        // the control shares no code with the readers it is a control for.
-        let uart = Uart::new_blocking(
+        // The instance clocks the peripheral and configures the pin exactly as
+        // every synthesized sequence has it; CR1 is then written from RM0390 and
+        // every frame read straight out of DR, so the control shares no code
+        // with the readers it is a control for.
+        let uart = Uart::new_blocking_half_duplex(
             bus.usart.reborrow(),
             bus.tx.reborrow(),
-            bus.rx.reborrow(),
-            readers::line(shape, embassy_stm32::gpio::Pull::Up),
+            readers::synth_line(shape),
+            HalfDuplexReadback::Readback,
         )
         .unwrap();
         let probe = synth::configure_by_hand(shape, synth);
@@ -293,16 +294,16 @@ fn register_controls(console: &mut Console<'_>, bus: &mut Bus, synth: &mut Synth
             console.i("pe_lead", control.pe_lead);
             console.u("poll", control.poll);
             console.u("timeout", control.timeout);
-            // What the stimulus itself did, with the receiver off: the pin's
-            // level under each pull and while PA9 is driven low, PA10's mode and
-            // alternate function as the constructor left them, the cycles DMA2
-            // took for `pwords` updates, and which drive carried the frames of
-            // this phase. A frame the readers never see is one of these.
+            // What the stimulus itself did, with the receiver off: the line's
+            // level under each of PA9's pull bits, its mode, alternate function
+            // and output type as the constructor left them, the cycles DMA2 took
+            // for `pwords` updates, and which drive carried the frames of this
+            // phase. A frame the readers never see is one of these.
             console.x("pin_lo", probe.low);
             console.x("pin_hi", probe.high);
-            console.x("tie", probe.tie);
             console.u("pin_mode", probe.moder);
             console.u("pin_af", probe.af);
+            console.u("pin_ot", probe.otyper);
             console.u("pwords", probe.words);
             console.u("prate", probe.rate);
             console.s("drive", probe.drive);
@@ -422,13 +423,10 @@ async fn main(_spawner: Spawner) {
     Synth::clocks_on();
     build_patterns();
 
-    let mut bus = Bus {
-        usart: p.USART1,
-        tx: p.PA9,
-        rx: p.PA10,
-        tx_dma: p.DMA2_CH7,
-        rx_dma: p.DMA2_CH2,
-    };
+    // PA10 stays in `p` and is never configured: it is USART1_RX, but this
+    // board holds it high from outside the chip, so every sequence runs on the
+    // single wire of half-duplex mode instead.
+    let mut bus = Bus { usart: p.USART1, tx: p.PA9, tx_dma: p.DMA2_CH7, rx_dma: p.DMA2_CH2 };
     let mut synth = Synth::new();
 
     run_phase(&mut console, &mut bus, &mut synth, phase).await;

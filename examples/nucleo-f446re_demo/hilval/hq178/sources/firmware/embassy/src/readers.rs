@@ -18,7 +18,6 @@
 use core::future::Future;
 
 use embassy_futures::join::join;
-use embassy_stm32::gpio::Pull;
 use embassy_stm32::mode::{Async, Blocking};
 use embassy_stm32::peripherals;
 use embassy_stm32::usart::{
@@ -77,7 +76,11 @@ pub const MAX_CALL_WORDS: usize = 20;
 
 // ---- the peripherals every sequence borrows --------------------------------
 
-/// USART1 on PA9 (TX) and PA10 (RX), both AF7 and both free on a NUCLEO-F446RE.
+/// USART1 on PA9 (AF7), the single wire of half-duplex mode.
+///
+/// Every sequence is half duplex, so PA9 carries both directions and PA10 is
+/// never configured: it is held high from outside the chip on this board, which
+/// is why no frame of this job is put on it (`firmware/hq178/README.md`).
 ///
 /// USART2 is the console. The transmit DMA is DMA2 stream 7 and the receive DMA
 /// is DMA2 stream 2 (RM0390: USART1_TX and USART1_RX on channel 4 of those
@@ -85,7 +88,6 @@ pub const MAX_CALL_WORDS: usize = 20;
 pub struct Bus {
     pub usart: Peri<'static, peripherals::USART1>,
     pub tx: Peri<'static, peripherals::PA9>,
-    pub rx: Peri<'static, peripherals::PA10>,
     pub tx_dma: Peri<'static, peripherals::DMA2_CH7>,
     pub rx_dma: Peri<'static, peripherals::DMA2_CH2>,
 }
@@ -269,7 +271,24 @@ static RX_RING: Static<[u8; 512]> = Static::new([0; 512]);
 
 // ---- configuration ---------------------------------------------------------
 
-pub fn line(shape: &Shape, rx_pull: Pull) -> Config {
+/// The configuration every synthesized sequence uses: the same line settings,
+/// in single-wire half-duplex mode with the pin open drain.
+///
+/// Half duplex puts the receiver on PA9, the one line of this board the
+/// receiver demonstrably reads (the readback sequences carry every value of
+/// every pattern over it, while PA10 stays high under its own pull-down). Open
+/// drain means the transmitter never drives that line high, so the pull bits
+/// `synth.rs` writes decide where it rests whether the transmitter is enabled
+/// or not, and a frame can be put on it bit by bit.
+pub fn synth_line(shape: &Shape) -> Config {
+    let mut config = line(shape);
+    config.tx_config = OutputConfig::OpenDrainPullUp;
+    config
+}
+
+/// The line settings of one configuration. Every sequence is half duplex, so no
+/// receive pin is ever configured and `rx_pull` is left at its default.
+pub fn line(shape: &Shape) -> Config {
     let mut config = Config::default();
     config.baudrate = BAUD;
     config.data_bits = if shape.data_bits == 7 { DataBits::DataBits7 } else { DataBits::DataBits8 };
@@ -279,9 +298,6 @@ pub fn line(shape: &Shape, rx_pull: Pull) -> Config {
         Par::Odd => Parity::ParityOdd,
     };
     config.stop_bits = StopBits::STOP1;
-    // A synthesized frame is made by switching this pin's pull bits, so the
-    // line idles at mark through the pull-up while nothing drives it.
-    config.rx_pull = rx_pull;
     // The half-duplex pin is released whenever the transmitter is switched off,
     // which every read does, and the receiver stays enabled on it. Push-pull
     // alone leaves it floating there (`OutputConfig::PushPull` is "no internal
@@ -329,7 +345,7 @@ pub fn configuration_registers(bus: &mut Bus, shape: &Shape) -> (u32, u32) {
     let uart = Uart::new_blocking_half_duplex(
         bus.usart.reborrow(),
         bus.tx.reborrow(),
-        line(shape, Pull::None),
+        line(shape),
         HalfDuplexReadback::Readback,
     )
     .unwrap();
@@ -448,7 +464,7 @@ pub async fn blk_readback(bus: &mut Bus, shape: &Shape, pattern: &[u8], state: &
     let mut uart = Uart::new_blocking_half_duplex(
         bus.usart.reborrow(),
         bus.tx.reborrow(),
-        line(shape, Pull::None),
+        line(shape),
         HalfDuplexReadback::Readback,
     )
     .unwrap();
@@ -490,11 +506,11 @@ pub async fn blk_synth(
 ) {
     let use_u16 = wide(shape, Reader::Blk);
     state.begin(true, width_of(shape, Reader::Blk));
-    let mut uart = Uart::new_blocking(
+    let mut uart = Uart::new_blocking_half_duplex(
         bus.usart.reborrow(),
         bus.tx.reborrow(),
-        bus.rx.reborrow(),
-        line(shape, Pull::Up),
+        synth_line(shape),
+        HalfDuplexReadback::Readback,
     )
     .unwrap();
     let shown = SHOWN.get();
@@ -536,7 +552,7 @@ pub async fn asy_readback(bus: &mut Bus, shape: &Shape, pattern: &[u8], state: &
         bus.tx_dma.reborrow(),
         bus.rx_dma.reborrow(),
         Irqs,
-        line(shape, Pull::None),
+        line(shape),
         HalfDuplexReadback::Readback,
     )
     .unwrap();
@@ -597,14 +613,19 @@ pub async fn asy_synth(
 ) {
     let use_u16 = wide(shape, Reader::Asy);
     state.begin(true, width_of(shape, Reader::Asy));
-    let mut rx = UartRx::new(
+    // The transmit half is held for the whole sequence: dropping it would hand
+    // the pin back to the driver and take the line the stimulus drives with it.
+    let (_tx, mut rx) = Uart::new_half_duplex(
         bus.usart.reborrow(),
-        bus.rx.reborrow(),
+        bus.tx.reborrow(),
+        bus.tx_dma.reborrow(),
         bus.rx_dma.reborrow(),
         Irqs,
-        line(shape, Pull::Up),
+        synth_line(shape),
+        HalfDuplexReadback::Readback,
     )
-    .unwrap();
+    .unwrap()
+    .split();
     let shown = SHOWN.get();
     synth.prepare(shape, frames, bad);
     let start = Instant::now();
@@ -667,7 +688,7 @@ pub async fn idl_readback(bus: &mut Bus, shape: &Shape, pattern: &[u8], state: &
         bus.tx_dma.reborrow(),
         bus.rx_dma.reborrow(),
         Irqs,
-        line(shape, Pull::None),
+        line(shape),
         HalfDuplexReadback::Readback,
     )
     .unwrap();
@@ -720,14 +741,17 @@ pub async fn idl_synth(
 ) {
     let use_u16 = wide(shape, Reader::Idl);
     state.begin(true, width_of(shape, Reader::Idl));
-    let mut rx = UartRx::new(
+    let (_tx, mut rx) = Uart::new_half_duplex(
         bus.usart.reborrow(),
-        bus.rx.reborrow(),
+        bus.tx.reborrow(),
+        bus.tx_dma.reborrow(),
         bus.rx_dma.reborrow(),
         Irqs,
-        line(shape, Pull::Up),
+        synth_line(shape),
+        HalfDuplexReadback::Readback,
     )
-    .unwrap();
+    .unwrap()
+    .split();
     let shown = SHOWN.get();
     synth.prepare(shape, frames, bad);
     let start = Instant::now();
@@ -812,7 +836,7 @@ pub async fn buf_readback(bus: &mut Bus, shape: &Shape, pattern: &[u8], state: &
         Irqs,
         &mut tx_ring[..],
         &mut rx_ring[..],
-        line(shape, Pull::None),
+        line(shape),
         HalfDuplexReadback::Readback,
     )
     .unwrap();
@@ -874,14 +898,14 @@ pub async fn buf_synth(
     state.begin(true, width_of(shape, Reader::Buf));
     let tx_ring = TX_RING.get();
     let rx_ring = RX_RING.get();
-    let uart = BufferedUart::new(
+    let uart = BufferedUart::new_half_duplex(
         bus.usart.reborrow(),
         bus.tx.reborrow(),
-        bus.rx.reborrow(),
         Irqs,
         &mut tx_ring[..],
         &mut rx_ring[..],
-        line(shape, Pull::Up),
+        synth_line(shape),
+        HalfDuplexReadback::Readback,
     )
     .unwrap();
     let (_tx, mut rx) = uart.split();
@@ -928,14 +952,17 @@ pub async fn rng_synth(
     // the reader exists.
     let ring8 = RING8.get();
     let ring16 = RING16.get();
-    let rx = UartRx::new(
+    let (_tx, rx) = Uart::new_half_duplex(
         bus.usart.reborrow(),
-        bus.rx.reborrow(),
+        bus.tx.reborrow(),
+        bus.tx_dma.reborrow(),
         bus.rx_dma.reborrow(),
         Irqs,
-        line(shape, Pull::Up),
+        synth_line(shape),
+        HalfDuplexReadback::Readback,
     )
-    .unwrap();
+    .unwrap()
+    .split();
     let shown = SHOWN.get();
     synth.prepare(shape, frames, bad);
     // A wrong-parity sequence stops at its first timeout, which is its probe; a
