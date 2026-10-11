@@ -23,8 +23,10 @@ file, because this file is published with the images:
   build copies from. Never written to.
 * `HILVAL_ZEPHYR_WORKSPACE`: a Zephyr workspace without west: one directory per
   Zephyr tree a job builds against (a job names its tree), the modules
-  `modules/hal/stm32`, `modules/hal/cmsis_6` and `modules/hal/cmsis`, and a
-  Python environment `.venv` with Zephyr's build requirements. Never written to.
+  `modules/hal/stm32`, `modules/hal/cmsis_6` and `modules/hal/cmsis` (and
+  checkouts of other module revisions beside them, such as
+  `modules/hal/stm32-c9afc5e`), and a Python environment `.venv` with Zephyr's
+  build requirements. Never written to.
 * `CARGO_HOME` (optional): where `cargo` and its registry cache are; unset,
   `~/.cargo`. Rust builds are offline, so every crate they need must already be
   in that cache or in a source checkout.
@@ -43,6 +45,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +64,45 @@ RUST_TARGET = "thumbv7em-none-eabihf"
 ZEPHYR_BOARD = "nucleo_f446re"
 ZEPHYR_MODULES = ("hal/stm32", "hal/cmsis_6", "hal/cmsis")
 MICROPYTHON_BOARD = "NUCLEO_F446RE"
+
+# STM32duino (Arduino_Core_STM32): the source cache checkouts a build reads, the
+# variant directory below the core, and what the core's boards.txt and
+# platform.txt give the Nucleo-64 entry NUCLEO_F446RE with the IDE's default
+# menu choices (generic Serial, no USB, -Os, no debug symbols, newlib nano).
+STM32DUINO_CORE = "stm32duino-53560ef"
+STM32DUINO_API = "arduinocore-api-bce6000"
+STM32DUINO_CMSIS = "cmsis6-v6.3.0"
+STM32DUINO_VARIANT = "STM32F4xx/F446R(C-E)T"
+_STM32DUINO_CPU = ("-mcpu=cortex-m4", "-mfpu=fpv4-sp-d16", "-mfloat-abi=hard", "-mthumb")
+_STM32DUINO_DEFINES = (
+    "VECT_TAB_OFFSET=0x0",
+    "USE_HAL_DRIVER",
+    "USE_FULL_LL_DRIVER",
+    "EXTENDED_PIN_MODE",
+    "NDEBUG",
+    "STM32F4xx",
+    "ARDUINO=10607",
+    "ARDUINO_NUCLEO_64",
+    "ARDUINO_NUCLEO_F446RE",
+    "ARDUINO_ARCH_STM32",
+    'BOARD_NAME="NUCLEO_F446RE"',
+    'VARIANT_H="variant_NUCLEO_F446RE.h"',
+    "STM32F446xx",
+    "HAL_UART_MODULE_ENABLED",
+)
+_STM32DUINO_LINK = (
+    "--specs=nano.specs",
+    "-Wl,--defsym=LD_FLASH_OFFSET=0x0",
+    "-Wl,--defsym=LD_MAX_SIZE=524288",
+    "-Wl,--defsym=LD_MAX_DATA_SIZE=131072",
+    "-Wl,--check-sections",
+    "-Wl,--gc-sections",
+    "-Wl,--entry=Reset_Handler",
+    "-Wl,--unresolved-symbols=report-all",
+    "-Wl,--warn-common",
+    "-Wl,--no-warn-rwx-segments",
+    "-Wl,--build-id=none",
+)
 
 _PATH_TOKEN = re.compile(r"@([A-Z][A-Z0-9_]*)@")
 _JOBS = str(min(os.cpu_count() or 4, 8))
@@ -347,6 +389,7 @@ def zephyr_image(
     *,
     zephyr: str,
     cmake_args: Sequence[str] = (),
+    modules: Sequence[str] = ZEPHYR_MODULES,
 ) -> Path:
     """Build the Zephyr application `app` for nucleo_f446re against the tree `zephyr`; the stripped ELF's path.
 
@@ -356,13 +399,20 @@ def zephyr_image(
     toolchain is the GNU Arm Embedded one (`gnuarmemb`). The CMake build, its
     cache and Zephyr's user cache lie below the job's build directory; the
     workspace is only read.
+
+    `modules` are the module checkouts below the workspace's `modules/`. A tree
+    whose `west.yml` pins another revision of a module names that checkout
+    instead, for example `("hal/stm32-c9afc5e", "hal/cmsis_6", "hal/cmsis")`.
     """
     workspace = zephyr_workspace()
     base = workspace / zephyr
     if not (base / "VERSION").is_file() or not (base / "CMakeLists.txt").is_file():
         raise ToolchainError(f"the Zephyr workspace has no tree {zephyr!r}")
-    modules = [workspace / "modules" / module for module in ZEPHYR_MODULES]
     for module in modules:
+        if Path(module).is_absolute() or ".." in Path(module).parts:
+            raise ToolchainError(f"module {module!r} must be a path below the workspace's modules/")
+    module_dirs = [workspace / "modules" / module for module in modules]
+    for module in module_dirs:
         if not module.is_dir():
             raise ToolchainError(f"the Zephyr workspace has no module {module.relative_to(workspace).as_posix()}")
     python = workspace / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python3")
@@ -382,7 +432,7 @@ def zephyr_image(
             build.as_posix(),
             "-GNinja",
             f"-DBOARD={ZEPHYR_BOARD}",
-            f"-DZEPHYR_MODULES={';'.join(module.as_posix() for module in modules)}",
+            f"-DZEPHYR_MODULES={';'.join(module.as_posix() for module in module_dirs)}",
             "-DZEPHYR_TOOLCHAIN_VARIANT=gnuarmemb",
             f"-DGNUARMEMB_TOOLCHAIN_PATH={gcc.parent.parent.as_posix()}",
             f"-DPython3_EXECUTABLE={python.as_posix()}",
@@ -513,6 +563,173 @@ def micropython_image(
         timeout_s=1800,
     )
     return strip_debug(out / "build" / "firmware.elf", out / f"{name}.elf")
+
+
+def stm32duino_image(
+    job: str,
+    name: str,
+    sketch: Path,
+    *,
+    source: Path | None = None,
+    libraries: Sequence[str] = (),
+    defines: Sequence[str] = (),
+) -> Path:
+    """The STM32duino sketch in `sketch` built for the NUCLEO_F446RE; the stripped ELF's path.
+
+    The build does what the Arduino IDE does with the core's `boards.txt` and
+    `platform.txt` for the Nucleo-64 entry NUCLEO_F446RE and the default menu
+    choices: generic `Serial` on USART2 (PA2/PA3), no USB, `-Os`, no debug
+    symbols, newlib nano, the variant's clock setup. The core and ArduinoCore-API
+    go into an archive; the variant, the libraries and the sketch are linked as
+    objects, with the variant's linker script and the core's `.noinit` script.
+
+    `sketch` is a directory in the repository; its `.c`, `.cpp` and `.S` files,
+    also in subdirectories, are the sketch, compiled as written. An `.ino` file
+    is refused because the IDE's prototype generation is not reproduced: write
+    the sketch as `.cpp` that includes `<Arduino.h>`. The directory is on the
+    include path, so a `hal_conf_extra.h` there works as in the IDE.
+    `libraries` names libraries of the core besides SrcWrapper, which is always
+    built (`("IWatchdog",)`). `defines` (`"SERIAL_TX_BUFFER_SIZE=256"`) go to
+    every compile, where the IDE would read a `build_opt.h`.
+
+    `source` is the core: by default `HILVAL_SRC_CACHE/stm32duino-53560ef`, or a
+    `patched_copy` of it; the build only reads it. Its `cores/arduino/api` is a
+    git submodule that is empty there, so the build copies ArduinoCore-API at
+    the submodule's commit (`arduinocore-api-bce6000`) into its build directory.
+    The Cortex-M headers come from `cmsis6-v6.3.0`, the CMSIS_6 release the
+    platform names. The compiler is the configured Arm toolchain, not the IDE's
+    xPack GCC.
+    """
+    origin = Path(source) if source is not None else source_cache(STM32DUINO_CORE)
+    cmsis_root = source_cache(STM32DUINO_CMSIS)
+    sketch = Path(sketch).resolve()
+    if not sketch.is_relative_to(REPO_ROOT.resolve()) or not sketch.is_dir():
+        raise ToolchainError(f"the sketch {sketch.name!r} must be a directory inside the repository")
+    if any(sketch.rglob("*.ino")):
+        raise ToolchainError("the sketch has an .ino file; write it as .cpp that includes <Arduino.h>")
+    for library in libraries:
+        if not re.fullmatch(r"[A-Za-z0-9_]+", library) or library == "SrcWrapper":
+            raise ToolchainError(f"library {library!r} must be the name of one of the core's libraries besides SrcWrapper")
+    core = origin / "cores" / "arduino"
+    variant = origin / "variants" / STM32DUINO_VARIANT
+    system = origin / "system"
+    hal = system / "Drivers" / "STM32F4xx_HAL_Driver"
+    device = system / "Drivers" / "CMSIS" / "Device" / "ST" / "STM32F4xx"
+    wrapper = origin / "libraries" / "SrcWrapper"
+    library_dirs = {library: origin / "libraries" / library / "src" for library in ("SrcWrapper", *libraries)}
+    cmsis = cmsis_root / "CMSIS" / "Core" / "Include"
+    for directory in (core, variant, system / "STM32F4xx", hal, device, wrapper / "inc", cmsis, *library_dirs.values()):
+        if not directory.is_dir():
+            raise ToolchainError(f"the STM32duino build expects {directory.name!r} and the checkout has none")
+
+    out = build_dir(job, name)
+    api_root = out / "api-root"
+    api = api_root / "api"
+    shutil.copytree(source_cache(STM32DUINO_API), api, ignore=shutil.ignore_patterns(".git", ".github"))
+
+    # In the order platform.txt puts them: the core's extra includes, CMSIS, then
+    # the core, the variant and the libraries the IDE adds. `api-root` makes the
+    # core's `#include "api/ArduinoAPI.h"` find the copy.
+    include_dirs = [
+        sketch,
+        core / "avr",
+        core / "stm32",
+        api / "deprecated",
+        api / "deprecated-avr-comp",
+        wrapper / "inc",
+        wrapper / "inc" / "LL",
+        hal / "Inc",
+        hal / "Src",
+        system / "STM32F4xx",
+        cmsis,
+        device / "Include",
+        device / "Source",
+        device / "Source" / "Templates" / "gcc",
+        core,
+        api_root,
+        variant,
+        *library_dirs.values(),
+    ]
+    common = [
+        *_STM32DUINO_CPU,
+        *prefix_map_flags(out, origin, cmsis_root),
+        *(f"-D{define}" for define in (*_STM32DUINO_DEFINES, *defines)),
+        *(f"-I{directory.as_posix()}" for directory in include_dirs),
+    ]
+    c_flags = ["-Os", "-w", "-std=gnu17", "-ffunction-sections", "-fdata-sections", "--param", "max-inline-insns-single=500"]
+    cpp_flags = [
+        "-Os",
+        "-w",
+        "-std=gnu++17",
+        "-ffunction-sections",
+        "-fdata-sections",
+        "-fno-threadsafe-statics",
+        "--param",
+        "max-inline-insns-single=500",
+        "-fno-rtti",
+        "-fno-exceptions",
+        "-fno-use-cxa-atexit",
+    ]
+    gcc, gxx = arm_tool("gcc"), arm_tool("g++")
+
+    def sources(root: Path) -> list[Path]:
+        return sorted(
+            path
+            for path in root.rglob("*")
+            if path.suffix in (".c", ".cpp", ".S")
+            and path.is_file()
+            and not any(part.startswith(".") for part in path.relative_to(root).parts)
+        )
+
+    groups = {
+        "core": [(core, path) for path in sources(core)] + [(api, path) for path in sources(api)],
+        "variant": [(variant, path) for path in sources(variant)],
+        **{f"lib-{library}": [(directory, path) for path in sources(directory)] for library, directory in library_dirs.items()},
+        "sketch": [(sketch, path) for path in sources(sketch)],
+    }
+    if not groups["sketch"]:
+        raise ToolchainError("the sketch has no .c, .cpp or .S file")
+    compiles = []
+    objects: dict[str, list[Path]] = {}
+    for group, files in groups.items():
+        for root, path in files:
+            relative = "/".join(re.sub(r"[^A-Za-z0-9_.-]", "_", part) for part in path.relative_to(root).parts)
+            target = Path("obj", group, f"{relative}.o")
+            (out / target).parent.mkdir(parents=True, exist_ok=True)
+            flags = cpp_flags if path.suffix == ".cpp" else ["-x", "assembler-with-cpp"] if path.suffix == ".S" else c_flags
+            compiles.append([gxx if path.suffix == ".cpp" else gcc, *common, *flags, "-c", path.as_posix(), "-o", target.as_posix()])
+            objects.setdefault(group, []).append(target)
+    with ThreadPoolExecutor(max_workers=int(_JOBS)) as pool:
+        for _ in pool.map(lambda command: run(command, cwd=out), compiles):
+            pass
+
+    run([arm_tool("ar"), "rcsD", "core.a", *(target.as_posix() for target in objects["core"])], cwd=out)
+    linked = [target for group, targets in objects.items() if group != "core" for target in targets]
+    # One argument per line: the object list would otherwise approach Windows' command-line limit.
+    (out / "objects.rsp").write_text("\n".join(target.as_posix() for target in linked) + "\n", encoding="utf-8")
+    run(
+        [
+            gcc,
+            *_STM32DUINO_CPU,
+            "-Os",
+            *_STM32DUINO_LINK,
+            f"-Wl,--default-script={(variant / 'ldscript.ld').as_posix()}",
+            f"-Wl,--script={(system / 'ldscript.ld').as_posix()}",
+            "-o",
+            "obj/image.elf",
+            "-L.",
+            "-Wl,--start-group",
+            "@objects.rsp",
+            "core.a",
+            "-lc",
+            "-Wl,--end-group",
+            "-lm",
+            "-lgcc",
+            "-lstdc++",
+        ],
+        cwd=out,
+    )
+    return strip_debug(out / "obj" / "image.elf", out / f"{name}.elf")
 
 
 def libopencm3(job: str, *, targets: Sequence[str] = ("stm32/f4",), source: Path | None = None) -> Path:
