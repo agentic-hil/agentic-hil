@@ -227,7 +227,7 @@ jobs:
       # verify.
       - name: Upload the run evidence
         if: ${{ always() && steps.withhold.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nucleo-f446re-bench-evidence
           path: |
@@ -294,7 +294,7 @@ jobs:
       # probe's serial numbers and the machine's names withheld.
       - name: Upload the Ubuntu 22.04 tier's report and log
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bench-tier-ubuntu-22.04
           path: bench-results/ubuntu-22.04/
@@ -308,7 +308,7 @@ jobs:
 
       - name: Upload the Ubuntu 24.04 tier's report and log
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bench-tier-ubuntu-24.04
           path: bench-results/ubuntu-24.04/
@@ -322,7 +322,7 @@ jobs:
 
       - name: Upload the Debian 12 tier's report and log
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bench-tier-debian-12
           path: bench-results/debian-12/
@@ -336,7 +336,7 @@ jobs:
 
       - name: Upload the Fedora 44 tier's report and log
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bench-tier-fedora-44
           path: bench-results/fedora-44/
