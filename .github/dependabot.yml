@@ -32,6 +32,14 @@ updates:
     # pylink-square<2.0, so the 2.0.1 pull request could not resolve and every
     # hash-pinned install in the matrix failed. Mirror pyocd's ceiling the same
     # way and drop it once pyocd accepts pylink-square 2.
+    #
+    # tibs arrives through esptool's bitstring. bitstring 4.4.0 requires
+    # tibs<0.6, and bitstring 5, the first release past that, needs Python 3.11
+    # while the locks still cover 3.10, so the 1.1.0 pull request could not
+    # resolve and every hash-pinned install in the matrix failed. tibs has 0.x
+    # releases above the ceiling too, so a major-only rule would only move the
+    # next pull request to 0.12.0; the rule names the ceiling itself instead.
+    # Drop it once the locks move to bitstring 5.
     ignore:
       - dependency-name: "wrapt"
         update-types:
@@ -39,6 +47,9 @@ updates:
       - dependency-name: "pylink-square"
         update-types:
           - version-update:semver-major
+      - dependency-name: "tibs"
+        versions:
+          - ">=0.6"
     groups:
       python-dependencies:
         patterns:
