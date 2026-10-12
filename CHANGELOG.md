@@ -20,6 +20,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Fixed
 
+- STM32CubeProgrammer's refusal of an input file it cannot open, `Error: File does not exist: <name>`, now answers `config_file_not_found` with the steps for a missing input file. It read as a failed flash before. That refusal and a raw binary refused past the end of flash are recorded from STM32CubeProgrammer 2.23.0 on a real board, the classification tests replay both instead of the wording the documentation quotes, and the CubeProgrammer bench stage compares the flash refusal with its recording. (#516)
+
 - The Read the Docs build of the old documentation address, `https://agentic-hil.readthedocs.io/`, no longer builds a second copy of the documentation whose pages name that address as canonical. It writes a notice at every path the old site served instead: each names the matching page under `https://agentic-hil.github.io/docs/` as canonical, sends the browser there with the fragment kept, and links it, and an address the old site never served gets a 404 page that links the new site. `docs/release-strategy.md` maps every old page to its current page and gives the redirect rule that answers the same addresses with a 301.
 
 ## [0.24.0] - 2026-10-06
