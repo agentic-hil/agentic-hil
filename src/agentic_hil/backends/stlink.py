@@ -1255,7 +1255,13 @@ class STLinkBackend:
             return "flash_failed"
         if reports_reset_failure(output):
             return "reset_failed"
-        if contains_any(lower, ["can't find", "couldn't find", "couldn't open", "not found"]):
+        # `file does not exist` is STM32CubeProgrammer 2.23.0's own refusal of an
+        # input path it cannot open, `Error: File does not exist: firmware.elf`,
+        # recorded on the bench for the flash argv this backend builds
+        # (stm32cubeprogrammer_2_23_0_failure_recordings.json). Without it the
+        # refusal fell through to the failure words below and read as a failed
+        # flash (#516).
+        if contains_any(lower, ["can't find", "couldn't find", "couldn't open", "not found", "file does not exist"]):
             return "config_file_not_found"
         if tool == "flash_firmware" and contains_any(lower, FAILURE_WORDS):
             return "flash_failed"
