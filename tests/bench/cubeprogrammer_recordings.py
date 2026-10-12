@@ -8,6 +8,13 @@ The test compiles the project's demo without touching the board, asks the
 temporary bench configuration over MCP to use the fixed CubeProgrammer install,
 then probes and flashes the demo through one MCP server and one declared run.
 The product's own audit log is preserved in JUnit as a sanitized recording.
+
+A second test runs a flash the CLI refuses, a raw binary based past the end of
+the part's flash, through the MCP server on a copy of the tier's configuration,
+and compares the `Error:` lines it printed with the recording in
+tests/fixtures/stm32cubeprogrammer_2_23_0_failure_recordings.json, so a
+CubeProgrammer that words the refusal differently fails here before the
+replayed lines go stale.
 """
 
 from __future__ import annotations
@@ -15,14 +22,18 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Iterable
-from pathlib import Path
+from collections.abc import Iterable, Iterator
+from dataclasses import replace
+from pathlib import Path, PurePosixPath
 
 import pytest
+import yaml
 
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.report import overall_success
 
-from .conftest import BENCH_ONLY, DEMO_IMAGE, Bench, built_where_it_stands
+from .conftest import BENCH_ONLY, DEMO_IMAGE, Bench, built_where_it_stands, put_on_board
+from .test_bench_debug_sessions import blocking_incident
 from .test_bench_faults import Server
 
 pytestmark = [pytest.mark.bench, BENCH_ONLY]
@@ -30,6 +41,13 @@ pytestmark = [pytest.mark.bench, BENCH_ONLY]
 RECORDING_SCHEMA = "agentic-hil.cubeprogrammer-recording/v1"
 CUBEPROGRAMMER = Path("/opt/st/cubeprogrammer-2.23.0/bin/STM32_Programmer_CLI")
 BOOT_BANNER = "Hello World"
+FAILURE_RECORDINGS = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "stm32cubeprogrammer_2_23_0_failure_recordings.json").read_text(encoding="utf-8"))
+OUTSIDE_FLASH = FAILURE_RECORDINGS["recordings"]["flash_bin_outside_flash"]
+# The staged image and the address after it in the recorded argv: a raw binary
+# based past the end of the part's flash. The image keeps the recorded name, so
+# the lines the CLI prints about the file read the same.
+OUTSIDE_FLASH_IMAGE = "build/" + PurePosixPath(OUTSIDE_FLASH["argv"][OUTSIDE_FLASH["argv"].index("-w") + 1]).name
+OUTSIDE_FLASH_ADDRESS = OUTSIDE_FLASH["argv"][OUTSIDE_FLASH["argv"].index("-w") + 2]
 
 
 def require_cubeprogrammer() -> Path:
@@ -271,3 +289,78 @@ def test_cubeprogrammer_flashes_and_resets_demo_through_one_mcp_run(bench: Bench
                     assert isinstance(stopped, dict) and stopped.get("ok") is True, stopped
             finally:
                 server.close()
+
+
+def error_lines(transcript: str) -> list[str]:
+    """The lines STM32CubeProgrammer begins with `Error:`, the ones it says a run stopped on."""
+    return [line.strip() for line in transcript.splitlines() if line.strip().startswith("Error:")]
+
+
+@pytest.fixture
+def outside_flash_bench(bench: Bench) -> Iterator[Bench]:
+    """A copy of the tier's configuration on `type: stlink` under reset, with a flash address past the end of flash.
+
+    Beside the configuration `init` wrote, under this session's own root, and
+    removed afterwards. The tier's own configuration is never written by it, so
+    the test does not depend on running after the demo flash above, which
+    switches that configuration to CubeProgrammer itself."""
+    executable = require_cubeprogrammer()
+    document = bench.configuration()
+    entry = document["debuggers"][bench.debugger_name()]
+    entry["type"] = "stlink"
+    entry["executable"] = str(executable)
+    entry["connect_mode"] = "under_reset"
+    entry["flash_address"] = OUTSIDE_FLASH_ADDRESS
+    entry.pop("interface_cfg", None)
+    entry.pop("target_cfg", None)
+    variant = bench.config.parent / "bench-cubeprogrammer-failures.yaml"
+    assert not variant.exists(), f"refusing to overwrite an existing fixture config: {variant}"
+    variant.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    image = bench.project / OUTSIDE_FLASH_IMAGE
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(bytes(range(16)))
+    try:
+        yield replace(bench, config=variant)
+    finally:
+        image.unlink(missing_ok=True)
+        variant.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def demo_back_on_board(bench: Bench, firmware: Path) -> Iterator[None]:
+    """The demo back on the board and running once the refused flash is done with it.
+
+    CubeProgrammer prints its erase and download headers for the segment before
+    it gives up, so its words do not establish that nothing was written. When
+    the recording was taken the address lay in no sector of the part and the
+    demo booted and printed its banner afterwards; it is put back regardless,
+    through the tier's own plan runner."""
+    yield
+    report = put_on_board(bench, firmware)
+    if report.get("ok") is not True:
+        pytest.fail(f"the demo firmware could not be put back on the board after the refused CubeProgrammer flash: {report.get('summary')}", pytrace=False)
+
+
+def test_cubeprogrammer_refuses_a_bin_past_the_end_of_flash_in_the_recorded_words(outside_flash_bench: Bench, demo_back_on_board: None, tmp_path: Path) -> None:
+    server = Server(outside_flash_bench, tmp_path / "cubeprogrammer-failures-mcp.stderr")
+    try:
+        server.greet()
+        errored, result = server.call("flash_firmware", {"image_path": OUTSIDE_FLASH_IMAGE})
+    finally:
+        server.close()
+        # The refused flash stands as an incident, as every flash_failed does,
+        # unless the bench's own recovery policy has already settled it.
+        incident = blocking_incident(outside_flash_bench)
+        if incident is not None:
+            recovered = outside_flash_bench.run("recover", "--confirm-safe-state", "--quarantine-id", str(incident.get("quarantine_id") or ""))
+            assert recovered.returncode == 0, f"{recovered.stdout}{recovered.stderr}"
+
+    assert errored is True, result
+    assert result["ok"] is False, result
+    assert result["backend"] == "stlink", result
+    assert result["backend_error_type"] == "flash_failed", result
+    assert result["error_type"] == "flash_failed", result
+    assert result.get("remediation") == remediation_fields("flash_failed", "stlink").get("remediation"), result.get("remediation")
+    output = result["programmer_output"]
+    assert output["returncode"] == OUTSIDE_FLASH["returncode"], output
+    assert error_lines(output["stdout"] + output["stderr"]) == error_lines(OUTSIDE_FLASH["stdout"] + OUTSIDE_FLASH["stderr"]), output
