@@ -392,10 +392,10 @@ generated the plans. Agentic HIL carried out every step on the board: it
 flashed each image, reset the board and recorded the serial port until the
 firmware's last line, and no step reached the board any other way. The suite
 then asserted every value of the tables above against the recorded lines, and
-`results/summarize.py` reproduces the tables from the logs. The comment is
-posted only after a maintainer has checked that the run passed and that the
-rows above match the logs. No person has reviewed the firmware, the test suite
-or the analysis beyond that.
+`results/summarize.py` reproduces the tables from the logs. Our maintainer
+approved posting the comment; the check that the run passed and that the rows
+above match the logs was made by the agent that operates the pipeline, and no
+person has reviewed the firmware, the test suite or the analysis.
 
 ## Licensing
 
