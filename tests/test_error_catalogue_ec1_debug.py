@@ -34,10 +34,10 @@ import ast
 import json
 import re
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path
-from types import MappingProxyType, ModuleType
+from types import MappingProxyType, ModuleType, SimpleNamespace
 
 import pytest
 from conftest import DEFAULT_TEST_PERMISSIONS, FAKE_OPENOCD, FAKE_OPENOCD_ACCESS_DENIED, write_config
@@ -61,11 +61,12 @@ from test_debug_sessions import (
     stlink_dump_service,
 )
 from test_debug_sessions import debug_service as session_service
+from test_esptool_backend import esptool_config, write_application
 from test_gdbserver_sessions import pyocd_session_service, st_link_session_service
 from test_openocd_access_denied import HostOs
 
 from agentic_hil import debugger, elfsymbols, gdbmi, tools
-from agentic_hil.backends import common, gdbdebug, openocd, pyocd, stlink
+from agentic_hil.backends import common, esptool, gdbdebug, openocd, pyocd, stlink
 from agentic_hil.config import load_config
 from agentic_hil.gdbmi import GdbMiCommandResult
 from agentic_hil.knowledge import (
@@ -87,8 +88,13 @@ Pair = tuple[str, str | None]
 # Where the debug refusals are built, and whose remediation each one is.
 
 # Each backend module answers under its own name: that is the `backend` its
-# results carry, and the scope the service fills a refusal under.
-BACKEND_MODULES: dict[str, ModuleType] = {"openocd": openocd, "pyocd": pyocd, "stlink": stlink}
+# results carry, and the scope the service fills a refusal under. esptool is
+# one of them and not one of `BACKENDS`: it flashes and resets through a ROM
+# bootloader and opens no debug session, so nothing below that is about the
+# typed sessions or their GDB server is read for it.
+BACKEND_MODULES: dict[str, ModuleType] = {"openocd": openocd, "pyocd": pyocd, "stlink": stlink, "esptool": esptool}
+# The scope of a refusal every backend answers with, esptool's included.
+EVERY_BACKEND: tuple[str, ...] = tuple(BACKEND_MODULES)
 
 # `GdbDebugSessions` runs the typed debug sessions, and every backend constructs
 # it under its own name (#624, pinned below), so a refusal its methods build is
@@ -121,7 +127,7 @@ GDBDEBUG_CONSTANT_SCOPES: dict[str, tuple[str, ...]] = {
 COMMON_FUNCTION_SCOPES: dict[str, tuple[str, ...]] = {
     # The one backend that opens no session where no GDB server is found.
     "debug_session_unsupported": ("stlink",),
-    "reset_init_unsupported": ("pyocd", "stlink"),
+    "reset_init_unsupported": ("esptool", "pyocd", "stlink"),
 }
 
 # The debug paths of the tool service. Each answers before any backend is
@@ -625,7 +631,7 @@ def scopes_of_site(source: Source, node: ast.expr, values: frozenset[str | None]
 
 # The debugger front end, the GDB/MI client and the ELF reader build no refusal
 # today; scanning them makes one that appears later fail `attach_scopes`.
-SCANNED_MODULES: tuple[ModuleType, ...] = (gdbdebug, openocd, pyocd, stlink, common, tools, debugger, gdbmi, elfsymbols)
+SCANNED_MODULES: tuple[ModuleType, ...] = (gdbdebug, openocd, pyocd, stlink, esptool, common, tools, debugger, gdbmi, elfsymbols)
 
 
 def scan(planted: Mapping[ModuleType, str] = MappingProxyType({})) -> dict[Pair, tuple[str, ...]]:
@@ -680,34 +686,38 @@ INVENTORY_BY_TYPE: dict[str, tuple[str | None, ...]] = {
     "breakpoints_not_removed": ("pyocd", "stlink"),
     "cleanup_failed": BACKENDS,
     "cleanup_required": (None,),
+    # esptool reaches the chip through the com_ports entry its debugger entry
+    # names, and through nothing else (esptool.py).
+    "com_port_not_configured": ("esptool",),
+    "com_port_open_failed": ("esptool",),
     "config_file_not_found": ("stlink",),
     "debug_session_setup_failed": BACKENDS,
     "debugger_command_rejected": ("openocd",),
     "debugger_config_not_found": ("openocd",),
-    "debugger_error": BACKENDS,
+    "debugger_error": EVERY_BACKEND,
     # common.py merges the bare entry beside it, for every backend alike.
     "debugger_not_executable": (None,),
-    "debugger_not_found": BACKENDS,
+    "debugger_not_found": EVERY_BACKEND,
     "detach_resume_not_confirmed": BACKENDS,
     "flash_erase_failed": BACKENDS,
-    "flash_failed": BACKENDS,
+    "flash_failed": EVERY_BACKEND,
     "gdb_async_unsupported": BACKENDS,
     # A missing GDB merges under the GDB's state, not the backend's (gdbdebug.py).
     "gdb_not_found": (None, gdbdebug.GDB_AUTODETECTED_MISSING_SCOPE, gdbdebug.GDB_NOT_CONFIGURED_SCOPE),
     "gdb_start_failed": BACKENDS,
     "halt_not_confirmed": BACKENDS,
-    "invalid_argument": (None, *BACKENDS),
+    "invalid_argument": (None, *EVERY_BACKEND),
     "memory_read_failed": BACKENDS,
     # The tool service merges a scope of its own for a call no probe can be
     # routed to: no debugger bound, or no probe named among several.
-    "not_supported": ("openocd", "openocd_probe_selection", "pyocd", "stlink", "unbound_debugger", "unnamed_probe"),
+    "not_supported": ("esptool", "openocd", "openocd_probe_selection", "pyocd", "stlink", "unbound_debugger", "unnamed_probe"),
     "output_write_failed": BACKENDS,
     # The permission helpers merge the bare entry, or a scope of their own: the
     # execution grant a debug_continue needs, and a granted key that blocks.
     "permission_denied": (None, "allow_debug_execution", EXCLUSIVE_PERMISSION_SCOPE, *BACKENDS),
     "probe_discovery_failed": BACKENDS,
     "probe_server_open_failed": ("stlink",),
-    "reset_failed": BACKENDS,
+    "reset_failed": EVERY_BACKEND,
     "resource_busy": (None,),
     "resource_quarantined": BACKENDS,
     "session_already_active": BACKENDS,
@@ -720,12 +730,12 @@ INVENTORY_BY_TYPE: dict[str, tuple[str | None, ...]] = {
     "symbol_source_changed": ("pyocd", "stlink"),
     "symbol_source_not_available": ("pyocd", "stlink"),
     "target_exception": BACKENDS,
-    "target_not_detected": BACKENDS,
-    "target_state_unconfirmed": ("openocd", "stlink"),
-    "target_type_invalid": ("pyocd",),
-    "timeout": BACKENDS,
+    "target_not_detected": EVERY_BACKEND,
+    "target_state_unconfirmed": ("esptool", "openocd", "stlink"),
+    "target_type_invalid": ("esptool", "pyocd"),
+    "timeout": EVERY_BACKEND,
     "unexpected_breakpoint": BACKENDS,
-    "verify_failed": BACKENDS,
+    "verify_failed": EVERY_BACKEND,
 }
 INVENTORY = frozenset((error_type, scope) for error_type, scopes in INVENTORY_BY_TYPE.items() for scope in scopes)
 
@@ -751,12 +761,40 @@ NEVER_REACHED: dict[Pair, str] = {}
 
 EXCLUDED: frozenset[Pair] = frozenset(OWNED_ELSEWHERE) | SILENT | frozenset(NEVER_REACHED)
 
+# The esptool backend's refusals, each written under its own key with the
+# backend: a serial port where the others have a probe, a ROM bootloader where
+# they have a debug interface, and an auto-reset circuit on DTR and RTS where
+# they have a reset line.
+ESPTOOL_WRITTEN = (
+    "com_port_not_configured",
+    "com_port_open_failed",
+    "debugger_error",
+    "debugger_not_found",
+    "flash_failed",
+    "not_supported",
+    "reset_failed",
+    "target_not_detected",
+    "target_state_unconfirmed",
+    "target_type_invalid",
+    "timeout",
+    "verify_failed",
+)
+
 # Pairs the bare key cannot answer, each with why: the scoped key has to exist.
 OWN_KEY_REQUIRED: dict[tuple[str, str], str] = {
     ("not_supported", "openocd"): "no bare `not_supported` is true for every refusal of that name, and the other backends' keys are about debug sessions",
     **{("audit_broken", backend): "the bare key is the coordination ledger's, which #646 writes; this is the debug session's own evidence" for backend in BACKENDS},
     **{("debugger_not_found", backend): "the executable that is missing, and where it comes from, is each backend's own" for backend in BACKENDS},
     **{("timeout", backend): "a GDB/MI session that stopped answering and a command-line tool that ran out of time are read differently" for backend in BACKENDS},
+    **{
+        (error_type, "esptool"): "esptool reaches the chip through its ROM bootloader over a serial port, and what the other keys say of a probe, a debug server or SWD is not true of it"
+        for error_type in ESPTOOL_WRITTEN
+        if not error_type.startswith("com_port_")
+    },
+    # The bare entries of these two are the COM tools': a `port_id` a call
+    # names, and a session's own open.
+    ("com_port_not_configured", "esptool"): "the bare entry is about the `port_id` a COM tool is called with; here the debugger entry's own `com_port` is missing",
+    ("com_port_open_failed", "esptool"): "the bare entry is a COM session's open; here esptool could not open the port, and a COM session of this server would have been refused before it ran",
 }
 
 # Bare keys this area writes. Each is what every producer of the type falls
@@ -785,6 +823,7 @@ WRITTEN_KEYS: frozenset[str] = frozenset(
         *(f"{error_type}:{backend}" for error_type in ("timeout", "debugger_not_found") for backend in BACKENDS),
         "not_supported:openocd",
         *(f"audit_broken:{backend}" for backend in BACKENDS),
+        *(f"{error_type}:esptool" for error_type in ESPTOOL_WRITTEN),
         *BARE_KEY_REQUIRED,
         "breakpoint_reconciliation_failed",
         "breakpoints_not_removed",
@@ -820,6 +859,8 @@ WRITTEN_HERE: frozenset[Pair] = frozenset(
         # The debug sessions those two open (#624).
         *(("breakpoints_not_removed", backend) for backend in ("pyocd", "stlink")),
         *(("audit_broken", backend) for backend in BACKENDS),
+        # The esptool backend, written with it.
+        *((error_type, "esptool") for error_type in ESPTOOL_WRITTEN),
     }
 )
 
@@ -1056,7 +1097,7 @@ def test_a_shared_refusal_builder_answers_under_the_backend_that_calls_it(functi
     assert _parameters(function)[0].arg == "backend_name"
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("backend", sorted(BACKEND_MODULES))
 def test_each_backend_publishes_what_its_own_table_maps(backend: str) -> None:
     """What `MAPPERS` reads into the scan: the backend's table, applied and nothing else."""
     (function,) = source_of(BACKEND_MODULES[backend]).functions["_public_error_type"]
@@ -1250,6 +1291,112 @@ CONTRACTS: dict[str, Contract] = {
     # before GDB detaches, the deletes and the list read back before the end;
     # the stop then holds the session like a halt it could not confirm.
     "breakpoints_not_removed": Contract(means=(r"breakpoints_removed_confirmed",), steps=(r"probe_target",), avoid=(r"debug_stop_session",), never=(RETRIED_STOP,)),
+    # The esptool backend (esptool.py), which reaches the chip through its ROM
+    # bootloader over a serial port and opens no debug session.
+    # ESPTOOL_NOT_FOUND and `_check_version`: the lookup and the version gate,
+    # both before the port is opened. `executable` is a description key.
+    "debugger_not_found:esptool": Contract(
+        means=(r"esptool_not_found", r"esptool_version_unsupported", r"opens no port"),
+        steps=(r"backend_error_type", r"\bexecutable\b", r"\bPATH\b|install", r"agentic-hil doctor"),
+        order=(r"backend_error_type", r"install", r"agentic-hil doctor"),
+        beside=((r"project_config_set", r"allow_config_description_write"),),
+        avoid=(r"workspace", r"by hand"),
+    ),
+    # `_check_version`: the version check's own wait, which opens no port
+    # (NOT_CONTACTED); `_run_esptool`: a port command killed at its deadline
+    # (CONTACT_UNPROVEN). project_config_set does not write `timeout_s`.
+    "timeout:esptool": Contract(
+        means=(r"version check", r"target_contacted", r"ROM bootloader"),
+        steps=(STATE_FIELDS, TIMEOUT_CEILING, r"probe_target"),
+        order=(STATE_FIELDS, r"probe_target"),
+        avoid=(RETRY, r"by hand"),
+        never=(r"project_config_set",),
+    ),
+    # `_unsupported_debug_tool`, `list_probes` and `reset_target` mode init:
+    # no probe to list and no debug interface to the CPU. Mode halt leaves the
+    # chip in its ROM bootloader, which is not a halted core.
+    "not_supported:esptool": Contract(
+        means=(r"debugger_probes_list", r"typed-debug", r"\binit\b", r"Nothing was sent"),
+        steps=(r"com_session_start", r"OpenOCD", r"unavailable"),
+        beside=((r"\bhalt\b", r"ROM bootloader"),),
+        avoid=(r"yourself", r"halted core"),
+    ),
+    # `_classify_output` (an empty region read back, or a failure line during a
+    # flash) and `_unconfirmed_backend_error_type` (exit 0 without every marker).
+    "flash_failed:esptool": Contract(
+        means=(r"Write failed, the written flash region is empty", r"flash_unconfirmed", r"Hash of data verified"),
+        steps=(r"programmer_output", r"flash_address", r"indeterminate"),
+        order=(r"programmer_output", r"flash_address", r"indeterminate"),
+        beside=((RETRY, r"cause is fixed"),),
+        avoid=(r"erase-flash", r"--force", r"partial transcript"),
+        never=(r"erase-flash|--erase-all",),
+    ),
+    # `_classify_output`: the MD5 esptool read back after the write.
+    "verify_failed:esptool": Contract(
+        means=(r"MD5 of file does not match data in flash", r"indeterminate"),
+        steps=(r"programmer_output", r"power", r"operator", r"indeterminate"),
+        order=(r"programmer_output", r"power", r"operator"),
+        beside=((RETRY, r"power"),),
+        avoid=(r"report the board as flashed", r"erase-flash"),
+    ),
+    # `_classify_output`: the connect lines esptool fails on. The control lines
+    # were driven, so the result is CONTACT_UNPROVEN (`_failure_result`).
+    "target_not_detected:esptool": Contract(
+        means=(r"Failed to connect to", r"Wrong boot mode detected", r"No serial data received", r"DTR and RTS"),
+        steps=(r"com_ports_list", r"\bBOOT\b|IO0", r"powered", r"probe_target"),
+        order=(r"com_ports_list", r"probe_target"),
+        avoid=(r"whichever port", r"--port"),
+    ),
+    # probe_target's exit 0 without every marker (`_unconfirmed_backend_error_type`).
+    "target_state_unconfirmed:esptool": Contract(
+        means=(r"status 0", r"Chip type:", r"Detected flash size:", r"matched_success_text"),
+        steps=(r"operation_result", r"\bexecutable\b", r"debugger_info", r"reset_target"),
+        order=(r"operation_result", r"reset_target"),
+        avoid=(r"target_not_detected", r"later probe"),
+    ),
+    # `_classify_output`: click refused `--chip`, or the chip answered as another
+    # family. project_config_set does not write `target_type`.
+    "target_type_invalid:esptool": Contract(
+        means=(r"chip_argument_invalid", r"chip_mismatch", r"Wrong chip argument"),
+        steps=(r"backend_error_type", r"target_type", r"operator", r"project_config_reload_description", r"agentic-hil doctor"),
+        order=(r"backend_error_type", r"target_type", r"agentic-hil doctor"),
+        avoid=(r"whatever the chip reported", r"--chip"),
+        never=(r"project_config_set",),
+    ),
+    # `_classify_output`: the port would not open. A COM session of this server
+    # on the same port is refused before esptool starts (tools.py,
+    # `_name_the_session_holding_the_port`).
+    "com_port_open_failed:esptool": Contract(
+        means=(r"Could not open", r"busy or doesn't exist", r"not\s+contacted"),
+        steps=(r"programmer_output", r"device_busy", r"dialout", r"com_ports_list"),
+        order=(r"programmer_output", r"device_busy"),
+        avoid=(r"another port", r"root|sudo"),
+    ),
+    # `_classify_output` (a failure line during a reset) and the exit 0 without
+    # the `--after` line. probe_target needs allow_reset on this backend.
+    "reset_failed:esptool": Contract(
+        means=(r"flash-id", r"--before=default-reset", r"reset_unconfirmed"),
+        steps=(STATE_FIELDS, r"probe_target", r"allow_reset", r"DTR and RTS"),
+        order=(STATE_FIELDS, r"probe_target"),
+        beside=((r"probe_target", r"allow_reset"),),
+        avoid=(r"flash_firmware|reset_target", RETRY),
+    ),
+    # `_classify_output`'s fallthrough, click's other usage errors, and
+    # `_workdir_unavailable`.
+    "debugger_error:esptool": Contract(
+        means=(r"unknown_debugger_error", r"usage_error", r"esptool_workdir_unavailable"),
+        steps=(r"log_path|programmer_output", r"classify_last_error", r"debugger_info", r"TMPDIR", STATE_FIELDS),
+        order=(r"log_path|programmer_output", r"classify_last_error"),
+        avoid=(RETRY,),
+    ),
+    # `_run_esptool`: a backend handed a configuration nobody validated.
+    # project_config_set does not write `com_port`.
+    "com_port_not_configured:esptool": Contract(
+        means=(r"debuggers\.<name>\.com_port", r"config_invalid", r"Nothing was opened"),
+        steps=(r"operator", r"project_config_reload_description", r"agentic-hil doctor"),
+        avoid=(r"--port",),
+        never=(r"project_config_set",),
+    ),
 }
 
 FORBIDDEN_CHARACTERS = tuple(chr(code) for code in (0x2013, 0x2014, 0x2192))
@@ -1770,8 +1917,43 @@ def listed_on_an_adapter_without_usb_identity(tmp_path: Path, monkeypatch: pytes
     return call(config_for(tmp_path, "openocd", FAKE_OPENOCD, interface_cfg="interface/cmsis-dap.cfg"), "debugger_probes_list")
 
 
+# -- the esptool backend, against the suite's fake esptool
+
+
+def esptool_call(tool: str, arguments: dict | None = None, *, fake: Mapping[str, str] = MappingProxyType({}), application: bool = False, **config: object) -> Callable[[Path, pytest.MonkeyPatch], dict]:
+    """`tool` on an esptool entry, with the fake told by `fake` what esptool says (fake_esptool.py)."""
+
+    def provoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+        for name, value in fake.items():
+            monkeypatch.setenv(f"AGENTIC_HIL_FAKE_ESPTOOL_{name}", value)
+        if application:
+            write_application(tmp_path)
+        return call(esptool_config(tmp_path, **config), tool, arguments or {})
+
+    return provoke
+
+
+def esptool_not_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    return call(esptool_config(tmp_path, debugger_executable=tmp_path / "not-installed" / "esptool.exe"), "debugger_info")
+
+
+def esptool_without_a_working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    monkeypatch.setattr(esptool, "tempfile", SimpleNamespace(mkdtemp=raises(OSError("injected: no temporary directory"))))
+    return call(esptool_config(tmp_path), "probe_target")
+
+
+def esptool_handed_an_entry_without_its_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """The backend given an esptool entry no loader validated: no com_ports entry named."""
+    config = esptool_config(tmp_path)
+    unvalidated = replace(config, debugger=replace(config.debugger, com_port=None, com_port_config=None))
+    return refused_by(AgenticHILToolService(config, backend=esptool.EsptoolBackend(unvalidated)), ("probe_target", {}))
+
+
 GAVE_UP = "Error: the tool gave up and said nothing about why\n"
 RESET_REFUSED = "Error: failed to reset the target\n"
+# click's answer to an option esptool does not know, printed before esptool runs.
+ESPTOOL_USAGE_ERROR = "Usage: esptool [OPTIONS] COMMAND [ARGS]...\nTry 'esptool -h' for help.\n\nError: No such option: --frobnicate\n"
+FLASHED_APPLICATION = {"image_path": "build/app.bin"}
 
 
 @dataclass(frozen=True)
@@ -1857,6 +2039,28 @@ REFUSALS = [
     Refusal("debugger_probes_list", "probe_discovery_failed", "pyocd", backend_call("pyocd", FAKE_TRANSCRIPT, "debugger_probes_list", stderr="boom\n")),
     Refusal("debugger_probes_list", "probe_discovery_failed", "stlink", backend_call("stlink", FAKE_TRANSCRIPT, "debugger_probes_list", stdout="nothing this listing knows\n", stderr="")),
     Refusal("debugger_probes_list", "not_supported", "openocd", listed_on_an_adapter_without_usb_identity),
+    # the esptool backend, which reaches the chip through its ROM bootloader
+    Refusal("debugger_info", "debugger_not_found", "esptool", esptool_not_installed),
+    Refusal("debugger_info", "debugger_not_found", "esptool", esptool_call("debugger_info", fake={"VERSION": "4.8.1"})),
+    Refusal("debugger_info", "timeout", "esptool", esptool_call("debugger_info", fake={"VERSION_HANG": "1"}, timeout_s=1)),
+    Refusal("probe_target", "timeout", "esptool", esptool_call("probe_target", fake={"SCENARIO": "hang"}, timeout_s=1)),
+    Refusal("debugger_probes_list", "not_supported", "esptool", esptool_call("debugger_probes_list")),
+    Refusal("reset_target", "not_supported", "esptool", esptool_call("reset_target", {"mode": "init"})),
+    Refusal("debug_get_session_status", "not_supported", "esptool", esptool_call("debug_get_session_status")),
+    Refusal("probe_target", "com_port_open_failed", "esptool", esptool_call("probe_target", fake={"SCENARIO": "port_busy"})),
+    Refusal("probe_target", "target_not_detected", "esptool", esptool_call("probe_target", fake={"SCENARIO": "no_serial_data"})),
+    Refusal("probe_target", "target_state_unconfirmed", "esptool", esptool_call("probe_target", fake={"SCENARIO": "silent"})),
+    Refusal("probe_target", "target_type_invalid", "esptool", esptool_call("probe_target", fake={"CHIP": "ESP32-S3"}, target_type="esp32")),
+    Refusal("probe_target", "target_type_invalid", "esptool", esptool_call("probe_target", target_type="esp99")),
+    Refusal("probe_target", "debugger_error", "esptool", esptool_call("probe_target", fake={"STDERR": GAVE_UP})),
+    Refusal("probe_target", "debugger_error", "esptool", esptool_call("probe_target", fake={"STDERR": ESPTOOL_USAGE_ERROR, "EXIT": "2"})),
+    Refusal("probe_target", "debugger_error", "esptool", esptool_without_a_working_directory),
+    Refusal("probe_target", "com_port_not_configured", "esptool", esptool_handed_an_entry_without_its_port),
+    Refusal("flash_firmware", "verify_failed", "esptool", esptool_call("flash_firmware", FLASHED_APPLICATION, fake={"SCENARIO": "verify_mismatch"}, application=True)),
+    Refusal("flash_firmware", "flash_failed", "esptool", esptool_call("flash_firmware", FLASHED_APPLICATION, fake={"SCENARIO": "write_empty"}, application=True)),
+    Refusal("flash_firmware", "flash_failed", "esptool", esptool_call("flash_firmware", FLASHED_APPLICATION, fake={"SCENARIO": "silent"}, application=True)),
+    Refusal("reset_target", "reset_failed", "esptool", esptool_call("reset_target", {"mode": "run"}, fake={"SCENARIO": "stopped_responding"})),
+    Refusal("reset_target", "reset_failed", "esptool", esptool_call("reset_target", {"mode": "run"}, fake={"SCENARIO": "silent"})),
 ]
 
 

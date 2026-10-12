@@ -138,8 +138,12 @@ def create_debugger_backend(config: AgenticHILConfig) -> DebuggerBackend:
         from agentic_hil.backends.pyocd import PyOCDBackend
 
         return PyOCDBackend(config)
+    if config.debugger.type == "esptool":
+        from agentic_hil.backends.esptool import EsptoolBackend
+
+        return EsptoolBackend(config)
     raise ConfigError(
         "config_invalid",
         "Unsupported debugger.type.",
-        {"field": f"debuggers.{config.debugger_id}.type", "value": config.debugger.type, "allowed_values": ["openocd", "stlink", "pyocd"]},
+        {"field": f"debuggers.{config.debugger_id}.type", "value": config.debugger.type, "allowed_values": ["openocd", "stlink", "pyocd", "esptool"]},
     )

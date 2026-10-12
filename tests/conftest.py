@@ -244,6 +244,12 @@ FAKE_PYOCD_SILENT_READ = ROOT / "tests" / "fixtures" / "fake_pyocd_silent_read.p
 FAKE_PYOCD_UNKNOWN_TARGET = ROOT / "tests" / "fixtures" / "fake_pyocd_unknown_target.py"
 FAKE_PYOCD_ERASE_REFUSED = ROOT / "tests" / "fixtures" / "fake_pyocd_erase_refused.py"
 FAKE_PYOCD_HALT_RECORDED = ROOT / "tests" / "fixtures" / "fake_pyocd_halt_recorded.py"
+FAKE_ESPTOOL = ROOT / "tests" / "fixtures" / "fake_esptool.py"
+# The serial line an esptool test reaches its board through. The device exists
+# nowhere, so a run that got past the fake would find nothing to reset, and the
+# entry names no hardware, so nothing enumerates the host's ports to check it.
+ESPTOOL_TEST_PORT = "COM250"
+ESPTOOL_COM_PORTS_YAML = f'com_ports:\n  esp:\n    device: "{ESPTOOL_TEST_PORT}"\n    baudrate: 115200\n'
 FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"
 
 
@@ -499,6 +505,22 @@ def _no_host_st_link_gdb_server(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_host_esptool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `type: esptool` entry finds no esptool on the machine running the suite.
+
+    With no executable configured, the esptool backend looks for the one installed
+    beside this package, then on PATH. The development environment installs the
+    `esptool` extra, so every esptool test that configured no fake would
+    otherwise run the real esptool against whatever serial port the test named,
+    and an ESP32 board plugged into a developer's machine would be reset by the
+    suite. Both names, because the backend imports the finder and the
+    configuration's pin reads it from its home module. A test about discovery
+    patches these names itself, after this one."""
+    monkeypatch.setattr("agentic_hil.backends.common.find_esptool", lambda: None)
+    monkeypatch.setattr("agentic_hil.backends.esptool.find_esptool", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_host_stlink_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """A session on the stlink backend finds no stlink-server on the machine running the suite.
 
@@ -628,6 +650,9 @@ def write_config(
     # Omitted by default like connect_mode: every file written before typed
     # debug sessions reached STM32CubeProgrammer never named it.
     gdb_server_executable: Path | str | None = None,
+    # The com_ports entry an esptool debugger names; omitted unless given, and
+    # refused by the loader on every other type.
+    com_port: str | None = None,
     config_path: Path | None = None,
     auto_recover: str | None = None,
     recovery_max_attempts: int | None = None,
@@ -639,7 +664,7 @@ def write_config(
     workspace_root = (workspace_root or directory).resolve()
     state_root = (state_root or Path(os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_STATE_HOME") or directory.parent / "user-state") / "agentic-hil").resolve()
     if debugger_executable is None:
-        fake_by_type = {"stlink": FAKE_STLINK, "pyocd": FAKE_PYOCD}
+        fake_by_type = {"stlink": FAKE_STLINK, "pyocd": FAKE_PYOCD, "esptool": FAKE_ESPTOOL}
         debugger_executable = fake_by_type.get(debugger_type, FAKE_OPENOCD)
     if allow_all_symbols is None:
         allow_all_symbols = allowed_symbols is None
@@ -656,6 +681,7 @@ def write_config(
         "timeout_s": timeout_s,
         **({"connect_mode": connect_mode} if connect_mode is not None else {}),
         **({"gdb_server_executable": Path(gdb_server_executable).as_posix() if isinstance(gdb_server_executable, Path) else gdb_server_executable} if gdb_server_executable is not None else {}),
+        **({"com_port": com_port} if com_port is not None else {}),
     }
     # Omitted entirely by default, so the common test config exercises the same
     # "policy was never named" path a config written before recovery existed has.
@@ -841,7 +867,9 @@ def section_yaml(section: str, supplied: str, grants: dict[str, bool], extra: di
         # a collision sets matching probe_ids itself; a test that wants the
         # missing-probe_id refusal passes auto_probe_ids=False.
         for index, (name, entry) in enumerate(entries.items()):
-            if entry.get("probe_id") is None:
+            # Not an esptool entry, which has no probe and is refused one: its
+            # identity is the com_ports entry it names.
+            if entry.get("probe_id") is None and entry.get("type") != "esptool":
                 entry["probe_id"] = f"TESTPROBE{index}-{name}"
     return yaml.safe_dump({section: entries}, sort_keys=False, default_flow_style=False)
 

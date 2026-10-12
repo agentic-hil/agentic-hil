@@ -14,7 +14,6 @@ from agentic_hil.bench import (
     DeviceBusyError,
     DeviceWaitStoppedError,
     _LifetimeLock,
-    fold_resource_name,
     is_physical_resource,
     physical_resources,
     utc_now_iso,
@@ -935,11 +934,12 @@ class HardwareCoordinator:
         normalized = sorted(set(resource for resource in lock_keys(resources) if resource))
         if not normalized:
             raise ValueError("At least one physical resource is required.")
-        # A run's declaration is checked against each device's own key and each
-        # name folded as it came, not against every name taken below: one of
-        # those is read from the host, and a link's node can appear after the
-        # run began (see `UartDevice.lock_keys`). The lease still takes them all.
-        claimed = sorted({item.lock_key if isinstance(item, Device) else fold_resource_name(item) for item in resources if isinstance(item, Device) or (isinstance(item, str) and item)})
+        # A run's declaration is checked against the names each device declares
+        # and each name folded as it came, not against every name taken below:
+        # one of those is read from the host, and a link's node can appear after
+        # the run began (see `UartDevice.lock_keys`). The lease still takes them
+        # all.
+        claimed = sorted({key for key in declared_keys(resources) if key})
         with self._guard:
             self._require_open()
             self.settle_external_recovery()
@@ -2930,6 +2930,18 @@ def debugger_effect_resources(config: AgenticHILConfig) -> tuple[str, ...]:
     # here, or a flash under `physical:<resource_id>` would leave a bootstrap read
     # elsewhere free to take `probe:<serial>` and connect underneath it.
     return (DEBUGGER_DISCOVERY_RESOURCE, *_bound_debugger_device(config).lock_keys)
+
+
+def debugger_effect_devices(config: AgenticHILConfig) -> tuple[Device | str, ...]:
+    # What a call driving the debugger hands `acquire`: the same names, with the
+    # debugger left a device so that a run's declaration is checked against the
+    # names it declares rather than every name it is held under. An esptool
+    # entry is also held under the node the host resolves its port's name to
+    # (`UartDevice.lock_keys`), and no run declares that one: spelled out, it
+    # refused a run's own flash as undeclared whenever the port was configured
+    # by a link. A run never declares this mix (`begin_run` refuses one), so a
+    # bare call's own run keeps declaring the names.
+    return (DEBUGGER_DISCOVERY_RESOURCE, _bound_debugger_device(config))
 
 
 def com_resource(config: AgenticHILConfig, port_id: str) -> str:

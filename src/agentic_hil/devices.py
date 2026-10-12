@@ -130,8 +130,9 @@ class Device:
     def lock_keys(self) -> tuple[str, ...]:
         """Every machine-wide name that must be held to hold this unit.
 
-        ``lock_key`` is the one canonical identity: what a set dedups on, what a
-        call inside a run is checked against, what config validation mirrors.
+        ``lock_key`` is the one canonical identity: what a set dedups on and
+        what config validation mirrors; a call inside a run is checked against
+        ``declared_keys``, which always holds it.
         This is the set the mutex actually takes, and for most devices it is just
         that one key; a `device_busy` refusal names whichever of them collided.
         It is more than one only where a single physical unit answers to two
@@ -158,7 +159,8 @@ class Device:
 
     @property
     def declared_keys(self) -> tuple[str, ...]:
-        """The names a run holding this device declares.
+        """The names a run holding this device declares, and the ones a call
+        reaching for it inside a run is checked against.
 
         Every lock key but one the device reads from the host each time it is
         asked; see ``lock_keys``."""
@@ -243,8 +245,30 @@ class DebuggerDevice(Device):
 
     debugger: DebuggerConfig = field(repr=False)
 
+    def _port_device(self) -> UartDevice | None:
+        """The serial line an esptool entry reaches its board through, or None.
+
+        An ESP32 has no probe of its own: esptool opens the board's USB-UART
+        bridge and talks to the ROM bootloader over it, so the `com_ports` entry
+        the debugger names is the one physical unit both halves drive. Its
+        identity is therefore the port's, key for key, and not a second one
+        derived beside it. Sharing the port's keys is what makes a flash and a
+        COM session on that line exclude each other, which they have to: the
+        operating system lets only one of them open the device, and esptool
+        resets the chip through the same DTR and RTS lines a session holds.
+
+        None for every other backend, and for an esptool entry whose port was
+        never resolved: that one falls through to the generic keys below, and
+        the backend refuses to drive it before any key matters."""
+        if self.debugger.type != "esptool" or self.debugger.com_port is None or self.debugger.com_port_config is None:
+            return None
+        return UartDevice(config_id=self.debugger.com_port, port=self.debugger.com_port_config)
+
     @property
     def lock_key(self) -> str:
+        port = self._port_device()
+        if port is not None:
+            return port.lock_key
         if self.debugger.resource_id:
             return f"physical:{fold_hardware_id(self.debugger.resource_id)}"
         if self.debugger.probe_id:
@@ -284,7 +308,12 @@ class DebuggerDevice(Device):
         already-derived name, takes that legacy key; holding it here means an
         upgrade in progress cannot let an old owner and a new one both take the
         one debugger. ``fold_resource_name`` keeps ``probe:<path>`` a host path so
-        the two spellings land on one lock."""
+        the two spellings land on one lock.
+
+        An esptool entry holds exactly what its port holds; see ``_port_device``."""
+        port = self._port_device()
+        if port is not None:
+            return port.lock_keys
         if self.debugger.resource_id and self.debugger.probe_id:
             return (self.lock_key, f"probe:{fold_hardware_id(self.debugger.probe_id)}")
         if self.identity_source == "executable" and self.debugger.executable:
@@ -292,7 +321,16 @@ class DebuggerDevice(Device):
         return (self.lock_key,)
 
     @property
+    def declared_keys(self) -> tuple[str, ...]:
+        # An esptool entry declares what its port declares: the name the host
+        # resolves a device link to is held and never declared (`Device.lock_keys`).
+        port = self._port_device()
+        return port.declared_keys if port is not None else self.lock_keys
+
+    @property
     def identity_source(self) -> str:
+        if self._port_device() is not None:
+            return "com_port"
         if self.debugger.resource_id:
             return "resource_id"
         if self.debugger.probe_id:
@@ -301,6 +339,11 @@ class DebuggerDevice(Device):
 
     @property
     def identity_warning(self) -> str | None:
+        port = self._port_device()
+        if port is not None:
+            # Whatever the port's own entry says about how well it names its
+            # adapter, because that entry is all this debugger is named by.
+            return port.identity_warning
         return None if self.identity_source in {"resource_id", "probe_id"} else UNIDENTIFIED_DEBUGGER_WARNING
 
 

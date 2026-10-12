@@ -34,7 +34,7 @@ SERVER_INSTRUCTIONS = (
     "This project's target board is reachable only through these tools. Every request that touches it (flashing, "
     "resetting, probing, debugging, UART or CAN traffic, firmware artifacts, test reports) is answered by calling "
     "them, before reaching for a shell.\n"
-    "Never substitute openocd, pyocd, st-flash, st-info, st-util, JLinkExe, gdb, screen, minicom, picocom, cansend, "
+    "Never substitute openocd, pyocd, esptool, st-flash, st-info, st-util, JLinkExe, gdb, screen, minicom, picocom, cansend, "
     "candump, a Makefile target that runs one of them, or direct access to /dev/tty*, COM* or a SocketCAN interface: "
     "they bypass the policy these tools enforce, and the operator cannot audit them.\n"
     "A permission_denied result is the answer: report the denied permission and stop. Never edit the authoritative "

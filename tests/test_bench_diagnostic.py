@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import shlex
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -325,6 +326,42 @@ def test_pyocd_recordings_are_an_independent_opt_in_stage_before_cube_and_usb():
     assert step_names.index("Run the stage without the probe's device group") < step_names.index(pyocd["name"])
     assert step_names.index(pyocd["name"]) < step_names.index("Run CubeProgrammer hardware recordings")
     assert step_names.index(pyocd["name"]) < step_names.index("Run USB reset and re-enumeration recording")
+
+
+def test_esp32_recordings_are_an_opt_in_stage_after_the_standard_gates_that_hands_in_the_esp32_board():
+    workflow = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    steps = workflow["jobs"]["bench-tier"]["steps"]
+    esp32_steps = [step for step in steps if "tests/bench/esp32_recordings.py" in step.get("run", "")]
+
+    assert inputs["run_esp32"]["type"] == "boolean"
+    assert inputs["run_esp32"]["default"] == "false"
+    assert len(esp32_steps) == 1, esp32_steps
+    esp32 = esp32_steps[0]
+    assert "success()" in esp32["if"]
+    assert "!inputs.diagnose_only" in esp32["if"]
+    assert "inputs.run_esp32" in esp32["if"]
+    assert esp32["working-directory"] == "under-test"
+    command = shlex.split(esp32["run"])
+    assert command[:3] == ["exec", "python3", "../harness/tools/bench_in_container.py"], command
+    assert command[command.index("--source") + 1] == "../under-test", command
+    assert "--expected-commit" in command, command
+    assert "--esp32" in command, command
+    assert command[command.index("--output") + 1] == "$BENCH_RESULTS/esp32", command
+    assert command[command.index("--") + 1 :] == ["tests/bench/esp32_recordings.py"], command
+    for absent in ("--runtime", "--live-device-tree", "--cubeprogrammer-archive", "--require-usb-uart", "--without-device-group"):
+        assert absent not in command, command
+    assert [step for step in steps if "--esp32" in step.get("run", "")] == [esp32]
+
+    standard = [step for step in steps if step.get("name") in {"Run the bench tier in its container", "Run the stage without the probe's device group"}]
+    assert len(standard) == 2
+    assert all("run_esp32" not in step.get("if", "") for step in standard)
+    assert all("run_esp32" not in step.get("if", "") for step in steps if step is not esp32)
+    step_names = [step.get("name") for step in steps]
+    upload = next(step for step in steps if "upload-artifact" in str(step.get("uses", "")))
+    for earlier in ("Run the bench tier in its container", "Run the stage without the probe's device group"):
+        assert step_names.index(earlier) < step_names.index(esp32["name"])
+    assert step_names.index(esp32["name"]) < step_names.index(upload["name"])
 
 
 def test_incident_recovery_check_is_an_explicit_preflight_before_the_standard_gates():

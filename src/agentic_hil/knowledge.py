@@ -46,7 +46,7 @@ DEBUGGER_BACKEND_URI_PREFIX = f"{DEBUGGER_BACKENDS_URI}/"
 JSON_MIME = "application/json"
 MARKDOWN_MIME = "text/markdown"
 
-BACKENDS = ("openocd", "stlink", "pyocd")
+BACKENDS = ("openocd", "stlink", "pyocd", "esptool")
 
 # The plan the reactor reads when nobody names another one, and the packaged
 # schema every plan is validated against. Both live here rather than in
@@ -2138,6 +2138,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "never silent and never unbounded.",
             "A holder whose `heartbeat_age_s` is large and `holder_heartbeat_stale` is true is hung rather than busy; "
             "the hold is still real, so stop that process rather than deleting anything.",
+            "A refusal that carries `held_by_com_session` is held by this server itself: a COM session on the serial "
+            "line an esptool debugger flashes and resets through. Stop it with `com_session_stop` on the port that "
+            "field names, make the call again, and start the session again afterwards to read what the board prints. "
+            "`next_step` says the same.",
         ),
         do_not=(
             "Do not delete the lock file, and do not retry in a loop. The hold belongs to a live process; removing it "
@@ -5207,6 +5211,305 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not expect hardware_recover to settle it. A broken audit is the operator's own route.",
         ),
     ),
+    # -- The ESP32 through esptool and its ROM bootloader ------------------------
+    # esptool reaches the chip over the board's USB-UART bridge and nothing else, so
+    # its failures are told in terms no other backend shares: a serial port where
+    # the others have a probe, a ROM bootloader where they have a debug interface,
+    # and an auto-reset circuit on DTR and RTS where they have a reset line.
+    "debugger_not_found:esptool": ErrorRemedy(
+        meaning=(
+            "The esptool this entry needs could not be run, or is not one this backend reads. `backend_error_type` "
+            "says which: `esptool_not_found` means `debuggers.<name>.executable` names nothing that exists, or, left "
+            "unset, there is no `esptool` console script beside the Python this server runs on and none on PATH. "
+            "`esptool_version_unsupported` means the esptool found is not 5.x (tested with 5.5.0): `version` holds the "
+            "version it reported, null when none was readable, and esptool 4 spells its commands and success lines "
+            "differently, so its output would be read against lines it never prints. The version check opens no port, "
+            "so the board was not contacted and is as the last call that reached it left it."
+        ),
+        remediation=(
+            "Read `backend_error_type`, and `version` and `supported_versions` where the result carries them.",
+            "Install esptool into the environment this server runs from: `pip install agentic-hil[esptool]` installs a "
+            "supported one beside agentic-hil, and that copy is found before anything on PATH.",
+            "Where a supported esptool lives somewhere else, name it by absolute path in "
+            "`debuggers.<name>.executable`. That key is written with project_config_set behind "
+            "`allow_config_description_write`, and which toolchain a bench runs is the operator's, so get their word.",
+            "Run `agentic-hil doctor` afterwards: it repeats the lookup and the version check.",
+        ),
+        do_not=(
+            "Do not install esptool into the workspace and point the configuration at it. A configured executable "
+            "inside the workspace is repository-controlled code running as the debugger.",
+            "Do not run `esptool` by hand to get past it. Its connect resets the chip through the bridge's control "
+            "lines, and a run this service did not start is one its coordination cannot see or account for.",
+        ),
+    ),
+    "timeout:esptool": ErrorRemedy(
+        meaning=(
+            "esptool did not finish before its deadline. The wait that ran out is one of two. The version check is "
+            "bounded by `debuggers.<name>.timeout_s`, at most 10 seconds, and opens no port, so its result says "
+            "`target_contacted` false. A run for probe_target, flash_firmware or reset_target is stopped at the "
+            "`debuggers.<name>.timeout_s` deadline, and by then esptool may have pulled the chip into its ROM "
+            "bootloader through DTR and RTS, or written part of an image, so the result knows about the board only "
+            "what its state fields say."
+        ),
+        remediation=(
+            "Read `target_contacted`, `side_effect_status` and `target_state` first, where the result carries them, "
+            "and then the log at `log_path`.",
+            "Then call probe_target: it reads the chip back through its ROM bootloader and writes nothing. A flash "
+            "that timed out is settled only by a flash that verifies.",
+            "Every wait is bounded by `debuggers.<name>.timeout_s`. A large image at 460800 baud needs more time than "
+            "a small one, and a bench that needs a longer ceiling is the operator's edit of the authoritative file, "
+            "because project_config_set does not write that key.",
+        ),
+        do_not=(
+            "Do not repeat a flash or a reset before the state fields say where the one that timed out left the board. "
+            "A second run over an unknown state adds a second unknown.",
+            "Do not run `esptool` by hand to see whether it is faster. The bench's coordination does not see that run, "
+            "and the board it resets is the one this failure is about.",
+        ),
+    ),
+    "not_supported:esptool": ErrorRemedy(
+        meaning=(
+            "This entry is `type: esptool`, which flashes and resets an ESP32 through its ROM bootloader over the "
+            "board's USB-UART bridge. There is no debug probe on that line and no debug interface to the CPU, so three "
+            "kinds of call are refused before anything is opened: debugger_probes_list has no probe to list "
+            "(com_ports_list lists the bridge, and probing every port for a bootloader would reset every board on it); "
+            "all twelve typed-debug tools are refused, the session tools because there is no debug interface to run a "
+            "session on and the symbol reads because those read the ELF this service flashed, while esptool flashes "
+            "binary images; and reset_target mode `init` is refused, because the reset-init event script is OpenOCD's. "
+            "Nothing was sent to the board."
+        ),
+        remediation=(
+            "If the step needs the chip stopped, use `reset_target` with mode `halt`: it resets the ESP32 into its ROM "
+            "bootloader and leaves it there, so the application is stopped until mode `run` lets it go.",
+            "Read what the application prints with `com_session_start` on the bridge's com_ports entry, then com_read. "
+            "The session and esptool take turns on that port, so stop the session before the next flash or reset.",
+            "A breakpoint or a symbol read needs a JTAG connection to the chip and an OpenOCD entry for it "
+            "(Espressif's build of OpenOCD). Setting that up is a change to the configuration, made with "
+            "project_config_set behind `allow_config_description_write` or by the operator, with the operator's word "
+            "in either case; say that this project has not tested that route and that it needs a GDB for the chip's "
+            "architecture.",
+            "Where the entry stays on esptool, report the step as unavailable on this bench.",
+        ),
+        do_not=(
+            "Do not run `esptool`, `idf.py monitor`, `openocd` or a GDB yourself to get the step done. Each of them "
+            "opens the board's port or its JTAG pins outside the policy this refusal comes from.",
+            "Do not report mode `halt` as a halted core that can be inspected. The ROM bootloader is waiting for a "
+            "command, and the application's registers and memory are not readable through it.",
+        ),
+    ),
+    "flash_failed:esptool": ErrorRemedy(
+        meaning=(
+            "esptool did not confirm the flash, so the board holds an image nobody can vouch for. `backend_error_type` "
+            "says how: `flash_failed` is esptool's own failure, such as `Write failed, the written flash region is "
+            "empty.` (the region read back erased after the write), a chip that stopped responding or timed out "
+            "mid-write, or an image or security check esptool refused; `flash_unconfirmed` is an exit status 0 without "
+            "`Hash of data verified.` or without the line the `--after` mode prints, and operation_result names which "
+            "lines did print. A chip in Secure Download Mode, or an encrypted write, reports no hash at all. The run "
+            "is `write-flash` at 460800 baud, at `flash_address` for a .bin and at the records' own addresses for a "
+            ".hex, and programmer_output carries esptool's transcript."
+        ),
+        remediation=(
+            "Read programmer_output, and the log at `log_path`, for the line esptool stopped on.",
+            "Check the address and the fit: an application image belongs at 0x10000 on an ESP32, a `merge-bin` image "
+            "at the offset merge-bin printed (`ready to flash to offset 0x0` unless it was built with "
+            "`--target-offset`), and `debuggers.<name>.flash_address` is where a .bin is written. probe_target reports "
+            "the chip's `flash_size`.",
+            "A line ending in `Use --force to flash anyway.` means the image at the bootloader offset (0x1000 on an "
+            "ESP32) was built for another chip or chip revision: rebuild it for the `chip_type` probe_target reports.",
+            "A chip that stopped responding points at power or the cable first; check both before the next flash.",
+            "Flash encryption or Secure Boot on the chip goes to the operator: this backend writes plain images and "
+            "passes neither `--encrypt` nor `--force`.",
+            "Treat the board as holding an indeterminate image until a flash writes and verifies, and flash again once "
+            "the cause is fixed.",
+        ),
+        do_not=(
+            "Do not run `esptool erase-flash` or add `--erase-all` or `--force` to get past it. Erasing loses what the "
+            "chip holds, a granted `allow_mass_erase` stops flash_firmware working at all, and `--force` writes an "
+            "image esptool has just said is wrong for the chip.",
+            "Do not report the board as flashed on a partial transcript. Only all of the expected lines together "
+            "confirm a flash.",
+        ),
+    ),
+    "verify_failed:esptool": ErrorRemedy(
+        meaning=(
+            "esptool wrote the image, then read the MD5 of the written flash region back from the chip, and it did not "
+            "match the image's: `MD5 of file does not match data in flash!`, with both sums in programmer_output. The "
+            "write happened, so the board holds an indeterminate image."
+        ),
+        remediation=(
+            "Read programmer_output and the log at `log_path`: the two MD5 lines say what was expected and what the "
+            "flash holds.",
+            "Check power and the USB cable first, since the write ran at 460800 baud, and flash again; an identical "
+            "failure a second time goes to the operator with the transcript, because then the flash chip itself is "
+            "suspect.",
+            "Treat the board as holding an indeterminate image until a flash writes and verifies.",
+        ),
+        do_not=(
+            "Do not report the board as flashed. The bytes in flash are not the image, whatever ran before the check.",
+            "Do not run `esptool erase-flash` or add `--erase-all` to start clean. An erase removes everything the "
+            "chip holds and confirms nothing about why the check failed.",
+        ),
+    ),
+    "target_not_detected:esptool": ErrorRemedy(
+        meaning=(
+            "esptool opened the serial port and the ESP32's ROM bootloader did not answer. esptool pulls the chip into "
+            "that bootloader through the bridge's DTR and RTS lines, which the board's auto-reset circuit wires to EN "
+            "and IO0, and the run ended on `Failed to connect to`, `Wrong boot mode detected` or `No serial data "
+            "received.` The control lines were driven, so the chip may have been reset; nothing was written. "
+            "`Wrong boot mode detected` is a chip that restarted and printed its boot line but did not start its "
+            "bootloader: the lines reach EN and not IO0. `No serial data received.` is no boot line after esptool's "
+            "last reset and no byte in answer to its last sync: the lines reached neither, the chip has no power, or "
+            "its TX does not reach the bridge. A board without an auto-reset circuit, whose bootloader is entered by "
+            "holding a FLASH or BOOT button while RST is pressed, ends every attempt that way, or on `Invalid head of "
+            "packet` while its application is printing."
+        ),
+        remediation=(
+            "Confirm with com_ports_list that `com_ports.<name>.device` is still the ESP32 board's bridge: a device "
+            "name is an enumeration order, and a CH340 bridge publishes no serial number to tell boards apart by.",
+            "On `Wrong boot mode detected`, the board's circuit restarts the chip without holding IO0 low. Ask the "
+            "operator to hold BOOT (IO0) while the call runs, pressing EN once, or to tie IO0 to ground for one attempt.",
+            "On `No serial data received.` or `Invalid head of packet`, ask the operator whether the board's "
+            "bootloader is entered with a FLASH or BOOT button. Such a board can be flashed only while somebody does "
+            "that for each call, and no reset from here starts its application either, so an unattended bench needs a "
+            "board whose bridge drives EN and IO0, as Espressif's ESP32-DevKitC does.",
+            "Check that the board is powered and that the USB cable carries data.",
+            "Then call probe_target, which writes nothing, to see whether the change helped.",
+        ),
+        do_not=(
+            "Do not point `com_ports.<name>.device` at whichever port answers. A port that answers is a board, and not "
+            "necessarily this one.",
+            "Do not run esptool without `--port`, or against each port in turn: its port scan resets every board it "
+            "reaches.",
+        ),
+    ),
+    "target_state_unconfirmed:esptool": ErrorRemedy(
+        meaning=(
+            "esptool exited with status 0 from probe_target without printing every line that confirms the probe: `Chip "
+            "type:`, `Detected flash size:`, and `Hard resetting` or `Staying in bootloader.` for the `--after` mode "
+            "it ran. operation_result lists expected_success_text and matched_success_text. The chip's state is "
+            "unknown: it may be in its application, in its ROM bootloader, or between the two."
+        ),
+        remediation=(
+            "Read operation_result for the lines that did print, then the log at `log_path` for the rest of the "
+            "transcript.",
+            "Check that `debuggers.<name>.executable` names esptool itself, since a wrapper that filters esptool's "
+            "output looks exactly like this: debugger_info reports the version it answers with.",
+            "Read quarantine_guidance where the result carries it, then call `reset_target` with mode `run` or `halt` "
+            "to put the chip into a state a confirmed call reports.",
+        ),
+        do_not=(
+            "Do not read it as `target_not_detected`. esptool exited successfully, so the bootloader may well have "
+            "answered; what is missing is the proof.",
+            "Do not take a later probe that answers as proof of what this one left behind. It describes the chip after "
+            "its own reset.",
+        ),
+    ),
+    "target_type_invalid:esptool": ErrorRemedy(
+        meaning=(
+            "The chip family esptool was given does not fit. `backend_error_type` says which way: "
+            "`chip_argument_invalid` means esptool refused `--chip` itself before anything was opened, and "
+            "`agentic-hil doctor` answers the same in `debuggers.<name>.target_support`, with close_matches and "
+            "supported_chips; `chip_mismatch` means the ROM bootloader answered as another family than "
+            "`debuggers.<name>.target_type` names (`This chip is ESP32-S3, not ESP32. Wrong chip argument?`), so the "
+            "port was opened and the chip was reset on the way."
+        ),
+        remediation=(
+            "Read `backend_error_type` and programmer_output: the line esptool printed names the family it found or "
+            "the names it accepts.",
+            "Ask the operator to set `debuggers.<name>.target_type` to the chip family on this board (esp32, esp32s3, "
+            "esp32c3, ...), or to remove it so esptool detects the chip. That is an edit of the authoritative file, "
+            "since project_config_set does not write that key, and project_config_reload_description takes it up.",
+            "Run `agentic-hil doctor` afterwards: its target support check puts the name to esptool and opens no port.",
+        ),
+        do_not=(
+            "Do not ask for `target_type` to be set to whatever the chip reported without asking whether this is the "
+            "right board. A chip of another family behind this port can be another board.",
+            "Do not run esptool by hand with another `--chip` to get past the check. The check is what keeps an image "
+            "built for one chip off another.",
+        ),
+    ),
+    "com_port_open_failed:esptool": ErrorRemedy(
+        meaning=(
+            "esptool could not open the serial port this entry's com_port names, and said `Could not open <port>, the "
+            "port is busy or doesn't exist.` The port is this backend's whole transport, so the board was not "
+            "contacted, unless the transcript shows esptool got further than the port."
+        ),
+        remediation=(
+            "Read programmer_output and likely_causes: esptool's line says which port and the reason the operating "
+            "system gave.",
+            "A COM session of this server on the same port is refused with `device_busy` before esptool starts, so a "
+            "port busy here is held by something outside this server: a terminal, an IDE's serial monitor or another "
+            "flashing tool. Ask the operator to close it.",
+            "On Linux, the device's group is usually `dialout` (or `uucp`), and a permission refusal means this user "
+            "is outside it; the operator adds the account to that group, and it takes effect at the next login.",
+            "A port that does not exist means the board was unplugged or enumerated under another name: com_ports_list "
+            "lists what this host has now.",
+        ),
+        do_not=(
+            "Do not point `com_ports.<name>.device` at another port because that one opens. The board behind it is a "
+            "different one.",
+            "Do not run the server, or esptool, as root or through sudo to get the port open.",
+        ),
+    ),
+    "reset_failed:esptool": ErrorRemedy(
+        meaning=(
+            "reset_target runs esptool's `flash-id` with `--before=default-reset`, which pulls the chip into its ROM "
+            "bootloader through DTR and RTS, and `--after=hard-reset` for mode `run` or `--after=no-reset` for mode "
+            "`halt`. `backend_error_type` `reset_failed` is esptool's own failure line; `reset_unconfirmed` is an exit "
+            "status 0 without `Hard resetting` or `Staying in bootloader.` Either way the chip's state is unknown."
+        ),
+        remediation=(
+            "Read `side_effect_status`, `target_state` and `quarantined` first, and the log at `log_path`.",
+            "Then call probe_target, which reads the chip back through its ROM bootloader: on this backend it needs "
+            "`allow_reset` as well as `allow_probe`, because it resets the chip to read it.",
+            "Check the auto-reset wiring from DTR and RTS to EN and IO0, the board's power and the USB cable.",
+        ),
+        do_not=(
+            "Do not repeat reset_target or flash_firmware before the state fields and probe_target have said where the "
+            "chip is. A second reset over an unknown state adds a second unknown.",
+        ),
+    ),
+    "debugger_error:esptool": ErrorRemedy(
+        meaning=(
+            "esptool failed in a way none of its known lines name, or before it reached the board. "
+            "`backend_error_type` says which: `unknown_debugger_error` is a failure whose words matched no known line; "
+            "`usage_error` is an argument this backend built that esptool refused before it opened the port, which "
+            "points at a change in esptool's command line; `esptool_workdir_unavailable` means the private run "
+            "directory and its empty configuration file could not be created, so esptool was not started, and "
+            "`backend_error` is the operating system's reason."
+        ),
+        remediation=(
+            "Read the log at `log_path` and programmer_output for the line esptool stopped on.",
+            "Call classify_last_error: it classifies the recorded failure and lists its likely causes.",
+            "For `usage_error`, debugger_info reports the esptool version. A version outside 5.x is refused before "
+            "this point, so a usage error from a 5.x esptool is a defect in this backend: report it with the log.",
+            "For `esptool_workdir_unavailable`, check the free space and the permissions of the temporary directory "
+            "(TMPDIR, or TEMP on Windows).",
+            "Read `side_effect_status` and `target_state` before the next call: a failure after the port opened may "
+            "have reset the chip.",
+        ),
+        do_not=(
+            "Do not repeat the call unchanged before the output is read. An unclassified failure repeats the same way, "
+            "and a run that got past the port may reset the chip each time.",
+        ),
+    ),
+    "com_port_not_configured:esptool": ErrorRemedy(
+        meaning=(
+            "This esptool entry's `debuggers.<name>.com_port` is unset, or names a com_ports entry that does not "
+            "exist. A configuration that loads refuses both with config_invalid, so the backend was handed one that "
+            "was never validated. Nothing was opened: without a port, esptool would scan every serial port on the host "
+            "and reset whatever board it found."
+        ),
+        remediation=(
+            "Ask the operator to set `debuggers.<name>.com_port` to the name of the com_ports entry for the board's "
+            "USB-UART bridge. That is an edit of the authoritative file, since project_config_set does not write that "
+            "key, and project_config_reload_description takes it up.",
+            "Run `agentic-hil doctor`: it validates the file and names the key it refuses.",
+        ),
+        do_not=(
+            "Do not run esptool without `--port` to find the board. Its port scan resets every board it reaches.",
+        ),
+    ),
     "breakpoint_reconciliation_failed": ErrorRemedy(
         meaning=(
             "debug_clear_breakpoints could not prove that the backend holds no breakpoints: GDB's breakpoint list "
@@ -7325,13 +7628,21 @@ def attach_quarantine_guidance(result: JsonObject) -> JsonObject:
 # Exactly what each backend reads out of a `debuggers.<name>` entry. "required"
 # means the backend cannot work without it; "discovered" means it is found
 # automatically when unset; "ignored" means the backend never reads it, so
-# setting it changes nothing.
+# setting it changes nothing; "refused" means the loader refuses the entry that
+# carries it (with an "enum", a value outside it). `"unset": "refused"` marks a
+# required field no default or fallback stands in for, so the loader refuses
+# the entry without it.
+_PROBE_BACKEND_COM_PORT: JsonObject = {
+    "status": "refused",
+    "note": "Only an esptool entry names a com_ports entry; this backend is identified by its probe, so the key is refused at load. project_config_set does not remove it either, so an entry leaves esptool only in the file, by the operator's hand.",
+}
 DEBUGGER_FIELD_MATRIX: JsonObject = {
     "openocd": {
         "tool": "openocd",
         "type": {"status": "optional", "value": "openocd", "note": "Default. Omit only if no other backend is meant. Settable over MCP behind allow_config_description_write, and switching an entry to this backend has to carry interface_cfg and target_cfg in the same call, because OpenOCD reaches the board through no other route; an entry that does not name them is refused rather than left half switched. Send executable in that call too, or `null` to have OpenOCD discovered on PATH: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to `openocd` on PATH, except on the untouched starter entry, which stays inert until somebody names a toolchain in it. An absolute path or a value containing a separator is resolved against workspace_root and must exist."},
         "gdb_server_executable": {"status": "ignored", "note": "OpenOCD is its own GDB server: a typed debug session runs `executable` with a `gdb_port` on a port this server reserves."},
+        "com_port": _PROBE_BACKEND_COM_PORT,
         "probe_id": {"status": "optional", "note": "Adapter serial number. OpenOCD 0.12.0 and newer are passed `adapter serial <probe_id>`; an older release is passed the adapter driver's own serial command (`hla_serial`, `st-link serial` or `cmsis_dap_serial`), and a call whose driver has none is refused `not_supported` before OpenOCD is started for it. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "OpenOCD selects the target through target_cfg."},
         "interface": {"status": "ignored", "note": "OpenOCD selects the transport through interface_cfg."},
@@ -7345,6 +7656,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "type": {"status": "required", "value": "stlink", "note": "Settable over MCP behind allow_config_description_write. Switching an entry to this backend needs no other key of this surface: interface defaults to SWD, and interface_cfg and target_cfg are ignored here, so they may stay in the entry. Send executable in the same call, or `null` to have STM32_Programmer_CLI discovered: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to STM32_Programmer_CLI on PATH, then the standard STM32CubeProgrammer and STM32CubeIDE install locations."},
         "gdb_server_executable": {"status": "discovered", "note": "The GDB server typed debug sessions run: ST-LINK_gdbserver, which STM32CubeCLT installs beside STM32_Programmer_CLI because the CLI has none. Falls back to the one in the same STM32CubeCLT tree as `executable` (`STLink-gdb-server/bin` beside `STM32CubeProgrammer/bin`), then ST-LINK_gdbserver on PATH, then the STM32CubeCLT installations under C:/ST. Held to the rules `executable` is. Started with `-cp` naming the CLI's directory, `-i <probe_id>`, `-d` for SWD and `-g`, so the connect neither resets nor moves the core. Unset and not found, flashing, probing and reading are unchanged and the debug session tools are refused naming this key."},
+        "com_port": _PROBE_BACKEND_COM_PORT,
         "probe_id": {"status": "optional", "note": "ST-Link serial number, passed as `sn=<probe_id>`. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "STM32CubeProgrammer identifies the part itself."},
         "interface": {"status": "required", "default": "SWD", "enum": ["SWD", "JTAG"], "note": "Passed as `port=<interface>`."},
@@ -7358,6 +7670,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "type": {"status": "required", "value": "pyocd", "note": "Settable over MCP behind allow_config_description_write. Switching an entry to this backend needs no other key of this surface, because target_type is not one it writes and pyOCD guesses from the probe's board ID when it is unset; a bench that needs a specific part still has to have target_type in the file. Send executable in the same call, or `null` to have pyocd discovered: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to `pyocd` on PATH. Install with `pip install agentic-hil[pyocd]` or `pip install pyocd`. Typed debug sessions run `pyocd gdbserver` from the same executable, on a port this server reserves for the session, with the same `--uid`, `--target` and `-W` every other call carries and pyOCD's semihosting console switched off, so the server opens no port of its own beside the one GDB connects to."},
         "gdb_server_executable": {"status": "ignored", "note": "Typed debug sessions run `pyocd gdbserver` from `executable`."},
+        "com_port": _PROBE_BACKEND_COM_PORT,
         "probe_id": {"status": "optional", "note": "Probe unique ID, passed as `--uid`. pyOCD matches it as a case-insensitive substring and strips a leading `<type>:`, so give the full ID. Required once more than one debugger is configured."},
         "target_type": {"status": "required", "note": "Passed as `--target`. Omitted entirely when unset, leaving pyOCD to guess from the probe's board ID. Most vendor parts resolve only after a CMSIS pack is installed."},
         "interface": {"status": "ignored"},
@@ -7365,6 +7678,20 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "target_cfg": {"status": "ignored"},
         "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "Nothing this key could say reaches pyOCD, so `under_reset` is refused at load rather than accepted and ignored. A bench that needs the flash to connect under reset runs it on `type: stlink`. The one connect option this server does pass to pyOCD is not this key's: the typed-debug memory reads with no session open send `--connect attach`, fixed, because it is the only mode pyOCD documents as reaching a running core without halting or resetting it, together with the target pack's DebugCoreStart sequence disabled, because that sequence lets a halted core run at the connect. `probe_target` keeps pyOCD's default connect, attach as well, and disables the same sequence. A typed debug session does not read this key either: whether it resets or attaches is the `mode` of `debug_start_session`, carried out by GDB against `pyocd gdbserver`."},
         "flash_address": {"status": "conditional", "note": "Required to flash a .bin, which carries no load address; passed as `--base-address`. Not read for .elf or .hex."},
+    },
+    "esptool": {
+        "tool": "esptool 5.x (tested with 5.5.0)",
+        "type": {"status": "required", "value": "esptool", "note": "Flashes and resets an ESP32-family chip through its ROM bootloader, over the serial line of the board's USB-UART bridge; there is no debug probe in between. Not reachable through project_config_set: the entry needs com_port, which that surface cannot write, so an entry becomes esptool only in the file, by the operator's hand. There are no debug sessions and no symbol reads on this backend: every typed debug tool and debugger_probes_list answer `not_supported`."},
+        "executable": {"status": "discovered", "note": "Falls back to the `esptool` console script in the environment this server runs from, which is where `pip install agentic-hil[esptool]` puts it, then to `esptool` on PATH; never the deprecated `esptool.py` shim. Only esptool 5.x is handed a port: `esptool version`, which opens no port, is read first, and any other major version is refused `debugger_not_found` with backend_error_type `esptool_version_unsupported`. Every run gets a private working directory and an empty esptool configuration file, and none of the ESPTOOL_*, ESP_*, IDF_* or colour variables of this server's environment, so nothing left in an operator's shell can add a port, a chip or an option to it."},
+        "gdb_server_executable": {"status": "ignored", "note": "esptool has no debug interface to the CPU."},
+        "com_port": {"status": "required", "unset": "refused", "note": "The name of the `com_ports` entry for the board's USB-UART bridge, not a device path. That entry's device is passed as `--port` on every call, so esptool never scans the host's ports (its scan resets every board it reaches), and its serial_number, vid and pid are checked against the adapter behind that name before esptool starts, as com_session_start checks them. Its device lock is this debugger's lock, so a flash and a COM session on that line exclude each other: a COM session this server holds on it is refused `device_busy` with `held_by_com_session`, and com_session_stop clears the way. Refused at load when unset, when it names no com_ports entry, when two esptool entries name one, and on every other type. The com_ports entry's baudrate is the session's: esptool connects at 115200 and flashes at 460800, fixed. Not settable through project_config_set."},
+        "probe_id": {"status": "refused", "note": "There is no probe between the host and an ESP32. Refused at load, as resource_id is on this entry: a serial number belongs in the com_ports entry's serial_number, and a shared lock name in its resource_id."},
+        "target_type": {"status": "optional", "note": "The chip family, spelt as esptool's `--chip` takes it: lowercase letters and digits (`esp32`, `esp32s3`, `esp32c3`); any other shape is refused at load. Unset passes `--chip=auto`, and esptool reads the family off the ROM bootloader. Set, a chip of another family is refused by esptool before anything is written (`target_type_invalid`, backend_error_type `chip_mismatch`). `agentic-hil doctor` puts the name to esptool as `--chip=<name> version`, which opens no port."},
+        "interface": {"status": "ignored", "note": "The transport is always the serial line com_port names."},
+        "interface_cfg": {"status": "ignored"},
+        "target_cfg": {"status": "ignored"},
+        "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "Every call enters the ROM bootloader through the bridge's DTR and RTS lines (`--before=default-reset`), so every connect already resets the chip and `under_reset` would add nothing; it is refused at load. Because of that reset, probe_target needs allow_reset on this backend, although it is a read."},
+        "flash_address": {"status": "conditional", "note": "Required to flash a .bin: the flash offset it is written at, 0x-prefixed hexadecimal or plain decimal, at the start of a 4 KiB sector (an ESP-IDF application usually at 0x10000; an image from `esptool merge-bin` at its `--target-offset`, 0x0 unless set). Not read for a .hex, whose records carry their addresses and are checked before the write: complete, no byte written twice, every run of data starting a sector. An .elf is refused rather than read: convert it with `esptool elf2image`, or combine bootloader, partition table and application with `esptool merge-bin`. Every write is verified by esptool against the image, and a flash without reset_after_flash leaves the chip in its ROM bootloader until reset_target runs it."},
     },
 }
 
@@ -7377,13 +7704,21 @@ MULTI_PROBE_RULE = {
         "one probe_id that is a substring of another when either entry is type pyocd",
         "two entries that resolve to the same coordination resource (same resource_id, or no probe_id and the same executable or type)",
     ],
+    "esptool": (
+        "An esptool entry has no probe and refuses probe_id. The com_ports entry its com_port names is its identity "
+        "instead, so two esptool entries naming one com_ports entry are refused at load as one coordination resource."
+    ),
 }
 
 FLASH_ADDRESS_RULE = {
-    "rule": "flash_address is required only for a .bin artifact, on every backend (openocd, stlink and pyocd).",
+    "rule": "flash_address is required only for a .bin artifact, on every backend (openocd, stlink, pyocd and esptool).",
     "why": ".bin carries no load address. .elf and .hex do, and the field is not read for them.",
     "failure_when_missing": "error_type `invalid_argument` from flash_firmware, before anything reaches the target.",
-    "example": "0x08000000 for STM32 internal flash.",
+    "example": "0x08000000 for STM32 internal flash; 0x10000 for an ESP-IDF application on an ESP32.",
+    "esptool": (
+        "esptool takes the address as a flash offset, which has to start a 4 KiB sector, and writes no .elf at all: "
+        "`esptool elf2image` turns one into the .bin it does write."
+    ),
 }
 
 # A second, later rule than MULTI_PROBE_RULE above, and deliberately not
@@ -7453,6 +7788,11 @@ BOOTSTRAP_DISCOVERY_RULE = {
         "Unchanged either way: more than one attached ST-Link is `ambiguous_hardware`, and a requested probe_id "
         "selects among what was enumerated and never adds to it."
     ),
+    "esptool": (
+        "Neither enumeration looks for an ESP32, and none of these commands writes an esptool entry: finding one "
+        "would mean opening serial ports, and opening the bridge of an ESP32 board resets the chip. The operator writes "
+        "the esptool entry and the com_ports entry it names into the file."
+    ),
 }
 
 UNNAMED_PROBE_RULE = {
@@ -7474,6 +7814,11 @@ UNNAMED_PROBE_RULE = {
         "whether the one probe behind an unnamed single debugger is still the physical unit it was last run. Nothing "
         "here, or at the pyOCD/ST-Link/OpenOCD boundary, pins that without a probe_id; the coordination lock has the "
         "same blind spot for the same reason (see devices.DebuggerDevice.identity_warning)."
+    ),
+    "esptool": (
+        "Exempt however many debuggers are configured: an esptool entry names no probe, it names the com_ports entry "
+        "of the board's serial line, and that entry's serial_number, vid and pid are checked against the attached "
+        "adapter before every call, as com_session_start checks them."
     ),
 }
 
@@ -7503,6 +7848,10 @@ def debugger_backends_document() -> JsonObject:
             ),
             "fields": ["allow_flash", "allow_reset", "allow_raw_debugger_commands", "allow_mass_erase"],
             "default": False,
+            "esptool": (
+                "probe_target is the one read that needs a grant, and only on esptool: esptool reaches the chip by "
+                "resetting it into its ROM bootloader, so the probe needs allow_reset."
+            ),
             "reading": (
                 "What protects a read is exclusivity, not a grant: every device a run declares is locked machine-wide "
                 "for the whole run, and a device the description does not name is refused. See MCP resource "
@@ -7977,7 +8326,7 @@ _SECTION_PURPOSE: dict[str, str] = {
     "permissions": "What may be done to this project beside its hardware: to this file itself, and to a quarantine incident on this bench.",
     "provenance": "Who wrote this file and who last changed it. A note to a reader; nothing reads it as policy.",
     "target": f"What board this is. Names in reports; `controller` is what a human recognises. Which field actually selects a target per backend, and known-good values: {TARGET_SUPPORT_URI}.",
-    "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. `type` names the debug stack that drives the entry and is settable like the rest of the description, but only as a whole switch: a change to it has to arrive with whatever the backend it names requires, or it is refused naming what is missing. Which of these fields each backend requires, discovers, ignores or refuses, `type` and `connect_mode` included: {DEBUGGER_BACKENDS_URI}.",
+    "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. `type` names the debug stack that drives the entry and is settable like the rest of the description, but only as a whole switch: a change to it has to arrive with whatever the backend it names requires, or it is refused naming what is missing. An ESP32 has no probe: its `type: esptool` entry names the `com_ports` entry of the board's USB-UART bridge as `com_port`, and is written into the file by the operator. Which of these fields each backend requires, discovers, ignores or refuses, `type` and `connect_mode` included: {DEBUGGER_BACKENDS_URI}.",
     "debug": (
         "Typed GDB session settings: which GDB reads this bench's images, which symbols may be read and how much. "
         "`gdb_executable` is the description half of this section and is settable behind "
@@ -8641,6 +8990,7 @@ Which field names the target depends on the backend. Setting the wrong one is si
 | `openocd` | `target_cfg` (plus `interface_cfg`) | OpenOCD's bundled scripts, e.g. `target/stm32f4x.cfg`, `interface/stlink.cfg` |
 | `stlink` | none; STM32CubeProgrammer identifies the part itself | not applicable |
 | `pyocd` | `target_type` | pyOCD's built-in list plus every installed CMSIS device-family pack |
+| `esptool` | `target_type`, optional; unset, esptool reads the chip family off the ROM bootloader | esptool's own `--chip` list: `esp32`, `esp32s3`, `esp32c3`, ... |
 
 ## Known-good values, STM32 Nucleo-F446RE with the on-board ST-Link
 
@@ -8659,6 +9009,37 @@ interface: SWD
 The two OpenOCD values above are search names: OpenOCD resolves them against its own script path, so they name no file on this host and the configuration accepts them without one. Give an absolute path instead when this bench should run exactly the script files it names; a path is then checked as a path, and must exist, live outside the workspace, and not be under the system temporary directory.
 
 `flash_address: "0x08000000"` is required only to flash a `.bin`, on every backend.
+
+## Known-good values, ESP32 development board through esptool
+
+An ESP32 board has no debug probe. esptool resets the chip into its ROM bootloader through the DTR and RTS lines of the board's USB-UART bridge and flashes it over the same serial line, so the debugger entry names the `com_ports` entry of that bridge, and that entry says which board it is:
+
+```yaml
+com_ports:
+  esp:
+    device: /dev/ttyUSB0        # COM5 on Windows
+    vid: "1a86"                 # a CH340 bridge, which publishes no serial number
+    pid: "7523"
+    identity_source: vid_pid
+    baudrate: 115200
+    assert_dtr: false           # DTR and RTS drive the chip's reset and boot pins:
+    assert_rts: false           # released, the application runs while a session listens
+debuggers:
+  esp32:
+    type: esptool
+    com_port: esp               # the com_ports entry above, by name
+    target_type: esp32          # optional; unset, esptool detects the chip
+    flash_address: "0x10000"    # where an ESP-IDF application goes
+    permissions:
+      allow_flash: true
+      allow_reset: true         # probe_target resets the chip as well
+```
+
+`flash_address` is the flash offset a `.bin` is written at and has to start a 4 KiB sector. A `.hex` carries its addresses; an `.elf` is refused, because esptool writes images: `esptool elf2image` makes one. `agentic-hil adopt-hardware` and `project_config_create` never write these entries, because finding the board would mean opening serial ports, and opening an ESP32 board's bridge resets the chip. The operator writes them into the file. Adoption refuses an esptool entry before it reads any probe, and a regeneration does not carry one over: `project_config_create` lists it under `dropped_entries`, `agentic-hil init --force` rewrites the whole file without it, and either way it is written again by hand.
+
+The bridge's serial line is the board's console as well. esptool and a COM session on it take turns: a flash or a reset while this server holds a session on the port is refused with `device_busy` and `held_by_com_session`, and `com_session_stop` clears the way. Keep `assert_dtr` and `assert_rts` false on that entry: a session then leaves the lines released and the application running, where a session that asserts them can reset the chip on open or hold it in its bootloader, depending on the order the driver moves the two lines in.
+
+Those lines have to reach the chip's EN and IO0 through an auto-reset circuit, as the two transistors on Espressif's ESP32-DevKitC wire them. A board whose bootloader is entered by holding a FLASH or BOOT button while RST is pressed answers every call with `target_not_detected` and esptool's `No serial data received.`, or `Invalid head of packet` while its application is printing: it can be flashed only while somebody presses the buttons, and no reset from here starts its application.
 
 ## pyOCD target types mostly come from CMSIS packs
 
@@ -8706,10 +9087,10 @@ These are host setup commands for the toolchain, not hardware actions. They do n
 
 | `status` | Means | `doctor` |
 |---|---|---|
-| `supported` | the backend resolves the configured `target_type`; `source` says `builtin` or `pack` | green |
-| `unsupported` | the backend enumerated its target types and this one is not among them, so no flash can work | **red**, with `install_commands` |
+| `supported` | the backend resolves the configured `target_type`; `source` says `builtin` or `pack`, or that esptool's `--chip` list holds it | green |
+| `unsupported` | the backend enumerated its target types and this one is not among them, so no flash can work | **red**, with `install_commands` on pyOCD, and `close_matches` and `supported_chips` on esptool |
 | `undetermined` | this host could not answer: no toolchain installed, the enumeration failed or could not be read | green, and `undetermined_reason` says why |
-| `not_configured` | no `target_type` is set, so pyOCD would guess from the probe's board ID | green |
+| `not_configured` | no `target_type` is set, so pyOCD would guess from the probe's board ID, and esptool asks the ROM bootloader | green |
 | `not_applicable` | this backend has no target type: OpenOCD uses `target_cfg`, STM32CubeProgrammer identifies the part itself | green |
 
 The line between `unsupported` and `undetermined` is deliberate. `unsupported` is a fact about this host; `undetermined` says nothing about the configuration and must not be read as one. A bench with no debugger toolchain installed yet stays green: `agentic-hil setup` rolls back on a red `doctor`, so conflating the two would break installation on exactly the fresh machine the check is meant to help.
@@ -9054,7 +9435,7 @@ MCP_RESOURCES: list[JsonObject] = [
         DEBUGGER_BACKENDS_URI,
         "debugger-backends",
         "Required fields per debugger backend",
-        "Which of type, executable, gdb_server_executable, probe_id, target_type, interface, interface_cfg, target_cfg, connect_mode and flash_address each of openocd, stlink and pyocd requires, discovers, ignores, or refuses; when probe_id becomes mandatory; when flash_address is needed; which backend can connect under reset; and which of bootstrap discovery's two enumerations answers on a given host, which decides the type and executable a generated entry gets.",
+        "Which of type, executable, gdb_server_executable, com_port, probe_id, target_type, interface, interface_cfg, target_cfg, connect_mode and flash_address each of openocd, stlink, pyocd and esptool requires, discovers, ignores, or refuses; when probe_id becomes mandatory; when flash_address is needed; which backend can connect under reset; how an ESP32 is reached through a com_ports entry instead of a probe; and which of bootstrap discovery's two enumerations answers on a given host, which decides the type and executable a generated entry gets.",
         JSON_MIME,
     ),
     _resource_descriptor(
@@ -9127,7 +9508,7 @@ MCP_RESOURCE_TEMPLATES: list[JsonObject] = [
         "uriTemplate": DEBUGGER_BACKEND_URI_PREFIX + "{backend}",
         "name": "debugger-backend",
         "title": "Required fields for one debugger backend",
-        "description": "The field matrix for a single backend: openocd, stlink, or pyocd.",
+        "description": "The field matrix for a single backend: openocd, stlink, pyocd, or esptool.",
         "mimeType": JSON_MIME,
     },
 ]

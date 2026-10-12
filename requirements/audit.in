@@ -1,6 +1,6 @@
 # The auditor the production dependency audit job runs
 # (.github/workflows/ci.yml). It reads requirements/production.txt, the
-# dependency set of the published distribution with both extras, compiled from
+# dependency set of the published distribution with its bench extras, compiled from
 # pyproject.toml the way requirements/dev.txt is; the command that regenerates
 # that lock is recorded at its top.
 #

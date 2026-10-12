@@ -97,6 +97,18 @@ adapter is there, and turns each of those, and a machine without one, into a
 refusal, before the queue and again after it, so a bench whose adapter went
 missing cannot pass with its tests deselected.
 
+The ESP32 board. `--esp32` hands in an ESP32 development board for the ESP32
+stage (`tests/bench/esp32_recordings.py`), which flashes and resets it through
+esptool. The board has no probe: esptool reaches the chip through the board's
+own USB-UART bridge, so the bridge's serial port is all that is handed in. It
+is found like the adapter, by public USB identity alone: WCH's CH340 and CH9102
+and Silicon Labs' CP210x, the bridges these boards carry. Its node goes in
+beside the probe's, its link under /dev/serial/by-id comes along, and
+AGENTIC_HIL_BENCH_ESP32 tells the tier its node. The stage is asked for by
+name, so the flag states that the board is there: no bridge, two of them, one
+with other than one port or one this user cannot open is a refusal, before the
+queue and again after it. Without the flag no bridge is handed in.
+
 Serialisation. Two runs must never drive the board at once. The backstop is the
 device locks the product takes under ~/.agentic-hil/device-locks: the machine's
 lock directory is mounted at the same place under the container's home, and a
@@ -323,6 +335,13 @@ PROBE_PRODUCT_IDS = frozenset({0x3744, 0x3748, 0x374B, 0x374D, 0x374E, 0x374F, 0
 USB_UART_ENV = "AGENTIC_HIL_BENCH_USB_UART"
 USB_UART_VENDOR_ID = 0x0403
 USB_UART_PRODUCT_IDS = frozenset({0x6001, 0x6010, 0x6011, 0x6014, 0x6015})
+# The ESP32 board `--esp32` hands in, by the public USB identity of the bridge on
+# it, as (vendor id, product id): WCH's CH340 and CH9102 and Silicon Labs'
+# CP210x. What tells the tier the bridge's node is copied in
+# tests/bench/conftest.py with the identities, for the adapter's reason; a test
+# keeps the copies one.
+ESP32_ENV = "AGENTIC_HIL_BENCH_ESP32"
+ESP32_BRIDGE_IDS = frozenset({(0x1A86, 0x7523), (0x1A86, 0x55D4), (0x10C4, 0xEA60)})
 SYSFS = Path("/sys")
 SERIAL_BY_ID = Path("/dev/serial/by-id")
 TTY_NAME = re.compile(r"^tty[A-Za-z0-9_]+$")
@@ -657,6 +676,22 @@ def discover_usb_uarts(sysfs: Path | None = None) -> list[UsbUart]:
     return adapters
 
 
+def discover_esp32_bridges(sysfs: Path | None = None) -> list[UsbUart]:
+    """Every attached USB-UART bridge of the kinds ESP32 boards carry, by vendor and product id alone."""
+    bridges: list[UsbUart] = []
+    for device in usb_devices(sysfs):
+        if (read_number(device / "idVendor", 16), read_number(device / "idProduct", 16)) not in ESP32_BRIDGE_IDS:
+            continue
+        where = where_it_sits(device)
+        if where is None:
+            continue
+        serial = read_attribute(device / "serial")
+        bridges.append(
+            UsbUart(where=where, serial_ports=tuple(serial_ports_of(device)), serial_numbers=(serial,) if serial else ())
+        )
+    return bridges
+
+
 def serial_number_behind(rdev: int) -> str | None:
     """The serial of the USB device a named node belongs to, found through /sys/dev/char."""
     if not rdev or not hasattr(os, "major"):
@@ -691,17 +726,18 @@ def checked_node(path: str) -> str:
 
 @dataclass(frozen=True)
 class Devices:
-    """What the container gets of the probe and of the adapter, and the probe's serials it is withheld by."""
+    """What the container gets of the probe, the adapter and the ESP32 board, and the probe's serials it is withheld by."""
 
     usb_nodes: tuple[str, ...]
     serial_ports: tuple[str, ...]
     serial_numbers: tuple[str, ...]
     usb_uart: str | None = None
+    esp32: str | None = None
 
     @property
     def ttys(self) -> tuple[str, ...]:
-        """Every serial port handed in: the probe's, then the adapter's."""
-        return (*self.serial_ports, *((self.usb_uart,) if self.usb_uart is not None else ()))
+        """Every serial port handed in: the probe's, then the adapter's, then the ESP32 board's."""
+        return (*self.serial_ports, *(port for port in (self.usb_uart, self.esp32) if port is not None))
 
     @property
     def nodes(self) -> tuple[str, ...]:
@@ -841,6 +877,39 @@ def the_usb_uart(runtime: str, required: bool, voice: Voice) -> str | None:
     if adapters:
         voice(f"{reason}; no adapter is handed in, and the tier deselects its tests marked usb_uart")
     return None
+
+
+def the_esp32(runtime: str, voice: Voice) -> str:
+    """The node of the one ESP32 board's bridge `--esp32` hands in; every reason there is none is a refusal.
+
+    Every bridge's serial number is withheld before anything about one is said,
+    as the adapter's are.
+    """
+    bridges = discover_esp32_bridges()
+    voice.withhold(serial for bridge in bridges for serial in bridge.serial_numbers)
+    if not bridges:
+        reason = "no USB-UART bridge of the kinds ESP32 boards carry (CH340, CH9102, CP210x) is attached to this machine's USB"
+    elif len(bridges) > 1:
+        reason = (
+            f"{len(bridges)} USB-UART bridges of the kinds ESP32 boards carry are attached "
+            f"({'; '.join(bridge.where for bridge in bridges)}), and choosing between them would be choosing a board"
+        )
+    elif len(bridges[0].serial_ports) != 1:
+        shown = len(bridges[0].serial_ports)
+        reason = (
+            f"the ESP32 board's bridge at {bridges[0].where} shows {shown or 'no'} serial port{'' if shown == 1 else 's'}, "
+            "and esptool reaches the chip over exactly one"
+        )
+    else:
+        try:
+            node = checked_node(bridges[0].serial_ports[0])
+        except Refused as refusal:
+            reason = str(refusal)
+        else:
+            reason = why_not_openable(runtime, node)
+            if reason is None:
+                return node
+    raise Refused(EXIT_NO_PROBE, f"{reason}; --esp32 says this run hands an ESP32 board in, so nothing was run")
 
 
 # This machine.
@@ -1273,6 +1342,8 @@ def tier_command(
         command += ["-e", f"{DEVICE_GROUPS_ENV}={DEVICE_GROUPS_WITHHELD}"]
     if devices.usb_uart is not None:
         command += ["-e", f"{USB_UART_ENV}={devices.usb_uart}"]
+    if devices.esp32 is not None:
+        command += ["-e", f"{ESP32_ENV}={devices.esp32}"]
     return [*command, image_id, "sh", "-c", CONTAINER_SCRIPT, SCRIPT_ARGV0, *FIXED_PYTEST_ARGS, *pytest_args]
 
 
@@ -1555,6 +1626,11 @@ def parse_options(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="State that a USB-UART adapter is wired to the board, and refuse the run unless exactly one is handed in.",
     )
+    parser.add_argument(
+        "--esp32",
+        action="store_true",
+        help="Hand in the ESP32 board's USB-UART bridge for the ESP32 stage, and refuse the run unless exactly one is attached.",
+    )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER, help="After --: handed to pytest, replacing tests/bench -v.")
     return parser.parse_args(argv)
 
@@ -1627,6 +1703,8 @@ def main(argv: list[str] | None = None) -> int:
                 # Only a run that states the adapter is there is refused here:
                 # one that does not is told about the adapter once, below.
                 the_usb_uart(runtime, True, voice)
+            if options.esp32:
+                the_esp32(runtime, voice)
             locks = device_lock_directory()
     except Refused as refusal:
         voice(str(refusal))
@@ -1689,7 +1767,11 @@ def main(argv: list[str] | None = None) -> int:
         devices = the_devices(options.usb_device, options.serial_device)
         voice.withhold(devices.serial_numbers)
         check_access(runtime, devices)
-        devices = replace(devices, usb_uart=the_usb_uart(runtime, options.require_usb_uart, voice))
+        devices = replace(
+            devices,
+            usb_uart=the_usb_uart(runtime, options.require_usb_uart, voice),
+            esp32=the_esp32(runtime, voice) if options.esp32 else None,
+        )
         stable_names = None if options.live_device_tree else stage_stable_names(devices.ttys, workdir / "by-id")
         # The one directory the tier writes to, and it is the run's own: the
         # output directory, which a gate uploads, is never mounted.

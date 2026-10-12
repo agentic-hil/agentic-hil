@@ -82,6 +82,7 @@ python3 tools/bench_in_container.py -- tests/bench/test_bench_serial.py -x
 python3 tools/bench_in_container.py --runtime docker
 python3 tools/bench_in_container.py --without-device-group
 python3 tools/bench_in_container.py --require-usb-uart       # the adapter must be there
+python3 tools/bench_in_container.py --esp32 -- tests/bench/esp32_recordings.py   # the ESP32 board's stage
 python3 tools/bench_in_container.py --runtime podman --live-device-tree -- tests/bench/usb_reset_reenumeration.py
 python3 tools/bench_in_container.py --distribution debian-12
 python3 tools/bench_in_container.py --build-only         # the image alone, anywhere
@@ -205,9 +206,11 @@ apply.
   in goes through the stage the same way, and `doctor` has to name its node too.
 - `--require-usb-uart` states that a USB-UART adapter is wired to the board; see
   "The USB-UART adapter" below.
+- `--esp32` hands in the bench's ESP32 board for the ESP32 stage; see "The ESP32
+  board" below.
 
-In ordinary stages, the container gets only the probe's device nodes and the
-adapter's, the machine's device-lock directory, the serial ports'
+In ordinary stages, the container gets only the probe's device nodes, the
+adapter's and, with `--esp32`, the ESP32 board's bridge's, the machine's device-lock directory, the serial ports'
 `/dev/serial/by-id` links read only, and the directory the report is written to. The USB live-device-tree
 stage instead gets the host `/dev` directory read only, as described above. The
 container has no network or capabilities, and has a process table and host name
@@ -269,6 +272,52 @@ watches PB12 with a pull-up, so the pin reads high while DTR is released and
 low while it is asserted, and `@peer modem` reports the level, the edges and the
 shortest and longest low pulse since `@peer modem clear`.
 
+## The ESP32 board
+
+A bench can have an ESP32 development board beside the board the tier drives,
+for the ESP32 stage, `tests/bench/esp32_recordings.py`, which flashes and
+resets it through the esptool backend. The board has no probe: esptool reaches
+the chip's ROM bootloader through the board's own USB-UART bridge, and the
+board's console is the same line. `--esp32` hands that bridge's node in beside
+the probe's, with its `/dev/serial/by-id` link, and tells the tier the node in
+`AGENTIC_HIL_BENCH_ESP32`. The bridge is found by public USB identity alone:
+WCH's CH340 (0x1a86:0x7523) and CH9102 (0x1a86:0x55d4) and Silicon Labs' CP210x
+(0x10c4:0xea60). The flag states that the board is there: no bridge, two of
+them, one with other than one serial port or one this user cannot open is
+refused with exit status 6, before the queue and again after it. Without the
+flag no bridge is handed in, and the stage runs only where a run names it.
+
+The stage flashes two images of its own, from `tests/bench/firmware/esp32/`, at
+0x1000, the second-stage bootloader's place, from where the ROM loads them
+straight into RAM. Each prints its letter, A or B, and a tick count from boot,
+about ten times a second by the ROM's delay loop. The letter says which flash
+the chip runs, and the count says whether the chip was restarted between two
+reads. Flashing them replaces the bootloader the board had, so the firmware it
+came with no longer starts until it is flashed again.
+`tools/build_esp32_bench_images.py` builds them with the toolchain the manifest
+beside them names. The bench image has no Xtensa toolchain and takes them as
+committed; `tests/test_bench_esp32_images.py` checks them against the manifest
+and their sources on every host.
+
+What the stage records, as JUnit properties that name no node, serial number,
+MAC address or path:
+
+- `esp32_probe_v1`: the esptool version, the chip the ROM bootloader names, and
+  where the images came from;
+- `esp32_console_open_v1`: what opening the console does to a running chip and
+  to one held in its ROM bootloader, for both settings of the bridge's control
+  lines (`assert_dtr` and `assert_rts` both released, and both asserted). The
+  board's auto-reset circuit turns the two lines into the chip's EN and IO0, so
+  this is measured on the board rather than assumed;
+- `esp32_flash_console_v1`, for each setting whose console shows the image:
+  image A seen on the console; a flash, a reset and a probe each refused while
+  the console holds the line, with the count carrying on through all three;
+  image B seen once the console is closed;
+- `esp32_reset_modes_v1`, on the setting that leaves a running chip alone:
+  `reset_target` run starts the image again, halt holds the chip in its ROM
+  bootloader, where a probe leaves it and the console stays quiet, and run
+  starts the image once more.
+
 ## Interrupting a run
 
 Ctrl-C, or the SIGTERM a runner's cancel sends after its SIGINT, stops the
@@ -305,8 +354,9 @@ The exit status is pytest's own when pytest reported, and otherwise one of these
 - 3: the image did not build;
 - 4: no result;
 - 5: `--no-wait` met a held machine;
-- 6: no probe could be handed in, or no USB-UART adapter where
-  `--require-usb-uart` states there is one;
+- 6: no probe could be handed in, no USB-UART adapter where
+  `--require-usb-uart` states there is one, or no single ESP32 board where
+  `--esp32` states there is one;
 - 7: a container was left behind;
 - 130: interrupted.
 
@@ -315,7 +365,8 @@ The exit status is pytest's own when pytest reported, and otherwise one of these
 The tier prints the probe's serial number and paths of the machine it runs on,
 and the gate's log and artifact can be read by anyone who can read the
 repository. Every line the runner prints or logs, and the JUnit report, has the
-serial numbers of the probe and of every USB-UART adapter attached, the
+serial numbers of the probe, of every USB-UART adapter attached and, with
+`--esp32`, of every ESP32 board's bridge attached, the
 machine's host name, the user's home directory and the user name replaced with
 `[withheld]`, line by line. No line is removed, so a
 failure still shows the line it failed on.
@@ -332,11 +383,11 @@ gh workflow run bench-gate.yml -f ref=<commit, branch or tag>
 
 The optional hardware stages are off by default. Enable the status-gated reset
 preflight with `run_recovery_check`, and recordings independently with
-`run_pyocd_recordings`, `run_cubeprogrammer_recordings`, or
-`run_usb_reset_reenumeration`:
+`run_pyocd_recordings`, `run_cubeprogrammer_recordings`,
+`run_usb_reset_reenumeration`, or `run_esp32`:
 
 ```
-gh workflow run bench-gate.yml -f ref=<commit, branch or tag> -f run_pyocd_recordings=true -f run_cubeprogrammer_recordings=true -f run_usb_reset_reenumeration=true
+gh workflow run bench-gate.yml -f ref=<commit, branch or tag> -f run_pyocd_recordings=true -f run_cubeprogrammer_recordings=true -f run_usb_reset_reenumeration=true -f run_esp32=true
 ```
 
 When selected, the recovery check runs before the standard tier in the default
@@ -381,7 +432,7 @@ The gate runs the tier, and then `--without-device-group` on the image the
 tier's run built: after a red tier too, because what the stage proves does not
 depend on what the tier found, and never after a cancelled run. Both pass
 `--require-usb-uart`, because the bench's board has its adapter wired. The opt-in
-pyOCD, CubeProgrammer and USB reset recordings each get their own invocation
+pyOCD, CubeProgrammer, USB reset and ESP32 recordings each get their own invocation
 and output directory after the standard stages; they run only when the earlier
 gates succeeded. No hardware result for an opt-in stage is implied by the
 container build or its smoke test.
