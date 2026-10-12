@@ -96,6 +96,11 @@ RECORDINGS = json.loads(RECORDINGS_PATH.read_text(encoding="utf-8"))
 # prints for the ones no bench can provoke without unplugging the probe or
 # protecting the flash (#516, #561).
 PYOCD_FAILURES = json.loads((FIXTURES / "pyocd_failure_recordings.json").read_text(encoding="utf-8"))
+# STM32CubeProgrammer 2.23.0's flash failures off the same bench: a raw binary
+# based past the end of flash, through the product, and an input file that does
+# not exist, by hand, because the product refuses a missing image before it
+# starts the CLI (#516).
+CUBE_FAILURES = json.loads((FIXTURES / "stm32cubeprogrammer_2_23_0_failure_recordings.json").read_text(encoding="utf-8"))
 TROUBLESHOOTING = ROOT.parent / "TROUBLESHOOTING.md"
 
 BACKENDS = ["openocd", "pyocd", "stlink"]
@@ -144,6 +149,10 @@ def pyocd_source_line(name: str) -> str:
 def cube_recording(name: str) -> dict:
     path = FIXTURES / "stm32cubeprogrammer_2_23_0_recordings.json"
     return json.loads(path.read_text(encoding="utf-8"))["recordings"][name]
+
+
+def cube_failure_recording(name: str) -> dict:
+    return CUBE_FAILURES["recordings"][name]
 
 
 def cube_bench_image_recording(name: str) -> dict:
@@ -758,8 +767,8 @@ CLASSIFIER_ROWS = [
     ("stlink", "probe_target", "ST-LINK SN  : STLINK123\nError: no device found\n", "target_not_detected", "issue"),
     ("stlink", "probe_target", "ST-LINK SN  : STLINK123\nError: unable to connect to target\n", "target_not_detected", "issue"),
     ("stlink", "flash_firmware", "ST-LINK SN  : STLINK123\nMemory Programming ...\nError: Verify failed at address 0x08000000\n", "verify_failed", "rule"),
-    ("stlink", "flash_firmware", "ST-LINK SN  : STLINK123\nError: File build/firmware.elf not found\n", "config_file_not_found", "rule"),
-    ("stlink", "flash_firmware", "ST-LINK SN  : STLINK123\nMemory Programming ...\nError: Download failed\n", "flash_failed", "rule"),
+    ("stlink", "flash_firmware", cube_failure_recording("flash_input_file_missing")["stdout"], "config_file_not_found", "recorded"),
+    ("stlink", "flash_firmware", cube_failure_recording("flash_bin_outside_flash")["stdout"], "flash_failed", "recorded"),
     ("pyocd", "probe_target", recording("pyocd_commander_status_no_probe")["stdout"], "probe_not_found", "recorded"),
     ("pyocd", "probe_target", "0000000:ERROR:Error attempting to connect to target\nError: unable to connect to the target\n", "target_not_detected", "in tree"),
     ("pyocd", "probe_target", pyocd_source_line("swd_no_ack"), "target_not_detected", "pyocd source"),
@@ -807,6 +816,7 @@ TOOL_RESULT_ROWS = [
     ("stlink", "probe_target", {}, "ST-LINK SN  : STLINK123\nError: no device found\n", "target_not_detected", "target_not_detected", "refused"),
     ("stlink", "probe_target", {}, "ST-LINK SN  : STLINK123\nError: unable to connect to target\n", "target_not_detected", "target_not_detected", "refused"),
     ("stlink", "flash_firmware", {"image_path": "build/firmware.elf"}, "ST-LINK SN  : STLINK123\nMemory Programming ...\nError: Verify failed at address 0x08000000\n", "verify_failed", "verify_failed", "quarantined"),
+    ("stlink", "flash_firmware", {"image_path": "build/firmware.elf"}, cube_failure_recording("flash_bin_outside_flash")["stdout"], "flash_failed", "flash_failed", "quarantined"),
     ("pyocd", "probe_target", {}, "0000000:ERROR:Error attempting to connect to target\nError: unable to connect to the target\n", "target_not_detected", "target_not_detected", "refused"),
     ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, "0001042 C Target type stm32f446re not recognized. Use 'pyocd list --targets' to see currently available target types. See <https://pyocd.io/docs/target_support.html> for how to install additional target support. [__main__]\n", "target_type_invalid", "target_type_invalid", "refused"),
     ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, "0000900 E Verify failed at 0x08000000 [load_cmd]\n", "verify_failed", "verify_failed", "quarantined"),
@@ -901,8 +911,14 @@ def test_a_missing_input_file_on_stlink_is_not_answered_with_the_missing_configu
     variant of this error_type already uses. What the operator gets instead is
     asserted here rather than only what they must not get, so no fix can be had
     by publishing an undocumented error_type or by leaving the result silent.
+
+    The refusal is the one STM32CubeProgrammer 2.23.0 printed on the bench for
+    the flash argv this backend builds, handed an input that does not exist
+    (`Error: File does not exist: firmware.elf`, exit 1). It was run by hand,
+    because the product refuses a missing image before it starts the CLI.
     """
-    play_transcript(monkeypatch, stderr="ST-LINK SN  : STLINK123\nError: File build/firmware.elf not found\n", returncode=1)
+    missing = cube_failure_recording("flash_input_file_missing")
+    play_transcript(monkeypatch, stdout=missing["stdout"], stderr=missing["stderr"], returncode=missing["returncode"])
     config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
 
     result = call(config, "flash_firmware", {"image_path": "build/firmware.elf"})
