@@ -635,6 +635,91 @@ def test_two_configured_debuggers_and_no_name_is_refused(tmp_path: Path, monkeyp
     assert after["debuggers"]["dut"]["probe_id"] is None
 
 
+def test_an_esptool_entry_is_refused_before_any_probe_is_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ESP32 has no probe, so adoption has nothing to read for its entry.
+
+    Discovery enumerates probes. For this entry it would read whichever other
+    probe is attached, an ST-Link here, and offer that serial to an entry the
+    loader refuses one, so the call is refused before any board is touched. The
+    other entry in the same file is still adopted when the call names it."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    document = document_of(path)
+    document["com_ports"] = {"esp": {"device": "COM250", "baudrate": 115200}}
+    document["debuggers"]["esp"] = {"type": "esptool", "com_port": "esp", "executable": None, "permissions": dict(document["debuggers"]["dut"]["permissions"])}
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+    discovery = attached(monkeypatch)
+
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True, "debugger_id": "esp"})
+        assert discovery["_selected"] == {}, "no probe was enumerated, let alone connected to"
+        assert path.read_text(encoding="utf-8") == before
+        chosen = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True, "debugger_id": "dut"})
+    finally:
+        tools.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "invalid_argument"
+    assert refused["field"] == "debugger_id"
+    assert refused["debugger_id"] == "esp"
+    assert refused["debugger_type"] == "esptool"
+    assert refused["side_effect_status"] == "not_started"
+    assert "com_ports entry" in refused["summary"], refused["summary"]
+    assert chosen["ok"] is True, chosen
+    after = document_of(path)
+    assert after["debuggers"]["dut"]["probe_id"] == PROBE_SERIAL
+    assert after["debuggers"]["esp"] == document["debuggers"]["esp"], "the operator's esptool entry is untouched"
+    # The ESP32's port was the only COM entry in the file, and "the only one" did
+    # not make it the home of the ST-Link's port: that got an entry of its own.
+    assert after["com_ports"]["esp"] == document["com_ports"]["esp"]
+    assert chosen["com_port_id"] == "dut_uart"
+    assert after["com_ports"]["dut_uart"]["serial_number"] == PROBE_SERIAL
+
+    # And the pure planner refuses the same entry when it is the only one, so no
+    # second caller of it can plan a probe into an esptool entry.
+    only = {"debuggers": {"esp": document["debuggers"]["esp"]}, "com_ports": document["com_ports"], "target": document["target"]}
+    planned = plan_adoption(only, {key: value for key, value in discovery.items() if key != "_selected"})
+    assert planned["ok"] is False
+    assert planned["error_type"] == "invalid_argument"
+    assert planned["field"] == "debugger_id"
+
+
+def test_a_probes_port_is_never_carried_into_the_port_an_esptool_entry_names() -> None:
+    """Not even when the call names that port, or when the default name is the ESP32's.
+
+    The com_ports entry an esptool debugger names is the ESP32's identity, so an
+    ST-Link's serial, ids and device written into it would describe two boards
+    at once. Named, it is reported as unavailable with nothing carried into it;
+    unnamed, it is not a candidate at all, and when it holds the default name no
+    new entry is invented under that name either."""
+    esp = {"type": "esptool", "com_port": "dut_uart", "executable": None}
+    document = {
+        "debuggers": {"dut": {"type": "stlink", "probe_id": None, "executable": None}, "esp": esp},
+        "target": {"name": "example-target", "controller": "unknown-controller"},
+        "com_ports": {"dut_uart": {"device": "COM250", "baudrate": 115200}},
+    }
+    discovery = {
+        "ok": True,
+        "backend": "stlink",
+        "probe_id": PROBE_SERIAL,
+        "executable": FAKE_STLINK.as_posix(),
+        "target": {"controller": "STM32F446RE"},
+        "com_port": {"device": "COM9", "serial_number": PROBE_SERIAL},
+    }
+
+    named = plan_adoption(document, discovery, debugger_id="dut", com_port_id="dut_uart")
+    unnamed = plan_adoption(document, discovery, debugger_id="dut")
+
+    for plan in (named, unnamed):
+        assert plan["ok"] is True, plan
+        assert not [item for item in plan["carried"] if item["key"].startswith("com_ports.")], plan["carried"]
+        assert "debuggers.dut.probe_id" in [item["key"] for item in plan["carried"]]
+    assert [item["key"] for item in named["unavailable"]] == ["com_ports.dut_uart.device"]
+    assert "esptool debugger `esp`" in named["unavailable"][0]["reason"]
+    assert [item["key"] for item in unnamed["unavailable"]] == ["com_ports.<name>.device"]
+
+
 def test_nothing_attached_is_an_answer_and_not_a_written_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
     before = path.read_text(encoding="utf-8")

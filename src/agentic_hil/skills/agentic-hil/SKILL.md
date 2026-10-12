@@ -44,8 +44,8 @@ those devices until `bench_run_stop`. Without it each call holds its device only
 for its own duration, and between flash and read the board is free for anything
 else on the machine. Inside a run only the declared devices may be touched.
 
-Do not substitute `openocd`, `pyocd`, `st-flash`, `st-util`, `JLinkExe`, `gdb`,
-`screen`, `minicom`, `picocom`, `cansend`, or `candump` for these tools, and do
+Do not substitute `openocd`, `pyocd`, `esptool`, `st-flash`, `st-util`, `JLinkExe`,
+`gdb`, `screen`, `minicom`, `picocom`, `cansend`, or `candump` for these tools, and do
 not open `/dev/tty*`, `COM*`, or a SocketCAN interface yourself. Reach for a raw
 command only when no Agentic HIL tool covers the request, and say plainly that
 you are stepping outside the gate.

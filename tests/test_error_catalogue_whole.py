@@ -71,7 +71,7 @@ from test_error_catalogue_ec3_run_coordination import PINNED_DYNAMIC as RUN_DYNA
 
 import agentic_hil
 from agentic_hil import humanize
-from agentic_hil.backends import common, gdbdebug, openocd, pyocd, stlink
+from agentic_hil.backends import common, esptool, gdbdebug, openocd, pyocd, stlink
 from agentic_hil.config import load_config
 from agentic_hil.knowledge import ERROR_URI_PREFIX, catalogue_entry, lookup_remedy
 from agentic_hil.mcp import MCP_RESOURCE_NOT_FOUND, handle_mcp_message
@@ -259,7 +259,7 @@ class PackageReader(Reader):
 
 # The modules whose refusals are filled, or merged, under the backend that
 # answers: the debug guard's rule for them (`attach_scopes`).
-BACKEND_SCOPED_MODULES = frozenset({gdbdebug.__name__, openocd.__name__, pyocd.__name__, stlink.__name__, common.__name__})
+BACKEND_SCOPED_MODULES = frozenset({gdbdebug.__name__, openocd.__name__, pyocd.__name__, stlink.__name__, esptool.__name__, common.__name__})
 
 
 def site_scopes(source: Source, node: ast.expr, values: frozenset[str | None]) -> tuple[str | None, ...]:
@@ -636,7 +636,8 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # ---------------------------------------------------------------------------
 # What the pins hold.
 
-SCANNED_MODULE_COUNT = 48
+# `agentic_hil.backends.esptool`, the ESP32 backend, is the 49th.
+SCANNED_MODULE_COUNT = 49
 # `can_broker_disconnected`, a broker connection that ended (#664), is the 219th.
 COLLECTED_TYPE_COUNT = 219
 # A producer is a type together with a function that writes it. A type many
@@ -674,7 +675,10 @@ COLLECTED_TYPE_COUNT = 219
 # no `flash_address` (#680).
 # no `flash_address` (#680). Deleting `report.read_report_file` and
 # `DebuggerDevice.routing_refusal`, which nothing called, takes five away (#682).
-PRODUCER_COUNT = 658
+# The esptool backend adds 27 and no type: 22 in `backends.esptool`, and the
+# five `config_invalid` refusals of the loader's esptool checks in `config`.
+# Every type they write is one another backend or the loader already writes.
+PRODUCER_COUNT = 685
 
 
 def pin_problems(inventory: Inventory) -> list[str]:

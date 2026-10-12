@@ -64,7 +64,7 @@ Every hardware action is validated against the selected authoritative configurat
 
 ## What it drives
 
-The unit it drives is the probe with its backend, not one board: three debugger backends (OpenOCD, pyOCD, and the STM32CubeProgrammer CLI), plus serial ports and CAN (PCAN, SocketCAN, or a custom bridge; several runs can share one bus), on Linux, macOS, and Windows, Python 3.10 or newer, all CI-tested. The worked example in [examples/nucleo-f446re_demo/](examples/nucleo-f446re_demo/) runs the whole loop on an ST Nucleo-F446RE, the board this repository proves the path on rather than the boundary of what runs; [installation](docs/installation.md) has every backend and platform in detail.
+The unit it drives is the probe with its backend, not one board: four debugger backends (OpenOCD, pyOCD, the STM32CubeProgrammer CLI, and esptool, which flashes and resets an ESP32 through the board's USB-UART bridge and opens no debug session), plus serial ports and CAN (PCAN, SocketCAN, or a custom bridge; several runs can share one bus), on Linux, macOS, and Windows, Python 3.10 or newer, all CI-tested. The worked example in [examples/nucleo-f446re_demo/](examples/nucleo-f446re_demo/) runs the whole loop on an ST Nucleo-F446RE, the board this repository proves the path on rather than the boundary of what runs; [installation](docs/installation.md) has every backend and platform in detail.
 
 ## The test reactor
 
@@ -103,7 +103,7 @@ The same loop runs headless as a pytest regression: `pytest tests/` in that dire
 
 | If you want | Read |
 |---|---|
-| to install, upgrade, add CAN or pyOCD, or look up a command | [docs/installation.md](docs/installation.md) |
+| to install, upgrade, add CAN, pyOCD or esptool, or look up a command | [docs/installation.md](docs/installation.md) |
 | what the authoritative configuration declares and who may change it | [docs/configuration.md](docs/configuration.md) |
 | the complete MCP tool surface and how a run is composed from it | [docs/mcp-tools.md](docs/mcp-tools.md) |
 | to register the server in a specific MCP host | [docs/mcp-hosts.md](docs/mcp-hosts.md) |
@@ -132,7 +132,7 @@ Policy bypasses are treated as vulnerabilities; see [SECURITY.md](SECURITY.md).
 
 ## Support
 
-Linux, macOS and Windows are supported equally, what is supported is the debug probe with the backend behind it (ST-Link through OpenOCD or the STM32CubeProgrammer CLI, CMSIS-DAP probes through pyOCD) rather than any list of boards, and issues are answered within 24 hours on workdays, security reports within seven days: [docs/support.md](docs/support.md) is the whole promise, including what is not promised. Ask in [Discussions Q&A](https://github.com/agentic-hil/agentic-hil/discussions/categories/q-a), show a run in [Show and tell](https://github.com/agentic-hil/agentic-hil/discussions/categories/show-and-tell), and put a first run on your own bench, green or red, in [the first run report](https://github.com/agentic-hil/agentic-hil/issues/new?template=first-run.yml).
+Linux, macOS and Windows are supported equally, what is supported is the debug probe with the backend behind it (ST-Link through OpenOCD or the STM32CubeProgrammer CLI, CMSIS-DAP probes through pyOCD, an ESP32 board's USB-UART bridge through esptool) rather than any list of boards, and issues are answered within 24 hours on workdays, security reports within seven days: [docs/support.md](docs/support.md) is the whole promise, including what is not promised. Ask in [Discussions Q&A](https://github.com/agentic-hil/agentic-hil/discussions/categories/q-a), show a run in [Show and tell](https://github.com/agentic-hil/agentic-hil/discussions/categories/show-and-tell), and put a first run on your own bench, green or red, in [the first run report](https://github.com/agentic-hil/agentic-hil/issues/new?template=first-run.yml).
 
 ## License
 
