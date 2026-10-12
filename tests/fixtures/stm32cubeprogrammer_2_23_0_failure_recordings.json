@@ -1,0 +1,47 @@
+{
+  "what": "Failures of STM32CubeProgrammer 2.23.0 recorded on the reference bench with the demo firmware running, which booted and printed its banner after each of them. `flash_bin_outside_flash` is `flash_firmware` of a sixteen-byte raw binary whose `flash_address` lies past the end of the part's flash, run through `agentic-hil mcp-stdio` on the bench image's CLI with `connect_mode: under_reset`; the argv and the output are the product's own action log. The CLI connects, prints its erase and download headers for the segment, and then gives up on the download. tests/bench/cubeprogrammer_recordings.py re-runs it through the product in the optional CubeProgrammer bench stage and compares the `Error:` lines. `flash_input_file_missing` is the argv the stlink backend builds for `flash_firmware` of an ELF under reset, with an input path that does not exist, run by hand under the bench lock in the same image, from the CLI's own directory as the backend runs it. It is run by hand because no product run can provoke it: the product checks and stages the image before it starts the CLI, and refuses a missing one there with `artifact_not_found`.",
+  "recorded_on": "2026-10-12",
+  "bench": "NUCLEO-F446RE (STM32F446xx, device ID 0x421, revision A) through its on-board in-circuit debugger, ST-LINK firmware V2J30M19, Linux bench image, demo firmware running",
+  "tool_versions": {
+    "stm32cubeprogrammer": "2.23.0"
+  },
+  "redaction": "The probe's serial number is `[redacted]` and the private directory the input was staged in is `[staging]`, as in the pyOCD recordings.",
+  "memory_map": "NVM size 512 KBytes, as the CLI's own connect banner reports it: flash 0x08000000-0x0807ffff, so 0x08100000 is past its end.",
+  "recordings": {
+    "flash_bin_outside_flash": {
+      "how": "through the product",
+      "argv": [
+        "/opt/st/cubeprogrammer-2.23.0/bin/STM32_Programmer_CLI",
+        "-q",
+        "-c",
+        "port=SWD",
+        "mode=UR",
+        "sn=[redacted]",
+        "-w",
+        "[staging]/cube-outside-flash.bin",
+        "0x08100000",
+        "-v"
+      ],
+      "returncode": 1,
+      "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V2J30M19\nBoard       : NUCLEO-F446RE\nVoltage     : 3.26V\nSWD freq    : 4000 KHz\nConnect mode: Under Reset\nReset mode  : Hardware reset\nDevice ID   : 0x421\nRevision ID : Rev A\nDevice name : STM32F446xx\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M4\nBL Version  : 0x90\n\n\n\nOpening and parsing file: cube-outside-flash.bin\n\n\nMemory Programming ...\n  File          : cube-outside-flash.bin\n  Size          : 16.00 B \n  Address       : 0x08100000\n\n\nErasing memory corresponding to segment 0:\nDownload in Progress:\n\n\nError: failed to download  Sector[0]\nError: failed to download the File\n",
+      "stderr": ""
+    },
+    "flash_input_file_missing": {
+      "how": "by hand",
+      "argv": [
+        "/opt/st/cubeprogrammer-2.23.0/bin/STM32_Programmer_CLI",
+        "-q",
+        "-c",
+        "port=SWD",
+        "mode=UR",
+        "sn=[redacted]",
+        "-w",
+        "[staging]/firmware.elf",
+        "-v"
+      ],
+      "returncode": 1,
+      "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V2J30M19\nBoard       : NUCLEO-F446RE\nVoltage     : 3.26V\nSWD freq    : 4000 KHz\nConnect mode: Under Reset\nReset mode  : Hardware reset\nDevice ID   : 0x421\nRevision ID : Rev A\nDevice name : STM32F446xx\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M4\nBL Version  : 0x90\n\nError: File does not exist: firmware.elf\n",
+      "stderr": ""
+    }
+  }
+}
