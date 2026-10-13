@@ -265,11 +265,15 @@ def test_a_stop_signal_reaches_the_command_and_what_it_says_then_is_withheld(tmp
     """
     root = tmp_path / "sys"
     a_probe(root, "1-2", serial=PROBE_SERIAL)
+    # The signal can land while "ready" is still being flushed: the bytes are in
+    # the pipe, so the test has read them, but the buffered writer is still held.
+    # A print from the handler then meets that writer and raises "reentrant call",
+    # so the handler writes to the descriptor itself.
     command = a_command(
         f"""
-        import signal, sys, time
+        import os, signal, sys, time
         def stop(number, frame):
-            print("stopping the plan on probe {PROBE_SERIAL}", flush=True)
+            os.write(sys.stdout.fileno(), "stopping the plan on probe {PROBE_SERIAL}\\n".encode())
             sys.exit(3)
         signal.signal(signal.SIGTERM, stop)
         print("ready", flush=True)
