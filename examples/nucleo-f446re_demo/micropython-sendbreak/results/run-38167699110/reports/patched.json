@@ -1,0 +1,253 @@
+{
+  "ok": true,
+  "tool": "test_reactor",
+  "name": "hilval-hq176-patched",
+  "test_config_path": "[withheld]/actions-runner/_work/agentic-hil/agentic-hil/examples/nucleo-f446re_demo/hilval/hq176/plans/patched.testconfig.yaml",
+  "test_config_sha256": "bd5f9881870fcf0675142bfe014866ea884ed5d822900740efe6ba3cc3289c2c",
+  "steps": [
+    {
+      "index": 1,
+      "route": "dut",
+      "action": "flash",
+      "result": {
+        "ok": true,
+        "tool": "flash_firmware",
+        "backend": "openocd",
+        "started_at": "2026-10-11T19:22:43.946Z",
+        "finished_at": "2026-10-11T19:22:54.439Z",
+        "elapsed_ms": 10492,
+        "summary": "Firmware flashed and verified. Target was not reset.",
+        "log_path": ".agentic-hil/logs/openocd-20261011T192243947Z-flash_firmware.log",
+        "success_confirmed": true,
+        "artifact": {
+          "source": "path",
+          "path": "build/hilval-hq176/patched.elf",
+          "sha256": "d95b4294f220f642d87396db6f9ab3cad2d33e82ef09fed76ea11c721aa95242"
+        },
+        "verify": true,
+        "reset_after_flash": false,
+        "side_effect_committed": true,
+        "side_effect_status": "committed",
+        "retry_safe": false,
+        "audit_ok": true,
+        "config_in_force": {
+          "path": "[withheld]/.config/agentic-hil/projects/nucleo-f446re_demo-c77fe8caab/config.yaml",
+          "digest_algorithm": "sha256",
+          "digest": "sha256:9e0b4615276e15b64107b9a0e09044c5c202265bbe5e337424c9b915ae67652c",
+          "description_source": "startup",
+          "file_state": "unchanged",
+          "file_digest": "sha256:9e0b4615276e15b64107b9a0e09044c5c202265bbe5e337424c9b915ae67652c",
+          "diverged_from_file": false,
+          "checked_at": "2026-10-11T19:22:54Z"
+        },
+        "report_path": ".agentic-hil/reports/last-report.json",
+        "lease_id": "38cf6e232e58e464b6b47f486b119ba8",
+        "resources": [
+          "debugger-discovery:all",
+          "probe:[withheld]"
+        ],
+        "lease_state": "released",
+        "safe_state_confirmed": true,
+        "processes_reaped": true,
+        "cleanup_required": false,
+        "quarantined": false,
+        "cleanup_reasons": [],
+        "quarantine_id": null
+      },
+      "elapsed_ms": 10710
+    },
+    {
+      "index": 2,
+      "route": "dut_uart",
+      "action": "uart_open",
+      "result": {
+        "ok": true,
+        "tool": "com_session_start",
+        "port_id": "dut_uart",
+        "already_active": false,
+        "session": {
+          "session_active": true,
+          "started_at": "2026-10-11T19:22:54.622Z",
+          "rx_buffer_bytes": 0,
+          "overflow_bytes": 0,
+          "log_path": ".agentic-hil/logs/com-20261011T192254589Z-dut_uart.jsonl"
+        },
+        "identity": {
+          "device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_[withheld]-if02",
+          "expected_serial_number": "[withheld]",
+          "expected_from": "com_ports.dut_uart.serial_number",
+          "expected_vid": 1155,
+          "expected_pid": 14155,
+          "stable_device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_[withheld]-if02",
+          "found_serial_number": "[withheld]",
+          "found_vid": 1155,
+          "found_pid": 14155,
+          "status": "confirmed",
+          "summary": "The port behind this entry is the hardware it names."
+        },
+        "summary": "COM port session started.",
+        "side_effect_committed": true,
+        "side_effect_status": "committed",
+        "retry_safe": false,
+        "first_contact_at": "2026-10-11T19:22:54.621Z",
+        "first_contact_by": "serial_open",
+        "lease_id": "c1e2535a0a4b988b46b57c8799ff3a12",
+        "resources": [
+          "com:serial:[withheld]"
+        ],
+        "lease_state": "active",
+        "safe_state_confirmed": false,
+        "processes_reaped": false,
+        "audit_ok": true,
+        "cleanup_required": false,
+        "quarantined": false,
+        "cleanup_reasons": [],
+        "quarantine_id": null,
+        "config_in_force": {
+          "path": "[withheld]/.config/agentic-hil/projects/nucleo-f446re_demo-c77fe8caab/config.yaml",
+          "digest_algorithm": "sha256",
+          "digest": "sha256:9e0b4615276e15b64107b9a0e09044c5c202265bbe5e337424c9b915ae67652c",
+          "description_source": "startup",
+          "file_state": "unchanged",
+          "file_digest": "sha256:9e0b4615276e15b64107b9a0e09044c5c202265bbe5e337424c9b915ae67652c",
+          "diverged_from_file": false,
+          "checked_at": "2026-10-11T19:22:54Z"
+        },
+        "report_path": ".agentic-hil/reports/last-report.json"
+      },
+      "elapsed_ms": 116
+    },
+    {
+      "index": 3,
+      "route": "dut",
+      "action": "reset",
+      "result": {
+        "ok": true,
+        "tool": "reset_target",
+        "backend": "openocd",
+        "started_at": "2026-10-11T19:22:54.734Z",
+        "finished_at": "2026-10-11T19:22:54.923Z",
+        "elapsed_ms": 188,
+        "summary": "Target reset with mode 'run'.",
+        "log_path": ".agentic-hil/logs/openocd-20261011T192254735Z-reset_target.log",
+        "success_confirmed": true,
+        "mode": "run",
+        "side_effect_committed": true,
+        "side_effect_status": "committed",
+        "retry_safe": false,
+        "audit_ok": true,
+        "config_in_force": {
+          "path": "[withheld]/.config/agentic-hil/projects/nucleo-f446re_demo-c77fe8caab/config.yaml",
+          "digest_algorithm": "sha256",
+          "digest": "sha256:9e0b4615276e15b64107b9a0e09044c5c202265bbe5e337424c9b915ae67652c",
+          "description_source": "startup",
+          "file_state": "unchanged",
+          "file_digest": "sha256:9e0b4615276e15b64107b9a0e09044c5c202265bbe5e337424c9b915ae67652c",
+          "diverged_from_file": false,
+          "checked_at": "2026-10-11T19:22:54Z"
+        },
+        "report_path": ".agentic-hil/reports/last-report.json",
+        "lease_id": "7752e34d41257063757c3577b5f7db4a",
+        "resources": [
+          "debugger-discovery:all",
+          "probe:[withheld]"
+        ],
+        "lease_state": "released",
+        "safe_state_confirmed": true,
+        "processes_reaped": true,
+        "cleanup_required": false,
+        "quarantined": false,
+        "cleanup_reasons": [],
+        "quarantine_id": null
+      },
+      "elapsed_ms": 356
+    },
+    {
+      "index": 4,
+      "route": "dut_uart",
+      "action": "uart_read",
+      "result": {
+        "ok": true,
+        "tool": "test_reactor",
+        "summary": "Expected pattern matched the COM port output.",
+        "port_id": "dut_uart",
+        "comparator": {
+          "pattern": "(?m)^H176 done\\r?$"
+        },
+        "timeout_s": 180.0,
+        "bytes_received": 50556,
+        "reads": 403,
+        "matched_text": {
+          "hex": "4831373620646f6e650d",
+          "text": "H176 done\r",
+          "encoding": "utf-8"
+        },
+        "matched_text_truncated": false
+      },
+      "elapsed_ms": 27079
+    },
+    {
+      "index": 5,
+      "route": "dut_uart",
+      "action": "uart_close",
+      "result": {
+        "ok": true,
+        "tool": "com_session_stop",
+        "port_id": "dut_uart",
+        "was_active": true,
+        "session": {
+          "session_active": false,
+          "started_at": "2026-10-11T19:22:54.622Z",
+          "rx_buffer_bytes": 0,
+          "overflow_bytes": 0,
+          "log_path": ".agentic-hil/logs/com-20261011T192254589Z-dut_uart.jsonl"
+        },
+        "summary": "COM port session stopped.",
+        "first_contact_at": "2026-10-11T19:22:54.621Z",
+        "first_contact_by": "serial_open",
+        "lease_id": "c1e2535a0a4b988b46b57c8799ff3a12",
+        "resources": [
+          "com:serial:[withheld]"
+        ],
+        "lease_state": "released",
+        "safe_state_confirmed": true,
+        "processes_reaped": true,
+        "audit_ok": true,
+        "cleanup_required": false,
+        "quarantined": false,
+        "cleanup_reasons": [],
+        "quarantine_id": null,
+        "config_in_force": {
+          "path": "[withheld]/.config/agentic-hil/projects/nucleo-f446re_demo-c77fe8caab/config.yaml",
+          "digest_algorithm": "sha256",
+          "digest": "sha256:9e0b4615276e15b64107b9a0e09044c5c202265bbe5e337424c9b915ae67652c",
+          "description_source": "startup",
+          "file_state": "unchanged",
+          "file_digest": "sha256:9e0b4615276e15b64107b9a0e09044c5c202265bbe5e337424c9b915ae67652c",
+          "diverged_from_file": false,
+          "checked_at": "2026-10-11T19:23:22Z"
+        },
+        "report_path": ".agentic-hil/reports/last-report.json"
+      },
+      "elapsed_ms": 84
+    }
+  ],
+  "cleanup": [],
+  "cleanup_ok": true,
+  "cleanup_errors": [],
+  "summary": "Test reactor sequence completed. This run's own report is kept at [withheld]/.local/state/agentic-hil/projects/f5eb77dfecd3b217a6a682ed/reports/runs/run-5dfa14fb155a5875.json; later runs do not overwrite it.",
+  "run": "run-5dfa14fb155a5875",
+  "audit_ok": true,
+  "config_in_force": {
+    "path": "[withheld]/.config/agentic-hil/projects/nucleo-f446re_demo-c77fe8caab/config.yaml",
+    "digest_algorithm": "sha256",
+    "digest": "sha256:9e0b4615276e15b64107b9a0e09044c5c202265bbe5e337424c9b915ae67652c",
+    "description_source": "startup",
+    "file_state": "unchanged",
+    "file_digest": "sha256:9e0b4615276e15b64107b9a0e09044c5c202265bbe5e337424c9b915ae67652c",
+    "diverged_from_file": false,
+    "checked_at": "2026-10-11T19:23:22Z"
+  },
+  "report_path": ".agentic-hil/reports/last-report.json",
+  "canonical_report_path": "[withheld]/.local/state/agentic-hil/projects/f5eb77dfecd3b217a6a682ed/reports/runs/run-5dfa14fb155a5875.json"
+}

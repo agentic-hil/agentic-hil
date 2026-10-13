@@ -1,0 +1,37 @@
+{
+  "outcome": "success",
+  "plan": {
+    "name": "hilval-hq176-patched",
+    "path": "hilval/hq176/plans/patched.testconfig.yaml",
+    "sha256": "bd5f9881870fcf0675142bfe014866ea884ed5d822900740efe6ba3cc3289c2c"
+  },
+  "firmware": {
+    "repository": "agentic-hil/agentic-hil",
+    "commit": "ebd3eeaf97903f68d25528e8c90ff2f9c6678646",
+    "ref": "refs/heads/bench/hilval-hq176"
+  },
+  "tools": {
+    "agentic_hil": "0.21.4",
+    "python": "3.12.3"
+  },
+  "bench": {
+    "config_digest": "sha256:9e0b4615276e15b64107b9a0e09044c5c202265bbe5e337424c9b915ae67652c",
+    "digest_algorithm": "sha256",
+    "diverged_from_file": false,
+    "runner": {
+      "name": "[withheld]"
+    },
+    "devices": {
+      "debuggers": [
+        "dut"
+      ],
+      "com_ports": [
+        "dut_uart"
+      ]
+    }
+  },
+  "run": {
+    "cleanup_ok": true,
+    "audit_ok": true
+  }
+}
