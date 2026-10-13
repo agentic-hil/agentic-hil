@@ -1,0 +1,10 @@
+# Dependabot regenerates the .in/.txt pairs with pip-tools. Keep setuptools
+# even when the existing lock has lost its entry: the container tests build
+# wheels with --no-isolation and need this backend in the installed environment.
+# Dependabot reads this top-level table when assembling its compiler options.
+[pip-tools]
+allow-unsafe = true
+
+# pip-compile itself reads the standard tool table when using this config.
+[tool.pip-tools]
+allow-unsafe = true
