@@ -284,10 +284,21 @@ jobs:
       # `--require-usb-uart` for the gate's reason: the board has a USB-UART
       # adapter wired to it, and a run that lost it must not pass with the
       # adapter's tests deselected.
+      #
+      # `--probe-from-config` names the probe, because the machine carries more
+      # than one and the runner never chooses between them. It is the probe the
+      # demo's job above drives: the one the bench's authoritative configuration
+      # for the demo's directory binds by its serial number, read through the
+      # bench's own `agentic-hil doctor --json` run in that directory, which is
+      # the same directory of the same checkout the demo's job runs in. That
+      # configuration is the operator's, made once outside this repository, so
+      # this file names no probe, no serial number and no node, and a probe
+      # moved to another port or another one plugged in beside it changes
+      # nothing here.
       - name: Run the bench tier on Ubuntu 22.04
         if: ${{ !cancelled() }}
         timeout-minutes: 40
-        run: exec python3 tools/bench_in_container.py --distribution ubuntu-22.04 --require-usb-uart --output bench-results/ubuntu-22.04
+        run: exec python3 tools/bench_in_container.py --distribution ubuntu-22.04 --probe-from-config examples/nucleo-f446re_demo --require-usb-uart --output bench-results/ubuntu-22.04
 
       # Right after its run and whatever it did, so a later distribution's limit
       # cannot cost an earlier one its report. The report and the log have the
@@ -304,7 +315,7 @@ jobs:
       - name: Run the bench tier on Ubuntu 24.04
         if: ${{ !cancelled() }}
         timeout-minutes: 40
-        run: exec python3 tools/bench_in_container.py --distribution ubuntu-24.04 --require-usb-uart --output bench-results/ubuntu-24.04
+        run: exec python3 tools/bench_in_container.py --distribution ubuntu-24.04 --probe-from-config examples/nucleo-f446re_demo --require-usb-uart --output bench-results/ubuntu-24.04
 
       - name: Upload the Ubuntu 24.04 tier's report and log
         if: always()
@@ -318,7 +329,7 @@ jobs:
       - name: Run the bench tier on Debian 12
         if: ${{ !cancelled() }}
         timeout-minutes: 40
-        run: exec python3 tools/bench_in_container.py --distribution debian-12 --require-usb-uart --output bench-results/debian-12
+        run: exec python3 tools/bench_in_container.py --distribution debian-12 --probe-from-config examples/nucleo-f446re_demo --require-usb-uart --output bench-results/debian-12
 
       - name: Upload the Debian 12 tier's report and log
         if: always()
@@ -332,7 +343,7 @@ jobs:
       - name: Run the bench tier on Fedora 44
         if: ${{ !cancelled() }}
         timeout-minutes: 40
-        run: exec python3 tools/bench_in_container.py --distribution fedora-44 --require-usb-uart --output bench-results/fedora-44
+        run: exec python3 tools/bench_in_container.py --distribution fedora-44 --probe-from-config examples/nucleo-f446re_demo --require-usb-uart --output bench-results/fedora-44
 
       - name: Upload the Fedora 44 tier's report and log
         if: always()

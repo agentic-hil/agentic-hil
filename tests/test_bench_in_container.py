@@ -1065,6 +1065,437 @@ def test_a_named_node_is_traced_back_to_its_probe_for_the_serial_to_withhold(
     assert f"probe {bench_in_container.WITHHELD} answered" in out
 
 
+# The probe the bench's configuration names.
+
+# Two more probes beside the bench's own, as a machine shared with other boards
+# carries them: STLINK-V3s, a product id the product recognises too, with serial
+# numbers and ports of their own. The bench's authoritative configuration names
+# one probe among them by its serial number.
+THIRD_SERIAL = "PROBESERIAL0003"
+SECOND_USB_NODE = "/dev/bus/usb/001/006"
+SECOND_TTY_NODE = "/dev/ttyACM1"
+# A probe another debugger entry of the configuration names, attached nowhere:
+# doctor's document carries its serial number all the same.
+ELSEWHERE_SERIAL = "PROBESERIAL0099"
+# The seam itself, kept before any fixture replaces it.
+THE_RUNNERS_OWN_DOCTOR = bench_in_container.bench_doctor
+
+
+def a_doctor_document(probe_id: object = PROBE_SERIAL, *, bound: bool = True) -> dict[str, object]:
+    """What `agentic-hil doctor --json` prints for the bench's configuration, cut to what the runner reads.
+
+    The shape is doctor's own, `debuggers.<name>.probe_id` and `.bound`, and
+    the config path is under the home it is withheld by; the test below holds
+    the shape to the product's.
+    """
+    return {
+        "ok": True,
+        "tool": "agentic_hil_doctor",
+        "config_path": f"{HOME}/.config/agentic-hil/projects/nucleo-f446re_demo-0123456789/config.yaml",
+        "debuggers": {"dut": {"type": "openocd", "probe_id": probe_id, "bound": bound, "permissions": {}}},
+        "com_ports": {"dut_uart": {"device": f"/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_{probe_id}-if02"}},
+    }
+
+
+@pytest.fixture
+def several(machine: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """The machine with three probes attached and the bench's configuration naming the first one found.
+
+    doctor is answered from `doctor_says`, and every directory it is asked in
+    is recorded.
+    """
+    a_usb_device(machine.sysfs, "1-2", product="3754", device=6, serial=SECOND_SERIAL, ttys=("ttyACM1",))
+    a_usb_device(machine.sysfs, "1-6", product="3754", device=7, serial=THIRD_SERIAL, ttys=("ttyACM2",))
+    machine.statuses[SECOND_USB_NODE] = a_node(mode=0o664, gid=USB_GROUP)
+    machine.statuses[SECOND_TTY_NODE] = a_node(gid=SERIAL_GROUP)
+    machine.openable.update({SECOND_USB_NODE, SECOND_TTY_NODE})
+    machine.demo = tmp_path / "checkout" / "examples" / "nucleo-f446re_demo"
+    machine.demo.mkdir(parents=True)
+    machine.doctor_says = json.dumps(a_doctor_document())
+    machine.doctor_asked_in = []
+
+    def doctor(directory: str) -> str:
+        machine.doctor_asked_in.append(directory)
+        return machine.doctor_says
+
+    monkeypatch.setattr(bench_in_container, "bench_doctor", doctor)
+    return machine
+
+
+def test_three_probes_without_a_name_are_still_refused(several: SimpleNamespace, capsys: pytest.CaptureFixture) -> None:
+    """Discovery still chooses nothing: the refusal points at the configuration, and doctor is not asked."""
+    assert run(several) == bench_in_container.EXIT_NO_PROBE
+
+    assert several.runtime.commands == []
+    assert several.doctor_asked_in == []
+    err = capsys.readouterr().err
+    assert "3 in-circuit debuggers or programmers are attached" in err
+    assert "--probe-from-config" in err
+
+
+@pytest.mark.parametrize(
+    ("probe_id", "nodes"),
+    [(PROBE_SERIAL, [USB_NODE, TTY_NODE]), (SECOND_SERIAL, [SECOND_USB_NODE, SECOND_TTY_NODE])],
+    ids=["first-found", "not-first-found"],
+)
+def test_the_probe_the_configuration_names_is_handed_in_and_no_other(
+    several: SimpleNamespace, capsys: pytest.CaptureFixture, probe_id: str, nodes: list[str]
+) -> None:
+    """The probe is the one whose serial number the bound debugger names,
+    wherever it sits among the others, and only its nodes go in. doctor is
+    asked in the directory named, before the queue and again after the wait."""
+    several.doctor_says = json.dumps(a_doctor_document(probe_id))
+
+    assert run(several, "--probe-from-config", str(several.demo)) == 0
+
+    assert option_values(several.runtime.tier, "--device") == nodes
+    assert several.doctor_asked_in == [str(several.demo), str(several.demo)]
+    err = capsys.readouterr().err
+    assert "the probe the debugger `dut` names in the authoritative configuration" in err
+    assert probe_id not in err
+
+
+def test_the_serial_number_is_compared_as_the_product_compares_it(several: SimpleNamespace) -> None:
+    """Case folded, as the product folds a probe serial before it matches one,
+    so a configuration the product accepts names the same probe here."""
+    from agentic_hil.types import fold_hardware_id
+
+    spelled = PROBE_SERIAL.lower()
+    assert fold_hardware_id(spelled) == fold_hardware_id(PROBE_SERIAL)
+    several.doctor_says = json.dumps(a_doctor_document(spelled))
+
+    assert run(several, "--probe-from-config", str(several.demo)) == 0
+
+    assert option_values(several.runtime.tier, "--device") == [USB_NODE, TTY_NODE]
+
+
+def test_the_document_read_is_the_one_doctor_prints() -> None:
+    """The two keys the runner reads, where doctor puts them: a debugger entry
+    names its probe in `probe_id` and says in `bound` whether it is the one the
+    configuration binds. Read from doctor's own source, since the runner is a
+    stdlib script that never imports the product."""
+    source = (REPOSITORY_ROOT / "src" / "agentic_hil" / "cli.py").read_text(encoding="utf-8")
+    entry = source[source.index('        "debuggers": {\n            name: {') :]
+    entry = entry[: entry.index("for name, entry in config.debuggers.items()")]
+    assert '"probe_id": entry.probe_id,' in entry
+    assert '"bound": name == config.debugger_id,' in entry
+
+
+@pytest.mark.parametrize(
+    ("said", "says"),
+    [
+        (
+            json.dumps({"ok": False, "error_type": "config_file_not_found", "summary": "No authoritative configuration was found."}),
+            "config_file_not_found",
+        ),
+        (json.dumps(a_doctor_document(bound=False)), "binds no debuggers"),
+        (json.dumps(a_doctor_document(None)), "adopt-hardware"),
+        (json.dumps(a_doctor_document("")), "adopt-hardware"),
+        (json.dumps(a_doctor_document(ELSEWHERE_SERIAL)), "none of the 3 in-circuit debuggers or programmers attached"),
+        ("Traceback (most recent call last):\n", "no JSON document"),
+        (json.dumps(["not", "a", "report"]), "no JSON document"),
+    ],
+    ids=["not-loaded", "nothing-bound", "no-probe-id", "empty-probe-id", "not-attached", "not-json", "not-a-document"],
+)
+def test_a_configuration_that_names_no_attached_probe_is_refused_before_anything_is_built(
+    several: SimpleNamespace, capsys: pytest.CaptureFixture, said: str, says: str
+) -> None:
+    """Every way the configuration fails to name one attached probe is a
+    refusal, and none falls back to discovery's choice."""
+    several.doctor_says = said
+
+    assert run(several, "--probe-from-config", str(several.demo)) == bench_in_container.EXIT_NO_PROBE
+
+    assert several.runtime.commands == []
+    err = capsys.readouterr().err
+    assert says in err
+    for serial in (PROBE_SERIAL, SECOND_SERIAL, THIRD_SERIAL, ELSEWHERE_SERIAL):
+        assert serial not in err
+
+
+def test_two_probes_carrying_the_serial_the_configuration_names_are_not_chosen_between(
+    several: SimpleNamespace, capsys: pytest.CaptureFixture
+) -> None:
+    """A serial number names one probe; two that carry it are two boards the
+    configuration cannot tell apart, and each is named by where it sits."""
+    a_usb_device(several.sysfs, "1-7", device=9, serial=PROBE_SERIAL, ttys=("ttyACM4",))
+
+    assert run(several, "--probe-from-config", str(several.demo)) == bench_in_container.EXIT_NO_PROBE
+
+    assert several.runtime.commands == []
+    err = capsys.readouterr().err
+    assert "bus 1 device 5" in err and "bus 1 device 9" in err
+    assert "choosing a board" in err
+    assert PROBE_SERIAL not in err
+
+
+def test_the_named_probe_without_a_serial_port_is_refused(several: SimpleNamespace, capsys: pytest.CaptureFixture) -> None:
+    shutil.rmtree(several.sysfs / "bus" / "usb" / "devices" / "1-1")
+    a_usb_device(several.sysfs, "1-1", ttys=())
+
+    assert run(several, "--probe-from-config", str(several.demo)) == bench_in_container.EXIT_NO_PROBE
+
+    assert several.runtime.commands == []
+    assert "shows no serial port" in capsys.readouterr().err
+
+
+def test_a_directory_that_is_not_there_is_refused_without_asking_doctor(
+    several: SimpleNamespace, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    missing = tmp_path / "checkout" / "examples" / "no-such-demo"
+
+    assert run(several, "--probe-from-config", str(missing)) == bench_in_container.EXIT_NO_PROBE
+
+    assert several.doctor_asked_in == []
+    assert several.runtime.commands == []
+    assert "not a directory" in capsys.readouterr().err
+
+
+def test_without_the_product_on_path_the_configuration_cannot_be_read(
+    several: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The real seam this time, on a machine whose PATH has the runtimes and not the product."""
+    monkeypatch.setattr(bench_in_container, "bench_doctor", THE_RUNNERS_OWN_DOCTOR)
+
+    assert run(several, "--probe-from-config", str(several.demo)) == bench_in_container.EXIT_NO_PROBE
+
+    assert several.runtime.commands == []
+    assert "agentic-hil was not found on PATH" in capsys.readouterr().err
+
+
+def test_doctor_is_the_products_own_run_in_the_directory_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The installation on PATH, asked for its JSON document in the directory
+    the configuration is bound to, with a limit, and its exit status left to
+    the document: doctor exits non-zero for findings about a bench that still
+    loaded."""
+    asked: list[tuple[list[str], dict[str, object]]] = []
+
+    def answer(command: list[str], **kwargs: object) -> Completed:
+        asked.append((command, kwargs))
+        return Completed(1, '{"debuggers": {}}', "")
+
+    monkeypatch.setattr(bench_in_container, "shutil", SimpleNamespace(which=lambda name: f"/home/bench/.local/bin/{name}"))
+    monkeypatch.setattr(bench_in_container, "subprocess", SimpleNamespace(run=answer))
+
+    assert bench_in_container.bench_doctor(str(tmp_path)) == '{"debuggers": {}}'
+
+    [(command, kwargs)] = asked
+    assert command == ["/home/bench/.local/bin/agentic-hil", "--json", "doctor"]
+    assert kwargs["cwd"] == str(tmp_path)
+    assert kwargs["check"] is False
+    assert kwargs["timeout"] == bench_in_container.COMMAND_TIMEOUT_S
+
+
+def test_the_configuration_and_the_named_nodes_are_not_given_together(
+    several: SimpleNamespace, capsys: pytest.CaptureFixture
+) -> None:
+    assert (
+        run(several, "--probe-from-config", str(several.demo), "--usb-device", USB_NODE, "--serial-device", TTY_NODE)
+        == bench_in_container.EXIT_NO_PROBE
+    )
+
+    assert several.doctor_asked_in == []
+    assert several.runtime.commands == []
+    assert "a run takes one of them" in capsys.readouterr().err
+
+
+def test_the_probe_is_found_again_by_its_serial_number_after_the_wait(
+    several: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A probe that re-enumerated while the run waited has new nodes, and the
+    tier gets those: the configuration is read again and the probe found again
+    by the serial number it names."""
+    built = bench_in_container.build_image
+
+    def build_and_reenumerate(*args: object, **kwargs: object) -> str:
+        image = built(*args, **kwargs)
+        shutil.rmtree(several.sysfs / "bus" / "usb" / "devices" / "1-1")
+        a_usb_device(several.sysfs, "1-1", device=12, ttys=("ttyACM5",))
+        several.statuses["/dev/bus/usb/001/012"] = a_node(mode=0o664, gid=USB_GROUP)
+        several.statuses["/dev/ttyACM5"] = a_node(gid=SERIAL_GROUP)
+        several.openable.update({"/dev/bus/usb/001/012", "/dev/ttyACM5"})
+        return image
+
+    monkeypatch.setattr(bench_in_container, "build_image", build_and_reenumerate)
+
+    assert run(several, "--probe-from-config", str(several.demo)) == 0
+
+    assert option_values(several.runtime.tier, "--device") == ["/dev/bus/usb/001/012", "/dev/ttyACM5"]
+    assert len(several.doctor_asked_in) == 2
+
+
+def test_the_named_probe_gone_while_the_run_waited_is_refused(several: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gone means gone: the other probes still attached are not a stand-in."""
+    built = bench_in_container.build_image
+
+    def build_and_unplug(*args: object, **kwargs: object) -> str:
+        image = built(*args, **kwargs)
+        shutil.rmtree(several.sysfs / "bus" / "usb" / "devices" / "1-1")
+        return image
+
+    monkeypatch.setattr(bench_in_container, "build_image", build_and_unplug)
+
+    assert run(several, "--probe-from-config", str(several.demo)) == bench_in_container.EXIT_NO_PROBE
+
+    assert len(several.runtime.issued("build")) == 1
+    assert several.runtime.issued("run") == []
+
+
+def test_every_serial_number_doctor_or_sysfs_shows_is_withheld(several: SimpleNamespace, capsys: pytest.CaptureFixture) -> None:
+    """The probe run against, the other probes attached, and a probe only the
+    configuration names: none reaches the output, the log or the report, and
+    no line is removed."""
+    document = a_doctor_document()
+    debuggers = document["debuggers"]
+    assert isinstance(debuggers, dict)
+    debuggers["spare"] = {"type": "pyocd", "probe_id": ELSEWHERE_SERIAL, "bound": False}
+    several.doctor_says = json.dumps(document)
+    serials = (PROBE_SERIAL, SECOND_SERIAL, THIRD_SERIAL, ELSEWHERE_SERIAL)
+    several.runtime.tier_output = MARKED + "".join(f"probe {serial} seen\n" for serial in serials) + "== 114 passed in 243.10s ==\n"
+
+    def report(command: list[str]) -> None:
+        results = Path(mounted_at(command, bench_in_container.RESULTS))
+        (results / bench_in_container.REPORT_NAME).write_text(
+            f'<testsuites><testcase name="t"><failure message="{" ".join(serials)}"/></testcase></testsuites>', encoding="utf-8"
+        )
+
+    several.runtime.during_run = report
+
+    assert run(several, "--probe-from-config", str(several.demo)) == 0
+
+    printed = capsys.readouterr()
+    log = (several.output / bench_in_container.LOG_NAME).read_text(encoding="utf-8")
+    junit = (several.output / bench_in_container.REPORT_NAME).read_text(encoding="utf-8")
+    for text in (printed.out, printed.err, log, junit):
+        for serial in serials:
+            assert serial not in text
+    assert printed.out.count(f"probe {bench_in_container.WITHHELD} seen") == len(serials)
+    assert len(log.splitlines()) == len(several.runtime.tier_output.splitlines()) + 1
+
+
+# The other probes.
+
+
+def masked_entries(command: list[str]) -> list[str]:
+    """Every sysfs path the command masks from the container, in order."""
+    return [
+        entry
+        for value in option_values(command, "--security-opt")
+        if value.startswith("mask=")
+        for entry in value.removeprefix("mask=").split(":")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("probe_id", "hidden"),
+    [(PROBE_SERIAL, ["1-2", "1-6"]), (SECOND_SERIAL, ["1-1", "1-6"])],
+    ids=["first-found", "not-first-found"],
+)
+def test_every_other_attached_probe_is_masked_out_of_the_containers_sysfs(
+    several: SimpleNamespace, capsys: pytest.CaptureFixture, probe_id: str, hidden: list[str]
+) -> None:
+    """Handing in one probe's nodes leaves the others in the container's sysfs,
+    and OpenOCD's ST-LINK driver opens every device it matches there before it
+    reads the serial number it selects by, which fails for each one whose node
+    is not in the container and says so as an error. So every other probe's
+    entry is masked, under the container's own /sys and not the host tree
+    discovery read, and the run says which ones by where they sit."""
+    several.doctor_says = json.dumps(a_doctor_document(probe_id))
+
+    assert run(several, "--probe-from-config", str(several.demo)) == 0
+
+    command = several.runtime.tier
+    assert masked_entries(command) == [f"/sys/bus/usb/devices/{name}" for name in hidden]
+    assert command.index("label=disable") < command.index(next(v for v in command if v.startswith("mask=")))
+    err = capsys.readouterr().err
+    assert "hiding the 2 other in-circuit debuggers or programmers attached here from the tier" in err
+    for name in hidden:
+        assert f"(sysfs {name})" in err
+    for serial in (PROBE_SERIAL, SECOND_SERIAL, THIRD_SERIAL):
+        assert serial not in err
+
+
+def test_a_lone_probe_has_nothing_masked(machine: SimpleNamespace, capsys: pytest.CaptureFixture) -> None:
+    assert run(machine) == 0
+
+    assert masked_entries(machine.runtime.tier) == []
+    assert "hiding" not in capsys.readouterr().err
+
+
+def test_nodes_named_by_hand_have_every_other_probe_masked(several: SimpleNamespace) -> None:
+    """The probe named by its nodes is recognised as discovery finds it, by its
+    USB node, and every other one is hidden the same way."""
+    assert run(several, "--usb-device", SECOND_USB_NODE, "--serial-device", SECOND_TTY_NODE) == 0
+
+    assert option_values(several.runtime.tier, "--device") == [SECOND_USB_NODE, SECOND_TTY_NODE]
+    assert masked_entries(several.runtime.tier) == ["/sys/bus/usb/devices/1-1", "/sys/bus/usb/devices/1-6"]
+
+
+def test_the_live_device_tree_has_the_other_probes_masked_too(several: SimpleNamespace) -> None:
+    """With the host's /dev in view the other probes' nodes are there to open,
+    so hiding their entries is all that keeps the tier to the one it is handed."""
+    assert run(several, "--runtime", "podman", "--live-device-tree", "--probe-from-config", str(several.demo)) == 0
+
+    assert masked_entries(several.runtime.tier) == ["/sys/bus/usb/devices/1-2", "/sys/bus/usb/devices/1-6"]
+
+
+def test_docker_with_another_probe_attached_is_refused_before_anything_is_built(
+    several: SimpleNamespace, capsys: pytest.CaptureFixture
+) -> None:
+    """Docker has no way to mask a path in a container, so a run there would
+    show the tier every other probe; it is refused, and never run with them in
+    view."""
+    assert run(several, "--runtime", "docker", "--probe-from-config", str(several.demo)) == bench_in_container.EXIT_CANNOT_RUN_HERE
+
+    assert several.runtime.commands == []
+    err = capsys.readouterr().err
+    assert "2 other in-circuit debuggers or programmers attached here would be in the tier's view under Docker" in err
+    assert "rootless Podman" in err
+
+
+def test_the_probes_to_hide_are_read_again_after_the_wait(several: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A probe plugged in while the run waited is hidden too: which entries are
+    masked is read from sysfs for the run, never carried over or written down."""
+    built = bench_in_container.build_image
+
+    def build_and_plug_in(*args: object, **kwargs: object) -> str:
+        image = built(*args, **kwargs)
+        a_usb_device(several.sysfs, "3-1.4", product="3754", bus=3, device=2, serial="PROBESERIAL0004", ttys=("ttyACM6",))
+        return image
+
+    monkeypatch.setattr(bench_in_container, "build_image", build_and_plug_in)
+
+    assert run(several, "--probe-from-config", str(several.demo)) == 0
+
+    assert masked_entries(several.runtime.tier) == [
+        "/sys/bus/usb/devices/1-2",
+        "/sys/bus/usb/devices/1-6",
+        "/sys/bus/usb/devices/3-1.4",
+    ]
+
+
+def test_an_entry_podman_would_split_is_refused_rather_than_masked_wrongly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Podman splits the paths it masks at colons. The kernel puts one only in
+    an interface's entry, never a device's, so an entry with one is no device
+    discovery should have found, and is refused rather than masked as two
+    paths that are not it."""
+    odd = bench_in_container.Probe(
+        where="bus 1 device 9 (sysfs 1-9:1.0)",
+        usb_nodes=("/dev/bus/usb/001/009",),
+        serial_ports=(),
+        serial_numbers=(),
+        sysfs_name="1-9:1.0",
+    )
+    monkeypatch.setattr(bench_in_container, "discover_probes", lambda: [odd])
+    devices = bench_in_container.Devices((USB_NODE,), (TTY_NODE,), (PROBE_SERIAL,))
+
+    with pytest.raises(bench_in_container.Refused) as refused:
+        bench_in_container.the_other_probes(devices, bench_in_container.Voice(bench_in_container.Redactor([])))
+
+    assert refused.value.status == bench_in_container.EXIT_NO_PROBE
+    assert "cannot be hidden from the container" in str(refused.value)
+
+
 # The USB-UART adapter.
 
 
