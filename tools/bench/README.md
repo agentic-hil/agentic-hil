@@ -25,7 +25,11 @@ configures anything on the machine.
 
 - The board, attached through its in-circuit debugger or programmer, with the
   probe's serial port enumerated. A run expects exactly one probe with a serial
-  port; with more attached, `--usb-device` and `--serial-device` name the nodes.
+  port. With more attached, `--probe-from-config` names the one the bench's own
+  authoritative configuration binds, which needs Agentic HIL on this user's
+  PATH and that configuration made once with `agentic-hil init` in the
+  directory named, and `--usb-device` and `--serial-device` name the nodes by
+  hand.
 - `python3` 3.10 or newer and `git`, which is everything the runner itself
   needs. It runs from a checkout and installs nothing.
 - Rootless Podman, with crun as the OCI runtime, `newuidmap` and `newgidmap`
@@ -138,10 +142,30 @@ collection says why. The option is refused with `--distribution` for the
 reasons above, and together with `--cubeprogrammer-archive`, because each is
 an image target of its own and this tree carries its own CLI.
 
-A run finds the probe through sysfs by its USB vendor and product ids, never by
-a serial number; takes this machine's run lock; builds the image; runs the tier
+A run finds the probe through sysfs by its USB vendor and product ids and never
+chooses one by a serial number (the one `--probe-from-config` reads is the
+operator's choice, not the run's); takes this machine's run lock; builds the
+image; runs the tier
 with the probe's nodes handed in; copies the JUnit report out; and reads pytest's
 summary line as the verdict.
+
+Every other probe attached is hidden from the container. Handing in one probe's
+nodes does not keep the tier from seeing the others: the container's `/sys` is a
+sysfs listing every USB device on the machine, and a debugger enumerates through
+it. OpenOCD's ST-LINK driver opens each device whose vendor and product id it
+matches before it compares the serial number it was told to select, so a probe
+whose node was not handed in fails to open in the container and costs one
+`libusb_open() failed` error in a run that otherwise worked, which the product
+reports as a failure-worded line (OpenOCD 0.12.0, which Ubuntu 24.04, Debian 12
+and Fedora 44 package, matches the STLINK-V3's product id 0x3754; Ubuntu 22.04's
+0.11.0 does not). So under Podman each attached probe discovery recognises,
+other than the one handed in, is masked with `--security-opt mask=` over its
+entry under `/sys/bus/usb/devices`, which crun covers with an empty read-only
+directory, and libusb in the container skips it as no device at all. The
+entries are the ones discovery reads for the run, before the queue and again
+after it, and the run says which probes it hides by where they sit. Docker has
+no way to mask a path, so a run under Docker with another probe attached is
+refused with exit status 2.
 
 The USB reset re-enumeration stage, pyOCD discovery diagnostic, and opt-in
 incident recovery check are the exceptions to static device-node mounts. They
@@ -193,6 +217,24 @@ apply.
   below.
 - `--usb-device` and `--serial-device` name the probe's nodes instead of
   finding them. They go together, and each can be given more than once.
+- `--probe-from-config DIR` runs against the probe the authoritative
+  configuration for DIR binds, on a machine with more than one attached. The
+  configuration is the one the operator made once with `agentic-hil init` in
+  DIR, read through the product installed on the machine, `agentic-hil doctor
+  --json` run in DIR, so the product finds and validates it and this tool
+  reads two keys of doctor's document: the debugger it binds, `bound`, and that
+  debugger's `probe_id`. The probe is the one attached probe whose USB serial
+  number is that `probe_id`, compared case folded as the product compares
+  them, and its nodes are found through sysfs as discovery finds them. Every
+  serial number doctor's document names and every attached probe's is
+  withheld. A configuration that does not load, binds no debugger or names no
+  probe, a probe it names that is not attached, two attached probes carrying
+  its serial number and one without a serial port are refused with exit
+  status 6, before the queue and again after it; nothing is chosen between,
+  and the option is not given with `--usb-device` or `--serial-device`. doctor
+  drives no hardware: it reads the configuration, asks the debugger's
+  executable for its version and asks the kernel whether this user may open
+  the nodes.
 - `--without-device-group` runs the one stage the tier cannot hold,
   `tests/bench/test_bench_without_device_group.py`, and nothing else: the
   container gets the probe's nodes and none of the groups they are opened
@@ -350,13 +392,13 @@ It is pytest's summary line or nothing:
 The exit status is pytest's own when pytest reported, and otherwise one of these:
 
 - 2: this machine cannot run the tier, such as a run off Linux, as root, with no
-  runtime or with Podman and no crun;
+  runtime, with Podman and no crun, or under Docker with another probe attached;
 - 3: the image did not build;
 - 4: no result;
 - 5: `--no-wait` met a held machine;
-- 6: no probe could be handed in, no USB-UART adapter where
-  `--require-usb-uart` states there is one, or no single ESP32 board where
-  `--esp32` states there is one;
+- 6: no probe could be handed in, the one `--probe-from-config` names
+  included, no USB-UART adapter where `--require-usb-uart` states there is one,
+  or no single ESP32 board where `--esp32` states there is one;
 - 7: a container was left behind;
 - 130: interrupted.
 
@@ -365,8 +407,10 @@ The exit status is pytest's own when pytest reported, and otherwise one of these
 The tier prints the probe's serial number and paths of the machine it runs on,
 and the gate's log and artifact can be read by anyone who can read the
 repository. Every line the runner prints or logs, and the JUnit report, has the
-serial numbers of the probe, of every USB-UART adapter attached and, with
-`--esp32`, of every ESP32 board's bridge attached, the
+serial numbers of the probe, of every USB-UART adapter attached, with
+`--esp32` of every ESP32 board's bridge attached and, with
+`--probe-from-config`, of every probe attached and every probe the
+configuration names, the
 machine's host name, the user's home directory and the user name replaced with
 `[withheld]`, line by line. No line is removed, so a
 failure still shows the line it failed on.
@@ -458,7 +502,11 @@ serial number and the machine's names as `[withheld]`, as this tool's do.
 
 Its second job runs this tool once for every distribution `--distribution`
 offers, with `--require-usb-uart` as the gate passes it, one after another,
-after the first job whatever it found: each run
+after the first job whatever it found. Each names its probe with
+`--probe-from-config examples/nucleo-f446re_demo`, since the machine carries
+more than one: the probe the first job drives, which the bench's configuration
+for the demo's directory binds, so the workflow names no probe, serial number
+or node of its own. Each run
 queues on the lock itself, as the gate's does, and each distribution's report
 and log are uploaded as `bench-tier-<distribution>`, whatever the run did, and
 kept for fourteen days.

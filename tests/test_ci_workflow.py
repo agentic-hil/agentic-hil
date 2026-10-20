@@ -1039,14 +1039,25 @@ def test_every_distribution_the_runner_builds_runs_its_whole_tier_one_after_anot
     still runs; after a cancel, none. Each takes the machine's run lock itself,
     as the gate's run does, and queues for it, and each states, as the gate's
     does, that the board's USB-UART adapter is there.
+
+    Each names its probe by the directory whose authoritative configuration
+    binds it, and that is the demo's directory, the one the job before it
+    drives the board from: the probe the distributions run against is the one
+    the bench's operator bound, never one the runner chose among several, and
+    never one this file names by serial number or node.
     """
     ran = distribution_steps()
+    demo = bench_job()["defaults"]["run"]["working-directory"]
 
+    assert demo == DEMO_DIRECTORY
     assert [distribution for distribution, _, _ in ran] == list(runner_distributions()), ran
     for distribution, step, _ in ran:
         line = run_lines({"steps": [step]})[0]
         command = shlex.split(line)
-        assert command == ["exec", "python3", DISTRIBUTION_RUNNER, "--distribution", distribution, "--require-usb-uart", "--output", f"{DISTRIBUTION_RESULTS}/{distribution}"], command
+        assert command == [
+            "exec", "python3", DISTRIBUTION_RUNNER, "--distribution", distribution, "--probe-from-config", demo,
+            "--require-usb-uart", "--output", f"{DISTRIBUTION_RESULTS}/{distribution}",
+        ], command
         assert step["if"] == "${{ !cancelled() }}", step
         assert "working-directory" not in step, step
         assert not RAW_HARDWARE.search(line), line
