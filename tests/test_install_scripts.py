@@ -155,6 +155,10 @@ POWERSHELL_UV_EXECUTION = re.compile(r"Invoke-Expression \(\[Text\.Encoding\]::U
 TLS_PROXY_DOCKERFILE = REPOSITORY_ROOT / "evals" / "tls_proxy" / "container" / "Dockerfile"
 DOCKERFILE_UV_VERSION = re.compile(r"^ARG UV_INSTALLER_VERSION=(\d+\.\d+\.\d+)$", re.MULTILINE)
 DOCKERFILE_UV_SHA256 = re.compile(rf"^ARG UV_INSTALLER_SHA256=({SHA256_HEX})$", re.MULTILINE)
+# The interpreter request both installers hand uv, which the classifiers in
+# pyproject.toml decide (see _declared_python_request).
+SHELL_UV_PYTHON_REQUEST = re.compile(r'^UV_PYTHON_REQUEST="([^"]+)"$', re.MULTILINE)
+POWERSHELL_UV_PYTHON_REQUEST = re.compile(r"^\$UvPythonRequest = '([^']+)'$", re.MULTILINE)
 
 # One line per agent on a successful registration, identical in both scripts,
 # because the operator reads whichever one their machine ran.
@@ -381,6 +385,46 @@ def test_every_site_that_fetches_the_uv_installer_pins_the_same_release() -> Non
     assert image_digest.group(1) == shell_digest.group(1), (
         "the TLS-proxy eval image fetches the file install.sh fetches, so it must carry install.sh's digest"
     )
+
+
+def _declared_python_request() -> str:
+    """The Pythons pyproject.toml declares, as the uv request `>=3.FLOOR,<3.CEILING+1`.
+
+    The classifiers name each minor the project supports and the CI matrix
+    tests; `requires-python` names the floor. An installer asking uv for
+    anything wider lets uv pick an interpreter nobody tested, which is how a
+    Windows machine with a Python newer than any PyYAML wheel ended up building
+    PyYAML from source.
+    """
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - only a 3.10 collection reaches this
+        import tomli as tomllib  # type: ignore[no-redef]
+    project = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    minors = sorted(int(found.group(1)) for classifier in project["classifiers"] if (found := re.fullmatch(r"Programming Language :: Python :: 3\.(\d+)", classifier)))
+    assert minors, "pyproject.toml names no Python 3 minor among its classifiers"
+    assert minors == list(range(minors[0], minors[-1] + 1)), f"the classifiers skip a Python: {minors}"
+    assert project["requires-python"] == f">=3.{minors[0]}", f"requires-python {project['requires-python']} is not the classifiers' floor 3.{minors[0]}"
+    return f">=3.{minors[0]},<3.{minors[-1] + 1}"
+
+
+def test_both_installers_ask_uv_for_the_pythons_the_package_declares() -> None:
+    """One range, three places: the classifiers, install.sh and install.ps1.
+
+    uv asked for no interpreter takes the newest one the Windows registry
+    lists. The day a runner image gained Python 3.15, for which PyYAML 6.0.3
+    publishes no wheel, `uv tool install agentic-hil` built PyYAML from source
+    and stopped for want of a C compiler. Both installers now ask uv for the
+    Pythons the project declares, and a release that adds one to the
+    classifiers fails here until it moves both scripts' range with it.
+    """
+    declared = _declared_python_request()
+    shell = SHELL_UV_PYTHON_REQUEST.search(_code_only(_shell_source()))
+    powershell = POWERSHELL_UV_PYTHON_REQUEST.search(_code_only(_powershell_source()))
+    assert shell is not None, "install.sh names no interpreter request for uv"
+    assert powershell is not None, "install.ps1 names no interpreter request for uv"
+    assert shell.group(1) == declared, f"install.sh asks uv for {shell.group(1)}, the classifiers declare {declared}"
+    assert powershell.group(1) == declared, f"install.ps1 asks uv for {powershell.group(1)}, the classifiers declare {declared}"
 
 
 def test_a_uv_digest_mismatch_names_both_hashes_and_says_the_pin_may_be_stale() -> None:
@@ -3127,7 +3171,53 @@ def _powershell_function(source: str, name: str) -> str:
 # against a receipt on disk without a uv on the machine. A helper added between
 # the reader and `Install-WithUv` has to be added here too, or the harness
 # fails on a name it does not know rather than on an assertion.
-_POWERSHELL_REFRESH_FUNCTIONS = ("Invoke-Uv", "Test-UvManagesTool", "Get-UvRecordedRequirements", "Get-RefreshSpec", "Install-WithUv")
+_POWERSHELL_REFRESH_FUNCTIONS = ("Invoke-UvOnSupportedPython", "Invoke-Uv", "Test-UvManagesTool", "Get-UvRecordedRequirements", "Get-RefreshSpec", "Install-WithUv")
+
+
+@pytest.mark.parametrize(("operator_request", "failing"), [(None, False), (None, True), ("3.12", False)])
+def test_the_powershell_interpreter_request_lasts_for_the_uv_call_alone(tmp_path: Path, operator_request: str | None, failing: bool) -> None:
+    """`Invoke-UvOnSupportedPython` sets UV_PYTHON for uv and takes it away again.
+
+    Through `irm | iex` install.ps1 runs in the reader's own session, so a
+    UV_PYTHON left behind would steer every uv command typed there afterwards.
+    uv sees the declared range during the call, the session has no UV_PYTHON
+    after it, also when the call fails, and an operator's own UV_PYTHON is
+    what uv sees and what stays.
+    """
+    powershell = _windows_powershell()
+    declared = _declared_python_request()
+    seen = tmp_path / "seen"
+    before = "Remove-Item Env:\\UV_PYTHON -ErrorAction SilentlyContinue\n" if operator_request is None else f"$env:UV_PYTHON = '{operator_request}'\n"
+    answer = "throw 'uv failed'" if failing else "return [pscustomobject]@{ ExitCode = 0; Output = '' }"
+    harness = (
+        "$ErrorActionPreference = 'Stop'\n"
+        f"$seen = '{seen}'\n"
+        f"$UvPythonRequest = '{declared}'\n"
+        f"{before}"
+        "function Invoke-Captured {\n"
+        "    param([string]$File, [string[]]$Arguments)\n"
+        "    Add-Content -LiteralPath $seen -Value \"during=$env:UV_PYTHON\" -Encoding utf8\n"
+        f"    {answer}\n"
+        "}\n"
+        f"{_powershell_function(_powershell_source(), 'Invoke-UvOnSupportedPython')}"
+        "try { $null = Invoke-UvOnSupportedPython -Arguments @('tool', 'install', 'agentic-hil') } catch { }\n"
+        "Add-Content -LiteralPath $seen -Value \"after=$env:UV_PYTHON\" -Encoding utf8\n"
+    )
+    script = tmp_path / "request-harness.ps1"
+    script.write_text(harness, encoding="utf-8")
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+    assert seen.read_text(encoding="utf-8-sig").splitlines() == [f"during={operator_request or declared}", f"after={operator_request or ''}"], result.stderr
 
 
 def _run_powershell_uv_refresh(tmp_path: Path, recorded_receipt: str) -> tuple[str, str]:
@@ -3705,20 +3795,21 @@ def test_the_retry_is_refused_when_it_was_told_to_be(tmp_path: Path) -> None:
     assert "invalid peer certificate: UnknownIssuer" in transcript, transcript
 
 
-def _recording_uv_stub(seen: Path) -> str:
-    """A uv that always succeeds and records the two cert variables it inherited.
+def _recording_uv_stub(seen: Path, variables: Sequence[str] = ("UV_SYSTEM_CERTS", "PIP_CERT")) -> str:
+    """A uv that always succeeds and records the variables it inherited, the two cert ones by default.
 
     Real uv reads only UV_SYSTEM_CERTS, but a shell stub can read any variable in
     its environment, so it records PIP_CERT too: --no-system-certs clears both
     before the manager runs, and this is where that clearing is observed.
     """
+    recorded = " ".join(f"${{{variable}:-unset}}" for variable in variables)
     return (
         'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
         '  echo "$UV_TOOL_BIN_DIR"\n'
         "  exit 0\n"
         "fi\n"
         'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
-        f'  echo "${{UV_SYSTEM_CERTS:-unset}} ${{PIP_CERT:-unset}}" > "{seen}"\n'
+        f'  echo "{recorded}" > "{seen}"\n'
         '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
         "#!/bin/sh\n"
         'case "\\$1" in\n'
@@ -3730,6 +3821,43 @@ def _recording_uv_stub(seen: Path) -> str:
         "fi\n"
         "exit 0\n"
     )
+
+
+@pytest.mark.parametrize("operator_request", [None, "3.12"])
+def test_the_shell_install_asks_uv_for_the_pythons_the_package_declares(tmp_path: Path, operator_request: str | None) -> None:
+    """uv installs the tool with the declared range as its interpreter request.
+
+    The range travels in UV_PYTHON on the uv command alone, and a UV_PYTHON
+    the operator exported is theirs: uv sees that one instead.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+    home = tmp_path / "home"
+    project = home / "project"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, uv_bin, tools):
+        directory.mkdir(parents=True)
+    seen = tmp_path / "what-uv-inherited"
+    _stub_executable(tools / "uv", _recording_uv_stub(seen, ("UV_PYTHON",)))
+    env = {"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin", "UV_TOOL_BIN_DIR": str(uv_bin), **({"UV_PYTHON": operator_request} if operator_request else {})}
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--no-can", "--no-agent-install"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert seen.read_text(encoding="utf-8").split() == [operator_request or _declared_python_request()], transcript
 
 
 def _no_system_certs_run(tmp_path: Path, pip_cert: str) -> tuple[subprocess.CompletedProcess[str], Path]:
@@ -4150,6 +4278,9 @@ if args[:2] in (["tool", "install"], ["tool", "upgrade"]):
     if plan.get("attempts"):
         with open(plan["attempts"], "a", encoding="utf-8") as attempts:
             attempts.write(os.environ.get("UV_SYSTEM_CERTS", "unset") + "\\n")
+    if plan.get("interpreter_requests"):
+        with open(plan["interpreter_requests"], "a", encoding="utf-8") as requests:
+            requests.write(os.environ.get("UV_PYTHON", "unset") + "\\n")
     if plan.get("proxied") and not os.environ.get("UV_SYSTEM_CERTS"):
         print("error: Failed to fetch: https://pypi.org/simple/agentic-hil/", file=sys.stderr)
         print("  Caused by: invalid peer certificate: UnknownIssuer", file=sys.stderr)
@@ -4270,6 +4401,7 @@ class _WindowsBench:
         self.log = tmp_path / "uv-invocations"
         self.python_log = tmp_path / "python-invocations"
         self.attempts = tmp_path / "attempts"
+        self.interpreter_requests = tmp_path / "interpreter-requests"
         if installed is not None:
             _windows_launcher(self.manager_bin / "agentic-hil.exe", installed, self.marker, "stale")
         staged = None
@@ -4280,7 +4412,7 @@ class _WindowsBench:
             (self.uv_tools / "agentic-hil").mkdir()
             (self.uv_tools / "agentic-hil" / "uv-receipt.toml").write_text(receipt, encoding="utf-8")
         if uv:
-            self._stub("uv", _UV_STUB_BODY, {"log": str(self.log), "attempts": str(self.attempts), "tool_list": tool_list, "writes": str(staged) if staged else None, "proxied": proxied, "refuses_occupied": UV_REFUSES_AN_EXISTING_EXECUTABLE if refuses_occupied else None})
+            self._stub("uv", _UV_STUB_BODY, {"log": str(self.log), "attempts": str(self.attempts), "interpreter_requests": str(self.interpreter_requests), "tool_list": tool_list, "writes": str(staged) if staged else None, "proxied": proxied, "refuses_occupied": UV_REFUSES_AN_EXISTING_EXECUTABLE if refuses_occupied else None})
         if python_with_pip:
             self._stub("python", _PYTHON_STUB_BODY, {"log": str(self.python_log), "scripts": str(self.pip_scripts), "writes": str(staged) if staged else None})
         # A claude on PATH, so agent detection has a claude-code to register for
@@ -4633,6 +4765,24 @@ def test_the_powershell_anchor_replaces_a_copy_uv_did_not_write_in_its_own_bin(t
     # resolved is not printed, so a transcript that ends in a working
     # installation carries no line reading as the fault.
     assert UV_REFUSES_AN_EXISTING_EXECUTABLE not in transcript, transcript
+    assert bench.version_in_uv_bin() == "99.0.0", transcript
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("operator_request", [None, "3.12"])
+def test_the_powershell_install_asks_uv_for_the_pythons_the_package_declares(tmp_path: Path, operator_request: str | None) -> None:
+    """The script Windows runs hands uv the declared range, through a `.cmd` uv.
+
+    The stub uv is a `.cmd`, which is why the range travels in UV_PYTHON: as an
+    argument, cmd would read its `<` and `>` as redirections. An operator's
+    own UV_PYTHON is what uv sees instead.
+    """
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes="99.0.0")
+
+    result, transcript = bench.run("--no-agent-install", "--no-can", **({"UV_PYTHON": operator_request} if operator_request else {}))
+
+    assert result.returncode == 0, transcript
+    assert bench.interpreter_requests.read_text(encoding="utf-8").split() == [operator_request or _declared_python_request()], transcript
     assert bench.version_in_uv_bin() == "99.0.0", transcript
 
 

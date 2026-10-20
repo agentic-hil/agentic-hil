@@ -63,6 +63,12 @@ in its place. After one restart of your agent,
 the agent itself creates this project's configuration over MCP at the first
 hardware question, which is the same file `init` would have written.
 
+Through uv, the package goes onto a Python version it supports: uv takes such
+an interpreter from the machine or downloads one, rather than the newest one it
+finds, for which a dependency may not publish a wheel yet. A `UV_PYTHON` you
+set yourself, or the interpreter `uv tool install --python` recorded for an
+earlier installation, takes precedence.
+
 Its flags are the same in both scripts: `--agent <claude-code|codex|opencode>`
 registers one agent instead of every one it finds, `--no-agent-install` stops
 after the package, `--version <x.y.z>` installs exactly that release (later
