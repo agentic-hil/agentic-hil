@@ -73,7 +73,8 @@ Its flags are the same in both scripts: `--agent <claude-code|codex|opencode>`
 registers one agent instead of every one it finds, `--no-agent-install` stops
 after the package, `--version <x.y.z>` installs exactly that release (later
 upgrades go through `agentic-hil upgrade`, not through a second run with a new
-pin), `--no-can` drops the `[can]` extra that is on by default, `--no-path`
+pin), `--no-can` is still accepted and leaves nothing out, because python-can
+comes with every installation, `--no-path`
 leaves your shell's startup files and your `Path` alone, and `--help` prints all of
 them. Piped, `sh` takes them after `-s --`:
 
@@ -194,14 +195,16 @@ agentic-hil --version` is a diagnostic only.
 
 ## Optional extras
 
-For direct PEAK/SocketCAN adapters add the CAN extra (`uv tool install
-'agentic-hil[can]'`), for the pyOCD backend `agentic-hil[pyocd]`, and for an
-ESP32 through esptool `agentic-hil[esptool]`. They are optional because they
+CAN needs no extra: python-can, which direct PEAK and SocketCAN adapters run
+through, is a dependency of the package itself, so no install or upgrade line
+leaves CAN support out. `agentic-hil[can]` is still accepted and adds nothing
+beyond it. The pyOCD backend needs `agentic-hil[pyocd]`, and an ESP32 through
+esptool needs `agentic-hil[esptool]`. Those two are optional because they
 carry platform-specific drivers or tools that flashing an ARM target and UART do
 not need; without them those tools refuse by name rather than failing at
-import: the CAN tools with `can_backend_not_available`, a pyOCD probe
-with `debugger_not_found` carrying `backend_error_type: pyocd_not_found`, and
-an esptool entry with the same error carrying `esptool_not_found`. esptool is
+import: a pyOCD probe with `debugger_not_found` carrying
+`backend_error_type: pyocd_not_found`, and an esptool entry with the same
+error carrying `esptool_not_found`. esptool is
 GPLv2+ and runs only as a subprocess, so the extra adds a program beside
 Agentic HIL rather than code inside it.
 

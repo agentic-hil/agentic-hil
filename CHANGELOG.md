@@ -17,6 +17,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 ### Changed
 
 - The Develop on your board page (`docs/use-cases/develop-on-your-board.md`) now walks through one recorded run on a real board in order: the task, the failing report, the one-line firmware fix and the rerun in which all three plans passed. Three excerpts of the 2026-09-15 starter record are shown as images, every report is linked, the versions the record used are named, the errors on the way are kept apart from the planted defect, and the page leads on to installation, your own first run and how to share its result. The `llms.txt` entry describes the walkthrough.
+- **An update can no longer take CAN support away.** python-can is now a dependency of the package itself instead of only of the `[can]` extra. `uv tool install` records the line it is given in place of the one before, so an update written as `uv tool install --upgrade "agentic-hil>=X"` over an installation made as `agentic-hil[can]` used to uninstall python-can, and the bench found out at its next `can_session_start` with `No module named 'can'`. Every install and upgrade line now carries it, whether or not it names an extra. `agentic-hil[can]` is still declared and still accepted, the installers' `--no-can` no longer leaves python-can out, and the runtime lock pins python-can with the two packages it adds, wrapt and packaging. `can_backend_not_available` with a `ModuleNotFoundError` now means python-can was removed from the environment after the install.
 
 ### Fixed
 

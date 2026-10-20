@@ -75,7 +75,7 @@ Options:
                       installation, not through a second run with a new pin.
   --can               Install the [can] extra for PEAK and SocketCAN adapters.
                       This is the default.
-  --no-can            Install without the [can] extra.
+  --no-can            Accepted; python-can comes with every installation.
   --no-path           Do not change your Path. Step 3 then prints the line
                       to run yourself, as it always does when it cannot
                       write the value.

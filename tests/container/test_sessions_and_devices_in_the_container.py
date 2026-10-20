@@ -6,7 +6,10 @@ puts on a terminal device for a hex stimulus, what the kernel answers a user
 who may not open the device, and what a Python environment that never had
 python-can installed answers when a CAN tool asks for it. Those are decided
 here: the socat pseudo-terminal pair, the container's unprivileged user, and
-a `uv tool install` of this checkout without the `[can]` extra.
+a `uv tool install` of this checkout with python-can taken out of it again.
+python-can is a dependency of the distribution itself, so no install line
+leaves it out; removing it afterwards is the one way a real environment
+lacks it.
 
 Recorded 2026-09-06 in the image tools/container/Dockerfile builds (python
 3.12-slim, socat from the distribution, uv 0.12.9); nothing here names a host,
@@ -27,6 +30,7 @@ from support import scaled_time_bound
 from .conftest import (
     ABOVE_EVERY_RELEASE,
     CONTAINER_ONLY,
+    ONE_RELEASE_ABOVE_THAT,
     LiveServer,
     PtyPair,
     UvTool,
@@ -165,17 +169,55 @@ def test_a_can_tool_naming_an_undeclared_bus_is_refused_before_any_socket_is_bou
 # The real absence of python-can, and the Linux channel rule with it present.
 
 
-def test_a_server_installed_without_the_can_extra_answers_can_backend_not_available(tmp_path: Path, uv_tool: UvTool, wheelhouse: Wheelhouse) -> None:
-    """A `uv tool install` of this checkout with no `[can]` extra: `can_session_start` refuses by name, not with an ImportError.
+def test_a_bare_install_line_over_a_can_installation_keeps_python_can(uv_tool: UvTool, wheelhouse: Wheelhouse) -> None:
+    """An update that names no extra still leaves CAN support in place.
 
-    The environment is the real absence: uv resolved this distribution's own
-    dependency set and nothing more, so `import can` fails in the installed
-    interpreter the way it fails on a bench that skipped the extra. The server
-    is that installation's own console script.
+    `uv tool install --upgrade "agentic-hil>=<floor>"` over a tool installed as
+    `agentic-hil[can]` records the new line in place of the old one, so the
+    receipt loses the extra. That is how a bench lost python-can to an update
+    and found out at its next `can_session_start`. python-can is a dependency
+    of the distribution itself, so the line that drops the extra drops nothing.
+    """
+    uv_tool.install("--find-links", str(wheelhouse.only(ABOVE_EVERY_RELEASE)), f"agentic-hil[can]=={ABOVE_EVERY_RELEASE}")
+    uv_tool.install("--upgrade", "--find-links", str(wheelhouse.only(ABOVE_EVERY_RELEASE, ONE_RELEASE_ABOVE_THAT)), f"agentic-hil>={ABOVE_EVERY_RELEASE}")
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - only a 3.10 collection reaches this
+        import tomli as tomllib  # type: ignore[no-redef]
+    recorded = {str(entry["name"]): entry for entry in tomllib.loads(uv_tool.receipt.read_text(encoding="utf-8"))["tool"]["requirements"]}
+    assert not recorded["agentic-hil"].get("extras"), recorded
+    imported = subprocess.run(
+        [str(uv_tool.interpreter), "-c", "import can, agentic_hil; print(agentic_hil.__version__)"],
+        capture_output=True,
+        text=True,
+        timeout=scaled_time_bound(60),
+        check=False,
+    )
+    assert imported.returncode == 0, imported.stderr
+    assert imported.stdout.strip() == ONE_RELEASE_ABOVE_THAT, imported.stdout
+
+
+def test_a_server_whose_python_can_was_removed_answers_can_backend_not_available(tmp_path: Path, uv_tool: UvTool, wheelhouse: Wheelhouse) -> None:
+    """python-can taken out of an installation: `can_session_start` refuses by name, not with an ImportError.
+
+    No install line leaves python-can out any more, so the absence is made the
+    one way a real environment still gets it: uninstalled after the fact. The
+    interpreter then fails `import can` for real, and the server is that
+    installation's own console script.
     """
     uv_tool.install("--find-links", str(wheelhouse.only(ABOVE_EVERY_RELEASE)), f"agentic-hil>={ABOVE_EVERY_RELEASE}")
+    removed = subprocess.run(
+        [uv_tool.uv, "pip", "uninstall", "--python", str(uv_tool.interpreter), "python-can"],
+        capture_output=True,
+        text=True,
+        env=uv_tool.environment(),
+        timeout=scaled_time_bound(60),
+        check=False,
+    )
+    assert removed.returncode == 0, removed.stderr
     absent = subprocess.run([str(uv_tool.interpreter), "-c", "import can"], capture_output=True, text=True, timeout=scaled_time_bound(60), check=False)
-    assert absent.returncode != 0, "python-can is installed in an environment that asked for no CAN extra"
+    assert absent.returncode != 0, "python-can is still importable after it was uninstalled"
     assert "ModuleNotFoundError" in absent.stderr, absent.stderr
     # The last line of that traceback is the import error's own line, which the
     # refusal carries as `backend_error` (#569).

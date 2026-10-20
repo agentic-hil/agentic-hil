@@ -662,8 +662,8 @@ def _unpinned_reinstall_command(manager: str, command: list[str]) -> str | None:
     The extras come from `_installed_extras`, read off the distribution that is
     actually installed. `uv`'s own hint names the bare distribution, and `uv`
     records a requirement literally, so a reader who follows that hint loses
-    whatever `[can]` or `[pyocd]` brought in -- on a bench with a CAN adapter,
-    silently.
+    whatever `[pyocd]` or `[esptool]` brought in, silently. python-can is not
+    at stake: it is a dependency of the distribution itself.
 
     The extras are not the only thing such a line drops, which is what
     `_recorded_install` is here for. `uv tool install --with pytest` records
@@ -1086,6 +1086,8 @@ def missing_configured_extras(config: AgenticHILConfig) -> JsonObject | None:
     `uv tool install --upgrade` *replaces* the recorded requirement rather than
     raising it, so a bench installed as `agentic-hil[can]` came back without the
     extra and nothing said so.
+    python-can is a dependency of the distribution itself since then, so this
+    now answers only for an environment python-can was removed from afterwards.
 
     Read off `_installed_extras`, which asks the installed distribution rather
     than trying an import: the question is what this installation has, and that

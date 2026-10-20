@@ -895,7 +895,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not report this as an upgrade, and do not ask the operator to restart anything on the strength of it. "
             "The installation still runs the version it ran before, with that version's behaviour and its refusals.",
             "Do not run `uv tool install agentic-hil@latest` from `uv`'s own hint. It names the distribution alone, "
-            "and `uv` records the requirement literally, so it uninstalls whatever `[can]` or `[pyocd]` brought in "
+            "and `uv` records the requirement literally, so it uninstalls whatever `[pyocd]` or `[esptool]` brought in "
             "and every package the receipt records beside it: a bench installed with `--with pytest` loses pytest, "
             "and `Uninstalled 5 packages` is the only notice it gets.",
             "Do not have Agentic HIL rewrite the installation on the operator's behalf, and do not reach for "
@@ -6587,9 +6587,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "needs itself, so this server needs python-can only for a direct adapter."
         ),
         remediation=(
-            "Read `backend_error`: `ModuleNotFoundError` means python-can is not installed there, and any other "
-            "import error means it is installed and fails while loading, often on a vendor library.",
-            "Install `agentic-hil[can]` into the environment the MCP server runs from, with that environment's own "
+            "Read `backend_error`: `ModuleNotFoundError` means python-can was removed from that environment after "
+            "the install, since every Agentic HIL installation carries it, and any other import error means it is "
+            "installed and fails while loading, often on a vendor library.",
+            "Reinstall Agentic HIL into the environment the MCP server runs from, with that environment's own "
             "Python, then call `can_session_start` again; restart the server if the import still fails.",
         ),
         do_not=(

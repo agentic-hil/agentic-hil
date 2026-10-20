@@ -82,7 +82,7 @@ Options:
                       installation, not through a second run with a new pin.
   --can               Install the [can] extra for PEAK and SocketCAN adapters.
                       This is the default.
-  --no-can            Install without the [can] extra.
+  --no-can            Accepted; python-can comes with every installation.
   --no-path           Do not touch your shell's startup files. Step 3 then
                       prints the one line to add yourself and names the
                       files it goes in, as it always does when it cannot

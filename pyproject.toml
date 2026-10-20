@@ -56,10 +56,14 @@ dependencies = [
   "jsonschema>=4.22",
   "PyYAML>=6.0",
   "pyserial>=3.5",
+  "python-can>=4.4",
   "tomli>=2; python_version < '3.11'"
 ]
 
 [project.optional-dependencies]
+# python-can is a dependency of the distribution itself, so an install or
+# upgrade line that names no extra keeps CAN support. The extra stays declared
+# because receipts, install scripts and documents name `agentic-hil[can]`.
 can = ["python-can>=4.4"]
 pyocd = ["pyocd>=0.36"]
 esptool = ["esptool>=5,<6"]
