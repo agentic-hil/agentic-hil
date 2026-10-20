@@ -1373,6 +1373,129 @@ def test_every_serial_number_doctor_or_sysfs_shows_is_withheld(several: SimpleNa
     assert len(log.splitlines()) == len(several.runtime.tier_output.splitlines()) + 1
 
 
+# The other probes.
+
+
+def masked_entries(command: list[str]) -> list[str]:
+    """Every sysfs path the command masks from the container, in order."""
+    return [
+        entry
+        for value in option_values(command, "--security-opt")
+        if value.startswith("mask=")
+        for entry in value.removeprefix("mask=").split(":")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("probe_id", "hidden"),
+    [(PROBE_SERIAL, ["1-2", "1-6"]), (SECOND_SERIAL, ["1-1", "1-6"])],
+    ids=["first-found", "not-first-found"],
+)
+def test_every_other_attached_probe_is_masked_out_of_the_containers_sysfs(
+    several: SimpleNamespace, capsys: pytest.CaptureFixture, probe_id: str, hidden: list[str]
+) -> None:
+    """Handing in one probe's nodes leaves the others in the container's sysfs,
+    and OpenOCD's ST-LINK driver opens every device it matches there before it
+    reads the serial number it selects by, which fails for each one whose node
+    is not in the container and says so as an error. So every other probe's
+    entry is masked, under the container's own /sys and not the host tree
+    discovery read, and the run says which ones by where they sit."""
+    several.doctor_says = json.dumps(a_doctor_document(probe_id))
+
+    assert run(several, "--probe-from-config", str(several.demo)) == 0
+
+    command = several.runtime.tier
+    assert masked_entries(command) == [f"/sys/bus/usb/devices/{name}" for name in hidden]
+    assert command.index("label=disable") < command.index(next(v for v in command if v.startswith("mask=")))
+    err = capsys.readouterr().err
+    assert "hiding the 2 other in-circuit debuggers or programmers attached here from the tier" in err
+    for name in hidden:
+        assert f"(sysfs {name})" in err
+    for serial in (PROBE_SERIAL, SECOND_SERIAL, THIRD_SERIAL):
+        assert serial not in err
+
+
+def test_a_lone_probe_has_nothing_masked(machine: SimpleNamespace, capsys: pytest.CaptureFixture) -> None:
+    assert run(machine) == 0
+
+    assert masked_entries(machine.runtime.tier) == []
+    assert "hiding" not in capsys.readouterr().err
+
+
+def test_nodes_named_by_hand_have_every_other_probe_masked(several: SimpleNamespace) -> None:
+    """The probe named by its nodes is recognised as discovery finds it, by its
+    USB node, and every other one is hidden the same way."""
+    assert run(several, "--usb-device", SECOND_USB_NODE, "--serial-device", SECOND_TTY_NODE) == 0
+
+    assert option_values(several.runtime.tier, "--device") == [SECOND_USB_NODE, SECOND_TTY_NODE]
+    assert masked_entries(several.runtime.tier) == ["/sys/bus/usb/devices/1-1", "/sys/bus/usb/devices/1-6"]
+
+
+def test_the_live_device_tree_has_the_other_probes_masked_too(several: SimpleNamespace) -> None:
+    """With the host's /dev in view the other probes' nodes are there to open,
+    so hiding their entries is all that keeps the tier to the one it is handed."""
+    assert run(several, "--runtime", "podman", "--live-device-tree", "--probe-from-config", str(several.demo)) == 0
+
+    assert masked_entries(several.runtime.tier) == ["/sys/bus/usb/devices/1-2", "/sys/bus/usb/devices/1-6"]
+
+
+def test_docker_with_another_probe_attached_is_refused_before_anything_is_built(
+    several: SimpleNamespace, capsys: pytest.CaptureFixture
+) -> None:
+    """Docker has no way to mask a path in a container, so a run there would
+    show the tier every other probe; it is refused, and never run with them in
+    view."""
+    assert run(several, "--runtime", "docker", "--probe-from-config", str(several.demo)) == bench_in_container.EXIT_CANNOT_RUN_HERE
+
+    assert several.runtime.commands == []
+    err = capsys.readouterr().err
+    assert "2 other in-circuit debuggers or programmers attached here would be in the tier's view under Docker" in err
+    assert "rootless Podman" in err
+
+
+def test_the_probes_to_hide_are_read_again_after_the_wait(several: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A probe plugged in while the run waited is hidden too: which entries are
+    masked is read from sysfs for the run, never carried over or written down."""
+    built = bench_in_container.build_image
+
+    def build_and_plug_in(*args: object, **kwargs: object) -> str:
+        image = built(*args, **kwargs)
+        a_usb_device(several.sysfs, "3-1.4", product="3754", bus=3, device=2, serial="PROBESERIAL0004", ttys=("ttyACM6",))
+        return image
+
+    monkeypatch.setattr(bench_in_container, "build_image", build_and_plug_in)
+
+    assert run(several, "--probe-from-config", str(several.demo)) == 0
+
+    assert masked_entries(several.runtime.tier) == [
+        "/sys/bus/usb/devices/1-2",
+        "/sys/bus/usb/devices/1-6",
+        "/sys/bus/usb/devices/3-1.4",
+    ]
+
+
+def test_an_entry_podman_would_split_is_refused_rather_than_masked_wrongly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Podman splits the paths it masks at colons. The kernel puts one only in
+    an interface's entry, never a device's, so an entry with one is no device
+    discovery should have found, and is refused rather than masked as two
+    paths that are not it."""
+    odd = bench_in_container.Probe(
+        where="bus 1 device 9 (sysfs 1-9:1.0)",
+        usb_nodes=("/dev/bus/usb/001/009",),
+        serial_ports=(),
+        serial_numbers=(),
+        sysfs_name="1-9:1.0",
+    )
+    monkeypatch.setattr(bench_in_container, "discover_probes", lambda: [odd])
+    devices = bench_in_container.Devices((USB_NODE,), (TTY_NODE,), (PROBE_SERIAL,))
+
+    with pytest.raises(bench_in_container.Refused) as refused:
+        bench_in_container.the_other_probes(devices, bench_in_container.Voice(bench_in_container.Redactor([])))
+
+    assert refused.value.status == bench_in_container.EXIT_NO_PROBE
+    assert "cannot be hidden from the container" in str(refused.value)
+
+
 # The USB-UART adapter.
 
 

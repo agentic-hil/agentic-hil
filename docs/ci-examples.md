@@ -246,7 +246,8 @@ drives, named by `--probe-from-config examples/nucleo-f446re_demo`: the probe
 whose serial number that runner's authoritative configuration for the demo binds,
 read through `agentic-hil doctor --json`. More than one probe may be attached to
 the machine, and the board is chosen once, in that configuration, never by the
-run and never in the workflow file.
+run and never in the workflow file. The other probes are masked out of the
+container's sysfs, so the debugger inside enumerates only the one it is handed.
 
 Beside it, `.github/workflows/bench-gate.yml` runs this repository's own bench
 tier, `tests/bench`, on the same board for one commit named when it is

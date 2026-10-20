@@ -149,6 +149,24 @@ image; runs the tier
 with the probe's nodes handed in; copies the JUnit report out; and reads pytest's
 summary line as the verdict.
 
+Every other probe attached is hidden from the container. Handing in one probe's
+nodes does not keep the tier from seeing the others: the container's `/sys` is a
+sysfs listing every USB device on the machine, and a debugger enumerates through
+it. OpenOCD's ST-LINK driver opens each device whose vendor and product id it
+matches before it compares the serial number it was told to select, so a probe
+whose node was not handed in fails to open in the container and costs one
+`libusb_open() failed` error in a run that otherwise worked, which the product
+reports as a failure-worded line (OpenOCD 0.12.0, which Ubuntu 24.04, Debian 12
+and Fedora 44 package, matches the STLINK-V3's product id 0x3754; Ubuntu 22.04's
+0.11.0 does not). So under Podman each attached probe discovery recognises,
+other than the one handed in, is masked with `--security-opt mask=` over its
+entry under `/sys/bus/usb/devices`, which crun covers with an empty read-only
+directory, and libusb in the container skips it as no device at all. The
+entries are the ones discovery reads for the run, before the queue and again
+after it, and the run says which probes it hides by where they sit. Docker has
+no way to mask a path, so a run under Docker with another probe attached is
+refused with exit status 2.
+
 The USB reset re-enumeration stage, pyOCD discovery diagnostic, and opt-in
 incident recovery check are the exceptions to static device-node mounts. They
 run with
@@ -374,7 +392,7 @@ It is pytest's summary line or nothing:
 The exit status is pytest's own when pytest reported, and otherwise one of these:
 
 - 2: this machine cannot run the tier, such as a run off Linux, as root, with no
-  runtime or with Podman and no crun;
+  runtime, with Podman and no crun, or under Docker with another probe attached;
 - 3: the image did not build;
 - 4: no result;
 - 5: `--no-wait` met a held machine;

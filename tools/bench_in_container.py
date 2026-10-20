@@ -101,6 +101,23 @@ debugger's executable for its version and asks the kernel whether this user
 may open the nodes. It is asked again after the wait for the machine, with the
 devices, so the probe run against is the one the configuration names then.
 
+The other probes. Handing in one probe's nodes does not keep the tier from
+seeing the others: the container's /sys is a sysfs like the host's, listing
+every USB device attached, and a debugger enumerates through it. OpenOCD's
+ST-LINK driver opens every attached device whose vendor and product id it
+matches before it reads the serial number it was told to select, and a probe
+whose node was not handed in cannot be opened in the container, so each of
+them prints a `libusb_open() failed` error into a run that otherwise worked
+(OpenOCD 0.12.0 matches the STLINK-V3's product id 0x3754; 0.11.0 does not).
+So every attached probe discovery recognises, other than the one handed in, is
+hidden from the container: under Podman with `--security-opt mask=` over its
+entry under /sys/bus/usb/devices, which crun covers with an empty read-only
+directory, so libusb skips it as no device at all. The entries are the ones
+discovery reads for this run, before the queue and again after it, and never
+names written down anywhere. Docker has no such option, so a run under Docker
+with another probe attached is refused (exit status 2) rather than run with
+the others in view.
+
 The USB-UART adapter. A board can have a USB-UART adapter wired to a second
 UART of its own beside the probe's serial port, and the tier then drives the
 board over both. The adapter is found the way the probe is, and never by a
@@ -194,8 +211,9 @@ bench-results by default. What the machine has to provide once is in
 tools/bench/README.md.
 
 Exit status: pytest's own when it reported; 2 when this machine cannot run the
-tier; 3 when the image did not build; 4 when there is no result; 5 when
-`--no-wait` met a held machine; 6 when no probe could be handed in, the one
+tier, Docker with another probe attached included; 3 when the image did not
+build; 4 when there is no result; 5 when `--no-wait` met a held machine; 6 when
+no probe could be handed in, the one
 `--probe-from-config` names included, or no adapter where `--require-usb-uart`
 says there is one; 7 when a container was left behind; 130 when interrupted.
 """
@@ -306,6 +324,9 @@ CONTAINER_PREFIX = "agentic-hil-bench-"
 CONTAINER_HOME = "/bench-home"
 CONTAINER_LOCKS = f"{CONTAINER_HOME}/.agentic-hil/device-locks"
 CONTAINER_SERIAL_BY_ID = "/dev/serial/by-id"
+# Where a USB device's entry is in the container's sysfs, which is a sysfs of
+# its own and not the host's tree that discovery reads under SYSFS.
+CONTAINER_USB_DEVICES = "/sys/bus/usb/devices"
 RESULTS = "/results"
 REPORT_NAME = "bench-junit.xml"
 LOG_NAME = "bench-tier.log"
@@ -599,12 +620,18 @@ class Voice:
 
 @dataclass(frozen=True)
 class Probe:
-    """One in-circuit debugger or programmer as sysfs shows it."""
+    """One in-circuit debugger or programmer as sysfs shows it.
+
+    `sysfs_name` is its entry under /sys/bus/usb/devices, the kernel's name for
+    the port it sits on, which is what hides it from a container it is not
+    handed to.
+    """
 
     where: str
     usb_nodes: tuple[str, ...]
     serial_ports: tuple[str, ...]
     serial_numbers: tuple[str, ...]
+    sysfs_name: str
 
     @property
     def nodes(self) -> tuple[str, ...]:
@@ -696,6 +723,7 @@ def discover_probes(sysfs: Path | None = None) -> list[Probe]:
                 usb_nodes=(f"/dev/bus/usb/{bus:03d}/{number:03d}",),
                 serial_ports=tuple(serial_ports_of(device)),
                 serial_numbers=(serial,) if serial else (),
+                sysfs_name=device.name,
             )
         )
     return probes
@@ -778,13 +806,18 @@ def checked_node(path: str) -> str:
 
 @dataclass(frozen=True)
 class Devices:
-    """What the container gets of the probe, the adapter and the ESP32 board, and the probe's serials it is withheld by."""
+    """What the container gets of the probe, the adapter and the ESP32 board, and the probe's serials it is withheld by.
+
+    `other_probes` is what it must not get: the sysfs entries of every other
+    attached probe, which the container is shown none of.
+    """
 
     usb_nodes: tuple[str, ...]
     serial_ports: tuple[str, ...]
     serial_numbers: tuple[str, ...]
     usb_uart: str | None = None
     esp32: str | None = None
+    other_probes: tuple[str, ...] = ()
 
     @property
     def ttys(self) -> tuple[str, ...]:
@@ -934,16 +967,54 @@ def the_configured_probe(directory: str, voice: Voice) -> Devices:
     return Devices(usb, ports, probe.serial_numbers)
 
 
+def the_other_probes(devices: Devices, voice: Voice) -> Devices:
+    """The devices, with every attached probe that is not the one handed in named for hiding.
+
+    A probe is the one handed in when one of its USB nodes is, so a probe named
+    by hand with --usb-device is recognised as discovery finds it, and where
+    the node named is no probe discovery recognises, every one it does is
+    hidden. Which probes those are is read now, never written down: a sysfs
+    entry is the port a device sits on, and that is the machine's to change.
+    """
+    handed = set(devices.usb_nodes)
+    others = [
+        probe for probe in discover_probes() if not handed.intersection(canonical_node(node) for node in probe.usb_nodes)
+    ]
+    if not others:
+        return devices
+    for probe in others:
+        # Podman separates the paths it masks by colons, and the kernel never
+        # puts one in a device's entry, only in an interface's: an entry with
+        # one would be masked as two paths that are not it.
+        if ":" in probe.sysfs_name or not probe.sysfs_name:
+            raise Refused(
+                EXIT_NO_PROBE,
+                f"the in-circuit debugger or programmer at {probe.where} has a sysfs entry that cannot be hidden from "
+                "the container, and the tier would see it beside the one it is handed",
+            )
+    count = len(others)
+    plural = "s" if count > 1 else ""
+    voice(
+        f"hiding the {count} other in-circuit debugger{plural} or programmer{plural} attached here from the tier "
+        f"({'; '.join(probe.where for probe in others)}), so the debugger in the container enumerates only the one "
+        "it is handed"
+    )
+    return replace(devices, other_probes=tuple(probe.sysfs_name for probe in others))
+
+
 def the_probe(options: argparse.Namespace, voice: Voice) -> Devices:
-    """The one probe this run hands in: the one the bench's configuration names, the nodes named, or the one found."""
+    """The one probe this run hands in: the one the bench's configuration names, the nodes named, or the one found.
+
+    Every other attached probe comes back named for hiding from the container.
+    """
     if options.probe_from_config is not None:
         if options.usb_device or options.serial_device:
             raise Refused(
                 EXIT_NO_PROBE,
                 "--probe-from-config and --usb-device or --serial-device each name the probe, and a run takes one of them",
             )
-        return the_configured_probe(options.probe_from_config, voice)
-    return the_devices(options.usb_device, options.serial_device)
+        return the_other_probes(the_configured_probe(options.probe_from_config, voice), voice)
+    return the_other_probes(the_devices(options.usb_device, options.serial_device), voice)
 
 
 def docker_opens(status: os.stat_result, uid: int, gid: int, groups: set[int]) -> bool:
@@ -995,6 +1066,17 @@ def why_not_openable(runtime: str, node: str) -> str | None:
 
 
 def check_access(runtime: str, devices: Devices) -> None:
+    """Whether the tier can open every node handed in, and is shown no other probe, under this runtime."""
+    if runtime != "podman" and devices.other_probes:
+        count = len(devices.other_probes)
+        plural = "s" if count > 1 else ""
+        raise Refused(
+            EXIT_CANNOT_RUN_HERE,
+            f"{count} other in-circuit debugger{plural} or programmer{plural} attached here would be in the tier's "
+            "view under Docker, which has no way to hide a device's sysfs entry from a container, and a debugger in "
+            "it would enumerate them beside the one it is handed. Run under rootless Podman, which hides them, or "
+            "detach them",
+        )
     for node in devices.nodes:
         reason = why_not_openable(runtime, node)
         if reason is not None:
@@ -1485,6 +1567,11 @@ def tier_command(
         if not withhold_groups:
             command += ["--group-add", "keep-groups"]
         command += ["--security-opt", "label=disable"]
+        if devices.other_probes:
+            # Every other attached probe, out of the container's sysfs, so the
+            # debugger in it enumerates only the probe it is handed.
+            masked = (f"{CONTAINER_USB_DEVICES}/{name}" for name in devices.other_probes)
+            command += ["--security-opt", "mask=" + ":".join(masked)]
     else:
         command += ["--user", f"{uid}:{gid}"]
         if not withhold_groups:

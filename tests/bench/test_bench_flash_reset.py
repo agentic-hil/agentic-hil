@@ -392,7 +392,7 @@ def test_a_flash_without_a_post_flash_reset_says_so_and_never_asks_the_debugger_
     assert_flash_holds(result)
     assert result["reset_after_flash"] is False, result
     expected = "Firmware flashed. Target was not reset." if result["backend"] == "pyocd" else "Firmware flashed and verified. Target was not reset."
-    assert result["summary"] == expected, result["summary"]
+    assert result["summary"] == expected, (result["summary"], result.get("backend_warnings"))
     if result["backend"] == "openocd":
         commanded = debugger_log(bench, result["log_path"])["command"]
         assert "verify reset" not in commanded, commanded
@@ -413,7 +413,7 @@ def test_a_flash_that_asks_for_a_post_flash_reset_gets_one_in_the_same_debugger_
     assert_flash_holds(result)
     assert result["reset_after_flash"] is True, result
     expected = "Firmware flashed and target reset." if result["backend"] == "pyocd" else "Firmware flashed, verified, and target reset."
-    assert result["summary"] == expected, result["summary"]
+    assert result["summary"] == expected, (result["summary"], result.get("backend_warnings"))
     if result["backend"] == "openocd":
         commanded = debugger_log(bench, result["log_path"])["command"]
         assert "verify reset" in commanded, commanded
