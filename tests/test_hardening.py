@@ -43,6 +43,7 @@ from agentic_hil.config import (
     debugger_is_starter_entry,
     derived_state_directory,
     executable_is_disabled,
+    host_debugger_executable,
     load_authoritative_config,
     load_config,
     openocd_script_kind,
@@ -3139,6 +3140,7 @@ def test_the_starter_entry_does_not_pick_up_a_toolchain_from_path(tmp_path: Path
     document["debuggers"]["dut"]["probe_id"] = None
     config_file.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     monkeypatch.setattr("shutil.which", lambda name, *args, **kwargs: str(FAKE_OPENOCD) if "openocd" in str(name).lower() else None)
+    monkeypatch.setattr("agentic_hil.config.host_debugger_executable", host_debugger_executable)
 
     config = load_authoritative_config(workspace)
 
@@ -3243,6 +3245,7 @@ def test_a_configured_openocd_entry_resolves_from_path_and_is_validated(tmp_path
     document["debuggers"]["dut"]["executable"] = None
     config_file.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     monkeypatch.setattr("shutil.which", lambda name, *args, **kwargs: str(FAKE_OPENOCD) if "openocd" in str(name).lower() else None)
+    monkeypatch.setattr("agentic_hil.config.host_debugger_executable", host_debugger_executable)
 
     config = load_authoritative_config(workspace)
 
@@ -3272,6 +3275,7 @@ def test_a_configured_openocd_entry_from_path_keeps_no_unchecked_script_paths(tm
     document["debuggers"]["dut"]["executable"] = None
     config_file.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     monkeypatch.setattr("shutil.which", lambda name, *args, **kwargs: str(FAKE_OPENOCD) if "openocd" in str(name).lower() else None)
+    monkeypatch.setattr("agentic_hil.config.host_debugger_executable", host_debugger_executable)
 
     with pytest.raises(ConfigError) as rejected:
         load_authoritative_config(workspace)
@@ -3313,6 +3317,7 @@ def test_the_served_worked_example_is_not_an_inert_starter(tmp_path: Path, monke
     document["debuggers"]["dut"]["executable"] = None
     config_file.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     monkeypatch.setattr("shutil.which", lambda name, *args, **kwargs: str(FAKE_OPENOCD) if "openocd" in str(name).lower() else None)
+    monkeypatch.setattr("agentic_hil.config.host_debugger_executable", host_debugger_executable)
 
     # The example's own scripts do not exist on this host, so the failure it must
     # not produce is the starter one: a disabled marker and a skipped bench.
