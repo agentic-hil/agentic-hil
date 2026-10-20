@@ -6590,7 +6590,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Read `backend_error`: `ModuleNotFoundError` means python-can was removed from that environment after "
             "the install, since every Agentic HIL installation carries it, and any other import error means it is "
             "installed and fails while loading, often on a vendor library.",
-            "Reinstall Agentic HIL into the environment the MCP server runs from, with that environment's own "
+            "Reinstall `agentic-hil[can]` into the environment the MCP server runs from, with that environment's own "
             "Python, then call `can_session_start` again; restart the server if the import still fails.",
         ),
         do_not=(

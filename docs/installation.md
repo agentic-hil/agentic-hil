@@ -198,7 +198,8 @@ agentic-hil --version` is a diagnostic only.
 CAN needs no extra: python-can, which direct PEAK and SocketCAN adapters run
 through, is a dependency of the package itself, so no install or upgrade line
 leaves CAN support out. `agentic-hil[can]` is still accepted and adds nothing
-beyond it. The pyOCD backend needs `agentic-hil[pyocd]`, and an ESP32 through
+beyond it; a python-can removed from the environment after the install makes
+the CAN tools refuse by name with `can_backend_not_available`. The pyOCD backend needs `agentic-hil[pyocd]`, and an ESP32 through
 esptool needs `agentic-hil[esptool]`. Those two are optional because they
 carry platform-specific drivers or tools that flashing an ARM target and UART do
 not need; without them those tools refuse by name rather than failing at

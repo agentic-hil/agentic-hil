@@ -168,7 +168,7 @@ CAN_LIKELY_CAUSES: dict[str, list[str]] = {
         "a USB CAN adapter was re-enumerated and its interface came back down",
     ],
     CAN_ADAPTER_LIBRARY_MISSING_ERROR: [
-        "the python-can interface for this adapter is not installed (every Agentic HIL installation carries python-can itself, and several adapters need a vendor library beside it)",
+        "the python-can interface for this adapter is not installed (`agentic-hil[can]` installs python-can itself, and several adapters need a vendor library beside it)",
         "the vendor library this adapter is driven through is not on the library search path of the interpreter running this server",
         "the library is installed for a different Python, or for a different architecture, than the one running this server",
     ],
@@ -250,8 +250,7 @@ CAN_LIKELY_CAUSES: dict[str, list[str]] = {
         "a program that is not a CAN adapter bridge at all is configured as one, and its first answer happened to parse",
     ],
     "can_backend_not_available": [
-        "python-can is missing from the interpreter running this server although every Agentic HIL installation carries it, "
-        "so it was removed from this environment after the install",
+        "python-can is not installed for the interpreter running this server, and `agentic-hil[can]` is what installs it",
         "this server runs on a different interpreter than the one the backend was installed into",
         "the installation is broken rather than absent, and importing the backend raises where the driver bindings are loaded",
     ],
