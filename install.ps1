@@ -199,13 +199,44 @@ function Clear-SystemCerts {
     }
 }
 
+# The Pythons agentic-hil declares and tests, written as a uv interpreter
+# request: the floor and the ceiling of the classifiers in pyproject.toml.
+# install.sh carries the same range, and a release that adds a Python to the
+# classifiers moves both; the suite fails until it does. uv asked for no
+# interpreter picks one itself, and on Windows that is the newest one the
+# registry lists. So the day a machine or a runner image gained a Python newer
+# than any PyYAML wheel, uv built PyYAML from source and the install stopped on
+# a C compiler nobody had been told they needed. With the range uv takes an
+# interpreter inside it, or downloads one, and a fresh receipt records the
+# range, which a refresh then replays like any interpreter uv recorded.
+$UvPythonRequest = '>=3.10,<3.14'
+
+function Invoke-UvOnSupportedPython {
+    # One uv command with the range above as its interpreter request. It goes
+    # in UV_PYTHON rather than as --python, so no uv argument list changes and
+    # a uv started through a `.cmd` file does not hand the `<` and `>` to cmd as
+    # redirections. It gives way to the operator's own request: a UV_PYTHON
+    # already set is theirs, and a --python replayed from the receipt outranks
+    # the variable inside uv. It is set for this call alone and taken away
+    # again, because through `irm | iex` this script runs in the reader's own
+    # session, and every uv command typed there afterwards would inherit it.
+    param([string[]]$Arguments)
+    $inherited = $env:UV_PYTHON
+    if (-not $inherited) { $env:UV_PYTHON = $UvPythonRequest }
+    try {
+        return (Invoke-Captured -File 'uv' -Arguments $Arguments)
+    } finally {
+        if (-not $inherited) { Remove-Item Env:\UV_PYTHON -ErrorAction SilentlyContinue }
+    }
+}
+
 function Invoke-Uv {
     # One uv command, run with the certificate-retry branch around it. uv's
     # output is captured rather than streamed, because the text of a failure is
     # what decides whether there is a second attempt to make, and the refresh,
     # fresh and pin paths hand their own argument list to this one retry.
     param([string[]]$Arguments)
-    $result = Invoke-Captured -File 'uv' -Arguments $Arguments
+    $result = Invoke-UvOnSupportedPython -Arguments $Arguments
     if ($result.ExitCode -eq 0) {
         Write-Host $result.Output.TrimEnd()
         return
@@ -219,7 +250,7 @@ function Invoke-Uv {
         $binDirectory = Get-UvBinDirectory
         if (-not $binDirectory) { $binDirectory = 'its bin directory' }
         Write-Say "package: uv refused to overwrite an agentic-hil in $binDirectory that it did not write (pip --user, pipx or another manager put it there), so it was told to replace it; that manager still records the old package, and uninstalling it there removes this launcher too, so run this script again if you do"
-        $forced = Invoke-Captured -File 'uv' -Arguments ($Arguments + @('--force'))
+        $forced = Invoke-UvOnSupportedPython -Arguments ($Arguments + @('--force'))
         Write-Host $forced.Output.TrimEnd()
         if ($forced.ExitCode -eq 0) { return }
         throw 'uv could not replace that copy either; TROUBLESHOOTING.md section 1 has the fallbacks'
@@ -235,7 +266,7 @@ function Invoke-Uv {
         Write-Say "certificates: that is a certificate uv cannot get to a root it carries, which is what a TLS-intercepting proxy looks like from inside uv; retrying once against this machine's own store, with verification still on"
         Enable-SystemCerts
         $script:SystemCertsMode = 'always'
-        $retry = Invoke-Captured -File 'uv' -Arguments $Arguments
+        $retry = Invoke-UvOnSupportedPython -Arguments $Arguments
         Write-Host $retry.Output.TrimEnd()
         if ($retry.ExitCode -eq 0) { return }
         throw "uv could not install agentic-hil against this machine's own certificate store either; the proxy's own CA is missing from that store, and installing it there is the fix; TROUBLESHOOTING.md section 1 has the rest"
