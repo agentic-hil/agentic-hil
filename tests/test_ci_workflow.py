@@ -279,7 +279,13 @@ def test_the_ledger_is_kept_for_run_tests_alone() -> None:
 
 
 def test_the_suite_sandbox_temp_root_is_set_only_for_run_tests() -> None:
-    """The autouse fixture follows tempfile's root on Windows; POSIX keeps /tmp."""
+    """The autouse fixture follows tempfile's root on Windows; POSIX keeps /tmp.
+
+    The dependency install is the one other step with the runner's short
+    temporary directory, where pip builds hidapi on a Python it publishes no
+    wheel for and the profile's temporary directory makes its object paths
+    longer than MSVC can open. No test runs in that step.
+    """
     temp_variables = ("TEMP", "TMP", "TMPDIR")
     workflow = workflow_document(WORKFLOW)
     carriers = [
@@ -289,10 +295,11 @@ def test_the_suite_sandbox_temp_root_is_set_only_for_run_tests() -> None:
         for variable in temp_variables
         if variable in (step.get("env") or {})
     ]
-    run_tests = next(step for step in matrix_steps() if step.get("name") == "Run tests")
+    steps = {step.get("name"): step for step in matrix_steps()}
 
-    assert carriers == [("test", "Run tests", variable) for variable in temp_variables], carriers
-    assert all(run_tests["env"][variable] == "${{ runner.temp }}" for variable in temp_variables), run_tests["env"]
+    assert carriers == [("test", name, variable) for name in ("Install dependencies", "Run tests") for variable in temp_variables], carriers
+    for name in ("Install dependencies", "Run tests"):
+        assert all(steps[name]["env"][variable] == "${{ runner.temp }}" for variable in temp_variables), steps[name]["env"]
     assert not any(variable in (workflow.get("env") or {}) for variable in temp_variables)
     for job_name, job in workflow["jobs"].items():
         assert not any(variable in (job.get("env") or {}) for variable in temp_variables), job_name

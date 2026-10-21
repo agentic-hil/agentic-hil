@@ -16,6 +16,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Changed
 
+- CI tests every Python from 3.10 to 3.15 on Linux, macOS and Windows, and `pyproject.toml` declares 3.14 and 3.15. One more leg on each OS runs the newest Python release setup-python can install, so a new release and a dependency without wheels for it show up there first; that leg reports without holding a pull request.
+
 - The Develop on your board page (`docs/use-cases/develop-on-your-board.md`) now walks through one recorded run on a real board in order: the task, the failing report, the one-line firmware fix and the rerun in which all three plans passed. Three excerpts of the 2026-09-15 starter record are shown as images, every report is linked, the versions the record used are named, the errors on the way are kept apart from the planted defect, and the page leads on to installation, your own first run and how to share its result. The `llms.txt` entry describes the walkthrough.
 
 ### Fixed
