@@ -544,23 +544,26 @@ user_bin_on_path() {
     export PATH
 }
 
-# The Pythons agentic-hil declares and tests, written as a uv interpreter
-# request: the floor and the ceiling of the classifiers in pyproject.toml.
-# install.ps1 carries the same range, and a release that adds a Python to the
-# classifiers moves both; the suite fails until it does. uv asked for no
-# interpreter picks one itself, the first on PATH here and the newest in the
-# registry on Windows, so a Python newer than any PyYAML wheel had uv build
-# PyYAML from source, which needs a C compiler. With the range uv takes an
-# interpreter inside it, or downloads one, and a fresh receipt records the
-# range, which a refresh then replays like any interpreter uv recorded.
-UV_PYTHON_REQUEST=">=3.10,<3.14"
+# The Pythons agentic-hil installs onto, written as a uv interpreter request:
+# the floor requires-python names in pyproject.toml, and no ceiling. install.ps1
+# carries the same floor. uv asked for no interpreter picks one itself, the first
+# on PATH here, which may be older than the floor. With the floor uv takes an
+# interpreter at or above it, or downloads one, and a fresh receipt records the
+# floor, which a refresh then replays like any interpreter uv recorded.
+UV_PYTHON_REQUEST=">=3.10"
 
-# One uv command with that range as its interpreter request, unless the operator
+# One uv command with that floor as its interpreter request, unless the operator
 # set UV_PYTHON themselves; a --python replayed from the receipt outranks either
-# inside uv. The assignment in front of the command reaches that one process and
-# nothing after it.
+# inside uv. It also carries PYYAML_FORCE_LIBYAML=0, which install_with_pip
+# hands pip as well. PyYAML publishes wheels for the Pythons it has caught up
+# with, and on a newer one the manager builds it from source, compiling an
+# optional C extension first. agentic-hil uses PyYAML's pure-Python loader and
+# dumper alone, so the switch builds without a compiler at no cost, and where a
+# wheel exists it changes nothing; a value the operator set is theirs. The
+# assignments in front of the command reach that one process and nothing after
+# it.
 uv_on_supported_python() {
-    UV_PYTHON="${UV_PYTHON:-$UV_PYTHON_REQUEST}" uv "$@"
+    UV_PYTHON="${UV_PYTHON:-$UV_PYTHON_REQUEST}" PYYAML_FORCE_LIBYAML="${PYYAML_FORCE_LIBYAML:-0}" uv "$@"
 }
 
 # One uv command, run with the certificate-retry branches around it, because the
@@ -923,8 +926,10 @@ install_with_pip() {
     case "$INSTALL_MODE" in
         refresh | pin) pip_reinstall="--force-reinstall" ;;
     esac
+    # PYYAML_FORCE_LIBYAML is uv_on_supported_python's switch, for the source
+    # build pip makes of PyYAML exactly as uv does.
     # shellcheck disable=SC2086 # pip_reinstall is one optional flag, split on purpose
-    if pip_output=$("$python_bin" -m pip install --user --upgrade $pip_reinstall "$(package_spec)" 2>&1); then
+    if pip_output=$(PYYAML_FORCE_LIBYAML="${PYYAML_FORCE_LIBYAML:-0}" "$python_bin" -m pip install --user --upgrade $pip_reinstall "$(package_spec)" 2>&1); then
         printf '%s\n' "$pip_output"
         return 0
     fi
@@ -935,7 +940,7 @@ install_with_pip() {
         if [ -n "${PIP_CERT:-}" ]; then
             say "certificates: retrying pip once against this machine's own store, with verification still on"
             # shellcheck disable=SC2086 # pip_reinstall is one optional flag, split on purpose
-            if pip_output=$("$python_bin" -m pip install --user --upgrade $pip_reinstall "$(package_spec)" 2>&1); then
+            if pip_output=$(PYYAML_FORCE_LIBYAML="${PYYAML_FORCE_LIBYAML:-0}" "$python_bin" -m pip install --user --upgrade $pip_reinstall "$(package_spec)" 2>&1); then
                 printf '%s\n' "$pip_output"
                 return 0
             fi

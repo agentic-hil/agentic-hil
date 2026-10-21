@@ -63,11 +63,13 @@ in its place. After one restart of your agent,
 the agent itself creates this project's configuration over MCP at the first
 hardware question, which is the same file `init` would have written.
 
-Through uv, the package goes onto a Python version it supports: uv takes such
-an interpreter from the machine or downloads one, rather than the newest one it
-finds, for which a dependency may not publish a wheel yet. A `UV_PYTHON` you
-set yourself, or the interpreter `uv tool install --python` recorded for an
-earlier installation, takes precedence.
+Through uv, the package goes onto a Python version it supports, 3.10 or newer:
+uv takes such an interpreter from the machine or downloads one. A `UV_PYTHON`
+you set yourself, or the interpreter `uv tool install --python` recorded for
+an earlier installation, takes precedence. Both scripts, and `agentic-hil
+upgrade` after them, build PyYAML without its optional C extension
+(`PYYAML_FORCE_LIBYAML=0`), which the package does not use, so on a Python
+PyYAML publishes no wheel for yet, PyYAML needs no compiler.
 
 Its flags are the same in both scripts: `--agent <claude-code|codex|opencode>`
 registers one agent instead of every one it finds, `--no-agent-install` stops
