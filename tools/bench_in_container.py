@@ -67,18 +67,56 @@ head for the distribution named is refused rather than built as the default.
 
 Device passthrough. The probe is found through sysfs by its public USB identity,
 the vendor and product ids the product itself recognises an in-circuit debugger
-or programmer by, and never by a serial number: idVendor and idProduct under
-/sys/bus/usb/devices, busnum and devnum for its node under /dev/bus/usb, and the
-tty directory of the interface that carries its serial port for the port.
-Exactly one probe with a serial port is run against. None is refused, and so
-are two, because choosing between them would be choosing a board;
-`--usb-device` and `--serial-device` name the nodes instead where discovery
-should not decide. The port's links under /dev/serial/by-id come along, read
-only and rebuilt for the ports handed in and no others, because the product
+or programmer by, and discovery never picks one by a serial number: idVendor and
+idProduct under /sys/bus/usb/devices, busnum and devnum for its node under
+/dev/bus/usb, and the tty directory of the interface that carries its serial
+port for the port. Exactly one probe with a serial port is run against. None is
+refused, and so are two, because choosing between them would be choosing a
+board; where more than one is attached, `--probe-from-config` names the probe
+the bench's own configuration names, and `--usb-device` and `--serial-device`
+name the nodes by hand. The port's links under /dev/serial/by-id come along,
+read only and rebuilt for the ports handed in and no others, because the product
 names a port by that link where it can, and a port named differently in the
 container can be a different device lock from the one the host's runs take on
 it. This tool never opens a device: it reads sysfs, looks at the nodes and hands
 their paths to the runtime.
+
+The probe a configuration names. A machine with several probes attached
+already says which one its board is behind: the authoritative configuration
+the operator made once with `agentic-hil init` binds a debugger to that probe
+by its serial number, and every plan and the scheduled bench workflow's first
+job reach the board through it. `--probe-from-config DIR` reads that
+configuration through the product installed on the machine, `agentic-hil
+doctor --json` run in DIR, which is how that job reads it, so the file is
+found, bound to its workspace and validated by the product and by nothing in
+this tool. The probe is the one attached probe whose USB serial number is the
+`probe_id` of the debugger the configuration binds, compared as the product
+compares them, case folded, and its nodes are found through sysfs as above.
+The serial number is the operator's statement, and nothing here guesses one: a
+configuration that does not load, binds no debugger or names no probe, a probe
+it names that is not attached, two attached probes that carry its serial
+number and one without a serial port are refused, and nothing is chosen
+between. doctor drives no hardware: it reads the configuration, asks the
+debugger's executable for its version and asks the kernel whether this user
+may open the nodes. It is asked again after the wait for the machine, with the
+devices, so the probe run against is the one the configuration names then.
+
+The other probes. Handing in one probe's nodes does not keep the tier from
+seeing the others: the container's /sys is a sysfs like the host's, listing
+every USB device attached, and a debugger enumerates through it. OpenOCD's
+ST-LINK driver opens every attached device whose vendor and product id it
+matches before it reads the serial number it was told to select, and a probe
+whose node was not handed in cannot be opened in the container, so each of
+them prints a `libusb_open() failed` error into a run that otherwise worked
+(OpenOCD 0.12.0 matches the STLINK-V3's product id 0x3754; 0.11.0 does not).
+So every attached probe discovery recognises, other than the one handed in, is
+hidden from the container: under Podman with `--security-opt mask=` over its
+entry under /sys/bus/usb/devices, which crun covers with an empty read-only
+directory, so libusb skips it as no device at all. The entries are the ones
+discovery reads for this run, before the queue and again after it, and never
+names written down anywhere. Docker has no such option, so a run under Docker
+with another probe attached is refused (exit status 2) rather than run with
+the others in view.
 
 The USB-UART adapter. A board can have a USB-UART adapter wired to a second
 UART of its own beside the probe's serial port, and the tier then drives the
@@ -137,9 +175,10 @@ nothing but the place the machine's lock directory is mounted.
 What is withheld. The gate's log and its artifact can be read by anyone who can
 read the repository, and the tier prints the probe's serial number and paths of
 this machine. Every line this tool prints or logs, and the JUnit report, has
-the probe's serial numbers, those of every USB-UART adapter it finds, this
-machine's host name, its home directory and its user name replaced with
-[withheld], line by line. No line is removed.
+the probe's serial numbers, those of every USB-UART adapter it finds, with
+`--probe-from-config` those of every probe attached and every probe the
+configuration names, this machine's host name, its home directory and its
+user name replaced with [withheld], line by line. No line is removed.
 
 The verdict is pytest's summary line or nothing. A run without one, without the
 marker the image writes, with a skip, or with nothing passed is not green,
@@ -163,6 +202,7 @@ Usage, from a checkout on the machine the board is attached to:
     python3 tools/bench_in_container.py --without-device-group
     python3 tools/bench_in_container.py --require-usb-uart   # the adapter must be there
     python3 tools/bench_in_container.py --distribution ubuntu-22.04
+    python3 tools/bench_in_container.py --probe-from-config examples/nucleo-f446re_demo
     python3 tools/bench_in_container.py --build-only         # the image alone, anywhere
 
 Everything after `--` goes to pytest and replaces the default selection,
@@ -171,10 +211,11 @@ bench-results by default. What the machine has to provide once is in
 tools/bench/README.md.
 
 Exit status: pytest's own when it reported; 2 when this machine cannot run the
-tier; 3 when the image did not build; 4 when there is no result; 5 when
-`--no-wait` met a held machine; 6 when no probe could be handed in, or no
-adapter where `--require-usb-uart` says there is one; 7 when a container was
-left behind; 130 when interrupted.
+tier, Docker with another probe attached included; 3 when the image did not
+build; 4 when there is no result; 5 when `--no-wait` met a held machine; 6 when
+no probe could be handed in, the one
+`--probe-from-config` names included, or no adapter where `--require-usb-uart`
+says there is one; 7 when a container was left behind; 130 when interrupted.
 """
 
 from __future__ import annotations
@@ -182,6 +223,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -282,6 +324,9 @@ CONTAINER_PREFIX = "agentic-hil-bench-"
 CONTAINER_HOME = "/bench-home"
 CONTAINER_LOCKS = f"{CONTAINER_HOME}/.agentic-hil/device-locks"
 CONTAINER_SERIAL_BY_ID = "/dev/serial/by-id"
+# Where a USB device's entry is in the container's sysfs, which is a sysfs of
+# its own and not the host's tree that discovery reads under SYSFS.
+CONTAINER_USB_DEVICES = "/sys/bus/usb/devices"
 RESULTS = "/results"
 REPORT_NAME = "bench-junit.xml"
 LOG_NAME = "bench-tier.log"
@@ -342,6 +387,12 @@ USB_UART_PRODUCT_IDS = frozenset({0x6001, 0x6010, 0x6011, 0x6014, 0x6015})
 # keeps the copies one.
 ESP32_ENV = "AGENTIC_HIL_BENCH_ESP32"
 ESP32_BRIDGE_IDS = frozenset({(0x1A86, 0x7523), (0x1A86, 0x55D4), (0x10C4, 0xEA60)})
+
+# The product's own command, which `--probe-from-config` reads the bench's
+# authoritative configuration through: the installation on the machine, on this
+# user's PATH, as the scheduled bench workflow's first job runs it.
+PRODUCT_COMMAND = "agentic-hil"
+
 SYSFS = Path("/sys")
 SERIAL_BY_ID = Path("/dev/serial/by-id")
 TTY_NAME = re.compile(r"^tty[A-Za-z0-9_]+$")
@@ -422,6 +473,28 @@ def canonical_node(path: str) -> str:
 
 def pause(seconds: float) -> None:
     time.sleep(seconds)
+
+
+def bench_doctor(directory: str) -> str | None:
+    """What `agentic-hil doctor --json` run in `directory` prints, or None where the command is not on PATH.
+
+    Its exit status is not read: doctor exits non-zero for a finding about a
+    bench whose configuration still loaded, and its document says which.
+    """
+    command = shutil.which(PRODUCT_COMMAND)
+    if command is None:
+        return None
+    result = subprocess.run(
+        [command, "--json", "doctor"],
+        cwd=directory,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=COMMAND_TIMEOUT_S,
+    )
+    return result.stdout
 
 
 def host_identities() -> list[str]:
@@ -547,12 +620,18 @@ class Voice:
 
 @dataclass(frozen=True)
 class Probe:
-    """One in-circuit debugger or programmer as sysfs shows it."""
+    """One in-circuit debugger or programmer as sysfs shows it.
+
+    `sysfs_name` is its entry under /sys/bus/usb/devices, the kernel's name for
+    the port it sits on, which is what hides it from a container it is not
+    handed to.
+    """
 
     where: str
     usb_nodes: tuple[str, ...]
     serial_ports: tuple[str, ...]
     serial_numbers: tuple[str, ...]
+    sysfs_name: str
 
     @property
     def nodes(self) -> tuple[str, ...]:
@@ -644,6 +723,7 @@ def discover_probes(sysfs: Path | None = None) -> list[Probe]:
                 usb_nodes=(f"/dev/bus/usb/{bus:03d}/{number:03d}",),
                 serial_ports=tuple(serial_ports_of(device)),
                 serial_numbers=(serial,) if serial else (),
+                sysfs_name=device.name,
             )
         )
     return probes
@@ -726,13 +806,18 @@ def checked_node(path: str) -> str:
 
 @dataclass(frozen=True)
 class Devices:
-    """What the container gets of the probe, the adapter and the ESP32 board, and the probe's serials it is withheld by."""
+    """What the container gets of the probe, the adapter and the ESP32 board, and the probe's serials it is withheld by.
+
+    `other_probes` is what it must not get: the sysfs entries of every other
+    attached probe, which the container is shown none of.
+    """
 
     usb_nodes: tuple[str, ...]
     serial_ports: tuple[str, ...]
     serial_numbers: tuple[str, ...]
     usb_uart: str | None = None
     esp32: str | None = None
+    other_probes: tuple[str, ...] = ()
 
     @property
     def ttys(self) -> tuple[str, ...]:
@@ -768,8 +853,9 @@ def the_devices(usb_devices: list[str], serial_devices: list[str]) -> Devices:
         raise Refused(
             EXIT_NO_PROBE,
             f"{len(probes)} in-circuit debuggers or programmers are attached ({'; '.join(probe.where for probe in probes)}), "
-            "and choosing between them would be choosing a board. Name the one to run against with --usb-device "
-            "and --serial-device",
+            "and choosing between them would be choosing a board. Name the one to run against with "
+            "--probe-from-config and the directory whose authoritative configuration binds it, or name its nodes "
+            "with --usb-device and --serial-device",
         )
     probe = probes[0]
     if not probe.serial_ports:
@@ -781,6 +867,154 @@ def the_devices(usb_devices: list[str], serial_devices: list[str]) -> Devices:
     usb = tuple(checked_node(node) for node in probe.usb_nodes)
     ports = tuple(checked_node(node) for node in probe.serial_ports)
     return Devices(usb, ports, probe.serial_numbers)
+
+
+def configured_probe_id(directory: str, voice: Voice) -> tuple[str, str]:
+    """The debugger the authoritative configuration for `directory` binds, and the serial number of its probe.
+
+    Read through the product's own doctor, so the configuration is found,
+    bound to its workspace and validated by the product. Every serial number
+    the document names is withheld before anything about it is said.
+    """
+    if not Path(directory).is_dir():
+        raise Refused(
+            EXIT_NO_PROBE,
+            f"--probe-from-config names {directory}, which is not a directory here. It names the directory whose "
+            "authoritative configuration binds the probe, the one `agentic-hil init` was run in",
+        )
+    try:
+        printed = bench_doctor(directory)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise Refused(EXIT_NO_PROBE, f"`{PRODUCT_COMMAND} doctor --json` could not be run in {directory}: {error}") from None
+    if printed is None:
+        raise Refused(
+            EXIT_NO_PROBE,
+            f"{PRODUCT_COMMAND} was not found on PATH, and --probe-from-config reads the bench's configuration through "
+            "the product installed on this machine. tools/bench/README.md says what the machine provides once",
+        )
+    try:
+        report = json.loads(printed)
+    except ValueError:
+        report = None
+    if not isinstance(report, dict):
+        raise Refused(
+            EXIT_NO_PROBE,
+            f"`{PRODUCT_COMMAND} doctor --json` in {directory} printed no JSON document, so which probe the bench's "
+            "configuration names is not known",
+        )
+    debuggers = report.get("debuggers")
+    if not isinstance(debuggers, dict):
+        raise Refused(
+            EXIT_NO_PROBE,
+            f"the authoritative configuration for {directory} did not load ({report.get('error_type') or 'no reason given'}: "
+            f"{report.get('summary') or 'doctor said nothing more'}), so it names no probe",
+        )
+    entries = {str(name): entry for name, entry in debuggers.items() if isinstance(entry, dict)}
+    voice.withhold(str(entry["probe_id"]) for entry in entries.values() if entry.get("probe_id"))
+    bound = [name for name, entry in entries.items() if entry.get("bound") is True]
+    if len(bound) != 1:
+        raise Refused(
+            EXIT_NO_PROBE,
+            f"the authoritative configuration for {directory} binds {len(bound) or 'no'} debugger"
+            f"{'' if len(bound) == 1 else 's'}, and the probe it names is the bound debugger's",
+        )
+    name = bound[0]
+    probe_id = entries[name].get("probe_id")
+    if not isinstance(probe_id, str) or not probe_id.strip():
+        raise Refused(
+            EXIT_NO_PROBE,
+            f"the debugger `{name}` the authoritative configuration for {directory} binds has no probe_id, so it names "
+            f"no probe. `{PRODUCT_COMMAND} adopt-hardware` in that directory fills it in from the attached probe",
+        )
+    return name, probe_id.strip()
+
+
+def the_configured_probe(directory: str, voice: Voice) -> Devices:
+    """The attached probe whose serial number the authoritative configuration for `directory` names.
+
+    Every attached probe's serial number is withheld first, as tools/withhold.py
+    withholds them, so nothing said about one names it.
+    """
+    probes = discover_probes()
+    voice.withhold(serial for probe in probes for serial in probe.serial_numbers)
+    debugger, probe_id = configured_probe_id(directory, voice)
+    wanted = probe_id.casefold()
+    named = f"the probe the debugger `{debugger}` names in the authoritative configuration for {directory}"
+    matching = [probe for probe in probes if any(serial.casefold() == wanted for serial in probe.serial_numbers)]
+    if not matching:
+        attached = (
+            f"none of the {len(probes)} in-circuit debuggers or programmers attached "
+            f"({'; '.join(probe.where for probe in probes)}) is"
+            if probes
+            else "no in-circuit debugger or programmer the product recognises is attached to this machine's USB, so none is"
+        )
+        raise Refused(EXIT_NO_PROBE, f"{attached} {named}, so the board that configuration describes is not here")
+    if len(matching) > 1:
+        raise Refused(
+            EXIT_NO_PROBE,
+            f"{len(matching)} attached in-circuit debuggers or programmers ({'; '.join(probe.where for probe in matching)}) "
+            f"carry the serial number of {named}, and choosing between them would be choosing a board",
+        )
+    probe = matching[0]
+    if not probe.serial_ports:
+        raise Refused(
+            EXIT_NO_PROBE,
+            f"{named}, at {probe.where}, shows no serial port, and the tier reads the board's output over one",
+        )
+    usb = tuple(checked_node(node) for node in probe.usb_nodes)
+    ports = tuple(checked_node(node) for node in probe.serial_ports)
+    voice(f"running against {named}: the one at {probe.where}")
+    return Devices(usb, ports, probe.serial_numbers)
+
+
+def the_other_probes(devices: Devices, voice: Voice) -> Devices:
+    """The devices, with every attached probe that is not the one handed in named for hiding.
+
+    A probe is the one handed in when one of its USB nodes is, so a probe named
+    by hand with --usb-device is recognised as discovery finds it, and where
+    the node named is no probe discovery recognises, every one it does is
+    hidden. Which probes those are is read now, never written down: a sysfs
+    entry is the port a device sits on, and that is the machine's to change.
+    """
+    handed = set(devices.usb_nodes)
+    others = [
+        probe for probe in discover_probes() if not handed.intersection(canonical_node(node) for node in probe.usb_nodes)
+    ]
+    if not others:
+        return devices
+    for probe in others:
+        # Podman separates the paths it masks by colons, and the kernel never
+        # puts one in a device's entry, only in an interface's: an entry with
+        # one would be masked as two paths that are not it.
+        if ":" in probe.sysfs_name or not probe.sysfs_name:
+            raise Refused(
+                EXIT_NO_PROBE,
+                f"the in-circuit debugger or programmer at {probe.where} has a sysfs entry that cannot be hidden from "
+                "the container, and the tier would see it beside the one it is handed",
+            )
+    count = len(others)
+    plural = "s" if count > 1 else ""
+    voice(
+        f"hiding the {count} other in-circuit debugger{plural} or programmer{plural} attached here from the tier "
+        f"({'; '.join(probe.where for probe in others)}), so the debugger in the container enumerates only the one "
+        "it is handed"
+    )
+    return replace(devices, other_probes=tuple(probe.sysfs_name for probe in others))
+
+
+def the_probe(options: argparse.Namespace, voice: Voice) -> Devices:
+    """The one probe this run hands in: the one the bench's configuration names, the nodes named, or the one found.
+
+    Every other attached probe comes back named for hiding from the container.
+    """
+    if options.probe_from_config is not None:
+        if options.usb_device or options.serial_device:
+            raise Refused(
+                EXIT_NO_PROBE,
+                "--probe-from-config and --usb-device or --serial-device each name the probe, and a run takes one of them",
+            )
+        return the_other_probes(the_configured_probe(options.probe_from_config, voice), voice)
+    return the_other_probes(the_devices(options.usb_device, options.serial_device), voice)
 
 
 def docker_opens(status: os.stat_result, uid: int, gid: int, groups: set[int]) -> bool:
@@ -832,6 +1066,17 @@ def why_not_openable(runtime: str, node: str) -> str | None:
 
 
 def check_access(runtime: str, devices: Devices) -> None:
+    """Whether the tier can open every node handed in, and is shown no other probe, under this runtime."""
+    if runtime != "podman" and devices.other_probes:
+        count = len(devices.other_probes)
+        plural = "s" if count > 1 else ""
+        raise Refused(
+            EXIT_CANNOT_RUN_HERE,
+            f"{count} other in-circuit debugger{plural} or programmer{plural} attached here would be in the tier's "
+            "view under Docker, which has no way to hide a device's sysfs entry from a container, and a debugger in "
+            "it would enumerate them beside the one it is handed. Run under rootless Podman, which hides them, or "
+            "detach them",
+        )
     for node in devices.nodes:
         reason = why_not_openable(runtime, node)
         if reason is not None:
@@ -1322,6 +1567,11 @@ def tier_command(
         if not withhold_groups:
             command += ["--group-add", "keep-groups"]
         command += ["--security-opt", "label=disable"]
+        if devices.other_probes:
+            # Every other attached probe, out of the container's sysfs, so the
+            # debugger in it enumerates only the probe it is handed.
+            masked = (f"{CONTAINER_USB_DEVICES}/{name}" for name in devices.other_probes)
+            command += ["--security-opt", "mask=" + ":".join(masked)]
     else:
         command += ["--user", f"{uid}:{gid}"]
         if not withhold_groups:
@@ -1573,6 +1823,15 @@ def parse_options(argv: list[str] | None) -> argparse.Namespace:
         metavar="NODE",
         help="The probe's serial port, instead of finding it. Repeatable; needs --usb-device.",
     )
+    parser.add_argument(
+        "--probe-from-config",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Run against the probe the authoritative configuration for DIR binds, read with `agentic-hil doctor --json` "
+            "run in DIR, instead of finding the only one attached."
+        ),
+    )
     parser.add_argument("--output", default="bench-results", help="Where the JUnit report and the log go (default bench-results).")
     parser.add_argument(
         "--source",
@@ -1696,7 +1955,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         if running:
             check_this_machine(runtime)
-            devices = the_devices(options.usb_device, options.serial_device)
+            devices = the_probe(options, voice)
             voice.withhold(devices.serial_numbers)
             check_access(runtime, devices)
             if options.require_usb_uart:
@@ -1762,9 +2021,10 @@ def main(argv: list[str] | None = None) -> int:
             voice(f"built {image_name(options.distribution)} as {image_id} from commit {commit[:12]} with {runtime}; --build-only, so nothing ran")
             return 0
 
-        # Again, now: the wait for the machine can be long, and a probe that
-        # re-enumerated during it has new nodes.
-        devices = the_devices(options.usb_device, options.serial_device)
+        # Again, now: the wait for the machine can be long, a probe that
+        # re-enumerated during it has new nodes, and the configuration that
+        # names one may have been changed meanwhile.
+        devices = the_probe(options, voice)
         voice.withhold(devices.serial_numbers)
         check_access(runtime, devices)
         devices = replace(

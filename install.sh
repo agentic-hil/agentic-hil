@@ -544,6 +544,25 @@ user_bin_on_path() {
     export PATH
 }
 
+# The Pythons agentic-hil declares and tests, written as a uv interpreter
+# request: the floor and the ceiling of the classifiers in pyproject.toml.
+# install.ps1 carries the same range, and a release that adds a Python to the
+# classifiers moves both; the suite fails until it does. uv asked for no
+# interpreter picks one itself, the first on PATH here and the newest in the
+# registry on Windows, so a Python newer than any PyYAML wheel had uv build
+# PyYAML from source, which needs a C compiler. With the range uv takes an
+# interpreter inside it, or downloads one, and a fresh receipt records the
+# range, which a refresh then replays like any interpreter uv recorded.
+UV_PYTHON_REQUEST=">=3.10,<3.14"
+
+# One uv command with that range as its interpreter request, unless the operator
+# set UV_PYTHON themselves; a --python replayed from the receipt outranks either
+# inside uv. The assignment in front of the command reaches that one process and
+# nothing after it.
+uv_on_supported_python() {
+    UV_PYTHON="${UV_PYTHON:-$UV_PYTHON_REQUEST}" uv "$@"
+}
+
 # One uv command, run with the certificate-retry branches around it, because the
 # text of a failure is what decides whether there is a second attempt to make.
 # The command's own words are this function's positional parameters, so the
@@ -551,7 +570,7 @@ user_bin_on_path() {
 # install ...`) share one retry. uv's output is captured rather than streamed for
 # the same reason: the retry reads it.
 run_uv() {
-    if uv_output=$(uv "$@" 2>&1); then
+    if uv_output=$(uv_on_supported_python "$@" 2>&1); then
         printf '%s\n' "$uv_output"
         return 0
     fi
@@ -565,7 +584,7 @@ run_uv() {
         # uninstalling the package there removes this launcher too (#488).
         uv_bin_dir=$(uv tool dir --bin 2>/dev/null) || uv_bin_dir="its bin directory"
         say "package: uv refused to overwrite an agentic-hil in $uv_bin_dir that it did not write (pip --user, pipx or another manager put it there), so it was told to replace it; that manager still records the old package, and uninstalling it there removes this launcher too, so run this script again if you do"
-        if uv_output=$(uv "$@" --force 2>&1); then
+        if uv_output=$(uv_on_supported_python "$@" --force 2>&1); then
             printf '%s\n' "$uv_output"
             return 0
         fi
@@ -583,7 +602,7 @@ run_uv() {
         say "certificates: that is a certificate uv cannot get to a root it carries, which is what a TLS-intercepting proxy looks like from inside uv; retrying once against this machine's own store, with verification still on"
         use_system_certs
         SYSTEM_CERTS="always"
-        if uv_output=$(uv "$@" 2>&1); then
+        if uv_output=$(uv_on_supported_python "$@" 2>&1); then
             printf '%s\n' "$uv_output"
             return 0
         fi
