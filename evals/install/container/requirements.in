@@ -3,10 +3,16 @@
 # This environment only ever runs the eval harness's own checks, so the pins
 # stay exact and are updated deliberately rather than resolved at build time.
 #
+# The registration-gate stage also downloads this lock as the offline wheelhouse
+# the current wheel is installed from, so every runtime dependency of the
+# distribution has to be here, python-can included, or that install has nothing
+# to resolve it against.
+#
 # Regenerate the hash-pinned lock file after editing:
 #   uv pip compile --generate-hashes --universal --python-version 3.11 \
 #     evals/install/container/requirements.in \
 #     -o evals/install/container/requirements.txt
 jsonschema==4.25.1
 pyserial==3.5
+python-can==4.6.1
 PyYAML==6.0.2

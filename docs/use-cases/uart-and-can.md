@@ -159,8 +159,8 @@ can_buses:
       allow_write: false
 ```
 
-- `socketcan` and `peak` run through python-can, installed with
-  `agentic-hil[can]`; a `process` bridge is a program you provide that speaks
+- `socketcan` and `peak` run through python-can, which every installation
+  carries; a `process` bridge is a program you provide that speaks
   the bridge protocol.
 - `listen_only: true` is enforced, not recorded. `peak` sets PCAN's passive
   state and reads the mode back from the driver. `socketcan` reads the kernel's

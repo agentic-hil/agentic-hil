@@ -5,4 +5,5 @@
 jsonschema>=4.22
 PyYAML>=6.0
 pyserial>=3.5
+python-can>=4.4
 tomli>=2; python_version < "3.11"

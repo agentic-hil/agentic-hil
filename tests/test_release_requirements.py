@@ -63,6 +63,22 @@ def test_the_runtime_lock_input_is_exactly_what_pyproject_declares() -> None:
     )
 
 
+def test_python_can_is_a_dependency_of_the_distribution_itself() -> None:
+    """CAN support never hangs on an install line naming `[can]`.
+
+    `uv tool install` records the line it was given in place of the one before,
+    so an update written as a bare `agentic-hil>=X` took python-can off a bench
+    installed as `agentic-hil[can]`. A dependency of the distribution itself
+    rides on every line. The extra stays declared, because receipts, install
+    scripts and documents name `agentic-hil[can]` and must keep resolving.
+    """
+    project = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    unconditional = [_normalised(dependency) for dependency in project["dependencies"] if ";" not in dependency]
+    assert any(re.fullmatch(r"python-can(>=[0-9.]+)?", dependency) for dependency in unconditional), project["dependencies"]
+    assert project["optional-dependencies"].get("can"), project["optional-dependencies"]
+    assert re.search(r"^python-can==", RUNTIME_TXT.read_text(encoding="utf-8"), flags=re.MULTILINE)
+
+
 def test_every_pin_in_the_runtime_lock_carries_a_hash() -> None:
     text = RUNTIME_TXT.read_text(encoding="utf-8")
     pins = re.findall(r"^([A-Za-z0-9_.\-]+)==", text, flags=re.MULTILINE)
