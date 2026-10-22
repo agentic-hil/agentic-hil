@@ -55,6 +55,8 @@ from pathlib import Path
 import pytest
 from support import scaled_time_bound
 
+from agentic_hil.config import host_debugger_executable
+
 from .conftest import COMMAND_TIMEOUT_S, CONTAINER_ONLY, fixture_configuration
 
 pytestmark = [pytest.mark.container, CONTAINER_ONLY]
@@ -221,6 +223,8 @@ def test_an_omitted_executable_runs_the_openocd_path_names(tmp_path: Path, monke
 
     project = tmp_path / "project"
     project.mkdir()
+    # The lookup the suite hides from every other test is this test's subject.
+    monkeypatch.setattr("agentic_hil.config.host_debugger_executable", host_debugger_executable)
     config_path = fixture_configuration(project, tmp_path / "config" / "config.yaml", tmp_path / "state", executable="null")
     monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(config_path))
     config = load_authoritative_config(project)
