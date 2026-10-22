@@ -64,7 +64,13 @@ import pytest
 from conftest import FAKE_OPENOCD, FAKE_PYOCD, FAKE_STLINK, write_authoritative_config, write_config
 from support import scaled_time_bound
 
-from agentic_hil.config import ConfigError, debugger_is_placeholder, load_authoritative_config, load_config
+from agentic_hil.config import (
+    ConfigError,
+    debugger_is_placeholder,
+    host_debugger_executable,
+    load_authoritative_config,
+    load_config,
+)
 from agentic_hil.tools import AgenticHILToolService
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -537,6 +543,8 @@ def test_an_omitted_executable_is_looked_up_on_path(tmp_path: Path, monkeypatch:
     """
     workspace = tmp_path / "workspace"
     launcher = fake_on_path(tmp_path / "on-path", monkeypatch, debugger_type)
+    # The lookup the suite hides from every other test is this test's subject.
+    monkeypatch.setattr("agentic_hil.config.host_debugger_executable", host_debugger_executable)
     authoritative_config_with_executable_spelling(workspace, monkeypatch, "null", debugger_type=debugger_type)
 
     config = load_authoritative_config(workspace)

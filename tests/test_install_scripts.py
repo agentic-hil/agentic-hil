@@ -6115,7 +6115,15 @@ def test_no_agent_cli_on_path_prints_the_agent_install_line_and_writes_nothing(t
         directory.mkdir(parents=True)
     marker = tmp_path / "agent-install-was-run"
     _uv_that_installs_a_stub(tools / "uv", marker=marker)
-    path = f"{tools}:/usr/bin:/bin"
+    # The system's programs without the three agent CLIs, so the host the test is
+    # about is the same on a machine that has one installed in /usr/bin.
+    system = tmp_path / "system"
+    system.mkdir()
+    for directory in (Path("/usr/bin"), Path("/bin")):
+        for program in sorted(directory.iterdir()):
+            if program.name not in {"claude", "codex", "opencode"} and not os.path.lexists(system / program.name):
+                (system / program.name).symlink_to(program)
+    path = f"{tools}:{system}"
     for cli in ("claude", "codex", "opencode"):
         assert shutil.which(cli, path=path) is None, f"{cli} resolves on {path}, so this is not the host the test is about"
 

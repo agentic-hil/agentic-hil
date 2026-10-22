@@ -25,6 +25,7 @@ import pytest
 import yaml
 from conftest import (
     DEFAULT_TEST_PERMISSIONS,
+    ESPTOOL_COM_PORTS_YAML,
     FAKE_OPENOCD,
     FAKE_OPENOCD_NO_TARGET,
     FAKE_STLINK,
@@ -81,7 +82,9 @@ from agentic_hil.config import (
     CONFIG_ENV,
     ConfigError,
     authoritative_config_target,
+    debugger_is_placeholder,
     is_user_private_group,
+    load_authoritative_config,
     load_config,
     project_config_directory,
     project_config_path,
@@ -7019,6 +7022,39 @@ def test_doctor_names_a_placeholder_debugger_beside_a_bound_one(tmp_path: Path, 
     assert "debuggers.spare.executable" in binding["unbound"][0]["summary"]
     # The bound probe still runs a plan, so the strong claim is not made.
     assert "no test plan can run" not in binding["summary"]
+
+
+@pytest.mark.parametrize(("debugger_type", "program"), [("openocd", "openocd"), ("pyocd", "pyocd"), ("stlink", "STM32_Programmer_CLI"), ("esptool", "esptool")])
+def test_a_placeholder_debugger_stays_one_whatever_the_host_has_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, debugger_type: str, program: str) -> None:
+    """The test above, on a machine that has the toolchain on PATH.
+
+    Pinning fills an entry that names no executable from the host, which is
+    what lets `init`, a plugged-in board and `adopt-hardware` reach a bound
+    bench with nobody typing a path. The suite's placeholder entries rely on
+    nothing being found: on a machine with OpenOCD in /usr/bin the `spare`
+    above was bound, `doctor` reported nothing unbound, and tests that pass on
+    CI failed there. The program pinning looks for is put first on PATH here,
+    and the entry is still the placeholder the suite wrote.
+    """
+    toolchain = tmp_path / "toolchain"
+    toolchain.mkdir()
+    stub = toolchain / (f"{program}.exe" if os.name == "nt" else program)
+    stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(toolchain) + os.pathsep + os.environ.get("PATH", ""))
+    workspace = tmp_path / "workspace"
+    # An esptool entry names the serial line it reaches the board through, bound or not.
+    serial = "    com_port: esp\n" if debugger_type == "esptool" else ""
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debuggers_yaml=f"debuggers:\n  spare:\n    type: {debugger_type}\n    executable: null\n    probe_id: null\n{serial}",
+        com_ports_yaml=ESPTOOL_COM_PORTS_YAML if serial else "com_ports: {}\n",
+    )
+
+    spare = load_authoritative_config(workspace).debuggers["spare"]
+
+    assert debugger_is_placeholder(spare), spare.executable
 
 
 def test_troubleshooting_describes_the_unbound_doctor_the_way_it_behaves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
