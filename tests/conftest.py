@@ -521,6 +521,19 @@ def _no_host_esptool(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_host_debugger_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A debugger entry that names no executable finds none on the machine running the suite.
+
+    Pinning fills such an entry from the host: STM32CubeProgrammer's install
+    locations, then `openocd`, `pyocd`, `STM32_Programmer_CLI` or `esptool` on
+    PATH. The suite writes entries like that as placeholders, so on a developer's
+    machine with OpenOCD installed every one of them was bound to it, `doctor`
+    reported nothing unbound, and tests that pass on CI failed there. A test
+    about that lookup patches this name itself, after this one."""
+    monkeypatch.setattr("agentic_hil.config.host_debugger_executable", lambda debugger_type: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_host_stlink_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """A session on the stlink backend finds no stlink-server on the machine running the suite.
 

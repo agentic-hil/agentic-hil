@@ -869,28 +869,9 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
     # drove a board while `doctor` skipped it, because the skip keyed on it being
     # the starter entry. It stays inert until somebody names an executable in it.
     starter = debugger_is_starter_entry(debugger)
-    candidates = (
-        []
-        if starter
-        else {
-            "openocd": ["openocd"],
-            "stlink": ["STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"],
-            "pyocd": ["pyocd"],
-            # The console script esptool 5 installs. Never `esptool.py`: that
-            # name is the deprecated shim of the same package, and on PATH it is
-            # just as likely to be a stray copy of the 4.x script.
-            "esptool": ["esptool"],
-        }[debugger.type]
-    )
     configured = debugger.executable
-    if configured is None and not starter and debugger.type == "stlink":
-        from agentic_hil.backends.common import find_stm32_programmer_cli
-
-        configured = find_stm32_programmer_cli()
-    if configured is None and not starter and debugger.type == "esptool":
-        from agentic_hil.backends.common import find_esptool
-
-        configured = find_esptool()
+    if configured is None and not starter:
+        configured = host_debugger_executable(debugger.type)
     # Everything else resolves as it always did, including the entry an operator
     # has typed but not yet given an executable: that is the documented first
     # edit of `init`, plug the board in, adopt. What changed is when the answer
@@ -899,7 +880,7 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
     # rather than staying classified by what it looked like before.
     pinned = replace(
         debugger,
-        executable=configured_executable(config, configured, f"{field_prefix}.executable", candidates=candidates),
+        executable=configured_executable(config, configured, f"{field_prefix}.executable"),
     )
     if debugger.type == "stlink":
         pinned = replace(pinned, gdb_server_executable=pinned_st_link_gdb_server(config, pinned, field_prefix))
@@ -912,6 +893,43 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
     # directories. "Nothing can drive this entry" has to mean nothing, reads
     # included, before validation may be skipped.
     return pinned_debugger_scripts(config, pinned, field_prefix)
+
+
+def host_debugger_executable(debugger_type: str) -> str | None:
+    """The toolchain this host has for a debugger type, or None.
+
+    What pinning fills an entry that names no executable with: the vendor
+    install locations first where a type has them, then the type's program on
+    PATH. One name for every lookup on the host, so the test suite can hide a
+    toolchain a developer has installed the way it hides the other host tools,
+    and a placeholder entry stays a placeholder on every machine.
+    """
+    if debugger_type == "stlink":
+        from agentic_hil.backends.common import find_stm32_programmer_cli
+
+        found = find_stm32_programmer_cli()
+        if found is not None:
+            return found
+    if debugger_type == "esptool":
+        from agentic_hil.backends.common import find_esptool
+
+        found = find_esptool()
+        if found is not None:
+            return found
+    candidates = {
+        "openocd": ["openocd"],
+        "stlink": ["STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"],
+        "pyocd": ["pyocd"],
+        # The console script esptool 5 installs. Never `esptool.py`: that
+        # name is the deprecated shim of the same package, and on PATH it is
+        # just as likely to be a stray copy of the 4.x script.
+        "esptool": ["esptool"],
+    }[debugger_type]
+    for candidate in candidates:
+        found = shutil.which(candidate)
+        if found is not None:
+            return found
+    return None
 
 
 def pinned_st_link_gdb_server(config: AgenticHILConfig, debugger: DebuggerConfig, field_prefix: str) -> str | None:
