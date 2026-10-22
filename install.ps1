@@ -199,23 +199,40 @@ function Clear-SystemCerts {
     }
 }
 
-# The Pythons agentic-hil declares and tests, written as a uv interpreter
-# request: the floor and the ceiling of the classifiers in pyproject.toml.
-# install.sh carries the same range, and a release that adds a Python to the
-# classifiers moves both; the suite fails until it does. uv asked for no
-# interpreter picks one itself, and on Windows that is the newest one the
-# registry lists. So the day a machine or a runner image gained a Python newer
-# than any PyYAML wheel, uv built PyYAML from source and the install stopped on
-# a C compiler nobody had been told they needed. With the range uv takes an
-# interpreter inside it, or downloads one, and a fresh receipt records the
-# range, which a refresh then replays like any interpreter uv recorded.
-$UvPythonRequest = '>=3.10,<3.14'
+# The Pythons agentic-hil installs onto, written as a uv interpreter request:
+# the floor requires-python names in pyproject.toml, and no ceiling. install.sh
+# carries the same floor. uv asked for no interpreter picks one itself, and on
+# Windows that is the newest one the registry lists, which may be older than the
+# floor. With the floor uv takes an interpreter at or above it, or downloads
+# one, and a fresh receipt records the floor, which a refresh then replays like
+# any interpreter uv recorded.
+$UvPythonRequest = '>=3.10'
+
+function Invoke-WithPurePythonYaml {
+    # One install command, uv's or pip's, with PYYAML_FORCE_LIBYAML=0. PyYAML
+    # publishes wheels for the Pythons it has caught up with, and on a newer one
+    # the manager builds it from source. Its setup.py then compiles an optional
+    # C extension first, and on a machine without Microsoft C++ that stops the
+    # build rather than falling back. agentic-hil uses PyYAML's pure-Python
+    # loader and dumper alone, so the switch costs nothing, and where a wheel
+    # exists it changes nothing either. A value already set is the operator's,
+    # and the switch is set for this call alone and taken away again, because
+    # through `irm | iex` this script runs in the reader's own session.
+    param([string]$File, [string[]]$Arguments)
+    $inherited = $env:PYYAML_FORCE_LIBYAML
+    if (-not $inherited) { $env:PYYAML_FORCE_LIBYAML = '0' }
+    try {
+        return (Invoke-Captured -File $File -Arguments $Arguments)
+    } finally {
+        if (-not $inherited) { Remove-Item Env:\PYYAML_FORCE_LIBYAML -ErrorAction SilentlyContinue }
+    }
+}
 
 function Invoke-UvOnSupportedPython {
-    # One uv command with the range above as its interpreter request. It goes
+    # One uv command with the floor above as its interpreter request. It goes
     # in UV_PYTHON rather than as --python, so no uv argument list changes and
-    # a uv started through a `.cmd` file does not hand the `<` and `>` to cmd as
-    # redirections. It gives way to the operator's own request: a UV_PYTHON
+    # a uv started through a `.cmd` file does not hand the `>` to cmd as a
+    # redirection. It gives way to the operator's own request: a UV_PYTHON
     # already set is theirs, and a --python replayed from the receipt outranks
     # the variable inside uv. It is set for this call alone and taken away
     # again, because through `irm | iex` this script runs in the reader's own
@@ -224,7 +241,7 @@ function Invoke-UvOnSupportedPython {
     $inherited = $env:UV_PYTHON
     if (-not $inherited) { $env:UV_PYTHON = $UvPythonRequest }
     try {
-        return (Invoke-Captured -File 'uv' -Arguments $Arguments)
+        return (Invoke-WithPurePythonYaml -File 'uv' -Arguments $Arguments)
     } finally {
         if (-not $inherited) { Remove-Item Env:\UV_PYTHON -ErrorAction SilentlyContinue }
     }
@@ -906,7 +923,7 @@ if (-not $needsPackage) {
         $pipArguments = @('-m', 'pip', 'install', '--user', '--upgrade')
         if ($InstallMode -eq 'refresh' -or $InstallMode -eq 'pin') { $pipArguments += '--force-reinstall' }
         $pipArguments += (Get-PackageSpec)
-        $pip = Invoke-Captured -File $pythonCommand -Arguments $pipArguments
+        $pip = Invoke-WithPurePythonYaml -File $pythonCommand -Arguments $pipArguments
         Write-Host $pip.Output.TrimEnd()
         if ($pip.ExitCode -ne 0) {
             # PEP 668: the distribution owns this interpreter. The answer is an

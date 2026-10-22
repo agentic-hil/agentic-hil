@@ -63,11 +63,13 @@ in its place. After one restart of your agent,
 the agent itself creates this project's configuration over MCP at the first
 hardware question, which is the same file `init` would have written.
 
-Through uv, the package goes onto a Python version it supports: uv takes such
-an interpreter from the machine or downloads one, rather than the newest one it
-finds, for which a dependency may not publish a wheel yet. A `UV_PYTHON` you
-set yourself, or the interpreter `uv tool install --python` recorded for an
-earlier installation, takes precedence.
+Through uv, the package goes onto a Python version it supports, 3.10 or newer:
+uv takes such an interpreter from the machine or downloads one. A `UV_PYTHON`
+you set yourself, or the interpreter `uv tool install --python` recorded for
+an earlier installation, takes precedence. Both scripts, and `agentic-hil
+upgrade` after them, build PyYAML without its optional C extension
+(`PYYAML_FORCE_LIBYAML=0`), which the package does not use, so on a Python
+PyYAML publishes no wheel for yet, PyYAML needs no compiler.
 
 Its flags are the same in both scripts: `--agent <claude-code|codex|opencode>`
 registers one agent instead of every one it finds, `--no-agent-install` stops
@@ -264,7 +266,7 @@ shell is one copy away once you have read what is in them.
 
 ## Platforms and debugger backends
 
-Linux, macOS, and Windows (CI-tested on Python 3.10 to 3.13). Debugger backends: OpenOCD (debug sessions need 0.11.0 or newer; flashing, reset and memory reads need no particular release), pyOCD (`agentic-hil[pyocd]`: covers most ARM Cortex-M targets via CMSIS packs and the in-circuit debuggers or programmers pyOCD itself supports, set `debuggers.<name>.target_type`; debug sessions run through `pyocd gdbserver` from the same install), and STM32CubeProgrammer CLI (auto-discovered on Windows; debug sessions run through the ST-LINK_gdbserver STM32CubeCLT installs, found beside the CLI of the same STM32CubeCLT or named as `debuggers.<name>.gdb_server_executable`), and esptool (`agentic-hil[esptool]`: ESP32-family chips through the USB-UART bridge on the board, esptool 5.x only; flashing, reset and probing, no debug sessions). An esptool entry remembers that it left the chip in its ROM bootloader, after `reset_target` mode `halt` or a flash without a reset, only for the life of the server process: a server started fresh resets the chip into its application on its first `probe_target`. Direct CAN requires `agentic-hil[can]` (python-can); CAN also supports a configured `process` bridge backend.
+Linux, macOS, and Windows (CI-tested on Python 3.10 to 3.15, and on the newest Python release). Debugger backends: OpenOCD (debug sessions need 0.11.0 or newer; flashing, reset and memory reads need no particular release), pyOCD (`agentic-hil[pyocd]`: covers most ARM Cortex-M targets via CMSIS packs and the in-circuit debuggers or programmers pyOCD itself supports, set `debuggers.<name>.target_type`; debug sessions run through `pyocd gdbserver` from the same install), and STM32CubeProgrammer CLI (auto-discovered on Windows; debug sessions run through the ST-LINK_gdbserver STM32CubeCLT installs, found beside the CLI of the same STM32CubeCLT or named as `debuggers.<name>.gdb_server_executable`), and esptool (`agentic-hil[esptool]`: ESP32-family chips through the USB-UART bridge on the board, esptool 5.x only; flashing, reset and probing, no debug sessions). An esptool entry remembers that it left the chip in its ROM bootloader, after `reset_target` mode `halt` or a flash without a reset, only for the life of the server process: a server started fresh resets the chip into its application on its first `probe_target`. Direct CAN requires `agentic-hil[can]` (python-can); CAN also supports a configured `process` bridge backend.
 
 Installing pyOCD is not enough to reach an STM32 part. Most vendor target types, the whole STM32F4 family included, come from a CMSIS device-family pack rather than pyOCD's built-in list, so they need a second, deliberate step:
 
