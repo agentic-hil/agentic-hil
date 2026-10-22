@@ -13,9 +13,17 @@
 # a compromised release of any of these or of anything they pull in cannot
 # enter the image that the required container check runs in.
 #
-# Regenerate the hash-pinned lock file after editing:
-#   uv pip compile --generate-hashes --universal --python-version 3.12 requirements/container.in -o requirements/container.txt
-uv==0.13.0
+# The lock is pip-compile's output, not uv's, because pip-compile is what
+# Dependabot regenerates it with. pip-compile files setuptools under its
+# "considered to be unsafe" note at the end, and Dependabot cuts that note and
+# everything after it from the new file whenever the old one had no such note.
+# A lock whose setuptools sits in line with the rest therefore lost it on every
+# bump, and the image's `--no-isolation` builds failed without their backend.
+#
+# Regenerate the hash-pinned lock file after editing, on Linux under Python
+# 3.12 (the image's platform and interpreter) with pip-tools 7.6.2 or later:
+#   pip-compile --allow-unsafe --generate-hashes --output-file=requirements/container.txt requirements/container.in
+uv==0.13.4
 pyocd==0.45.1
 setuptools>=77
 wheel

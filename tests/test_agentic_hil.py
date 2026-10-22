@@ -610,6 +610,34 @@ def _place_agent_skill(agent_id: str) -> Path:
     return target
 
 
+@pytest.mark.parametrize(("operator_setting", "handed_an_environment"), [(None, False), (None, True), ("1", False)])
+def test_every_upgrade_child_builds_pyyaml_without_a_compiler(monkeypatch: pytest.MonkeyPatch, operator_setting: str | None, handed_an_environment: bool) -> None:
+    """The installers' PYYAML_FORCE_LIBYAML=0, on the runner every upgrade command goes through.
+
+    `agentic-hil upgrade` runs the same `pip install` and `uv tool upgrade` the
+    installers do, so on a Python PyYAML publishes no wheel for it meets the
+    same source build, whose optional C extension stops the build on a Windows
+    machine without Microsoft C++. Every child gets the switch, the one that
+    inherits this environment and the certificate retry that is handed a copy
+    of it, an operator's own value wins, and this process's environment is left
+    as it was.
+    """
+    from agentic_hil.upgrade import _run_upgrade_process
+
+    if operator_setting is None:
+        monkeypatch.delenv("PYYAML_FORCE_LIBYAML", raising=False)
+    else:
+        monkeypatch.setenv("PYYAML_FORCE_LIBYAML", operator_setting)
+    before = dict(os.environ)
+    command = [sys.executable, "-c", "import os; print(os.environ.get('PYYAML_FORCE_LIBYAML', 'unset'))"]
+
+    completed = _run_upgrade_process(command, env={**os.environ, "UV_SYSTEM_CERTS": "1"} if handed_an_environment else None)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == (operator_setting or "0")
+    assert dict(os.environ) == before
+
+
 def test_upgrade_uses_running_python_and_refreshes_the_agent_it_had_set_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

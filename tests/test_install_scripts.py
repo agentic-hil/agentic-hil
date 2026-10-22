@@ -155,8 +155,8 @@ POWERSHELL_UV_EXECUTION = re.compile(r"Invoke-Expression \(\[Text\.Encoding\]::U
 TLS_PROXY_DOCKERFILE = REPOSITORY_ROOT / "evals" / "tls_proxy" / "container" / "Dockerfile"
 DOCKERFILE_UV_VERSION = re.compile(r"^ARG UV_INSTALLER_VERSION=(\d+\.\d+\.\d+)$", re.MULTILINE)
 DOCKERFILE_UV_SHA256 = re.compile(rf"^ARG UV_INSTALLER_SHA256=({SHA256_HEX})$", re.MULTILINE)
-# The interpreter request both installers hand uv, which the classifiers in
-# pyproject.toml decide (see _declared_python_request).
+# The interpreter request both installers hand uv, which requires-python in
+# pyproject.toml decides (see _declared_python_request).
 SHELL_UV_PYTHON_REQUEST = re.compile(r'^UV_PYTHON_REQUEST="([^"]+)"$', re.MULTILINE)
 POWERSHELL_UV_PYTHON_REQUEST = re.compile(r"^\$UvPythonRequest = '([^']+)'$", re.MULTILINE)
 
@@ -388,13 +388,14 @@ def test_every_site_that_fetches_the_uv_installer_pins_the_same_release() -> Non
 
 
 def _declared_python_request() -> str:
-    """The Pythons pyproject.toml declares, as the uv request `>=3.FLOOR,<3.CEILING+1`.
+    """The Pythons pyproject.toml declares, as the uv request `>=3.FLOOR`.
 
-    The classifiers name each minor the project supports and the CI matrix
-    tests; `requires-python` names the floor. An installer asking uv for
-    anything wider lets uv pick an interpreter nobody tested, which is how a
-    Windows machine with a Python newer than any PyYAML wheel ended up building
-    PyYAML from source.
+    `requires-python` names the floor, and the classifiers name each minor from
+    there that the CI matrix tests. The request is the floor alone: a Python
+    newer than the newest classifier is one this release has not been tested
+    on, not one it refuses. The one dependency that had kept a newer Python
+    out, PyYAML without a wheel for it, now builds as pure Python everywhere
+    the installers run it (see test_the_shell_install_builds_pyyaml_without_a_compiler).
     """
     try:
         import tomllib
@@ -405,18 +406,17 @@ def _declared_python_request() -> str:
     assert minors, "pyproject.toml names no Python 3 minor among its classifiers"
     assert minors == list(range(minors[0], minors[-1] + 1)), f"the classifiers skip a Python: {minors}"
     assert project["requires-python"] == f">=3.{minors[0]}", f"requires-python {project['requires-python']} is not the classifiers' floor 3.{minors[0]}"
-    return f">=3.{minors[0]},<3.{minors[-1] + 1}"
+    return f">=3.{minors[0]}"
 
 
 def test_both_installers_ask_uv_for_the_pythons_the_package_declares() -> None:
-    """One range, three places: the classifiers, install.sh and install.ps1.
+    """One floor, three places: requires-python, install.sh and install.ps1.
 
-    uv asked for no interpreter takes the newest one the Windows registry
-    lists. The day a runner image gained Python 3.15, for which PyYAML 6.0.3
-    publishes no wheel, `uv tool install agentic-hil` built PyYAML from source
-    and stopped for want of a C compiler. Both installers now ask uv for the
-    Pythons the project declares, and a release that adds one to the
-    classifiers fails here until it moves both scripts' range with it.
+    uv asked for no interpreter takes one itself, the first on PATH here and
+    the newest the Windows registry lists, and that one may be older than the
+    package allows. Both installers hand uv the declared floor, so uv takes an
+    interpreter at or above it or downloads one, and they set no ceiling: the
+    newest Python on a machine is a Python agentic-hil installs onto.
     """
     declared = _declared_python_request()
     shell = SHELL_UV_PYTHON_REQUEST.search(_code_only(_shell_source()))
@@ -1775,6 +1775,38 @@ def test_a_pip_that_fails_for_another_reason_still_stops_the_run(tmp_path: Path)
     assert not fetched.exists(), transcript
     assert not uv_log.exists(), transcript
     assert not marker.exists(), transcript
+
+
+@pytest.mark.parametrize("operator_setting", [None, "1"])
+def test_the_shell_pip_route_builds_pyyaml_without_a_compiler(tmp_path: Path, operator_setting: str | None) -> None:
+    """The uv route's PYYAML_FORCE_LIBYAML=0, on the route without uv.
+
+    pip builds PyYAML from source on a Python PyYAML has no wheel for, exactly
+    as uv does, so the same switch goes with it. This pip records what it
+    inherited and then fails, which stops the run with the record as the one
+    thing left to read.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    seen = tmp_path / "what-pip-inherited"
+    python = (
+        'case "$*" in\n'
+        "  *version_info*) exit 0 ;;\n"
+        f"{_PLAIN_PREFIXES}"
+        '  *"pip --version"*) echo "pip 24.0 from /usr/lib/python3/dist-packages/pip (python 3.12)"; exit 0 ;;\n'
+        f'  *"pip install"*) echo "${{PYYAML_FORCE_LIBYAML:-unset}}" >> "{seen}"; echo "ERROR: Could not find a version that satisfies the requirement agentic-hil"; exit 1 ;;\n'
+        "esac\n"
+        "exit 0\n"
+    )
+    env, project, _marker, _uv_log, _fetched = _machine_whose_only_python_is(tmp_path, python)
+    if operator_setting is not None:
+        env["PYYAML_FORCE_LIBYAML"] = operator_setting
+
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert "pip could not install agentic-hil" in transcript, transcript
+    assert seen.read_text(encoding="utf-8").split() == [operator_setting or "0"], transcript
 
 
 def test_both_scripts_ask_whether_a_discovered_python_has_pip_before_using_it() -> None:
@@ -3171,7 +3203,7 @@ def _powershell_function(source: str, name: str) -> str:
 # against a receipt on disk without a uv on the machine. A helper added between
 # the reader and `Install-WithUv` has to be added here too, or the harness
 # fails on a name it does not know rather than on an assertion.
-_POWERSHELL_REFRESH_FUNCTIONS = ("Invoke-UvOnSupportedPython", "Invoke-Uv", "Test-UvManagesTool", "Get-UvRecordedRequirements", "Get-RefreshSpec", "Install-WithUv")
+_POWERSHELL_REFRESH_FUNCTIONS = ("Invoke-WithPurePythonYaml", "Invoke-UvOnSupportedPython", "Invoke-Uv", "Test-UvManagesTool", "Get-UvRecordedRequirements", "Get-RefreshSpec", "Install-WithUv")
 
 
 @pytest.mark.parametrize(("operator_request", "failing"), [(None, False), (None, True), ("3.12", False)])
@@ -3199,6 +3231,7 @@ def test_the_powershell_interpreter_request_lasts_for_the_uv_call_alone(tmp_path
         "    Add-Content -LiteralPath $seen -Value \"during=$env:UV_PYTHON\" -Encoding utf8\n"
         f"    {answer}\n"
         "}\n"
+        f"{_powershell_function(_powershell_source(), 'Invoke-WithPurePythonYaml')}"
         f"{_powershell_function(_powershell_source(), 'Invoke-UvOnSupportedPython')}"
         "try { $null = Invoke-UvOnSupportedPython -Arguments @('tool', 'install', 'agentic-hil') } catch { }\n"
         "Add-Content -LiteralPath $seen -Value \"after=$env:UV_PYTHON\" -Encoding utf8\n"
@@ -3218,6 +3251,50 @@ def test_the_powershell_interpreter_request_lasts_for_the_uv_call_alone(tmp_path
 
     assert result.returncode == 0, f"{result.stdout}{result.stderr}"
     assert seen.read_text(encoding="utf-8-sig").splitlines() == [f"during={operator_request or declared}", f"after={operator_request or ''}"], result.stderr
+
+
+@pytest.mark.parametrize(("operator_setting", "failing"), [(None, False), (None, True), ("1", False)])
+def test_the_powershell_yaml_switch_lasts_for_the_install_call_alone(tmp_path: Path, operator_setting: str | None, failing: bool) -> None:
+    """`Invoke-WithPurePythonYaml` sets PYYAML_FORCE_LIBYAML for one command and takes it away again.
+
+    The rule UV_PYTHON follows, for the same reason: through `irm | iex`
+    install.ps1 runs in the reader's own session. The install command sees
+    `0`, the session has no PYYAML_FORCE_LIBYAML after it, also when the
+    command fails, and an operator's own value is what the command sees and
+    what stays.
+    """
+    powershell = _windows_powershell()
+    seen = tmp_path / "seen"
+    before = "Remove-Item Env:\\PYYAML_FORCE_LIBYAML -ErrorAction SilentlyContinue\n" if operator_setting is None else f"$env:PYYAML_FORCE_LIBYAML = '{operator_setting}'\n"
+    answer = "throw 'pip failed'" if failing else "return [pscustomobject]@{ ExitCode = 0; Output = '' }"
+    harness = (
+        "$ErrorActionPreference = 'Stop'\n"
+        f"$seen = '{seen}'\n"
+        f"{before}"
+        "function Invoke-Captured {\n"
+        "    param([string]$File, [string[]]$Arguments)\n"
+        "    Add-Content -LiteralPath $seen -Value \"during=$env:PYYAML_FORCE_LIBYAML\" -Encoding utf8\n"
+        f"    {answer}\n"
+        "}\n"
+        f"{_powershell_function(_powershell_source(), 'Invoke-WithPurePythonYaml')}"
+        "try { $null = Invoke-WithPurePythonYaml -File 'python' -Arguments @('-m', 'pip', 'install', 'agentic-hil') } catch { }\n"
+        "Add-Content -LiteralPath $seen -Value \"after=$env:PYYAML_FORCE_LIBYAML\" -Encoding utf8\n"
+    )
+    script = tmp_path / "yaml-switch-harness.ps1"
+    script.write_text(harness, encoding="utf-8")
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+    assert seen.read_text(encoding="utf-8-sig").splitlines() == [f"during={operator_setting or '0'}", f"after={operator_setting or ''}"], result.stderr
 
 
 def _run_powershell_uv_refresh(tmp_path: Path, recorded_receipt: str) -> tuple[str, str]:
@@ -3823,12 +3900,12 @@ def _recording_uv_stub(seen: Path, variables: Sequence[str] = ("UV_SYSTEM_CERTS"
     )
 
 
-@pytest.mark.parametrize("operator_request", [None, "3.12"])
-def test_the_shell_install_asks_uv_for_the_pythons_the_package_declares(tmp_path: Path, operator_request: str | None) -> None:
-    """uv installs the tool with the declared range as its interpreter request.
+def _shell_install_through_a_recording_uv(tmp_path: Path, variable: str, operator_value: str | None) -> tuple[str, list[str]]:
+    """Run install.sh against a uv that records what it inherited of `variable`.
 
-    The range travels in UV_PYTHON on the uv command alone, and a UV_PYTHON
-    the operator exported is theirs: uv sees that one instead.
+    `operator_value` is that variable as the operator exported it, or None for
+    a shell that has none. Returns the transcript of a run that succeeded and
+    what the uv install saw.
     """
     if os.name != "posix":
         pytest.skip("the shell install flow is exercised on the POSIX half")
@@ -3840,8 +3917,8 @@ def test_the_shell_install_asks_uv_for_the_pythons_the_package_declares(tmp_path
     for directory in (project, uv_bin, tools):
         directory.mkdir(parents=True)
     seen = tmp_path / "what-uv-inherited"
-    _stub_executable(tools / "uv", _recording_uv_stub(seen, ("UV_PYTHON",)))
-    env = {"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin", "UV_TOOL_BIN_DIR": str(uv_bin), **({"UV_PYTHON": operator_request} if operator_request else {})}
+    _stub_executable(tools / "uv", _recording_uv_stub(seen, (variable,)))
+    env = {"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin", "UV_TOOL_BIN_DIR": str(uv_bin), **({variable: operator_value} if operator_value else {})}
 
     result = subprocess.run(
         [shell, str(SHELL_SCRIPT), "--no-can", "--no-agent-install"],
@@ -3857,7 +3934,36 @@ def test_the_shell_install_asks_uv_for_the_pythons_the_package_declares(tmp_path
 
     transcript = f"{result.stdout}{result.stderr}"
     assert result.returncode == 0, transcript
-    assert seen.read_text(encoding="utf-8").split() == [operator_request or _declared_python_request()], transcript
+    return transcript, seen.read_text(encoding="utf-8").split()
+
+
+@pytest.mark.parametrize("operator_request", [None, "3.12"])
+def test_the_shell_install_asks_uv_for_the_pythons_the_package_declares(tmp_path: Path, operator_request: str | None) -> None:
+    """uv installs the tool with the declared floor as its interpreter request.
+
+    The floor travels in UV_PYTHON on the uv command alone, and a UV_PYTHON
+    the operator exported is theirs: uv sees that one instead.
+    """
+    transcript, seen = _shell_install_through_a_recording_uv(tmp_path, "UV_PYTHON", operator_request)
+
+    assert seen == [operator_request or _declared_python_request()], transcript
+
+
+@pytest.mark.parametrize("operator_setting", [None, "1"])
+def test_the_shell_install_builds_pyyaml_without_a_compiler(tmp_path: Path, operator_setting: str | None) -> None:
+    """uv installs the tool with PYYAML_FORCE_LIBYAML=0, unless the operator set it.
+
+    PyYAML publishes wheels for the Pythons it has caught up with, and on a
+    newer one the installer builds it from source. Its setup.py then compiles
+    an optional C extension first, and on Windows a machine without Microsoft
+    C++ stops the build there instead of falling back. agentic-hil uses
+    PyYAML's pure-Python loader and dumper alone, so the switch costs nothing,
+    and where a wheel exists it changes nothing either. A value the operator
+    exported is theirs.
+    """
+    transcript, seen = _shell_install_through_a_recording_uv(tmp_path, "PYYAML_FORCE_LIBYAML", operator_setting)
+
+    assert seen == [operator_setting or "0"], transcript
 
 
 def _no_system_certs_run(tmp_path: Path, pip_cert: str) -> tuple[subprocess.CompletedProcess[str], Path]:
@@ -4281,6 +4387,9 @@ if args[:2] in (["tool", "install"], ["tool", "upgrade"]):
     if plan.get("interpreter_requests"):
         with open(plan["interpreter_requests"], "a", encoding="utf-8") as requests:
             requests.write(os.environ.get("UV_PYTHON", "unset") + "\\n")
+    if plan.get("build_switches"):
+        with open(plan["build_switches"], "a", encoding="utf-8") as switches:
+            switches.write(os.environ.get("PYYAML_FORCE_LIBYAML", "unset") + "\\n")
     if plan.get("proxied") and not os.environ.get("UV_SYSTEM_CERTS"):
         print("error: Failed to fetch: https://pypi.org/simple/agentic-hil/", file=sys.stderr)
         print("  Caused by: invalid peer certificate: UnknownIssuer", file=sys.stderr)
@@ -4302,6 +4411,7 @@ raise SystemExit(0)
 
 _PYTHON_STUB_BODY = '''"""The python install.ps1 finds when there is no uv: new enough, with a pip, and a user scripts directory of its own."""
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -4321,6 +4431,9 @@ if args[:2] == ["-m", "pip"]:
         print("pip 25.2 from " + plan["scripts"] + " (python 3.12)")
         raise SystemExit(0)
     if "install" in args:
+        if plan.get("build_switches"):
+            with open(plan["build_switches"], "a", encoding="utf-8") as switches:
+                switches.write(os.environ.get("PYYAML_FORCE_LIBYAML", "unset") + "\\n")
         Path(plan["scripts"]).mkdir(parents=True, exist_ok=True)
         if plan.get("writes"):
             shutil.copy2(plan["writes"], Path(plan["scripts"]) / "agentic-hil.exe")
@@ -4402,6 +4515,7 @@ class _WindowsBench:
         self.python_log = tmp_path / "python-invocations"
         self.attempts = tmp_path / "attempts"
         self.interpreter_requests = tmp_path / "interpreter-requests"
+        self.build_switches = tmp_path / "build-switches"
         if installed is not None:
             _windows_launcher(self.manager_bin / "agentic-hil.exe", installed, self.marker, "stale")
         staged = None
@@ -4412,9 +4526,9 @@ class _WindowsBench:
             (self.uv_tools / "agentic-hil").mkdir()
             (self.uv_tools / "agentic-hil" / "uv-receipt.toml").write_text(receipt, encoding="utf-8")
         if uv:
-            self._stub("uv", _UV_STUB_BODY, {"log": str(self.log), "attempts": str(self.attempts), "interpreter_requests": str(self.interpreter_requests), "tool_list": tool_list, "writes": str(staged) if staged else None, "proxied": proxied, "refuses_occupied": UV_REFUSES_AN_EXISTING_EXECUTABLE if refuses_occupied else None})
+            self._stub("uv", _UV_STUB_BODY, {"log": str(self.log), "attempts": str(self.attempts), "interpreter_requests": str(self.interpreter_requests), "build_switches": str(self.build_switches), "tool_list": tool_list, "writes": str(staged) if staged else None, "proxied": proxied, "refuses_occupied": UV_REFUSES_AN_EXISTING_EXECUTABLE if refuses_occupied else None})
         if python_with_pip:
-            self._stub("python", _PYTHON_STUB_BODY, {"log": str(self.python_log), "scripts": str(self.pip_scripts), "writes": str(staged) if staged else None})
+            self._stub("python", _PYTHON_STUB_BODY, {"log": str(self.python_log), "scripts": str(self.pip_scripts), "build_switches": str(self.build_switches), "writes": str(staged) if staged else None})
         # A claude on PATH, so agent detection has a claude-code to register for
         # where a test lets step 4 run.
         (self.early_bin / "claude.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
@@ -4771,11 +4885,11 @@ def test_the_powershell_anchor_replaces_a_copy_uv_did_not_write_in_its_own_bin(t
 @WINDOWS_ONLY
 @pytest.mark.parametrize("operator_request", [None, "3.12"])
 def test_the_powershell_install_asks_uv_for_the_pythons_the_package_declares(tmp_path: Path, operator_request: str | None) -> None:
-    """The script Windows runs hands uv the declared range, through a `.cmd` uv.
+    """The script Windows runs hands uv the declared floor, through a `.cmd` uv.
 
-    The stub uv is a `.cmd`, which is why the range travels in UV_PYTHON: as an
-    argument, cmd would read its `<` and `>` as redirections. An operator's
-    own UV_PYTHON is what uv sees instead.
+    The stub uv is a `.cmd`, which is why the floor travels in UV_PYTHON: as an
+    argument, cmd would read its `>` as a redirection. An operator's own
+    UV_PYTHON is what uv sees instead.
     """
     bench = _WindowsBench(tmp_path, installed=None, manager_writes="99.0.0")
 
@@ -4784,6 +4898,25 @@ def test_the_powershell_install_asks_uv_for_the_pythons_the_package_declares(tmp
     assert result.returncode == 0, transcript
     assert bench.interpreter_requests.read_text(encoding="utf-8").split() == [operator_request or _declared_python_request()], transcript
     assert bench.version_in_uv_bin() == "99.0.0", transcript
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("route", ["uv", "pip"])
+def test_the_powershell_install_builds_pyyaml_without_a_compiler(tmp_path: Path, route: str) -> None:
+    """Both routes of the script Windows runs install with PYYAML_FORCE_LIBYAML=0.
+
+    Windows is where PyYAML's source build needs the switch: its setup.py
+    falls back to pure Python when a compiler fails, but a machine with no
+    Microsoft C++ to find at all stops the build instead. With the switch the
+    install goes through on a Python PyYAML publishes no wheel for yet.
+    """
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes="99.0.0", uv=route == "uv", python_with_pip=route == "pip")
+
+    result, transcript = bench.run("--no-agent-install", "--no-can")
+
+    assert result.returncode == 0, transcript
+    assert bench.build_switches.read_text(encoding="utf-8").split() == ["0"], transcript
+    assert bench.version_in(bench.manager_bin) == "99.0.0", transcript
 
 
 @WINDOWS_ONLY
@@ -6704,7 +6837,11 @@ class _RealUvWindowsBench:
         return environment
 
     def uv(self, *arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run([str(self.uv_bin / "uv.exe"), *arguments], capture_output=True, text=True, env=self.environment(tool_bin_on_path=False), timeout=scaled_time_bound(CONTAINER_TIMEOUT_S), check=False)
+        # With the switch install.ps1 gives its own uv call, so the earlier
+        # installation this stands for also builds PyYAML on an interpreter it
+        # publishes no wheel for, where the runner has no compiler.
+        environment = {**self.environment(tool_bin_on_path=False), "PYYAML_FORCE_LIBYAML": "0"}
+        return subprocess.run([str(self.uv_bin / "uv.exe"), *arguments], capture_output=True, text=True, env=environment, timeout=scaled_time_bound(CONTAINER_TIMEOUT_S), check=False)
 
     def run(self, *arguments: str, tool_bin_on_path: bool) -> tuple[subprocess.CompletedProcess[str], str]:
         # -NoPath for the same reason as the bench above: this one reaches the

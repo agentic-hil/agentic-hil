@@ -498,12 +498,16 @@ def test_an_atomic_heartbeat_between_open_and_stat_keeps_the_holder(monkeypatch:
         owner.release_all()
 
 
-def test_retrying_a_holder_read_still_refuses_a_hard_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_retrying_a_holder_read_still_refuses_a_hard_link(monkeypatch: pytest.MonkeyPatch) -> None:
     owner = BenchMutex(frontend="owner", label="unsafe-record")
     contender = BenchMutex(frontend="contender")
     monkeypatch.setattr(owner, "_ensure_heartbeat_pump", lambda: None)
     owner.acquire([BOARD])
-    link = tmp_path / "holder-link.json"
+    # Beside the record, not in tmp_path: a hard link cannot leave its
+    # filesystem, and where /tmp is a tmpfs (Ubuntu 26.04) the sandbox home
+    # under it and the basetemp are two devices. Nothing in the lock directory
+    # is found by listing it, so a stray name there is never read.
+    link = owner._holder_path(BOARD).with_name("holder-link.json")
     read_text = bench_module.safe_read_text
     attempts = 0
 

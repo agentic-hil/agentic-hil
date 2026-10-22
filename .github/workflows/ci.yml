@@ -41,6 +41,13 @@ jobs:
     # margin for a slow runner rather than deadlines a slow runner beats, and a
     # leg that reaches one is a hang and not a queue.
     timeout-minutes: 45
+    # Every Python the package declares, and on each OS one leg more on the
+    # newest Python there is. A `3.x` leg takes a new release on the day
+    # setup-python can install it, `check-latest` rather than the newest one in
+    # the runner's cache, and reports without holding the change under review:
+    # a release a dependency has not yet published wheels for is news about
+    # the release, and the leg is where it shows up first.
+    continue-on-error: ${{ matrix.newest || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -53,6 +60,18 @@ jobs:
           - "3.11"
           - "3.12"
           - "3.13"
+          - "3.14"
+          - "3.15"
+        include:
+          - os: ubuntu-latest
+            python-version: "3.x"
+            newest: true
+          - os: macos-latest
+            python-version: "3.x"
+            newest: true
+          - os: windows-latest
+            python-version: "3.x"
+            newest: true
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,13 +80,28 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
+          check-latest: ${{ matrix.newest || false }}
           cache: pip
 
       # Dependencies come from a hash-pinned lock so pip can reject a substituted
       # artifact; the project itself is then installed editable with --no-deps,
       # because a local path has no artifact to hash and pip refuses to mix the
-      # two modes in one command.
+      # two modes in one command. PYYAML_FORCE_LIBYAML=0 is the switch both
+      # installers and `agentic-hil upgrade` set, so on a Python PyYAML
+      # publishes no wheel for this builds the same pure-Python PyYAML they do.
+      # The temporary directory is the runner's short one because of hidapi,
+      # which pyOCD requires on Windows and macOS: where it publishes no wheel,
+      # pip builds it, and its build names each object file after the whole
+      # path of the unpacked source, below a build directory inside that same
+      # path. Under the profile's temporary directory on Windows that is
+      # longer than MSVC can open, and the build stops at `fatal error C1083:
+      # Cannot open compiler generated file`.
       - name: Install dependencies
+        env:
+          PYYAML_FORCE_LIBYAML: "0"
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
         run: python -m pip install --require-hashes -r requirements/dev.txt
 
       - name: Install package
@@ -342,7 +376,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The newest interpreter the test matrix runs. mypy still checks the
+      # An interpreter the test matrix runs. mypy still checks the
       # code as Python 3.10, the oldest one the package supports
       # (`python_version` under `[tool.mypy]`).
       - name: Set up Python

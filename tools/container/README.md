@@ -114,8 +114,12 @@ Pinned:
   the dependency set below. A version pin on its own still takes whatever the
   index serves under that name, which is what Scorecard's pinned-dependencies
   check read off the old build. Regenerate the lock after editing the input
-  with `uv pip compile --generate-hashes --universal --python-version 3.12
-  requirements/container.in -o requirements/container.txt`;
+  on Linux under Python 3.12 with pip-tools 7.6.2 or later, `pip-compile
+  --allow-unsafe --generate-hashes --output-file=requirements/container.txt
+  requirements/container.in`. It is pip-compile's output because Dependabot
+  regenerates it with pip-compile, and setuptools has to stay under that
+  tool's note on unsafe packages at the end of the file: Dependabot drops the
+  note and what follows it from a lock that did not already carry it;
 - the dependency set, installed with `--require-hashes` from
   `requirements/dev.txt`, which is the same locked file the hosted matrix job
   installs from. This checkout goes on top of it with `--no-deps`.

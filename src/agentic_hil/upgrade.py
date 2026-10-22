@@ -1766,14 +1766,24 @@ def _with_unrecovered_launchers(outcome: JsonObject, restore: _RestoredLaunchers
 def _run_upgrade_process(command: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """One child process, output captured, wait bounded.
 
-    `env` is the whole environment the child is given, and `None` is the
+    `env` is the environment the child is given, and `None` is the
     inheritance every call but the certificate retry wants. The retry hands in a
     copy of this process's environment with one variable added rather than
     exporting that variable here: `os.environ` belongs to the process the
     operator started, and a module that wrote to it would change every later
     child of this run and every caller that shares the interpreter.
+
+    Every child also gets PYYAML_FORCE_LIBYAML=0, the installers' switch, unless
+    the operator set it. On a Python PyYAML publishes no wheel for, the manager
+    builds it from source and compiles an optional C extension first, which on a
+    Windows machine without Microsoft C++ stops the upgrade. agentic-hil uses
+    PyYAML's pure-Python loader and dumper alone, and where a wheel exists the
+    switch changes nothing.
     """
-    return subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, timeout=600, check=False)
+    child = dict(os.environ if env is None else env)
+    if not child.get("PYYAML_FORCE_LIBYAML"):
+        child["PYYAML_FORCE_LIBYAML"] = "0"
+    return subprocess.run(command, cwd=cwd, env=child, capture_output=True, text=True, timeout=600, check=False)
 
 
 def _process_result(completed: subprocess.CompletedProcess[str]) -> JsonObject:
