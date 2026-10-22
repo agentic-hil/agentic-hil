@@ -23,7 +23,7 @@
 # Regenerate the hash-pinned lock file after editing, on Linux under Python
 # 3.12 (the image's platform and interpreter) with pip-tools 7.6.2 or later:
 #   pip-compile --allow-unsafe --generate-hashes --output-file=requirements/container.txt requirements/container.in
-uv==0.13.1
+uv==0.13.4
 pyocd==0.45.1
 setuptools>=77
 wheel
