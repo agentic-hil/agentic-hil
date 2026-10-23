@@ -688,6 +688,11 @@ class AgenticHILConfig:
 
 PowerSupplyFaultType = Literal["power_supply_no_reply", "power_supply_protection_not_armed"]
 POWER_SUPPLY_FAULT_TYPES: tuple[str, ...] = get_args(PowerSupplyFaultType)
+# Why a supply did not answer, as `PowerSupplyFault.cause` names it: no reply
+# came, the port would not open, a write timed out, the serial line failed in
+# some other way, or the backend refused the command before sending it.
+PowerSupplyFaultCause = Literal["no_reply", "port_open_failed", "write_timeout", "serial_error", "not_sent"]
+POWER_SUPPLY_FAULT_CAUSES: tuple[str, ...] = get_args(PowerSupplyFaultCause)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -731,12 +736,18 @@ class PowerSupplyFault(Exception):
     ``wrote`` says whether anything that changes the supply was sent before the
     fault, so the class layer can tell a refusal from a state it no longer knows.
     Only the two types a backend may raise are accepted; every other refusal is
-    decided by the class layer, the same for every backend."""
+    decided by the class layer, the same for every backend. ``cause`` says why a
+    supply did not answer, from `POWER_SUPPLY_FAULT_CAUSES`, so the caller learns
+    a port that would not open from a supply that stayed silent; ``None`` leaves
+    it to the class layer, which reads it as no reply."""
 
-    def __init__(self, error_type: str, summary: str, *, wrote: bool):
+    def __init__(self, error_type: str, summary: str, *, wrote: bool, cause: str | None = None):
         if error_type not in POWER_SUPPLY_FAULT_TYPES:
             raise ValueError(f"A power supply backend raises only {', '.join(POWER_SUPPLY_FAULT_TYPES)}; got {error_type!r}.")
+        if cause is not None and cause not in POWER_SUPPLY_FAULT_CAUSES:
+            raise ValueError(f"A power supply fault's cause is one of {', '.join(POWER_SUPPLY_FAULT_CAUSES)}; got {cause!r}.")
         super().__init__(summary)
         self.error_type = error_type
         self.summary = summary
         self.wrote = wrote
+        self.cause = cause

@@ -2260,10 +2260,16 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "false when this call had written a set point, a protection threshold or the output before the silence: "
             "that write may or may not have taken effect, so the supply state is unconfirmed and the call carries the "
             "cleanup reason `power_supply_state_unconfirmed`. Without a write before it, nothing on the supply was "
-            "changed by this call."
+            "changed by this call. `cause` says what stood in the way: `no_reply` (the supply stayed silent or "
+            "answered something unreadable), `port_open_failed` (its port did not open, often because another "
+            "program holds it), `write_timeout` (a write on its serial line timed out), `serial_error` (the serial "
+            "line failed in another way, such as a cable pulled during the call) or `not_sent` (the backend refused "
+            "the command before sending it); `backend_error` carries the error itself."
         ),
         remediation=(
             "Read `last_known_output`: the last output state this call read, and when.",
+            "Read `cause` and `backend_error`. A port that did not open is usually held by another program, which "
+            "has to let it go before the supply can be reached.",
             "When the result carries `power_supply_state_unconfirmed`, read `quarantine_guidance` and have the owner "
             "check the supply's set points and output on the unit itself before the bench is used again.",
             "Without a write, check the cable and the port, then call `power_supply_status` once.",

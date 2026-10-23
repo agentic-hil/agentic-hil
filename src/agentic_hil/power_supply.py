@@ -887,20 +887,29 @@ class PowerSupplyService:
                 if call.wrote:
                     lease.quarantine("power_supply_state_unconfirmed", fault)
                 raise
-            unconfirmed = call.wrote or fault.wrote
-            if unconfirmed:
-                lease.quarantine("power_supply_state_unconfirmed", fault)
-            result = power_supply_no_reply_refusal(call.tool, call.supply_id, call.last_channel or call.channel, fault.summary, unconfirmed=unconfirmed)
-            if not unconfirmed:
-                result.update(NOT_STARTED)
-            result["last_known_output"] = call.known_output()
-            return result
+            return self._no_reply(lease, call, fault, fault.summary, unconfirmed=call.wrote or fault.wrote, cause=fault.cause or "no_reply")
+        except OSError as error:
+            # The serial line failing under a backend that let pyserial's own
+            # error through: the same fault as one the backend named, and the
+            # supply is unconfirmed only once this call had sent it a write.
+            return self._no_reply(lease, call, error, f"{type(error).__name__}: {error}", unconfirmed=call.wrote, cause="serial_error")
         except Exception as error:
             # A backend bug, contained by the dispatch above. Once a write was
             # sent, what the supply holds is unknown, and the lease says so.
             if call.wrote:
                 lease.quarantine("power_supply_state_unconfirmed", error)
             raise
+
+    def _no_reply(self, lease: HardwareLease, call: _Call, error: BaseException, backend_error: str, *, unconfirmed: bool, cause: str) -> JsonObject:
+        if unconfirmed:
+            lease.quarantine("power_supply_state_unconfirmed", error)
+        result = power_supply_no_reply_refusal(
+            call.tool, call.supply_id, call.last_channel or call.channel, backend_error, unconfirmed=unconfirmed, cause=cause
+        )
+        if not unconfirmed:
+            result.update(NOT_STARTED)
+        result["last_known_output"] = call.known_output()
+        return result
 
     def _read(self, backend: PowerSupplyBackend, call: _Call, channel: int) -> ChannelStatus:
         status = backend.channel_status(channel)
@@ -1320,15 +1329,28 @@ def power_supply_identity_mismatch_refusal(
     return result
 
 
-def power_supply_no_reply_refusal(tool: str, supply_id: str, channel: int, backend_error: str, *, unconfirmed: bool) -> JsonObject:
-    """The supply did not answer; after a write that leaves its state unconfirmed."""
+# What stood between this server and the supply, by `PowerSupplyFault.cause`.
+_NO_REPLY_CAUSES = {
+    "no_reply": "did not answer",
+    "port_open_failed": "could not be reached because its port did not open",
+    "write_timeout": "could not be reached because a write on its serial line timed out",
+    "serial_error": "could not be reached because its serial line failed",
+    "not_sent": "was not sent the command, because its backend refused it before sending anything",
+}
+
+
+def power_supply_no_reply_refusal(
+    tool: str, supply_id: str, channel: int, backend_error: str, *, unconfirmed: bool, cause: str = "no_reply"
+) -> JsonObject:
+    """The supply did not answer, for `cause`; after a write that leaves its state unconfirmed."""
+    what = _NO_REPLY_CAUSES.get(cause, _NO_REPLY_CAUSES["no_reply"])
     if unconfirmed:
         summary = (
-            f"Power supply '{supply_id}' stopped answering after this call had sent it a write, so whether that write "
+            f"Power supply '{supply_id}' {what} after this call had sent it a write, so whether that write "
             "took effect is unconfirmed: the unit itself has to be checked before the bench is used again."
         )
     else:
-        summary = f"Power supply '{supply_id}' did not answer, and nothing that changes it had been sent."
+        summary = f"Power supply '{supply_id}' {what}, and nothing that changes it had been sent."
     result: JsonObject = {
         "ok": False,
         "tool": tool,
@@ -1336,6 +1358,7 @@ def power_supply_no_reply_refusal(tool: str, supply_id: str, channel: int, backe
         "summary": summary,
         "supply_id": supply_id,
         "channel": channel,
+        "cause": cause,
         "backend_error": backend_error,
         "retry_safe": not unconfirmed,
         **remediation_fields("power_supply_no_reply"),

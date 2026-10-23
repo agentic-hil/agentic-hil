@@ -35,7 +35,10 @@ guess:
 
 A reply that does not come, or comes without its newline, is
 ``power_supply_no_reply``, and it too ends the conversation: a late reply must
-never be read as the answer to a later command.
+never be read as the answer to a later command. So is a serial line that fails
+under the conversation: a port that does not open, a write that times out, any
+other error pyserial raises. The fault names that cause and says whether a set
+point could have reached the supply, and the error itself is in its summary.
 
 Every exchange is kept as evidence: the command, the reply as hex, its latency
 and the time. The ``SN:`` span of an identity reply is masked before it is kept,
@@ -103,6 +106,18 @@ class Transport(Protocol):
 
 class RS3005PRefused(RuntimeError):
     """A call this backend will not make: nothing was sent for it."""
+
+
+class PortOpenFailed(OSError):
+    """The supply's port could not be opened, so nothing was sent on it."""
+
+
+# How each failure of the serial line itself is said, by its fault cause.
+_LINE_FAILURES = {
+    "port_open_failed": "The port of the RS-3005P did not open",
+    "write_timeout": "A write to the RS-3005P timed out",
+    "serial_error": "The serial line to the RS-3005P failed",
+}
 
 
 def utc_now() -> str:
@@ -255,7 +270,7 @@ class RS3005PBackend:
         self._ready(channel)
         command = f"{setter}:{setter_text(value, places)}"
         started = self._monotonic()
-        self._exchange(lambda: self._transport.write(command.encode("ascii") + TERMINATOR))
+        self._exchange(lambda: self._transport.write(command.encode("ascii") + TERMINATOR), command=command, wrote=True)
         self._record(operation, command, b"", started, latency=False, draft=SETTER_DRAFT, gap_s=SETTER_GAP_S)
         self._sleep(SETTER_GAP_S)
         query = f"{setter}?"
@@ -264,8 +279,8 @@ class RS3005PBackend:
     def _ask(self, operation: str, command: str, *, wrote: bool, masked: bool = False) -> bytes:
         """One query and its newline-terminated reply; anything short of that is no reply."""
         started = self._monotonic()
-        self._exchange(lambda: self._transport.write(command.encode("ascii") + TERMINATOR))
-        reply = self._exchange(lambda: self._transport.read_until(TERMINATOR))
+        self._exchange(lambda: self._transport.write(command.encode("ascii") + TERMINATOR), command=command, wrote=wrote)
+        reply = self._exchange(lambda: self._transport.read_until(TERMINATOR), command=command, wrote=wrote)
         self._record(operation, command, mask_identity_reply(reply) if masked else reply, started)
         if not reply.endswith(TERMINATOR):
             self._no_reply(command, wrote=wrote, why=f"answered {len(reply)} bytes and no newline" if reply else "did not answer")
@@ -274,9 +289,9 @@ class RS3005PBackend:
     def _status_byte(self, operation: str) -> bytes:
         """`STATUS?`: one raw byte and an optional newline, kept and not read."""
         started = self._monotonic()
-        self._exchange(lambda: self._transport.write(b"STATUS?" + TERMINATOR))
-        first = self._exchange(lambda: self._transport.read(1))
-        second = self._exchange(lambda: self._transport.read(1)) if first else b""
+        self._exchange(lambda: self._transport.write(b"STATUS?" + TERMINATOR), command="STATUS?", wrote=False)
+        first = self._exchange(lambda: self._transport.read(1), command="STATUS?", wrote=False)
+        second = self._exchange(lambda: self._transport.read(1), command="STATUS?", wrote=False) if first else b""
         reply = first + second
         self._record(operation, "STATUS?", reply, started)
         if not first:
@@ -291,20 +306,45 @@ class RS3005PBackend:
             self._no_reply(command, wrote=wrote, why=f"answered {len(text)} bytes that are not a decimal number")
         return Decimal(text.decode("ascii"))
 
-    def _no_reply(self, command: str, *, wrote: bool, why: str) -> NoReturn:
-        self._ended = f"the supply {why} to {command}"
-        summary = f"The RS-3005P {why} to {command}"
+    def _no_reply(self, command: str, *, wrote: bool, why: str, cause: str = "no_reply") -> NoReturn:
+        """End the conversation with `power_supply_no_reply`.
+
+        For the cause ``no_reply`` ``why`` says what the supply answered; for a
+        failure of the serial line itself it is the transport's error, named by
+        its type."""
+        if cause == "no_reply":
+            self._ended = f"the supply {why} to {command}"
+            summary = f"The RS-3005P {why} to {command}"
+        else:
+            self._ended = f"{_LINE_FAILURES[cause].lower()} at {command}: {why}"
+            summary = f"{_LINE_FAILURES[cause]} at {command} ({why})"
         if wrote:
             summary += ", after a set point was written"
         summary += ". The conversation is ended, so a late reply cannot be read as the answer to another command."
-        fault = PowerSupplyFault("power_supply_no_reply", summary, wrote=wrote)
+        fault = PowerSupplyFault("power_supply_no_reply", summary, wrote=wrote, cause=cause)
         self._last_fault = fault
         raise fault
 
-    def _exchange(self, step: Callable[[], Any]) -> Any:
-        """One transport call; a transport that fails ends the conversation, and its error is passed on unchanged."""
+    def _exchange(self, step: Callable[[], Any], *, command: str, wrote: bool) -> Any:
+        """One transport call for `command`; a transport that fails ends the conversation.
+
+        A failure of the serial line (pyserial raises an OSError for every one)
+        is `power_supply_no_reply` naming its cause. ``wrote`` is whether this
+        step could have changed the supply; a port that did not open sent
+        nothing. Any other error is passed on unchanged."""
         try:
             return step()
+        except OSError as error:
+            from serial import SerialTimeoutException  # type: ignore[import-untyped]
+
+            if isinstance(error, PortOpenFailed):
+                cause, wrote = "port_open_failed", False
+            elif isinstance(error, SerialTimeoutException):
+                cause = "write_timeout"
+            else:
+                cause = "serial_error"
+            reported = error.__cause__ if isinstance(error, PortOpenFailed) and error.__cause__ is not None else error
+            self._no_reply(command, wrote=wrote, why=f"{type(reported).__name__}: {reported}", cause=cause)
         except BaseException as error:
             self._ended = f"the serial line failed: {type(error).__name__}"
             raise
@@ -355,22 +395,27 @@ class SerialTransport:
 
             # Built unopened so every setting, the modem lines among them, is
             # decided before the port is opened; exclusively, so no other
-            # program interleaves its bytes with this conversation.
-            handle = serial.Serial()
-            handle.port = self._device
-            handle.baudrate = BAUDRATE
-            handle.bytesize = serial.EIGHTBITS
-            handle.parity = serial.PARITY_NONE
-            handle.stopbits = serial.STOPBITS_ONE
-            handle.xonxoff = False
-            handle.rtscts = False
-            handle.dsrdtr = False
-            handle.timeout = self._timeout_s
-            handle.write_timeout = self._write_timeout_s
-            handle.dtr = self._dtr
-            handle.rts = self._rts
-            handle.exclusive = True
-            handle.open()
+            # program interleaves its bytes with this conversation. Whatever
+            # fails here, a setting pyserial refuses or the open itself, sent
+            # nothing, and says so as `PortOpenFailed`.
+            try:
+                handle = serial.Serial()
+                handle.port = self._device
+                handle.baudrate = BAUDRATE
+                handle.bytesize = serial.EIGHTBITS
+                handle.parity = serial.PARITY_NONE
+                handle.stopbits = serial.STOPBITS_ONE
+                handle.xonxoff = False
+                handle.rtscts = False
+                handle.dsrdtr = False
+                handle.timeout = self._timeout_s
+                handle.write_timeout = self._write_timeout_s
+                handle.dtr = self._dtr
+                handle.rts = self._rts
+                handle.exclusive = True
+                handle.open()
+            except (OSError, ValueError) as error:
+                raise PortOpenFailed(f"{type(error).__name__}: {error}") from error
             self._handle = handle
         return self._handle
 

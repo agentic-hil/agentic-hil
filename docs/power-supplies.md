@@ -71,7 +71,7 @@ On such a bench the boot cannot be watched on that console, and only the owner c
 ## When a write does not hold
 
 - **`power_supply_readback_mismatch`**: the supply answered, and reads back something other than what was written. `requested` and `read_back` say both; the state is known, it is the read-back.
-- **`power_supply_no_reply`**: the supply did not answer in time. Before any write nothing changed, and `retry_safe` is true. After a write, whether it took effect is unconfirmed: `retry_safe` is false and the call carries the cleanup reason `power_supply_state_unconfirmed`, whose `quarantine_guidance` names what was attempted, what is confirmed, what is unknown and what to check on the unit itself.
+- **`power_supply_no_reply`**: the supply could not be reached. `cause` says why: `no_reply` (it did not answer in time, or answered something unreadable), `port_open_failed` (its port did not open, often because another program holds it), `write_timeout` (a write on its serial line timed out), `serial_error` (the serial line failed in another way) or `not_sent` (the backend refused the command before sending it), and `backend_error` carries the error itself. Before any write nothing changed, and `retry_safe` is true. After a write, whether it took effect is unconfirmed: `retry_safe` is false and the call carries the cleanup reason `power_supply_state_unconfirmed`, whose `quarantine_guidance` names what was attempted, what is confirmed, what is unknown and what to check on the unit itself.
 
 Every failure carries `last_known_output`: the channel, its output state and the time it was last read in this call, all null when nothing was read.
 
@@ -158,6 +158,11 @@ What has not been recorded is refused rather than guessed:
   is not a decimal number is `power_supply_no_reply`, and the result says
   whether a set point had already been written. The conversation ends there, so
   a late reply can never be taken as the answer to a later command.
+- **A failing serial line.** A port that does not open, a write that times out
+  and any other error on the serial line are `power_supply_no_reply` too, with
+  `cause` naming which and the error in `backend_error`. A port that did not
+  open sent nothing; a setter whose write failed may have reached the supply,
+  so its state is unconfirmed. The conversation ends the same way.
 - **STATUS framing.** A STATUS reply longer than one byte and a newline ends the
   conversation for the same reason.
 
