@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Protocol
 
 from agentic_hil.config import ConfigError
-from agentic_hil.types import AgenticHILConfig, JsonObject
+from agentic_hil.types import AgenticHILConfig, ChannelStatus, JsonObject, SupplyIdentity
 
 
 class DebuggerBackend(Protocol):
@@ -54,6 +55,52 @@ class DebuggerBackend(Protocol):
         ...
 
     def target_support(self) -> JsonObject: ...
+
+    def classify_last_error(self) -> JsonObject: ...
+
+    def close(self) -> None: ...
+
+
+class PowerSupplyBackend(Protocol):
+    """What the power supply class layer needs from one supply type.
+
+    Signatures only, and device-neutral: no command string and no raw byte
+    crosses this interface. Every rule (limits, permissions, leases, identity,
+    protection, exact read-back) lives in the class layer, the same for every
+    backend. A backend that cannot do what it is asked raises
+    `PowerSupplyFault`; it never answers with a guess."""
+
+    def identity(self) -> SupplyIdentity:
+        """Ask the supply who it is. On an unknown identity this is the only command that was sent."""
+        ...
+
+    def capabilities(self) -> JsonObject:
+        """The supply type's static hardware bounds, never limits, and without I/O.
+
+        Channels, per-channel voltage and current maximum and resolution, what is
+        measured, whether output state is readable, and per protection whether it
+        is `threshold`, `at_setpoint` or `unsupported` and whether its armed
+        threshold can be read back."""
+        ...
+
+    def channel_status(self, channel: int) -> ChannelStatus: ...
+
+    def set_voltage(self, channel: int, volts: Decimal) -> None: ...
+
+    def set_current(self, channel: int, amps: Decimal) -> None: ...
+
+    def set_output(self, channel: int, on: bool) -> None: ...
+
+    def arm_protection(self, channel: int, ovp_v: Decimal | None, ocp_a: Decimal | None) -> None:
+        """Set each given threshold to exactly that value and enable it.
+
+        `None` leaves that protection untouched. No set point and no output state
+        changes. Raises `PowerSupplyFault` when it cannot do this."""
+        ...
+
+    def evidence(self) -> list[JsonObject]:
+        """The transcript of this connection: command, reply as hex with any serial masked, latency and time."""
+        ...
 
     def classify_last_error(self) -> JsonObject: ...
 

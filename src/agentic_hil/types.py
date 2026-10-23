@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 JsonObject = dict[str, Any]
 
@@ -677,3 +677,66 @@ class AgenticHILConfig:
 
     def can_read_allowed(self, bus: CanBusConfig) -> bool:
         return self.read_free or bus.permissions.allow_read
+
+
+# ---------------------------------------------------------------------------
+# Power supplies: the values that cross the backend interface.
+#
+# Device-neutral on purpose: no command string and no raw byte reaches the class
+# layer. A backend turns its own protocol into these, and the class layer applies
+# the same rules to every backend through them.
+
+PowerSupplyFaultType = Literal["power_supply_no_reply", "power_supply_protection_not_armed"]
+POWER_SUPPLY_FAULT_TYPES: tuple[str, ...] = get_args(PowerSupplyFaultType)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SupplyIdentity:
+    """Who answered on the supply's port.
+
+    ``accepted`` is the backend's word that this model and firmware are ones it
+    drives; anything else is an unknown identity and nothing beyond the identity
+    query is written to it. ``serial`` exists only so the class layer can compare
+    it with the configured one: it is a secret, and its repr never shows it."""
+
+    model: str | None
+    firmware: str | None
+    accepted: bool
+    serial: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ChannelStatus:
+    """One channel as the supply reported it at ``read_at`` (ISO 8601, UTC).
+
+    Every reading is exact as reported, never rounded. A field the backend cannot
+    read on this supply is ``None``, which is a statement that it is unknown and
+    never a default of zero or off."""
+
+    set_voltage_v: Decimal | None
+    set_current_a: Decimal | None
+    measured_voltage_v: Decimal | None
+    measured_current_a: Decimal | None
+    output_on: bool | None
+    regulation: Literal["cv", "cc"] | None
+    protection_tripped: bool | None
+    ovp_threshold_v: Decimal | None
+    ocp_threshold_a: Decimal | None
+    read_at: str
+
+
+class PowerSupplyFault(Exception):
+    """A backend could not do what it was asked, typed for the catalogue.
+
+    ``wrote`` says whether anything that changes the supply was sent before the
+    fault, so the class layer can tell a refusal from a state it no longer knows.
+    Only the two types a backend may raise are accepted; every other refusal is
+    decided by the class layer, the same for every backend."""
+
+    def __init__(self, error_type: str, summary: str, *, wrote: bool):
+        if error_type not in POWER_SUPPLY_FAULT_TYPES:
+            raise ValueError(f"A power supply backend raises only {', '.join(POWER_SUPPLY_FAULT_TYPES)}; got {error_type!r}.")
+        super().__init__(summary)
+        self.error_type = error_type
+        self.summary = summary
+        self.wrote = wrote
