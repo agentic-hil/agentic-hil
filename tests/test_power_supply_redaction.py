@@ -28,6 +28,9 @@ from typing import Any
 
 import pytest
 import serial
+from power_supply_fakes import Bench as SupplyBench
+from power_supply_fakes import fake_inventory, host_port
+from power_supply_fakes import make_bench as make_supply_bench
 from test_adopt_failed_com_inventory import KEY, PROBE, _stm32cubeprogrammer_host
 from test_config_adopt import placeholder_bench
 from test_contact_marker import FakePort
@@ -48,7 +51,7 @@ from agentic_hil.report import (
 )
 from agentic_hil.runevidence import write_run_evidence
 from agentic_hil.tools import AgenticHILToolService
-from agentic_hil.types import AgenticHILConfig, JsonObject
+from agentic_hil.types import AgenticHILConfig, JsonObject, PowerSupplyFault
 
 SCHEMA_CASES: tuple[Refusal, ...] = (
     Refusal(
@@ -342,24 +345,80 @@ def _adopt_hardware_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     return AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp"), PROJECT_CONFIG_ADOPT, {"probe_id": PROBE}, serial
 
 
-TOOL_CASES: dict[str, Callable[[Path, pytest.MonkeyPatch], tuple[AgenticHILToolService, str, JsonObject, str]]] = {
+def _careless_supply_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SupplyBench:
+    """A fake supply whose identity parser left the serial in the firmware field.
+
+    The class layer reports the firmware it was handed, so the serial reaches the
+    result, and only the masking at the exit of `call` keeps it out."""
+    bench = make_supply_bench(tmp_path, monkeypatch)
+    assert bench.port_serial is not None
+    bench.unit.firmware = f"F1 SN:{bench.port_serial}"
+    return bench
+
+
+def _power_supply_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[AgenticHILToolService, str, JsonObject, tuple[str, ...]]:
+    bench = _careless_supply_bench(tmp_path, monkeypatch)
+    return bench.service(), "power_supply_status", {"supply_id": bench.supply_id}, bench.secrets()
+
+
+def _power_supply_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[AgenticHILToolService, str, JsonObject, tuple[str, ...]]:
+    bench = _careless_supply_bench(tmp_path, monkeypatch)
+    return bench.service(), "power_supply_set", {"supply_id": bench.supply_id, "voltage_v": 3.3}, bench.secrets()
+
+
+def _identity_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[AgenticHILToolService, str, JsonObject, tuple[str, ...]]:
+    """The supply's device is now a unit with another serial: both serials are in the refusal."""
+    bench = make_supply_bench(tmp_path, monkeypatch)
+    other = fresh_serial()
+    fake_inventory(monkeypatch, host_port(bench.device, other))
+    return bench.service(), "power_supply_set", {"supply_id": bench.supply_id, "voltage_v": 3.3}, (*bench.secrets(), other)
+
+
+def _identity_unverified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[AgenticHILToolService, str, JsonObject, tuple[str, ...]]:
+    """The supply's device reports no serial, so the expected one could not be compared."""
+    bench = make_supply_bench(tmp_path, monkeypatch)
+    fake_inventory(monkeypatch, host_port(bench.device, None))
+    return bench.service(), "power_supply_status", {"supply_id": bench.supply_id}, bench.secrets()
+
+
+TOOL_CASES: dict[str, Callable[[Path, pytest.MonkeyPatch], tuple[AgenticHILToolService, str, JsonObject, str | tuple[str, ...]]]] = {
     "com_ports_list": _com_ports_list,
     "project_config_describe": _project_config_describe,
     "adopt_hardware_refusal": _adopt_hardware_refusal,
+    "power_supply_status": _power_supply_status,
+    "power_supply_set": _power_supply_set,
+    "identity_mismatch": _identity_mismatch,
+    "identity_unverified": _identity_unverified,
+}
+
+# What each supply case answers, so a case that never reached the supply's port
+# cannot pass on a refusal that holds no serial at all.
+SUPPLY_TOOL_OUTCOMES: dict[str, str | None] = {
+    "power_supply_status": None,
+    "power_supply_set": None,
+    "identity_mismatch": "com_port_identity_mismatch",
+    "identity_unverified": "com_port_identity_unverified",
 }
 
 
 @pytest.mark.parametrize("case", list(TOOL_CASES))
 def test_tool_results_carry_no_supply_serial(case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tools, name, arguments, serial = TOOL_CASES[case](tmp_path, monkeypatch)
+    tools, name, arguments, planted = TOOL_CASES[case](tmp_path, monkeypatch)
+    secrets = (planted,) if isinstance(planted, str) else planted
     try:
         result = tools.call(name, arguments)
         reply = mcp.call_tool({"name": name, "arguments": arguments}, tools)
     finally:
         tools.close()
 
+    if case in SUPPLY_TOOL_OUTCOMES:
+        expected = SUPPLY_TOOL_OUTCOMES[case]
+        if expected is None:
+            assert result["ok"] is True, result
+        else:
+            assert result.get("error_type") == expected, result
     for text in (json.dumps(result), json.dumps(reply)):
-        assert_masked(text, serial)
+        assert_masked(text, *secrets)
         assert MARKER in text, case
     if case == "adopt_hardware_refusal":
         entries = [item for item in result["unavailable"] if item.get("key") == KEY]
@@ -616,6 +675,129 @@ def test_run_evidence_carries_no_registered_supply_serial(tmp_path: Path) -> Non
     assert written
     for path, text in written:
         assert serial.lower() not in text.lower(), path
+
+
+# --- the supply tools on disk (#733) -----------------------------------------
+
+
+def _recorded_lease_records(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    records: list[str] = []
+    write_record_text = coordination.atomic_write_text
+
+    def recording(path: Any, text: str, *args: Any, **kwargs: Any) -> Any:
+        records.append(text)
+        return write_record_text(path, text, *args, **kwargs)
+
+    monkeypatch.setattr(coordination, "atomic_write_text", recording)
+    return records
+
+
+def _assert_kept_masked(config: AgenticHILConfig, records: list[str], *secrets: str) -> None:
+    assert records, "no lease record was written"
+    for text in records:
+        assert_masked(text, *secrets)
+    for path in (last_report_path(config), report_state_path(config)):
+        assert_masked(Path(path).read_text(encoding="utf-8"), *secrets)
+    swept = list(files_below(Path(config.state_root)))
+    assert swept
+    for path, text in swept:
+        for secret in secrets:
+            assert secret.lower() not in text.lower(), path
+
+
+def test_a_supply_call_keeps_no_supply_serial_in_its_reports_or_below_the_state_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fake's transcript holds its `*IDN?` reply with the serial in clear; the report keeps that transcript, masked."""
+    bench = make_supply_bench(tmp_path, monkeypatch)
+    records = _recorded_lease_records(monkeypatch)
+    tools = bench.service()
+    try:
+        result = tools.call("power_supply_set", {"supply_id": bench.supply_id, "voltage_v": 3.3})
+    finally:
+        tools.close()
+
+    assert result["ok"] is True, result
+    report = json.loads(Path(last_report_path(bench.config)).read_text(encoding="utf-8"))
+    assert report["tool"] == "power_supply_set", report
+    assert MARKER in json.dumps(report["backend_evidence"]), report["backend_evidence"]
+    _assert_kept_masked(bench.config, records, *bench.secrets())
+
+
+def test_a_supply_backend_exception_carrying_a_serial_is_masked_wherever_it_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The error line is kept, in the result and the lease record, with the serial masked in both."""
+    bench = make_supply_bench(tmp_path, monkeypatch)
+    assert bench.port_serial is not None
+    bench.unit.raises["set_voltage"] = RuntimeError(f"the supply link beside unit {bench.port_serial} dropped")
+    records = _recorded_lease_records(monkeypatch)
+    tools = bench.service()
+    try:
+        result = tools.call("power_supply_set", {"supply_id": bench.supply_id, "voltage_v": 3.3})
+    finally:
+        tools.close()
+
+    assert result["ok"] is False, result
+    assert result.get("cleanup_reasons"), result
+    assert f"the supply link beside unit {MARKER} dropped" in json.dumps(result), result
+    assert_masked(json.dumps(result), *bench.secrets())
+    summaries = [item.get("summary") for text in records for item in json.loads(text).get("errors", [])]
+    assert f"the supply link beside unit {MARKER} dropped" in summaries, summaries
+    _assert_kept_masked(bench.config, records, *bench.secrets())
+    cli.entrypoint(["lease-status", "--json"])
+    assert_masked(capsys.readouterr().out, *bench.secrets())
+
+
+def test_lease_status_after_a_supply_quarantine_carries_no_supply_serial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A set point without a reply quarantines the lease with the fault, and every status of it is masked."""
+    bench = make_supply_bench(tmp_path, monkeypatch)
+    assert bench.port_serial is not None
+    bench.unit.raises["set_voltage"] = PowerSupplyFault(
+        "power_supply_no_reply", f"The supply beside unit {bench.port_serial} did not answer.", wrote=True
+    )
+    records = _recorded_lease_records(monkeypatch)
+    tools = bench.service()
+    try:
+        result = tools.call("power_supply_set", {"supply_id": bench.supply_id, "voltage_v": 3.3})
+        status = tools.call("hardware_lease_status", {})
+    finally:
+        tools.close()
+
+    assert result.get("error_type") == "power_supply_no_reply", result
+    assert "power_supply_state_unconfirmed" in json.dumps(status), status
+    assert_masked(json.dumps(result), *bench.secrets())
+    assert_masked(json.dumps(status), *bench.secrets())
+    summaries = [item.get("summary") for text in records for item in json.loads(text).get("errors", [])]
+    assert f"The supply beside unit {MARKER} did not answer." in summaries, summaries
+    _assert_kept_masked(bench.config, records, *bench.secrets())
+    cli.entrypoint(["lease-status", "--json"])
+    printed = capsys.readouterr().out
+    assert_masked(printed, *bench.secrets())
+    assert "power_supply_state_unconfirmed" in printed
+
+
+def test_run_evidence_over_a_supply_report_carries_no_supply_serial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`run-evidence` loads no config, so its registry is empty: the report it reads was masked when it was written."""
+    bench = make_supply_bench(tmp_path, monkeypatch)
+    tools = bench.service()
+    try:
+        result = tools.call("power_supply_set", {"supply_id": bench.supply_id, "voltage_v": 3.3})
+    finally:
+        tools.close()
+    assert result["ok"] is True, result
+    monkeypatch.setattr(power_supply, "_CONFIG_SECRETS", set())
+    out = tmp_path / "evidence"
+
+    evidence = write_run_evidence(str(last_report_path(bench.config)), str(out), workspace=bench.workspace, environ={})
+
+    assert evidence.get("ok") is True, evidence
+    written = list(files_below(out))
+    assert written
+    assert any("power_supply_set" in text for _, text in written), written
+    for path, text in written:
+        for secret in bench.secrets():
+            assert secret.lower() not in text.lower(), path
 
 
 def test_a_com_stdio_refusal_carries_no_supply_serial() -> None:
