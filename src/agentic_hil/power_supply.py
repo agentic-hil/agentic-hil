@@ -814,7 +814,16 @@ class PowerSupplyService:
                 if parsed < 0:
                     return invalid_argument(tool, name, "minimum", f"`{name}` cannot be below zero.")
                 resolution = Decimal(ranges[quantity]["resolution"])
-                if parsed % resolution != 0:
+                try:
+                    off_step = parsed % resolution != 0
+                except InvalidOperation:
+                    # So far above any range that the step itself cannot be
+                    # computed at this precision; refused here, never raised.
+                    return invalid_argument(
+                        tool, name, "maximum",
+                        f"`{name}` is {parsed} {unit}, far above the {ranges[quantity]['max']} {unit} this supply type can set at most.",
+                    )
+                if off_step:
                     return invalid_argument(
                         tool, name, "multipleOf",
                         f"`{name}` is {parsed} {unit}, which this supply type cannot set: it sets {quantity} in steps of {resolution} {unit}. Nothing is rounded.",
