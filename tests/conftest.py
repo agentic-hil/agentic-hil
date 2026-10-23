@@ -645,6 +645,11 @@ def write_config(
     debuggers_yaml: str = "",
     com_ports_yaml: str = "com_ports: {}\n",
     can_buses_yaml: str = "can_buses: {}\n",
+    # Raw YAML for the `power_supplies` section (issue #731), inserted verbatim.
+    # Empty by default, so every existing configuration is written byte for byte
+    # as before. A test that wants a supply passes the whole section, at the
+    # column the file's top-level keys sit at.
+    power_supplies_yaml: str = "",
     permissions: dict[str, bool] | None = None,
     debugger_name: str = "dut",
     auto_probe_ids: bool = True,
@@ -732,7 +737,7 @@ artifacts:
   upload_directory: ".agentic-hil/artifacts"
   max_upload_size_mb: 1
   allow_upload: true
-{section_yaml("debuggers", debuggers_yaml, grants, extra={debugger_name: primary}, auto_probe_ids=auto_probe_ids, config_version=config_version)}{section_yaml("com_ports", com_ports_yaml, grants, config_version=config_version)}{section_yaml("can_buses", can_buses_yaml, grants, config_version=config_version)}reports:
+{section_yaml("debuggers", debuggers_yaml, grants, extra={debugger_name: primary}, auto_probe_ids=auto_probe_ids, config_version=config_version)}{section_yaml("com_ports", com_ports_yaml, grants, config_version=config_version)}{section_yaml("can_buses", can_buses_yaml, grants, config_version=config_version)}{power_supplies_yaml}reports:
   directory: ".agentic-hil/reports"
 logs:
   directory: ".agentic-hil/logs"

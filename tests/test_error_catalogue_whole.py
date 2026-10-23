@@ -636,8 +636,9 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # ---------------------------------------------------------------------------
 # What the pins hold.
 
-# `agentic_hil.backends.esptool`, the ESP32 backend, is the 49th.
-SCANNED_MODULE_COUNT = 49
+# `agentic_hil.power_supply`, the power-supply config module (#731), is the 50th;
+# `agentic_hil.backends.esptool`, the ESP32 backend, was the 49th.
+SCANNED_MODULE_COUNT = 50
 # `can_broker_disconnected`, a broker connection that ended (#664), is the 219th.
 COLLECTED_TYPE_COUNT = 219
 # A producer is a type together with a function that writes it. A type many
@@ -678,7 +679,12 @@ COLLECTED_TYPE_COUNT = 219
 # The esptool backend adds 27 and no type: 22 in `backends.esptool`, and the
 # five `config_invalid` refusals of the loader's esptool checks in `config`.
 # Every type they write is one another backend or the loader already writes.
-PRODUCER_COUNT = 685
+# The power-supply config section (#731) adds four producers of `config_invalid`
+# in `power_supply.py`, each written with that literal type: the legacy-section
+# refusal `reject_legacy_power_supplies`, the supply entry's `power_supply_config`,
+# the limit check `power_supply_limit`, and the supply-port checks in
+# `validate_supply_ports`. No new type is added.
+PRODUCER_COUNT = 689
 
 
 def pin_problems(inventory: Inventory) -> list[str]:

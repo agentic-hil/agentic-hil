@@ -233,6 +233,12 @@ def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
     """
     if not isinstance(raw, dict):
         raise ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": config_path})
+    # Issue #731, C1: a supply's serials are registered before any refusal below
+    # can echo one. Quality-gates stub: the registry is not written yet, so a
+    # document with a power_supplies section stops here.
+    from agentic_hil.power_supply import register_config_secrets
+
+    register_config_secrets(raw)
     reject_bridge_args(raw, config_path)
     reject_removed_sections(raw, config_path)
     reject_removed_keys(raw, config_path)
