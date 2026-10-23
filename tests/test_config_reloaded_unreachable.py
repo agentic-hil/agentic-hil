@@ -289,6 +289,7 @@ RECONFIGURE_CALL_SITES: dict[tuple[str, str, str], str] = {
     ("src/agentic_hil/tools.py", "_swap_config", "self.artifacts"): "the artifact service",
     ("src/agentic_hil/tools.py", "_swap_config", "self.com_ports"): "the COM loop that would write the stop reason",
     ("src/agentic_hil/tools.py", "_swap_config", "self.can_buses"): "the CAN loop that would write the stop reason",
+    ("src/agentic_hil/tools.py", "_swap_config", "self.power_supplies"): "the power supply service, which keeps no session and writes no stop reason",
     ("src/agentic_hil/stdio.py", "utf8_reply_stream", BARE_CALL): "a text stream pinning its own codec, nothing to do with the config swap",
 }
 

@@ -14,6 +14,7 @@ nav:
       - UART and CAN feedback: use-cases/uart-and-can.md
       - Plans without a board: use-cases/check-plan.md
   - Configuration: configuration.md
+  - Bench power supplies: power-supplies.md
   - MCP hosts: mcp-hosts.md
   - MCP tools: mcp-tools.md
   - Tool definition score: tool-definition-score.md

@@ -170,6 +170,65 @@ class UnboundDebuggerBackend:
         return lambda *args, **kwargs: self._refuse(name)
 
 
+class UnboundPowerSupplyBackend:
+    """Stands in for a supply type this release has no backend for.
+
+    Every operation answers the unbound refusal (`not_supported`, not retry
+    safe) and none raises or reaches a port: a configured supply whose type
+    cannot be driven yet is a fact about this release, and the call that meets
+    it is refused whole rather than half carried out."""
+
+    def __init__(self, config: AgenticHILConfig, supply_id: str | None = None):
+        self.config = config
+        supplies = config.power_supplies
+        self.supply_id = supply_id if supply_id is not None else (next(iter(supplies)) if len(supplies) == 1 else None)
+
+    def _refuse(self, tool: str) -> JsonObject:
+        from agentic_hil.tools import unbound_power_supply_error
+
+        return unbound_power_supply_error(self.config, tool, self.supply_id)
+
+    def identity(self) -> JsonObject:
+        return self._refuse("identity")
+
+    def capabilities(self) -> JsonObject:
+        return self._refuse("capabilities")
+
+    def channel_status(self, channel: int) -> JsonObject:
+        return self._refuse("channel_status")
+
+    def set_voltage(self, channel: int, volts: Decimal) -> JsonObject:
+        return self._refuse("set_voltage")
+
+    def set_current(self, channel: int, amps: Decimal) -> JsonObject:
+        return self._refuse("set_current")
+
+    def set_output(self, channel: int, on: bool) -> JsonObject:
+        return self._refuse("set_output")
+
+    def arm_protection(self, channel: int, ovp_v: Decimal | None, ocp_a: Decimal | None) -> JsonObject:
+        return self._refuse("arm_protection")
+
+    def evidence(self) -> list[JsonObject]:
+        return []
+
+    def classify_last_error(self) -> JsonObject:
+        return self._refuse("classify_last_error")
+
+    def close(self) -> None:
+        return None
+
+
+def create_power_supply_backend(config: AgenticHILConfig, supply_id: str) -> PowerSupplyBackend | UnboundPowerSupplyBackend:
+    """The backend for one configured supply: its type's factory, looked up at call time, or the unbound stand-in."""
+    from agentic_hil.power_supply import POWER_SUPPLY_BACKENDS
+
+    factory = POWER_SUPPLY_BACKENDS.get(config.power_supplies[supply_id].type)
+    if factory is None:
+        return UnboundPowerSupplyBackend(config, supply_id)
+    return factory(config, supply_id)
+
+
 def create_debugger_backend(config: AgenticHILConfig) -> DebuggerBackend:
     if config.debugger is None:
         return UnboundDebuggerBackend(config)

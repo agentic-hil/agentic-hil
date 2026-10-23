@@ -750,7 +750,10 @@ def test_a_supply_backend_exception_carrying_a_serial_is_masked_wherever_it_is_k
 def test_lease_status_after_a_supply_quarantine_carries_no_supply_serial(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A set point without a reply quarantines the lease with the fault, and every status of it is masked."""
+    """A set point without a reply quarantines the lease with the fault, and every status of it is masked.
+
+    Read inside a declared run, because a bare call stands its incident down
+    on the way out: the run is what keeps the quarantine standing to be read."""
     bench = make_supply_bench(tmp_path, monkeypatch)
     assert bench.port_serial is not None
     bench.unit.raises["set_voltage"] = PowerSupplyFault(
@@ -759,9 +762,14 @@ def test_lease_status_after_a_supply_quarantine_carries_no_supply_serial(
     records = _recorded_lease_records(monkeypatch)
     tools = bench.service()
     try:
+        started = tools.call("bench_run_start", {"devices": [{"kind": "power_supply", "id": bench.supply_id}, {"kind": "debugger", "id": "dut"}]})
+        assert started["ok"] is True, started
         result = tools.call("power_supply_set", {"supply_id": bench.supply_id, "voltage_v": 3.3})
         status = tools.call("hardware_lease_status", {})
+        cli.entrypoint(["lease-status", "--json"])
+        printed = capsys.readouterr().out
     finally:
+        tools.call("bench_run_stop")
         tools.close()
 
     assert result.get("error_type") == "power_supply_no_reply", result
@@ -771,8 +779,6 @@ def test_lease_status_after_a_supply_quarantine_carries_no_supply_serial(
     summaries = [item.get("summary") for text in records for item in json.loads(text).get("errors", [])]
     assert f"The supply beside unit {MARKER} did not answer." in summaries, summaries
     _assert_kept_masked(bench.config, records, *bench.secrets())
-    cli.entrypoint(["lease-status", "--json"])
-    printed = capsys.readouterr().out
     assert_masked(printed, *bench.secrets())
     assert "power_supply_state_unconfirmed" in printed
 
@@ -786,6 +792,8 @@ def test_run_evidence_over_a_supply_report_carries_no_supply_serial(tmp_path: Pa
     finally:
         tools.close()
     assert result["ok"] is True, result
+    # The report run-evidence reads is the supply call's own.
+    assert json.loads(Path(last_report_path(bench.config)).read_text(encoding="utf-8"))["tool"] == "power_supply_set"
     monkeypatch.setattr(power_supply, "_CONFIG_SECRETS", set())
     out = tmp_path / "evidence"
 
@@ -794,7 +802,6 @@ def test_run_evidence_over_a_supply_report_carries_no_supply_serial(tmp_path: Pa
     assert evidence.get("ok") is True, evidence
     written = list(files_below(out))
     assert written
-    assert any("power_supply_set" in text for _, text in written), written
     for path, text in written:
         for secret in bench.secrets():
             assert secret.lower() not in text.lower(), path

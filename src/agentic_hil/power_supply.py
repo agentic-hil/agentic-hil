@@ -1,4 +1,4 @@
-"""Bench power supplies: the type table, the config checks and the secret registry.
+"""Bench power supplies: the type table, the config checks, the secret registry and the class layer.
 
 A bench supply is declared under ``power_supplies`` in the authoritative
 configuration. This module holds what the loader needs to read that section:
@@ -11,29 +11,55 @@ configuration. This module holds what the loader needs to read that section:
 - The registry of serials that identify a supply. A serial is a secret: it names
   one physical unit, so it is kept out of every refusal, and the loader registers
   the serials of a document before any check can refuse that document.
+
+It also holds ``PowerSupplyService``, the class layer behind the four supply
+tools. Every rule a supply call obeys lives there, the same for every backend:
+the grants and the owner's limits before any contact, the lease, the unit's
+identity, the device-side protection armed at the limits before any write, an
+exact read-back after every write, and one connection per call, closed and
+reported whatever happened. A backend only speaks its own protocol, through the
+device-neutral interface in ``debugger.PowerSupplyBackend``.
 """
 
 from __future__ import annotations
 
 import re
 import threading
-from collections.abc import Iterable, Mapping
+import time
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agentic_hil.config import ConfigError
+from agentic_hil.contracts import invalid_argument
+from agentic_hil.debugger import PowerSupplyBackend, UnboundPowerSupplyBackend, create_power_supply_backend
+from agentic_hil.devices import Device, DeviceError, PowerSupplyDevice, debugger_device, power_supply_device
+from agentic_hil.knowledge import (
+    permission_denied_fields,
+    permission_denied_summary,
+    permission_key,
+    remediation_fields,
+)
 from agentic_hil.types import (
     READ_FREE_CONFIG_VERSION,
     AgenticHILConfig,
     CanBusConfig,
+    ChannelStatus,
     ComPortConfig,
     DebuggerConfig,
+    JsonObject,
     PowerSupplyChannelConfig,
     PowerSupplyConfig,
+    PowerSupplyFault,
     PowerSupplyPermissions,
     com_port_is_unbound,
     fold_hardware_id,
 )
+
+if TYPE_CHECKING:
+    from agentic_hil.coordination import HardwareCoordinator, HardwareLease
 
 # One record per supply model. Every record carries exactly these keys:
 #
@@ -456,11 +482,802 @@ def validate_supply_ports(
                 )
 
 
+# ---------------------------------------------------------------------------
+# The class layer.
+
+# One factory per supply type this build can drive, keyed by the type name of
+# `POWER_SUPPLY_TYPES`. A factory opens one connection to one configured supply;
+# the class layer calls it once per tool call and closes what it returns. A
+# configured type with no factory here is answered by `UnboundPowerSupplyBackend`.
+POWER_SUPPLY_BACKENDS: dict[str, Callable[[AgenticHILConfig, str], PowerSupplyBackend]] = {}
+
+# The bounds of `power_supply_cycle`'s off time, in seconds. The tool schema
+# states the same two numbers, and the class layer checks them again so a
+# caller that reaches it another way meets the same rule.
+CYCLE_OFF_MIN_S = 0.5
+CYCLE_OFF_MAX_S = 30.0
+
+POWER_SUPPLY_TOOLS = ("power_supply_status", "power_supply_set", "power_supply_output", "power_supply_cycle")
+POWER_SUPPLY_WRITE_TOOLS = frozenset({"power_supply_set", "power_supply_output", "power_supply_cycle"})
+
+# What a refusal before the first command carries: nothing was sent, so nothing changed.
+NOT_STARTED: JsonObject = {"side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged"}
+
+_LIMIT_FIELDS = (("voltage_v", "voltage", "V"), ("current_a", "current", "A"))
+_PROTECTIONS = (("ovp", "ovp_threshold_v", "voltage_v"), ("ocp", "ocp_threshold_a", "current_a"))
+
+
+def sleep(seconds: float) -> None:
+    """The wait between output off and output on in a power cycle."""
+    time.sleep(seconds)
+
+
+def _text(value: Decimal | None) -> str | None:
+    """An exact decimal as the text a result carries, never a float."""
+    return None if value is None else str(value)
+
+
+def effective_limits(supply: PowerSupplyConfig, channel: int) -> dict[str, Decimal | None]:
+    """The lower of the supply limit and the channel limit, per quantity; None where either is unwritten."""
+    own = supply.channels.get(channel) or PowerSupplyChannelConfig()
+    pairs = (
+        ("voltage_v", supply.voltage_limit_v, own.voltage_limit_v),
+        ("current_a", supply.current_limit_a, own.current_limit_a),
+    )
+    return {name: (min(whole, part) if whole is not None and part is not None else None) for name, whole, part in pairs}
+
+
+def missing_limit_keys(supply_id: str, supply: PowerSupplyConfig, channel: int) -> list[str]:
+    """The dotted keys of every limit a write on this channel needs and the configuration does not set."""
+    own = supply.channels.get(channel) or PowerSupplyChannelConfig()
+    prefix = f"power_supplies.{supply_id}"
+    found: list[str] = []
+    if supply.voltage_limit_v is None:
+        found.append(f"{prefix}.voltage_limit_v")
+    if supply.current_limit_a is None:
+        found.append(f"{prefix}.current_limit_a")
+    if own.voltage_limit_v is None:
+        found.append(f"{prefix}.channels.{channel}.voltage_limit_v")
+    if own.current_limit_a is None:
+        found.append(f"{prefix}.channels.{channel}.current_limit_a")
+    return sorted(found)
+
+
+def missing_limits_summary(supply_id: str, channel: int, keys: list[str]) -> str:
+    return (
+        f"Writes on power supply '{supply_id}' channel {channel} were refused before contact: the authoritative "
+        f"configuration sets no {', '.join(keys)}."
+    )
+
+
+def missing_limits_next_step(keys: list[str]) -> str:
+    return (
+        "This refusal is the answer to the request. Report it and stop. Writes on this channel stay refused until the "
+        f"authoritative configuration sets {', '.join(keys)}. Only the owner writes these limits, by hand in the "
+        "authoritative configuration file, and then restarts the Agentic HIL server, because the power_supplies "
+        "section is read only at startup. No tool on this server writes them. You must not propose, estimate or derive "
+        "a value for any of them, whether from the supply's capability range, its present set point or a datasheet, "
+        "and you must not drive the supply another way."
+    )
+
+
+def channel_json(channel: int, status: ChannelStatus) -> JsonObject:
+    """One channel reading as a result carries it: every value exact, every unread one null."""
+    return {
+        "channel": channel,
+        "set_voltage_v": _text(status.set_voltage_v),
+        "set_current_a": _text(status.set_current_a),
+        "measured_voltage_v": _text(status.measured_voltage_v),
+        "measured_current_a": _text(status.measured_current_a),
+        "output_on": status.output_on,
+        "regulation": status.regulation,
+        "protection_tripped": status.protection_tripped,
+        "ovp_threshold_v": _text(status.ovp_threshold_v),
+        "ocp_threshold_a": _text(status.ocp_threshold_a),
+        "read_at": status.read_at,
+    }
+
+
+def _limits_json(limits: dict[str, Decimal | None]) -> JsonObject:
+    return {name: _text(value) for name, value in limits.items()}
+
+
+def _protection_block(record: Mapping[str, Any], status: ChannelStatus | None) -> JsonObject:
+    """The protection block of a channel this call did not arm: what the type supports and what reads back."""
+    readable = record["protection_readable"]
+    block: JsonObject = {}
+    for name, attribute, _ in _PROTECTIONS:
+        read = getattr(status, attribute) if status is not None and readable[name] else None
+        block[name] = {"support": record["protection"][name], "armed": None, "threshold": None, "threshold_read": _text(read)}
+    return block
+
+
+@dataclass
+class _Call:
+    """One supply tool call: what was asked, and what has been done on the supply so far."""
+
+    tool: str
+    supply_id: str
+    supply: PowerSupplyConfig
+    record: Mapping[str, Any]
+    channels: list[int]
+    requested: dict[str, Decimal] = dataclass_field(default_factory=dict)
+    on: bool | None = None
+    off_s: float | None = None
+    limits: dict[str, Decimal | None] = dataclass_field(default_factory=dict)
+    model: str | None = None
+    firmware: str | None = None
+    # Set before the first command that changes the supply is sent. From then
+    # on a lost reply leaves the supply in a state nobody has read.
+    wrote: bool = False
+    last: ChannelStatus | None = None
+    last_channel: int | None = None
+
+    @property
+    def channel(self) -> int:
+        return self.channels[0]
+
+    def known_output(self) -> JsonObject:
+        """The last output state this call read, and when; all null before the first read."""
+        if self.last is None:
+            return {"channel": self.channels[0] if len(self.channels) == 1 else None, "output_on": None, "read_at": None}
+        return {"channel": self.last_channel, "output_on": self.last.output_on, "read_at": self.last.read_at}
+
+
+def _unknown_output(channel: int | None = None) -> JsonObject:
+    return {"channel": channel, "output_on": None, "read_at": None}
+
+
+class PowerSupplyService:
+    """The four supply tools, with the same rules for every backend.
+
+    A call that changes the supply runs in this order: the checks that need no
+    contact (arguments, grant, the owner's limits, what the type can read
+    back, the requested values against the limits), the port's USB identity,
+    the lease, the unit's own identity, the stored set points against the
+    limits before an output is switched on, the device-side protection armed at
+    the limits, and then the writes, each read back exactly. `power_supply_status`
+    reads and never writes. Each call opens one connection and closes it, and
+    writes one report carrying the connection's transcript."""
+
+    def __init__(self, config: AgenticHILConfig, coordinator: HardwareCoordinator) -> None:
+        self.config = config
+        self.coordinator = coordinator
+
+    def reconfigure(self, config: AgenticHILConfig) -> None:
+        self.config = config
+
+    def status(self, args: JsonObject) -> JsonObject:
+        return self._call("power_supply_status", args)
+
+    def set(self, args: JsonObject) -> JsonObject:
+        return self._call("power_supply_set", args)
+
+    def output(self, args: JsonObject) -> JsonObject:
+        return self._call("power_supply_output", args)
+
+    def cycle(self, args: JsonObject) -> JsonObject:
+        return self._call("power_supply_cycle", args)
+
+    # -- before contact -----------------------------------------------------
+
+    def _call(self, tool: str, args: JsonObject) -> JsonObject:
+        from agentic_hil.report import write_report
+
+        try:
+            device = power_supply_device(self.config, str(args.get("supply_id", "")))
+        except DeviceError as error:
+            refusal: JsonObject = {"tool": tool, **error.result}
+            refusal.update(NOT_STARTED)
+            refusal["last_known_output"] = _unknown_output()
+            return write_report(self.config, refusal)
+        planned = self._plan(tool, device, args)
+        if not isinstance(planned, _Call):
+            planned.update(NOT_STARTED)
+            planned.setdefault("supply_id", device.config_id)
+            planned["last_known_output"] = _unknown_output(args.get("channel") if isinstance(args.get("channel"), int) else None)
+            return write_report(self.config, planned)
+        return self._contact(device, planned)
+
+    def _plan(self, tool: str, device: PowerSupplyDevice, args: JsonObject) -> _Call | JsonObject:
+        """Every check that needs no contact, in order; the call to make, or the refusal."""
+        supply_id = device.config_id
+        supply = device.supply
+        record = POWER_SUPPLY_TYPES[supply.type]
+        count = int(record["channels"])
+        raw_channel = args.get("channel")
+        if raw_channel is None:
+            if count != 1 and tool != "power_supply_status":
+                return invalid_argument(tool, "channel", "required", f"Power supply '{supply_id}' has {count} channels, so `channel` has to name one, numbered from 1.")
+            channels = list(range(1, count + 1)) if tool == "power_supply_status" else [1]
+        else:
+            if isinstance(raw_channel, bool) or not isinstance(raw_channel, int):
+                return invalid_argument(tool, "channel", "type", "`channel` must be an integer.")
+            if raw_channel < 1:
+                return invalid_argument(tool, "channel", "minimum", "`channel` is numbered from 1.")
+            if raw_channel > count:
+                return invalid_argument(tool, "channel", "maximum", f"Power supply '{supply_id}' has {count} channel(s), numbered from 1; it has no channel {raw_channel}.")
+            channels = [raw_channel]
+        call = _Call(tool=tool, supply_id=supply_id, supply=supply, record=record, channels=channels)
+        refusal = self._arguments(call, args)
+        if refusal is not None:
+            return refusal
+        if supply.type not in POWER_SUPPLY_BACKENDS:
+            from agentic_hil.tools import unbound_power_supply_error
+
+            return unbound_power_supply_error(self.config, tool, supply_id)
+        if tool not in POWER_SUPPLY_WRITE_TOOLS:
+            return call
+        flag = "allow_set" if tool == "power_supply_set" else "allow_output"
+        if not getattr(supply.permissions, flag):
+            return power_supply_grant_closed_refusal(tool, supply_id, call.channel, flag)
+        missing = missing_limit_keys(supply_id, supply, call.channel)
+        if missing:
+            return power_supply_missing_limits_refusal(tool, supply_id, call.channel, missing)
+        if tool != "power_supply_set" and not record["output_readable"]:
+            return power_supply_output_unreadable_refusal(tool, supply_id, supply.type, call.channel)
+        call.limits = effective_limits(supply, call.channel)
+        for name, value in call.requested.items():
+            limit = call.limits[name]
+            if limit is not None and value > limit:
+                return power_supply_limit_exceeded_refusal(tool, supply_id, call.channel, name, value, limit, stored=False)
+        return call
+
+    def _arguments(self, call: _Call, args: JsonObject) -> JsonObject | None:
+        tool = call.tool
+        if tool == "power_supply_set":
+            ranges = call.record["ranges"][str(call.channel)]
+            for name, quantity, unit in _LIMIT_FIELDS:
+                value = args.get(name)
+                if value is None:
+                    continue
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return invalid_argument(tool, name, "type", f"`{name}` must be a number of {unit}.")
+                parsed = Decimal(str(value))
+                if not parsed.is_finite():
+                    return invalid_argument(tool, name, "finite", f"`{name}` must be a finite number of {unit}.")
+                if parsed < 0:
+                    return invalid_argument(tool, name, "minimum", f"`{name}` cannot be below zero.")
+                resolution = Decimal(ranges[quantity]["resolution"])
+                if parsed % resolution != 0:
+                    return invalid_argument(
+                        tool, name, "multipleOf",
+                        f"`{name}` is {parsed} {unit}, which this supply type cannot set: it sets {quantity} in steps of {resolution} {unit}. Nothing is rounded.",
+                    )
+                call.requested[name] = parsed
+            if not call.requested:
+                return invalid_argument(tool, "voltage_v", "required", "`power_supply_set` needs `voltage_v`, `current_a` or both.")
+        elif tool == "power_supply_output":
+            on = args.get("on")
+            if not isinstance(on, bool):
+                return invalid_argument(tool, "on", "type", "`on` must be true or false.")
+            call.on = on
+        elif tool == "power_supply_cycle":
+            off_s = args.get("off_s")
+            if isinstance(off_s, bool) or not isinstance(off_s, (int, float)):
+                return invalid_argument(tool, "off_s", "type", "`off_s` must be a number of seconds.")
+            if off_s != off_s or off_s in {float("inf"), float("-inf")}:
+                return invalid_argument(tool, "off_s", "finite", "`off_s` must be a finite number of seconds.")
+            if off_s < CYCLE_OFF_MIN_S:
+                return invalid_argument(tool, "off_s", "minimum", f"`off_s` is at least {CYCLE_OFF_MIN_S} s.")
+            if off_s > CYCLE_OFF_MAX_S:
+                return invalid_argument(tool, "off_s", "maximum", f"`off_s` is at most {CYCLE_OFF_MAX_S:g} s.")
+            call.off_s = float(off_s)
+        return None
+
+    # -- contact ------------------------------------------------------------
+
+    def _contact(self, device: PowerSupplyDevice, call: _Call) -> JsonObject:
+        from agentic_hil.comports import verify_port_identity
+        from agentic_hil.coordination import CoordinationError
+        from agentic_hil.report import write_report
+
+        identity = verify_port_identity(self.config, call.supply.com_port, call.tool)
+        if not identity["ok"]:
+            refused: JsonObject = {**identity, "supply_id": call.supply_id}
+            refused["last_known_output"] = call.known_output()
+            return write_report(self.config, refused)
+        resources: list[Device | str] = [device]
+        if call.tool in POWER_SUPPLY_WRITE_TOOLS:
+            resources += [debugger_device(self.config, name) for name in call.supply.powers]
+        try:
+            lease = self.coordinator.acquire(*resources)
+        except CoordinationError as error:
+            held: JsonObject = {"tool": call.tool, "supply_id": call.supply_id, **error.result, "side_effect_committed": False}
+            held["last_known_output"] = call.known_output()
+            return write_report(self.config, held)
+        backend = create_power_supply_backend(self.config, call.supply_id)
+        if isinstance(backend, UnboundPowerSupplyBackend):
+            from agentic_hil.tools import unbound_power_supply_error
+
+            unbound = unbound_power_supply_error(self.config, call.tool, call.supply_id)
+            unbound["last_known_output"] = call.known_output()
+            return self._commit(lease, unbound, [])
+        evidence: list[JsonObject] = []
+        try:
+            result = self._converse(backend, lease, call)
+        finally:
+            try:
+                evidence = list(backend.evidence())
+            except Exception as error:
+                evidence = [{"evidence_error": str(error)}]
+            backend.close()
+        return self._commit(lease, result, evidence)
+
+    def _converse(self, backend: PowerSupplyBackend, lease: HardwareLease, call: _Call) -> JsonObject:
+        try:
+            return self._exchange(backend, call)
+        except PowerSupplyFault as fault:
+            if fault.error_type != "power_supply_no_reply":
+                if call.wrote:
+                    lease.quarantine("power_supply_state_unconfirmed", fault)
+                raise
+            unconfirmed = call.wrote or fault.wrote
+            if unconfirmed:
+                lease.quarantine("power_supply_state_unconfirmed", fault)
+            result = power_supply_no_reply_refusal(call.tool, call.supply_id, call.last_channel or call.channel, fault.summary, unconfirmed=unconfirmed)
+            if not unconfirmed:
+                result.update(NOT_STARTED)
+            result["last_known_output"] = call.known_output()
+            return result
+        except Exception as error:
+            # A backend bug, contained by the dispatch above. Once a write was
+            # sent, what the supply holds is unknown, and the lease says so.
+            if call.wrote:
+                lease.quarantine("power_supply_state_unconfirmed", error)
+            raise
+
+    def _read(self, backend: PowerSupplyBackend, call: _Call, channel: int) -> ChannelStatus:
+        status = backend.channel_status(channel)
+        call.last = status
+        call.last_channel = channel
+        return status
+
+    def _exchange(self, backend: PowerSupplyBackend, call: _Call) -> JsonObject:
+        identity = backend.identity()
+        register_idn_serial(identity.serial)
+        call.model, call.firmware = identity.model, identity.firmware
+        if not identity.accepted:
+            unknown = power_supply_identity_unknown_refusal(call.tool, call.supply_id, call.supply.type, identity.model, identity.firmware)
+            unknown["last_known_output"] = call.known_output()
+            return unknown
+        expected = call.supply.idn_serial
+        if expected is not None and secret_text(identity.serial) != expected:
+            mismatch = power_supply_identity_mismatch_refusal(call.tool, call.supply_id, identity.model, identity.firmware, expected, secret_text(identity.serial))
+            mismatch["last_known_output"] = call.known_output()
+            return mismatch
+        if call.tool == "power_supply_status":
+            return self._status(backend, call)
+        return self._write(backend, call)
+
+    def _status(self, backend: PowerSupplyBackend, call: _Call) -> JsonObject:
+        channels: list[JsonObject] = []
+        limits: JsonObject = {}
+        protection: JsonObject = {}
+        missing: set[str] = set()
+        refused: list[str] = []
+        for channel in call.channels:
+            status = self._read(backend, call, channel)
+            channels.append(channel_json(channel, status))
+            limits[str(channel)] = _limits_json(effective_limits(call.supply, channel))
+            protection[str(channel)] = _protection_block(call.record, status)
+            keys = missing_limit_keys(call.supply_id, call.supply, channel)
+            if keys:
+                missing.update(keys)
+                refused.append(missing_limits_summary(call.supply_id, channel, keys))
+        return {
+            "ok": True,
+            "tool": call.tool,
+            "supply_id": call.supply_id,
+            "supply_type": call.supply.type,
+            "model": call.model,
+            "firmware": call.firmware,
+            "channels": channels,
+            "limits": limits,
+            "missing_limits": sorted(missing),
+            "writes_refused_reason": " ".join(refused) if refused else None,
+            "protection": protection,
+            "last_known_output": call.known_output(),
+            "summary": f"Read power supply '{call.supply_id}': {len(channels)} channel(s), nothing written.",
+        }
+
+    def _write(self, backend: PowerSupplyBackend, call: _Call) -> JsonObject:
+        channel = call.channel
+        before = self._read(backend, call, channel)
+        if call.tool == "power_supply_cycle" or call.on is True:
+            # The set point already stored reaches the board the moment the
+            # output switches on, so it is held to the limits like a request.
+            for name, attribute in (("voltage_v", "set_voltage_v"), ("current_a", "set_current_a")):
+                stored = getattr(before, attribute)
+                limit = call.limits[name]
+                if limit is not None and (stored is None or stored > limit):
+                    exceeded = power_supply_limit_exceeded_refusal(call.tool, call.supply_id, channel, name, stored, limit, stored=True)
+                    exceeded["last_known_output"] = call.known_output()
+                    return exceeded
+        protection = _protection_block(call.record, before)
+        if call.tool != "power_supply_output" or call.on is True:
+            failure = self._arm(backend, call, protection)
+            if failure is not None:
+                failure["last_known_output"] = call.known_output()
+                return failure
+        requested: JsonObject
+        read_back: JsonObject
+        if call.tool == "power_supply_set":
+            requested = {name: str(value) for name, value in call.requested.items()}
+            read_back = {}
+            for name, attribute in (("voltage_v", "set_voltage_v"), ("current_a", "set_current_a")):
+                value = call.requested.get(name)
+                if value is None:
+                    continue
+                call.wrote = True
+                if name == "voltage_v":
+                    backend.set_voltage(channel, value)
+                else:
+                    backend.set_current(channel, value)
+                read = getattr(self._read(backend, call, channel), attribute)
+                read_back[name] = _text(read)
+                if read != value:
+                    return self._mismatch(call, requested, read_back)
+        else:
+            steps = [False, True] if call.tool == "power_supply_cycle" else [bool(call.on)]
+            requested = {"output_on": steps[-1]}
+            read_back = {}
+            for position, on in enumerate(steps):
+                if position:
+                    sleep(float(call.off_s or CYCLE_OFF_MIN_S))
+                call.wrote = True
+                backend.set_output(channel, on)
+                state = self._read(backend, call, channel).output_on
+                read_back = {"output_on": state}
+                if state is not on:
+                    return self._mismatch(call, {"output_on": on}, read_back)
+        assert call.last is not None
+        result: JsonObject = {
+            "ok": True,
+            "tool": call.tool,
+            "supply_id": call.supply_id,
+            "supply_type": call.supply.type,
+            "channel": channel,
+            "model": call.model,
+            "firmware": call.firmware,
+            "requested": requested,
+            "read_back": read_back,
+            "measured": {"voltage_v": _text(call.last.measured_voltage_v), "current_a": _text(call.last.measured_current_a)},
+            "limits": {str(channel): _limits_json(call.limits)},
+            "protection": {str(channel): protection},
+            "channels": [channel_json(channel, call.last)],
+            "last_known_output": call.known_output(),
+            "side_effect_committed": True,
+            "side_effect_status": "committed",
+            "summary": _success_summary(call, requested),
+        }
+        if call.off_s is not None:
+            result["off_s"] = call.off_s
+        return result
+
+    def _mismatch(self, call: _Call, requested: JsonObject, read_back: JsonObject) -> JsonObject:
+        failure = power_supply_readback_mismatch_refusal(call.tool, call.supply_id, call.channel, requested, read_back)
+        failure["last_known_output"] = call.known_output()
+        return failure
+
+    def _arm(self, backend: PowerSupplyBackend, call: _Call, protection: JsonObject) -> JsonObject | None:
+        """Arm every threshold protection of the channel at the effective limits, and confirm what reads back."""
+        channel = call.channel
+        support = call.record["protection"]
+        readable = call.record["protection_readable"]
+        thresholds: dict[str, Decimal | None] = {
+            name: call.limits[limit_name] if support[name] == "threshold" else None for name, _, limit_name in _PROTECTIONS
+        }
+        if all(value is None for value in thresholds.values()):
+            return None
+        first = next(name for name, value in thresholds.items() if value is not None)
+        call.wrote = True
+        try:
+            backend.arm_protection(channel, thresholds["ovp"], thresholds["ocp"])
+        except PowerSupplyFault as fault:
+            if fault.error_type != "power_supply_protection_not_armed":
+                raise
+            return power_supply_protection_not_armed_refusal(
+                call.tool, call.supply_id, channel, first, "backend_fault", thresholds[first], None, wrote=fault.wrote
+            )
+        armed = [name for name, value in thresholds.items() if value is not None]
+        status = self._read(backend, call, channel) if any(readable[name] for name in armed) else None
+        for name, attribute, _ in _PROTECTIONS:
+            value = thresholds[name]
+            if value is None:
+                continue
+            entry = protection[name]
+            entry["threshold"] = _text(value)
+            if not readable[name] or status is None:
+                entry["armed"] = "unconfirmed"
+                continue
+            read = getattr(status, attribute)
+            entry["threshold_read"] = _text(read)
+            if read is None or read != value:
+                cause = "readback_missing" if read is None else "readback_mismatch"
+                return power_supply_protection_not_armed_refusal(call.tool, call.supply_id, channel, name, cause, value, read, wrote=True)
+            entry["armed"] = "confirmed"
+        return None
+
+    # -- after contact --------------------------------------------------------
+
+    def _commit(self, lease: HardwareLease, result: JsonObject, evidence: list[JsonObject]) -> JsonObject:
+        """Report the call with its transcript, give the lease back unless it holds an incident, and answer."""
+        from agentic_hil.report import recommit_report_with_status, report_write_failed, write_report
+
+        prepared = {**result, "backend_evidence": evidence, **lease.status()}
+        written = write_report(self.config, prepared)
+        if report_write_failed(prepared, written):
+            lease.quarantine("power_supply_report_audit_broken", audit_broken=True)
+            final = write_report(self.config, {**written, **lease.status()})
+        elif lease.status()["quarantined"]:
+            final = written
+        elif not lease.release():
+            unreleased: JsonObject = {**written, **lease.status(), "ok": False, "cleanup_required": True}
+            unreleased["summary"] = "Power supply lease release remained unconfirmed."
+            final = write_report(self.config, unreleased)
+        else:
+            final = recommit_report_with_status(self.config, written, lease.status())
+        return {key: value for key, value in final.items() if key != "backend_evidence"}
+
+
+def _success_summary(call: _Call, requested: JsonObject) -> str:
+    where = f"power supply '{call.supply_id}' channel {call.channel}"
+    if call.tool == "power_supply_set":
+        values = " and ".join(f"{value} {'V' if name == 'voltage_v' else 'A'}" for name, value in requested.items())
+        return f"Set {values} on {where}; every value read back exactly."
+    if call.tool == "power_supply_cycle":
+        return f"Cycled the output of {where}: off, {call.off_s:g} s, on, each state read back."
+    return f"Switched the output of {where} {'on' if call.on else 'off'}; the state read back."
+
+
+# ---------------------------------------------------------------------------
+# The refusals of the class layer, one builder per kind.
+
+
+def power_supply_missing_limits_refusal(tool: str, supply_id: str, channel: int, missing: list[str]) -> JsonObject:
+    """D8: a write on a channel whose limits the configuration does not set is refused before contact."""
+    result: JsonObject = {
+        "ok": False,
+        "tool": tool,
+        "error_type": "permission_denied",
+        "supply_id": supply_id,
+        "channel": channel,
+        "missing_limits": list(missing),
+        "retry_safe": False,
+        **remediation_fields("permission_denied", "power_supply_limits"),
+    }
+    result["summary"] = missing_limits_summary(supply_id, channel, missing)
+    result["next_step"] = missing_limits_next_step(missing)
+    result.update(NOT_STARTED)
+    return result
+
+
+def power_supply_grant_closed_refusal(tool: str, supply_id: str, channel: int, flag: str) -> JsonObject:
+    """A write the supply's grant does not open, refused before contact and naming its key."""
+    key = permission_key("power_supplies", supply_id, flag)
+    text = {
+        "allow_set": f"Set points on power supply '{supply_id}' are not granted by the authoritative configuration.",
+        "allow_output": f"Switching the output of power supply '{supply_id}' is not granted by the authoritative configuration.",
+    }[flag]
+    result: JsonObject = {
+        "ok": False,
+        "tool": tool,
+        "error_type": "permission_denied",
+        "summary": permission_denied_summary(text, key),
+        "supply_id": supply_id,
+        "channel": channel,
+        "retry_safe": False,
+    }
+    result.update(permission_denied_fields(key))
+    result.update(remediation_fields("permission_denied", permission=key))
+    result.update(NOT_STARTED)
+    return result
+
+
+def power_supply_output_unreadable_refusal(tool: str, supply_id: str, supply_type: str, channel: int) -> JsonObject:
+    """D7: a supply type that cannot read its output state back is never told to switch it."""
+    result: JsonObject = {
+        "ok": False,
+        "tool": tool,
+        "error_type": "not_supported",
+        "summary": (
+            f"Power supply '{supply_id}' is a {supply_type}, which cannot read its output state back, so `{tool}` is "
+            "refused before contact: a switch nobody can read back would leave the board's power state unknown."
+        ),
+        "supply_id": supply_id,
+        "supply_type": supply_type,
+        "channel": channel,
+        "capability": "output_state",
+        "retry_safe": False,
+        **remediation_fields("not_supported", "power_supply"),
+    }
+    result.update(NOT_STARTED)
+    return result
+
+
+def power_supply_limit_exceeded_refusal(
+    tool: str, supply_id: str, channel: int, name: str, value: Decimal | None, limit: Decimal, *, stored: bool
+) -> JsonObject:
+    """A value above the channel's effective limit: the one asked for, or the set point already stored."""
+    quantity, unit = ("voltage", "V") if name == "voltage_v" else ("current", "A")
+    where = f"power supply '{supply_id}' channel {channel}"
+    if not stored:
+        summary = f"The requested {quantity} of {value} {unit} is above the effective limit of {limit} {unit} on {where}, so nothing was written."
+    elif value is None:
+        summary = (
+            f"The {quantity} set point stored on {where} did not read back, so it cannot be shown to be within the "
+            f"effective limit of {limit} {unit}, and the output was not switched."
+        )
+    else:
+        summary = (
+            f"The {quantity} set point stored on {where} is {value} {unit}, above the effective limit of {limit} {unit}, "
+            "so the output was not switched: the stored value would reach the board the moment it turned on."
+        )
+    result: JsonObject = {
+        "ok": False,
+        "tool": tool,
+        "error_type": "power_supply_limit_exceeded",
+        "summary": summary,
+        "supply_id": supply_id,
+        "channel": channel,
+        "field": name,
+        "requested": _text(value),
+        "limit": str(limit),
+        "retry_safe": False,
+        **remediation_fields("power_supply_limit_exceeded"),
+    }
+    result.update(NOT_STARTED)
+    return result
+
+
+def power_supply_identity_unknown_refusal(tool: str, supply_id: str, supply_type: str, model: str | None, firmware: str | None) -> JsonObject:
+    """The unit answered with a model or firmware no verified record covers; only the identity query was sent."""
+    result: JsonObject = {
+        "ok": False,
+        "tool": tool,
+        "error_type": "power_supply_identity_unknown",
+        "summary": (
+            f"The unit behind power supply '{supply_id}' reported model {model!r} and firmware {firmware!r}, which this "
+            f"server has no verified {supply_type} record for. Only the identity query was sent."
+        ),
+        "supply_id": supply_id,
+        "supply_type": supply_type,
+        "model": model,
+        "firmware": firmware,
+        "retry_safe": False,
+        **remediation_fields("power_supply_identity_unknown"),
+    }
+    result.update(NOT_STARTED)
+    return result
+
+
+def power_supply_identity_mismatch_refusal(
+    tool: str, supply_id: str, model: str | None, firmware: str | None, expected: str, reported: str | None
+) -> JsonObject:
+    """The unit reported a serial other than the configured `idn_serial`; only the identity query was sent."""
+    result: JsonObject = {
+        "ok": False,
+        "tool": tool,
+        "error_type": "power_supply_identity_mismatch",
+        "summary": (
+            f"The unit behind power supply '{supply_id}' reported a serial other than "
+            f"`power_supplies.{supply_id}.idn_serial`, so another unit is on this port. Only the identity query was sent."
+        ),
+        "supply_id": supply_id,
+        "model": model,
+        "firmware": firmware,
+        "expected_idn_serial": expected,
+        "reported_idn_serial": reported,
+        "retry_safe": False,
+        **remediation_fields("power_supply_identity_mismatch"),
+    }
+    result.update(NOT_STARTED)
+    return result
+
+
+def power_supply_no_reply_refusal(tool: str, supply_id: str, channel: int, backend_error: str, *, unconfirmed: bool) -> JsonObject:
+    """The supply did not answer; after a write that leaves its state unconfirmed."""
+    if unconfirmed:
+        summary = (
+            f"Power supply '{supply_id}' stopped answering after this call had sent it a write, so whether that write "
+            "took effect is unconfirmed: the unit itself has to be checked before the bench is used again."
+        )
+    else:
+        summary = f"Power supply '{supply_id}' did not answer, and nothing that changes it had been sent."
+    result: JsonObject = {
+        "ok": False,
+        "tool": tool,
+        "error_type": "power_supply_no_reply",
+        "summary": summary,
+        "supply_id": supply_id,
+        "channel": channel,
+        "backend_error": backend_error,
+        "retry_safe": not unconfirmed,
+        **remediation_fields("power_supply_no_reply"),
+    }
+    if unconfirmed:
+        result.update({"side_effect_status": "unknown", "hardware_state": "unknown", "cleanup_required": True})
+    return result
+
+
+def power_supply_protection_not_armed_refusal(
+    tool: str,
+    supply_id: str,
+    channel: int,
+    protection: str,
+    cause: str,
+    requested: Decimal | None,
+    read_back: Decimal | None,
+    *,
+    wrote: bool,
+) -> JsonObject:
+    """The device-side protection could not be armed at the limits, so nothing else was written."""
+    how = {
+        "backend_fault": "the supply refused the threshold",
+        "readback_mismatch": f"the threshold read back as {read_back}",
+        "readback_missing": "the threshold did not read back",
+    }[cause]
+    result: JsonObject = {
+        "ok": False,
+        "tool": tool,
+        "error_type": "power_supply_protection_not_armed",
+        "summary": (
+            f"The {protection} protection of power supply '{supply_id}' channel {channel} could not be armed at "
+            f"{requested}: {how}. No set point was written and no output switched."
+        ),
+        "supply_id": supply_id,
+        "channel": channel,
+        "protection": protection,
+        "cause": cause,
+        "requested": _text(requested),
+        "read_back": _text(read_back),
+        "retry_safe": False,
+        **remediation_fields("power_supply_protection_not_armed"),
+    }
+    if wrote:
+        result.update({"side_effect_committed": True, "side_effect_status": "partial", "hardware_state": "unknown"})
+    else:
+        result.update(NOT_STARTED)
+    return result
+
+
+def power_supply_readback_mismatch_refusal(tool: str, supply_id: str, channel: int, requested: JsonObject, read_back: JsonObject) -> JsonObject:
+    """A write that read back as something else: the supply answered, so its state is the read-back."""
+    told = ", ".join(f"{name} {value}" for name, value in requested.items())
+    holds = ", ".join(f"{name} {value}" for name, value in read_back.items())
+    result: JsonObject = {
+        "ok": False,
+        "tool": tool,
+        "error_type": "power_supply_readback_mismatch",
+        "summary": f"Power supply '{supply_id}' channel {channel} was told {told} and reads back {holds}.",
+        "supply_id": supply_id,
+        "channel": channel,
+        "requested": requested,
+        "read_back": read_back,
+        "retry_safe": False,
+        "side_effect_committed": True,
+        "side_effect_status": "partial",
+        **remediation_fields("power_supply_readback_mismatch"),
+    }
+    return result
+
+
 __all__ = [
+    "CYCLE_OFF_MAX_S",
+    "CYCLE_OFF_MIN_S",
     "DEFAULT_POWER_SUPPLY_TIMEOUT_S",
+    "NOT_STARTED",
+    "POWER_SUPPLY_BACKENDS",
     "POWER_SUPPLY_PERMISSION_FLAGS",
+    "POWER_SUPPLY_TOOLS",
     "POWER_SUPPLY_TYPES",
+    "POWER_SUPPLY_WRITE_TOOLS",
+    "PowerSupplyService",
+    "channel_json",
     "config_secret_fields",
+    "effective_limits",
+    "missing_limit_keys",
     "power_supply_config",
     "power_supply_limit",
     "register_config_secrets",
@@ -471,6 +1288,7 @@ __all__ = [
     "reject_legacy_power_supplies",
     "secret_bearing_fields",
     "secret_text",
+    "sleep",
     "supply_config_secrets",
     "supply_port_names",
     "supply_secrets",

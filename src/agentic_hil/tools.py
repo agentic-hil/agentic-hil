@@ -85,7 +85,15 @@ from agentic_hil.coordination import (
     nothing_standing_result,
 )
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
-from agentic_hil.devices import Device, DeviceError, can_device, resolve_devices, uart_device
+from agentic_hil.devices import (
+    Device,
+    DeviceError,
+    can_device,
+    debugger_device,
+    power_supply_device,
+    resolve_devices,
+    uart_device,
+)
 from agentic_hil.knowledge import (
     AUDIT_BROKEN_SCOPE,
     ERROR_CATALOGUE,
@@ -103,7 +111,7 @@ from agentic_hil.knowledge import (
     recovery_operator_command,
     remediation_fields,
 )
-from agentic_hil.power_supply import supply_secrets
+from agentic_hil.power_supply import PowerSupplyService, supply_secrets
 from agentic_hil.process import cleanup_registered_processes, managed_process_owner
 from agentic_hil.provisional import cleanup_provisional_handles
 from agentic_hil.redact import redact_values
@@ -260,6 +268,7 @@ class AgenticHILToolService:
         self.artifacts = artifacts or ArtifactManager(self.config)
         self.com_ports = com_ports or ComPortService(self.config, self.coordinator)
         self.can_buses = can_buses or CanBusService(self.config, self.coordinator)
+        self.power_supplies = PowerSupplyService(self.config, self.coordinator)
         self._debug_artifact: JsonObject | None = None
         # The last ELF this service put on the target, kept so a backend with no
         # debug session of its own can still resolve a symbol against the image
@@ -1007,6 +1016,10 @@ class AgenticHILToolService:
             "can_session_stop": lambda: self.can_buses.session_stop(str(args.get("bus_id", "")), args.get("participant")),
             "can_send": lambda: self.can_buses.send(str(args.get("bus_id", "")), {key: value for key, value in args.items() if key not in {"bus_id", "participant"}}, args.get("participant")),
             "can_read": lambda: self.can_buses.read(str(args.get("bus_id", "")), args.get("max_frames"), args.get("wait_timeout_s"), args.get("until_id"), args.get("participant")),
+            "power_supply_status": lambda: self.power_supplies.status(args),
+            "power_supply_set": lambda: self.power_supplies.set(args),
+            "power_supply_output": lambda: self.power_supplies.output(args),
+            "power_supply_cycle": lambda: self.power_supplies.cycle(args),
             "bench_run_start": lambda: self.bench_run_start(args),
             "bench_run_stop": lambda: self.bench_run_stop(),
             "bench_run_status": lambda: self.bench_run_status(),
@@ -1270,6 +1283,12 @@ class AgenticHILToolService:
                 }
                 if poison_error is not None:
                     result["quarantine_error"] = str(poison_error)
+                # What the open leases could not confirm, the call's own reasons
+                # beside the exception's, so the answer names them however the
+                # incident ends.
+                reasons = sorted({reason for lease in self.coordinator.leases.values() for reason in lease.cleanup_reasons()})
+                if reasons:
+                    result["cleanup_reasons"] = reasons
                 if isinstance(error, (ConfigError, OSError)):
                     result.update({"audit_ok": False, "audit_error": audit_error_detail(error)})
                 written = write_report(self.config, result)
@@ -1346,6 +1365,7 @@ class AgenticHILToolService:
         self.artifacts.reconfigure(config)
         self.com_ports.reconfigure(config)
         self.can_buses.reconfigure(config)
+        self.power_supplies.reconfigure(config)
 
     def hardware_lease_status(self) -> JsonObject:
         # A record this version cannot trust is answered with its own refusal,
@@ -2914,6 +2934,7 @@ def audited_hardware_tools() -> set[str]:
         "debugger_probes_list", "probe_target", "flash_firmware", "reset_target", "debug_start_session",
         "debug_set_breakpoint", "debug_continue", "debug_symbol_info", "debug_symbol_value", "debug_dump_symbol_ihex",
         "com_session_start", "com_write", "com_read", "can_session_start", "can_send", "can_read",
+        "power_supply_status", "power_supply_set", "power_supply_output", "power_supply_cycle",
         PROJECT_CONFIG_ADOPT, PROJECT_CONFIG_CREATE,
     }
 
@@ -2959,7 +2980,7 @@ IMPLICIT_RUN_LABEL = "implicit:"
 # among them, and for the reason contracts.py gives at length: it connects, and
 # an SWD attach halts a running core, so it is an effect on the target and its
 # own failure path treats it as one.
-_READ_ONLY_HARDWARE_TOOLS = frozenset({"debugger_probes_list", "com_read", "can_read", "debug_symbol_info", "debug_symbol_value"})
+_READ_ONLY_HARDWARE_TOOLS = frozenset({"debugger_probes_list", "com_read", "can_read", "debug_symbol_info", "debug_symbol_value", "power_supply_status"})
 # Session starts are deliberately outside the implicit run. The hold one takes
 # outlives the call that opened it (that is what a session is), so a
 # single-action run around a session start would end, and release, while the
@@ -3133,6 +3154,11 @@ def implicit_run_resources(config: AgenticHILConfig, name: str, args: JsonObject
         return [uart_device(config, str(args.get("port_id", "")))]
     if name == "can_send":
         return [can_device(config, str(args.get("bus_id", "")), args.get("participant") if isinstance(args.get("participant"), str) else None)]
+    if name in {"power_supply_set", "power_supply_output", "power_supply_cycle"}:
+        # A supply write changes what the boards it powers run on, so the call
+        # leases the supply and every board it powers, and its run declares them.
+        supply = power_supply_device(config, str(args.get("supply_id", "")))
+        return [supply, *(debugger_device(config, powered) for powered in supply.supply.powers)]
     return []
 
 
@@ -3266,6 +3292,30 @@ def unbound_debugger_error(tool: str, config: AgenticHILConfig) -> JsonObject:
         # No argument to this tool can change the outcome; retrying only wastes turns.
         "retry_safe": False,
         **remediation_fields("not_supported", UNBOUND_DEBUGGER_SCOPE),
+    }
+
+
+def unbound_power_supply_error(config: AgenticHILConfig, tool: str, supply_id: str | None) -> JsonObject:
+    """Refuse a supply call whose supply type has no backend in this build.
+
+    Nothing was sent and no lease was taken. No argument binds a backend, so
+    the call is not retry safe."""
+    supply = config.power_supplies.get(supply_id) if supply_id is not None else None
+    supply_type = supply.type if supply is not None else None
+    subject = f"Power supply '{supply_id}'" if supply_id is not None else "This power supply"
+    kind = f"is a {supply_type}, a type" if supply_type is not None else "has a type"
+    return {
+        "ok": False,
+        "tool": tool,
+        "error_type": "not_supported",
+        "summary": f"{subject} {kind} this build has no backend for, so nothing was sent to it.",
+        "supply_id": supply_id,
+        "supply_type": supply_type,
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "hardware_state": "unchanged",
+        "retry_safe": False,
+        **remediation_fields("not_supported", "unbound_power_supply"),
     }
 
 

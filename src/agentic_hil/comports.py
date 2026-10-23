@@ -226,6 +226,35 @@ COM_PORT_IDENTITY_UNVERIFIED = "com_port_identity_unverified"
 COM_PORT_NOT_BOUND = "com_port_not_bound"
 
 
+def com_port_power_supply(config: AgenticHILConfig, port_id: str) -> str | None:
+    """The configured power supply whose serial link this port is, if any."""
+    return next((name for name, supply in sorted(config.power_supplies.items()) if supply.com_port == port_id), None)
+
+
+def com_port_reserved_for_power_supply(tool: str, port_id: str, supply_id: str) -> JsonObject:
+    """Refuse a COM session or capture on the port of a power supply.
+
+    The port belongs to the supply, and two writers on one serial line would
+    interleave their bytes. Decided from the configuration alone, before the
+    port is touched."""
+    return {
+        "ok": False,
+        "tool": tool,
+        "port_id": port_id,
+        "error_type": "com_port_reserved_for_power_supply",
+        "power_supply": supply_id,
+        "summary": (
+            f"COM port '{port_id}' is the serial link of power supply '{supply_id}', so it is reserved for the "
+            "supply's own tools. Nothing was opened."
+        ),
+        "retry_safe": False,
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "hardware_state": "unchanged",
+        **remediation_fields("com_port_reserved_for_power_supply"),
+    }
+
+
 def com_port_unbound(tool: str, port_id: str) -> JsonObject:
     """Refuse a declared COM port that has no device to open.
 
@@ -1089,6 +1118,9 @@ class ComPortService:
         port = self._configured_port(port_id, "com_session_start")
         if not port["ok"]:
             return self._write_report(port)
+        supply_id = com_port_power_supply(self.config, port_id)
+        if supply_id is not None:
+            return self._write_report(com_port_reserved_for_power_supply("com_session_start", port_id, supply_id))
         # A write-only line is a legitimate configuration, and the session is the
         # only way to reach the port at all: gating the open on allow_read alone
         # made allow_write without allow_read a grant that could never be used.
@@ -1512,6 +1544,9 @@ class ComPortService:
         port = self._configured_port(port_id, tool)
         if not port["ok"]:
             return port
+        supply_id = com_port_power_supply(self.config, port_id)
+        if supply_id is not None:
+            return com_port_reserved_for_power_supply(tool, port_id, supply_id)
         port_config = port["port_config"]
         if not self.config.com_read_allowed(port_config):
             return self._permission_denied(tool, "Reading this COM port is disabled by the authoritative config.", port_id, "allow_read")

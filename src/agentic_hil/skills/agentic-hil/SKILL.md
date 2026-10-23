@@ -29,6 +29,7 @@ directly.
 | Read a variable, symbol, or memory region | `debug_symbol_info`, `debug_symbol_value`, `debug_dump_symbol_ihex` |
 | Serial console, boot log, UART traffic | `com_ports_list`, `com_session_start`, `com_read`, `com_write`, `com_session_stop` |
 | CAN frames | `can_buses_list`, `can_read`, `can_send`, `can_session_start`, `can_session_stop` |
+| Bench power supply: read, set, switch, or power-cycle a board | `power_supply_status`, `power_supply_set`, `power_supply_output`, `power_supply_cycle` |
 | Hand a build artifact to the target workflow | `artifact_upload` |
 | What happened in the last run, why did it fail | `get_last_report`, `classify_last_error` |
 | A sequence of hardware calls that belong to one run | `bench_run_start`, `bench_run_stop`, `bench_run_status` |

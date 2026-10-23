@@ -65,6 +65,11 @@ def object_schema(
     return schema
 
 
+# The two arguments every power supply tool takes.
+SUPPLY_ID: JsonObject = {**NONEMPTY_STRING, "description": "A `power_supplies` entry of the authoritative configuration, else `unknown_device`."}
+SUPPLY_CHANNEL: JsonObject = {"type": "integer", "minimum": 1, "description": "Output channel, numbered from 1. Required on a supply with more than one channel."}
+
+
 # One entry of a run's declaration. `id` names the *config entry*; the lock this
 # resolves to is derived from the hardware behind it, so two entries describing
 # one physical unit collapse onto one lock. The DUT is not a kind here: it is
@@ -76,8 +81,8 @@ DEVICE_SELECTOR: JsonObject = {
     "properties": {
         "kind": {
             "type": "string",
-            "enum": ["debugger", "uart", "can"],
-            "description": "debugger (a `debuggers` entry), uart (`com_ports`) or can (`can_buses`). The board under test is not a kind.",
+            "enum": ["debugger", "uart", "can", "power_supply"],
+            "description": "debugger (a `debuggers` entry), uart (`com_ports`), can (`can_buses`) or power_supply (`power_supplies`). The board under test is not a kind.",
         },
         # Optional only for a debugger, and then it means the debugger this
         # server is bound to, or the only one configured: with several and no
@@ -85,8 +90,8 @@ DEVICE_SELECTOR: JsonObject = {
         "id": {
             **NONEMPTY_STRING,
             "description": (
-                "The config entry's name, else `unknown_device`. Required for uart and can; a debugger may leave it "
-                "out, meaning the one this server is bound to or the only one configured, else `invalid_argument`."
+                "The config entry's name, else `unknown_device`. Required for uart, can and power_supply; a debugger may "
+                "omit it, meaning the one this server is bound to or the only one, else `invalid_argument`."
             ),
         },
         "participant": {
@@ -130,6 +135,10 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "can_session_stop", "description": "Close the can_session_start session on bus_id when done with the bus; its lease is released. Its adapter closes unless other participants share the bus. A declared run still holds the bus. can_send and can_read then answer `session_not_active`. With no session open, `was_active` is false. If the close fails or a bridge is silent for 1 s, it returns `can_adapter_close_failed` and keeps the session.", "inputSchema": object_schema({"bus_id": {**NONEMPTY_STRING, "description": "A `can_buses` entry from can_buses_list, else `can_bus_not_configured`. Example: can_session_start(bus_id=\"bench\"), can_read(bus_id=\"bench\", max_frames=10), can_session_stop(bus_id=\"bench\")."}, "participant": {**NONEMPTY_STRING, "description": "Required on a bus with `shares`: only this participant detaches, the others stay. A name with no open session, or any name on a bus without `shares`, answers `was_active: false` and closes nothing."}}, required=["bus_id"])},
     {"name": "can_send", "description": "Send one CAN frame (CAN FD on an `fd: true` bus) on the can_session_start session, else `session_not_active`. Needs the bus `allow_write`, else `permission_denied`; a `listen_only` bus refuses with `can_listen_only_mode`. A repeat sends again. `ok`: the adapter accepted it, not that a node ACKed it. `can_send_failed` sets `cleanup_required`: it may have gone out. Use this instead of cansend.", "inputSchema": object_schema({"bus_id": {**NONEMPTY_STRING, "description": "A `can_buses` entry (can_buses_list), else `can_bus_not_configured`. The adapter gets the bus `timeout_s` (default 10 s) to take the frame; replies come from can_read."}, "participant": {**NONEMPTY_STRING, "description": "Required with `shares`; needs its own `allow_write`. frame_id must pass its filter (`can_participant_filter_violation`). Sends spend its budget; `can_participant_frame_budget_exhausted` ends its run."}, "frame_id": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string", "pattern": r"^(?:0[xX][0-9A-Fa-f]+|[0-9]+)$"}], "description": "Arbitration id: an integer, a decimal string or a 0x hex string. 0 to 0x7FF, or 0 to 0x1FFFFFFF when extended, else `invalid_argument`. The result echoes the sent `frame`."}, "extended": {"type": "boolean", "default": False, "description": "Default false: 11-bit standard id. True: 29-bit extended id."}, "rtr": {"type": "boolean", "default": False, "description": "Default false: a data frame. True sends a remote frame; an `fd: true` bus refuses it with `can_fd_remote_frame_unsupported`."}, "data_hex": {"type": "string", "default": "", "description": "Hex byte pairs, whitespace ignored; default empty. At most `max_frame_data_bytes`; classic over 8 bytes: `can_classic_frame_too_large`; FD only 0-8,12,16,20,24,32,48,64: `can_fd_frame_length_invalid`."}}, required=["bus_id", "frame_id"])},
     {"name": "can_read", "description": "Read the CAN frames your can_session_start session received into `frames`, counted by `frames_read`. Use it instead of candump; to wait for a reply, pass until_id rather than polling. Without a session: `session_not_active`. Returned frames are consumed; an empty read is still ok. Adapter faults: `can_read_failed`; after `can_adapter_invalid_response`, can_session_stop and start again.", "inputSchema": object_schema({"bus_id": {**NONEMPTY_STRING, "description": "A `can_buses` entry (can_buses_list), else `can_bus_not_configured`."}, "participant": {**NONEMPTY_STRING, "description": "Required on a bus with `shares`. It reads only frames its filter accepts, never its own sends. Each frame read spends its budget; `can_participant_frame_budget_exhausted` ends its run."}, "max_frames": {"type": "integer", "minimum": 1, "description": "Most frames to return, 1 to the bus `max_buffer_frames` (1024 unless configured), else `invalid_argument`. Default `max_buffer_frames`."}, "wait_timeout_s": {**TIMEOUT, "description": "Seconds to wait for frames. Without until_id: default 0 (answer at once with what is queued), at most the bus `timeout_s` (default 10 s) and 60 s. With until_id: default 10 s, at most 60 s."}, "until_id": {**UNTIL_ID, "description": "Integer id (0 to 0x1FFFFFFF) to wait for, or a list of 1 to 8. Returns the frames read through the first match. Only the numeric id is compared, not the extended flag."}}, required=["bus_id"])},
+    {"name": "power_supply_status", "description": "Read a configured bench power supply: per channel its set points, measured voltage and current, output state, protection and effective limits, each exact or null where the type cannot read it. Writes nothing and needs no grant. `missing_limits` and `writes_refused_reason` say why writes on a channel would be refused. A unit other than the configured one fails `power_supply_identity_mismatch`.", "inputSchema": object_schema({"supply_id": SUPPLY_ID, "channel": {**SUPPLY_CHANNEL, "description": "Output channel, numbered from 1. Without it every channel is read."}}, required=["supply_id"])},
+    {"name": "power_supply_set", "description": "Set the voltage, the current or both on one supply channel. Needs `allow_set`. Refused before contact when the configuration sets no limit for the channel, or a value is above its effective limit (`power_supply_limit_exceeded`). Arms the supply's protection at the limits first, writes, and reads every value back exactly (`power_supply_readback_mismatch`). Does not switch the output.", "inputSchema": object_schema({"supply_id": SUPPLY_ID, "channel": SUPPLY_CHANNEL, "voltage_v": {"type": "number", "minimum": 0, "description": "Voltage set point in V, a multiple of the type's resolution and at most the effective limit. Never rounded."}, "current_a": {"type": "number", "minimum": 0, "description": "Current set point in A, a multiple of the type's resolution and at most the effective limit. Never rounded."}}, required=["supply_id"])},
+    {"name": "power_supply_output", "description": "Switch one supply channel's output on or off and read the state back. Needs `allow_output`. Before switching on, the stored set points are held to the effective limits and the protection is armed at them. A type that cannot read its output state is refused before contact (`not_supported`). Switching to the state already held changes nothing.", "inputSchema": object_schema({"supply_id": SUPPLY_ID, "channel": SUPPLY_CHANNEL, "on": {"type": "boolean", "description": "true switches the output on, false switches it off."}}, required=["supply_id", "on"])},
+    {"name": "power_supply_cycle", "description": "Power-cycle the board on one supply channel: output off, wait `off_s`, output on, each state read back. Needs `allow_output`. The stored set points are held to the effective limits and the protection is armed at them first. A type that cannot read its output state is refused before contact (`not_supported`). Every call cycles the board again.", "inputSchema": object_schema({"supply_id": SUPPLY_ID, "channel": SUPPLY_CHANNEL, "off_s": {"type": "number", "minimum": 0.5, "maximum": 30, "description": "Seconds the output stays off, 0.5 to 30."}}, required=["supply_id", "off_s"])},
     {
         "name": "bench_run_start",
         "description": (
@@ -650,6 +659,15 @@ TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     # failed read sent no frame), so the bus is untouched. Like com_read it
     # consumes: the frames it returns are off the queue.
     "can_read": {"title": "Read CAN frames", "readOnlyHint": True, "openWorldHint": False},
+    # Reads the supply and writes nothing to it, so it holds no grant.
+    "power_supply_status": {"title": "Read a power supply", "readOnlyHint": True, "openWorldHint": False},
+    # Setting the same value twice leaves the supply where the first call left
+    # it, so a repeat is absorbed; a set point still reaches the board.
+    "power_supply_set": {"title": "Set a power supply channel", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+    # Switching to the state already held changes nothing, so a repeat is absorbed.
+    "power_supply_output": {"title": "Switch a power supply output", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+    # Every call takes the board's power away and gives it back again.
+    "power_supply_cycle": {"title": "Power-cycle a board", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
     # Takes the machine-wide locks for every declared device and holds them
     # until bench_run_stop. It destroys nothing. It is not idempotent either: a
     # second call while a run is open is refused with `run_already_active`
