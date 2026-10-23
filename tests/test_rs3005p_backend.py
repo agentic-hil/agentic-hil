@@ -252,13 +252,60 @@ def test_a_status_reply_longer_than_one_byte_and_a_newline_ends_the_conversation
     fake = FakeSupply(status=b"\x53\x41\n")
     supply = accepted(fake)
 
-    supply.channel_status(1)
+    # The read that met the framing fails too: a status taken from a
+    # conversation that has just ended is not one the caller can rely on.
+    with pytest.raises(PowerSupplyFault) as fault:
+        supply.channel_status(1)
     sent = written(fake)
     with pytest.raises(RuntimeError):
         supply.set_voltage(1, Decimal("5.00"))
 
+    assert (fault.value.error_type, fault.value.wrote) == ("power_supply_no_reply", False)
+    assert "STATUS?" in fault.value.summary, fault.value.summary
     assert written(fake) == sent
     assert [entry["reply_hex"] for entry in supply.evidence() if entry["command"] == "STATUS?"] == ["5341"]
+
+
+def _before_identity(fake: FakeSupply) -> Any:
+    return backend(fake)
+
+
+def _ended(fake: FakeSupply) -> Any:
+    supply = accepted(fake)
+    with suppress(PowerSupplyFault):
+        supply.channel_status(1)
+    return supply
+
+
+def _closed(fake: FakeSupply) -> Any:
+    supply = accepted(fake)
+    supply.close()
+    return supply
+
+
+@pytest.mark.parametrize(
+    ("fake", "situation", "operation"),
+    [
+        (lambda: FakeSupply(), _before_identity, lambda supply: supply.set_voltage(1, Decimal("5.00"))),
+        (lambda: FakeSupply(idn=b"KA3005P V5.8 SN:SYNTH\n"), lambda fake: (supply := backend(fake), supply.identity())[0], lambda supply: supply.set_current(1, Decimal("0.100"))),
+        (lambda: FakeSupply(silent=(b"VOUT1?",)), _ended, lambda supply: supply.set_voltage(1, Decimal("5.00"))),
+        (lambda: FakeSupply(), _closed, lambda supply: supply.set_voltage(1, Decimal("5.00"))),
+        (lambda: FakeSupply(), accepted, lambda supply: supply.set_output(1, True)),
+    ],
+    ids=["before-identity", "identity-not-accepted", "conversation-ended", "closed", "output-switching"],
+)
+def test_a_command_the_backend_refuses_is_a_fault_that_wrote_nothing(fake: Any, situation: Any, operation: Any) -> None:
+    """The layer above learns from the fault itself that nothing reached the supply."""
+    transport = fake()
+    supply = situation(transport)
+    sent = written(transport)
+
+    with pytest.raises(PowerSupplyFault) as fault:
+        operation(supply)
+
+    assert isinstance(fault.value, RuntimeError)
+    assert (fault.value.error_type, fault.value.wrote, fault.value.cause) == ("power_supply_no_reply", False, "not_sent")
+    assert written(transport) == sent
 
 
 def test_every_command_ends_in_a_newline_and_waits_for_the_previous_reply() -> None:

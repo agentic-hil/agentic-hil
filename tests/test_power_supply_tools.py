@@ -705,3 +705,33 @@ def test_a_setter_whose_write_times_out_leaves_the_supply_unconfirmed(tmp_path: 
     assert "Write timeout" in result["backend_error"], result
     assert result["retry_safe"] is False, result
     assert "power_supply_state_unconfirmed" in (result.get("cleanup_reasons") or []), result
+
+
+class LongStatusSerial(TranscribedSupplySerial):
+    """A STATUS reply that runs past one byte and a newline, a framing nobody recorded."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.replies[b"STATUS?"] = b"\x53\x41\n"
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [("power_supply_status", {}), ("power_supply_set", {"voltage_v": 5.0, "current_a": 0.5})],
+    ids=["status", "set"],
+)
+def test_a_status_reply_that_does_not_frame_fails_the_call_before_any_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, arguments: dict[str, Any]
+) -> None:
+    service = rs3005p_service(tmp_path, monkeypatch, LongStatusSerial)
+    try:
+        result = service.call(name, {"supply_id": "bench", **arguments})
+    finally:
+        service.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "power_supply_no_reply", result
+    assert "STATUS?" in result["backend_error"], result
+    assert result["retry_safe"] is True and result["side_effect_status"] == "not_started", result
+    assert "power_supply_state_unconfirmed" not in (result.get("cleanup_reasons") or []), result
+    assert not [sent for port in TranscribedSupplySerial.built for sent in port.sent if b":" in sent], "a setter was sent"

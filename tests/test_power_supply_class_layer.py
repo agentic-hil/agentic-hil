@@ -617,6 +617,54 @@ def test_a_serial_exception_after_a_write_leaves_the_supply_unconfirmed(tmp_path
     assert_last_known_output(result)
 
 
+# A write the backend refused before sending anything left the supply as it
+# was, and its fault says so; only a write that may have reached the supply
+# leaves it unconfirmed.
+
+NO_PROTECTION = record(ovp="unsupported", ocp="unsupported", ovp_readable=False, ocp_readable=False)
+
+
+def refused_before_sending() -> BaseException:
+    from agentic_hil.types import PowerSupplyFault
+
+    return PowerSupplyFault("power_supply_no_reply", "The fake supply's backend refused the command before sending anything.", wrote=False)
+
+
+@pytest.mark.parametrize(
+    ("refusing", "type_record", "tool", "arguments"),
+    [
+        pytest.param("set_voltage", NO_PROTECTION, "power_supply_set", {"voltage_v": 5.0}, id="setter"),
+        pytest.param("set_output", NO_PROTECTION, "power_supply_output", {"on": True}, id="output"),
+        pytest.param("arm_protection", None, "power_supply_set", {"voltage_v": 5.0}, id="arm"),
+    ],
+)
+def test_a_write_the_backend_refused_before_sending_is_a_plain_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusing: str, type_record: dict[str, Any] | None, tool: str, arguments: dict[str, Any]
+) -> None:
+    bench = make_bench(tmp_path, monkeypatch, type_record=type_record, unit_changes={"raises": {refusing: refused_before_sending()}})
+
+    result = call(bench, tool, {"supply_id": SUPPLY, **arguments})
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "power_supply_no_reply", result
+    assert bench.unit.names()[-1] == refusing, bench.unit.calls
+    assert result["retry_safe"] is True, result
+    assert result.get("side_effect_status", "not_started") == "not_started", result
+    assert_not_quarantined(result)
+    assert_last_known_output(result)
+
+
+def test_a_refusal_after_a_write_in_the_same_call_still_leaves_the_supply_unconfirmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bench = make_bench(tmp_path, monkeypatch, type_record=NO_PROTECTION, unit_changes={"raises": {"set_current": refused_before_sending()}})
+
+    result = set_points(bench, voltage_v=6.0, current_a=0.5)
+
+    assert result["error_type"] == "power_supply_no_reply", result
+    assert [entry[0] for entry in setter_calls(bench)] == ["set_voltage", "set_current"], bench.unit.calls
+    assert result["retry_safe"] is False, result
+    assert_quarantined(result)
+
+
 # ---------------------------------------------------------------------------
 # Identity (C4).
 
