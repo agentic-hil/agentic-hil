@@ -699,7 +699,10 @@ COLLECTED_TYPE_COUNT = 226
 # `not_supported` for a supply type with no backend, and one function in
 # `comports.py` writes `com_port_reserved_for_power_supply` for both the COM
 # session and the flash capture.
-PRODUCER_COUNT = 700
+# The refusal while this server's own session holds a board the supply powers
+# (#734) adds two `device_busy` producers in `power_supply.py`, one function for
+# the debug session and one for a COM session. No new type is added.
+PRODUCER_COUNT = 702
 
 
 def pin_problems(inventory: Inventory) -> list[str]:

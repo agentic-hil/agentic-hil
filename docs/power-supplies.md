@@ -39,15 +39,33 @@ Results and `power_supply_status` carry a `protection` block per channel, `{ovp|
 ## What a call that changes the supply does
 
 1. **Every check that needs no contact**, in this order: the supply and the arguments, a backend for its type, the grant, the owner's limits, whether the type can read its output state back (for `power_supply_output` and `power_supply_cycle`), and the requested values against the limits. A refusal here sends nothing to the supply.
-2. **The port's USB identity**, checked before the port is opened, as for every configured COM port: an adapter with another VID, PID or serial is never opened.
-3. **The lock**, on the supply and on every debugger it powers (`powers`), all or nothing, so no flash, reset or session reaches a board whose power is being changed. `power_supply_status` locks the supply alone. Inside a run declared with `bench_run_start`, the supply and every powered debugger have to be declared (`{"kind": "power_supply", "id": "<entry>"}`); outside one, a call that changes the supply runs as a run of its own over the same devices.
-4. **The unit's identity.** The identity query is the first command sent and the only one until the model, the firmware and, where the entry names one, the `idn_serial` match. A model or firmware this server has no verified record for is refused as `power_supply_identity_unknown`, another unit of the same model as `power_supply_identity_mismatch`.
-5. **The stored set points**, for output on and power cycle.
-6. **The protection**, armed at the limits.
-7. **The writes**, each followed by an exact read-back.
-8. **Close and report.** The connection closes whatever happened, and the report keeps the transcript of the exchange.
+2. **This server's own sessions.** A debug session this server holds on a debugger the supply powers refuses the call as `device_busy` with `held_by_debug_session: true`, and a COM session on a port that shares a lock key with the supply or a powered debugger refuses it as `device_busy` with `held_by_com_session`, naming the port. Nothing is sent to the supply, and `next_step` names the call that ends the session ([Watching a cold boot](#watching-a-cold-boot)).
+3. **The port's USB identity**, checked before the port is opened, as for every configured COM port: an adapter with another VID, PID or serial is never opened.
+4. **The lock**, on the supply and on every debugger it powers (`powers`), all or nothing, so no flash, reset or session reaches a board whose power is being changed. `power_supply_status` locks the supply alone. Inside a run declared with `bench_run_start`, the supply and every powered debugger have to be declared (`{"kind": "power_supply", "id": "<entry>"}`); outside one, a call that passes steps 1 and 2 runs as a run of its own over the same devices.
+5. **The unit's identity.** The identity query is the first command sent and the only one until the model, the firmware and, where the entry names one, the `idn_serial` match. A model or firmware this server has no verified record for is refused as `power_supply_identity_unknown`, another unit of the same model as `power_supply_identity_mismatch`.
+6. **The stored set points**, for output on and power cycle.
+7. **The protection**, armed at the limits.
+8. **The writes**, each followed by an exact read-back.
+9. **Close and report.** The connection closes whatever happened, and the report keeps the transcript of the exchange.
 
 Each call opens one connection to the supply and closes it. The port of a supply belongs to that supply alone: `com_session_start` and a `flash_firmware` capture on it are refused as `com_port_reserved_for_power_supply`, before the port is touched.
+
+## Watching a cold boot
+
+`power_supply_cycle` restarts the board from cold. To read its boot from the first byte, open the console before the cycle:
+
+1. `com_session_start` on the console's port, with `clear_buffer: true`;
+2. `power_supply_cycle`;
+3. `com_read`, which returns what the board printed as it came up.
+
+This works whenever the console's port shares no lock key with the supply or with any debugger the supply powers. The session and the cycle then lock different devices, and because this server runs one call at a time, the session stays open across the cycle. Inside a run declared with `bench_run_start`, declare the console, the supply and every powered debugger.
+
+When the keys overlap, the cycle is refused before anything is sent to the supply, as `device_busy` with `held_by_com_session` naming the port, and its `next_step` says to stop the session with `com_session_stop` first. They overlap when:
+
+- the console's entry shares its `resource_id` with a debugger the supply powers, so both lock as one physical device;
+- the console is the `com_port` of an esptool debugger the supply powers, as on an ESP32 board whose USB-UART bridge is both the flashing line and the console.
+
+On such a bench the boot cannot be watched on that console, and only the owner can change that, in the authoritative configuration. A debug session this server holds on a powered debugger refuses the same calls with `held_by_debug_session`, until `debug_stop_session` ends it.
 
 ## When a write does not hold
 

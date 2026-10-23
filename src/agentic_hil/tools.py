@@ -111,7 +111,7 @@ from agentic_hil.knowledge import (
     recovery_operator_command,
     remediation_fields,
 )
-from agentic_hil.power_supply import PowerSupplyService, supply_secrets
+from agentic_hil.power_supply import POWER_SUPPLY_WRITE_TOOLS, PowerSupplyService, supply_secrets
 from agentic_hil.process import cleanup_registered_processes, managed_process_owner
 from agentic_hil.provisional import cleanup_provisional_handles
 from agentic_hil.redact import redact_values
@@ -268,7 +268,15 @@ class AgenticHILToolService:
         self.artifacts = artifacts or ArtifactManager(self.config)
         self.com_ports = com_ports or ComPortService(self.config, self.coordinator)
         self.can_buses = can_buses or CanBusService(self.config, self.coordinator)
-        self.power_supplies = PowerSupplyService(self.config, self.coordinator)
+        # The supply tools see this server's own sessions through these two
+        # read-only views, so a write on a board one of them holds is refused
+        # naming that session instead of meeting it at the lease.
+        self.power_supplies = PowerSupplyService(
+            self.config,
+            self.coordinator,
+            com_sessions=lambda: {port_id: list(getattr(session.lease, "resources", ())) for port_id, session in getattr(self.com_ports, "sessions", {}).items()},
+            debug_session=lambda: list(self._debug_lease.resources) if self._debug_lease is not None else [],
+        )
         self._debug_artifact: JsonObject | None = None
         # The last ELF this service put on the target, kept so a backend with no
         # debug session of its own can still resolve a symbol against the image
@@ -1153,6 +1161,13 @@ class AgenticHILToolService:
             # here, at the one place every tool passes through, so the wrap is
             # never a thing each tool has to remember to do.
             if name in implicit_run_tools() and not self.coordinator.run_active and not self.coordinator.incident_stands:
+                if name in POWER_SUPPLY_WRITE_TOOLS and self.power_supplies.refuses_before_contact(name, args):
+                    # A supply write refused before contact (its arguments, its
+                    # grant, its limits, or this server's own session on a board
+                    # the supply powers) leases nothing, so it declares no run:
+                    # the run's hold would meet that very session first and
+                    # answer as a hold that names nobody.
+                    return self._dispatch_tool(name, args, blocked_before, action)
                 return self._in_implicit_run(name, args, lambda: self._dispatch_tool(name, args, blocked_before, action))
             return self._dispatch_tool(name, args, blocked_before, action)
         return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool.", **remediation_fields("unknown_tool")}

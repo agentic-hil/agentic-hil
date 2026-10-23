@@ -2142,6 +2142,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "line an esptool debugger flashes and resets through. Stop it with `com_session_stop` on the port that "
             "field names, make the call again, and start the session again afterwards to read what the board prints. "
             "`next_step` says the same.",
+            "A power supply call refused with `held_by_com_session` or `held_by_debug_session` is held by this server's "
+            "own session on a board that supply powers, and nothing was sent to the supply: stop that session with "
+            "`com_session_stop` or `debug_stop_session`, as `next_step` names it, and make the call again.",
         ),
         do_not=(
             "Do not delete the lock file, and do not retry in a loop. The hold belongs to a live process; removing it "

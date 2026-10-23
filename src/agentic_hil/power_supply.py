@@ -26,7 +26,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from decimal import Decimal, InvalidOperation
@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any
 from agentic_hil.config import ConfigError
 from agentic_hil.contracts import invalid_argument
 from agentic_hil.debugger import PowerSupplyBackend, UnboundPowerSupplyBackend, create_power_supply_backend
-from agentic_hil.devices import Device, DeviceError, PowerSupplyDevice, debugger_device, power_supply_device
+from agentic_hil.devices import Device, DeviceError, PowerSupplyDevice, debugger_device, lock_keys, power_supply_device
 from agentic_hil.knowledge import (
     permission_denied_fields,
     permission_denied_summary,
@@ -633,16 +633,31 @@ class PowerSupplyService:
 
     A call that changes the supply runs in this order: the checks that need no
     contact (arguments, grant, the owner's limits, what the type can read
-    back, the requested values against the limits), the port's USB identity,
-    the lease, the unit's own identity, the stored set points against the
-    limits before an output is switched on, the device-side protection armed at
-    the limits, and then the writes, each read back exactly. `power_supply_status`
+    back, the requested values against the limits), this server's own debug and
+    COM sessions on a board the supply powers, the port's USB identity, the
+    lease, the unit's own identity, the stored set points against the limits
+    before an output is switched on, the device-side protection armed at the
+    limits, and then the writes, each read back exactly. `power_supply_status`
     reads and never writes. Each call opens one connection and closes it, and
-    writes one report carrying the connection's transcript."""
+    writes one report carrying the connection's transcript.
 
-    def __init__(self, config: AgenticHILConfig, coordinator: HardwareCoordinator) -> None:
+    `com_sessions` and `debug_session` are how this server's own sessions are
+    seen: read-only callables returning the lock keys each open COM session
+    holds, by port id, and the lock keys the open debug session holds, empty
+    when there is none."""
+
+    def __init__(
+        self,
+        config: AgenticHILConfig,
+        coordinator: HardwareCoordinator,
+        *,
+        com_sessions: Callable[[], Mapping[str, Sequence[str]]] | None = None,
+        debug_session: Callable[[], Sequence[str]] | None = None,
+    ) -> None:
         self.config = config
         self.coordinator = coordinator
+        self.com_sessions: Callable[[], Mapping[str, Sequence[str]]] = com_sessions or (lambda: {})
+        self.debug_session: Callable[[], Sequence[str]] = debug_session or (lambda: ())
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
         self.config = config
@@ -658,6 +673,18 @@ class PowerSupplyService:
 
     def cycle(self, args: JsonObject) -> JsonObject:
         return self._call("power_supply_cycle", args)
+
+    def refuses_before_contact(self, tool: str, args: JsonObject) -> bool:
+        """Whether this call ends at a check that needs no contact, so it holds nothing.
+
+        Asked before a bare write is wrapped in a run of its own: a call refused
+        here leases nothing, and a run declared around it would only meet this
+        server's own session on a powered board as a hold that names nobody."""
+        try:
+            device = power_supply_device(self.config, str(args.get("supply_id", "")))
+        except DeviceError:
+            return True
+        return not isinstance(self._plan(tool, device, args), _Call)
 
     # -- before contact -----------------------------------------------------
 
@@ -721,7 +748,27 @@ class PowerSupplyService:
             limit = call.limits[name]
             if limit is not None and value > limit:
                 return power_supply_limit_exceeded_refusal(tool, supply_id, call.channel, name, value, limit, stored=False)
-        return call
+        return self._own_sessions(device, call) or call
+
+    def _own_sessions(self, device: PowerSupplyDevice, call: _Call) -> JsonObject | None:
+        """This server's own sessions on a board the supply powers, before the lease.
+
+        A call that changes the supply locks the supply and every board it
+        powers. A session this server keeps on one of those lock keys would meet
+        that lock as a hold that names nobody, so it is checked here, the debug
+        session first and then the COM sessions in port order, and the refusal
+        names the session and the call that ends it. Nothing reaches the supply."""
+        powered = sorted(call.supply.powers)
+        debug_keys = set(self.debug_session())
+        if debug_keys:
+            for name in powered:
+                if debug_keys & set(lock_keys([debugger_device(self.config, name)])):
+                    return power_supply_held_by_debug_session_refusal(call.tool, call.supply_id, call.channel, name)
+        keys = set(lock_keys([device, *(debugger_device(self.config, name) for name in powered)]))
+        for port_id, resources in sorted(self.com_sessions().items()):
+            if keys & set(resources):
+                return power_supply_held_by_com_session_refusal(call.tool, call.supply_id, call.channel, port_id)
+        return None
 
     def _arguments(self, call: _Call, args: JsonObject) -> JsonObject | None:
         tool = call.tool
@@ -1049,6 +1096,56 @@ def power_supply_missing_limits_refusal(tool: str, supply_id: str, channel: int,
     }
     result["summary"] = missing_limits_summary(supply_id, channel, missing)
     result["next_step"] = missing_limits_next_step(missing)
+    result.update(NOT_STARTED)
+    return result
+
+
+def power_supply_held_by_debug_session_refusal(tool: str, supply_id: str, channel: int, debugger_id: str) -> JsonObject:
+    """C3: this server's own debug session holds a debugger the supply powers; refused before contact."""
+    result: JsonObject = {
+        "ok": False,
+        "tool": tool,
+        "error_type": "device_busy",
+        "summary": (
+            f"This server's own debug session holds debugger '{debugger_id}', which power supply '{supply_id}' powers, "
+            f"so {tool} was refused before anything was sent to the supply."
+        ),
+        "supply_id": supply_id,
+        "channel": channel,
+        "held_by_debug_session": True,
+        "retry_safe": True,
+        **remediation_fields("device_busy"),
+    }
+    result["next_step"] = (
+        f"This server's own debug session holds debugger '{debugger_id}', which power supply '{supply_id}' powers, so "
+        f"{tool} was refused before contact. Stop that session with debug_stop_session and call {tool} again."
+    )
+    result.update(NOT_STARTED)
+    return result
+
+
+def power_supply_held_by_com_session_refusal(tool: str, supply_id: str, channel: int, port_id: str) -> JsonObject:
+    """C3: this server's own COM session holds a lock key of a board the supply powers; refused before contact."""
+    result: JsonObject = {
+        "ok": False,
+        "tool": tool,
+        "error_type": "device_busy",
+        "summary": (
+            f"This server's own COM session on '{port_id}' holds a lock key of the board that power supply "
+            f"'{supply_id}' powers, so {tool} was refused before anything was sent to the supply."
+        ),
+        "supply_id": supply_id,
+        "channel": channel,
+        "held_by_com_session": port_id,
+        "retry_safe": True,
+        **remediation_fields("device_busy"),
+    }
+    result["next_step"] = (
+        f"This server's own COM session on '{port_id}' holds the board that power supply '{supply_id}' powers, so "
+        f"{tool} was refused before contact. Stop that session with com_session_stop and call {tool} again. A cold "
+        "boot can be watched on a console only if the console's port shares no lock key with the debuggers this "
+        "supply powers; only the owner can change that, in the authoritative configuration. See docs/power-supplies.md."
+    )
     result.update(NOT_STARTED)
     return result
 
