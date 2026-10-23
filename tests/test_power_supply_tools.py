@@ -10,18 +10,24 @@ Product imports sit inside each test, so each node fails on its own.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 from power_supply_fakes import (
     THRESHOLD_TYPE,
+    FakeDebugger,
     call,
     dut_entry,
+    fake_inventory,
     fresh_resource,
+    fresh_serial,
+    host_port,
     install_fake_serial,
     make_bench,
     record_sleep,
+    supply_entry,
     synthetic_device,
     write_elf,
 )
@@ -449,3 +455,133 @@ def test_a_console_session_sharing_no_key_stays_open_across_the_cycle(tmp_path: 
     assert still_open
     assert sleeps == [0.5], sleeps
     assert [call[0] for call in bench.unit.writes()] == ["arm_protection", "set_output", "set_output"], bench.unit.calls
+
+
+# ---------------------------------------------------------------------------
+# The first backend (issue #735): a supply configured as `rs3005p` is driven by
+# the RS-3005P backend through the four supply tools, over a pyserial stand-in
+# that answers as the issue #730 transcription does. No port is ever opened.
+
+TRANSCRIPTION = Path(__file__).parent / "fixtures" / "rs3005p_v6_9_issue_transcription.json"
+
+
+class TranscribedSupplySerial:
+    """pyserial's `Serial` answering as the RS-3005P of the issue #730 transcription.
+
+    Each query the transcription lists is answered with its reply and a trailing
+    newline, and the identity reply carries the synthetic `idn` the test
+    configured. A setter is taken silently and changes what its query reads back,
+    which is this stand-in's assumption and not a recording."""
+
+    built: list[TranscribedSupplySerial] = []
+    idn = ""
+
+    def __init__(self) -> None:
+        import json
+
+        exchanges = json.loads(TRANSCRIPTION.read_text(encoding="utf-8"))["exchanges"]
+        self.replies = {exchange["command"].encode(): exchange["reply"].encode() + b"\n" for exchange in exchanges if "reply" in exchange}
+        status = next(exchange for exchange in exchanges if exchange["command"] == "STATUS?")
+        self.replies[b"STATUS?"] = bytes.fromhex(status["reply_raw_hex"]) + b"\n"
+        self.replies[b"*IDN?"] = f"RS-3005P V6.9 SN:{self.idn}\n".encode()
+        self.is_open = False
+        self.port: str | None = None
+        self.baudrate: int | None = None
+        self.sent: list[bytes] = []
+        self.pending = bytearray()
+        TranscribedSupplySerial.built.append(self)
+
+    def open(self) -> None:
+        self.is_open = True
+
+    def write(self, data: bytes) -> int:
+        assert self.is_open, "written before the port was opened"
+        self.sent.append(bytes(data))
+        command = bytes(data).removesuffix(b"\n")
+        for setter, query in ((b"VSET1:", b"VSET1?"), (b"ISET1:", b"ISET1?")):
+            if command.startswith(setter):
+                self.replies[query] = command[len(setter) :] + b"\n"
+                return len(data)
+        self.pending += self.replies.get(command, b"")
+        return len(data)
+
+    def read_until(self, expected: bytes = b"\n", size: int | None = None) -> bytes:
+        end = self.pending.find(expected)
+        length = len(self.pending) if end < 0 else end + len(expected)
+        reply = bytes(self.pending[:length])
+        del self.pending[:length]
+        return reply
+
+    def read(self, size: int = 1) -> bytes:
+        reply = bytes(self.pending[:size])
+        del self.pending[:size]
+        return reply
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def test_a_configured_rs3005p_supply_is_driven_by_the_rs3005p_backend_through_the_supply_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import serial
+    import yaml
+    from conftest import write_authoritative_config
+
+    from agentic_hil.config import load_authoritative_config
+    from agentic_hil.tools import AgenticHILToolService
+
+    port_serial, idn = fresh_serial(), fresh_serial()
+    device = synthetic_device()
+    port = {"device": device, "resource_id": fresh_resource(), "vid": "0416", "pid": "5011", "serial_number": port_serial}
+    workspace = (tmp_path / "workspace").resolve()
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        config_version=3,
+        com_ports_yaml=yaml.safe_dump({"com_ports": {"psu": port}}, sort_keys=False),
+        power_supplies_yaml=yaml.safe_dump({"power_supplies": {"bench": supply_entry(supply_type="rs3005p", idn_serial=idn)}}, sort_keys=False),
+    )
+    monkeypatch.chdir(workspace)
+    config = load_authoritative_config(workspace)
+    fake_inventory(monkeypatch, host_port(device, port_serial, vid=0x0416, pid=0x5011))
+    monkeypatch.setattr(TranscribedSupplySerial, "built", [])
+    monkeypatch.setattr(TranscribedSupplySerial, "idn", idn)
+    monkeypatch.setattr(serial, "Serial", TranscribedSupplySerial)
+
+    service = AgenticHILToolService(config, backend=FakeDebugger())
+    try:
+        read = service.call("power_supply_status", {"supply_id": "bench"})
+        opened_by_status = list(TranscribedSupplySerial.built)
+        written = service.call("power_supply_set", {"supply_id": "bench", "voltage_v": 5.0})
+        opened_by_set = TranscribedSupplySerial.built[len(opened_by_status) :]
+        switched = service.call("power_supply_output", {"supply_id": "bench", "on": True})
+        cycled = service.call("power_supply_cycle", {"supply_id": "bench", "off_s": 0.5})
+    finally:
+        service.close()
+
+    assert read["ok"] is True, read
+    assert (read["model"], read["firmware"]) == ("RS-3005P", "V6.9"), read
+    [channel] = read["channels"]
+    assert [Decimal(channel[key]) for key in ("set_voltage_v", "set_current_a", "measured_voltage_v", "measured_current_a")] == [
+        Decimal("24.00"),
+        Decimal("2.000"),
+        Decimal("24.00"),
+        Decimal("0.000"),
+    ], channel
+    assert channel["output_on"] is None, channel
+    (status_port,) = opened_by_status
+    assert (status_port.port, status_port.baudrate) == (device, 9600)
+    assert status_port.sent == [b"*IDN?\n", b"VSET1?\n", b"ISET1?\n", b"VOUT1?\n", b"IOUT1?\n", b"STATUS?\n"]
+    assert status_port.is_open is False
+
+    assert written["ok"] is True, written
+    (set_port,) = opened_by_set
+    assert set_port.sent[0] == b"*IDN?\n", set_port.sent
+    assert b"VSET1:5.00\n" in set_port.sent, set_port.sent
+    assert set_port.sent[set_port.sent.index(b"VSET1:5.00\n") + 1] == b"VSET1?\n", set_port.sent
+    assert not [command for command in set_port.sent if b"OVP" in command or b"OCP" in command or command.startswith(b"OUT")], set_port.sent
+    assert set_port.is_open is False
+
+    for refused in (switched, cycled):
+        assert refused["ok"] is False and refused["error_type"] == "not_supported", refused
+        assert refused["capability"] == "output_state", refused
+    assert len(TranscribedSupplySerial.built) == 2, "output switching and power cycle opened the supply's port"
