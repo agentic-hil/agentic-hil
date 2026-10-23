@@ -485,11 +485,23 @@ def validate_supply_ports(
 # ---------------------------------------------------------------------------
 # The class layer.
 
+def _rs3005p_backend(config: AgenticHILConfig, supply_id: str) -> PowerSupplyBackend:
+    """The RS-3005P backend for `power_supplies.<supply_id>`, over the port it names; nothing is opened yet.
+
+    Imported when a call needs it, so loading this module never loads the
+    backends package."""
+    from agentic_hil.backends.rs3005p import rs3005p_factory
+
+    return rs3005p_factory(config, supply_id)
+
+
 # One factory per supply type this build can drive, keyed by the type name of
 # `POWER_SUPPLY_TYPES`. A factory opens one connection to one configured supply;
 # the class layer calls it once per tool call and closes what it returns. A
 # configured type with no factory here is answered by `UnboundPowerSupplyBackend`.
-POWER_SUPPLY_BACKENDS: dict[str, Callable[[AgenticHILConfig, str], PowerSupplyBackend]] = {}
+POWER_SUPPLY_BACKENDS: dict[str, Callable[[AgenticHILConfig, str], PowerSupplyBackend]] = {
+    "rs3005p": _rs3005p_backend,
+}
 
 # The bounds of `power_supply_cycle`'s off time, in seconds. The tool schema
 # states the same two numbers, and the class layer checks them again so a
