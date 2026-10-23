@@ -359,6 +359,21 @@ def test_the_schema_puts_the_supply_entry_under_additional_properties() -> None:
         assert dash not in text
 
 
+@pytest.mark.parametrize("where", ["supply", "channel"])
+@pytest.mark.parametrize("key", ["voltage_limit_v", "current_limit_a"])
+def test_a_limit_description_says_an_absent_limit_refuses_every_write(where: str, key: str) -> None:
+    """The code refuses every write while a limit is missing and never takes one from the type's range."""
+    entry = config_schema()["properties"]["power_supplies"]["additionalProperties"]
+    if where == "channel":
+        entry = entry["properties"]["channels"]["additionalProperties"]
+    description = entry["properties"][key]["description"]
+
+    assert "only bound" not in description
+    assert "every write" in description and "refused" in description
+    assert "never stands in" in description
+    assert "the type's own range is the only bound" not in config_shape_document()
+
+
 # ---------------------------------------------------------------------------
 # Loading: limits, secrets and the refusals.
 
