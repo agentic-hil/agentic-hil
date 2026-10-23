@@ -167,6 +167,7 @@ platform = "linux"
 mypy_path = "src"
 files = [
   "src/agentic_hil/artifacts.py",
+  "src/agentic_hil/backends/rs3005p.py",
   "src/agentic_hil/bench.py",
   "src/agentic_hil/config.py",
   "src/agentic_hil/configstate.py",

@@ -109,7 +109,7 @@ def configured_limits() -> dict[str, Any]:
 
 def effective(limits: dict[str, Any], quantity: str) -> Decimal:
     """The lower of the supply's and the channel's limit; both are the owner's, and neither may be missing."""
-    key = f"{quantity}_limit"
+    key = {"voltage": "voltage_limit_v", "current": "current_limit_a"}[quantity]
     supply_limit = limits.get(key)
     channel_limit = limits.get("channels", {}).get(str(CHANNEL), {}).get(key)
     missing = [name for name, value in ((key, supply_limit), (f"channels.{CHANNEL}.{key}", channel_limit)) if value is None]
