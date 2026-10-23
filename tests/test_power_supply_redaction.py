@@ -1,21 +1,54 @@
-"""No load-time refusal of a power supply repeats a serial, an idn_serial or a port's resource id (issue #731).
+"""No supply serial leaves this process in clear (issues #731 and #732).
 
-The first twenty-three cases are the refusals of `test_power_supply_config.py`, reached
-again from the outside: `str(error)`, `to_dict()`, the stderr of `stdio.mcp_stdio`
-and the stderr of `cli.emit_protocol_error`. The last four are schema refusals at
-the fields that carry a secret. Every value is synthetic and built from uuid4.
+The first part is #731: no load-time refusal of a power supply repeats a serial,
+an idn_serial or a port's resource id. The first twenty-three cases are the
+refusals of `test_power_supply_config.py`, reached again from the outside:
+`str(error)`, `to_dict()`, the stderr of `stdio.mcp_stdio` and the stderr of
+`cli.emit_protocol_error`. The last four are schema refusals at the fields that
+carry a secret.
+
+The second part is #732: the serials of a supply, its port's `serial_number`, its
+`idn_serial` and every serial the host inventory reports for a supply's USB
+identity, are masked at every point that writes or prints a result. Only
+`agentic-hil com-ports` prints them in clear, because the owner binds a supply
+from it. Every value is synthetic and built from uuid4.
 """
 
 from __future__ import annotations
 
+import copy
+import dataclasses
+import io
 import json
+import uuid
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
+import serial
+from test_adopt_failed_com_inventory import KEY, PROBE, _stm32cubeprogrammer_host
+from test_config_adopt import placeholder_bench
+from test_contact_marker import FakePort
+from test_device_access import BY_ID_PATH, ON_THE_HOST, recorded_host
 from test_power_supply_config import REFUSALS, Refusal, Values, document, port, supply, write_bench
 
-from agentic_hil import cli, stdio
+from agentic_hil import cli, comstdio, coordination, device_access, mcp, power_supply, redact, stdio
+from agentic_hil.adopt import PROJECT_CONFIG_ADOPT
+from agentic_hil.comports import list_available_com_ports
 from agentic_hil.config import ConfigError, load_authoritative_config
+from agentic_hil.coordination import HardwareCoordinator
+from agentic_hil.report import (
+    canonical_run_report_path,
+    last_failure_path,
+    last_report_path,
+    report_state_path,
+    write_report,
+)
+from agentic_hil.runevidence import write_run_evidence
+from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.types import AgenticHILConfig, JsonObject
 
 SCHEMA_CASES: tuple[Refusal, ...] = (
     Refusal(
@@ -77,3 +110,548 @@ def test_a_load_time_refusal_never_repeats_a_supply_serial(
     for text in (str(error), json.dumps(error.to_dict()), stdio_stderr, cli_stderr):
         for secret in secrets:
             assert secret.lower() not in text.lower(), case.name
+
+
+# ---------------------------------------------------------------------------
+# #732: the serials of a supply are masked wherever a result is written or printed.
+
+MARKER = "[redacted]"
+# The USB identity of the rs3005p's serial bridge, as the inventory reports it.
+SUPPLY_VID = 0x0416
+SUPPLY_PID = 0x5011
+
+
+def fresh_serial() -> str:
+    return f"SN{uuid.uuid4().hex.upper()}"
+
+
+def supply_port_info(device: str, serial: str, *, vid: int = SUPPLY_VID, pid: int = SUPPLY_PID) -> SimpleNamespace:
+    """One entry of `list_ports.comports()`, in the attributes the inventory reads."""
+    return SimpleNamespace(
+        device=device,
+        name=device,
+        description="USB serial bridge",
+        hwid=f"USB VID:PID={vid:04X}:{pid:04X} SER={serial} LOCATION=1-4:1.0",
+        location="1-4:1.0",
+        serial_number=serial,
+        vid=vid,
+        pid=pid,
+    )
+
+
+def host_inventory(monkeypatch: pytest.MonkeyPatch, *entries: SimpleNamespace) -> None:
+    monkeypatch.setattr("serial.tools.list_ports.comports", lambda: list(entries))
+
+
+@pytest.fixture(autouse=True)
+def _no_host_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test here reads the serial ports of the machine it runs on."""
+    host_inventory(monkeypatch)
+
+
+def assert_masked(text: str, *secrets: str) -> None:
+    for secret in secrets:
+        assert secret.lower() not in text.lower()
+
+
+def files_below(root: Path) -> Iterator[tuple[Path, str]]:
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            yield path, path.read_bytes().decode("utf-8", errors="replace")
+
+
+# --- redact_values ----------------------------------------------------------
+
+
+def test_redact_values_matches_a_secret_whatever_its_case() -> None:
+    secret = fresh_serial()
+    masked = redact.redact_values({"summary": f"unit {secret.lower()} and unit {secret} answered"}, frozenset({secret}))
+    assert masked == {"summary": f"unit {MARKER} and unit {MARKER} answered"}
+
+
+@pytest.mark.parametrize(
+    ("template", "expected"),
+    [
+        ("USB VID:PID=0416:5011 SER={s} LOCATION=1-4", f"USB VID:PID=0416:5011 SER={MARKER} LOCATION=1-4"),
+        ("/dev/serial/by-id/usb-Vendor_Bridge_{s}-if00", f"/dev/serial/by-id/usb-Vendor_Bridge_{MARKER}-if00"),
+        ("SN:{s}", f"SN:{MARKER}"),
+        ("the unit '{s}' answered", f"the unit '{MARKER}' answered"),
+        ('"{s}"', f'"{MARKER}"'),
+        ("{s}", MARKER),
+    ],
+    ids=["hwid", "by_id_path", "idn_field", "single_quoted", "double_quoted", "whole_value"],
+)
+def test_redact_values_masks_a_secret_with_no_letter_or_digit_beside_it(template: str, expected: str) -> None:
+    secret = fresh_serial()
+    assert redact.redact_values({"value": template.format(s=secret)}, frozenset({secret})) == {"value": expected}
+
+
+@pytest.mark.parametrize("template", ["X{s}", "{s}0", "a{s}b", "9{s}Z"], ids=["letter_before", "digit_after", "letters_around", "digit_and_letter"])
+def test_redact_values_leaves_a_secret_inside_a_longer_word(template: str) -> None:
+    secret = fresh_serial()
+    value = {"value": template.format(s=secret)}
+    assert redact.redact_values(value, frozenset({secret})) == value
+
+
+def test_redact_values_never_alters_a_digest_that_contains_a_secret() -> None:
+    secret = uuid.uuid4().hex[:12]
+    digest = f"{uuid.uuid4().hex}{secret}{uuid.uuid4().hex}"
+    value = {"config_sha256": digest, "token": f"a{secret}0"}
+    assert redact.redact_values(value, frozenset({secret})) == value
+
+
+def test_redact_values_replaces_the_longest_secret_first() -> None:
+    short = fresh_serial()
+    long = f"{short}-01"
+    masked = redact.redact_values({"summary": f"id {long} end, id {short} end"}, frozenset({short, long}))
+    assert masked == {"summary": f"id {MARKER} end, id {MARKER} end"}
+
+
+def test_redact_values_searches_keys_and_values_at_any_depth() -> None:
+    secret = fresh_serial()
+    value = {
+        f"port {secret}": 1,
+        secret: {"serial_number": secret, "ports": [{"hwid": f"SER={secret}"}, f"SN:{secret}"]},
+        "count": 3,
+        "flag": True,
+        "nothing": None,
+        "ratio": 1.5,
+    }
+    assert redact.redact_values(value, frozenset({secret})) == {
+        f"port {MARKER}": 1,
+        MARKER: {"serial_number": MARKER, "ports": [{"hwid": f"SER={MARKER}"}, f"SN:{MARKER}"]},
+        "count": 3,
+        "flag": True,
+        "nothing": None,
+        "ratio": 1.5,
+    }
+
+
+def test_redact_values_leaves_preserved_keys_as_they_are() -> None:
+    secret = fresh_serial()
+    value = {
+        "workspace": f"/work/{secret}/firmware",
+        "resources": [f"physical:{secret}"],
+        "summary": f"unit {secret}",
+        "lease": {"workspace": f"/work/{secret}", "summary": f"unit {secret}"},
+    }
+    masked = redact.redact_values(value, frozenset({secret}), preserve_keys=("workspace", "resources"))
+    assert masked == {
+        "workspace": f"/work/{secret}/firmware",
+        "resources": [f"physical:{secret}"],
+        "summary": f"unit {MARKER}",
+        "lease": {"workspace": f"/work/{secret}", "summary": f"unit {MARKER}"},
+    }
+
+
+def test_redact_values_with_no_secret_returns_its_input_unchanged() -> None:
+    value = {"summary": f"unit {fresh_serial()}", "ports": [{"serial_number": fresh_serial()}]}
+    assert redact.redact_values(value, frozenset()) == value
+    # A blank secret is no secret: it would otherwise match every gap between words.
+    assert redact.redact_values(value, frozenset({"", "   "})) == value
+
+
+def test_redact_values_returns_a_copy_and_leaves_its_input_alone() -> None:
+    secret = fresh_serial()
+    value: JsonObject = {"summary": f"unit {secret}", "ports": [{"serial_number": secret}]}
+    before = copy.deepcopy(value)
+    masked = redact.redact_values(value, frozenset({secret}))
+    assert value == before
+    assert masked != value
+
+
+# --- supply_secrets ---------------------------------------------------------
+
+
+def test_the_host_inventory_registers_supply_serials_for_this_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    supply_serial, other_serial = fresh_serial(), fresh_serial()
+    host_inventory(monkeypatch, supply_port_info("COM251", supply_serial), supply_port_info("COM252", other_serial, vid=0x0403, pid=0x6001))
+    assert supply_serial not in power_supply.supply_secrets(None)
+
+    inventory = list_available_com_ports()
+
+    assert inventory["ok"] is True, inventory
+    # The inventory itself is the owner's reading, so it carries the serial as the host reported it.
+    assert [entry["serial_number"] for entry in inventory["ports"]] == [supply_serial, other_serial]
+    secrets = power_supply.supply_secrets(None)
+    assert supply_serial in secrets
+    assert other_serial not in secrets
+
+
+def test_an_idn_serial_read_from_a_unit_is_registered_for_this_process() -> None:
+    serial = fresh_serial()
+    power_supply.register_idn_serial(f"  {serial}  ")
+    power_supply.register_idn_serial("   ")
+    secrets = power_supply.supply_secrets(None)
+    assert serial in secrets
+    assert "" not in secrets
+
+
+def test_supply_secrets_of_a_config_are_its_port_serial_and_idn_serial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    values = Values.fresh()
+    idn_serial, uart_serial, padded = fresh_serial(), fresh_serial(), fresh_serial()
+    workspace, _ = write_bench(
+        tmp_path,
+        monkeypatch,
+        com_ports={"psu": port(values.serial, values.resource), "uart": {"device": "COM251", "serial_number": uart_serial}},
+        power_supplies={"bench": supply(idn_serial=idn_serial)},
+    )
+    config = load_authoritative_config(workspace)
+
+    secrets = power_supply.supply_secrets(config)
+
+    assert {values.serial, idn_serial} <= secrets
+    # A port no supply uses is not a supply's, and a resource_id is a lock key, never a serial.
+    assert uart_serial not in secrets
+    assert values.resource not in secrets
+    # Loading the file registered both, so a point with no config at hand knows them too.
+    assert {values.serial, idn_serial} <= power_supply.supply_secrets(None)
+
+    # Every value is stripped, and a blank one is no secret.
+    bench = dataclasses.replace(config.power_supplies["bench"], idn_serial=f"  {padded}  ")
+    psu = dataclasses.replace(config.com_ports["psu"], serial_number="   ")
+    edited = dataclasses.replace(config, power_supplies={"bench": bench}, com_ports={**config.com_ports, "psu": psu})
+    secrets = power_supply.supply_secrets(edited)
+    assert padded in secrets
+    assert f"  {padded}  " not in secrets
+    assert not any(not secret.strip() for secret in secrets)
+
+
+# --- tool results -----------------------------------------------------------
+
+
+def _com_ports_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[AgenticHILToolService, str, JsonObject, str]:
+    values = Values.fresh()
+    workspace, _ = write_bench(tmp_path, monkeypatch, **document(values))
+    host_inventory(monkeypatch, supply_port_info("COM250", values.serial))
+    return AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp"), "com_ports_list", {}, values.serial
+
+
+def _project_config_describe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[AgenticHILToolService, str, JsonObject, str]:
+    values = Values.fresh()
+    workspace, _ = write_bench(tmp_path, monkeypatch, **document(values))
+    return AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp"), "project_config_describe", {}, values.serial
+
+
+def _adopt_hardware_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[AgenticHILToolService, str, JsonObject, str]:
+    """No supply is configured: the serial is known only because the inventory reported it."""
+    serial = fresh_serial()
+    workspace, _ = placeholder_bench(tmp_path, monkeypatch)
+    _stm32cubeprogrammer_host(monkeypatch)
+    host_inventory(monkeypatch, supply_port_info("COM251", serial))
+    return AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp"), PROJECT_CONFIG_ADOPT, {"probe_id": PROBE}, serial
+
+
+TOOL_CASES: dict[str, Callable[[Path, pytest.MonkeyPatch], tuple[AgenticHILToolService, str, JsonObject, str]]] = {
+    "com_ports_list": _com_ports_list,
+    "project_config_describe": _project_config_describe,
+    "adopt_hardware_refusal": _adopt_hardware_refusal,
+}
+
+
+@pytest.mark.parametrize("case", list(TOOL_CASES))
+def test_tool_results_carry_no_supply_serial(case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, name, arguments, serial = TOOL_CASES[case](tmp_path, monkeypatch)
+    try:
+        result = tools.call(name, arguments)
+        reply = mcp.call_tool({"name": name, "arguments": arguments}, tools)
+    finally:
+        tools.close()
+
+    for text in (json.dumps(result), json.dumps(reply)):
+        assert_masked(text, serial)
+        assert MARKER in text, case
+    if case == "adopt_hardware_refusal":
+        entries = [item for item in result["unavailable"] if item.get("key") == KEY]
+        assert [entry["serial_number"] for entry in entries[0]["host_com_ports"]] == [MARKER], entries
+
+
+# --- the command line -------------------------------------------------------
+
+CLI_SINKS: dict[str, Callable[[JsonObject], object]] = {
+    "emit_result_json": lambda result: cli.emit_result(result, "doctor", human=False),
+    "emit_result_human": lambda result: cli.emit_result(result, "doctor", human=True),
+    "emit_protocol_error": lambda result: cli.emit_protocol_error(result, "mcp-stdio"),
+    "print_json": lambda result: cli.print_json(result, "doctor"),
+}
+
+
+@pytest.mark.parametrize("sink", list(CLI_SINKS))
+def test_the_cli_output_functions_mask_supply_serials(sink: str, capsys: pytest.CaptureFixture[str]) -> None:
+    serial = fresh_serial()
+    power_supply.register_secrets([serial])
+    result: JsonObject = {
+        "ok": False,
+        "tool": "agentic_hil_doctor",
+        "error_type": "config_invalid",
+        "summary": f"The unit SER={serial} did not answer.",
+        "serial_number": serial,
+    }
+
+    CLI_SINKS[sink](result)
+
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert_masked(text, serial)
+    assert MARKER in text
+
+
+def test_agentic_hil_com_ports_prints_the_supply_serial_in_clear(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """The owner binds a supply by the serial this command shows, so this one command prints it."""
+    serial = fresh_serial()
+    host_inventory(monkeypatch, supply_port_info("COM251", serial))
+
+    assert cli.entrypoint(["com-ports", "--json"]) == 0
+    printed = capsys.readouterr().out
+    inventory = json.loads(printed)
+    assert inventory["ports"][0]["serial_number"] == serial
+    assert cli.entrypoint(["com-ports"]) == 0
+    assert serial in capsys.readouterr().out
+
+    # The reading registered the serial, so every other command masks it.
+    assert serial in power_supply.supply_secrets(None)
+    cli.emit_result(inventory, "doctor", human=False)
+    assert_masked(capsys.readouterr().out, serial)
+
+
+def _doctor_by_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[list[list[str]], str]:
+    """A supply bound by its by-id link, on the recorded Linux host.
+
+    The host is the recording's own, with one link added beside the recorded
+    probe link: the supply's, which names the same recorded port node."""
+    values = Values.fresh()
+    link = f"/dev/serial/by-id/usb-Vendor_Bridge_{values.serial}-if00"
+    entry = port(values.serial, values.resource)
+    entry["device"] = link
+    write_bench(tmp_path, monkeypatch, com_ports={"psu": entry}, power_supplies={"bench": supply()})
+    host = recorded_host(tmp_path, ON_THE_HOST)
+    host.nodes[link] = {**host.nodes[BY_ID_PATH], "path": link}
+    monkeypatch.setattr(device_access, "HOST", host)
+    return [["doctor", "--json"], ["doctor"]], values.serial
+
+
+def _adopt_hardware(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[list[list[str]], str]:
+    serial = fresh_serial()
+    placeholder_bench(tmp_path, monkeypatch)
+    _stm32cubeprogrammer_host(monkeypatch)
+    host_inventory(monkeypatch, supply_port_info("COM251", serial))
+    command = ["adopt-hardware", "--probe-id", PROBE, "--dry-run"]
+    return [[*command, "--json"], command], serial
+
+
+def _init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[list[list[str]], str]:
+    serial = fresh_serial()
+    workspace = tmp_path / "firmware"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    host_inventory(monkeypatch, supply_port_info("COM251", serial))
+    return [["init", "--json"], ["init"]], serial
+
+
+CLI_CASES: dict[str, Callable[[Path, pytest.MonkeyPatch], tuple[list[list[str]], str]]] = {
+    "doctor_by_id": _doctor_by_id,
+    "adopt_hardware": _adopt_hardware,
+    "init": _init,
+}
+
+
+@pytest.mark.parametrize("case", list(CLI_CASES))
+def test_doctor_and_adopt_hardware_print_no_supply_serial(
+    case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    commands, serial = CLI_CASES[case](tmp_path, monkeypatch)
+    for argv in commands:
+        cli.entrypoint(argv)
+        captured = capsys.readouterr()
+        assert_masked(captured.out + captured.err, serial)
+        if "--json" in argv:
+            # The serial was there to print, and the document holds the marker in its place.
+            assert MARKER in json.dumps(json.loads(captured.out)), argv
+
+
+# --- what is kept on disk ---------------------------------------------------
+
+
+def _supply_bench_with_a_uart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, values: Values) -> AgenticHILConfig:
+    workspace, _ = write_bench(
+        tmp_path,
+        monkeypatch,
+        com_ports={"psu": port(values.serial, values.resource), "uart": {"device": "COM_TEST", "identity_source": "device"}},
+        power_supplies={"bench": supply()},
+        auto_recover="off",
+    )
+    return load_authoritative_config(workspace)
+
+
+def test_the_reports_of_a_run_carry_no_supply_serial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The last report, the last-failure report, report-state and the canonical run report."""
+    values = Values.fresh()
+    config = _supply_bench_with_a_uart(tmp_path, monkeypatch, values)
+    handle = f"run-{uuid.uuid4().hex}"
+
+    written = write_report(
+        config,
+        {
+            "ok": False,
+            "tool": "com_write",
+            "error_type": "hardware_action_exception",
+            "run": handle,
+            "summary": f"The adapter beside unit {values.serial} stopped answering.",
+            "backend_error": f"SER={values.serial}",
+        },
+    )
+
+    assert_masked(json.dumps(written), values.serial)
+    assert written["backend_error"] == f"SER={MARKER}"
+    for path in (last_report_path(config), last_failure_path(config), report_state_path(config), canonical_run_report_path(config, handle)):
+        text = Path(path).read_text(encoding="utf-8")
+        assert_masked(text, values.serial)
+        assert MARKER in text, path
+
+
+@pytest.mark.parametrize("error_class", [RuntimeError, OSError], ids=["runtime_error", "os_error"])
+def test_an_exception_carrying_a_supply_serial_is_masked_wherever_it_is_kept(
+    error_class: type[Exception], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`backend_error`, the reports, `errors[].summary` in the lease record, lease status, and every file of the state root."""
+    values = Values.fresh()
+    config = _supply_bench_with_a_uart(tmp_path, monkeypatch, values)
+    records: list[str] = []
+    write_record_text = coordination.atomic_write_text
+
+    def recording(path: Any, text: str, *args: Any, **kwargs: Any) -> Any:
+        records.append(text)
+        return write_record_text(path, text, *args, **kwargs)
+
+    monkeypatch.setattr(coordination, "atomic_write_text", recording)
+    # A fake handle on an open session, whose write raises: the write failure
+    # quarantines the lease with the exception, so the record keeps its text.
+    monkeypatch.setattr(serial, "Serial", lambda *args, **kwargs: FakePort().handle())
+    tools = AgenticHILToolService(config, frontend="mcp")
+    error = error_class(f"the adapter beside unit {values.serial} stopped answering")
+    try:
+        started = tools.call("com_session_start", {"port_id": "uart"})
+        assert started["ok"] is True, started
+        monkeypatch.setattr(tools.com_ports.sessions["uart"].serial_handle, "write", lambda data: (_ for _ in ()).throw(error))
+        result = tools.call("com_write", {"port_id": "uart", "text": "x"})
+        status = tools.call("hardware_lease_status", {})
+    finally:
+        tools.close()
+
+    assert result["ok"] is False, result
+    assert result["backend_error"] == f"the adapter beside unit {MARKER} stopped answering", result
+    assert_masked(json.dumps(result), values.serial)
+    assert_masked(json.dumps(status), values.serial)
+    # The lease record took the error, and took it masked.
+    summaries = [item.get("summary") for text in records for item in json.loads(text).get("errors", [])]
+    assert f"the adapter beside unit {MARKER} stopped answering" in summaries, summaries
+    for text in records:
+        assert_masked(text, values.serial)
+
+    cli.entrypoint(["lease-status", "--json"])
+    assert_masked(capsys.readouterr().out, values.serial)
+
+    for path in (last_report_path(config), last_failure_path(config), report_state_path(config)):
+        assert_masked(Path(path).read_text(encoding="utf-8"), values.serial)
+    swept = list(files_below(Path(config.state_root)))
+    assert swept
+    for path, text in swept:
+        assert values.serial.lower() not in text.lower(), path
+
+
+def test_a_lease_record_keeps_the_fields_records_are_matched_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A workspace whose path holds a serial: the record keeps it, and the next owner still recognises the project."""
+    values = Values.fresh()
+    config = _supply_bench_with_a_uart(tmp_path / values.serial, monkeypatch, values)
+    resource = "physical:uart"
+    owner = HardwareCoordinator(config, "owner-a")
+    try:
+        lease = owner.acquire(resource)
+        # The records themselves; the lock files beside them are held open while the lease stands.
+        records = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(Path(owner.record_directory).glob("*.json"))]
+        kept = [record for record in records if "workspace" in record]
+        assert kept, "no record carries the workspace"
+        for record in kept:
+            assert record["workspace"] == str(Path(config.work_dir).resolve()), record
+            assert values.serial in record["workspace"]
+        lease.release()
+    finally:
+        owner.close()
+    successor = HardwareCoordinator(config, "owner-b")
+    try:
+        successor.acquire(resource).release()
+    finally:
+        successor.close()
+
+
+def test_lease_status_masks_a_record_another_process_wrote_in_clear() -> None:
+    serial = fresh_serial()
+    power_supply.register_secrets([serial])
+    public = coordination._public_record({"state": "cleanup_required", "errors": [{"summary": f"unit {serial} stopped"}]})
+    assert public == {"state": "cleanup_required", "errors": [{"summary": f"unit {MARKER} stopped"}]}
+
+
+def test_run_evidence_carries_no_registered_supply_serial(tmp_path: Path) -> None:
+    serial = fresh_serial()
+    power_supply.register_secrets([serial])
+    report_path = tmp_path / "last-report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "ok": False,
+                "tool": "com_write",
+                "error_type": "hardware_action_exception",
+                "summary": f"The adapter beside unit {serial} stopped answering.",
+                "backend_error": f"SER={serial}",
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "evidence"
+
+    result = write_run_evidence(str(report_path), str(out), workspace=tmp_path, environ={})
+
+    assert_masked(json.dumps(result), serial)
+    written = list(files_below(out))
+    assert written
+    for path, text in written:
+        assert serial.lower() not in text.lower(), path
+
+
+def test_a_com_stdio_refusal_carries_no_supply_serial() -> None:
+    serial = fresh_serial()
+    power_supply.register_secrets([serial])
+    output = io.StringIO()
+    comstdio.write_error(output, {"ok": False, "error_type": "com_port_open_failed", "summary": f"SER={serial} is gone."})
+    assert json.loads(output.getvalue())["summary"] == f"SER={MARKER} is gone."
+
+
+def test_an_mcp_reply_carries_no_supply_serial_whatever_the_service_returned() -> None:
+    serial = fresh_serial()
+    power_supply.register_secrets([serial])
+
+    class Service:
+        config = None
+
+        def call(self, name: str, arguments: JsonObject) -> JsonObject:
+            return {"ok": True, "tool": name, "ports": [{"serial_number": serial}], "summary": f"unit {serial} listed"}
+
+    reply = mcp.call_tool({"name": "com_ports_list", "arguments": {}}, Service())  # type: ignore[arg-type]
+
+    assert_masked(json.dumps(reply), serial)
+    assert reply["structuredContent"]["ports"] == [{"serial_number": MARKER}]
+
+
+def test_the_mcp_server_start_up_refusal_carries_no_supply_serial(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    serial = fresh_serial()
+    power_supply.register_secrets([serial])
+    device = f"/dev/serial/by-id/usb-Vendor_Bridge_{serial}-if00"
+
+    def refuse(workspace: Path) -> AgenticHILConfig:
+        raise ConfigError("config_invalid", f"The port that carries {serial} is not reachable.", {"device": device})
+
+    monkeypatch.setattr(stdio, "load_authoritative_config", refuse)
+    assert stdio.mcp_stdio() == 2
+    stderr = capsys.readouterr().err
+    assert_masked(stderr, serial)
+    assert json.loads(stderr)["device"] == f"/dev/serial/by-id/usb-Vendor_Bridge_{MARKER}-if00"
