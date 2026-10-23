@@ -639,8 +639,12 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # `agentic_hil.power_supply`, the power-supply config module (#731), is the 50th;
 # `agentic_hil.backends.esptool`, the ESP32 backend, was the 49th.
 SCANNED_MODULE_COUNT = 50
-# `can_broker_disconnected`, a broker connection that ended (#664), is the 219th.
-COLLECTED_TYPE_COUNT = 219
+# The power supply tools (#733) add seven, the 220th to the 226th: the six
+# `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
+# `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
+# and `com_port_reserved_for_power_supply`. `can_broker_disconnected`, a broker
+# connection that ended (#664), was the 219th.
+COLLECTED_TYPE_COUNT = 226
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -684,7 +688,18 @@ COLLECTED_TYPE_COUNT = 219
 # refusal `reject_legacy_power_supplies`, the supply entry's `power_supply_config`,
 # the limit check `power_supply_limit`, and the supply-port checks in
 # `validate_supply_ports`. No new type is added.
-PRODUCER_COUNT = 689
+# The power supply tools (#733) add eleven, each written with a literal type.
+# Nine are in `power_supply.py`: two `permission_denied` refusals (the missing
+# limits of D8 and a switched-off permission, each built by its own function),
+# one `not_supported` (a capability the supply type cannot read), and one
+# function each for `power_supply_limit_exceeded`,
+# `power_supply_identity_unknown`, `power_supply_identity_mismatch`,
+# `power_supply_no_reply`, `power_supply_protection_not_armed` and
+# `power_supply_readback_mismatch`. `tools.unbound_power_supply_error` writes
+# `not_supported` for a supply type with no backend, and one function in
+# `comports.py` writes `com_port_reserved_for_power_supply` for both the COM
+# session and the flash capture.
+PRODUCER_COUNT = 700
 
 
 def pin_problems(inventory: Inventory) -> list[str]:

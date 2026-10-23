@@ -31,6 +31,10 @@ flash_firmware
 get_last_report
 hardware_lease_status
 hardware_recover
+power_supply_cycle
+power_supply_output
+power_supply_set
+power_supply_status
 probe_target
 project_config_adopt_hardware
 project_config_create
