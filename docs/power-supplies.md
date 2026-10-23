@@ -95,3 +95,84 @@ What a backend cannot do it raises as a typed fault naming a catalogue error typ
 
 - **`unsupported` is a value, `not_supported` the refusal.** A capability the type lacks is reported with the status value `unsupported` in `protection` and in the type's record. A tool that needs it answers with the error type `not_supported` and names the missing capability in `capability`, the same split the debugger backends use, so a host matches one error type for every capability a backend lacks.
 - **A port without a USB serial is bound by its unit serial.** The port of a supply is bound by its VID and PID, a `resource_id` no other device shares and, where the adapter publishes one, its USB serial. Where the adapter publishes none, the port check can only confirm the model of adapter, so the entry has to name `idn_serial`, and the supply's answer to the identity query is compared with it before any other command is sent. On such a port the identity query is the one command a different unit of the same model can receive.
+
+## RS-3005P
+
+Agentic HIL drives an RS-3005P bench power supply over its USB serial port, with
+the KA3005P command set at 9600 baud, 8N1 and no flow control. The type is
+`rs3005p`: one channel, with a capability range of 30 V and 5 A at a resolution
+of 0.01 V and 0.001 A. That range is the hardware bound only. The limits a bench
+runs at are the ones the owner writes into the authoritative configuration, and
+the range never stands in for them.
+
+On channel 1 it reads the set and the measured voltage and current, and it sets
+the voltage and the current limit. Every set point is written exactly as asked,
+never rounded, and read back with its own query before the write counts.
+
+### Recorded
+
+These replies were recorded on 2026-10-22 from a unit on firmware V6.9, with
+queries only, and are what the backend decodes:
+
+| Command | Reply | Read as |
+|---|---|---|
+| `*IDN?` | `RS-3005P V6.9 SN:<serial>` | model, firmware and serial |
+| `VSET1?` | `24.00` | set voltage |
+| `ISET1?` | `2.000` | set current |
+| `VOUT1?` | `24.00` | measured voltage |
+| `IOUT1?` | `0.000` | measured current |
+| `STATUS?` | one raw byte, `0x53` | kept as evidence, no meaning |
+
+A command ending in a newline is answered with a trailing newline, and the
+first reply byte arrives 13 to 44 ms after the write. Two commands written back
+to back get only the first one answered, so every command waits for the reply
+to the one before it.
+
+### Draft
+
+Not yet recorded, and used as drafts until a recording settles them:
+
+- the setter format, `VSET1:12.34` and `ISET1:1.234`, with as many places as the
+  query replies carry;
+- the setter's own reply, which is not read; the backend waits 0.1 s and reads
+  the set point back with its query;
+- the reply timeout, the entry's `timeout_s` (1 s unless the owner sets one);
+- the framing of `STATUS?`, read as one byte and an optional newline;
+- the capability range of 30 V and 5 A, taken from the datasheet and the model
+  name.
+
+### Fails closed
+
+What has not been recorded is refused rather than guessed:
+
+- **Identity.** Only an RS-3005P on firmware V6.9 is driven. Another model or
+  firmware is read and named, and nothing after `*IDN?` is sent to it.
+- **Output state, regulation and protection trips.** The meaning of the STATUS
+  byte is not recorded, so these read as `null`. Switching the output and power
+  cycling answer `not_supported` before the supply is contacted.
+- **OVP and OCP.** Both are `unsupported` and neither threshold reads back. No
+  OVP or OCP command is ever sent, and a request to arm one fails with
+  `power_supply_protection_not_armed` before contact.
+- **No reply.** A reply that does not arrive, arrives without its newline, or
+  is not a decimal number is `power_supply_no_reply`, and the result says
+  whether a set point had already been written. The conversation ends there, so
+  a late reply can never be taken as the answer to a later command.
+- **STATUS framing.** A STATUS reply longer than one byte and a newline ends the
+  conversation for the same reason.
+
+### Evidence
+
+Every exchange is kept: the command, the full reply as hex with its terminator,
+its latency and the time. The `SN:` span of an identity reply is masked with
+`*`, keeping its length, before anything is kept; a reply that does not parse as
+an identity is masked whole.
+
+### Checking it on a bench
+
+`tests/bench/test_bench_power_supply.py` drives the supply through the MCP
+server of a bench workspace, on a bench run (`AGENTIC_HIL_BENCH=1`) where
+`AGENTIC_HIL_BENCH_POWER_SUPPLY` names that workspace. It reads the status,
+sets half of the owner's effective limit (rounded down to the resolution) and
+reads it back exactly, and has a request one step above the limit refused with
+`power_supply_limit_exceeded` and nothing changed. A bench run that names no
+workspace leaves the test out and says so; a skipped run qualifies nothing.
