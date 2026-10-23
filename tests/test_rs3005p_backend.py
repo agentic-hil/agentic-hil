@@ -53,13 +53,27 @@ class FakeSupply:
     so the fake answers nothing, and the next query reads the value back as it
     was written. That read-back format is the fake's assumption, not a fact."""
 
-    def __init__(self, *, idn: bytes | None = None, status: bytes = b"\x53\n", silent: tuple[bytes, ...] = (), cut_short: dict[bytes, bytes] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        idn: bytes | None = None,
+        status: bytes = b"\x53\n",
+        silent: tuple[bytes, ...] = (),
+        cut_short: dict[bytes, bytes] | None = None,
+        write_fails: dict[bytes, BaseException] | None = None,
+        read_fails: dict[bytes, BaseException] | None = None,
+    ) -> None:
         self.answers: dict[bytes, bytes] = {name.encode(): exchange["reply"].encode() + b"\n" for name, exchange in exchanges().items() if "reply" in exchange}
         self.answers[b"STATUS?"] = status
         if idn is not None:
             self.answers[b"*IDN?"] = idn
         self.answers.update(cut_short or {})
         self.silent = set(silent)
+        # The serial line failing as pyserial fails: on writing a command, or on
+        # reading the reply to the command written last.
+        self.write_fails = dict(write_fails or {})
+        self.read_fails = dict(read_fails or {})
+        self.last_command = b""
         self.events: list[tuple[str, Any]] = []
         self.pending = bytearray()
         self.unanswered: list[bytes] = []
@@ -68,6 +82,9 @@ class FakeSupply:
 
     def write(self, data: bytes) -> int:
         self.events.append(("write", bytes(data)))
+        self.last_command = bytes(data).removesuffix(b"\n")
+        if self.last_command in self.write_fails:
+            raise self.write_fails[self.last_command]
         if self.pending:
             self.unanswered.append(bytes(data))
             return len(data)
@@ -82,6 +99,8 @@ class FakeSupply:
 
     def read_until(self, terminator: bytes = b"\n") -> bytes:
         self.now += READ_TAKES_S
+        if self.last_command in self.read_fails:
+            raise self.read_fails[self.last_command]
         end = self.pending.find(terminator)
         size = len(self.pending) if end < 0 else end + len(terminator)
         reply = bytes(self.pending[:size])
@@ -91,6 +110,8 @@ class FakeSupply:
 
     def read(self, size: int = 1) -> bytes:
         self.now += READ_TAKES_S
+        if self.last_command in self.read_fails:
+            raise self.read_fails[self.last_command]
         reply = bytes(self.pending[:size])
         del self.pending[:size]
         self.events.append(("read", reply))
@@ -355,6 +376,75 @@ def test_no_fault_is_classified_before_one_was_raised() -> None:
     supply.channel_status(1)
 
     assert supply.classify_last_error()["last_fault"] is None
+
+
+def _write_timeout() -> BaseException:
+    import serial
+
+    return serial.SerialTimeoutException("Write timeout")
+
+
+def _line_lost() -> BaseException:
+    import serial
+
+    return serial.SerialException("device reports readiness to read but returned no data (device disconnected or multiple access on port?)")
+
+
+@pytest.mark.parametrize(
+    ("failure", "step", "cause", "wrote"),
+    [
+        (lambda: {"write_fails": {b"VOUT1?": _write_timeout()}}, lambda supply: supply.channel_status(1), "write_timeout", False),
+        (lambda: {"write_fails": {b"VSET1:5.00": _write_timeout()}}, lambda supply: supply.set_voltage(1, Decimal("5.00")), "write_timeout", True),
+        (lambda: {"read_fails": {b"IOUT1?": _line_lost()}}, lambda supply: supply.channel_status(1), "serial_error", False),
+        (lambda: {"read_fails": {b"ISET1?": _line_lost()}}, lambda supply: supply.set_current(1, Decimal("0.100")), "serial_error", True),
+    ],
+    ids=["query-write-timeout", "setter-write-timeout", "query-read-fails", "read-back-read-fails"],
+)
+def test_a_serial_line_that_fails_is_no_reply_naming_its_cause_and_whether_it_wrote(failure: Any, step: Any, cause: str, wrote: bool) -> None:
+    """pyserial's own errors reach the class layer as the catalogue fault, never raw."""
+    failures = failure()
+    (error,) = [*failures.get("write_fails", {}).values(), *failures.get("read_fails", {}).values()]
+    fake = FakeSupply(**failures)
+    supply = accepted(fake)
+
+    with pytest.raises(PowerSupplyFault) as fault:
+        step(supply)
+
+    assert (fault.value.error_type, fault.value.cause, fault.value.wrote) == ("power_supply_no_reply", cause, wrote)
+    assert type(error).__name__ in fault.value.summary and str(error) in fault.value.summary, fault.value.summary
+    assert supply.classify_last_error()["last_fault"]["error_type"] == "power_supply_no_reply"
+    sent = written(fake)
+    with pytest.raises(RuntimeError):
+        supply.channel_status(1)
+    assert written(fake) == sent
+
+
+def test_a_port_that_will_not_open_is_no_reply_and_nothing_was_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    import serial
+
+    from agentic_hil.backends import rs3005p
+
+    refused = "could not open port 'psu': PermissionError(13, 'Access is denied.', None, 5)"
+
+    class RefusingSerial(FakeSerial):
+        def open(self) -> None:
+            raise serial.SerialException(refused)
+
+    monkeypatch.setattr(FakeSerial, "built", [])
+    monkeypatch.setattr(serial, "Serial", RefusingSerial)
+    supply = rs3005p.rs3005p_factory(a_config(f"psu-{uuid.uuid4().hex[:8]}"), "bench")
+
+    with pytest.raises(PowerSupplyFault) as fault:
+        supply.identity()
+
+    assert (fault.value.error_type, fault.value.cause, fault.value.wrote) == ("power_supply_no_reply", "port_open_failed", False)
+    assert refused in fault.value.summary, fault.value.summary
+    (handle,) = FakeSerial.built
+    assert handle.sent == [] and handle.is_open is False
+    with pytest.raises(RuntimeError):
+        supply.channel_status(1)
+    supply.close()
+    assert handle.sent == []
 
 
 # -- what is never sent ------------------------------------------------------

@@ -588,3 +588,120 @@ def test_a_configured_rs3005p_supply_is_driven_by_the_rs3005p_backend_through_th
         assert refused["ok"] is False and refused["error_type"] == "not_supported", refused
         assert refused["capability"] == "output_state", refused
     assert len(TranscribedSupplySerial.built) == 2, "output switching and power cycle opened the supply's port"
+
+
+# The serial line failing under the RS-3005P backend, as pyserial fails.
+
+OPEN_REFUSED = "could not open port 'psu': PermissionError(13, 'Access is denied.', None, 5)"
+LINE_LOST = "device reports readiness to read but returned no data (device disconnected or multiple access on port?)"
+
+
+class PortRefusedSerial(TranscribedSupplySerial):
+    """A port another program holds: pyserial's open raises."""
+
+    def open(self) -> None:
+        import serial
+
+        raise serial.SerialException(OPEN_REFUSED)
+
+
+class LineLostSerial(TranscribedSupplySerial):
+    """A line that drops while the measured voltage is read."""
+
+    def read_until(self, expected: bytes = b"\n", size: int | None = None) -> bytes:
+        import serial
+
+        if self.sent and self.sent[-1] == b"VOUT1?\n":
+            raise serial.SerialException(LINE_LOST)
+        return super().read_until(expected, size)
+
+
+class SetterTimeoutSerial(TranscribedSupplySerial):
+    """A setter whose write times out: some of it may have reached the supply."""
+
+    def write(self, data: bytes) -> int:
+        import serial
+
+        if bytes(data).startswith(b"VSET1:"):
+            self.sent.append(bytes(data))
+            raise serial.SerialTimeoutException("Write timeout")
+        return super().write(data)
+
+
+def rs3005p_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, serial_class: type) -> Any:
+    """A tool service over a configured rs3005p supply whose port is `serial_class`."""
+    import serial
+    import yaml
+    from conftest import write_authoritative_config
+
+    from agentic_hil.config import load_authoritative_config
+    from agentic_hil.tools import AgenticHILToolService
+
+    port_serial, idn = fresh_serial(), fresh_serial()
+    device = synthetic_device()
+    port = {"device": device, "resource_id": fresh_resource(), "vid": "0416", "pid": "5011", "serial_number": port_serial}
+    workspace = (tmp_path / "workspace").resolve()
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        config_version=3,
+        com_ports_yaml=yaml.safe_dump({"com_ports": {"psu": port}}, sort_keys=False),
+        power_supplies_yaml=yaml.safe_dump({"power_supplies": {"bench": supply_entry(supply_type="rs3005p", idn_serial=idn)}}, sort_keys=False),
+    )
+    monkeypatch.chdir(workspace)
+    config = load_authoritative_config(workspace)
+    fake_inventory(monkeypatch, host_port(device, port_serial, vid=0x0416, pid=0x5011))
+    monkeypatch.setattr(TranscribedSupplySerial, "built", [])
+    monkeypatch.setattr(TranscribedSupplySerial, "idn", idn)
+    monkeypatch.setattr(serial, "Serial", serial_class)
+    return AgenticHILToolService(config, backend=FakeDebugger())
+
+
+@pytest.mark.parametrize(
+    ("serial_class", "cause", "line"),
+    [(PortRefusedSerial, "port_open_failed", OPEN_REFUSED), (LineLostSerial, "serial_error", LINE_LOST)],
+    ids=["port-refused", "line-lost"],
+)
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [("power_supply_status", {}), ("power_supply_set", {"voltage_v": 5.0, "current_a": 0.5})],
+    ids=["status", "set"],
+)
+def test_a_serial_failure_before_any_write_is_a_plain_failure_naming_its_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, serial_class: type, cause: str, line: str, name: str, arguments: dict[str, Any]
+) -> None:
+    from agentic_hil.report import read_last_report
+
+    service = rs3005p_service(tmp_path, monkeypatch, serial_class)
+    try:
+        result = service.call(name, {"supply_id": "bench", **arguments})
+        lease = service.call("hardware_lease_status", {})
+    finally:
+        service.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "power_supply_no_reply", result
+    assert result["cause"] == cause, result
+    assert line in result["backend_error"], result
+    assert result["retry_safe"] is True and result["side_effect_status"] == "not_started", result
+    assert "power_supply_state_unconfirmed" not in (result.get("cleanup_reasons") or []), result
+    assert result.get("quarantined") is not True and lease["blocked"] is False, (result, lease)
+    assert "last_known_output" in result, result
+    assert read_last_report(service.config)["error_type"] == "power_supply_no_reply"
+    assert not [sent for port in TranscribedSupplySerial.built for sent in port.sent if b":" in sent], "a setter was sent"
+
+
+def test_a_setter_whose_write_times_out_leaves_the_supply_unconfirmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = rs3005p_service(tmp_path, monkeypatch, SetterTimeoutSerial)
+    try:
+        result = service.call("power_supply_set", {"supply_id": "bench", "voltage_v": 5.0, "current_a": 0.5})
+    finally:
+        service.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "power_supply_no_reply", result
+    assert any(entry.get("reason") == "power_supply_state_unconfirmed" for entry in result.get("quarantine_guidance") or []), result
+    assert result["cause"] == "write_timeout", result
+    assert "Write timeout" in result["backend_error"], result
+    assert result["retry_safe"] is False, result
+    assert "power_supply_state_unconfirmed" in (result.get("cleanup_reasons") or []), result

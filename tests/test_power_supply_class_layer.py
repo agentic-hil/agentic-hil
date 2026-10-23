@@ -544,6 +544,79 @@ def test_no_reply_to_identity_is_not_quarantined(tmp_path: Path, monkeypatch: py
     assert_last_known_output(result)
 
 
+# A serial line that fails: the port will not open, a write times out, the line
+# drops. The backend says so as a fault naming the cause; a pyserial exception
+# that escapes a backend anyway is held to the same rule.
+
+PORT_REFUSED = "could not open port 'psu': PermissionError(13, 'Access is denied.', None, 5)"
+
+
+def port_refused_fault() -> BaseException:
+    from agentic_hil.types import PowerSupplyFault
+
+    return PowerSupplyFault("power_supply_no_reply", f"The fake supply's port could not be opened: SerialException: {PORT_REFUSED}", wrote=False, cause="port_open_failed")
+
+
+def raw_serial_exception() -> BaseException:
+    import serial
+
+    return serial.SerialException(PORT_REFUSED)
+
+
+@pytest.mark.parametrize(
+    ("fault", "cause"),
+    [pytest.param(port_refused_fault, "port_open_failed", id="backend-fault"), pytest.param(raw_serial_exception, "serial_error", id="raw-serial-exception")],
+)
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        pytest.param("power_supply_status", {}, id="status"),
+        pytest.param("power_supply_set", {"voltage_v": 5.0}, id="set"),
+        pytest.param("power_supply_output", {"on": True}, id="output"),
+    ],
+)
+def test_a_serial_line_that_fails_before_any_write_is_a_plain_failure_naming_its_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: Any, cause: str, tool: str, arguments: dict[str, Any]
+) -> None:
+    from agentic_hil.report import read_last_report
+
+    bench = make_bench(tmp_path, monkeypatch, unit_changes={"raises": {"identity": fault()}})
+    service = bench.service()
+    try:
+        result = call(bench, tool, {"supply_id": SUPPLY, **arguments}, service=service)
+        lease = service.call("hardware_lease_status", {})
+    finally:
+        service.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "power_supply_no_reply", result
+    assert result["cause"] == cause, result
+    assert PORT_REFUSED in result["backend_error"], result
+    assert result["retry_safe"] is True, result
+    assert result.get("side_effect_status", "not_started") == "not_started", result
+    assert_not_quarantined(result)
+    assert lease["blocked"] is False, lease
+    assert_last_known_output(result)
+    assert bench.unit.writes() == [], bench.unit.calls
+    assert read_last_report(bench.config)["error_type"] == "power_supply_no_reply"
+
+
+def test_a_serial_exception_after_a_write_leaves_the_supply_unconfirmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import serial
+
+    bench = make_bench(tmp_path, monkeypatch, unit_changes={"raises": {"set_voltage": serial.SerialException("write failed: [Errno 5] Input/output error")}})
+
+    result = set_points(bench, voltage_v=5.0)
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "power_supply_no_reply", result
+    assert result["cause"] == "serial_error", result
+    assert "Input/output error" in result["backend_error"], result
+    assert result["retry_safe"] is False, result
+    assert_quarantined(result)
+    assert_last_known_output(result)
+
+
 # ---------------------------------------------------------------------------
 # Identity (C4).
 
