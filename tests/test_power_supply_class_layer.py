@@ -253,6 +253,32 @@ def test_an_invalid_set_point_is_refused_without_rounding(tmp_path: Path, monkey
     assert bench.unit.connections == 0
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        pytest.param("voltage_v", 1e30, id="voltage_1e30"),
+        pytest.param("voltage_v", 1e26, id="voltage_1e26"),
+        pytest.param("current_a", 1e26, id="current_1e26"),
+        pytest.param("voltage_v", 10**40, id="voltage_integer_1e40"),
+    ],
+)
+def test_a_set_point_too_large_to_check_is_refused_naming_the_argument(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, value: float) -> None:
+    """Far above any range, its step cannot even be checked; it is refused before contact, not raised."""
+    bench = make_bench(tmp_path, monkeypatch)
+    service = bench.service()
+    try:
+        result = call(bench, "power_supply_set", {"supply_id": SUPPLY, name: value}, service=service)
+        again = call(bench, "power_supply_status", {"supply_id": SUPPLY}, service=service)
+    finally:
+        service.close()
+
+    assert result["ok"] is False and result["error_type"] == "invalid_argument", result
+    assert result["field"] == name and f"`{name}`" in result["summary"], result
+    assert result.get("cleanup_reasons") in (None, []), result
+    assert bench.unit.writes() == [], bench.unit.calls
+    assert again["ok"] is True, again
+
+
 def test_a_stored_set_point_above_the_limit_blocks_output_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bench = make_bench(tmp_path, monkeypatch)
     # The supply was left at 24 V by hand, as the recording in #730 shows a unit can be.
