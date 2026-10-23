@@ -30,10 +30,16 @@ that the pattern is anchored at the end of the key and ``authkey`` does not end
 in ``key``-as-a-word (``token|secret|...`` never matched it), so the arm is
 explicit rather than a widening of the existing one, which would also have
 started redacting ``resource_key``-shaped fields that are not credentials.
+
+``redact_values`` is the third measure, for secrets known by value rather than by
+key: the serials of a bench power supply. Its callers hand it the set
+(``power_supply.supply_secrets``) at every point that writes or prints a result.
 """
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
+from functools import lru_cache
 from typing import Any, overload
 
 _REDACTION_MARKER = "[redacted]"
@@ -267,6 +273,66 @@ def _redact_stream_member(value: object) -> object:
     if isinstance(value, list):
         return [_redact_stream_member(item) for item in value]
     return redact_sensitive(value)
+
+
+# ---------------------------------------------------------------------------
+# Known values, masked wherever they occur.
+#
+# A key name says nothing about a serial that names one physical unit: it turns
+# up in a summary, in a `hwid` as `SER=<serial>`, in a by-id path as
+# `_<serial>-if00` and in a backend's error line. So this pass is handed the
+# values themselves and searches every key and every string for them. An
+# occurrence is masked only where no ASCII letter or digit sits directly beside
+# it, which keeps a digest or a token that merely contains the same characters
+# intact.
+
+_WORD_CHARACTER = "A-Za-z0-9"
+
+
+@lru_cache(maxsize=64)
+def _secrets_pattern(secrets: frozenset[object]) -> re.Pattern[str] | None:
+    texts = sorted({item.strip() for item in secrets if isinstance(item, str) and item.strip()}, key=lambda text: (-len(text), text))
+    if not texts:
+        return None
+    # Longest first, so a secret that extends another is masked whole rather
+    # than leaving its tail behind the shorter one's marker.
+    alternatives = "|".join(re.escape(text) for text in texts)
+    return re.compile(f"(?<![{_WORD_CHARACTER}])(?:{alternatives})(?![{_WORD_CHARACTER}])", re.IGNORECASE)
+
+
+@overload
+def redact_values(value: dict[str, Any], secrets: Iterable[str], *, preserve_keys: Iterable[str] = ()) -> dict[str, Any]: ...
+
+
+@overload
+def redact_values(value: object, secrets: Iterable[str], *, preserve_keys: Iterable[str] = ()) -> object: ...
+
+
+def redact_values(value: object, secrets: Iterable[str], *, preserve_keys: Iterable[str] = ()) -> object:
+    """A copy of ``value`` with every occurrence of a secret replaced by the marker.
+
+    Every dict key and every string value is searched, at any depth, without
+    regard to case. A member whose key is in ``preserve_keys`` keeps its value
+    as it is. With no secret, or only blank ones, ``value`` comes back unchanged."""
+    pattern = _secrets_pattern(frozenset(secrets))
+    if pattern is None:
+        return value
+    return _mask_values(value, pattern, frozenset(preserve_keys))
+
+
+def _mask_values(value: object, pattern: re.Pattern[str], preserve: frozenset[str]) -> object:
+    if isinstance(value, str):
+        return pattern.sub(_REDACTION_MARKER, value)
+    if isinstance(value, dict):
+        return {
+            (pattern.sub(_REDACTION_MARKER, key) if isinstance(key, str) else key): (item if key in preserve else _mask_values(item, pattern, preserve))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_mask_values(item, pattern, preserve) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_mask_values(item, pattern, preserve) for item in value)
+    return value
 
 
 def filesystem_error_detail(error: BaseException) -> dict:

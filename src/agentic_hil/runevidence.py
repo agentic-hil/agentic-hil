@@ -85,7 +85,8 @@ from agentic_hil import __version__
 from agentic_hil.config import ConfigError, to_posix
 from agentic_hil.junit import run_refusal
 from agentic_hil.knowledge import REDACTION_UNAVAILABLE_ERROR
-from agentic_hil.redact import redact_sensitive, redact_stream_text
+from agentic_hil.power_supply import supply_secrets
+from agentic_hil.redact import redact_sensitive, redact_stream_text, redact_values
 from agentic_hil.report import overall_success
 from agentic_hil.test_reactor import (
     TEST_CONFIG_SHA256_KEY,
@@ -184,7 +185,9 @@ def write_run_evidence(report_path: str, out_dir: str, *, workspace: str | Path 
     redacted = redact_sensitive(_read_report(report_path))
     if not isinstance(redacted, dict):
         return _redaction_refusal(Path(out_dir).expanduser(), environment)
-    report = redacted
+    # Every supply serial this process has registered is masked too, so a
+    # serial a run reported reaches neither the summary nor the bundle.
+    report = redact_values(redacted, supply_secrets(None))
     excluded = excluded_values(report, root)
     plan = _plan_of(report, root)
     summary = run_summary(report, root, environment, plan=plan, excluded=excluded)

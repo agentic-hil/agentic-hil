@@ -86,6 +86,11 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
         # directory listing whose answer is the same for every port in it.
         stable_names = serial_by_id_links()
         ports = [available_port_info(port, stable_names) for port in list_ports.comports()]
+        # A supply's serial is a secret from the moment the host reports it, so it
+        # is registered before this reading reaches any output that masks it.
+        from agentic_hil.power_supply import register_inventory_serials
+
+        register_inventory_serials(ports)
         return {"ok": True, "tool": tool, "ports": ports, "summary": f"{len(ports)} available COM port(s)."}
     except OSError as error:
         return {

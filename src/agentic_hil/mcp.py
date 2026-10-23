@@ -11,7 +11,8 @@ from agentic_hil.contracts import invalid_argument
 from agentic_hil.knowledge import ERROR_CATALOGUE, ERROR_URI_PREFIX, read_resource, remediation_fields
 from agentic_hil.knowledge import MCP_RESOURCE_TEMPLATES as MCP_RESOURCE_TEMPLATES
 from agentic_hil.knowledge import MCP_RESOURCES as MCP_RESOURCES
-from agentic_hil.redact import redact_sensitive, redact_stream_text
+from agentic_hil.power_supply import supply_secrets
+from agentic_hil.redact import redact_sensitive, redact_stream_text, redact_values
 from agentic_hil.report import conclusive_success
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 from agentic_hil.types import JsonObject
@@ -395,8 +396,10 @@ def call_tool(params: Any, tools: AgenticHILToolService) -> JsonObject:
     # Defense-in-depth: strip any secret-named field before the result is
     # serialized into the MCP content text and structuredContent. isError is
     # computed from the raw result (redaction touches no success field), with
-    # the same verdict the command line's exit status takes.
-    safe_result = redact_sensitive(result)
+    # the same verdict the command line's exit status takes. A supply serial is
+    # masked here too, whatever service answered: one with no configuration of
+    # its own still masks every serial this process has registered.
+    safe_result = redact_values(redact_sensitive(result), supply_secrets(getattr(tools, "config", None)))
     return {"content": [{"type": "text", "text": tool_result_text(safe_result, sent)}], "structuredContent": safe_result, "isError": not conclusive_success(result)}
 
 

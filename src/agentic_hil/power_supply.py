@@ -24,6 +24,7 @@ from typing import Any
 from agentic_hil.config import ConfigError
 from agentic_hil.types import (
     READ_FREE_CONFIG_VERSION,
+    AgenticHILConfig,
     CanBusConfig,
     ComPortConfig,
     DebuggerConfig,
@@ -174,6 +175,52 @@ def registered_config_secrets() -> frozenset[str]:
     """Every supply serial this process has registered so far."""
     with _SECRETS_LOCK:
         return frozenset(_CONFIG_SECRETS)
+
+
+def supply_usb_ids() -> frozenset[tuple[int, int]]:
+    """The (vid, pid) pairs a supply model this release knows enumerates as."""
+    return frozenset((vid, pid) for record in POWER_SUPPLY_TYPES.values() for vid, pid in record["usb_ids"])
+
+
+def register_inventory_serials(ports: Iterable[object]) -> None:
+    """Register the serial of every inventory entry whose USB identity is a supply's.
+
+    Called with the host inventory before it is returned, so a serial the host
+    reported for a supply's serial bridge is masked wherever it is printed later,
+    whether or not any configuration names that unit yet."""
+    known = supply_usb_ids()
+    serials: list[object] = []
+    for entry in ports:
+        if not isinstance(entry, Mapping):
+            continue
+        vid, pid = entry.get("vid"), entry.get("pid")
+        if isinstance(vid, int) and not isinstance(vid, bool) and isinstance(pid, int) and not isinstance(pid, bool) and (vid, pid) in known:
+            serials.append(entry.get("serial_number"))
+    register_secrets(serials)
+
+
+def register_idn_serial(serial: object) -> None:
+    """Register the serial a unit reported in its `*IDN?` answer."""
+    register_secrets([serial])
+
+
+def supply_secrets(config: AgenticHILConfig | None) -> frozenset[str]:
+    """Every supply serial an output must not carry in clear.
+
+    The `serial_number` of each supply's port and each `idn_serial` of `config`,
+    and every serial this process has registered: those of each configuration it
+    loaded, those the host inventory reported for a supply's USB identity, and
+    those a unit reported in its `*IDN?` answer. Every value is stripped, and a
+    blank one is no secret."""
+    found = set(registered_config_secrets())
+    if config is not None:
+        supplies = getattr(config, "power_supplies", None) or {}
+        com_ports = getattr(config, "com_ports", None) or {}
+        for value in supply_config_secrets(supplies, com_ports).values():
+            text = secret_text(value)
+            if text is not None:
+                found.add(text)
+    return frozenset(found)
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +464,8 @@ __all__ = [
     "power_supply_config",
     "power_supply_limit",
     "register_config_secrets",
+    "register_idn_serial",
+    "register_inventory_serials",
     "register_secrets",
     "registered_config_secrets",
     "reject_legacy_power_supplies",
@@ -424,5 +473,7 @@ __all__ = [
     "secret_text",
     "supply_config_secrets",
     "supply_port_names",
+    "supply_secrets",
+    "supply_usb_ids",
     "validate_supply_ports",
 ]

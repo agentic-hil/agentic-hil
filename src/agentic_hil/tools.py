@@ -103,8 +103,10 @@ from agentic_hil.knowledge import (
     recovery_operator_command,
     remediation_fields,
 )
+from agentic_hil.power_supply import supply_secrets
 from agentic_hil.process import cleanup_registered_processes, managed_process_owner
 from agentic_hil.provisional import cleanup_provisional_handles
+from agentic_hil.redact import redact_values
 from agentic_hil.report import (
     CONTACT_MARKER_KEY,
     CONTACT_MARKER_SOURCE_KEY,
@@ -742,9 +744,12 @@ class AgenticHILToolService:
             if name in debugger_tools():
                 result = attach_debugger_remediation(result)
             result = attach_quarantine_guidance(result)
+            # A supply serial leaves no tool result in clear, whichever subsystem
+            # or exception put it there. Masked last, so nothing attached above
+            # carries one past this point.
             if "config_status" in result:
-                return result
-            return with_config_status(result, config_status(self.config), prominent=name in prominent_config_status_tools())
+                return redact_values(result, supply_secrets(self.config))
+            return redact_values(with_config_status(result, config_status(self.config), prominent=name in prominent_config_status_tools()), supply_secrets(self.config))
 
     def _name_the_session_holding_the_port(self, name: str, result: JsonObject) -> JsonObject:
         """Name this server's own COM session where it is what refused an esptool call.
