@@ -58,6 +58,24 @@
         }
       },
       "default": {}
+    },
+    "power_supply_permissions": {
+      "type": "object",
+      "description": "What this bench power supply may do beyond reading it. Scoped to this supply alone. A flag the file does not name is false, and no generated configuration writes a supply, so only the owner of this file grants either one.",
+      "additionalProperties": false,
+      "properties": {
+        "allow_set": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether a call may set this supply's voltage and current, inside the limits this entry states."
+        },
+        "allow_output": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether a call may switch this supply's output on or off."
+        }
+      },
+      "default": {}
     }
   },
   "required": [
@@ -683,6 +701,88 @@
             }
           }
         ]
+      },
+      "default": {}
+    },
+    "power_supplies": {
+      "type": "object",
+      "description": "Named bench power supplies, each reached through a configured COM port that it holds for itself. Read from version 2 on. The limits and both grants belong to the owner of this file: they are written here by hand, no tool writes them, and a running server adopts a changed supply, a lowered limit included, only when it restarts.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "com_port",
+          "powers"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "The supply model, one of the types this release can drive, such as rs3005p."
+          },
+          "com_port": {
+            "type": "string",
+            "description": "The com_ports entry this supply is reached through. That entry has to name its device, resource_id, vid and pid, its resource_id may not contain a serial, and no other entry may use the port."
+          },
+          "powers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The debuggers whose boards this supply powers, named as they are named under debuggers."
+          },
+          "voltage_limit_v": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "The highest voltage in volts a call may set on any channel of this supply. It has to lie inside the range of the supply type and be a whole number of the type's steps; a value outside either refuses the whole file, it is never rounded. Absent, the type's own range is the only bound."
+          },
+          "current_limit_a": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "The highest current in amperes a call may set on any channel of this supply. It has to lie inside the range of the supply type and be a whole number of the type's steps; a value outside either refuses the whole file, it is never rounded. Absent, the type's own range is the only bound."
+          },
+          "channels": {
+            "type": "object",
+            "description": "Limits for single output channels, keyed by the channel number from 1. A channel's limit applies together with the supply-wide one.",
+            "propertyNames": {
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "voltage_limit_v": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "The highest voltage in volts a call may set on this channel. It has to lie inside the range of the supply type and be a whole number of the type's steps; a value outside either refuses the whole file, it is never rounded. Absent, the type's own range is the only bound."
+                },
+                "current_limit_a": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "The highest current in amperes a call may set on this channel. It has to lie inside the range of the supply type and be a whole number of the type's steps; a value outside either refuses the whole file, it is never rounded. Absent, the type's own range is the only bound."
+                }
+              }
+            },
+            "default": {}
+          },
+          "idn_serial": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.:-]+$",
+            "description": "The serial the supply reports for itself. Required when the port names no serial_number, so this unit is told apart from another unit of the same model. Like every serial of a supply, it is kept out of every refusal and report."
+          },
+          "timeout_s": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 1.0,
+            "description": "How long one exchange with the supply may take, in seconds. The default is provisional until the reply time of a unit has been measured."
+          },
+          "permissions": {
+            "$ref": "#/$defs/power_supply_permissions"
+          }
+        }
       },
       "default": {}
     },

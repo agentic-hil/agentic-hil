@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Literal
 
 JsonObject = dict[str, Any]
@@ -507,6 +508,52 @@ class CanBusConfig:
 
 
 @dataclass(frozen=True)
+class PowerSupplyPermissions:
+    """What one configured bench power supply may be told to do.
+
+    ``allow_set`` covers set points; ``allow_output`` covers switching the output
+    and cycling it. A flag a file does not name is false, so a supply entry grants
+    nothing until its owner writes the grant down."""
+
+    allow_set: bool = False
+    allow_output: bool = False
+
+
+@dataclass(frozen=True)
+class PowerSupplyChannelConfig:
+    """The owner's limits for one output channel. ``None`` is a limit nobody wrote.
+
+    Exact decimals, never floats: a limit is compared against a set point to the
+    supply's own resolution, and a float cannot hold 0.1 exactly."""
+
+    voltage_limit_v: Decimal | None = None
+    current_limit_a: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class PowerSupplyConfig:
+    """One bench power supply: which model it is, how it is reached, what it powers.
+
+    ``com_port`` names the ``com_ports`` entry the supply is wired to, and that
+    entry is reserved for it. ``powers`` names the debuggers whose boards this
+    supply feeds. The supply-wide limits and each channel's limits are the owner's,
+    written by hand; the effective limit of a channel is the lower of the two."""
+
+    type: str
+    com_port: str
+    powers: tuple[str, ...]
+    voltage_limit_v: Decimal | None = None
+    current_limit_a: Decimal | None = None
+    channels: dict[int, PowerSupplyChannelConfig] = field(default_factory=dict)
+    # The serial the supply reports in its identity reply. Required where the port
+    # entry has no `serial_number`, because it is then the only thing that tells
+    # one unit of the model from another.
+    idn_serial: str | None = None
+    timeout_s: float = 1.0
+    permissions: PowerSupplyPermissions = field(default_factory=PowerSupplyPermissions)
+
+
+@dataclass(frozen=True)
 class ValidationConfig:
     require_existing_file: bool
     require_allowed_root: bool
@@ -606,6 +653,9 @@ class AgenticHILConfig:
     # `loaded_at` stays the startup parse, because that is when the permissions
     # were taken and they are never taken again.
     description_reloaded_at: str = ""
+    # The bench power supplies. Only a restart adopts this section: a description
+    # reload carries the supplies parsed at startup over unchanged.
+    power_supplies: dict[str, PowerSupplyConfig] = field(default_factory=dict)
 
     @property
     def read_free(self) -> bool:

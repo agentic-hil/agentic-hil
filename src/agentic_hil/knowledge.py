@@ -8130,6 +8130,11 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     ConfigKeyRule("debuggers", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
     ConfigKeyRule("com_ports", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
     ConfigKeyRule("can_buses", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
+    # A bench supply's two grants, and nothing else of the entry. Its limits, its
+    # port, its serial and the boards it powers are the owner's and are written in
+    # the file by hand: no rule names them, so no call can set one, and a
+    # description reload never re-reads the section.
+    ConfigKeyRule("power_supplies", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
     # And the two grants the schema puts directly on a fixed section instead of
     # inside a `permissions` block. A generation writes both true like every
     # other permission, so leaving them out of the key model left two things a
@@ -8142,7 +8147,7 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
 )
 
 # Sections whose entries are named by the operator and may be added.
-CONFIG_NAMED_SECTIONS = ("debuggers", "com_ports", "can_buses")
+CONFIG_NAMED_SECTIONS = ("debuggers", "com_ports", "can_buses", "power_supplies")
 
 
 @dataclass(frozen=True)
@@ -8341,6 +8346,13 @@ _SECTION_PURPOSE: dict[str, str] = {
         "kernel's control mode because only `ip link` can set it, and `process` requires the bridge to confirm it. An "
         "adapter that cannot be held to it refuses the session instead of listening anyway. `can_buses_list` reports "
         "`listen_only_enforcement` per bus."
+    ),
+    "power_supplies": (
+        "The bench power supplies. Each entry names its model as `type`, the `com_ports` entry it is reached through "
+        "as `com_port`, which no other entry may then use, and the debuggers whose boards it powers as `powers`. The "
+        "voltage and current limits, the serial and both grants (`allow_set`, `allow_output`) belong to the owner of "
+        "this file: they are written here by hand, `project_config_set` can only take a grant away, and a running "
+        "server adopts a changed supply, a lowered limit included, only when it restarts. Read from `version: 2` on."
     ),
     "validation": "How strictly a firmware artifact is checked before it is accepted.",
     "reports": "Where structured reports are written, relative to `state_root`.",
