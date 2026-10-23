@@ -14,7 +14,17 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from power_supply_fakes import THRESHOLD_TYPE, call, make_bench
+from power_supply_fakes import (
+    THRESHOLD_TYPE,
+    call,
+    dut_entry,
+    fresh_resource,
+    install_fake_serial,
+    make_bench,
+    record_sleep,
+    synthetic_device,
+    write_elf,
+)
 
 SUPPLY_TOOLS = ("power_supply_status", "power_supply_set", "power_supply_output", "power_supply_cycle")
 WRITE_TOOLS = ("power_supply_set", "power_supply_output", "power_supply_cycle")
@@ -313,3 +323,129 @@ def test_the_unbound_refusal_is_not_supported_and_not_retry_safe(tmp_path: Path,
     assert refusal["supply_type"] == THRESHOLD_TYPE, refusal
     assert THRESHOLD_TYPE in refusal["summary"], refusal
     assert refusal["remediation"] == remediation_fields("not_supported", "unbound_power_supply")["remediation"], refusal
+
+
+# ---------------------------------------------------------------------------
+# This server's own sessions on a board the supply powers (issue #734).
+#
+# A call that changes the supply locks every board it powers, so a session this
+# server keeps on one of those boards would collide with it at the lease and
+# answer as a hold nobody named. These are checked before the lease, and before
+# anything reaches the supply: the refusal names the session and the call that
+# frees it.
+
+
+def _session_next_step(port_id: str, supply_id: str, tool: str) -> str:
+    return (
+        f"This server's own COM session on '{port_id}' holds the board that power supply '{supply_id}' powers, so "
+        f"{tool} was refused before contact. Stop that session with com_session_stop and call {tool} again. A cold "
+        "boot can be watched on a console only if the console's port shares no lock key with the debuggers this "
+        "supply powers; only the owner can change that, in the authoritative configuration. See docs/power-supplies.md."
+    )
+
+
+def _cold_boot_order() -> list[str]:
+    """The tool calls docs/power-supplies.md gives for watching a cold boot, in the order it gives them."""
+    import re
+
+    document = (Path(__file__).resolve().parents[1] / "docs" / "power-supplies.md").read_text(encoding="utf-8")
+    assert "\n## Watching a cold boot\n" in document, "docs/power-supplies.md has no `## Watching a cold boot` section"
+    section = document.split("\n## Watching a cold boot\n", 1)[1].split("\n## ", 1)[0]
+    steps = [line for line in section.splitlines() if re.match(r"\d+\. ", line)]
+    return [re.findall(r"`([a-z_]+)`", step)[0] for step in steps]
+
+
+def test_an_open_debug_session_on_a_powered_debugger_refuses_with_held_by_debug_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.knowledge import remediation_fields
+
+    bench = make_bench(tmp_path, monkeypatch)
+    write_elf(bench.workspace)
+    service = bench.service()
+    try:
+        started = service.call("debug_start_session", {"image_path": "build/app.elf"})
+        assert started["ok"] is True, started
+        result = service.call("power_supply_set", {"supply_id": bench.supply_id, "voltage_v": 3.3})
+    finally:
+        service.call("debug_stop_session", {})
+        service.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "device_busy", result
+    assert result["held_by_debug_session"] is True, result
+    assert result["side_effect_status"] == "not_started", result
+    assert result["hardware_state"] == "unchanged", result
+    assert result["last_known_output"]["output_on"] is None, result
+    assert result["remediation"] == remediation_fields("device_busy")["remediation"], result
+    assert "debug_stop_session" in result["next_step"], result
+    # Not even the identity query reached the supply.
+    assert bench.unit.calls == [], bench.unit.calls
+
+
+def test_this_servers_com_session_on_a_powered_boards_key_refuses_the_cycle_until_it_stops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.knowledge import remediation_fields
+
+    shared = fresh_resource()
+    bench = make_bench(
+        tmp_path,
+        monkeypatch,
+        debuggers={"dut": dut_entry(resource_id=shared)},
+        extra_com_ports={"console": {"device": synthetic_device(), "resource_id": shared}},
+    )
+    install_fake_serial(monkeypatch)
+    sleeps = record_sleep(monkeypatch, bench.unit)
+    service = bench.service()
+    try:
+        opened = service.call("com_session_start", {"port_id": "console", "clear_buffer": True})
+        assert opened["ok"] is True, opened
+        refused = service.call("power_supply_cycle", {"supply_id": bench.supply_id, "off_s": 0.5})
+        reached_while_refused = list(bench.unit.calls)
+        stopped = service.call("com_session_stop", {"port_id": "console"})
+        assert stopped["ok"] is True, stopped
+        cycled = service.call("power_supply_cycle", {"supply_id": bench.supply_id, "off_s": 0.5})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "device_busy", refused
+    assert refused["held_by_com_session"] == "console", refused
+    assert refused["side_effect_status"] == "not_started", refused
+    assert refused["hardware_state"] == "unchanged", refused
+    assert refused["last_known_output"]["output_on"] is None, refused
+    assert refused["remediation"] == remediation_fields("device_busy")["remediation"], refused
+    assert refused["next_step"] == _session_next_step("console", bench.supply_id, "power_supply_cycle"), refused
+    # The fake records no call at all: not even the identity query was sent.
+    assert reached_while_refused == [], reached_while_refused
+    # The same cycle goes through once the session is stopped.
+    assert cycled["ok"] is True, cycled
+    assert sleeps == [0.5], sleeps
+
+
+def test_a_console_session_sharing_no_key_stays_open_across_the_cycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The order docs/power-supplies.md gives for watching a cold boot, run as written.
+
+    The console shares no lock key with the supply or the board it powers, so the
+    two leases take different locks, and the session stays open across the cycle."""
+    order = _cold_boot_order()
+    assert order == ["com_session_start", "power_supply_cycle", "com_read"], order
+
+    bench = make_bench(tmp_path, monkeypatch, extra_com_ports={"console": {"device": synthetic_device(), "resource_id": fresh_resource()}})
+    install_fake_serial(monkeypatch)
+    sleeps = record_sleep(monkeypatch, bench.unit)
+    service = bench.service()
+    try:
+        arguments = {
+            "com_session_start": {"port_id": "console", "clear_buffer": True},
+            "power_supply_cycle": {"supply_id": bench.supply_id, "off_s": 0.5},
+            "com_read": {"port_id": "console"},
+        }
+        results = [service.call(name, arguments[name]) for name in order]
+        still_open = "console" in service.com_ports.sessions
+        service.call("com_session_stop", {"port_id": "console"})
+    finally:
+        service.close()
+
+    for name, result in zip(order, results, strict=True):
+        assert result["ok"] is True, (name, result)
+    assert still_open
+    assert sleeps == [0.5], sleeps
+    assert [call[0] for call in bench.unit.writes()] == ["arm_protection", "set_output", "set_output"], bench.unit.calls

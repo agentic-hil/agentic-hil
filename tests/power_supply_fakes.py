@@ -288,6 +288,14 @@ class FakeDebugger:
         self.calls.append(f"reset_target:{mode}")
         return {"ok": True, "tool": "reset_target", "mode": mode}
 
+    def debug_start_session(self, artifact: Any, mode: str = "attach", timeout_s: float | None = None) -> dict[str, Any]:
+        self.calls.append(f"debug_start_session:{mode}")
+        return {"ok": True, "tool": "debug_start_session", "mode": mode}
+
+    def debug_stop_session(self, timeout_s: float | None = None) -> dict[str, Any]:
+        self.calls.append("debug_stop_session")
+        return {"ok": True, "tool": "debug_stop_session"}
+
     def close(self) -> None:
         return None
 
@@ -506,3 +514,69 @@ def text_of(value: Any) -> str:
 
 
 Factory = Callable[[Any, str], Any]
+
+
+# ---------------------------------------------------------------------------
+# A console beside the supply (issue #734).
+
+
+def synthetic_device() -> str:
+    """A serial device name no host here has: the fake serial below is all that ever opens it."""
+    return f"COM{300 + uuid.uuid4().int % 50}"
+
+
+def dut_entry(**changes: Any) -> dict[str, Any]:
+    """The board's debugger `dut` as a whole entry, so a test can give it a key a console shares."""
+    from conftest import FAKE_OPENOCD
+
+    return {"type": "openocd", "executable": FAKE_OPENOCD.as_posix(), "interface": "SWD", "timeout_s": 5, **changes}
+
+
+def write_elf(workspace: Path) -> str:
+    """An image the artifact check accepts: four bytes of ELF magic under the allowed root."""
+    image = workspace / "build" / "app.elf"
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    return "build/app.elf"
+
+
+class FakeSerialHandle:
+    """A serial port that opens, reads nothing and accepts every write, so no host port is ever opened."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.is_open = False
+        self.in_waiting = 0
+
+    def open(self) -> None:
+        self.is_open = True
+
+    def read(self, size: int = 1) -> bytes:
+        import time
+
+        time.sleep(0.01)
+        return b""
+
+    def write(self, data: bytes) -> int:
+        return len(data)
+
+    def flush(self) -> None:
+        return None
+
+    def reset_input_buffer(self) -> None:
+        return None
+
+    def cancel_read(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def install_fake_serial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every serial port this server opens a `FakeSerialHandle`.
+
+    Patched at pyserial's own class, so the enumeration the fakes above patch
+    stays the real module's, and the session code above it runs unchanged."""
+    import serial
+
+    monkeypatch.setattr(serial, "Serial", FakeSerialHandle)
