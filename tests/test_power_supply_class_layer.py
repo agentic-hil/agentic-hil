@@ -282,6 +282,69 @@ def test_a_stored_set_point_above_the_limit_blocks_a_cycle(tmp_path: Path, monke
     assert bench.unit.writes() == [] and sleeps == [], bench.unit.calls
 
 
+@pytest.mark.parametrize(
+    ("supply_type", "arguments", "field", "stored", "limit"),
+    [
+        pytest.param(THRESHOLD_TYPE, {"voltage_v": 5}, "current_a", Decimal("2.000"), EFFECTIVE_CURRENT, id="current_left_above"),
+        pytest.param(THRESHOLD_TYPE, {"current_a": 0.5}, "voltage_v", Decimal("24.00"), EFFECTIVE_VOLTAGE, id="voltage_left_above"),
+        pytest.param("rs3005p", {"voltage_v": 5}, "current_a", Decimal("2.000"), EFFECTIVE_CURRENT, id="rs3005p_record"),
+    ],
+)
+def test_a_set_that_leaves_a_stored_set_point_above_the_limit_is_refused_before_any_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, supply_type: str, arguments: dict[str, Any], field: str, stored: Decimal, limit: Decimal
+) -> None:
+    from agentic_hil.power_supply import POWER_SUPPLY_TYPES
+
+    bench = make_bench(tmp_path, monkeypatch, supply_type=supply_type, type_record=POWER_SUPPLY_TYPES.get(supply_type))
+    # The supply was left at 24 V and 2 A by hand, as the recording in #730 shows a unit can be.
+    bench.unit.channels[1].set_voltage = Decimal("24.00")
+    bench.unit.channels[1].set_current = Decimal("2.000")
+
+    result = set_points(bench, **arguments)
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "power_supply_limit_exceeded", result
+    assert result["field"] == field, result
+    assert Decimal(result["requested"]) == stored and Decimal(result["limit"]) == limit, result
+    assert str(stored) in result["summary"] and str(limit) in result["summary"], result
+    assert f"`{field}`" in result["summary"], result
+    assert result["side_effect_status"] == "not_started", result
+    assert bench.unit.writes() == [], bench.unit.calls
+    assert bench.unit.channels[1].set_voltage == Decimal("24.00") and bench.unit.channels[1].set_current == Decimal("2.000")
+    assert_not_quarantined(result)
+    assert_last_known_output(result)
+
+
+@pytest.mark.parametrize(
+    ("stored", "arguments", "order"),
+    [
+        pytest.param(
+            (Decimal("9.00"), Decimal("0.250")), {"voltage_v": 5, "current_a": 0.8}, ["set_voltage", "set_current"], id="voltage_falls_current_rises"
+        ),
+        pytest.param(
+            (Decimal("5.00"), Decimal("0.700")), {"voltage_v": 9.5, "current_a": 0.3}, ["set_current", "set_voltage"], id="voltage_rises_current_falls"
+        ),
+    ],
+)
+def test_a_set_of_both_quantities_writes_every_decrease_before_any_increase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stored: tuple[Decimal, Decimal], arguments: dict[str, Any], order: list[str]
+) -> None:
+    # Written the other way round, the supply would hold the higher voltage and
+    # the higher current together for a moment, which neither value alone allows.
+    bench = make_bench(tmp_path, monkeypatch)
+    bench.unit.channels[1].set_voltage, bench.unit.channels[1].set_current = stored
+
+    result = set_points(bench, **arguments)
+
+    assert result["ok"] is True, result
+    assert [entry[0] for entry in setter_calls(bench)] == order, bench.unit.calls
+    names = [entry[0] for entry in bench.unit.calls]
+    for setter in order:
+        assert names[names.index(setter) + 1] == "channel_status", names
+    assert bench.unit.channels[1].set_voltage == Decimal(str(arguments["voltage_v"]))
+    assert bench.unit.channels[1].set_current == Decimal(str(arguments["current_a"]))
+
+
 # ---------------------------------------------------------------------------
 # Missing limits (D8).
 
