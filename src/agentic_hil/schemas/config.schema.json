@@ -737,12 +737,12 @@
           "voltage_limit_v": {
             "type": "number",
             "exclusiveMinimum": 0,
-            "description": "The highest voltage in volts a call may set on any channel of this supply. It has to lie inside the range of the supply type and be a whole number of the type's steps; a value outside either refuses the whole file, it is never rounded. Absent, the type's own range is the only bound."
+            "description": "The highest voltage in volts a call may set on any channel of this supply. It has to lie inside the range of the supply type and be a whole number of the type's steps; a value outside either refuses the whole file, it is never rounded. Absent, the supply still loads and can be read, but every write on it is refused until the file sets this limit; the type's range never stands in for it."
           },
           "current_limit_a": {
             "type": "number",
             "exclusiveMinimum": 0,
-            "description": "The highest current in amperes a call may set on any channel of this supply. It has to lie inside the range of the supply type and be a whole number of the type's steps; a value outside either refuses the whole file, it is never rounded. Absent, the type's own range is the only bound."
+            "description": "The highest current in amperes a call may set on any channel of this supply. It has to lie inside the range of the supply type and be a whole number of the type's steps; a value outside either refuses the whole file, it is never rounded. Absent, the supply still loads and can be read, but every write on it is refused until the file sets this limit; the type's range never stands in for it."
           },
           "channels": {
             "type": "object",
@@ -757,12 +757,12 @@
                 "voltage_limit_v": {
                   "type": "number",
                   "exclusiveMinimum": 0,
-                  "description": "The highest voltage in volts a call may set on this channel. It has to lie inside the range of the supply type and be a whole number of the type's steps; a value outside either refuses the whole file, it is never rounded. Absent, the type's own range is the only bound."
+                  "description": "The highest voltage in volts a call may set on this channel. It has to lie inside the range of the supply type and be a whole number of the type's steps; a value outside either refuses the whole file, it is never rounded. Absent, the channel can still be read, but every write on it is refused until the file sets this limit; the type's range never stands in for it."
                 },
                 "current_limit_a": {
                   "type": "number",
                   "exclusiveMinimum": 0,
-                  "description": "The highest current in amperes a call may set on this channel. It has to lie inside the range of the supply type and be a whole number of the type's steps; a value outside either refuses the whole file, it is never rounded. Absent, the type's own range is the only bound."
+                  "description": "The highest current in amperes a call may set on this channel. It has to lie inside the range of the supply type and be a whole number of the type's steps; a value outside either refuses the whole file, it is never rounded. Absent, the channel can still be read, but every write on it is refused until the file sets this limit; the type's range never stands in for it."
                 }
               }
             },
