@@ -409,7 +409,7 @@ class SerialTransport:
 
     def _open(self) -> Any:
         if self._handle is None:
-            import serial  # type: ignore[import-untyped]
+            import serial
 
             # Built unopened so every setting, the modem lines among them, is
             # decided before the port is opened; exclusively, so no other
