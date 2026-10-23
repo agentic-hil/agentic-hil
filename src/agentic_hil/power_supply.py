@@ -1001,11 +1001,8 @@ class PowerSupplyService:
             read_back = {}
             for name, attribute in _write_order(call.requested, before):
                 value = call.requested[name]
-                call.wrote = True
-                if name == "voltage_v":
-                    backend.set_voltage(channel, value)
-                else:
-                    backend.set_current(channel, value)
+                setter = backend.set_voltage if name == "voltage_v" else backend.set_current
+                self._send(call, setter, channel, value)
                 read = getattr(self._read(backend, call, channel), attribute)
                 read_back[name] = _text(read)
                 if read != value:
@@ -1017,8 +1014,7 @@ class PowerSupplyService:
             for position, on in enumerate(steps):
                 if position:
                     sleep(float(call.off_s or CYCLE_OFF_MIN_S))
-                call.wrote = True
-                backend.set_output(channel, on)
+                self._send(call, backend.set_output, channel, on)
                 state = self._read(backend, call, channel).output_on
                 read_back = {"output_on": state}
                 if state is not on:
@@ -1047,6 +1043,22 @@ class PowerSupplyService:
             result["off_s"] = call.off_s
         return result
 
+    def _send(self, call: _Call, operation: Callable[..., None], *arguments: Any) -> None:
+        """One backend operation that may change the supply, and whether it did.
+
+        A fault the backend raises says itself whether anything was sent, so a
+        refusal that sent nothing leaves the call as it was. Any other error
+        leaves that unknown, and the call counts as having written."""
+        try:
+            operation(*arguments)
+        except PowerSupplyFault as fault:
+            call.wrote = call.wrote or fault.wrote
+            raise
+        except BaseException:
+            call.wrote = True
+            raise
+        call.wrote = True
+
     def _mismatch(self, call: _Call, requested: JsonObject, read_back: JsonObject) -> JsonObject:
         failure = power_supply_readback_mismatch_refusal(call.tool, call.supply_id, call.channel, requested, read_back)
         failure["last_known_output"] = call.known_output()
@@ -1063,9 +1075,8 @@ class PowerSupplyService:
         if all(value is None for value in thresholds.values()):
             return None
         first = next(name for name, value in thresholds.items() if value is not None)
-        call.wrote = True
         try:
-            backend.arm_protection(channel, thresholds["ovp"], thresholds["ocp"])
+            self._send(call, backend.arm_protection, channel, thresholds["ovp"], thresholds["ocp"])
         except PowerSupplyFault as fault:
             if fault.error_type != "power_supply_protection_not_armed":
                 raise

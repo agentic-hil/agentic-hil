@@ -30,8 +30,13 @@ guess:
   waits ``SETTER_GAP_S``, also a draft, and reads the set point back with its
   query. The layer above compares that read-back exactly before a write counts.
 * How ``STATUS?`` is framed is not recorded. It is read as one byte and an
-  optional newline; anything else after the byte ends the conversation, because
-  it could otherwise be read as the answer to the next command.
+  optional newline; anything else after the byte is ``power_supply_no_reply``
+  and ends the conversation, because it could otherwise be read as the answer
+  to the next command.
+* A call this backend refuses before sending anything (on a conversation that
+  ended or was closed, before an accepted identity, or to switch the output) is
+  ``RS3005PRefused``: ``power_supply_no_reply`` with the cause ``not_sent`` and
+  nothing written.
 
 A reply that does not come, or comes without its newline, is
 ``power_supply_no_reply``, and it too ends the conversation: a late reply must
@@ -104,8 +109,15 @@ class Transport(Protocol):
     def close(self) -> None: ...
 
 
-class RS3005PRefused(RuntimeError):
-    """A call this backend will not make: nothing was sent for it."""
+class RS3005PRefused(PowerSupplyFault, RuntimeError):
+    """A call this backend will not make: nothing was sent for it.
+
+    The fault says so itself, with ``wrote`` false and the cause ``not_sent``,
+    so the layer above leaves the supply's state confirmed. It is still a
+    RuntimeError, as it always was."""
+
+    def __init__(self, error_type: str, summary: str) -> None:
+        super().__init__(error_type, summary, wrote=False, cause="not_sent")
 
 
 class PortOpenFailed(OSError):
@@ -216,9 +228,7 @@ class RS3005PBackend:
         self._set("set_current", channel, "ISET1", amps, CURRENT_PLACES)
 
     def set_output(self, channel: int, on: bool) -> None:
-        raise RS3005PRefused(
-            "Output switching on the RS-3005P is not sent: its OUT commands and the STATUS byte that would confirm them are not recorded."
-        )
+        self._refuse("Output switching on the RS-3005P is not sent: its OUT commands and the STATUS byte that would confirm them are not recorded.")
 
     def arm_protection(self, channel: int, ovp_v: Decimal | None, ocp_a: Decimal | None) -> None:
         if ovp_v is None and ocp_a is None:
@@ -250,16 +260,16 @@ class RS3005PBackend:
 
     def _open_conversation(self) -> None:
         if self._closed:
-            raise RS3005PRefused("This RS-3005P conversation is closed; nothing more is sent on it.")
+            self._refuse("This RS-3005P conversation is closed; nothing more is sent on it.")
         if self._ended is not None:
-            raise RS3005PRefused(f"This RS-3005P conversation ended ({self._ended}); nothing more is sent on it.")
+            self._refuse(f"This RS-3005P conversation ended ({self._ended}); nothing more is sent on it.")
 
     def _ready(self, channel: int) -> None:
         self._open_conversation()
         if self._identity is None:
-            raise RS3005PRefused("Nothing is sent to the supply before its identity was read.")
+            self._refuse("Nothing is sent to the supply before its identity was read.")
         if not self._identity.accepted:
-            raise RS3005PRefused(
+            self._refuse(
                 f"The supply identified as {self._identity.model or 'an unparsed reply'} {self._identity.firmware or ''}".rstrip()
                 + "; this backend drives only RS-3005P V6.9, so nothing else is sent."
             )
@@ -297,7 +307,9 @@ class RS3005PBackend:
         if not first:
             self._no_reply("STATUS?", wrote=False, why="did not answer")
         if second not in (b"", TERMINATOR):
-            self._ended = "the STATUS reply ran past one byte and a newline, a framing nobody recorded"
+            # Whatever follows could be read as the next command's reply, so
+            # the conversation ends here, and so does the read that met it.
+            self._no_reply("STATUS?", wrote=False, why="answered more than one byte and a newline, a framing nobody recorded,")
         return reply
 
     def _number(self, reply: bytes, command: str, *, wrote: bool) -> Decimal:
@@ -305,6 +317,12 @@ class RS3005PBackend:
         if _NUMBER.fullmatch(text) is None:
             self._no_reply(command, wrote=wrote, why=f"answered {len(text)} bytes that are not a decimal number")
         return Decimal(text.decode("ascii"))
+
+    def _refuse(self, why: str) -> NoReturn:
+        """Refuse a call before anything is sent for it."""
+        refused = RS3005PRefused("power_supply_no_reply", why)
+        self._last_fault = refused
+        raise refused
 
     def _no_reply(self, command: str, *, wrote: bool, why: str, cause: str = "no_reply") -> NoReturn:
         """End the conversation with `power_supply_no_reply`.

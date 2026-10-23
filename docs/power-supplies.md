@@ -163,8 +163,13 @@ What has not been recorded is refused rather than guessed:
   `cause` naming which and the error in `backend_error`. A port that did not
   open sent nothing; a setter whose write failed may have reached the supply,
   so its state is unconfirmed. The conversation ends the same way.
-- **STATUS framing.** A STATUS reply longer than one byte and a newline ends the
-  conversation for the same reason.
+- **STATUS framing.** A STATUS reply longer than one byte and a newline is
+  `power_supply_no_reply` too, and ends the conversation for the same reason, so
+  the read that met it fails and nothing is written after it.
+- **Refused before sending.** A command the backend will not send, on an ended
+  or closed conversation or to switch the output, is `power_supply_no_reply`
+  with the cause `not_sent`. Nothing reached the supply, so its state stays
+  confirmed unless an earlier write in the same call changed it.
 
 ### Evidence
 

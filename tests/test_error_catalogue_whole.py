@@ -706,7 +706,9 @@ COLLECTED_TYPE_COUNT = 226
 # The RS-3005P backend (#735) adds two, one for each type it raises:
 # `RS3005PBackend._no_reply` writes `power_supply_no_reply` and
 # `RS3005PBackend.arm_protection` writes `power_supply_protection_not_armed`.
-PRODUCER_COUNT = 704
+# Its refusals before anything is sent add one: `RS3005PBackend._refuse` writes
+# `power_supply_no_reply` through `RS3005PRefused`, a fault that wrote nothing.
+PRODUCER_COUNT = 705
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
