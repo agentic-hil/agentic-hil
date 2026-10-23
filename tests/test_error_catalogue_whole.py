@@ -636,9 +636,10 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # ---------------------------------------------------------------------------
 # What the pins hold.
 
-# `agentic_hil.power_supply`, the power-supply config module (#731), is the 50th;
-# `agentic_hil.backends.esptool`, the ESP32 backend, was the 49th.
-SCANNED_MODULE_COUNT = 50
+# `agentic_hil.backends.rs3005p`, the RS-3005P power supply backend (#735), is
+# the 51st; `agentic_hil.power_supply`, the power-supply config module (#731),
+# was the 50th; `agentic_hil.backends.esptool`, the ESP32 backend, was the 49th.
+SCANNED_MODULE_COUNT = 51
 # The power supply tools (#733) add seven, the 220th to the 226th: the six
 # `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
 # `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
@@ -702,7 +703,10 @@ COLLECTED_TYPE_COUNT = 226
 # The refusal while this server's own session holds a board the supply powers
 # (#734) adds two `device_busy` producers in `power_supply.py`, one function for
 # the debug session and one for a COM session. No new type is added.
-PRODUCER_COUNT = 702
+# The RS-3005P backend (#735) adds two, one for each type it raises:
+# `RS3005PBackend._no_reply` writes `power_supply_no_reply` and
+# `RS3005PBackend.arm_protection` writes `power_supply_protection_not_armed`.
+PRODUCER_COUNT = 704
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
@@ -750,6 +754,9 @@ PINNED_DYNAMIC: dict[DynamicSite, str] = {
     ("config", "ConfigError.to_dict", "self.error_type"): "the constructor's argument, read at every construction of ConfigError in the package",
     ("knowledge", "catalogue_entry", "error_type"): "the catalogue key's own type, written back into the entry the reference serves for it",
     ("runevidence", "_run", "str(report['error_type'])"): "a run report's recorded type, copied into the run evidence",
+    ("backends.rs3005p", "RS3005PBackend.classify_last_error", "fault.error_type"): (
+        "the fault this backend last raised, typed by a literal at each raise of PowerSupplyFault in this module"
+    ),
 }
 
 

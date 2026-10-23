@@ -331,6 +331,76 @@ def test_the_stlink_sessions_module_carries_the_stm32cubeclt_mark() -> None:
     assert CUBECLT in [mark.name for mark in test_bench_stlink_sessions.pytestmark]
 
 
+# -- the test that drives a bench power supply --------------------------------
+
+
+def test_what_drives_a_power_supply_runs_only_where_a_supply_workspace_is_named(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Deselected, not skipped, with no workspace named or a name that is no directory; kept beside the rest where one is.
+
+    A bench without a supply names none, and a skip is what fails the tier, so a
+    run there must leave the test out rather than report it skipped. The reason
+    is the line the run prints."""
+    from tests.bench import conftest
+
+    monkeypatch.setenv(conftest.BENCH_ENV, "1")
+    monkeypatch.delenv(conftest.DEVICE_GROUPS_ENV, raising=False)
+    monkeypatch.delenv(conftest.CUBECLT_ENV, raising=False)
+    supply = "tests/bench/test_bench_power_supply.py::test_a_set_point"
+    stage = "tests/bench/test_bench_without_device_group.py::test_probe"
+    rest = ["tests/bench/test_bench_serial.py::test_echo", "tests/test_config.py::test_load"]
+    workspace = tmp_path / "supply-workspace"
+    outcomes = []
+    for named in (None, str(workspace), "made"):
+        if named is None:
+            monkeypatch.delenv(conftest.POWER_SUPPLY_ENV, raising=False)
+        elif named == "made":
+            workspace.mkdir()
+            monkeypatch.setenv(conftest.POWER_SUPPLY_ENV, str(workspace))
+        else:
+            monkeypatch.setenv(conftest.POWER_SUPPLY_ENV, named)
+        items, config = [*the_items(), AnItem(supply, "bench", conftest.POWER_SUPPLY)], AConfig()
+        conftest.pytest_collection_modifyitems(config, items)
+        outcomes.append(([item.nodeid for item in items], [item.nodeid for item in config.deselected], conftest.pytest_report_collectionfinish(config)))
+
+    assert outcomes[0][:2] == (rest, [stage, supply])
+    assert outcomes[0][2] == f"tests marked power_supply: deselected, {conftest.POWER_SUPPLY_ENV} names no bench workspace with a power supply for this run"
+    assert outcomes[1][:2] == (rest, [stage, supply])
+    assert outcomes[1][2] == f"tests marked power_supply: deselected, {conftest.POWER_SUPPLY_ENV} names {workspace}, which is no directory here"
+    assert outcomes[2] == ([*rest, supply], [stage], None)
+
+
+def test_off_a_bench_the_power_supply_test_keeps_its_place(monkeypatch: pytest.MonkeyPatch) -> None:
+    """There it skips by its own mark, like every other test of the tier."""
+    from tests.bench import conftest
+
+    monkeypatch.delenv(conftest.BENCH_ENV, raising=False)
+    monkeypatch.delenv(conftest.POWER_SUPPLY_ENV, raising=False)
+    supply = "tests/bench/test_bench_power_supply.py::test_a_set_point"
+    items, config = [*the_items(), AnItem(supply, "bench", conftest.POWER_SUPPLY)], AConfig()
+
+    conftest.pytest_collection_modifyitems(config, items)
+
+    assert [item.nodeid for item in items] == [*[item.nodeid for item in the_items()], supply]
+    assert config.deselected == []
+
+
+def test_the_power_supply_mark_is_declared_where_strict_markers_look(pytestconfig: pytest.Config) -> None:
+    from tests.bench.conftest import POWER_SUPPLY
+
+    declared = pytestconfig.getini("markers")
+
+    assert [line for line in declared if line.startswith(f"{POWER_SUPPLY}:")], declared
+
+
+def test_the_power_supply_module_carries_the_bench_and_the_power_supply_marks() -> None:
+    """The module the mark leaves out is the one that drives the supply, by its own `pytestmark`."""
+    from tests.bench import test_bench_power_supply
+    from tests.bench.conftest import POWER_SUPPLY
+
+    names = [mark.name for mark in test_bench_power_supply.pytestmark]
+    assert "bench" in names and POWER_SUPPLY in names
+
+
 # -- the test that can make the probe re-enumerate its serial port (#620) ----
 
 
