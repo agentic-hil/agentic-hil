@@ -22,7 +22,8 @@ The owner sets `voltage_limit_v` and `current_limit_a` for the supply and, under
 - **The effective limit** of a channel is the lower of the supply value and the channel value, for voltage and current separately. The supply's own hardware range is a further bound and never a stand-in: a limit is never defaulted, never taken from that range and never taken from the present set point.
 - **A missing limit refuses writes.** When any of the four values for the addressed channel is missing, every write on that channel is refused before contact, output off and power cycle included. The refusal is `permission_denied` with `missing_limits`, the dotted keys the owner has to write. `power_supply_status` still reads the channel and says the same in `writes_refused_reason`.
 - **A request above the limit is refused before contact** as `power_supply_limit_exceeded`, with `field`, `requested` and `limit`.
-- **The stored set point counts.** `power_supply_output` with `on: true` and `power_supply_cycle` first read the set points already stored on the supply, because they reach the board the moment the output switches on. A stored value above the effective limit, or one the supply does not report, refuses the call the same way before anything is switched.
+- **The stored set point counts.** `power_supply_output` with `on: true` and `power_supply_cycle` first read the set points already stored on the supply, because they reach the board the moment the output switches on. `power_supply_set` reads them too, and holds every quantity it does not write to the limit, because that value stays in place beside the one it writes. A stored value above the effective limit, or one the supply does not report, refuses the call the same way before anything is written or switched, and names the stored value and the limit. A stored value is never lowered unasked: a set has to write that quantity too, within the limit.
+- **Lower before raise.** When `power_supply_set` writes both quantities, every one that falls below its stored value is written before any that rises, so the supply never holds the higher voltage and the higher current together between the two writes.
 
 ## Protection
 
@@ -43,9 +44,9 @@ Results and `power_supply_status` carry a `protection` block per channel, `{ovp|
 3. **The port's USB identity**, checked before the port is opened, as for every configured COM port: an adapter with another VID, PID or serial is never opened.
 4. **The lock**, on the supply and on every debugger it powers (`powers`), all or nothing, so no flash, reset or session reaches a board whose power is being changed. `power_supply_status` locks the supply alone. Inside a run declared with `bench_run_start`, the supply and every powered debugger have to be declared (`{"kind": "power_supply", "id": "<entry>"}`); outside one, a call that passes steps 1 and 2 runs as a run of its own over the same devices.
 5. **The unit's identity.** The identity query is the first command sent and the only one until the model, the firmware and, where the entry names one, the `idn_serial` match. A model or firmware this server has no verified record for is refused as `power_supply_identity_unknown`, another unit of the same model as `power_supply_identity_mismatch`.
-6. **The stored set points**, for output on and power cycle.
+6. **The stored set points**, for output on and power cycle, and for every quantity a set leaves as it is.
 7. **The protection**, armed at the limits.
-8. **The writes**, each followed by an exact read-back.
+8. **The writes**, each followed by an exact read-back, every lowered set point before any raised one.
 9. **Close and report.** The connection closes whatever happened, and the report keeps the transcript of the exchange.
 
 Each call opens one connection to the supply and closes it. The port of a supply belongs to that supply alone: `com_session_start` and a `flash_firmware` capture on it are refused as `com_port_reserved_for_power_supply`, before the port is touched.

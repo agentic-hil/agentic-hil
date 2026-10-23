@@ -2203,14 +2203,16 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning=(
             "A value is above the effective limit of the channel, the lower of the supply limit and the channel limit "
             "the authoritative configuration sets. `field` names the quantity, `requested` the value and `limit` the "
-            "effective limit. On `power_supply_set` the value is the one asked for; on `power_supply_output` and "
-            "`power_supply_cycle` it is the set point already stored on the supply, which would reach the board the "
-            "moment the output switched on. The refusal came before any write: nothing was set, no protection was "
-            "armed and no output was switched."
+            "effective limit. On `power_supply_set` the value is the one asked for, or the set point already stored "
+            "for a quantity the call leaves as it is, which would stay in place beside the one written; on "
+            "`power_supply_output` and `power_supply_cycle` it is the set point already stored on the supply, which "
+            "would reach the board the moment the output switched on. The refusal came before any write: nothing was "
+            "set, no protection was armed and no output was switched."
         ),
         remediation=(
             "Ask for a value at or below `limit`. When the stored set point is what is too high, write one within the "
-            "limit with `power_supply_set` first, then switch the output.",
+            "limit with `power_supply_set` first, then switch the output. A set that leaves a stored value above the "
+            "limit has to write that quantity too, in the same call.",
             "If the task needs more than `limit`, report it and stop. Only the owner raises a limit, by hand in the "
             "authoritative configuration file, followed by a restart of the server.",
         ),

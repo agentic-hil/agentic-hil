@@ -517,6 +517,22 @@ NOT_STARTED: JsonObject = {"side_effect_committed": False, "side_effect_status":
 
 _LIMIT_FIELDS = (("voltage_v", "voltage", "V"), ("current_a", "current", "A"))
 _PROTECTIONS = (("ovp", "ovp_threshold_v", "voltage_v"), ("ocp", "ocp_threshold_a", "current_a"))
+_SET_POINTS = (("voltage_v", "set_voltage_v"), ("current_a", "set_current_a"))
+
+
+def _write_order(requested: Mapping[str, Decimal], before: ChannelStatus) -> list[tuple[str, str]]:
+    """The requested set points, every one that lowers its stored value before any that raises it.
+
+    Written the other way round, the supply would hold the higher voltage and
+    the higher current together between the two writes, a pair neither request
+    allows. A stored value that did not read back counts as raised."""
+    asked = [(name, attribute) for name, attribute in _SET_POINTS if name in requested]
+
+    def lowers(entry: tuple[str, str]) -> bool:
+        stored = getattr(before, entry[1])
+        return stored is not None and requested[entry[0]] < stored
+
+    return [entry for entry in asked if lowers(entry)] + [entry for entry in asked if not lowers(entry)]
 
 
 def sleep(seconds: float) -> None:
@@ -943,16 +959,26 @@ class PowerSupplyService:
     def _write(self, backend: PowerSupplyBackend, call: _Call) -> JsonObject:
         channel = call.channel
         before = self._read(backend, call, channel)
-        if call.tool == "power_supply_cycle" or call.on is True:
-            # The set point already stored reaches the board the moment the
-            # output switches on, so it is held to the limits like a request.
-            for name, attribute in (("voltage_v", "set_voltage_v"), ("current_a", "set_current_a")):
-                stored = getattr(before, attribute)
-                limit = call.limits[name]
-                if limit is not None and (stored is None or stored > limit):
-                    exceeded = power_supply_limit_exceeded_refusal(call.tool, call.supply_id, channel, name, stored, limit, stored=True)
-                    exceeded["last_known_output"] = call.known_output()
-                    return exceeded
+        # The set point already stored reaches the board the moment the output
+        # switches on, and stays beside a set that leaves it, so it is held to
+        # the limits like a request: before an output on or a cycle, and for
+        # every quantity a set does not write. Nothing is lowered unasked.
+        held = (
+            [name for name, _ in _SET_POINTS if name not in call.requested]
+            if call.tool == "power_supply_set"
+            else [name for name, _ in _SET_POINTS]
+            if call.tool == "power_supply_cycle" or call.on is True
+            else []
+        )
+        for name, attribute in _SET_POINTS:
+            if name not in held:
+                continue
+            stored = getattr(before, attribute)
+            limit = call.limits[name]
+            if limit is not None and (stored is None or stored > limit):
+                exceeded = power_supply_limit_exceeded_refusal(call.tool, call.supply_id, channel, name, stored, limit, stored=True)
+                exceeded["last_known_output"] = call.known_output()
+                return exceeded
         protection = _protection_block(call.record, before)
         if call.tool != "power_supply_output" or call.on is True:
             failure = self._arm(backend, call, protection)
@@ -964,10 +990,8 @@ class PowerSupplyService:
         if call.tool == "power_supply_set":
             requested = {name: str(value) for name, value in call.requested.items()}
             read_back = {}
-            for name, attribute in (("voltage_v", "set_voltage_v"), ("current_a", "set_current_a")):
-                value = call.requested.get(name)
-                if value is None:
-                    continue
+            for name, attribute in _write_order(call.requested, before):
+                value = call.requested[name]
                 call.wrote = True
                 if name == "voltage_v":
                     backend.set_voltage(channel, value)
@@ -1213,6 +1237,17 @@ def power_supply_limit_exceeded_refusal(
     where = f"power supply '{supply_id}' channel {channel}"
     if not stored:
         summary = f"The requested {quantity} of {value} {unit} is above the effective limit of {limit} {unit} on {where}, so nothing was written."
+    elif tool == "power_supply_set":
+        shown = (
+            "did not read back, so it cannot be shown to be within"
+            if value is None
+            else f"is {value} {unit}, above"
+        )
+        summary = (
+            f"The {quantity} set point stored on {where} {shown} the effective limit of {limit} {unit}, and this call "
+            f"leaves it as it is, so nothing was written: the call has to set `{name}` too, at or below {limit} {unit}. "
+            "A stored value is never lowered unasked."
+        )
     elif value is None:
         summary = (
             f"The {quantity} set point stored on {where} did not read back, so it cannot be shown to be within the "

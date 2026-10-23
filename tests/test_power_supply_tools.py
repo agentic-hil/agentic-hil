@@ -551,7 +551,9 @@ def test_a_configured_rs3005p_supply_is_driven_by_the_rs3005p_backend_through_th
     try:
         read = service.call("power_supply_status", {"supply_id": "bench"})
         opened_by_status = list(TranscribedSupplySerial.built)
-        written = service.call("power_supply_set", {"supply_id": "bench", "voltage_v": 5.0})
+        # The transcription's unit stores 2.000 A, above the 0.8 A limit, so a set
+        # writes the current too rather than leave it beside the new voltage.
+        written = service.call("power_supply_set", {"supply_id": "bench", "voltage_v": 5.0, "current_a": 0.5})
         opened_by_set = TranscribedSupplySerial.built[len(opened_by_status) :]
         switched = service.call("power_supply_output", {"supply_id": "bench", "on": True})
         cycled = service.call("power_supply_cycle", {"supply_id": "bench", "off_s": 0.5})
@@ -578,6 +580,7 @@ def test_a_configured_rs3005p_supply_is_driven_by_the_rs3005p_backend_through_th
     assert set_port.sent[0] == b"*IDN?\n", set_port.sent
     assert b"VSET1:5.00\n" in set_port.sent, set_port.sent
     assert set_port.sent[set_port.sent.index(b"VSET1:5.00\n") + 1] == b"VSET1?\n", set_port.sent
+    assert set_port.sent[set_port.sent.index(b"ISET1:0.500\n") + 1] == b"ISET1?\n", set_port.sent
     assert not [command for command in set_port.sent if b"OVP" in command or b"OCP" in command or command.startswith(b"OUT")], set_port.sent
     assert set_port.is_open is False
 
