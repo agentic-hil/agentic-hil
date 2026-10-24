@@ -8337,7 +8337,10 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # A bench supply's two grants, and nothing else of the entry. Its limits, its
     # port, its serial and the boards it powers are the owner's and are written in
     # the file by hand: no rule names them, so no call can set one, and a
-    # description reload never re-reads the section.
+    # description reload never re-reads the section. The description of the
+    # `com_ports` entry it names is the owner's too, although the com_ports rule
+    # above names its fields: `project_config_set` refuses an agent those keys on
+    # that entry and adoption carries nothing into it (`power_supply_ports`).
     ConfigKeyRule("power_supplies", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
     # And the two grants the schema puts directly on a fixed section instead of
     # inside a `permissions` block. A generation writes both true like every
