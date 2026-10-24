@@ -70,7 +70,7 @@ On such a bench the boot cannot be watched on that console, and only the owner c
 
 ## When a write does not hold
 
-- **`power_supply_readback_mismatch`**: the supply answered, and reads back something other than what was written. `requested` and `read_back` say both; the state is known, it is the read-back.
+- **`power_supply_readback_mismatch`**: the supply answered, and reads back something other than what was written. `requested` and `read_back` say both; the state is known, it is the read-back. A read-back above the effective limit adds `read_back_above_limit` (`field`, `read_back`, `limit`) and the cleanup reason `power_supply_above_limit`: the bench stays held until the owner has brought the set point on the unit within the limit.
 - **`power_supply_no_reply`**: the supply could not be reached. `cause` says why: `no_reply` (it did not answer in time, or answered something unreadable), `port_open_failed` (its port did not open, often because another program holds it), `write_timeout` (a write on its serial line timed out), `serial_error` (the serial line failed in another way) or `not_sent` (the backend refused the command before sending it), and `backend_error` carries the error itself. Before any write nothing changed, and `retry_safe` is true. After a write, whether it took effect is unconfirmed: `retry_safe` is false and the call carries the cleanup reason `power_supply_state_unconfirmed`, whose `quarantine_guidance` names what was attempted, what is confirmed, what is unknown and what to check on the unit itself.
 
 Every failure carries `last_known_output`: the channel, its output state and the time it was last read in this call, all null when nothing was read.

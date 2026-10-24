@@ -2283,10 +2283,14 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning=(
             "A value was written and the read straight after it returned something else. `requested` is what was "
             "written and `read_back` is what the supply reports now, compared exactly. The supply answered, so its "
-            "state is known: it is the `read_back` value, not the request."
+            "state is known: it is the `read_back` value, not the request. When that value lies above the owner's "
+            "limit, the result carries `read_back_above_limit` (`field`, `read_back`, `limit`) and the cleanup reason "
+            "`power_supply_above_limit`, and the bench stays held until the owner has brought the unit back within it."
         ),
         remediation=(
             "Report `requested` and `read_back`.",
+            "When the result carries `power_supply_above_limit`, read `quarantine_guidance` and have the owner bring "
+            "the set point on the unit itself within the limit before the bench is used again.",
             "Call `power_supply_status` to read the whole channel before deciding anything else.",
             "A supply that does not hold what it was told is a fact for the owner to look at, not one to work around.",
         ),
@@ -7718,6 +7722,12 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
         confirmed="Every write before the lost one was read back; the result's `last_known_output` is the last state read.",
         unknown="Whether the last write took effect: the supply's set point, protection or output may be the old value or the new one.",
         physical_check="Read the set points and the output state on the supply itself, bring the output to the state the board needs, then sign.",
+    ),
+    "power_supply_above_limit": QuarantineReasonGuide(
+        attempted="A power supply call wrote a set point within the owner's limit, and the supply read it back above that limit.",
+        confirmed="The supply answered: the set point it holds is the `read_back_above_limit` value, above the limit the owner set.",
+        unknown="Whether the output is on, and with it whether that value already reaches the board: not every supply reads its output state back.",
+        physical_check="Switch the output off on the supply itself, bring the set point within the limit by hand, then sign.",
     ),
     "power_supply_report_audit_broken": _audit_guide("A power supply call completed but its report could not be persisted."),
     # -- CAN buses --------------------------------------------------------------
