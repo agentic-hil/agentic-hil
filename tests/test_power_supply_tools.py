@@ -463,6 +463,7 @@ def test_a_console_session_sharing_no_key_stays_open_across_the_cycle(tmp_path: 
 # that answers as the issue #730 transcription does. No port is ever opened.
 
 TRANSCRIPTION = Path(__file__).parent / "fixtures" / "rs3005p_v6_9_issue_transcription.json"
+OUTPUT_RECORDING = Path(__file__).parent / "fixtures" / "rs3005p_v6_9_output_recording.json"
 
 
 class TranscribedSupplySerial:
@@ -471,10 +472,14 @@ class TranscribedSupplySerial:
     Each query the transcription lists is answered with its reply and a trailing
     newline, and the identity reply carries the synthetic `idn` the test
     configured. A setter is taken silently and changes what its query reads back,
-    which is this stand-in's assumption and not a recording."""
+    which is this stand-in's assumption and not a recording. `OUT0` and `OUT1`
+    are taken silently too and turn the STATUS byte to what #736 recorded after
+    them. Each call opens a new port, so a test that needs one call's writes to
+    reach the next sets `carried` to a dict the instances share."""
 
     built: list[TranscribedSupplySerial] = []
     idn = ""
+    carried: dict[bytes, bytes] | None = None
 
     def __init__(self) -> None:
         import json
@@ -484,6 +489,9 @@ class TranscribedSupplySerial:
         status = next(exchange for exchange in exchanges if exchange["command"] == "STATUS?")
         self.replies[b"STATUS?"] = bytes.fromhex(status["reply_raw_hex"]) + b"\n"
         self.replies[b"*IDN?"] = f"RS-3005P V6.9 SN:{self.idn}\n".encode()
+        self.replies.update(self.carried or {})
+        switches = json.loads(OUTPUT_RECORDING.read_text(encoding="utf-8"))["switches"]
+        self.switches = {switch["command"].encode(): bytes.fromhex(switch["after"]["STATUS?"]) + b"\n" for switch in switches}
         self.is_open = False
         self.port: str | None = None
         self.baudrate: int | None = None
@@ -498,10 +506,17 @@ class TranscribedSupplySerial:
         assert self.is_open, "written before the port was opened"
         self.sent.append(bytes(data))
         command = bytes(data).removesuffix(b"\n")
+        changed: dict[bytes, bytes] = {}
+        if command in self.switches:
+            changed[b"STATUS?"] = self.switches[command]
         for setter, query in ((b"VSET1:", b"VSET1?"), (b"ISET1:", b"ISET1?")):
             if command.startswith(setter):
-                self.replies[query] = command[len(setter) :] + b"\n"
-                return len(data)
+                changed[query] = command[len(setter) :] + b"\n"
+        if changed:
+            self.replies.update(changed)
+            if self.carried is not None:
+                self.carried.update(changed)
+            return len(data)
         self.pending += self.replies.get(command, b"")
         return len(data)
 
@@ -545,6 +560,7 @@ def test_a_configured_rs3005p_supply_is_driven_by_the_rs3005p_backend_through_th
     fake_inventory(monkeypatch, host_port(device, port_serial, vid=0x0416, pid=0x5011))
     monkeypatch.setattr(TranscribedSupplySerial, "built", [])
     monkeypatch.setattr(TranscribedSupplySerial, "idn", idn)
+    monkeypatch.setattr(TranscribedSupplySerial, "carried", {})
     monkeypatch.setattr(serial, "Serial", TranscribedSupplySerial)
 
     service = AgenticHILToolService(config, backend=FakeDebugger())
@@ -569,7 +585,7 @@ def test_a_configured_rs3005p_supply_is_driven_by_the_rs3005p_backend_through_th
         Decimal("24.00"),
         Decimal("0.000"),
     ], channel
-    assert channel["output_on"] is None, channel
+    assert channel["output_on"] is True, channel
     (status_port,) = opened_by_status
     assert (status_port.port, status_port.baudrate) == (device, 9600)
     assert status_port.sent == [b"*IDN?\n", b"VSET1?\n", b"ISET1?\n", b"VOUT1?\n", b"IOUT1?\n", b"STATUS?\n"]
@@ -584,10 +600,16 @@ def test_a_configured_rs3005p_supply_is_driven_by_the_rs3005p_backend_through_th
     assert not [command for command in set_port.sent if b"OVP" in command or b"OCP" in command or command.startswith(b"OUT")], set_port.sent
     assert set_port.is_open is False
 
-    for refused in (switched, cycled):
-        assert refused["ok"] is False and refused["error_type"] == "not_supported", refused
-        assert refused["capability"] == "output_state", refused
-    assert len(TranscribedSupplySerial.built) == 2, "output switching and power cycle opened the supply's port"
+    switch_port, cycle_port = TranscribedSupplySerial.built[2:]
+    assert switched["ok"] is True and switched["read_back"] == {"output_on": True}, switched
+    assert [command for command in switch_port.sent if command.startswith(b"OUT")] == [b"OUT1\n"], switch_port.sent
+    assert cycled["ok"] is True and cycled["read_back"] == {"output_on": True}, cycled
+    assert [command for command in cycle_port.sent if command.startswith(b"OUT")] == [b"OUT0\n", b"OUT1\n"], cycle_port.sent
+    for port in (switch_port, cycle_port):
+        assert port.sent[0] == b"*IDN?\n", port.sent
+        assert not [command for command in port.sent if b"OVP" in command or b"OCP" in command], port.sent
+        assert port.is_open is False
+    assert len(TranscribedSupplySerial.built) == 4
 
 
 # The serial line failing under the RS-3005P backend, as pyserial fails.

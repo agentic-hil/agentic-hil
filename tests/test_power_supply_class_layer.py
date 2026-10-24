@@ -500,6 +500,28 @@ def test_a_read_back_mismatch_is_a_failure_without_quarantine(tmp_path: Path, mo
     assert_last_known_output(result)
 
 
+def test_a_read_back_above_the_limit_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A supply that holds more than the owner's limit is an incident, not a refusal the next call can pass."""
+    from agentic_hil.knowledge import QUARANTINE_REASON_GUIDES
+
+    bench = make_bench(tmp_path, monkeypatch, unit_changes={"skew": {"set_voltage": Decimal(VOLTAGE_RESOLUTION)}})
+
+    result = set_points(bench, voltage_v=float(EFFECTIVE_VOLTAGE))
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "power_supply_readback_mismatch", result
+    assert result["read_back_above_limit"] == {
+        "field": "voltage_v",
+        "read_back": str(EFFECTIVE_VOLTAGE + Decimal(VOLTAGE_RESOLUTION)),
+        "limit": str(EFFECTIVE_VOLTAGE),
+    }, result
+    assert "above the limit" in result["summary"], result
+    assert "power_supply_above_limit" in QUARANTINE_REASON_GUIDES
+    assert "power_supply_above_limit" in (result.get("cleanup_reasons") or []), result
+    assert any(entry.get("reason") == "power_supply_above_limit" for entry in result.get("quarantine_guidance") or []), result
+    assert_last_known_output(result)
+
+
 def test_an_output_that_does_not_follow_is_a_read_back_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bench = make_bench(tmp_path, monkeypatch, unit_changes={"output_stuck": True})
 

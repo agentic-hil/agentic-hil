@@ -73,6 +73,7 @@ from agentic_hil.configwrite import (
     config_change_next_steps,
     leases_under_incident,
     load_config_document,
+    power_supply_ports,
     project_config_set,
     under_incident_sentence,
 )
@@ -308,11 +309,12 @@ def _choose_com_port(document: JsonObject, requested: str | None, port_names: tu
     An entry an esptool debugger names is never chosen unless the call names it
     (and the plan then carries nothing into it): it belongs to the ESP32's
     USB-UART bridge, and "the only one" must not make it the home of another
-    probe's port."""
+    probe's port. The port a bench supply is reached through is held back the
+    same way, because it is that supply's identity."""
     entries = _entries(document, "com_ports")
     if requested is not None:
         return requested, entries.get(requested)
-    claimed = esptool_ports(document)
+    claimed = {**esptool_ports(document), **power_supply_ports(document)}
     free = {name: entry for name, entry in entries.items() if name not in claimed}
     if port_names:
         matched = [name for name, entry in free.items() if _names_discovered_port(entry.get("device"), port_names)]
@@ -711,6 +713,19 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
                     f"`com_ports.{port_name}` is the serial line the esptool debugger "
                     f"`{esptool_ports(document)[port_name]}` reaches its board through, and its keys identify that "
                     "board's USB-UART bridge. Adoption does not carry another probe's port into it."
+                ),
+                "next_step": "Name a COM port entry of this probe's own as com_port_id, or a new name to have one created.",
+            }
+        )
+    elif port_name in power_supply_ports(document):
+        unavailable.append(
+            {
+                "key": f"com_ports.{port_name}.device",
+                "discovered_value": device,
+                "reason": (
+                    f"`com_ports.{port_name}` is the port the power supply `{power_supply_ports(document)[port_name]}` "
+                    "is reached through, and its keys identify that supply. They are the owner's, written by hand, and "
+                    "adoption does not carry a probe's port into them."
                 ),
                 "next_step": "Name a COM port entry of this probe's own as com_port_id, or a new name to have one created.",
             }

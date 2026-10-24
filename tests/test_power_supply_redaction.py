@@ -419,7 +419,12 @@ def test_tool_results_carry_no_supply_serial(case: str, tmp_path: Path, monkeypa
             assert result.get("error_type") == expected, result
     for text in (json.dumps(result), json.dumps(reply)):
         assert_masked(text, *secrets)
-        assert MARKER in text, case
+        # `project_config_describe` no longer lists the description of a supply's
+        # port at all, so there is no serial left in it to mask.
+        if case != "project_config_describe":
+            assert MARKER in text, case
+    if case == "project_config_describe":
+        assert not [entry for entry in result["writable_keys"] + result["locked_keys"] if entry["key"].startswith("com_ports.psu.serial")], result
     if case == "adopt_hardware_refusal":
         entries = [item for item in result["unavailable"] if item.get("key") == KEY]
         assert [entry["serial_number"] for entry in entries[0]["host_com_ports"]] == [MARKER], entries

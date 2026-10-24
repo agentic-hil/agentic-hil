@@ -24,11 +24,18 @@ import pytest
 import yaml
 from conftest import write_authoritative_config, write_config
 
+from agentic_hil.adopt import plan_adoption
 from agentic_hil.config import ConfigError, carry_over_permissions, config_schema, load_authoritative_config
 from agentic_hil.configreload import reload_description
-from agentic_hil.configwrite import resolve_permission_key
-from agentic_hil.knowledge import CONFIG_PERMISSIONS_RIGHT, config_shape_document, resolve_config_key
+from agentic_hil.configwrite import PROJECT_CONFIG_DESCRIBE, PROJECT_CONFIG_SET, resolve_permission_key
+from agentic_hil.knowledge import (
+    CONFIG_DESCRIPTION_RIGHT,
+    CONFIG_PERMISSIONS_RIGHT,
+    config_shape_document,
+    resolve_config_key,
+)
 from agentic_hil.power_supply import POWER_SUPPLY_TYPES
+from agentic_hil.tools import AgenticHILToolService
 
 ROOT = Path(__file__).resolve().parents[1]
 # Synthetic. The vid and pid happen to match the rs3005p's USB identity, which is
@@ -335,7 +342,7 @@ def test_every_type_record_has_the_seven_keys_and_rs3005p_is_pinned_exactly(
     }
     assert record["usb_ids"] == [[0x0416, 0x5011]]
     assert record["measures"] == {"voltage": True, "current": True}
-    assert record["output_readable"] is False
+    assert record["output_readable"] is True
     assert record["protection"] == {"ovp": "unsupported", "ocp": "unsupported"}
     assert record["protection_readable"] == {"ovp": False, "ocp": False}
     for name, other in POWER_SUPPLY_TYPES.items():
@@ -682,6 +689,82 @@ def test_grant_and_revoke_reach_the_two_supply_grants_and_nothing_else() -> None
     for key in ("power_supplies.bench.voltage_limit_v", "power_supplies.bench.idn_serial"):
         resolved, reason = resolve_permission_key(key)
         assert resolved is None and reason is not None and key in reason, key
+
+
+SUPPLY_PORT_FIELDS = ("device", "baudrate", "serial_number", "vid", "pid", "identity_source")
+
+
+def test_an_agent_cannot_rebind_the_port_a_supply_is_reached_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The supply's port is the owner's, like its limits: the description grant opens other ports, not that one."""
+    values = Values.fresh()
+    workspace, path = write_bench(
+        tmp_path,
+        monkeypatch,
+        **document(values, com_ports={"psu": port(values.serial, values.resource), "dut_uart": {"device": "COM251", "baudrate": 115200, "identity_source": "device"}}),
+    )
+    rewrite(path, lambda raw: raw.setdefault("permissions", {}).update({CONFIG_DESCRIPTION_RIGHT: True}))
+    tools = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    try:
+        described = tools.call(PROJECT_CONFIG_DESCRIBE)
+        listed = {entry["key"] for entry in described["writable_keys"] + described["locked_keys"]}
+        assert not {f"com_ports.psu.{field}" for field in SUPPLY_PORT_FIELDS} & listed, sorted(listed)
+        assert "com_ports.dut_uart.baudrate" in {entry["key"] for entry in described["writable_keys"]}
+
+        before = path.read_text(encoding="utf-8")
+        for field, value in (("serial_number", values.other_serial), ("device", "COM252"), ("vid", "1234"), ("pid", "5678"), ("identity_source", "vid_pid")):
+            refused = tools.call(PROJECT_CONFIG_SET, {"changes": [{"key": f"com_ports.psu.{field}", "value": value}]})
+            assert refused["ok"] is False, refused
+            assert refused["error_type"] == "invalid_argument", refused
+            assert refused["rejected_keys"] == [f"com_ports.psu.{field}"], refused
+            assert "power_supplies.bench" in refused["summary"], refused
+            text = json.dumps(refused, ensure_ascii=False).lower()
+            for secret in values.secrets():
+                assert secret.lower() not in text
+            assert path.read_text(encoding="utf-8") == before
+
+        # Mixed with a key the grant does open, the whole call is refused.
+        mixed = tools.call(
+            PROJECT_CONFIG_SET,
+            {"changes": [{"key": "com_ports.dut_uart.baudrate", "value": 9600}, {"key": "com_ports.psu.baudrate", "value": 9600}]},
+        )
+        assert mixed["ok"] is False and mixed["rejected_keys"] == ["com_ports.psu.baudrate"], mixed
+        assert path.read_text(encoding="utf-8") == before
+
+        opened = tools.call(PROJECT_CONFIG_SET, {"changes": [{"key": "com_ports.dut_uart.baudrate", "value": 9600}]})
+        assert opened["ok"] is True, opened
+    finally:
+        tools.close()
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))["com_ports"]["psu"]
+    assert {key: value for key, value in written.items() if key != "permissions"} == port(values.serial, values.resource)
+
+
+def test_a_probes_port_is_never_carried_into_the_port_a_supply_names() -> None:
+    """Not when the call names that port, and not as the only port the bench has."""
+    values = Values.fresh()
+    document_ = {
+        "debuggers": {"dut": {"type": "stlink", "probe_id": None, "executable": None}},
+        "target": {"name": "example-target", "controller": "unknown-controller"},
+        "com_ports": {"psu": {"device": DEVICE, "baudrate": 9600}},
+        "power_supplies": {"bench": supply()},
+    }
+    discovery = {
+        "ok": True,
+        "backend": "stlink",
+        "probe_id": values.other_serial,
+        "executable": "st-flash",
+        "target": {"controller": "STM32F446RE"},
+        "com_port": {"device": "COM9", "serial_number": values.other_serial, "vid": VID, "pid": PID},
+    }
+
+    named = plan_adoption(document_, discovery, debugger_id="dut", com_port_id="psu")
+    unnamed = plan_adoption(document_, discovery, debugger_id="dut")
+
+    for plan in (named, unnamed):
+        assert plan["ok"] is True, plan
+        assert not [item for item in plan["carried"] if item["key"].startswith("com_ports.psu")], plan["carried"]
+        assert "debuggers.dut.probe_id" in [item["key"] for item in plan["carried"]]
+    assert [item["key"] for item in named["unavailable"]] == ["com_ports.psu.device"]
+    assert "power supply `bench`" in named["unavailable"][0]["reason"]
 
 
 def test_a_regeneration_names_a_dropped_supply_in_dropped_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

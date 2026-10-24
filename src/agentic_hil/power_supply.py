@@ -85,7 +85,7 @@ POWER_SUPPLY_TYPES: dict[str, dict[str, Any]] = {
             }
         },
         "measures": {"voltage": True, "current": True},
-        "output_readable": False,
+        "output_readable": True,
         "protection": {"ovp": "unsupported", "ocp": "unsupported"},
         "protection_readable": {"ovp": False, "ocp": False},
         "usb_ids": [[0x0416, 0x5011]],
@@ -640,6 +640,9 @@ class _Call:
     wrote: bool = False
     last: ChannelStatus | None = None
     last_channel: int | None = None
+    # A set point the supply read back above the owner's limit: the field, the
+    # value and the limit, which hold the bench until the owner has checked it.
+    above_limit: JsonObject | None = None
 
     @property
     def channel(self) -> int:
@@ -890,7 +893,7 @@ class PowerSupplyService:
 
     def _converse(self, backend: PowerSupplyBackend, lease: HardwareLease, call: _Call) -> JsonObject:
         try:
-            return self._exchange(backend, call)
+            result = self._exchange(backend, call)
         except PowerSupplyFault as fault:
             if fault.error_type != "power_supply_no_reply":
                 if call.wrote:
@@ -908,6 +911,12 @@ class PowerSupplyService:
             if call.wrote:
                 lease.quarantine("power_supply_state_unconfirmed", error)
             raise
+        if call.above_limit is not None:
+            # The supply answered with a set point above the limit. Its state is
+            # known and outside what the owner allowed, so no next call may
+            # proceed from it until the owner has brought the unit back.
+            lease.quarantine("power_supply_above_limit", result["summary"])
+        return result
 
     def _no_reply(self, lease: HardwareLease, call: _Call, error: BaseException, backend_error: str, *, unconfirmed: bool, cause: str) -> JsonObject:
         if unconfirmed:
@@ -1015,6 +1024,9 @@ class PowerSupplyService:
                 read = getattr(self._read(backend, call, channel), attribute)
                 read_back[name] = _text(read)
                 if read != value:
+                    limit = call.limits[name]
+                    if read is not None and limit is not None and read > limit:
+                        call.above_limit = {"field": name, "read_back": _text(read), "limit": _text(limit)}
                     return self._mismatch(call, requested, read_back)
         else:
             steps = [False, True] if call.tool == "power_supply_cycle" else [bool(call.on)]
@@ -1070,6 +1082,13 @@ class PowerSupplyService:
 
     def _mismatch(self, call: _Call, requested: JsonObject, read_back: JsonObject) -> JsonObject:
         failure = power_supply_readback_mismatch_refusal(call.tool, call.supply_id, call.channel, requested, read_back)
+        if call.above_limit is not None:
+            above = call.above_limit
+            failure["read_back_above_limit"] = above
+            failure["summary"] += (
+                f" The read-back {above['field']} {above['read_back']} is above the limit {above['limit']}: "
+                "the bench is held until the owner has brought the unit within the limit."
+            )
         failure["last_known_output"] = call.known_output()
         return failure
 
