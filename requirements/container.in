@@ -25,5 +25,5 @@
 #   pip-compile --allow-unsafe --generate-hashes --output-file=requirements/container.txt requirements/container.in
 uv==0.13.4
 pyocd==0.45.1
-setuptools>=77
+setuptools>=84.1.0
 wheel
