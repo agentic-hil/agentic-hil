@@ -342,7 +342,7 @@ def test_every_type_record_has_the_seven_keys_and_rs3005p_is_pinned_exactly(
     }
     assert record["usb_ids"] == [[0x0416, 0x5011]]
     assert record["measures"] == {"voltage": True, "current": True}
-    assert record["output_readable"] is False
+    assert record["output_readable"] is True
     assert record["protection"] == {"ovp": "unsupported", "ocp": "unsupported"}
     assert record["protection_readable"] == {"ovp": False, "ocp": False}
     for name, other in POWER_SUPPLY_TYPES.items():

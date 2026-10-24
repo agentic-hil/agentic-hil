@@ -85,7 +85,7 @@ POWER_SUPPLY_TYPES: dict[str, dict[str, Any]] = {
             }
         },
         "measures": {"voltage": True, "current": True},
-        "output_readable": False,
+        "output_readable": True,
         "protection": {"ovp": "unsupported", "ocp": "unsupported"},
         "protection_readable": {"ovp": False, "ocp": False},
         "usb_ids": [[0x0416, 0x5011]],

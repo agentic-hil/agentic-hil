@@ -1,0 +1,22 @@
+{
+  "how": "recorded through power_supply_output on 2026-10-24 (#736, R2); the identity serial is not kept",
+  "model": "RS-3005P",
+  "firmware": "V6.9",
+  "recorded_on": "2026-10-24",
+  "load": "nothing attached to the output",
+  "switches": [
+    {
+      "command": "OUT0",
+      "reply_hex": "",
+      "before": {"VOUT1?": "03.30", "STATUS?": "53"},
+      "after": {"VOUT1?": "00.00", "STATUS?": "12"}
+    },
+    {
+      "command": "OUT1",
+      "reply_hex": "",
+      "before": {"VOUT1?": "00.00", "STATUS?": "12"},
+      "after": {"VOUT1?": "03.03", "STATUS?": "53"}
+    }
+  ],
+  "note": "after = read 0.1 s after the switch; VOUT1? was still rising after OUT1. Bit 6 (0x40) follows the output in both directions; bit 0 changed too and is given no meaning."
+}
