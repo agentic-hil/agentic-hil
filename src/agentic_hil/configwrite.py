@@ -815,6 +815,12 @@ def _project_config_set(
             not_false = [resolved.key for resolved, value in requested if resolved.right == CONFIG_PERMISSIONS_RIGHT and value is not False]
             if not_false:
                 return _only_false_allowed(not_false, target_path)
+            # And a supply's port, which is its identity: an agent that could
+            # rewrite it could point the owner's limits at another device, the
+            # next restart would adopt that, and nothing would ask the owner.
+            reserved = _supply_port_keys(document, requested)
+            if reserved:
+                return _supply_port_refused(reserved)
 
         before_permissions = permission_surface(document)
         before_description = description_view(document)
@@ -1901,9 +1907,59 @@ def _describe_unreadable(existing: AgenticHILConfig, error: ConfigError, status:
     )
 
 
+def power_supply_ports(document: JsonObject) -> dict[str, str]:
+    """The com_ports entries a bench supply is reached through, each with that supply's name.
+
+    Such an entry is the supply's identity, written by the owner with its limits,
+    so it is the owner's in the same way: neither this surface nor
+    `adopt-hardware` writes its description, and only a restart adopts it."""
+    supplies = document.get("power_supplies")
+    if not isinstance(supplies, dict):
+        return {}
+    return {
+        str(entry["com_port"]): str(name)
+        for name, entry in supplies.items()
+        if isinstance(entry, dict) and isinstance(entry.get("com_port"), str) and entry["com_port"]
+    }
+
+
+def _supply_port_keys(document: JsonObject, requested: list[tuple[ResolvedConfigKey, Any]]) -> dict[str, str]:
+    """The requested description keys that sit on a supply's port, each with that supply's name.
+
+    The port's permissions stay with the permissions rule: narrowing one is as
+    open here as on any other port."""
+    ports = power_supply_ports(document)
+    return {
+        resolved.key: ports[str(resolved.entry)]
+        for resolved, _ in requested
+        if resolved.section == "com_ports" and not resolved.under_permissions and resolved.entry in ports
+    }
+
+
+def _supply_port_refused(reserved: dict[str, str]) -> JsonObject:
+    supplies = ", ".join(f"`power_supplies.{name}`" for name in sorted(set(reserved.values())))
+    return _invalid(
+        "changes",
+        (
+            f"{len(reserved)} key(s) in this call describe the port {supplies} is reached through. That port is the "
+            "supply's identity and is the owner's, written by hand with its limits, so the description grant does "
+            "not open it. Nothing was written."
+        ),
+        rejected_keys=sorted(reserved),
+        next_step=(
+            "Leave the supply's port as it is. If it is wrong (the supply moved, or another unit is attached), report "
+            "that to the owner, who corrects it in the file and restarts the server; stop there."
+        ),
+    )
+
+
 def _concrete_keys(document: JsonObject) -> list[JsonObject]:
-    """Every settable key of this document, resolved against what is in it."""
+    """Every settable key of this document, resolved against what is in it.
+
+    The description of a supply's port is left out: no caller of this surface
+    may set it, so listing it as open or as locked would both be wrong."""
     keys: list[JsonObject] = []
+    supply_ports = power_supply_ports(document)
     for rule in CONFIG_KEY_RULES:
         entries: Sequence[str | None]
         if rule.named:
@@ -1911,6 +1967,8 @@ def _concrete_keys(document: JsonObject) -> list[JsonObject]:
             entries = sorted(str(name) for name in section) if isinstance(section, dict) else []
         else:
             entries = [None]
+        if rule.section == "com_ports" and not rule.under_permissions:
+            entries = [entry for entry in entries if entry not in supply_ports]
         for entry in entries:
             for field in config_rule_fields(rule):
                 resolved = f"{rule.section}.{entry}" if entry is not None else rule.section
