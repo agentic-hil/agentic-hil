@@ -106,9 +106,11 @@ of 0.01 V and 0.001 A. That range is the hardware bound only. The limits a bench
 runs at are the ones the owner writes into the authoritative configuration, and
 the range never stands in for them.
 
-On channel 1 it reads the set and the measured voltage and current, and it sets
-the voltage and the current limit. Every set point is written exactly as asked,
-never rounded, and read back with its own query before the write counts.
+On channel 1 it reads the set and the measured voltage and current and the
+output state, sets the voltage and the current limit, and switches the output.
+Every set point is written exactly as asked, never rounded, and read back with
+its own query before the write counts; every switch is read back from the
+STATUS byte.
 
 ### Recorded
 
@@ -124,6 +126,25 @@ queries only, and are what the backend decodes:
 | `IOUT1?` | `0.000` | measured current |
 | `STATUS?` | one raw byte, `0x53` | kept as evidence, no meaning |
 
+On 2026-10-24 the same firmware was recorded through the tools themselves, with
+nothing attached to the output:
+
+| Command | Then read | Read as |
+|---|---|---|
+| `VSET1:3.30` | `VSET1?` `03.30` | the voltage setter as drafted |
+| `ISET1:0.100` | `ISET1?` `0.100` | the current setter as drafted |
+| `OUT0` | `STATUS?` `0x12`, `VOUT1?` `00.00` | output off |
+| `OUT1` | `STATUS?` `0x53`, `VOUT1?` `03.03` | output on |
+
+Neither a setter nor `OUT0`/`OUT1` answers anything. Bit 6 of the STATUS byte
+(`0x40`) is the only bit that follows the output in both directions, and it is
+the only bit the backend reads: set means the output is on. Bit 0 changed too
+and is given no meaning, because the off state cannot tell regulation apart.
+`VOUT1?` read 0.1 s after `OUT1` was still rising, so the switch is confirmed by
+the STATUS bit and never by the measured voltage. After the supply's own power
+key cycled it, the output came back on at the stored set point: the unit does
+not power up with its output off.
+
 A command ending in a newline is answered with a trailing newline, and the
 first reply byte arrives 13 to 44 ms after the write. Two commands written back
 to back get only the first one answered, so every command waits for the reply
@@ -133,10 +154,9 @@ to the one before it.
 
 Not yet recorded, and used as drafts until a recording settles them:
 
-- the setter format, `VSET1:12.34` and `ISET1:1.234`, with as many places as the
-  query replies carry;
-- the setter's own reply, which is not read; the backend waits 0.1 s and reads
-  the set point back with its query;
+- the setter format beyond the two values recorded, `VSET1:12.34` and
+  `ISET1:1.234`, with as many places as the query replies carry;
+- the wait after a setter or an output switch, 0.1 s, before the read-back;
 - the reply timeout, the entry's `timeout_s` (1 s unless the owner sets one);
 - the framing of `STATUS?`, read as one byte and an optional newline;
 - the capability range of 30 V and 5 A, taken from the datasheet and the model
@@ -148,9 +168,9 @@ What has not been recorded is refused rather than guessed:
 
 - **Identity.** Only an RS-3005P on firmware V6.9 is driven. Another model or
   firmware is read and named, and nothing after `*IDN?` is sent to it.
-- **Output state, regulation and protection trips.** The meaning of the STATUS
-  byte is not recorded, so these read as `null`. Switching the output and power
-  cycling answer `not_supported` before the supply is contacted.
+- **Regulation and protection trips.** No bit of the STATUS byte is recorded
+  for them, so they read as `null`. Output switching is sent only to a firmware
+  whose STATUS table names the output bit, which today is V6.9 alone.
 - **OVP and OCP.** Both are `unsupported` and neither threshold reads back. No
   OVP or OCP command is ever sent, and a request to arm one fails with
   `power_supply_protection_not_armed` before contact.
@@ -167,7 +187,7 @@ What has not been recorded is refused rather than guessed:
   `power_supply_no_reply` too, and ends the conversation for the same reason, so
   the read that met it fails and nothing is written after it.
 - **Refused before sending.** A command the backend will not send, on an ended
-  or closed conversation or to switch the output, is `power_supply_no_reply`
+  or closed conversation or to switch an output it cannot read back, is `power_supply_no_reply`
   with the cause `not_sent`. Nothing reached the supply, so its state stays
   confirmed unless an earlier write in the same call changed it.
 

@@ -4,10 +4,12 @@ The fake answers what issue #730 recorded (2026-10-22, firmware V6.9, queries
 only), read from `fixtures/rs3005p_v6_9_issue_transcription.json`: every
 newline-terminated command gets its reply with a trailing newline, and a command
 written before the previous reply was read is not answered, as the recording
-found for two queries sent back to back. What nobody recorded (the setter reply,
-the meaning of the STATUS byte, output switching and the protections) the fake
-does not invent either: the backend has to fail closed on it, and these tests
-hold it to that.
+found for two queries sent back to back. Output switching answers as #736
+recorded it (2026-10-24, `fixtures/rs3005p_v6_9_output_recording.json`): `OUT0`
+and `OUT1` answer nothing and turn the STATUS byte to what was read after them.
+What nobody recorded (the setter reply, any other bit of the STATUS byte and the
+protections) the fake does not invent either: the backend has to fail closed on
+it, and these tests hold it to that.
 
 No test here opens a port. The factory's own test replaces pyserial's `Serial`
 before anything is built, and names a device that does not exist.
@@ -28,6 +30,7 @@ import pytest
 from agentic_hil.types import ChannelStatus, PowerSupplyFault
 
 FIXTURE = Path(__file__).parent / "fixtures" / "rs3005p_v6_9_issue_transcription.json"
+OUTPUT_FIXTURE = Path(__file__).parent / "fixtures" / "rs3005p_v6_9_output_recording.json"
 AT = "2026-10-22T12:00:00.000Z"
 # What one read of the fake takes: the recording's first reply byte came 13 to
 # 44 ms after the write.
@@ -40,6 +43,14 @@ def transcription() -> dict[str, Any]:
 
 def exchanges() -> dict[str, dict[str, Any]]:
     return {exchange["command"]: exchange for exchange in transcription()["exchanges"]}
+
+
+def output_recording() -> dict[str, Any]:
+    return json.loads(OUTPUT_FIXTURE.read_text(encoding="utf-8"))
+
+
+def switches() -> dict[bytes, dict[str, Any]]:
+    return {switch["command"].encode(): switch for switch in output_recording()["switches"]}
 
 
 def synthetic_serial() -> str:
@@ -89,6 +100,10 @@ class FakeSupply:
             self.unanswered.append(bytes(data))
             return len(data)
         command = bytes(data).removesuffix(b"\n")
+        recorded = switches().get(command)
+        if recorded is not None:
+            self.answers[b"STATUS?"] = bytes.fromhex(recorded["after"]["STATUS?"]) + b"\n"
+            return len(data)
         for setter, query in ((b"VSET1:", b"VSET1?"), (b"ISET1:", b"ISET1?")):
             if command.startswith(setter):
                 self.answers[query] = command[len(setter) :] + b"\n"
@@ -221,18 +236,18 @@ def test_the_transcribed_queries_decode_exactly_and_what_is_not_recorded_reads_n
         set_current_a=Decimal("2.000"),
         measured_voltage_v=Decimal("24.00"),
         measured_current_a=Decimal("0.000"),
-        output_on=None,
+        output_on=True,
         regulation=None,
         protection_tripped=None,
         ovp_threshold_v=None,
         ocp_threshold_a=None,
         read_at=AT,
     )
-    assert STATUS_TABLES == {}
+    assert STATUS_TABLES == {("RS-3005P", "V6.9"): {"output_bit": 6}}
 
 
 @pytest.mark.parametrize("framing", [b"\x53\n", b"\x53"], ids=["with-newline", "byte-alone"])
-def test_the_status_byte_is_kept_as_evidence_and_given_no_meaning(framing: bytes) -> None:
+def test_the_status_byte_is_kept_as_evidence_and_only_its_output_bit_is_read(framing: bytes) -> None:
     status_exchange = exchanges()["STATUS?"]
     assert (status_exchange["reply_raw_hex"], status_exchange["note"]) == ("53", "state not recorded, no meaning derived")
     fake = FakeSupply(status=framing)
@@ -243,7 +258,7 @@ def test_the_status_byte_is_kept_as_evidence_and_given_no_meaning(framing: bytes
 
     recorded = [entry for entry in supply.evidence() if entry["command"] == "STATUS?"]
     assert [entry["reply_hex"] for entry in recorded] == [framing.hex()]
-    assert (status.output_on, status.regulation, status.protection_tripped) == (None, None, None)
+    assert (status.output_on, status.regulation, status.protection_tripped) == (True, None, None)
     assert fake.unanswered == []
 
 
@@ -290,9 +305,9 @@ def _closed(fake: FakeSupply) -> Any:
         (lambda: FakeSupply(idn=b"KA3005P V5.8 SN:SYNTH\n"), lambda fake: (supply := backend(fake), supply.identity())[0], lambda supply: supply.set_current(1, Decimal("0.100"))),
         (lambda: FakeSupply(silent=(b"VOUT1?",)), _ended, lambda supply: supply.set_voltage(1, Decimal("5.00"))),
         (lambda: FakeSupply(), _closed, lambda supply: supply.set_voltage(1, Decimal("5.00"))),
-        (lambda: FakeSupply(), accepted, lambda supply: supply.set_output(1, True)),
+        (lambda: FakeSupply(), _closed, lambda supply: supply.set_output(1, True)),
     ],
-    ids=["before-identity", "identity-not-accepted", "conversation-ended", "closed", "output-switching"],
+    ids=["before-identity", "identity-not-accepted", "conversation-ended", "closed", "output-switching-closed"],
 )
 def test_a_command_the_backend_refuses_is_a_fault_that_wrote_nothing(fake: Any, situation: Any, operation: Any) -> None:
     """The layer above learns from the fault itself that nothing reached the supply."""
@@ -497,15 +512,39 @@ def test_a_port_that_will_not_open_is_no_reply_and_nothing_was_written(monkeypat
 # -- what is never sent ------------------------------------------------------
 
 
+@pytest.mark.parametrize("command", [b"OUT0", b"OUT1"])
+def test_output_switching_sends_the_recorded_command_and_reads_the_output_bit_back(command: bytes) -> None:
+    switch = switches()[command]
+    fake = FakeSupply(status=bytes.fromhex(switch["before"]["STATUS?"]) + b"\n")
+    supply = accepted(fake)
+    on = command == b"OUT1"
+
+    assert supply.channel_status(1).output_on is (not on)
+    supply.set_output(1, on)
+    status = supply.channel_status(1)
+
+    assert written(fake)[6] == command + b"\n"
+    assert fake.events[fake.events.index(("write", command + b"\n")) + 1] == ("sleep", 0.1)
+    assert (status.output_on, status.regulation) == (on, None)
+    entry = next(entry for entry in supply.evidence() if entry["command"] == command.decode())
+    assert (entry["operation"], entry["reply_hex"], entry["latency_ms"], entry["gap_s"]) == ("set_output", "", None, 0.1)
+    assert fake.unanswered == []
+
+
 @pytest.mark.parametrize("on", [True, False])
-def test_output_switching_is_never_sent(on: bool) -> None:
+def test_output_switching_is_not_sent_to_a_firmware_without_a_status_table(on: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil.backends import rs3005p
+
+    monkeypatch.setattr(rs3005p, "STATUS_TABLES", {})
     fake = FakeSupply()
     supply = accepted(fake)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(PowerSupplyFault) as fault:
         supply.set_output(1, on)
 
-    assert written(fake) == [b"*IDN?\n"]
+    assert (fault.value.error_type, fault.value.wrote, fault.value.cause) == ("power_supply_no_reply", False, "not_sent")
+    assert supply.channel_status(1).output_on is None
+    assert b"OUT0\n" not in written(fake) and b"OUT1\n" not in written(fake)
 
 
 def test_arming_nothing_sends_nothing_and_arming_a_threshold_fails_before_contact() -> None:
@@ -523,7 +562,7 @@ def test_arming_nothing_sends_nothing_and_arming_a_threshold_fails_before_contac
     assert written(fake) == [b"*IDN?\n"]
 
 
-def test_no_protection_and_no_output_command_is_ever_sent() -> None:
+def test_no_protection_command_is_ever_sent_and_the_output_only_as_out0_or_out1() -> None:
     fake = FakeSupply()
     supply = accepted(fake)
 
@@ -538,7 +577,7 @@ def test_no_protection_and_no_output_command_is_ever_sent() -> None:
 
     sent = [command.upper() for command in written(fake)]
     assert not [command for command in sent if b"OVP" in command or b"OCP" in command]
-    assert not [command for command in sent if b"OUT" in command and command not in {b"VOUT1?\n", b"IOUT1?\n"}]
+    assert [command for command in sent if b"OUT" in command and command not in {b"VOUT1?\n", b"IOUT1?\n"}] == [b"OUT1\n", b"OUT0\n"]
 
 
 # -- capabilities -------------------------------------------------------------
@@ -558,7 +597,7 @@ def test_the_capabilities_are_the_type_record_and_touch_nothing() -> None:
     assert POWER_SUPPLY_TYPES["rs3005p"]["channels"] == 1
     assert supply.capabilities()["protection"] == {"ovp": "unsupported", "ocp": "unsupported"}
     assert supply.capabilities()["protection_readable"] == {"ovp": False, "ocp": False}
-    assert supply.capabilities()["output_readable"] is False and STATUS_TABLES == {}
+    assert supply.capabilities()["output_readable"] is True and set(STATUS_TABLES) == {("RS-3005P", "V6.9")}
     assert fake.events == []
 
 
