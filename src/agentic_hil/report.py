@@ -26,7 +26,8 @@ from agentic_hil.config import (
 )
 from agentic_hil.configstate import config_stale, config_status
 from agentic_hil.knowledge import remediation_fields
-from agentic_hil.redact import filesystem_error_detail
+from agentic_hil.power_supply import supply_secrets
+from agentic_hil.redact import filesystem_error_detail, redact_values
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 _GENESIS_DIGEST = "0" * 64
@@ -49,7 +50,9 @@ def logs_directory(config: AgenticHILConfig) -> str:
 
 
 def append_jsonl(log_path: str, event: JsonObject, config: AgenticHILConfig | None = None) -> Exception | None:
-    entry = dict(event)
+    # Masked once, before either copy is written, so the workspace log and the
+    # canonical ledger hold the same line and neither holds a supply serial.
+    entry = redact_values(dict(event), supply_secrets(config))
     entry.setdefault("time", utc_now_iso())
     line = json.dumps(entry) + "\n"
     # The canonical trusted copy is written FIRST: if the untrusted workspace
@@ -378,7 +381,9 @@ def config_in_force(config: AgenticHILConfig) -> JsonObject:
 
 
 def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
-    enriched = dict(report)
+    # A supply serial never reaches a report on disk, whichever field of the run
+    # carried it: every copy written below is made from this masked one.
+    enriched = redact_values(dict(report), supply_secrets(config))
     enriched.setdefault("audit_ok", True)
     # setdefault, not assignment: `recommit_report_with_status` and the adoption
     # path commit the same report again after a terminal lease transition, and

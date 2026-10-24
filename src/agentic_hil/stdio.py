@@ -7,6 +7,8 @@ from typing import BinaryIO, TextIO
 
 from agentic_hil.config import ConfigError, load_authoritative_config
 from agentic_hil.mcp import handle_mcp_message, oversized_message_response, parse_error_response
+from agentic_hil.power_supply import supply_secrets
+from agentic_hil.redact import redact_values
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -278,7 +280,9 @@ def mcp_stdio(config_path: str | None = None) -> int:
                 )
         return run_stdio_server(config)
     except ConfigError as error:
-        sys.stderr.write(json.dumps(error.to_dict(), indent=2) + "\n")
+        # The loader registered the serials of the document it refused, so a
+        # refusal that names a supply port by its serial reaches stderr masked.
+        sys.stderr.write(json.dumps(redact_values(error.to_dict(), supply_secrets(None)), indent=2) + "\n")
         return 2
 
 

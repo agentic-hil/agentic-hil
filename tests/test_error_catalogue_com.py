@@ -80,6 +80,8 @@ COM_INVENTORY = frozenset(
         "com_port_not_bound",
         "com_port_not_configured",
         "com_port_open_failed",
+        # The port a power supply is configured on is the supply's (#733).
+        "com_port_reserved_for_power_supply",
         "com_reader_start_failed",
         "config_invalid",
         "invalid_argument",
@@ -752,6 +754,14 @@ CLAIMS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
         ("steps", (r"confirm-safe-state", r"quarantine-id")),
         ("do_not", (r"\b(delete|truncate|remove)\b", r"\blog\b")),
     ],
+    # The port a power supply is configured on is the supply's (#733, D3).
+    "com_port_reserved_for_power_supply": [
+        ("meaning", (r"\bpower supply\b", r"`power_supply`")),
+        ("meaning", (r"\bnothing\b", r"\bopen")),
+        ("first", (r"`power_supply_status`",)),
+        ("steps", (r"\bconsole\b", r"`com_ports`")),
+        ("do_not", (r"\bport\b", r"\b(another|other)\b")),
+    ],
 }
 
 # Steps whose order is the point: each pattern set must be met in a later step
@@ -1105,6 +1115,7 @@ PAYLOAD_EXEMPT = {
     "undeclared_device": "forwarded from the coordinator; resolved, and reached by the forwarding test below",
     "serial_read_failed": "nested under reader_error; the reader tests below",
     "audit_write_failed": "nested under reader_error; the reader tests below",
+    "com_port_reserved_for_power_supply": "needs a configured power supply; provoked through com_session_start and the flash capture in test_power_supply_tools.py",
 }
 
 

@@ -752,7 +752,17 @@ def test_the_wrapped_set_is_exactly_the_effect_class(tmp_path: Path) -> None:
     """Pinned by name as well as by derivation. The derivation is what keeps a
     tool added later from being silently left outside the run model; the names
     are what make a change to it a decision somebody has to write down."""
-    assert implicit_run_tools() == {"com_write", "can_send", "flash_firmware", "probe_target", "reset_target"}
+    assert implicit_run_tools() == {
+        "com_write",
+        "can_send",
+        "flash_firmware",
+        "probe_target",
+        "reset_target",
+        # A supply write changes what the board it powers runs on (#733).
+        "power_supply_set",
+        "power_supply_output",
+        "power_supply_cycle",
+    }
     # Every member raises incidents: that is the base the derivation subtracts
     # from, and a member outside it could never abort into anything.
     assert implicit_run_tools() <= audited_hardware_tools()

@@ -636,10 +636,16 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # ---------------------------------------------------------------------------
 # What the pins hold.
 
-# `agentic_hil.backends.esptool`, the ESP32 backend, is the 49th.
-SCANNED_MODULE_COUNT = 49
-# `can_broker_disconnected`, a broker connection that ended (#664), is the 219th.
-COLLECTED_TYPE_COUNT = 219
+# `agentic_hil.backends.rs3005p`, the RS-3005P power supply backend (#735), is
+# the 51st; `agentic_hil.power_supply`, the power-supply config module (#731),
+# was the 50th; `agentic_hil.backends.esptool`, the ESP32 backend, was the 49th.
+SCANNED_MODULE_COUNT = 51
+# The power supply tools (#733) add seven, the 220th to the 226th: the six
+# `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
+# `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
+# and `com_port_reserved_for_power_supply`. `can_broker_disconnected`, a broker
+# connection that ended (#664), was the 219th.
+COLLECTED_TYPE_COUNT = 226
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -678,7 +684,31 @@ COLLECTED_TYPE_COUNT = 219
 # The esptool backend adds 27 and no type: 22 in `backends.esptool`, and the
 # five `config_invalid` refusals of the loader's esptool checks in `config`.
 # Every type they write is one another backend or the loader already writes.
-PRODUCER_COUNT = 685
+# The power-supply config section (#731) adds four producers of `config_invalid`
+# in `power_supply.py`, each written with that literal type: the legacy-section
+# refusal `reject_legacy_power_supplies`, the supply entry's `power_supply_config`,
+# the limit check `power_supply_limit`, and the supply-port checks in
+# `validate_supply_ports`. No new type is added.
+# The power supply tools (#733) add eleven, each written with a literal type.
+# Nine are in `power_supply.py`: two `permission_denied` refusals (the missing
+# limits of D8 and a switched-off permission, each built by its own function),
+# one `not_supported` (a capability the supply type cannot read), and one
+# function each for `power_supply_limit_exceeded`,
+# `power_supply_identity_unknown`, `power_supply_identity_mismatch`,
+# `power_supply_no_reply`, `power_supply_protection_not_armed` and
+# `power_supply_readback_mismatch`. `tools.unbound_power_supply_error` writes
+# `not_supported` for a supply type with no backend, and one function in
+# `comports.py` writes `com_port_reserved_for_power_supply` for both the COM
+# session and the flash capture.
+# The refusal while this server's own session holds a board the supply powers
+# (#734) adds two `device_busy` producers in `power_supply.py`, one function for
+# the debug session and one for a COM session. No new type is added.
+# The RS-3005P backend (#735) adds two, one for each type it raises:
+# `RS3005PBackend._no_reply` writes `power_supply_no_reply` and
+# `RS3005PBackend.arm_protection` writes `power_supply_protection_not_armed`.
+# Its refusals before anything is sent add one: `RS3005PBackend._refuse` writes
+# `power_supply_no_reply` through `RS3005PRefused`, a fault that wrote nothing.
+PRODUCER_COUNT = 705
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
@@ -726,6 +756,9 @@ PINNED_DYNAMIC: dict[DynamicSite, str] = {
     ("config", "ConfigError.to_dict", "self.error_type"): "the constructor's argument, read at every construction of ConfigError in the package",
     ("knowledge", "catalogue_entry", "error_type"): "the catalogue key's own type, written back into the entry the reference serves for it",
     ("runevidence", "_run", "str(report['error_type'])"): "a run report's recorded type, copied into the run evidence",
+    ("backends.rs3005p", "RS3005PBackend.classify_last_error", "fault.error_type"): (
+        "the fault this backend last raised, typed by a literal at each raise of PowerSupplyFault in this module"
+    ),
 }
 
 

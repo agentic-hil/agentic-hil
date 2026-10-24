@@ -449,6 +449,7 @@ NEW_ENTRIES = frozenset(
 SCOPED_SITES: dict[tuple[str, str], str] = {
     ("tools", "unbound_debugger_error"): "not_supported:unbound_debugger",
     ("tools", "unnamed_probe_error"): "not_supported:unnamed_probe",
+    ("tools", "unbound_power_supply_error"): "not_supported:unbound_power_supply",
 }
 SCOPED_VALUE = "not_supported"
 
@@ -853,6 +854,12 @@ FACTS: dict[str, Facts] = {
         steps=(r"debugger_probes_list", r"project_config_adopt_hardware.*debugger_id.*probe_id", r"every other entry", r"call the tool again"),
         mentions=(r"OpenOCD cannot enumerate", r"allow_config_description_write"),
         do_not=(r"remove the other entries", r"guess a serial"),
+    ),
+    # A configured supply whose type has no backend in this build (#733).
+    "not_supported:unbound_power_supply": Facts(
+        says=(r"no backend", r"nothing was sent to the supply", r"retry_safe: false"),
+        steps=(r"`supply_type`", r"report it and stop"),
+        do_not=(r"other arguments", r"another way"),
     ),
     "adapter_not_found:discovery": Facts(
         says=(r"found no in-circuit debugger or programmer", r"requested_probe_id", r"nothing was read from a board and nothing was written"),

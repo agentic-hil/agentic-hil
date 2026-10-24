@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from decimal import Decimal
+from typing import Any, Literal, get_args
 
 JsonObject = dict[str, Any]
 
@@ -507,6 +508,52 @@ class CanBusConfig:
 
 
 @dataclass(frozen=True)
+class PowerSupplyPermissions:
+    """What one configured bench power supply may be told to do.
+
+    ``allow_set`` covers set points; ``allow_output`` covers switching the output
+    and cycling it. A flag a file does not name is false, so a supply entry grants
+    nothing until its owner writes the grant down."""
+
+    allow_set: bool = False
+    allow_output: bool = False
+
+
+@dataclass(frozen=True)
+class PowerSupplyChannelConfig:
+    """The owner's limits for one output channel. ``None`` is a limit nobody wrote.
+
+    Exact decimals, never floats: a limit is compared against a set point to the
+    supply's own resolution, and a float cannot hold 0.1 exactly."""
+
+    voltage_limit_v: Decimal | None = None
+    current_limit_a: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class PowerSupplyConfig:
+    """One bench power supply: which model it is, how it is reached, what it powers.
+
+    ``com_port`` names the ``com_ports`` entry the supply is wired to, and that
+    entry is reserved for it. ``powers`` names the debuggers whose boards this
+    supply feeds. The supply-wide limits and each channel's limits are the owner's,
+    written by hand; the effective limit of a channel is the lower of the two."""
+
+    type: str
+    com_port: str
+    powers: tuple[str, ...]
+    voltage_limit_v: Decimal | None = None
+    current_limit_a: Decimal | None = None
+    channels: dict[int, PowerSupplyChannelConfig] = field(default_factory=dict)
+    # The serial the supply reports in its identity reply. Required where the port
+    # entry has no `serial_number`, because it is then the only thing that tells
+    # one unit of the model from another.
+    idn_serial: str | None = None
+    timeout_s: float = 1.0
+    permissions: PowerSupplyPermissions = field(default_factory=PowerSupplyPermissions)
+
+
+@dataclass(frozen=True)
 class ValidationConfig:
     require_existing_file: bool
     require_allowed_root: bool
@@ -606,6 +653,9 @@ class AgenticHILConfig:
     # `loaded_at` stays the startup parse, because that is when the permissions
     # were taken and they are never taken again.
     description_reloaded_at: str = ""
+    # The bench power supplies. Only a restart adopts this section: a description
+    # reload carries the supplies parsed at startup over unchanged.
+    power_supplies: dict[str, PowerSupplyConfig] = field(default_factory=dict)
 
     @property
     def read_free(self) -> bool:
@@ -627,3 +677,77 @@ class AgenticHILConfig:
 
     def can_read_allowed(self, bus: CanBusConfig) -> bool:
         return self.read_free or bus.permissions.allow_read
+
+
+# ---------------------------------------------------------------------------
+# Power supplies: the values that cross the backend interface.
+#
+# Device-neutral on purpose: no command string and no raw byte reaches the class
+# layer. A backend turns its own protocol into these, and the class layer applies
+# the same rules to every backend through them.
+
+PowerSupplyFaultType = Literal["power_supply_no_reply", "power_supply_protection_not_armed"]
+POWER_SUPPLY_FAULT_TYPES: tuple[str, ...] = get_args(PowerSupplyFaultType)
+# Why a supply did not answer, as `PowerSupplyFault.cause` names it: no reply
+# came, the port would not open, a write timed out, the serial line failed in
+# some other way, or the backend refused the command before sending it.
+PowerSupplyFaultCause = Literal["no_reply", "port_open_failed", "write_timeout", "serial_error", "not_sent"]
+POWER_SUPPLY_FAULT_CAUSES: tuple[str, ...] = get_args(PowerSupplyFaultCause)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SupplyIdentity:
+    """Who answered on the supply's port.
+
+    ``accepted`` is the backend's word that this model and firmware are ones it
+    drives; anything else is an unknown identity and nothing beyond the identity
+    query is written to it. ``serial`` exists only so the class layer can compare
+    it with the configured one: it is a secret, and its repr never shows it."""
+
+    model: str | None
+    firmware: str | None
+    accepted: bool
+    serial: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ChannelStatus:
+    """One channel as the supply reported it at ``read_at`` (ISO 8601, UTC).
+
+    Every reading is exact as reported, never rounded. A field the backend cannot
+    read on this supply is ``None``, which is a statement that it is unknown and
+    never a default of zero or off."""
+
+    set_voltage_v: Decimal | None
+    set_current_a: Decimal | None
+    measured_voltage_v: Decimal | None
+    measured_current_a: Decimal | None
+    output_on: bool | None
+    regulation: Literal["cv", "cc"] | None
+    protection_tripped: bool | None
+    ovp_threshold_v: Decimal | None
+    ocp_threshold_a: Decimal | None
+    read_at: str
+
+
+class PowerSupplyFault(Exception):
+    """A backend could not do what it was asked, typed for the catalogue.
+
+    ``wrote`` says whether anything that changes the supply was sent before the
+    fault, so the class layer can tell a refusal from a state it no longer knows.
+    Only the two types a backend may raise are accepted; every other refusal is
+    decided by the class layer, the same for every backend. ``cause`` says why a
+    supply did not answer, from `POWER_SUPPLY_FAULT_CAUSES`, so the caller learns
+    a port that would not open from a supply that stayed silent; ``None`` leaves
+    it to the class layer, which reads it as no reply."""
+
+    def __init__(self, error_type: str, summary: str, *, wrote: bool, cause: str | None = None):
+        if error_type not in POWER_SUPPLY_FAULT_TYPES:
+            raise ValueError(f"A power supply backend raises only {', '.join(POWER_SUPPLY_FAULT_TYPES)}; got {error_type!r}.")
+        if cause is not None and cause not in POWER_SUPPLY_FAULT_CAUSES:
+            raise ValueError(f"A power supply fault's cause is one of {', '.join(POWER_SUPPLY_FAULT_CAUSES)}; got {cause!r}.")
+        super().__init__(summary)
+        self.error_type = error_type
+        self.summary = summary
+        self.wrote = wrote
+        self.cause = cause

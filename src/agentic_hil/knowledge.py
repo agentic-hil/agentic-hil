@@ -2142,6 +2142,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "line an esptool debugger flashes and resets through. Stop it with `com_session_stop` on the port that "
             "field names, make the call again, and start the session again afterwards to read what the board prints. "
             "`next_step` says the same.",
+            "A power supply call refused with `held_by_com_session` or `held_by_debug_session` is held by this server's "
+            "own session on a board that supply powers, and nothing was sent to the supply: stop that session with "
+            "`com_session_stop` or `debug_stop_session`, as `next_step` names it, and make the call again.",
         ),
         do_not=(
             "Do not delete the lock file, and do not retry in a loop. The hold belongs to a live process; removing it "
@@ -2176,6 +2179,189 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "That turns the one check that noticed into agreement with whatever is plugged in, which is the silent "
             "wrong-board flash this refusal exists to prevent. Change the board or change `device`; the identity is not "
             "the thing to edit.",
+        ),
+    ),
+    # -- Power supplies (#733) ---------------------------------------------------
+    "com_port_reserved_for_power_supply": ErrorRemedy(
+        meaning=(
+            "This port is the serial link of the power supply named in `power_supply`, so it belongs to that supply "
+            "and no COM session or flash capture may use it. Nothing was opened and nothing was written: the refusal "
+            "came from the configuration alone, before the port was touched."
+        ),
+        remediation=(
+            "Drive the supply through its own tools: `power_supply_status` reads it, and `power_supply_set`, "
+            "`power_supply_output` and `power_supply_cycle` change it.",
+            "To read what the board prints, use the `com_ports` entry of the board's own console adapter; "
+            "`com_ports_list` names every configured port and what it is for.",
+        ),
+        do_not=(
+            "Do not point another `com_ports` entry at this port's device, and do not open the port another way. Two "
+            "writers on one serial line interleave their bytes, and the supply would then read commands nobody sent.",
+        ),
+    ),
+    "power_supply_limit_exceeded": ErrorRemedy(
+        meaning=(
+            "A value is above the effective limit of the channel, the lower of the supply limit and the channel limit "
+            "the authoritative configuration sets. `field` names the quantity, `requested` the value and `limit` the "
+            "effective limit. On `power_supply_set` the value is the one asked for, or the set point already stored "
+            "for a quantity the call leaves as it is, which would stay in place beside the one written; on "
+            "`power_supply_output` and `power_supply_cycle` it is the set point already stored on the supply, which "
+            "would reach the board the moment the output switched on. The refusal came before any write: nothing was "
+            "set, no protection was armed and no output was switched."
+        ),
+        remediation=(
+            "Ask for a value at or below `limit`. When the stored set point is what is too high, write one within the "
+            "limit with `power_supply_set` first, then switch the output. A set that leaves a stored value above the "
+            "limit has to write that quantity too, in the same call.",
+            "If the task needs more than `limit`, report it and stop. Only the owner raises a limit, by hand in the "
+            "authoritative configuration file, followed by a restart of the server.",
+        ),
+        do_not=(
+            "Do not raise or remove the limit, and do not drive the supply another way. The limit is the bound the "
+            "board's owner chose for this bench, and it holds for every way of reaching the supply.",
+        ),
+    ),
+    "power_supply_identity_unknown": ErrorRemedy(
+        meaning=(
+            "The supply answered its identity query with a model or firmware this server has no verified record for. "
+            "`model` and `firmware` are what the unit reported. Nothing but the identity query was sent: no set "
+            "point, no protection threshold and no output command, because a command set is trusted only on the "
+            "firmware it was verified on."
+        ),
+        remediation=(
+            "Report the reported `model` and `firmware` and stop.",
+            "Check that `power_supplies.<id>.type` names the supply that is actually connected to this port; a supply "
+            "on the wrong port answers with its own identity.",
+        ),
+        do_not=(
+            "Do not change `type` to another model so the call goes through, and do not drive the supply another way. "
+            "What the commands of an unverified firmware do is not known.",
+        ),
+    ),
+    "power_supply_identity_mismatch": ErrorRemedy(
+        meaning=(
+            "The supply on this port reported a unit serial other than the `power_supplies.<id>.idn_serial` the "
+            "authoritative configuration names, so another unit of the same type is behind this port. Only the "
+            "identity query was sent; nothing was set or switched. Both serials are masked in the result."
+        ),
+        remediation=(
+            "Check which supply is cabled to this port, and connect the unit the configuration names.",
+            "If the unit was replaced on purpose, the owner writes the new `idn_serial` by hand in the authoritative "
+            "configuration file and restarts the server, after checking that the limits still fit the new unit.",
+        ),
+        do_not=(
+            "Do not drive this unit through another supply entry or another way. The limits of this entry were set "
+            "for the unit it names.",
+        ),
+    ),
+    "power_supply_no_reply": ErrorRemedy(
+        meaning=(
+            "The supply did not answer a command within its reply window. `retry_safe` says what that leaves. It is "
+            "false when this call had written a set point, a protection threshold or the output before the silence: "
+            "that write may or may not have taken effect, so the supply state is unconfirmed and the call carries the "
+            "cleanup reason `power_supply_state_unconfirmed`. Without a write before it, nothing on the supply was "
+            "changed by this call. `cause` says what stood in the way: `no_reply` (the supply stayed silent or "
+            "answered something unreadable), `port_open_failed` (its port did not open, often because another "
+            "program holds it), `write_timeout` (a write on its serial line timed out), `serial_error` (the serial "
+            "line failed in another way, such as a cable pulled during the call) or `not_sent` (the backend refused "
+            "the command before sending it); `backend_error` carries the error itself."
+        ),
+        remediation=(
+            "Read `last_known_output`: the last output state this call read, and when.",
+            "Read `cause` and `backend_error`. A port that did not open is usually held by another program, which "
+            "has to let it go before the supply can be reached.",
+            "When the result carries `power_supply_state_unconfirmed`, read `quarantine_guidance` and have the owner "
+            "check the supply's set points and output on the unit itself before the bench is used again.",
+            "Without a write, check the cable and the port, then call `power_supply_status` once.",
+        ),
+        do_not=(
+            "Do not retry a write in a loop. A write that got no reply may have been applied, and repeating it on an "
+            "unconfirmed state does not confirm it.",
+        ),
+    ),
+    "power_supply_readback_mismatch": ErrorRemedy(
+        meaning=(
+            "A value was written and the read straight after it returned something else. `requested` is what was "
+            "written and `read_back` is what the supply reports now, compared exactly. The supply answered, so its "
+            "state is known: it is the `read_back` value, not the request."
+        ),
+        remediation=(
+            "Report `requested` and `read_back`.",
+            "Call `power_supply_status` to read the whole channel before deciding anything else.",
+            "A supply that does not hold what it was told is a fact for the owner to look at, not one to work around.",
+        ),
+        do_not=(
+            "Do not write the value again with an offset to land on the request, and do not retry in a loop. The "
+            "comparison is exact on purpose.",
+        ),
+    ),
+    "power_supply_protection_not_armed": ErrorRemedy(
+        meaning=(
+            "The device-side protection could not be armed at the configured limits, so no set point was written and "
+            "no output switched. `protection` names which one (`ovp` or `ocp`), `requested` the threshold asked for, "
+            "`read_back` what the supply reports (null when it reports none) and `cause` why. `backend_fault`: the "
+            "supply refused the thresholds and nothing was written. `readback_mismatch` and `readback_missing`: the "
+            "thresholds were sent and read back wrong or not at all, so the protection state is unknown."
+        ),
+        remediation=(
+            "This refusal is the answer to the request. Report it and stop.",
+            "The owner inspects the supply and its protection settings before it is used for this again.",
+        ),
+        do_not=(
+            "Do not retry in a loop. Every call that changes the supply arms the protection again first, and refuses "
+            "again before any write.",
+            "Do not drive the supply another way. That steps around the limits and the protection both.",
+        ),
+    ),
+    "not_supported:power_supply": ErrorRemedy(
+        meaning=(
+            "This supply type cannot read its output state back, so this server cannot confirm an output switch and "
+            "refuses `power_supply_output` and `power_supply_cycle` on it before any contact. `capability` names "
+            "what is missing (`output_state`). Set points and `power_supply_status` still work. Calling again does "
+            "not change that (`retry_safe: false`)."
+        ),
+        remediation=(
+            "Report it and stop for the part of the task that switches the output.",
+            "Use `power_supply_set` and `power_supply_status` for what they cover; the owner switches the output by "
+            "hand.",
+        ),
+        do_not=(
+            "Do not switch the output another way, through the port or a script. A switch nobody can read back leaves "
+            "the board's power state unknown.",
+        ),
+    ),
+    "not_supported:unbound_power_supply": ErrorRemedy(
+        meaning=(
+            "The configured supply's type has no backend in this build, so this server cannot drive it. Nothing was "
+            "sent to the supply and its port was not opened. Calling again does not change that (`retry_safe: false`)."
+        ),
+        remediation=(
+            "Read `supply_type`: it is the type the configuration names for this supply.",
+            "Report it and stop. Support for a supply type comes with a release of this server, not from "
+            "configuration.",
+        ),
+        do_not=(
+            "Do not retry the tool with other arguments. No argument binds a backend.",
+            "Do not drive the supply another way, through its serial port or a script of your own.",
+        ),
+    ),
+    "permission_denied:power_supply_limits": ErrorRemedy(
+        meaning=(
+            "Writes on this channel are refused before contact because the authoritative configuration sets no limit "
+            "for one or more of the keys `missing_limits` names. A limit is never defaulted, never taken from the "
+            "supply's capability range and never taken from its present set point. Nothing was sent to the supply."
+        ),
+        remediation=(
+            "This refusal is the answer to the request. Report it and stop, naming every key in `missing_limits`.",
+            "Only the owner writes these limits, by hand in the authoritative configuration file, and then restarts "
+            "the Agentic HIL server, because the power_supplies section is read only at startup.",
+            "`power_supply_status` still reads the supply in the meantime, and says the same in "
+            "`writes_refused_reason`.",
+        ),
+        do_not=(
+            "Do not propose, estimate or derive a value for a limit, whether from the capability range, the present "
+            "set point or a datasheet.",
+            "Do not drive the supply another way.",
         ),
     ),
     COM_PORT_BUSY_ERROR: ErrorRemedy(
@@ -7526,6 +7712,14 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
     "com_write_audit_broken": _audit_guide("A COM write happened (or failed) and its audit entry could not be written."),
     "com_audit_broken": _audit_guide("Stopping a COM session could not write its closing audit entry."),
     "com_report_audit_broken": _audit_guide("A COM call completed but its report could not be persisted."),
+    # -- Power supplies (#733) ---------------------------------------------------
+    "power_supply_state_unconfirmed": QuarantineReasonGuide(
+        attempted="A power supply call was writing a set point, a protection threshold or the output, and lost the supply's answer or failed part-way.",
+        confirmed="Every write before the lost one was read back; the result's `last_known_output` is the last state read.",
+        unknown="Whether the last write took effect: the supply's set point, protection or output may be the old value or the new one.",
+        physical_check="Read the set points and the output state on the supply itself, bring the output to the state the board needs, then sign.",
+    ),
+    "power_supply_report_audit_broken": _audit_guide("A power supply call completed but its report could not be persisted."),
     # -- CAN buses --------------------------------------------------------------
     "can_open_interrupted": QuarantineReasonGuide(
         attempted="can_session_start was interrupted while opening the adapter.",
@@ -8130,6 +8324,11 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     ConfigKeyRule("debuggers", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
     ConfigKeyRule("com_ports", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
     ConfigKeyRule("can_buses", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
+    # A bench supply's two grants, and nothing else of the entry. Its limits, its
+    # port, its serial and the boards it powers are the owner's and are written in
+    # the file by hand: no rule names them, so no call can set one, and a
+    # description reload never re-reads the section.
+    ConfigKeyRule("power_supplies", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
     # And the two grants the schema puts directly on a fixed section instead of
     # inside a `permissions` block. A generation writes both true like every
     # other permission, so leaving them out of the key model left two things a
@@ -8142,7 +8341,7 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
 )
 
 # Sections whose entries are named by the operator and may be added.
-CONFIG_NAMED_SECTIONS = ("debuggers", "com_ports", "can_buses")
+CONFIG_NAMED_SECTIONS = ("debuggers", "com_ports", "can_buses", "power_supplies")
 
 
 @dataclass(frozen=True)
@@ -8341,6 +8540,13 @@ _SECTION_PURPOSE: dict[str, str] = {
         "kernel's control mode because only `ip link` can set it, and `process` requires the bridge to confirm it. An "
         "adapter that cannot be held to it refuses the session instead of listening anyway. `can_buses_list` reports "
         "`listen_only_enforcement` per bus."
+    ),
+    "power_supplies": (
+        "The bench power supplies. Each entry names its model as `type`, the `com_ports` entry it is reached through "
+        "as `com_port`, which no other entry may then use, and the debuggers whose boards it powers as `powers`. The "
+        "voltage and current limits, the serial and both grants (`allow_set`, `allow_output`) belong to the owner of "
+        "this file: they are written here by hand, `project_config_set` can only take a grant away, and a running "
+        "server adopts a changed supply, a lowered limit included, only when it restarts. Read from `version: 2` on."
     ),
     "validation": "How strictly a firmware artifact is checked before it is accepted.",
     "reports": "Where structured reports are written, relative to `state_root`.",
@@ -8745,7 +8951,7 @@ A single call needs no declaration. A *sequence* does: without one, `flash_firmw
 | `bench_run_stop` | releases the run's devices; safe to call when no run is open |
 | `bench_run_status` | whether a run is open here, what it declared, and since when |
 
-`kind` is one of `debugger`, `uart`, `can`. `id` is the name of the config entry; for `debugger` it may be omitted when the project configures exactly one. The DUT is not a kind: it is what the devices drive, not something that drives.
+`kind` is one of `debugger`, `uart`, `can`, `power_supply`. `id` is the name of the config entry; for `debugger` it may be omitted when the project configures exactly one. The DUT is not a kind: it is what the devices drive, not something that drives.
 
 A written test plan needs no declaration around it. `test_reactor_run` drives the same reactor `agentic-hil test-reactor` drives, and there the plan *is* the declaration: every device it names is taken before its first step and held past its last, and a step reaching for one the plan did not name is refused with `undeclared_device` exactly as a call inside a `bench_run_start` would be. Asked for while this session's own `bench_run_start` is open, a plan is refused as `run_already_active` naming `bench_run_stop` as the way out: a plan is a run of its own, and one run per owner is the rule.
 

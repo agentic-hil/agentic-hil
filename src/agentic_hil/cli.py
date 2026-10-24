@@ -103,8 +103,9 @@ from agentic_hil.knowledge import (
     RUNNING_SERVER_COMPARISON,
     remediation_fields,
 )
+from agentic_hil.power_supply import supply_secrets
 from agentic_hil.reactorrun import run_plan, start_plan_detached
-from agentic_hil.redact import redact_sensitive
+from agentic_hil.redact import redact_sensitive, redact_values
 from agentic_hil.report import (
     conclusive_success,
     overall_success,
@@ -354,6 +355,25 @@ def human_readable_output(command: str, *, json_requested: bool) -> bool:
     return command not in PROTOCOL_COMMANDS and not json_requested
 
 
+# The commands that print supply serials in clear. `agentic-hil com-ports` is the
+# host inventory an owner copies a supply's `serial_number` from into the
+# configuration, so it shows the serial it read. Every other command masks it.
+SUPPLY_SERIALS_IN_CLEAR = frozenset({"com-ports"})
+
+
+def redact_output(value: object, command: str | None) -> object:
+    """What a sink may print of `value`: `redact_sensitive`, then supply serials masked.
+
+    The serials are every one this process has registered, so a command with no
+    configuration loaded still masks a serial the host inventory reported. A
+    redaction that returns no document is handed back as it is, for the sink to
+    refuse."""
+    redacted = redact_sensitive(value)
+    if not isinstance(redacted, dict) or command in SUPPLY_SERIALS_IN_CLEAR:
+        return redacted
+    return redact_values(redacted, supply_secrets(None))
+
+
 def emit_result(result: JsonObject, command: str | None, *, human: bool) -> bool:
     """Print one result document, as the machine document or as prose.
 
@@ -376,7 +396,7 @@ def emit_result(result: JsonObject, command: str | None, *, human: bool) -> bool
     """
     if not human:
         return print_json(result, command)
-    redacted = redact_sensitive(result)
+    redacted = redact_output(result, command)
     if not isinstance(redacted, dict):
         write_rendered(sys.stdout, render_result(redaction_unavailable(command), command))
         return True
@@ -393,7 +413,7 @@ def emit_protocol_error(result: JsonObject, command: str | None) -> None:
     leaves the process; if it cannot vouch for the document, only the safe
     refusal is written.
     """
-    redacted = redact_sensitive(result)
+    redacted = redact_output(result, command)
     if not isinstance(redacted, dict):
         redacted = redaction_unavailable(command)
     sys.stderr.write(json.dumps(redacted, indent=2) + "\n")
@@ -6001,7 +6021,7 @@ def print_json(value: JsonObject, command: str | None = None) -> bool:
     returned. Both sinks share `redact_sensitive`, so neither can be the safe one
     to retry when it fails, and this is what makes that true rather than
     advertised."""
-    redacted = redact_sensitive(value)
+    redacted = redact_output(value, command)
     if not isinstance(redacted, dict):
         sys.stdout.write(json.dumps(redaction_unavailable(command), indent=2) + "\n")
         return True

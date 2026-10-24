@@ -185,6 +185,36 @@ What follows from there being no probe:
 
 `agentic-hil doctor` checks `target_type` without opening the port: it puts the name to esptool as `--chip=<name> version`, and a family this esptool does not know is red, with the close matches and the list esptool accepts. The MCP resource `agentic-hil://reference/debugger-backends/esptool` has the field matrix.
 
+## Bench power supplies
+
+A bench power supply that feeds the board is declared under `power_supplies`, next to the debugger and the ports, so the configuration that says which board a run reaches also says what powers it. The section is read from version 2 on (`version: 2` or `version: 3`), where an exclusive hold on the bench is what keeps a reading undisturbed; a version 1 file that declares a supply is refused at load. Each entry names its model, the `com_ports` entry it is reached through, and the debuggers whose boards it powers:
+
+```yaml
+com_ports:
+  psu:
+    device: COM9                # /dev/serial/by-id/... on Linux
+    resource_id: bench-psu      # the supply's own lock, naming no serial
+    vid: "0416"
+    pid: "5011"
+power_supplies:
+  bench:
+    type: rs3005p
+    com_port: psu               # the com_ports entry above, by name
+    powers: [dut]               # debuggers entries, by name
+    idn_serial: "<the serial the supply reports>"
+    voltage_limit_v: 3.3        # the highest voltage a call may set
+    current_limit_a: 0.5        # the highest current a call may set
+    permissions:
+      allow_set: false
+      allow_output: false
+```
+
+- **The owner sets the limits and the grants.** `voltage_limit_v` and `current_limit_a` bound every setting a call may make, supply wide and, under `channels`, per output channel numbered from 1. They load as exact decimals and are checked against the record of the supply type: a limit that is not a number, is zero or below, lies above the type's range, or is not a whole number of the type's steps refuses the whole file, and nothing is rounded. A supply without limits still loads and can be read, and every write on a channel is refused until the file sets all four of its limits, the supply's two and the channel's two under `channels.<n>` ([Bench power supplies](power-supplies.md#limits)). `allow_set` and `allow_output` are false unless the file says otherwise. All of these are written in the file by hand: no generation writes a supply, and `project_config_set` and `agentic-hil grant` reach the two grants only, never a limit.
+- **A restart adopts a change.** `project_config_reload_description` never re-reads `power_supplies`, a lowered limit included: the supply in force stays the one parsed at startup, and the result lists the section under `restart_required_for` until the server restarts onto the file. A reload is still checked against that startup supply, so a reload that renames a debugger it powers, or takes an identity key from its port, is refused naming the field and the restart that adopts the file instead.
+- **The port is the supply's alone.** The `com_ports` entry has to name its `device`, a `resource_id`, a `vid` and a `pid`, so the supply is opened only on the adapter it was declared on and holds a lock that no debugger, port or bus shares. No esptool debugger and no second supply may name the same port.
+- **Its serials stay private.** A supply is told apart from another unit of the same model by its port's `serial_number` or, where the adapter publishes none, by the `idn_serial` the supply reports for itself, and one of the two is required. Neither appears in any refusal: a malformed value is refused by its field alone, and a `resource_id` that contains either serial is refused, because a lock key is printed wherever locks are.
+- **Regeneration lists it.** A regenerated file carries no supply, so `project_config_create` names each one under `dropped_entries` rather than losing it in silence.
+
 ## Artifact Roots
 
 `artifacts.allowed_roots` lists the directories under `workspace_root` that firmware may be flashed from and debug dumps written to, each including its subdirectories. There is exactly one spelling for the whole project:
@@ -364,7 +394,7 @@ It takes no arguments and re-reads exactly four sections (`target`, `debuggers`,
 
 **It re-reads no permission at all.** Not narrowed, not compared, not adopted, and there is no flag that changes that. The grants in force after a reload are byte-for-byte the ones parsed at startup, and a device this server has never seen arrives holding **nothing**: from `version: 2` on it can be probed and read, because reading needs no grant and exclusivity is what protects it, and flashing, reset, mass erase and COM/CAN writes are denied on it until an operator restarts the server onto the file that grants them. Renaming an entry is the same case: the new name is a device this server has not seen, so it arrives closed.
 
-What still needs a restart is refused by name rather than quietly skipped, because each of these is either a permission wearing a description key's clothes or a section that mixes the two: `permissions`, `version` (it decides whether reading needs a grant at all), `workspace_root`, `state_root`, `debug` (`allow_all_symbols` is a grant, `allowed_symbols` an allowlist), `artifacts` (`allow_upload` is a grant, `allowed_roots` decides what may be flashed), `validation`, `recovery` (it decides whether the machine may drive a physical reset on its own), `reports` and `logs`. The result lists them with the reason.
+What still needs a restart is refused by name rather than quietly skipped, because each of these is either a permission wearing a description key's clothes or a section that mixes the two: `permissions`, `version` (it decides whether reading needs a grant at all), `workspace_root`, `state_root`, `debug` (`allow_all_symbols` is a grant, `allowed_symbols` an allowlist), `artifacts` (`allow_upload` is a grant, `allowed_roots` decides what may be flashed), `validation`, `recovery` (it decides whether the machine may drive a physical reset on its own), `reports`, `logs` and `power_supplies` (the supplies, their limits and their grants belong to the file's owner). The result lists them with the reason.
 
 It is refused while a run, a COM/CAN session or a debug session holds this bench (`config_reload_in_open_run`), while an incident on it is unresolved (`resource_quarantined`), and when the file is missing, unreadable or does not load: the same three states `config_status` reports, with nothing changed on any of them. It writes nothing, so no grant gates it: a bench whose `allow_config_description_write` is false can still pick up a board somebody plugged in.
 

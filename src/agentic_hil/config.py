@@ -52,6 +52,7 @@ from agentic_hil.types import (
     IoPermissions,
     JsonObject,
     LogsConfig,
+    PowerSupplyConfig,
     ProjectPermissions,
     RecoveryConfig,
     ReportsConfig,
@@ -216,6 +217,7 @@ class ValidatedDocument:
     debuggers: dict[str, DebuggerConfig]
     com_ports: dict[str, ComPortConfig]
     can_buses: dict[str, CanBusConfig]
+    power_supplies: dict[str, PowerSupplyConfig]
 
 
 def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
@@ -233,11 +235,23 @@ def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
     """
     if not isinstance(raw, dict):
         raise ConfigError("config_invalid", "Agentic HIL configuration root must be a mapping.", {"path": config_path})
+    # A supply's serials are registered before any refusal below can repeat one,
+    # so every later output point can strip them, a refusal of this very
+    # document included. Imported here: power_supply imports this module.
+    from agentic_hil.power_supply import (
+        power_supply_config,
+        register_config_secrets,
+        reject_legacy_power_supplies,
+        validate_supply_ports,
+    )
+
+    register_config_secrets(raw)
     reject_bridge_args(raw, config_path)
     reject_removed_sections(raw, config_path)
     reject_removed_keys(raw, config_path)
     reject_empty_allowed_roots(raw, config_path)
     config_version = configured_version(raw, config_path)
+    reject_legacy_power_supplies(raw, config_path, config_version)
     reject_read_permissions(raw, config_path, config_version)
     validate_config_schema(raw, config_path)
 
@@ -258,6 +272,14 @@ def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
     debuggers = {name: named_debugger_config(name, value, target) for name, value in mapping(raw.get("debuggers"), "debuggers").items()}
     com_ports = {name: com_port_config(name, value) for name, value in mapping(raw.get("com_ports"), "com_ports").items()}
     can_buses = {name: can_bus_config(name, value) for name, value in mapping(raw.get("can_buses"), "can_buses").items()}
+    power_supplies = {
+        name: power_supply_config(name, value, config_path)
+        for name, value in mapping(raw.get("power_supplies"), "power_supplies").items()
+    }
+    # Before every check that can repeat a resource_id: the port of a supply may
+    # not carry a serial in its resource_id, and that refusal names the field
+    # without its value.
+    validate_supply_ports(power_supplies, debuggers, com_ports, can_buses, config_path)
     # An esptool debugger is identified by the `com_ports` entry it names, so the
     # port is attached to it here, once both sections are parsed and before any
     # check below reads its identity off it.
@@ -280,6 +302,7 @@ def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
         debuggers=debuggers,
         com_ports=com_ports,
         can_buses=can_buses,
+        power_supplies=power_supplies,
     )
 
 
@@ -393,6 +416,7 @@ def assembled_config(raw: Any, document: ValidatedDocument, resolved_config_path
         artifacts=artifacts_config(artifacts_raw),
         com_ports=document.com_ports,
         can_buses=document.can_buses,
+        power_supplies=document.power_supplies,
         validation=validation_config(validation_raw),
         reports=reports_config(reports_raw),
         logs=logs_config(logs_raw),
@@ -2111,6 +2135,9 @@ def carry_over_permissions(document: JsonObject, existing: AgenticHILConfig) -> 
         "debuggers": dict(existing.debuggers),
         "com_ports": dict(existing.com_ports),
         "can_buses": dict(existing.can_buses),
+        # Never generated: a supply is declared by hand, so a regenerated document
+        # carries none, and each one is named here instead of vanishing.
+        "power_supplies": dict(existing.power_supplies),
     }
     for section, flags in GENERATED_WRITE_PERMISSIONS.items():
         entries = document.get(section)
@@ -3147,24 +3174,32 @@ def to_posix(value: str) -> str:
 
 
 def raise_config_validation_error(error: Any, config_path: str | None = None, document: Any = None) -> None:
+    from agentic_hil.power_supply import secret_bearing_fields
+
     details: JsonObject = {"field": schema_error_field(error)}
     if config_path is not None:
         details["path"] = config_path
+    # A supply's serials are named by their field and never repeated: the value
+    # of a malformed one is still the serial of a real unit.
+    secret = details["field"] in secret_bearing_fields(document)
 
     if error.validator == "additionalProperties":
         raise_unknown_field_error(error, details, document)
     if error.validator == "enum":
         details["allowed_values"] = error.validator_value
-        add_scalar_schema_value(details, error.instance)
+        if not secret:
+            add_scalar_schema_value(details, error.instance)
         raise ConfigError("config_invalid", f"{details['field']} has an unsupported value.", details) from error
     if error.validator == "type":
         details["expected_type"] = error.validator_value
-        add_scalar_schema_value(details, error.instance)
+        if not secret:
+            add_scalar_schema_value(details, error.instance)
         raise ConfigError("config_invalid", f"{details['field']} has the wrong type.", details) from error
 
     details["validator"] = error.validator
     details["schema_error"] = "Value does not satisfy the Agentic HIL configuration schema."
-    add_scalar_schema_value(details, error.instance)
+    if not secret:
+        add_scalar_schema_value(details, error.instance)
     raise ConfigError("config_invalid", "Agentic HIL configuration failed schema validation.", details) from error
 
 
@@ -3199,7 +3234,7 @@ def raise_unknown_field_error(error: Any, details: JsonObject, document: Any = N
         details["rejected_fields"] = rejected
     details["allowed_fields"] = sorted((error.schema.get("properties") or {}).keys())
     parts = [str(part) for part in error.absolute_path]
-    where = f"under {format_field_path(parts)}" if parts else "at the top level of the file"
+    where = f"under {format_document_path(list(error.absolute_path))}" if parts else "at the top level of the file"
     wrote_it = recorded_writing_release(document)
     introduced = fields_from_a_newer_release(config_container_key(parts), rejected) if not wrote_it else {}
     newest = wrote_it or (max(introduced.values(), key=release_order) if introduced else "")
@@ -3335,10 +3370,10 @@ def add_scalar_schema_value(details: JsonObject, value: object) -> None:
         details["value"] = value
 
 
-def reject_nonfinite_numbers(value: object, error_type: str, path: str | None = None, parts: list[str] | None = None) -> None:
+def reject_nonfinite_numbers(value: object, error_type: str, path: str | None = None, parts: list[str | int] | None = None) -> None:
     field_parts = parts or []
     if isinstance(value, float) and not math.isfinite(value):
-        details: JsonObject = {"field": format_field_path(field_parts), "value": "non-finite"}
+        details: JsonObject = {"field": format_document_path(field_parts), "value": "non-finite"}
         if path is not None:
             details["path"] = path
         raise ConfigError(error_type, "Configuration values must be finite numbers.", details)
@@ -3347,7 +3382,7 @@ def reject_nonfinite_numbers(value: object, error_type: str, path: str | None = 
             reject_nonfinite_numbers(child, error_type, path, [*field_parts, str(key)])
     elif isinstance(value, list):
         for index, child in enumerate(value):
-            reject_nonfinite_numbers(child, error_type, path, [*field_parts, str(index)])
+            reject_nonfinite_numbers(child, error_type, path, [*field_parts, index])
 
 
 def schema_error_field(error: Any) -> str:
@@ -3358,12 +3393,12 @@ def schema_error_field(error: Any) -> str:
     to name, so the path stops at the container they sat under and
     `rejected_fields` carries the keys themselves.
     """
-    parts = [str(part) for part in error.absolute_path]
+    parts: list[str | int] = list(error.absolute_path)
     if error.validator == "additionalProperties":
         names = unexpected_property_names(error.message)
         if len(names) == 1:
             parts.append(names[0])
-    return format_field_path(parts)
+    return format_document_path(parts)
 
 
 def format_field_path(parts: list[str]) -> str:
@@ -3373,6 +3408,23 @@ def format_field_path(parts: list[str]) -> str:
             result = f"{result}[{part}]" if result else f"[{part}]"
         else:
             result = f"{result}.{part}" if result else part
+    return result or "$"
+
+
+def format_document_path(parts: list[str | int]) -> str:
+    """A path into a parsed document, with a list index and a mapping key told apart.
+
+    A list index is written `[0]` and a mapping key `.key`, a key of digits
+    included: a supply's channel `1` is `channels.1`, the key the file holds,
+    and never an index into a list it does not have. Every key a configuration
+    holds is text, because the loader refuses any other, so the two kinds of
+    step cannot be confused."""
+    result = ""
+    for part in parts:
+        if isinstance(part, int) and not isinstance(part, bool):
+            result = f"{result}[{part}]"
+        else:
+            result = f"{result}.{part}" if result else str(part)
     return result or "$"
 
 

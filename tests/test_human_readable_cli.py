@@ -1979,8 +1979,12 @@ def test_the_json_flag_prints_the_real_init_document_unchanged(tmp_path: Path, m
     The next steps reaching the screen is a change to the rendering and to
     nothing else; the document a caller parses, the config step's `next_steps`
     included, is the one the command built.
+
+    On a host with no serial ports: a host that lists a bench supply prints its
+    serial masked, which `test_power_supply_redaction.py` pins.
     """
     _no_toolchain_init(tmp_path, monkeypatch)
+    monkeypatch.setattr("serial.tools.list_ports.comports", lambda *args, **kwargs: [])
     result = cli.init_project()
     assert result["steps"]["config"]["next_steps"], result
 

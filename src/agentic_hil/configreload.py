@@ -93,6 +93,7 @@ from agentic_hil.config import (
 )
 from agentic_hil.configstate import config_status, remember_pending_description_restarts
 from agentic_hil.knowledge import CONFIG_SHAPE_URI, remediation_fields
+from agentic_hil.power_supply import validate_supply_ports
 from agentic_hil.types import (
     AgenticHILConfig,
     DebuggerPermissions,
@@ -124,6 +125,7 @@ NOT_RELOADED_SECTIONS: tuple[tuple[str, str], ...] = (
     ("recovery", "decides whether this machine may drive a physical reset on its own."),
     ("reports", "an operator-owned path; a running server's audit trail may not move underneath it."),
     ("logs", "an operator-owned path; a running server's audit trail may not move underneath it."),
+    ("power_supplies", "the bench supplies, their limits and their grants, all owned by the file's owner. Only a restart adopts them, a lowered limit included."),
     ("<entry>.permissions", "every device entry's own grants. Never re-read; a restart adopts them."),
 )
 
@@ -244,6 +246,7 @@ def restart_view(config: AgenticHILConfig) -> JsonObject:
         "recovery": recovery,
         "reports": asdict(config.reports),
         "logs": asdict(config.logs),
+        "power_supplies": {name: asdict(entry) for name, entry in config.power_supplies.items()},
     }
 
 
@@ -436,6 +439,14 @@ def reload_description(
         # other call them different.
         return None, _relocated_refusal(existing, disk)
 
+    try:
+        # The supplies in force are the ones parsed at startup, since a reload
+        # never re-reads `power_supplies`, and they have to hold against the
+        # debuggers and ports this reload would adopt. The file passing on its
+        # own checks its own supplies, not these.
+        validate_supply_ports(existing.power_supplies, disk.debuggers, disk.com_ports, disk.can_buses, disk.config_path)
+    except ConfigError as error:
+        return None, _startup_supply_refusal(existing, error)
     try:
         # The composition, not the file, is what gets enforced, and the checks
         # that depend on which permissions apply have to be met by it. The disk
@@ -648,6 +659,60 @@ def _uncomposable_refusal(existing: AgenticHILConfig, error: ConfigError) -> Jso
             "Nothing changed here. This server is enforcing exactly what it was a moment ago, and repeating the call "
             "after the file is repaired is the whole of the recovery.",
         ],
+        **NOT_STARTED,
+        "retry_safe": True,
+        "cleanup_required": False,
+    }
+
+
+def _startup_supply_refusal(existing: AgenticHILConfig, error: ConfigError) -> JsonObject:
+    """A power supply this server started with no longer fits the description on disk.
+
+    Its own refusal, because the remedy depends on which side the field is on.
+    A field under `power_supplies` belongs to the supply parsed at startup, and a
+    reload never re-reads that section, so no edit to it in the file changes the
+    answer: the general advice to repair the named key would send an operator at
+    a key that is not the one being checked, and it is left out. A field under
+    `com_ports` is a port the reload would adopt, and repairing it in the file is
+    a real remedy, so that advice stays. A restart adopts the file's
+    `power_supplies` along with the rest of it, and is a way through on both.
+    """
+    refusal: JsonObject = {"tool": PROJECT_CONFIG_RELOAD, **error.to_dict()}
+    field = error.details.get("field")
+    if isinstance(field, str) and field.startswith("power_supplies."):
+        refusal.pop("remediation", None)
+        refusal.pop("do_not", None)
+        steps = [
+            "Report `field` and `summary`: `field` is a key of the power supply this server parsed at startup, and that "
+            "supply is the one checked here, not the one the file now declares.",
+            "Editing `power_supplies` in the file does not change this answer, because a reload never re-reads that "
+            "section. A restart of the MCP server adopts the file's `power_supplies` together with everything else in it.",
+            "Without a restart, the way through is a description that still carries what the startup supply relies on, "
+            "such as the debugger it powers under the name it had.",
+        ]
+    else:
+        steps = [
+            "Report `field` and `summary`: they name the key of a port that a power supply in force uses, and putting "
+            "that key right in the file lets this call through.",
+            "The alternative is a restart of the MCP server. That adopts the file's `power_supplies` together with its "
+            "ports, so a file that no longer declares this supply then no longer needs the port to carry one.",
+        ]
+    steps.append(
+        "Nothing changed here. This server is enforcing exactly what it was a moment ago, and the policy in force is "
+        "reported below as `permissions_in_force`."
+    )
+    return {
+        **refusal,
+        "summary": (
+            f"{error.summary} The file on disk loads on its own, but the description in it does not fit a power supply "
+            "this server parsed at startup. Nothing was re-read: this server is still enforcing the configuration it "
+            "loaded at startup."
+        ),
+        "config_status": config_status(existing),
+        "permissions_in_force": permission_summary(existing),
+        "path": existing.config_path,
+        "workspace_root": existing.workspace_root,
+        "next_steps": steps,
         **NOT_STARTED,
         "retry_safe": True,
         "cleanup_required": False,

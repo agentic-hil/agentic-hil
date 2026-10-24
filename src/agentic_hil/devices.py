@@ -40,6 +40,7 @@ from agentic_hil.types import (
     ComPortConfig,
     DebuggerConfig,
     JsonObject,
+    PowerSupplyConfig,
     com_port_carries_hardware_identity,
     com_port_identity_source,
     com_port_is_unbound,
@@ -47,7 +48,7 @@ from agentic_hil.types import (
     fold_hardware_id,
 )
 
-DEVICE_KINDS = ("debugger", "uart", "can")
+DEVICE_KINDS = ("debugger", "uart", "can", "power_supply")
 
 # Named once so the refusal, the docs and the warning cannot drift apart. This is
 # the one identity in this module that is NOT hardware-derived; see
@@ -566,6 +567,47 @@ class CanDevice(Device):
 
 
 @dataclass(frozen=True)
+class PowerSupplyDevice(Device):
+    """A configured bench power supply, the unit behind its serial port.
+
+    A supply is locked and declared by its port: the port's entry names the
+    hardware (a `resource_id`, which the loader requires of a supply's port), so
+    the supply and its port are one unit and take one key. The tools address
+    it by `supply_id`."""
+
+    kind: ClassVar[str] = "power_supply"
+    scope_field: ClassVar[str | None] = "supply_id"
+    tools: ClassVar[frozenset[str]] = frozenset({"power_supply_status", "power_supply_set", "power_supply_output", "power_supply_cycle"})
+
+    supply: PowerSupplyConfig = field(repr=False)
+    port: ComPortConfig = field(repr=False)
+
+    @property
+    def _port_device(self) -> UartDevice:
+        return UartDevice(config_id=self.supply.com_port, port=self.port)
+
+    @property
+    def lock_key(self) -> str:
+        return self._port_device.lock_key
+
+    @property
+    def lock_keys(self) -> tuple[str, ...]:
+        return self._port_device.lock_keys
+
+    @property
+    def declared_keys(self) -> tuple[str, ...]:
+        return self._port_device.declared_keys
+
+    @property
+    def identity_source(self) -> str:
+        return self._port_device.identity_source
+
+    @property
+    def identity_warning(self) -> str | None:
+        return self._port_device.identity_warning
+
+
+@dataclass(frozen=True)
 class DeviceSet:
     """The devices of one run, in the order they are taken.
 
@@ -706,6 +748,14 @@ def can_device(config: AgenticHILConfig, bus_id: str, participant: str | None = 
     return CanDevice(config_id=bus_id, bus=bus, participant=participant)
 
 
+def power_supply_device(config: AgenticHILConfig, supply_id: str) -> PowerSupplyDevice:
+    supplies = config.power_supplies
+    supply = supplies.get(supply_id)
+    if supply is None:
+        raise DeviceError(_unknown_device("power_supply", supply_id, sorted(supplies)))
+    return PowerSupplyDevice(config_id=supply_id, supply=supply, port=config.com_ports[supply.com_port])
+
+
 def _unknown_device(kind: str, name: str, configured: list[str]) -> JsonObject:
     return {
         "ok": False,
@@ -754,19 +804,22 @@ def resolve_device(config: AgenticHILConfig, selector: object) -> Device:
         # The only kind whose id may be omitted, and only when the project
         # configures exactly one probe; debugger_device says so when it cannot.
         return debugger_device(config, str(name) if name is not None else None)
-    if kind in {"uart", "can"}:
+    if kind in {"uart", "can", "power_supply"}:
         if name is None:
+            configured = {"uart": sorted(config.com_ports), "can": sorted(config.can_buses), "power_supply": sorted(config.power_supplies)}[kind]
             raise DeviceError(
                 {
                     "ok": False,
                     "error_type": "invalid_argument",
                     "summary": f"A {kind} device must be named by the id of its config entry; only a debugger may be left unnamed, and only with one configured.",
                     "kind": kind,
-                    "configured_devices": sorted(config.com_ports if kind == "uart" else config.can_buses),
+                    "configured_devices": configured,
                     "side_effect_committed": False,
                     "retry_safe": False,
                 }
             )
+        if kind == "power_supply":
+            return power_supply_device(config, str(name))
         if kind == "can" and str(name) in config.can_buses and config.can_buses[str(name)].shares and participant is None:
             raise DeviceError({"ok": False, "error_type": "can_participant_required", "summary": "A shared CAN bus run selector must name the participant view it declares.", "bus_id": str(name), "configured_participants": sorted(config.can_buses[str(name)].shares), "side_effect_committed": False, "retry_safe": False})
         return uart_device(config, str(name)) if kind == "uart" else can_device(config, str(name), str(selector["participant"]) if selector.get("participant") is not None else None)

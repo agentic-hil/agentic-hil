@@ -39,7 +39,8 @@ from agentic_hil.devices import (
     lock_keys,
 )
 from agentic_hil.knowledge import attach_quarantine_guidance, recovery_operator_command, remediation_fields
-from agentic_hil.redact import filesystem_error_detail, redact_sensitive
+from agentic_hil.power_supply import supply_secrets
+from agentic_hil.redact import filesystem_error_detail, redact_sensitive, redact_values
 from agentic_hil.report import CALL_SCOPED_LEASE_TOOLS, CONFIG_IN_FORCE_KEY, CONTACT_MARKER_KEY, read_report_state
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -195,10 +196,19 @@ ATTESTATION_NO_STANDING_STATE = "no_standing_state"
 # `can_report_audit_broken`, `debug_audit_broken`, ...) and the durable record a
 # later process adopts carries the string and not the flag that raised it.
 AUDIT_BROKEN_MARKER = "audit_broken"
+# The fields a lease or quarantine record is matched on. A supply serial is masked
+# everywhere else in a record before it is written, but never in these: a path or
+# an id that holds a serial by chance is still the one a later process looks its
+# own project up by, and a masked copy of it would match nothing.
+RECORD_MATCH_KEYS = frozenset({"workspace", "config_path", "project_resource", "resources", "owner_marker", "config_sha256", "quarantine_id", "lease_id"})
+
+
 def _public_record(record: JsonObject | None) -> JsonObject | None:
     if not isinstance(record, dict):
         return record
-    redacted = redact_sensitive(record)
+    # A record another process wrote may still carry a supply serial in clear, so
+    # what this one reports from it is masked against every serial it knows.
+    redacted = redact_values(redact_sensitive(record), supply_secrets(None))
     assert isinstance(redacted, dict)
     return {key: value for key, value in redacted.items() if key not in _RECORD_OUTPUT_HIDDEN_KEYS}
 
@@ -2562,7 +2572,10 @@ class HardwareCoordinator:
         return _read_record_at(self._record_path(resource), resource)
 
     def _write_record(self, resource: str, record: JsonObject) -> None:
-        atomic_write_text(self._record_path(resource), json.dumps(record, indent=2) + "\n")
+        # Masked before it reaches the disk, except the fields a record is matched
+        # on: a successor finds its own project by them, so they stay as written.
+        masked = redact_values(record, supply_secrets(self.config), preserve_keys=RECORD_MATCH_KEYS)
+        atomic_write_text(self._record_path(resource), json.dumps(masked, indent=2) + "\n")
 
     def _foreign_incident_refusal(self, resource: str, record: JsonObject) -> JsonObject:
         """The refusal a neighbour's unresolved incident raises here.

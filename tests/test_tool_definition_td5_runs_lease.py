@@ -127,7 +127,7 @@ SCHEMAS = {
                     "type": "object",
                     "additionalProperties": False,
                     "required": ["kind"],
-                    "properties": {"kind": {"type": "string", "enum": ["debugger", "uart", "can"]}, "id": NONEMPTY, "participant": NONEMPTY},
+                    "properties": {"kind": {"type": "string", "enum": ["debugger", "uart", "can", "power_supply"]}, "id": NONEMPTY, "participant": NONEMPTY},
                 },
             },
             "label": NONEMPTY,

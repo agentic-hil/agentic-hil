@@ -1,0 +1,32 @@
+{
+  "what": "The query replies of an RS-3005P bench power supply (KA3005P command set), as issue #730 lists them. The RS-3005P backend decodes exactly these and nothing it has not seen.",
+  "how": "transcribed from issue #730; raw bytes not available; not a recording made by this run",
+  "recorded_on": "2026-10-22",
+  "model": "RS-3005P",
+  "firmware": "V6.9",
+  "conditions": "pyserial 3.5 on Windows, queries only: no setter, output or protection command was sent",
+  "port": {"baudrate": 9600, "bytesize": 8, "parity": "N", "stopbits": 1, "flow_control": "none"},
+  "framing": "A command sent without a terminator is answered without one; the same command terminated by a newline is answered with a trailing newline.",
+  "first_reply_byte_ms": {"min": 13, "max": 44},
+  "pacing": "VSET1?ISET1? written back to back without a gap: only VSET1? is answered. The reply is read before the next command is sent.",
+  "exchanges": [
+    {
+      "command": "*IDN?",
+      "reply": "RS-3005P V6.9 SN:[redacted]",
+      "reply_bytes": 25,
+      "first_reply_byte_ms": {"min": 36, "max": 44},
+      "note": "the serial is redacted; the issue gives the reply length with the real serial"
+    },
+    {"command": "VSET1?", "reply": "24.00", "reply_bytes": 5, "meaning": "set voltage"},
+    {"command": "ISET1?", "reply": "2.000", "reply_bytes": 5, "meaning": "set current"},
+    {"command": "VOUT1?", "reply": "24.00", "meaning": "measured voltage"},
+    {"command": "IOUT1?", "reply": "0.000", "meaning": "measured current"},
+    {
+      "command": "STATUS?",
+      "reply_raw_hex": "53",
+      "reply_bytes": 1,
+      "meaning": "one raw byte, not ASCII text",
+      "note": "state not recorded, no meaning derived"
+    }
+  ]
+}

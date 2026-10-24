@@ -67,6 +67,11 @@ How a run reaches the bench:
   ESP32 stage, ``esp32_recordings.py``, reads it. That stage is a module of its
   own, collected only where a run names it, and it fails rather than skips on a
   run that was handed no board.
+* ``AGENTIC_HIL_BENCH_POWER_SUPPLY=<workspace>`` names a bench workspace whose
+  authoritative configuration declares a power supply, its limits and the
+  grants to set it. The tests marked ``power_supply`` drive that supply through
+  the MCP server in that workspace; a bench run that names none, or names
+  something that is no directory, deselects them with one line saying why.
 * HOME is deliberately *not* redirected for the commands this tier runs. The
   machine-wide device locks live under it, and they are what keeps this run off
   a board another run is holding. A tier that isolated HOME would be a tier that
@@ -116,6 +121,15 @@ NEEDS_THE_WHEELHOUSE = "wheelhouse"
 CUBECLT_ENV = "AGENTIC_HIL_BENCH_CUBECLT"
 CUBECLT = "cubeclt"
 CUBECLT_LEFT_OUT = pytest.StashKey[str]()
+# The bench workspace a run was given for a power supply, and the mark of the
+# tests that drive it. The workspace is a project whose authoritative
+# configuration the owner wrote, with the supply, its limits and its grants;
+# the tests read that configuration and never write it. Where none is named, or
+# what is named is no directory, those tests are deselected, and the run says
+# why in one line.
+POWER_SUPPLY_ENV = "AGENTIC_HIL_BENCH_POWER_SUPPLY"
+POWER_SUPPLY = "power_supply"
+POWER_SUPPLY_LEFT_OUT = pytest.StashKey[str]()
 # The mark of a test that can make the in-circuit debugger remove its serial
 # port and create it again (#620). A container started with fixed `--device`
 # bindings keeps the node it was given, so every test after that one would fail
@@ -900,6 +914,16 @@ def why_the_cubeclt_tests_are_left_out() -> str | None:
     return None
 
 
+def why_the_power_supply_tests_are_left_out() -> str | None:
+    """Why the tests with the power supply mark are deselected from this run, or None where they run."""
+    named = os.environ.get(POWER_SUPPLY_ENV)
+    if not named:
+        return f"deselected, {POWER_SUPPLY_ENV} names no bench workspace with a power supply for this run"
+    if not Path(named).is_dir():
+        return f"deselected, {POWER_SUPPLY_ENV} names {named}, which is no directory here"
+    return None
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """The stage that withholds the probe's group runs alone, and never beside the tier.
 
@@ -914,7 +938,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     reason is reported after collection. So is a test with the USB-UART
     adapter's mark on a run that was handed no adapter, and a test that drives
     the board through an STM32CubeCLT tree, where
-    `why_the_cubeclt_tests_are_left_out` gives a reason. What is kept runs in
+    `why_the_cubeclt_tests_are_left_out` gives a reason, and a test that drives a
+    bench power supply, where `why_the_power_supply_tests_are_left_out` gives
+    one. What is kept runs in
     collection order, except that a test marked `REENUMERATES_THE_PROBE` runs
     after every other.
     """
@@ -926,6 +952,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     left_out = why_the_index_tests_are_left_out() if indexing else None
     on_cubeclt = not withheld and any(item.get_closest_marker(CUBECLT) is not None for item in items)
     cubeclt_left_out = why_the_cubeclt_tests_are_left_out() if on_cubeclt else None
+    on_a_supply = not withheld and any(item.get_closest_marker(POWER_SUPPLY) is not None for item in items)
+    supply_left_out = why_the_power_supply_tests_are_left_out() if on_a_supply else None
     kept: list[pytest.Item] = []
     deselected: list[pytest.Item] = []
     unwired = 0
@@ -934,9 +962,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         installable = left_out is None or item.get_closest_marker(NEEDS_THE_WHEELHOUSE) is None
         reachable = wired or item.get_closest_marker(USB_UART) is None
         has_its_tree = cubeclt_left_out is None or item.get_closest_marker(CUBECLT) is None
-        if in_the_stage == withheld and installable and has_its_tree and not reachable:
+        has_its_supply = supply_left_out is None or item.get_closest_marker(POWER_SUPPLY) is None
+        if in_the_stage == withheld and installable and has_its_tree and has_its_supply and not reachable:
             unwired += 1
-        (kept if in_the_stage == withheld and installable and has_its_tree and reachable else deselected).append(item)
+        (kept if in_the_stage == withheld and installable and has_its_tree and has_its_supply and reachable else deselected).append(item)
     if left_out is not None:
         config.stash[INDEX_LEFT_OUT] = f"tests marked {NEEDS_THE_WHEELHOUSE}: {left_out}"
     if unwired:
@@ -945,6 +974,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         )
     if cubeclt_left_out is not None:
         config.stash[CUBECLT_LEFT_OUT] = f"tests marked {CUBECLT}: {cubeclt_left_out}"
+    if supply_left_out is not None:
+        config.stash[POWER_SUPPLY_LEFT_OUT] = f"tests marked {POWER_SUPPLY}: {supply_left_out}"
     # Stable, so the rest keep the order they were collected in.
     kept.sort(key=lambda item: item.get_closest_marker(REENUMERATES_THE_PROBE) is not None)
     if deselected:
@@ -953,10 +984,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 def pytest_report_collectionfinish(config: pytest.Config) -> str | list[str] | None:
-    """One line for each kind of test deselected for what this run lacks: the package index, the USB-UART adapter, the STM32CubeCLT tree."""
+    """One line for each kind of test deselected for what this run lacks: the package index, the USB-UART adapter, the STM32CubeCLT tree, the power supply."""
     lines = [
         line
-        for key in (INDEX_LEFT_OUT, USB_UART_LEFT_OUT, CUBECLT_LEFT_OUT)
+        for key in (INDEX_LEFT_OUT, USB_UART_LEFT_OUT, CUBECLT_LEFT_OUT, POWER_SUPPLY_LEFT_OUT)
         if (line := config.stash.get(key, None)) is not None
     ]
     if not lines:
