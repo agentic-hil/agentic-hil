@@ -77,9 +77,14 @@ TERMINATOR = b"\n"
 # driven.
 ACCEPTED_IDENTITIES = frozenset({("RS-3005P", "V6.9")})
 
-# The meaning of the STATUS byte per (model, firmware), from recordings only.
-# None exists yet, so no bit of it is read.
-STATUS_TABLES: dict[tuple[str, str], dict[str, Any]] = {}
+# The meaning of the STATUS byte per (model, firmware), from recordings only:
+# `output_bit` is the bit that is set while the output is on. Only that bit is
+# read; the others are kept as evidence and given no meaning. Output switching
+# is sent only to a unit whose table names that bit, because its read-back is
+# what confirms the switch.
+STATUS_TABLES: dict[tuple[str, str], dict[str, Any]] = {
+    ("RS-3005P", "V6.9"): {"output_bit": 6},
+}
 
 # Draft, not measured: how long a setter is given before its read-back query.
 # The recording saw the first reply byte of a query 13 to 44 ms after the write;
@@ -92,6 +97,7 @@ VOLTAGE_PLACES = 2
 CURRENT_PLACES = 3
 
 SETTER_DRAFT = "draft: the setter format is inferred from the query replies, and the setter's own reply is not recorded, so none is read"
+OUTPUT_DRAFT = "the output command answers nothing; its effect is read back from the STATUS byte"
 
 _IDENTITY = re.compile(rb"(\S+) (V\S+) SN:(.+)")
 _NUMBER = re.compile(rb"[0-9]+(?:\.[0-9]+)?")
@@ -207,13 +213,13 @@ class RS3005PBackend:
             self._number(self._ask("channel_status", command, wrote=False), command, wrote=False)
             for command in ("VSET1?", "ISET1?", "VOUT1?", "IOUT1?")
         )
-        self._status_byte("channel_status")
+        status = self._status_byte("channel_status")
         return ChannelStatus(
             set_voltage_v=set_voltage,
             set_current_a=set_current,
             measured_voltage_v=measured_voltage,
             measured_current_a=measured_current,
-            output_on=None,
+            output_on=self._output_on(status),
             regulation=None,
             protection_tripped=None,
             ovp_threshold_v=None,
@@ -228,7 +234,17 @@ class RS3005PBackend:
         self._set("set_current", channel, "ISET1", amps, CURRENT_PLACES)
 
     def set_output(self, channel: int, on: bool) -> None:
-        self._refuse("Output switching on the RS-3005P is not sent: its OUT commands and the STATUS byte that would confirm them are not recorded.")
+        self._ready(channel)
+        assert self._identity is not None
+        if self._status_table() is None:
+            self._refuse(
+                f"Output switching is not sent to RS-3005P {self._identity.firmware}: no STATUS byte of it is recorded, so nothing would confirm the switch."
+            )
+        command = "OUT1" if on else "OUT0"
+        started = self._monotonic()
+        self._exchange(lambda: self._transport.write(command.encode("ascii") + TERMINATOR), command=command, wrote=True)
+        self._record("set_output", command, b"", started, latency=False, draft=OUTPUT_DRAFT, gap_s=SETTER_GAP_S)
+        self._sleep(SETTER_GAP_S)
 
     def arm_protection(self, channel: int, ovp_v: Decimal | None, ocp_a: Decimal | None) -> None:
         if ovp_v is None and ocp_a is None:
@@ -297,7 +313,7 @@ class RS3005PBackend:
         return reply
 
     def _status_byte(self, operation: str) -> bytes:
-        """`STATUS?`: one raw byte and an optional newline, kept and not read."""
+        """`STATUS?`: one raw byte and an optional newline, kept as evidence; only a recorded bit is read from it."""
         started = self._monotonic()
         self._exchange(lambda: self._transport.write(b"STATUS?" + TERMINATOR), command="STATUS?", wrote=False)
         first = self._exchange(lambda: self._transport.read(1), command="STATUS?", wrote=False)
@@ -311,6 +327,19 @@ class RS3005PBackend:
             # the conversation ends here, and so does the read that met it.
             self._no_reply("STATUS?", wrote=False, why="answered more than one byte and a newline, a framing nobody recorded,")
         return reply
+
+    def _status_table(self) -> dict[str, Any] | None:
+        identity = self._identity
+        if identity is None or identity.model is None or identity.firmware is None:
+            return None
+        return STATUS_TABLES.get((identity.model, identity.firmware))
+
+    def _output_on(self, status: bytes) -> bool | None:
+        """The output state the STATUS byte reports, where a recording says which bit holds it."""
+        table = self._status_table()
+        if table is None:
+            return None
+        return bool(status[0] >> table["output_bit"] & 1)
 
     def _number(self, reply: bytes, command: str, *, wrote: bool) -> Decimal:
         text = reply.removesuffix(TERMINATOR)
