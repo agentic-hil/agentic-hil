@@ -644,8 +644,9 @@ SCANNED_MODULE_COUNT = 51
 # `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
 # `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
 # and `com_port_reserved_for_power_supply`. `can_broker_disconnected`, a broker
-# connection that ended (#664), was the 219th.
-COLLECTED_TYPE_COUNT = 226
+# connection that ended (#664), was the 219th. `device_lock_root_unusable`, a
+# machine device-lock directory this account cannot use (#777), is the 227th.
+COLLECTED_TYPE_COUNT = 227
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -708,7 +709,9 @@ COLLECTED_TYPE_COUNT = 226
 # `RS3005PBackend.arm_protection` writes `power_supply_protection_not_armed`.
 # Its refusals before anything is sent add one: `RS3005PBackend._refuse` writes
 # `power_supply_no_reply` through `RS3005PRefused`, a fault that wrote nothing.
-PRODUCER_COUNT = 705
+# The machine device-lock directory (#777) adds one, with its type:
+# `bench._unusable_lock_root` writes `device_lock_root_unusable`.
+PRODUCER_COUNT = 706
 
 
 def pin_problems(inventory: Inventory) -> list[str]:

@@ -50,6 +50,12 @@ the tier's fixtures never drive the board while a newcomer command does. A run o
 this module outside that lock, directly on a bench somebody else also uses, has
 nothing that keeps a newcomer command and another run's session apart, and must
 be started under it.
+
+On a machine with the shared directory ``/var/lib/agentic-hil/device-locks``
+(#777), which the tier gets mounted at its own path, every account keeps its
+device locks there, the newcomer's redirected home included, and the newcomer's
+commands and the tier's fixtures meet on one set of locks. The module proves
+whichever of the two applies.
 """
 
 from __future__ import annotations
@@ -97,6 +103,10 @@ pytestmark = [pytest.mark.bench, BENCH_ONLY]
 
 # The agents `setup` supports, in the order the quick start names them.
 AGENTS = ("claude-code", "codex", "opencode")
+
+# The product's fixed machine directory for device locks (agentic_hil.bench),
+# spelled here because this module never imports the product it measures.
+MACHINE_DEVICE_LOCK_ROOT = Path("/var/lib/agentic-hil/device-locks")
 
 # Where each agent keeps what this product writes for it, under the home
 # directory, and the user-level MCP registration each one reads, as
@@ -663,8 +673,8 @@ def test_the_demo_plan_is_green_from_the_newcomers_project(first_run: FirstRun, 
 
     The newcomer's build is flashed, so the board is marked as carrying another
     image and gets the session's demo back afterwards. The run took its device
-    locks in the newcomer's home, which is where the module docstring says they
-    go.
+    locks in the newcomer's home, or in the machine directory where there is
+    one, which is where the module docstring says they go.
     """
     board_images.displaced = True
     status, report = first_run.newcomer.document("test-reactor", "--test-config", "testconfig.yaml", cwd=first_run.project)
@@ -676,7 +686,11 @@ def test_the_demo_plan_is_green_from_the_newcomers_project(first_run: FirstRun, 
     assert [step["action"] for step in steps] == ["flash", "uart_open", "reset", "uart_read"], steps
     for step in steps:
         assert step["result"]["ok"] is True, step
-    assert (first_run.newcomer.home / ".agentic-hil" / "device-locks").is_dir()
+    home_locks = first_run.newcomer.home / ".agentic-hil" / "device-locks"
+    if MACHINE_DEVICE_LOCK_ROOT.is_dir():
+        assert not home_locks.exists(), home_locks
+    else:
+        assert home_locks.is_dir()
 
 
 def test_the_readme_four_calls_hear_the_banner_through_the_registered_server(
@@ -1210,6 +1224,10 @@ def test_upgrade_while_the_accounts_server_holds_the_board_is_not_refused_and_la
     server it did not reach still answers with the release it imported and
     closes its session, which frees the board; started again it runs the new
     release, and so does `agentic-hil` in a new shell.
+
+    The requirement pip is handed names the `[can]` extra: python-can is a
+    dependency of the package itself, so every installation has the extra and
+    the line keeps it.
     """
     installation = own_installation
     status, result = installation.upgrade
@@ -1222,7 +1240,7 @@ def test_upgrade_while_the_accounts_server_holds_the_board_is_not_refused_and_la
     assert result["manager"] == "pip", result
     command = result["command"]
     assert command[:4] == [installation.interpreter["executable"], "-m", "pip", "install"], command
-    assert {"--upgrade", "--user"} <= set(command) and command[-1] == "agentic-hil", command
+    assert {"--upgrade", "--user"} <= set(command) and command[-1] == "agentic-hil[can]", command
     assert result["install"]["returncode"] == 0, result["install"]
     assert result["restart_required"] is True, result
     assert installation.after_the_swap["ok"] is True, installation.after_the_swap

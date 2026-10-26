@@ -129,7 +129,9 @@ send it on: a battery result is a statement about one release on one machine.
   upgrades anything, and that is the point: an installed product is what is being
   measured.
 - **The device locks are shared, deliberately.** `HOME` is left alone, because
-  the machine-wide device locks live under it and they are what keeps this run
+  the device locks live under it, or in the machine directory
+  `/var/lib/agentic-hil/device-locks` where a Linux bench has one, and they are
+  what keeps this run
   off a board another run is holding. If a nightly job or another operator has
   the board, the battery waits or is refused by name rather than meeting them on
   the probe.
