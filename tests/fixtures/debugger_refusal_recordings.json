@@ -1,11 +1,12 @@
 {
   "what": "Refusals and version texts of the two debugger programs the container test image installs, recorded with nothing on USB. The unit tier's playback fake replays these streams byte for byte so the classifier is held to the tools' own words, and the container tier re-runs the commands and compares, so a reworded release turns a test red rather than a bench. STM32CubeProgrammer is not here: it does not run in the image and its phrases still need a bench recording.",
   "recorded_on": "2026-09-06",
+  "pyocd_recorded_on": "2026-10-26",
   "image": "tools/container/Dockerfile (python:3.12-slim), no probe attached",
   "tool_versions": {
     "openocd": "Open On-Chip Debugger 0.12.0",
     "openocd_debian_package": "0.12.0-3+b2",
-    "pyocd": "0.45.1"
+    "pyocd": "0.46.0"
   },
   "recordings": {
     "openocd_version": {
@@ -126,7 +127,7 @@
         "--version"
       ],
       "returncode": 0,
-      "stdout": "0.45.1\n",
+      "stdout": "0.46.0\n",
       "stderr": ""
     },
     "pyocd_unknown_option": {
@@ -146,7 +147,7 @@
         "--command",
         "status"
       ],
-      "returncode": 0,
+      "returncode": 3,
       "stdout": "No connected debug probes\n",
       "stderr": ""
     },
