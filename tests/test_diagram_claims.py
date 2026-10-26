@@ -497,10 +497,10 @@ def test_the_page_body_still_states_the_rule_it_states_now() -> None:
 
 
 def test_the_landing_page_still_states_the_rule_it_states_now() -> None:
-    """`README.md` under `## Security by construction`, unchanged."""
-    statement = statement_under("README.md", "## Security by construction", "standing quarantine")
+    """`README.md` under `## Set boundaries that hold`, unchanged."""
+    statement = statement_under("README.md", "## Set boundaries that hold", "broken audit trail")
 
-    assert "the standing quarantine is kept for the one state no later contact can rebuild, a broken audit trail" in statement
+    assert "A broken audit trail holds the bench until operator recovery, because another hardware test cannot rebuild missing evidence" in statement
 
 
 def test_the_served_guidance_still_states_the_rule_it_states_now() -> None:

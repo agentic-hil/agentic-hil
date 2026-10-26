@@ -1,4 +1,4 @@
-"""README.md and docs/safety-model.md state one permission default, and the code decides it.
+"""docs/safety-model.md states the permission default, the code decides it, and README.md never says otherwise.
 
 Both pages said "deny-by-default permissions per device", which a generated
 configuration is not: `generated_permissions` writes every switch true except the
@@ -7,6 +7,11 @@ declares it is a *device*, not a switch on one. Each page carried that claim in
 its own words, which is the failure this file exists to stop: correcting one
 left the other standing, and the page a reader is sent to for the depth is the
 one that outlives a landing page's edits.
+
+The README is the landing half of that statement. It keeps the two commands an
+operator types, in the depth page's words, the interlocked pair, whole, and the
+direction an agent may move a permission in, and it leaves the generated default
+and the refusal's name to the page it sends a reader to.
 
 So the two statements are located structurally (the section heading, then the
 statement under it) rather than by quoting them, and every fact they are held to
@@ -19,7 +24,7 @@ generation withholds, or invents one fails here rather than at a reader's bench.
 
 The one anchor that is prose is the direction an agent may move a permission in.
 The behaviour behind it is asserted directly against `permission_widening` in the
-same file, so the sentence stays only while it is still true.
+same file, so the sentences stay only while they are still true.
 """
 
 from __future__ import annotations
@@ -56,28 +61,46 @@ PERMISSION_NAME = re.compile(r"`(allow_[a-z_]+)`")
 # day this has to fail.
 PAIR_CLAUSE = " and ".join(f"`{flag}`" for flag in EXCLUSIVE_FLASH_PERMISSIONS)
 
-# The MCP asymmetry, in the words both pages use for it. Not derivable from the
-# code, so `test_the_direction_both_pages_claim_is_the_one_the_writer_enforces`
-# holds the behaviour instead and this holds the two pages to one wording.
-MCP_DIRECTION = "narrows its own authority and never widens it"
+# The same pair as the README names it: the interlock, rather than the default.
+INTERLOCK_CLAUSE = f"while either {' or '.join(f'`{flag}`' for flag in EXCLUSIVE_FLASH_PERMISSIONS)} is enabled"
 
-# Where a reader meets each statement. The heading, then the first thing under
-# it: a paragraph in the README, a bullet in the safety model.
+LANDING_PAGE = "README.md"
+
+# The MCP asymmetry, in the words each page uses for it. Not derivable from the
+# code, so `test_the_direction_both_pages_claim_is_the_one_the_writer_enforces`
+# holds the behaviour instead and this holds each page to its sentence.
+MCP_DIRECTION = {
+    LANDING_PAGE: "an agent can only narrow its authority",
+    "docs/safety-model.md": "narrows its own authority and never widens it",
+}
+
+# Where a reader meets each statement. The heading, then what is under it: the
+# short paragraphs of one section in the README, a bullet in the safety model.
 PAGES = {
-    "README.md": ("README.md", "## Security by construction"),
+    LANDING_PAGE: ("README.md", "## Set boundaries that hold"),
     "docs/safety-model.md": ("docs/safety-model.md", "## Permissions and validation"),
 }
 
 
 def statement_under(document: Path, heading: str) -> str:
-    """The one statement a reader meets under `heading`, as they meet it."""
+    """The one statement a reader meets under `heading`, as they meet it.
+
+    A section that opens with a bullet states it in that bullet; a section
+    written as prose states it across its paragraphs, up to the next heading."""
     lines = document.read_text(encoding="utf-8").splitlines()
     headings = [index for index, line in enumerate(lines) if line.strip() == heading]
     assert len(headings) == 1, f"{document.name} has {len(headings)} {heading!r} headings; this test is not reading it any more"
+    section = []
     for line in lines[headings[0] + 1 :]:
+        if line.startswith("#"):
+            break
         if line.strip():
-            return line.strip()
-    raise AssertionError(f"{document.name} says nothing under {heading!r}")
+            section.append(line.strip())
+    if not section:
+        raise AssertionError(f"{document.name} says nothing under {heading!r}")
+    if section[0].startswith("- "):
+        return section[0]
+    return " ".join(section)
 
 
 def statements() -> dict[str, str]:
@@ -135,14 +158,22 @@ def cli_command(name: str) -> str:
     return f"agentic-hil {name}"
 
 
-def shared_claims() -> dict[str, str]:
-    """What both pages must say, in the same words, from the same sources."""
-    return {
-        "the pair a generation holds false": f"{PAIR_CLAUSE} false",
+def claims_on(page: str) -> dict[str, str]:
+    """What `page` must say, from the same sources as the other page.
+
+    The commands are in the same words on both. The README names the pair as
+    the interlock it is and leaves the default a generation writes to the page
+    it sends a reader to."""
+    claims = {
         "the command that takes one grant back": f"{cli_command('revoke')} <key>",
         "the command that reopens it": f"{cli_command('grant')} <key>",
-        "the direction an agent may move a permission": MCP_DIRECTION,
+        "the direction an agent may move a permission": MCP_DIRECTION[page],
     }
+    if page == LANDING_PAGE:
+        claims["the pair that refuses flashing"] = INTERLOCK_CLAUSE
+    else:
+        claims["the pair a generation holds false"] = f"{PAIR_CLAUSE} false"
+    return claims
 
 
 @pytest.fixture
@@ -166,7 +197,7 @@ def test_both_pages_carry_the_same_claims(page: str) -> None:
     """The drift itself: a fact one page states and the other does not."""
     statement = both_statements()[page]
 
-    missing = {claim: expected for claim, expected in shared_claims().items() if expected not in statement}
+    missing = {claim: expected for claim, expected in claims_on(page).items() if expected not in statement}
     assert missing == {}, f"{page} does not carry {missing}, in: {statement}"
 
 
@@ -208,18 +239,21 @@ def test_the_landing_page_names_no_permission_the_depth_page_leaves_out() -> Non
     assert landing <= depth, f"README.md names {sorted(landing - depth)}, which docs/safety-model.md does not"
 
 
-def test_both_pages_name_the_refusal_an_undeclared_device_really_gets(generated_configuration: AgenticHILConfig) -> None:
+def test_the_depth_page_names_the_refusal_an_undeclared_device_really_gets(generated_configuration: AgenticHILConfig) -> None:
     """The claim the correction rests on, read off the bench rather than off prose.
 
     Presence is the thing that is denied until it is declared, and this is the
     refusal a call gets for reaching past the declaration. Taken from a real
-    resolution on a really generated file, so the pages name the error type an
-    operator will actually see."""
+    resolution on a really generated file, so the page that names it names the
+    error type an operator will actually see. The README states the refusal
+    and leaves its name to that page."""
     with pytest.raises(DeviceError) as refusal:
         resolve_device(generated_configuration, {"kind": "uart", "id": "a-port-this-configuration-does-not-declare"})
 
     error_type = refusal.value.result["error_type"]
     for page, statement in both_statements().items():
+        if page == LANDING_PAGE:
+            continue
         assert error_type in statement, f"{page} does not name the refusal an undeclared device gets ({error_type}): {statement}"
 
 
