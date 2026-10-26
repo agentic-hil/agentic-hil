@@ -153,11 +153,21 @@ jobs:
       # for itself. The step is killed seconds later, which can be before that
       # teardown is done: the container finishes it on its own, and the next
       # run waits for it before it builds anything.
+      #
+      # `--probe-from-config` names the probe in this step, the two standard
+      # stages and the pyOCD, CubeProgrammer and USB reset recordings below, as
+      # in hardware-bench.yml, because the machine carries more than one and
+      # the runner never chooses between them. The directory is the demo's in
+      # the nightly's checkout at the workspace root, which this job's two
+      # checkouts sit beside: the bench's authoritative configuration is bound
+      # to that directory by its path, and the demo's directory in either
+      # checkout here has none. So the gate drives the probe the nightly drives,
+      # and this file names no probe, no serial number and no node.
       - name: Run the opt-in incident recovery check
         id: recovery_check
         if: ${{ success() && !inputs.diagnose_only && inputs.run_recovery_check }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --runtime podman --live-device-tree --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS/recovery-check" -- tests/bench/recovery_check.py
+        run: exec python3 ../harness/tools/bench_in_container.py --runtime podman --live-device-tree --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --probe-from-config ../examples/nucleo-f446re_demo --output "$BENCH_RESULTS/recovery-check" -- tests/bench/recovery_check.py
 
       # `--require-usb-uart` states that this bench's board has a USB-UART
       # adapter wired to it beside the probe. Without it, a bench whose adapter
@@ -166,7 +176,7 @@ jobs:
       - name: Run the bench tier in its container
         if: ${{ success() && !inputs.diagnose_only }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --require-usb-uart --output "$BENCH_RESULTS"
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --probe-from-config ../examples/nucleo-f446re_demo --require-usb-uart --output "$BENCH_RESULTS"
 
       # The one stage the tier cannot hold: the probe attached and this user not
       # allowed to open it, as on a Linux account that has not joined the group
@@ -180,7 +190,7 @@ jobs:
       - name: Run the stage without the probe's device group
         if: ${{ !cancelled() && !inputs.diagnose_only && (!inputs.run_recovery_check || steps.recovery_check.outcome == 'success') }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --without-device-group --require-usb-uart --output "$BENCH_RESULTS/without-device-group"
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --probe-from-config ../examples/nucleo-f446re_demo --without-device-group --require-usb-uart --output "$BENCH_RESULTS/without-device-group"
 
       # Kept separate from the standard tier so the extra pyOCD hardware
       # recordings cannot change either hard gate. It uses the normal bench
@@ -188,7 +198,7 @@ jobs:
       - name: Run pyOCD hardware recordings
         if: ${{ success() && !inputs.diagnose_only && inputs.run_pyocd_recordings }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --runtime podman --live-device-tree --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS/pyocd" -- -x tests/bench/pyocd_recordings.py
+        run: exec python3 ../harness/tools/bench_in_container.py --runtime podman --live-device-tree --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --probe-from-config ../examples/nucleo-f446re_demo --output "$BENCH_RESULTS/pyocd" -- -x tests/bench/pyocd_recordings.py
 
       # Kept separate from the standard tier and the without-device-group
       # stage so the extra hardware scenario cannot change either hard gate.
@@ -197,7 +207,7 @@ jobs:
       - name: Run CubeProgrammer hardware recordings
         if: ${{ success() && !inputs.diagnose_only && inputs.run_cubeprogrammer_recordings }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS/cubeprogrammer" --cubeprogrammer-archive "$HOME/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip" -- tests/bench/cubeprogrammer_recordings.py
+        run: exec python3 ../harness/tools/bench_in_container.py --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --probe-from-config ../examples/nucleo-f446re_demo --output "$BENCH_RESULTS/cubeprogrammer" --cubeprogrammer-archive "$HOME/.cache/agentic-hil/toolchains/cubeprogrammer-2.23.0.zip" -- tests/bench/cubeprogrammer_recordings.py
 
       # This opt-in requests USBDEVFS_RESET for the verified ST-Link device
       # through the existing isolated runner. A reset request is not proof of
@@ -206,7 +216,7 @@ jobs:
       - name: Run USB reset and re-enumeration recording
         if: ${{ success() && !inputs.diagnose_only && inputs.run_usb_reset_reenumeration }}
         working-directory: under-test
-        run: exec python3 ../harness/tools/bench_in_container.py --runtime podman --live-device-tree --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --output "$BENCH_RESULTS/usb-reset" -- tests/bench/usb_reset_reenumeration.py
+        run: exec python3 ../harness/tools/bench_in_container.py --runtime podman --live-device-tree --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --probe-from-config ../examples/nucleo-f446re_demo --output "$BENCH_RESULTS/usb-reset" -- tests/bench/usb_reset_reenumeration.py
 
       # Kept separate from the standard tier like the recordings above, and
       # opt-in because the ESP32 board is a second board on the bench, beside
