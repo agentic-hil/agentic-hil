@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -217,8 +218,20 @@ def test_a_stop_asked_while_the_worker_waits_for_a_held_device_ends_the_wait(tmp
     """A run in `starting` reads its stop inside the device wait, not after it.
 
     A stranger holds the plan's device, the run is registered and asked to
-    stop, and then waits up to 3 s for the device. The mutex wait itself must
-    end promptly as `stopped`, even when writing the final report is slow."""
+    stop, and then waits up to 3 s for the device. The stop is on disk before
+    the wait begins, so the wait ends `stopped` on its first turn: the stop
+    file is asked once and answers yes, and no poll interval is slept. The
+    report is written once, after the wait has ended.
+
+    Counted in turns of the wait rather than timed. How many turns the wait
+    takes before it reads the stop is what the product decides; how long one
+    turn takes is the host's. Timed against 1 s, the claim went red on Windows
+    runners at 3.17 s, 1.34 s and 2.14 s with the run ended `stopped` every
+    time: the turn is one check of the in-process lock table and one read of
+    the stop file, no sleep, so a stall of the host inside it (a garbage
+    collection, a file system call that does not return) was read as a wait
+    the product took."""
+    import agentic_hil.bench as bench
     import agentic_hil.reactorrun as reactorrun
     from agentic_hil.bench import BenchMutex
     from agentic_hil.reactorrun import run_registered_plan
@@ -228,28 +241,62 @@ def test_a_stop_asked_while_the_worker_waits_for_a_held_device_ends_the_wait(tmp
     test_config = load_test_config(str(plan), config.work_dir)
     stranger = BenchMutex(frontend="stranger", label="other-bench-session")
     stranger.acquire(declared_devices(config, test_config))
-    original_acquire = BenchMutex.acquire
-    waited_s: list[float] = []
-    mutex_wait_finished_at: list[float] = []
+    # Only what this thread does inside the run's own mutex wait is counted: a
+    # thread an earlier test left behind may sleep or take a lock meanwhile.
+    this_thread = threading.get_ident()
+    in_wait: list[bool] = []
+    waits_ended: list[bool] = []
+    lock_tries: list[str] = []
+    stop_answers: list[bool] = []
+    slept_s: list[float] = []
     report_started_after_mutex: list[bool] = []
 
-    def measured_acquire(mutex, *args, **kwargs):
-        wait_started = time.monotonic()
+    def inside_the_wait() -> bool:
+        return bool(in_wait) and threading.get_ident() == this_thread
+
+    original_acquire = BenchMutex.acquire
+
+    def counted_acquire(mutex, *args, **kwargs):
+        in_wait.append(True)
         try:
             return original_acquire(mutex, *args, **kwargs)
         finally:
-            mutex_wait_finished_at.append(time.monotonic())
-            waited_s.append(mutex_wait_finished_at[-1] - wait_started)
+            in_wait.clear()
+            waits_ended.append(True)
 
-    monkeypatch.setattr(BenchMutex, "acquire", measured_acquire)
+    original_try = bench._LifetimeLock.acquire
+
+    def counted_try(lock):
+        if inside_the_wait():
+            lock_tries.append(lock.path.name)
+        return original_try(lock)
+
+    original_stop_requested = runlifecycle.RunRegistration.stop_requested
+
+    def counted_stop_requested(registration):
+        answer = original_stop_requested(registration)
+        if inside_the_wait():
+            stop_answers.append(answer)
+        return answer
+
+    real_sleep = time.sleep
+
+    def counted_sleep(seconds):
+        if inside_the_wait():
+            slept_s.append(seconds)
+        real_sleep(seconds)
+
+    monkeypatch.setattr(BenchMutex, "acquire", counted_acquire)
+    monkeypatch.setattr(bench._LifetimeLock, "acquire", counted_try)
+    monkeypatch.setattr(runlifecycle.RunRegistration, "stop_requested", counted_stop_requested)
+    monkeypatch.setattr(time, "sleep", counted_sleep)
     original_write_report = reactorrun.write_report
 
-    def slow_report(*args, **kwargs):
-        report_started_after_mutex.append(bool(mutex_wait_finished_at))
-        time.sleep(scaled_time_bound(1.1))
+    def recorded_report(*args, **kwargs):
+        report_started_after_mutex.append(bool(waits_ended))
         return original_write_report(*args, **kwargs)
 
-    monkeypatch.setattr(reactorrun, "write_report", slow_report)
+    monkeypatch.setattr(reactorrun, "write_report", recorded_report)
     try:
         registration = runlifecycle.RunRegistration.take(config, runlifecycle.new_run_handle(), name=test_config.name, test_config_path=test_config.path, detached=True)
         with registration:
@@ -261,11 +308,13 @@ def test_a_stop_asked_while_the_worker_waits_for_a_held_device_ends_the_wait(tmp
     finally:
         stranger.release_all()
 
-    # The mutex polls the lock every 0.2 s and the stop file at most every 0.1 s.
-    # Time exactly the acquire boundary so durable report I/O cannot turn a
-    # successful prompt stop into a timing failure.
-    assert len(waited_s) == 1, waited_s
-    assert waited_s[0] < scaled_time_bound(1.0), (waited_s, result.get("error_type"), result.get("summary"))
+    # A second turn costs a poll interval slept and another look at the stop
+    # file, so the first turn being the last is these two lists, whatever the
+    # host's clock did meanwhile.
+    turns = {"stop_answers": stop_answers, "slept_s": slept_s, "lock_tries": lock_tries, "error_type": result.get("error_type")}
+    assert waits_ended == [True], waits_ended
+    assert stop_answers == [True], turns
+    assert slept_s == [], turns
     assert report_started_after_mutex == [True], report_started_after_mutex
     assert result["stopped"] is True, result
     assert result["error_type"] == "run_stopped", result
