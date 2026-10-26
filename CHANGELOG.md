@@ -4,7 +4,7 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
-## [Unreleased]
+## [0.25.0] - 2026-10-26
 
 ### Added
 
@@ -22,6 +22,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - The Develop on your board page (`docs/use-cases/develop-on-your-board.md`) now walks through one recorded run on a real board in order: the task, the failing report, the one-line firmware fix and the rerun in which all three plans passed. Three excerpts of the 2026-09-15 starter record are shown as images, every report is linked, the versions the record used are named, the errors on the way are kept apart from the planted defect, and the page leads on to installation, your own first run and how to share its result. The `llms.txt` entry describes the walkthrough.
 - **An update can no longer take CAN support away.** python-can is now a dependency of the package itself instead of only of the `[can]` extra. `uv tool install` records the line it is given in place of the one before, so an update written as `uv tool install --upgrade "agentic-hil>=X"` over an installation made as `agentic-hil[can]` used to uninstall python-can, and the bench found out at its next `can_session_start` with `No module named 'can'`. Every install and upgrade line now carries it, whether or not it names an extra. `agentic-hil[can]` is still declared and still accepted, the installers' `--no-can` no longer leaves python-can out, and the runtime lock pins python-can with the two packages it adds, wrapt and packaging. `can_backend_not_available` with a `ModuleNotFoundError` now means python-can was removed from the environment after the install.
+
+- Both one-line installers pin Astral's uv installer at 0.13.5 and carry the SHA-256 of exactly those bytes, `1c6e7f025499664633ac2dce43a210800510e9ef0625c52e034a8afdf8bf177a` for the POSIX installer and `84b66aa3018e9d800886543380d967bb3fb9652cfb251cfa5f3c73f4e62f59f2` for the PowerShell one, and the TLS-proxy eval image carries the POSIX pair. Read against 0.12.23, the new installers differ only in the version strings and the per-artifact checksums: Astral's POSIX installer still verifies each archive it downloads against a per-artifact SHA-256 and their PowerShell installer still unpacks with no checksum step at all, so on Windows this pin remains the only integrity check between `astral.sh` and an executed script, and the comment in `install.ps1` that says so names the release it was read at. uv 0.13 downloads Python 3.15 where no supported interpreter is installed, a version CI tests on every OS.
 
 ### Fixed
 
