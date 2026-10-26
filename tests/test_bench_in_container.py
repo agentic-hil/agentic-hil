@@ -2092,6 +2092,71 @@ def test_a_device_lock_directory_that_is_a_link_is_refused(machine: SimpleNamesp
     assert machine.runtime.issued("run") == []
 
 
+def a_machine_lock_directory(monkeypatch: pytest.MonkeyPatch, mode: int = stat.S_IFDIR | 0o2770, *, enterable: bool = True) -> str:
+    """The directory every account of the lock group keeps its device locks in (#777)."""
+    machine_locks = bench_in_container.MACHINE_LOCKS
+    statuses = {machine_locks: SimpleNamespace(st_mode=mode), machine_locks.rsplit("/", 1)[0]: SimpleNamespace(st_mode=stat.S_IFDIR | 0o755)}
+
+    def status_of(path: str) -> SimpleNamespace:
+        if path not in statuses:
+            raise FileNotFoundError(2, "No such file or directory", path)
+        return statuses[path]
+
+    monkeypatch.setattr(bench_in_container, "lock_directory_status", status_of)
+    monkeypatch.setattr(bench_in_container, "can_enter", lambda path: enterable)
+    return machine_locks
+
+
+def test_the_tier_mounts_the_machines_shared_lock_directory_at_its_own_path(machine: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where it exists, the product inside uses it as the product outside does:
+    one set of locks for the tier, the host and every other account."""
+    machine_locks = a_machine_lock_directory(monkeypatch)
+
+    assert run(machine) == 0
+
+    command = machine.runtime.tier
+    assert mounted_at(command, machine_locks) == machine_locks
+    assert not [volume for volume in option_values(command, "-v") if volume.endswith(f":{bench_in_container.CONTAINER_LOCKS}")]
+
+
+def test_the_stage_without_the_device_group_keeps_the_home_lock_directory(machine: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """That stage withholds every supplementary group, the lock group among them,
+    and cannot open the board either: the home directory is all it can use."""
+    machine_locks = a_machine_lock_directory(monkeypatch)
+
+    assert run(machine, "--without-device-group") == 0
+
+    command = machine.runtime.tier
+    assert mounted_at(command, bench_in_container.CONTAINER_LOCKS) == str(machine.home / ".agentic-hil" / "device-locks")
+    assert not [volume for volume in option_values(command, "-v") if volume.endswith(f":{machine_locks}")]
+
+
+@pytest.mark.parametrize(
+    ("mode", "enterable", "says"),
+    [
+        pytest.param(stat.S_IFLNK | 0o777, True, "link", id="a-link"),
+        pytest.param(stat.S_IFREG | 0o660, True, "not a directory", id="a-file"),
+        pytest.param(stat.S_IFDIR | 0o770, True, "setgid", id="no-setgid"),
+        pytest.param(stat.S_IFDIR | 0o2775, True, "others", id="others-may-read"),
+        pytest.param(stat.S_IFDIR | 0o2750, True, "group", id="the-group-may-only-read"),
+        pytest.param(stat.S_IFDIR | 0o2770, False, "this account", id="not-in-the-group"),
+    ],
+)
+def test_a_machine_lock_directory_that_cannot_be_used_refuses_the_tier(
+    machine: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, mode: int, enterable: bool, says: str
+) -> None:
+    """Before the queue and the image, never by falling back to the home
+    directory: the tier would hold locks no other account sees."""
+    machine_locks = a_machine_lock_directory(monkeypatch, mode, enterable=enterable)
+
+    assert run(machine) == bench_in_container.EXIT_CANNOT_RUN_HERE
+
+    assert machine.runtime.issued("run") == []
+    err = capsys.readouterr().err
+    assert machine_locks in err
+    assert says in err
+
+
 # The verdict.
 
 
