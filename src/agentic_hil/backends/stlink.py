@@ -1234,6 +1234,15 @@ class STLinkBackend:
             return "adapter_usb_error"
         if contains_any(lower, ["no st-link", "no stlink", "st-link not found", "stlink not found", "no debug probe"]):
             return "probe_not_found"
+        # STM32CubeProgrammer 2.23.0's answer for a configured `sn=` with no
+        # ST-Link behind it, `Error: Serial number not found. Wrong parameter:
+        # sn=<serial>` and exit 1, recorded with the probe's USB port powered off
+        # (connect_probe_powered_off and reset_halt_probe_powered_off in
+        # stm32cubeprogrammer_2_23_0_failure_recordings.json, #737). Ahead of the
+        # generic `not found` rule below, which would read it as a missing input
+        # file.
+        if "serial number not found" in lower:
+            return "probe_not_found"
         if contains_any(lower, ["no stm32 target found", "cannot connect to target", "can not connect to target", "failed to connect"]):
             return "target_not_detected"
         if contains_any(lower, ["no device found", "device not found", "unable to connect"]):

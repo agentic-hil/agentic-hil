@@ -42,6 +42,49 @@
       "returncode": 1,
       "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V2J30M19\nBoard       : NUCLEO-F446RE\nVoltage     : 3.26V\nSWD freq    : 4000 KHz\nConnect mode: Under Reset\nReset mode  : Hardware reset\nDevice ID   : 0x421\nRevision ID : Rev A\nDevice name : STM32F446xx\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M4\nBL Version  : 0x90\n\nError: File does not exist: firmware.elf\n",
       "stderr": ""
+    },
+    "connect_probe_powered_off": {
+      "how": "through the product, probe_target, with the probe's USB port powered off through a switchable hub",
+      "recorded_on": "2026-10-23",
+      "bench": "NUCLEO-H533RE through an STLINK-V3, ST-LINK firmware V3J13M4, Linux, the probe's USB port powered off through a switchable hub",
+      "tool_versions": {
+        "stm32cubeprogrammer": "2.23.0",
+        "stm32cubeclt": "1.22.0",
+        "agentic_hil": "0.24.1.dev0"
+      },
+      "argv": [
+        "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+        "-q",
+        "-c",
+        "port=SWD",
+        "mode=HOTPLUG",
+        "sn=[redacted]"
+      ],
+      "returncode": 1,
+      "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nError: Serial number not found. Wrong parameter: sn=[redacted]\n",
+      "stderr": ""
+    },
+    "reset_halt_probe_powered_off": {
+      "how": "through the product, the reset_target in halt mode that the cleanup after the failed probe_target ran, with the probe's USB port powered off through a switchable hub",
+      "recorded_on": "2026-10-23",
+      "bench": "NUCLEO-H533RE through an STLINK-V3, ST-LINK firmware V3J13M4, Linux, the probe's USB port powered off through a switchable hub",
+      "tool_versions": {
+        "stm32cubeprogrammer": "2.23.0",
+        "stm32cubeclt": "1.22.0",
+        "agentic_hil": "0.24.1.dev0"
+      },
+      "argv": [
+        "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+        "-q",
+        "-c",
+        "port=SWD",
+        "mode=NORMAL",
+        "sn=[redacted]",
+        "-halt"
+      ],
+      "returncode": 1,
+      "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nError: Serial number not found. Wrong parameter: sn=[redacted]\n",
+      "stderr": ""
     }
   }
 }
