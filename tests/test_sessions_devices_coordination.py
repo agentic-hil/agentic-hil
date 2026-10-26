@@ -803,16 +803,19 @@ def test_a_call_naming_an_undeclared_device_is_refused_with_the_documented_error
     # not have is `unknown_device` (`resolve_devices`, pinned by
     # test_permission_default_claim against a generated file), and a port tool
     # or a bus tool naming one is the two above, which TROUBLESHOOTING.md
-    # already relies on. The pages carry all three and say which is which,
-    # rather than one name for three routes.
-    for document in ("README.md", "docs/safety-model.md"):
-        text = (REPOSITORY_ROOT / document).read_text(encoding="utf-8")
-        sentence = next((line for line in text.splitlines() if "does not exist on this bench until" in line), None)
-        assert sentence is not None, f"{document} no longer carries the presence sentence"
-        assert "`com_port_not_configured`" in sentence, (document, sentence)
-        assert "`can_bus_not_configured`" in sentence, (document, sentence)
-        assert "`unknown_device` where a run declares it" in sentence, (document, sentence)
-        assert "refused with `unknown_device`" not in sentence, (document, sentence)
+    # already relies on. The safety model carries all three and says which is
+    # which, rather than one name for three routes; the README states the
+    # refusal and leaves the names to the page it sends a reader to.
+    text = (REPOSITORY_ROOT / "docs" / "safety-model.md").read_text(encoding="utf-8")
+    sentence = next((line for line in text.splitlines() if "does not exist on this bench until" in line), None)
+    assert sentence is not None, "docs/safety-model.md no longer carries the presence sentence"
+    assert "`com_port_not_configured`" in sentence, sentence
+    assert "`can_bus_not_configured`" in sentence, sentence
+    assert "`unknown_device` where a run declares it" in sentence, sentence
+    assert "refused with `unknown_device`" not in sentence, sentence
+    readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "rejects undeclared devices before opening a driver" in readme, "README.md no longer carries the presence sentence"
+    assert "refused with `unknown_device`" not in readme
     troubleshooting = (REPOSITORY_ROOT / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
     assert "turns a precise refusal back into `com_port_not_configured`" in troubleshooting
     # docs/security-design.md makes the same promise in its own words, in the

@@ -1149,7 +1149,7 @@ _DOCUMENTED_FILES = sorted(
 
 # The three kinds of list, each with the pattern that finds it and the check
 # that holds it. A choice list is `--agent <a|b|c>`; the one-line install's is
-# the sentence about a PATH with no agent CLI on it, wrapped however the file
+# the sentence about finding no agent CLI on the PATH, wrapped however the file
 # wraps it; the quick starts' is one agent after `--agent` and the others after
 # `# or:`.
 _CHOICES_OF_AGENT = "the choices of --agent"
@@ -1170,7 +1170,7 @@ def _documented_agent_lists() -> dict[str, Callable[[str, Sequence[Any]], list[s
         for match in re.finditer(r"--agent <([^<>\s]*\|[^<>\s]*)>", text):
             names = match.group(1).split("|")
             lists[where(match, _CHOICES_OF_AGENT)] = lambda at, agents, names=names: _ids_held_to(at, names, agents)
-        for match in re.finditer(r"Finding no (.+?) CLI there", text, re.DOTALL):
+        for match in re.finditer(r"If no (.+?) CLI is found", text, re.DOTALL):
             commands = [command.strip("`") for command in _prose_list(match.group(1))]
             lists[where(match, _COMMANDS_LOOKED_FOR)] = lambda at, agents, commands=commands: _commands_held_to(at, commands, agents)
         for match in re.finditer(r"--agent ([a-z][a-z0-9-]*)[ \t]+# or: ([a-z][a-z0-9-]*(?:[ \t]*/[ \t]*[a-z][a-z0-9-]*)*)", text):
