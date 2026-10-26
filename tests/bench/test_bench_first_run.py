@@ -1224,6 +1224,10 @@ def test_upgrade_while_the_accounts_server_holds_the_board_is_not_refused_and_la
     server it did not reach still answers with the release it imported and
     closes its session, which frees the board; started again it runs the new
     release, and so does `agentic-hil` in a new shell.
+
+    The requirement pip is handed names the `[can]` extra: python-can is a
+    dependency of the package itself, so every installation has the extra and
+    the line keeps it.
     """
     installation = own_installation
     status, result = installation.upgrade
@@ -1236,7 +1240,7 @@ def test_upgrade_while_the_accounts_server_holds_the_board_is_not_refused_and_la
     assert result["manager"] == "pip", result
     command = result["command"]
     assert command[:4] == [installation.interpreter["executable"], "-m", "pip", "install"], command
-    assert {"--upgrade", "--user"} <= set(command) and command[-1] == "agentic-hil", command
+    assert {"--upgrade", "--user"} <= set(command) and command[-1] == "agentic-hil[can]", command
     assert result["install"]["returncode"] == 0, result["install"]
     assert result["restart_required"] is True, result
     assert installation.after_the_swap["ok"] is True, installation.after_the_swap

@@ -1109,6 +1109,10 @@ GATE_RUNNER = "tools/bench_in_container.py"
 GATE_RESULTS = "$BENCH_RESULTS"
 GATE_STAGE_RESULTS = f"{GATE_RESULTS}/without-device-group"
 GATE_UPLOAD_RESULTS = "${{ env.BENCH_RESULTS }}/"
+# The directory whose authoritative configuration names the probe, as the run
+# steps spell it from the named commit's checkout they work in: the demo's
+# directory of the nightly's checkout at the workspace root, beside the gate's.
+GATE_PROBE_CONFIG = "../examples/nucleo-f446re_demo"
 
 
 def gate_job() -> dict:
@@ -1212,6 +1216,10 @@ def test_the_gate_runs_the_runner_and_nothing_else() -> None:
     Both state that the board's USB-UART adapter is there: the runner hands it
     in either way, and without the statement a bench that lost it would pass
     with the tests that drive the board over it deselected.
+
+    Both name the probe by the directory whose authoritative configuration
+    binds it, since the bench carries more than one and the runner never
+    chooses between them.
     """
     lines = [
         line
@@ -1230,8 +1238,11 @@ def test_the_gate_runs_the_runner_and_nothing_else() -> None:
         for word in ("pip", "agentic-hil", "podman", "docker", "sudo"):
             assert word not in command, command
     source_args = ["--source", "../under-test", "--expected-commit", "$(git -C ../under-test rev-parse HEAD)"]
-    assert tier[3:] == [*source_args, "--require-usb-uart", "--output", GATE_RESULTS], tier
-    assert stage[3:] == [*source_args, "--without-device-group", "--require-usb-uart", "--output", GATE_STAGE_RESULTS], stage
+    probe_args = ["--probe-from-config", GATE_PROBE_CONFIG]
+    assert tier[3:] == [*source_args, *probe_args, "--require-usb-uart", "--output", GATE_RESULTS], tier
+    assert stage[3:] == [
+        *source_args, *probe_args, "--without-device-group", "--require-usb-uart", "--output", GATE_STAGE_RESULTS,
+    ], stage
 
 
 def test_the_stage_without_the_device_group_runs_after_the_tier_unless_the_run_was_cancelled() -> None:
@@ -1278,6 +1289,50 @@ def test_the_commit_under_test_runs_only_inside_the_container() -> None:
         assert command[2] == f"../{harness_path}/{GATE_RUNNER}", command
         assert command[command.index("--source") + 1] == f"../{named_path}", command
         assert command[command.index("--expected-commit") + 1] == f"$(git -C ../{named_path} rev-parse HEAD)", command
+
+
+def test_the_gates_board_stages_name_the_probe_the_nightlys_demo_job_drives() -> None:
+    """By the demo's directory of the nightly's checkout, which the gate's two sit beside.
+
+    The bench carries more than one probe and the runner never chooses between
+    them, so each stage on the demo's board names its probe with
+    `--probe-from-config` and none by its nodes. The configuration that option
+    reads is the operator's, made once with `agentic-hil init` in the demo's
+    directory of the checkout the nightly's jobs make at the workspace root,
+    and bound to that directory by its path: the demo's directory in either of
+    the gate's own checkouts has none. The gate's job runs in the same
+    workspace, so the option, read from the directory each stage works in,
+    lands on that one directory.
+    """
+    nightly = [
+        step
+        for job in (bench_job(), distributions_job())
+        for step in job["steps"]
+        if "actions/checkout" in str(step.get("uses", ""))
+    ]
+    assert nightly and all("path" not in step.get("with", {}) for step in nightly), nightly
+    demo = bench_job()["defaults"]["run"]["working-directory"]
+    own = {step["with"]["path"] for step in gate_checkouts()}
+
+    named_stages = {
+        "Run the opt-in incident recovery check",
+        "Run the bench tier in its container",
+        "Run the stage without the probe's device group",
+        "Run pyOCD hardware recordings",
+        "Run CubeProgrammer hardware recordings",
+        "Run USB reset and re-enumeration recording",
+    }
+    stages = [step for step in gate_job()["steps"] if step.get("name") in named_stages]
+    assert {step["name"] for step in stages} == named_stages, stages
+    for step in stages:
+        command = shlex.split(run_lines({"steps": [step]})[0])
+        named = option_value(command, "--probe-from-config")
+        assert named, (step["name"], command)
+        landed = posixpath.normpath(posixpath.join(step["working-directory"], named))
+        assert landed == demo, (step["name"], landed)
+        assert landed.split("/")[0] not in own, (step["name"], landed)
+        assert option_value(command, "--usb-device") is None, command
+        assert option_value(command, "--serial-device") is None, command
 
 
 def test_the_gate_keeps_the_token_out_of_both_checkouts() -> None:
