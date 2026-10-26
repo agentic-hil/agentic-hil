@@ -148,10 +148,18 @@ with other than one port or one this user cannot open is a refusal, before the
 queue and again after it. Without the flag no bridge is handed in.
 
 Serialisation. Two runs must never drive the board at once. The backstop is the
-device locks the product takes under ~/.agentic-hil/device-locks: the machine's
-lock directory is mounted at the same place under the container's home, and a
-flock on a file in a bind mount is one lock on the host and in every container,
-whatever their pid namespaces. The container keeps a pid namespace of its own
+device locks the product takes under ~/.agentic-hil/device-locks, or in the
+machine directory /var/lib/agentic-hil/device-locks where an administrator
+created one for every account of a group (#777). The machine directory is
+mounted at its own path and the home one at the same place under the
+container's home, so the product inside finds the locks where the product
+outside does, and a flock on a file in a bind mount is one lock on the host and
+in every container, whatever their pid namespaces. A machine directory that
+exists and cannot be used refuses the run, as the product refuses every device
+lock over it, rather than handing the tier the home one: locks there are locks
+no other account sees. The stage without the device group withholds every
+supplementary group, the lock group among them, and cannot open the board
+either, so it is handed the home directory. The container keeps a pid namespace of its own
 and gets a host name of its own, so a holder record written inside it names
 that container, and a check that compares the host before the pid cannot take
 it for a process on the host. `--pid=host` was the other way to share the
@@ -323,6 +331,16 @@ CONTAINER_PREFIX = "agentic-hil-bench-"
 
 CONTAINER_HOME = "/bench-home"
 CONTAINER_LOCKS = f"{CONTAINER_HOME}/.agentic-hil/device-locks"
+# The machine directory the product prefers on Linux where it exists, mounted at
+# its own path. Its rules are the product's own, `machine_device_lock_root` in
+# src/agentic_hil/bench.py, asked here before the queue so a run that could take
+# no lock is refused before it builds anything.
+MACHINE_LOCKS = "/var/lib/agentic-hil/device-locks"
+MACHINE_LOCKS_SETUP = (
+    "sudo groupadd agentic-hil; sudo install -d -m 0755 /var/lib/agentic-hil; "
+    "sudo install -d -o root -g agentic-hil -m 2770 /var/lib/agentic-hil/device-locks; "
+    "sudo usermod -aG agentic-hil <account>, then log in again"
+)
 CONTAINER_SERIAL_BY_ID = "/dev/serial/by-id"
 # Where a USB device's entry is in the container's sysfs, which is a sysfs of
 # its own and not the host's tree that discovery reads under SYSFS.
@@ -469,6 +487,14 @@ def host_can_open(path: str) -> bool:
 
 def canonical_node(path: str) -> str:
     return os.path.realpath(path)
+
+
+def lock_directory_status(path: str) -> os.stat_result:
+    return os.lstat(path)
+
+
+def can_enter(path: str) -> bool:
+    return os.access(path, os.R_OK | os.W_OK | os.X_OK)
 
 
 def pause(seconds: float) -> None:
@@ -1199,13 +1225,18 @@ def check_this_machine(runtime: str) -> None:
         )
 
 
-def device_lock_directory() -> Path:
-    """The machine's device-lock directory, created as the product would create it.
+def device_lock_directory(groups_withheld: bool = False) -> str:
+    """The device-lock directory the tier is handed.
 
-    A link anywhere in it is refused: the product walks this directory without
-    following links and refuses one on the host, and mounting a link's target
-    would give the container locks the host's runs never take.
+    The machine directory where it exists, unless the stage withholds the groups
+    it is entered through; else this user's own, created as the product would
+    create it. A link anywhere in either is refused: the product walks the
+    directory without following links and refuses one on the host, and mounting
+    a link's target would give the container locks the host's runs never take.
     """
+    machine = machine_lock_directory()
+    if machine is not None and not groups_withheld:
+        return machine
     root = Path(os.path.expanduser("~")) / ".agentic-hil"
     locks = root / "device-locks"
     for directory in (root, locks):
@@ -1221,7 +1252,48 @@ def device_lock_directory() -> Path:
                 f"{directory} is not a plain directory. The product refuses a link there, and mounting what it points "
                 "at would give the tier device locks no run on this machine takes",
             )
-    return locks
+    return str(locks)
+
+
+def machine_lock_directory() -> str | None:
+    """The machine directory where it exists and can be used, None where it does not exist."""
+    parent = MACHINE_LOCKS.rsplit("/", 1)[0]
+    try:
+        status = lock_directory_status(MACHINE_LOCKS)
+        parent_status = lock_directory_status(parent)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        problem: str | None = f"cannot be looked at by this user ({error.strerror})"
+    else:
+        problem = machine_lock_problem(status, parent_status)
+    if problem is not None:
+        raise Refused(
+            EXIT_CANNOT_RUN_HERE,
+            f"the machine's device-lock directory {MACHINE_LOCKS} {problem}. The product refuses every device lock "
+            f"while it is so, and the tier is not handed the home directory instead, whose locks no other account "
+            f"sees. Set it up as: {MACHINE_LOCKS_SETUP}",
+        )
+    return MACHINE_LOCKS
+
+
+def machine_lock_problem(status: os.stat_result, parent: os.stat_result) -> str | None:
+    mode = stat.S_IMODE(status.st_mode)
+    if stat.S_ISLNK(parent.st_mode):
+        return "has a link for its parent, and device locks are only kept where no link leads"
+    if stat.S_ISLNK(status.st_mode):
+        return "is a link, and device locks are only kept where no link leads"
+    if not stat.S_ISDIR(status.st_mode):
+        return "is not a directory"
+    if not mode & stat.S_ISGID:
+        return "lacks the setgid bit, so a lock file one account creates in it would not carry the group the others open it through"
+    if mode & 0o007:
+        return f"grants access to others ({mode:04o}), and only the group's accounts may hold or read a device lock"
+    if mode & 0o070 != 0o070:
+        return f"does not give its group read, write and enter ({mode:04o})"
+    if not can_enter(MACHINE_LOCKS):
+        return "cannot be read, written and entered by this account: it is not in the directory's group, or it was added and has not logged in again"
+    return None
 
 
 def prepare_output(option: str) -> Path:
@@ -1532,7 +1604,7 @@ def tier_command(
     image_id: str,
     name: str,
     devices: Devices,
-    locks: Path,
+    locks: str,
     results: Path,
     stable_names: Path | None,
     pytest_args: list[str],
@@ -1582,7 +1654,9 @@ def tier_command(
     else:
         for node in devices.nodes:
             command += ["--device", node]
-    command += ["-v", f"{locks}:{CONTAINER_LOCKS}", "-v", f"{results}:{RESULTS}"]
+    # The machine directory at its own path, where the product inside looks for
+    # it first; the home one under the container's home.
+    command += ["-v", f"{locks}:{MACHINE_LOCKS if locks == MACHINE_LOCKS else CONTAINER_LOCKS}", "-v", f"{results}:{RESULTS}"]
     if stable_names is not None and not live_device_tree:
         command += ["-v", f"{stable_names}:{CONTAINER_SERIAL_BY_ID}:ro"]
     for key, value in ENVIRONMENT.items():
@@ -1964,7 +2038,7 @@ def main(argv: list[str] | None = None) -> int:
                 the_usb_uart(runtime, True, voice)
             if options.esp32:
                 the_esp32(runtime, voice)
-            locks = device_lock_directory()
+            locks = device_lock_directory(options.without_device_group)
     except Refused as refusal:
         voice(str(refusal))
         return refusal.status

@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agentic_hil.backends.common import invocation
-from agentic_hil.bench import BenchMutex, DeviceBusyError, device_lock_root, utc_now_iso
+from agentic_hil.bench import BenchMutex, DeviceBusyError, device_lock_root, lock_file_mode, utc_now_iso
 from agentic_hil.config import ConfigError, atomic_write_text, safe_read_text
 from agentic_hil.process import ProcessImage, snapshot_process_images, spawn_detached_process, terminate_process_tree
 from agentic_hil.types import JsonObject
@@ -428,7 +428,8 @@ def _read_record(port: int) -> JsonObject | None:
 
 
 def _write_record(port: int, recorded: JsonObject) -> None:
-    atomic_write_text(_record_path(port), json.dumps(recorded, sort_keys=True))
+    path = _record_path(port)
+    atomic_write_text(path, json.dumps(recorded, sort_keys=True), mode=lock_file_mode(path.parent))
 
 
 def _drop_record(port: int) -> None:

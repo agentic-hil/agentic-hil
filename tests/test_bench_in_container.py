@@ -374,6 +374,9 @@ def machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, a_machine_of_this_t
     monkeypatch.setattr(bench_in_container, "user_groups", lambda: {GID, SERIAL_GROUP, USB_GROUP})
     monkeypatch.setattr(bench_in_container, "device_status", status_of)
     monkeypatch.setattr(bench_in_container, "canonical_node", lambda path: path)
+    # No machine lock directory unless a test gives it one, whatever the host
+    # running this suite has (#777).
+    monkeypatch.setattr(bench_in_container, "lock_directory_status", lambda path: status_of(f"absent:{path}"))
     monkeypatch.setattr(bench_in_container, "host_can_open", lambda path: path in openable)
     monkeypatch.setattr(bench_in_container, "host_identities", lambda: [HOST_NAME, HOME, USER])
     monkeypatch.setattr(bench_in_container, "repository_root", lambda: tmp_path / "checkout")

@@ -2151,6 +2151,33 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "would let two runs drive one board, which is the failure the mutex exists to prevent.",
         ),
     ),
+    # The machine's shared device-lock directory exists and this account cannot
+    # use it (#777). Refused rather than passed over for the home directory,
+    # because a lock kept there is one no other account sees.
+    "device_lock_root_unusable": ErrorRemedy(
+        meaning=(
+            "This Linux machine has the shared device-lock directory `/var/lib/agentic-hil/device-locks`, which every "
+            "account in the group `agentic-hil` keeps its device locks in, and this account cannot use it. `problem` "
+            "says why: the directory or its parent is a link or not a directory, it lacks the setgid bit, it grants "
+            "anything to others, its group may not read, write and enter it, or this account may not. Every device "
+            "lock is refused until it is fixed, so nothing was touched."
+        ),
+        remediation=(
+            "Most often this account is not in the group yet, or was added and has not logged in again: have the "
+            "operator run `sudo usermod -aG agentic-hil <account>` and start a fresh login session, then make the call "
+            "again.",
+            "Otherwise have the operator create the directory the way `setup` names it: `sudo groupadd agentic-hil`, "
+            "`sudo install -d -m 0755 /var/lib/agentic-hil` and "
+            "`sudo install -d -o root -g agentic-hil -m 2770 /var/lib/agentic-hil/device-locks`.",
+            "`agentic-hil doctor` names the directory, what is wrong with it and the fix, under `device_locks`.",
+        ),
+        do_not=(
+            "Do not delete the directory to get past this while another account on the machine uses it: its holds would "
+            "stop being seen, and two runs could drive one board.",
+            "Do not point the device locks anywhere else. There is no override on purpose, because an override is how "
+            "two sessions stop seeing each other.",
+        ),
+    ),
     "com_port_identity_mismatch": ErrorRemedy(
         meaning=(
             "The device name in a COM port entry currently leads to different hardware than the entry says it belongs "
@@ -8939,7 +8966,7 @@ A third thing *describes* the hardware contact and guards nothing. Every tool in
 | what is locked | the physical device: `physical:<resource_id>`, `probe:<serial>`, `probe-exe:<executable>`, `com:serial:<serial_number>`, `com:<device>`, `can:<adapter>:<channel>` |
 | case | a name for hardware (`resource_id`, a probe serial, a port's `serial_number`, a CAN channel) folds case on every platform, because `0669FF` and `0669ff` are one unit wherever the bench runs. A host path (a debugger executable, a serial device) folds the way its own filesystem does, so `COM7` and `com7` are one port on Windows while `/dev/ttyACM0` and `/dev/ttyacm0` are two on Linux. Two entries whose `resource_id` values differ only in case are refused at config load rather than merged |
 | a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order (attaching a second adapter can hand one entry another board), so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so, and from `version: 3` on that warning is a property of the file instead: such an entry must declare what identifies it with `identity_source` or the configuration is refused at load, naming `agentic-hil adopt-hardware`. `vid`/`pid` sit beside the serial and name the device *type* rather than a unit, so they are never a lock key: a USB serial is unique only within its vendor, so a serial matching under a foreign vid/pid is refused too, and an adapter that publishes no serial at all is compared on the type alone, which separates a CH340 from an ST-Link and not one CH340 from another, and `identity_source: vid_pid` says exactly that. An entry that *does* name hardware is opened on one ground only: the attached device is `confirmed` to be the board it names. A port that has come to be a different board is refused with `com_port_identity_mismatch`; a port whose identity cannot be checked at all (no serial backend, not enumerated exactly once, no serial reported, or no USB ids reported where the entry names them) is refused with `com_port_identity_unverified`, because a check that could not run does not prove the name still leads to its board. Both refuse before the port is opened and are retry-safe. An entry that names no hardware is opened as `not_declared`, unverified by design |
-| where | `~/.agentic-hil/device-locks`, one agreed place per machine, never under `state_root`: a lock kept per configuration is not a bench lock |
+| where | `~/.agentic-hil/device-locks`, one agreed place per account, never under `state_root`: a lock kept per configuration is not a bench lock. On Linux, where an administrator created `/var/lib/agentic-hil/device-locks` for the group `agentic-hil`, every account keeps its device locks there instead, so two accounts on one board see each other's hold. One that exists and cannot be used refuses every device lock with `device_lock_root_unusable` rather than falling back to the home directory |
 | how long | the whole run, from the declaration to its end; the lease each call takes borrows that hold |
 | what may be touched | only what the test description declares; anything else is refused with `undeclared_device` |
 | contention | refused with `device_busy`, naming the holder; waiting happens only when the caller asked for it with `wait_s`, and stays bounded |
@@ -8987,7 +9014,7 @@ Nothing times a run out, and that is deliberate: dropping a device that may be m
 
 So an abandoned run costs nothing beyond the life of the server process. While it lasts, a contender's `device_busy` refusal carries `heartbeat_age_s` and, past four heartbeat intervals, `holder_heartbeat_stale: true`. An idle holder is visible rather than merely obstructive. A refusal that carries no `holder` carries no heartbeat either: the device is held by an owner whose record does not name it yet, so wait for it, bounded by `wait_s`, rather than reading it as a hang. Call `bench_run_status` if you are unsure whether you still hold the bench, and `bench_run_stop` to be sure you do not.
 
-One case is outside this: a server process left running with its stdin never closed, by a host that leaked the pipe. It sees no disconnect and holds the run. Ending that process is the answer; never delete a lock file under `~/.agentic-hil/device-locks`.
+One case is outside this: a server process left running with its stdin never closed, by a host that leaked the pipe. It sees no disconnect and holds the run. Ending that process is the answer; never delete a lock file under `~/.agentic-hil/device-locks` or `/var/lib/agentic-hil/device-locks`.
 
 ### Two config entries, one board
 
@@ -9170,7 +9197,7 @@ The executable that check accepts is one owned by you or by root, executable, an
 | authoritative configuration | `%APPDATA%\\agentic-hil\\projects\\<name>-<digest>\\config.yaml`, else `%USERPROFILE%\\.agentic-hil\\projects\\<name>-<digest>\\config.yaml` | `$XDG_CONFIG_HOME/agentic-hil/projects/<name>-<digest>/config.yaml`, else `~/.agentic-hil/projects/<name>-<digest>/config.yaml` |
 | `state_root` | `%LOCALAPPDATA%\\agentic-hil`, else `%USERPROFILE%\\.agentic-hil\\state` | `$XDG_STATE_HOME/agentic-hil`, else `~/.agentic-hil/state` |
 | record of configurations bound by `AGENTIC_HIL_CONFIG` | `%APPDATA%\\agentic-hil\\external-projects.json`, and `%USERPROFILE%\\.agentic-hil\\external-projects.json` | `$XDG_CONFIG_HOME/agentic-hil/external-projects.json`, and `~/.agentic-hil/external-projects.json` |
-| device locks | `%USERPROFILE%\\.agentic-hil\\device-locks`, fixed | `~/.agentic-hil/device-locks`, fixed |
+| device locks | `%USERPROFILE%\\.agentic-hil\\device-locks`, fixed | `~/.agentic-hil/device-locks`, fixed; on Linux `/var/lib/agentic-hil/device-locks` instead, for every account, where an administrator created it |
 
 Two roots wherever a row names two, best first: the platform default, then `~/.agentic-hil`, which is the walk `agentic-hil init` runs and the root every path refusal already recommends. `else` is meant literally, the second root is taken when the first cannot be written, checked as a write rather than as merely existing, which is what a redirected profile or a packaged host does to the default. The configuration adds one rule on top of that order, that an existing file wins over it: a configuration already written under the fallback is this workspace's authoritative one, every later load finds it there, and `init --force` rewrites it where it is rather than generating a second beside the default. The record is the row spelled `and`, because both of its files can hold entries at once; the `AGENTIC_HIL_CONFIG` bullet below says how they are read and which one a write lands in.
 

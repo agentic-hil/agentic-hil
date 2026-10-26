@@ -19,7 +19,13 @@ import yaml
 
 from agentic_hil import __version__, upgrade
 from agentic_hil.adopt import discovery_remedy, enumerated_stlink_ports, is_unset, project_config_adopt_hardware
-from agentic_hil.bench import BenchMutex, DeviceBusyError
+from agentic_hil.bench import (
+    BENCH_ROOT_NAME,
+    DEVICE_LOCK_DIRECTORY_NAME,
+    BenchMutex,
+    DeviceBusyError,
+    machine_device_lock_root,
+)
 from agentic_hil.bootstrap import (
     BOOTSTRAP_BACKEND,
     DEFAULT_PROJECT_PROFILE,
@@ -2158,7 +2164,18 @@ DOCTOR_DEVICE_ACCESS_FINDING = "device_access"
 # back configuration repairs none of it, and `agentic-hil report-state-repair`
 # does.
 DOCTOR_REPORT_STATE_FINDING = "report_state"
-DOCTOR_FINDINGS_SETUP_KEEPS = frozenset({DOCTOR_UNBOUND_FINDING, DOCTOR_STANDING_INCIDENT_FINDING, DOCTOR_DEVICE_ACCESS_FINDING, DOCTOR_REPORT_STATE_FINDING})
+# The machine's shared device-lock directory exists and this account cannot use
+# it (#777), so every device lock is refused. `setup` keeps the file it wrote
+# over it: the finding is about this account on this machine, the repair is the
+# administrator's, and no document changes either.
+DOCTOR_DEVICE_LOCKS_FINDING = "device_locks"
+DOCTOR_FINDINGS_SETUP_KEEPS = frozenset({
+    DOCTOR_UNBOUND_FINDING,
+    DOCTOR_STANDING_INCIDENT_FINDING,
+    DOCTOR_DEVICE_ACCESS_FINDING,
+    DOCTOR_REPORT_STATE_FINDING,
+    DOCTOR_DEVICE_LOCKS_FINDING,
+})
 
 
 def doctor_findings_setup_keeps(doctor_result: JsonObject) -> bool:
@@ -5129,6 +5146,35 @@ def _doctor_report_state(config: AgenticHILConfig) -> JsonObject:
     return {"ok": True, "path": path, "summary": "This project's report state reads, or none has been written yet."}
 
 
+def _doctor_device_locks() -> JsonObject:
+    """Which directory this account's device locks live in, and whether it can be used.
+
+    The machine directory, where an administrator created one, is shared by
+    every account in its group; where it exists and this account cannot use it,
+    every device lock is refused rather than taken in the home directory, so the
+    first hardware call would be where anyone found out (#777). Asked without
+    creating anything: the home directory is named, not made.
+    """
+    try:
+        machine = machine_device_lock_root()
+    except ConfigError as error:
+        return {**error.to_dict(), "ok": False, "root": "machine"}
+    if machine is not None:
+        return {
+            "ok": True,
+            "root": "machine",
+            "path": str(machine),
+            "summary": f"Device locks are taken in the machine directory {machine}, shared by every account in its group.",
+        }
+    home = Path(os.path.expanduser("~")) / BENCH_ROOT_NAME / DEVICE_LOCK_DIRECTORY_NAME
+    return {
+        "ok": True,
+        "root": "home",
+        "path": str(home),
+        "summary": f"Device locks are taken in this account's {home}; another account on this machine does not see them.",
+    }
+
+
 def _adopt_reads_board_instruction(config: AgenticHILConfig) -> str:
     """The debugger-aware `adopt-hardware` that reads the board to fill identity keys.
 
@@ -5329,6 +5375,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         return result
     state_root_check = _doctor_state_root(config)
     binding_check = _doctor_bench_binding(config)
+    device_locks_check = _doctor_device_locks()
     # Check every probe whose toolchain this configuration required to resolve,
     # not only a bound one. Reporting a green doctor because nothing was bound
     # would hide an unplugged board, a wrong probe_id, or a broken toolchain on
@@ -5426,6 +5473,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         *([] if binding_ok else [DOCTOR_UNBOUND_FINDING]),
         *([DOCTOR_STANDING_INCIDENT_FINDING] if standing else []),
         *([DOCTOR_DEVICE_ACCESS_FINDING] if denied_access else []),
+        *([] if device_locks_check.get("ok") is True else [DOCTOR_DEVICE_LOCKS_FINDING]),
     ]
     all_ok = not unhealthy
     if not checked:
@@ -5452,6 +5500,10 @@ def doctor(config_path: str | None = None) -> JsonObject:
         )
     if report_state_check is not None and report_state_check.get("ok") is not True:
         summary = f"{summary} {report_state_check['summary']}"
+    if device_locks_check.get("ok") is not True:
+        # In the headline: every hardware call is refused over it, and the
+        # sentence names the directory, what is wrong with it and the fix.
+        summary = f"{summary} {device_locks_check['summary']}"
     if "next_step" in binding_check:
         # In the headline, beside the state root sentence and for the same
         # reason: a caller that keeps only `summary` has to be told that this
@@ -5530,6 +5582,9 @@ def doctor(config_path: str | None = None) -> JsonObject:
         # when this file names a device it does not identify, and `unbound`
         # names each of them with the key to fill in.
         "bench_binding": binding_check,
+        # Where this account's device locks live, the machine directory or the
+        # home directory, and whether the machine directory can be used (#777).
+        "device_locks": device_locks_check,
         # Always present, empty on a healthy bench: which checks decided `ok`.
         # A caller that has to tell "this bench is broken" from "this bench is
         # not bound yet" reads this rather than diffing the sections itself.
