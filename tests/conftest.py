@@ -554,6 +554,21 @@ def _no_host_stlink_server(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_host_machine_device_locks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The product finds no machine device-lock directory on the machine running the suite.
+
+    On Linux, `/var/lib/agentic-hil/device-locks` takes every account's device
+    locks where an administrator created it (#777). On a bench that has one,
+    every test's locks would otherwise be taken there beside the bench's real
+    holds, and a test that looks for its locks under its sandboxed home would
+    fail there alone. In this process only: a child the suite starts on such a
+    machine finds the real directory, which is the one it would have to
+    serialise against anyway. A test about the machine directory patches this
+    name itself, after this one."""
+    monkeypatch.setattr("agentic_hil.bench.MACHINE_DEVICE_LOCK_ROOT", Path("/nonexistent-agentic-hil-suite/device-locks"))
+
+
+@pytest.fixture(autouse=True)
 def _no_host_device_access(monkeypatch: pytest.MonkeyPatch) -> None:
     """`doctor` asks nothing of the device nodes on the machine running the suite.
 

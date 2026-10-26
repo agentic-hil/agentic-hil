@@ -423,6 +423,7 @@ PINNED_SITES: dict[str, frozenset[tuple[str, str]]] = {
     "coordination_closed": _at("coordination", "HardwareCoordinator._require_open"),
     "coordination_state_invalid": _at("coordination", "HardwareCoordinator._mark_incident_resources", "HardwareCoordinator.recover", "_read_record_at"),
     "device_busy": _at("bench", "BenchMutex.busy_result"),
+    "device_lock_root_unusable": _at("bench", "_unusable_lock_root"),
     "interrupted": _at("reactorrun", "run_registered_plan"),
     "invalid_argument": (
         _at("bench", "validated_wait")
@@ -648,6 +649,7 @@ ALREADY_COVERED = frozenset(
         "com_port_not_bound",
         "config_changed",
         "device_busy",
+        "device_lock_root_unusable",
         "invalid_argument",
         "permission_denied",
         "resource_quarantined",

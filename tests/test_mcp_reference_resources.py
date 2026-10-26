@@ -393,8 +393,13 @@ def test_the_path_table_names_every_root_a_file_can_land_under(service: AgenticH
         "`%APPDATA%\\agentic-hil\\external-projects.json`, and `%USERPROFILE%\\.agentic-hil\\external-projects.json`",
         "`$XDG_CONFIG_HOME/agentic-hil/external-projects.json`, and `~/.agentic-hil/external-projects.json`",
     ]
-    # And the one location that has no second root keeps saying so.
-    assert cells["device locks"] == ["`%USERPROFILE%\\.agentic-hil\\device-locks`, fixed", "`~/.agentic-hil/device-locks`, fixed"]
+    # And the one location that has no second root keeps saying so. The machine
+    # directory on Linux is no fallback either: where it exists it replaces the
+    # home directory for every account (#777).
+    assert cells["device locks"] == [
+        "`%USERPROFILE%\\.agentic-hil\\device-locks`, fixed",
+        "`~/.agentic-hil/device-locks`, fixed; on Linux `/var/lib/agentic-hil/device-locks` instead, for every account, where an administrator created it",
+    ]
 
 
 def _prose_lines(text: str) -> list[str]:

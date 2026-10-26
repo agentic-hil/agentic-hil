@@ -2994,6 +2994,7 @@ def atomic_write_bytes(
     data: bytes,
     *,
     workspace: str | Path | None = None,
+    mode: int | None = None,
 ) -> None:
     path = _validated_absolute_file_path(file_path, workspace)
     # The rule the mandatory read asks, asked by the raw writer for the same
@@ -3021,7 +3022,11 @@ def atomic_write_bytes(
                 if current is not None and (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1):
                     raise ConfigError("unsafe_configured_path", "Output file must be a single-link regular file.", {"path": str(path)})
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
-                descriptor = os.open(temporary_name, flags, 0o600, dir_fd=parent_descriptor)
+                descriptor = os.open(temporary_name, flags, 0o600 if mode is None else mode, dir_fd=parent_descriptor)
+                if mode is not None:
+                    # Set, not left to the umask: a file shared through a group
+                    # directory is no use to the group without its bits (#777).
+                    os.fchmod(descriptor, mode)
                 with os.fdopen(descriptor, "wb") as handle:
                     descriptor = -1
                     handle.write(data)
@@ -3061,8 +3066,9 @@ def atomic_write_text(
     *,
     encoding: str = "utf-8",
     workspace: str | Path | None = None,
+    mode: int | None = None,
 ) -> None:
-    atomic_write_bytes(file_path, text.encode(encoding), workspace=workspace)
+    atomic_write_bytes(file_path, text.encode(encoding), workspace=workspace, mode=mode)
 
 
 def safe_append_text(file_path: str | Path, text: str, *, encoding: str = "utf-8") -> None:

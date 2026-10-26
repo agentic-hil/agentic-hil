@@ -12,7 +12,12 @@ than what it locks.
 ``state_root``. On 2026-08-02 two sessions held the same Nucleo and could not
 see each other because their ``state_root`` differed; a lock kept per
 configuration is not a bench lock. There is deliberately no environment override
-for the location: an override is how two sessions diverge again.
+for the location: an override is how two sessions diverge again. A home is one
+account's, though, and two accounts on one board diverge the same way (#777),
+so on Linux a directory an administrator creates for a group,
+``/var/lib/agentic-hil/device-locks``, takes the home's place for every account
+whenever it exists, and one that exists and cannot be used refuses the lock
+rather than send it home.
 
 **Crash safety without an operator.** Ownership is the OS advisory lock on
 ``<digest>.lock``, which the kernel drops when the holding process dies. A
@@ -31,6 +36,7 @@ import os
 import secrets
 import socket
 import stat
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -42,6 +48,7 @@ from pathlib import Path
 from agentic_hil.config import (
     ConfigError,
     _close_windows_handles,
+    _open_directory_fd,
     _windows_hold_directory_chain,
     _windows_open_regular_file,
     atomic_write_text,
@@ -55,6 +62,17 @@ from agentic_hil.types import JsonObject, fold_device_path, fold_hardware_id
 HOLDER_RECORD_VERSION = 1
 BENCH_ROOT_NAME = ".agentic-hil"
 DEVICE_LOCK_DIRECTORY_NAME = "device-locks"
+# The directory every account of one group keeps its device locks in, where an
+# administrator created it. Fixed like the home directory, for the same reason.
+MACHINE_DEVICE_LOCK_ROOT = Path("/var/lib/agentic-hil/device-locks")
+# What a lock file or record in it is created with, set explicitly: a umask of
+# 077 would otherwise leave a file another account of the group cannot open.
+MACHINE_LOCK_FILE_MODE = 0o660
+MACHINE_DEVICE_LOCK_SETUP = (
+    "sudo groupadd agentic-hil; sudo install -d -m 0755 /var/lib/agentic-hil; "
+    "sudo install -d -o root -g agentic-hil -m 2770 /var/lib/agentic-hil/device-locks; "
+    "sudo usermod -aG agentic-hil <account>"
+)
 # Written into every holder record so a contender can judge a heartbeat's age
 # against what the holder promised, not against a constant compiled into it.
 HEARTBEAT_INTERVAL_S = 30.0
@@ -77,8 +95,9 @@ def utc_now_iso() -> str:
 
 
 class _LifetimeLock:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, mode: int | None = None):
         self.path = path
+        self.mode = mode
         self.descriptor = -1
         self.directory_handles: list[int] = []
         self.locked = False
@@ -95,10 +114,12 @@ class _LifetimeLock:
                 self.descriptor = _windows_open_regular_file(self.path, read=True, write=True, create=True)
             else:
                 flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-                self.descriptor = os.open(self.path, flags, 0o600)
+                self.descriptor = os.open(self.path, flags, 0o600 if self.mode is None else self.mode)
             opened = os.fstat(self.descriptor)
             if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
                 raise OSError("Coordination lock is not a single-link regular file.")
+            if self.mode is not None and os.name != "nt" and opened.st_uid == os.geteuid() and stat.S_IMODE(opened.st_mode) != self.mode:
+                os.fchmod(self.descriptor, self.mode)
             if os.name == "nt":
                 if opened.st_size == 0:
                     os.write(self.descriptor, b"0")
@@ -285,10 +306,86 @@ def device_lock_root() -> Path:
     ``~/.agentic-hil/device-locks``: fixed, with no configuration key and no
     environment override, because an override is how two sessions stop seeing
     each other. The home directory is chosen because every process of this user
-    reaches it without having to agree on a configuration first.
+    reaches it without having to agree on a configuration first. Where the
+    machine directory exists, it is that instead, for every account alike.
     """
+    machine = machine_device_lock_root()
+    if machine is not None:
+        return machine
     home = Path(os.path.expanduser("~"))
     return safe_directory(home / BENCH_ROOT_NAME / DEVICE_LOCK_DIRECTORY_NAME)
+
+
+def machine_lock_root_applies() -> bool:
+    """Linux alone: on macOS ``/var`` is a link, which the walk refuses, and
+    Windows keeps its locks under the profile."""
+    return sys.platform.startswith("linux")
+
+
+def machine_device_lock_root() -> Path | None:
+    """The machine directory where it exists and can be used, None where it does not exist.
+
+    Never created here: whether one group shares a board is the administrator's
+    decision, made once with ``MACHINE_DEVICE_LOCK_SETUP``. One that exists and
+    cannot be used is refused with ``device_lock_root_unusable``, never passed
+    over for the home directory, because a lock kept there is a lock no other
+    account sees, which is the failure the directory removes. The checks read
+    mode bits and never owner or group ids: a rootless container sees the
+    directory's group as an unmapped id, and the kernel still lets its members in.
+    """
+    if not machine_lock_root_applies():
+        return None
+    path = MACHINE_DEVICE_LOCK_ROOT
+    try:
+        status = os.lstat(path)
+        parent = os.lstat(path.parent)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise _unusable_lock_root(path, f"cannot be looked at by this account ({error.strerror})") from None
+    problem = _machine_lock_root_problem(path, status, parent)
+    if problem is not None:
+        raise _unusable_lock_root(path, problem)
+    try:
+        os.close(_open_directory_fd(path))
+    except (ConfigError, OSError):
+        raise _unusable_lock_root(path, "is reached through a link, and device locks are only kept where no link leads") from None
+    return path
+
+
+def _machine_lock_root_problem(path: Path, status: os.stat_result, parent: os.stat_result) -> str | None:
+    mode = stat.S_IMODE(status.st_mode)
+    if stat.S_ISLNK(parent.st_mode):
+        return f"has a link for its parent {path.parent}, and device locks are only kept where no link leads"
+    if stat.S_ISLNK(status.st_mode):
+        return "is a link, and device locks are only kept where no link leads"
+    if not stat.S_ISDIR(status.st_mode):
+        return "is not a directory"
+    if not mode & stat.S_ISGID:
+        return "lacks the setgid bit, so a lock file one account creates in it would not carry the group the others open it through"
+    if mode & 0o007:
+        return f"grants access to others ({mode:04o}), and only the group's accounts may hold or read a device lock"
+    if mode & 0o070 != 0o070:
+        return f"does not give its group read, write and enter ({mode:04o})"
+    if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+        return "cannot be read, written and entered by this account: it is not in the directory's group, or it was added and has not logged in again"
+    return None
+
+
+def _unusable_lock_root(path: Path, problem: str) -> ConfigError:
+    return ConfigError(
+        "device_lock_root_unusable",
+        f"The machine's device-lock directory {path} {problem}. Every device lock is refused until it is fixed: while it "
+        "exists it is the one place every account keeps device locks, and a lock kept in a home directory instead is one "
+        "no other account would see.",
+        {"path": str(path), "problem": problem, "setup": MACHINE_DEVICE_LOCK_SETUP},
+    )
+
+
+def lock_file_mode(root: Path) -> int | None:
+    """The mode a lock file or record under `root` is created with: the group's
+    in the machine directory, and the default owner-only one anywhere else."""
+    return MACHINE_LOCK_FILE_MODE if root == MACHINE_DEVICE_LOCK_ROOT else None
 
 
 def resource_digest(resource: str) -> str:
@@ -338,6 +435,7 @@ class BenchMutex:
 
     def __init__(self, *, frontend: str = "python", label: str | None = None, root: Path | None = None):
         self.owner = BenchOwner(owner_id=secrets.token_hex(8), pid=os.getpid(), host=socket.gethostname(), frontend=frontend, label=label)
+        self._given_root = root
         self._root = root
         self._held: dict[str, _HeldDevice] = {}
         self._guard = threading.RLock()
@@ -355,9 +453,18 @@ class BenchMutex:
 
     @property
     def root(self) -> Path:
-        if self._root is None:
-            self._root = device_lock_root()
-        return self._root
+        """Looked up again whenever this owner holds nothing, and kept while it
+        holds anything: a server started before the machine directory existed
+        moves over at its next acquire, and one owner's holds never straddle two
+        directories."""
+        with self._guard:
+            if self._root is None or (self._given_root is None and not self._held):
+                self._root = device_lock_root()
+            return self._root
+
+    def _lock(self, resource: str) -> _LifetimeLock:
+        root = self.root
+        return _LifetimeLock(root / f"{resource_digest(resource)}.lock", lock_file_mode(root))
 
     def held_resources(self) -> frozenset[str]:
         with self._guard:
@@ -539,7 +646,7 @@ class BenchMutex:
             held.holders += 1
             return False
         started = time.monotonic()
-        lock = _LifetimeLock(self.root / f"{resource_digest(resource)}.lock")
+        lock = self._lock(resource)
         while True:
             try:
                 lock.acquire()
@@ -569,12 +676,12 @@ class BenchMutex:
                         result.update(filesystem_error_detail(error))
                     raise DeviceBusyError(result) from error
                 time.sleep(min(WAIT_POLL_INTERVAL_S, max(deadline - time.monotonic(), 0.0)))
-                lock = _LifetimeLock(self.root / f"{resource_digest(resource)}.lock")
+                lock = self._lock(resource)
         # The lock is ours, so any record still claiming the device belongs to an
         # owner the OS already reaped. Say so instead of quietly overwriting it:
         # "the previous run died" is exactly what an operator needs to hear, and
         # it is the evidence that a crash frees the bench without a manual step.
-        previous = self._read_holder(resource)
+        previous = self._read_holder(resource, lock.path.parent)
         reclaimed = previous if isinstance(previous, dict) and previous.get("state") == "held" else None
         self._held[resource] = _HeldDevice(resource=resource, lock=lock, acquired_at=utc_now_iso(), reclaimed_from=_reclaim_detail(reclaimed))
         # A device whose record cannot be written is still exclusively ours; only
@@ -598,8 +705,8 @@ class BenchMutex:
         if not self._held:
             self._stop_heartbeat_pump()
 
-    def _holder_path(self, resource: str) -> Path:
-        return self.root / f"{resource_digest(resource)}.holder.json"
+    def _holder_path(self, resource: str, root: Path | None = None) -> Path:
+        return (self.root if root is None else root) / f"{resource_digest(resource)}.holder.json"
 
     def _write_holder(self, resource: str, state: str, *, released: bool = False) -> None:
         held = self._held.get(resource)
@@ -616,16 +723,19 @@ class BenchMutex:
             record["released_at"] = record["heartbeat_at"]
         if held is not None and held.reclaimed_from is not None:
             record["reclaimed_from"] = held.reclaimed_from
-        atomic_write_text(self._holder_path(resource), json.dumps(record, indent=2) + "\n")
+        # Beside the lock it describes, which is where a contender reads it.
+        root = held.lock.path.parent if held is not None else self.root
+        atomic_write_text(self._holder_path(resource, root), json.dumps(record, indent=2) + "\n", mode=lock_file_mode(root))
 
-    def _read_holder(self, resource: str) -> JsonObject | None:
+    def _read_holder(self, resource: str, root: Path | None = None) -> JsonObject | None:
         # A heartbeat atomically replaces the record. If it lands between open
         # and stat, the safe reader refuses the changed inode. Retry the full
         # safety check, bounded so a persistently unsafe path still yields no
         # holder and never keeps a contender waiting indefinitely.
+        path = self._holder_path(resource, root)
         for _ in range(3):
             try:
-                text = safe_read_text(self._holder_path(resource))
+                text = safe_read_text(path)
                 break
             except ConfigError as error:
                 if error.error_type != "unsafe_configured_path":

@@ -411,6 +411,17 @@ Symptom: a call returns `device_busy` and names a `holder`, or tools return `res
 
 `device_busy` is not a fault. Another run holds that physical device for its whole duration, which is the exclusivity that replaced the read permission. The refusal carries `holder` (pid, host, frontend, and the run label when there is one) and `held_since`; nothing was touched. Wait for that run, or ask its owner to finish. A refusal that carries no `holder` is the same hold by an owner whose record does not name it yet: wait for it the same way. If waiting is right, ask for it explicitly and bounded: `agentic-hil test-reactor --wait-s <seconds>`. If the holder is a test run you want to end early, end it in an orderly way rather than by killing it: `agentic-hil test-reactor-status` lists the runs this bench knows, and `agentic-hil test-reactor-stop --run <handle>` asks one to finish the step it is in, close its devices and write its report. Never delete a lock file under `~/.agentic-hil/device-locks`: the hold belongs to a live process, and removing it lets two runs drive one board.
 
+Two accounts on one machine keep their device locks in their own home directories, so they do not see each other's hold. On Linux an administrator makes the locks one per machine for every account in a group, once:
+
+```sh
+sudo groupadd agentic-hil
+sudo install -d -m 0755 /var/lib/agentic-hil
+sudo install -d -o root -g agentic-hil -m 2770 /var/lib/agentic-hil/device-locks
+sudo usermod -aG agentic-hil <account>
+```
+
+Create it while no run holds a device, and log in again after `usermod`. `agentic-hil doctor` names which directory the locks are taken in under `device_locks`. A call refused with `device_lock_root_unusable` names that directory and what is wrong with it, most often an account that is not in the group yet or has not logged in again since; every device lock is refused until it is fixed, and no lock is taken in the home directory instead.
+
 A holder reported with `holder_heartbeat_stale: true` is hung rather than busy; stop that process. A crashed one needs nothing at all: the operating system drops the lock when the process dies, and the next run reports what it reclaimed.
 
 `undeclared_device` is separate: a run reached for a device its test plan does not name. Add the device to the plan and rerun; the plan is what the mutex locks before the first step, so a device it does not name was never locked.
