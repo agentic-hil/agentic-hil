@@ -6,13 +6,17 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/agentic-hil/agentic-hil/ci.yml?branch=master&label=CI)](https://github.com/agentic-hil/agentic-hil/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/agentic-hil/agentic-hil)](LICENSE)
 
-**Your AI agent writes the firmware, flashes it to the board on your desk, drives UART and CAN against it, reads back what the hardware actually did, and fixes what it got wrong; the run on the real board is what decides whether the work is done, and you review the pull request with that run's evidence in it.**
+**Connect your AI to reality.**
+
+Let your agent develop, test, and improve firmware autonomously. In the real world. Agentic HIL makes this possible as a hard gate: it enforces strict safety boundaries and verifies the results on real hardware.
 
 https://github.com/user-attachments/assets/8d39ba93-beeb-484e-b9e9-d9ce79538523
 
-Nothing in that run is staged. One restart after the install line, in a freshly created firmware project, the first sentence makes the agent set the bench up itself and the second makes the board say Hello World and prove it said it: the configuration is created over MCP with the permissions reported out loud, the firmware is written on the spot, `flash_firmware` and `com_read` go through the gate, the twelve bytes come back off the wire, and the plan it pins is run once green and once against a wrong expectation, because a test that cannot fail proves nothing. What remains in the project afterwards is the plan as a reviewable file and the run's own report: lease released, safe state confirmed, nothing quarantined.
+Watch the agent set up a fresh firmware project, write the firmware, and make the board say Hello World after installation and one restart. The recording shows real hardware feedback through the gate. The agent saves a test plan and runs it with both a correct and a deliberately wrong expectation. You get the plan, a report, and evidence that the test can pass and fail. The run ends with the lease released, the safe state confirmed, and nothing quarantined.
 
-## Install
+## Get started
+
+Install Agentic HIL for your user with one command. **No admin rights required.**
 
 **Linux / macOS** (any shell):
 
@@ -26,57 +30,77 @@ curl -LsSf https://agentic-hil.github.io/install.sh | sh
 irm https://agentic-hil.github.io/install.ps1 | iex
 ```
 
-The command lands in the user bin directory of the package manager that installed it, and the installer asks that manager where it went rather than assuming: `uv tool dir --bin` for a uv install, and the selected interpreter itself for a `pip --user` one. When that directory is not on your `PATH` already, the installer puts it there and says so: one line in each startup file your shell reads, or on Windows the directory in front of your own `Path`. Open a new shell and the command is there. Pass `--no-path` (`-NoPath` in PowerShell) to keep that edit for yourself, and the installer prints the exact line instead.
+The installer registers the skill and MCP server for every supported agent CLI it finds on your `PATH`. It keeps the installation outside your repositories. **Restart your agent once**, then ask your first hardware question. Your agent sets up the project's bench through MCP.
 
-One line installs the package user-local and registers the agent skill and the MCP server for every agent CLI it finds on your `PATH`. **No admin rights required, ever**, and it touches nothing inside any repository. Finding no `claude`, `codex` or `opencode` CLI there, it says so and writes nothing of any agent's: install the agent CLI, then run `agentic-hil agent-install --agent <claude-code|codex|opencode>` yourself, which is the line the installer prints for that case. Then **restart your agent once**, and after that one restart your agent sets this project up itself, at the first hardware question you ask it.
+If no `claude`, `codex`, or `opencode` CLI is found, the installer prints the next step. Install your agent CLI, then run `agentic-hil agent-install --agent <claude-code|codex|opencode>` to register it.
 
-The line above and the checksummed route in [installation](docs/installation.md) run the same installer, and on a machine with nothing here yet both install the same thing, the release from PyPI: the script resolves `agentic-hil[can]` against the package index and carries no branch or git reference at all, and `--version <x.y.z>` pins one exact release instead. On a rerun it repairs what is already installed rather than forcing the public release over it: an installation reporting a `.devN` version (an editable checkout of this repository) is kept untouched, and a uv-managed tool installed from a path, URL or git reference is refreshed from that same recorded source rather than switched to the index. What the checksummed route adds is the script itself, read before it runs: `install.sh` and its `install.sh.sha256` come from the same release, one is checked against the other, and the file that runs is the file you checked.
+The installer asks the package manager where its user bin directory is and adds that directory to your shell startup files or Windows user `Path` when needed. Open a new shell to use the command. Pass `--no-path` (`-NoPath` in PowerShell) to manage that change yourself; the installer prints the line to add.
 
-[The STM32 starter](https://github.com/agentic-hil/stm32-starter) is the shortest way to watch that happen on hardware: three steps on a Nucleo-F446RE, with the firmware, the test plans and one planted defect already in place.
+A fresh installation gets `agentic-hil[can]` from PyPI. Use `--version <x.y.z>` to pin a release. Rerunning the installer repairs an existing installation: editable checkouts reporting a `.devN` version are kept, and uv tools installed from a path, URL, or git reference are refreshed from that recorded source. To inspect and verify the installer before running it, follow the checksummed route in [installation](docs/installation.md): download the script and its checksum from the same release, check the file, then run that file.
 
-Claude Code can also take the skill from the plugin marketplace:
+For a guided first run, try [the STM32 starter](https://github.com/agentic-hil/stm32-starter). It has the firmware, test plans, and a planted defect ready for a three-step walkthrough on a Nucleo-F446RE.
+
+Claude Code can also install the skill from the plugin marketplace:
 `/plugin marketplace add agentic-hil/agentic-hil`, then `/plugin install agentic-hil@agentic-hil`.
-The plugin carries the skill and nothing else; the MCP server itself still comes from the install line above, which registers a verified absolute executable path outside your repository.
+The install command above still provides and registers the MCP server, with a verified absolute executable path outside your repository.
 
-[Installation](docs/installation.md) has every other path: the `cmd.exe` spelling, the repair run (the same line again, which reinstalls in place when `agentic-hil upgrade` itself fails), that checksummed route in full, registering one agent instead of all of them, driving your own package manager, `setup` for a bench that is already attached, the optional extras, upgrading, and every platform and debugger backend. [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something does not start.
+See [installation](docs/installation.md) for `cmd.exe`, registering one agent, using your own package manager, setting up an attached bench, optional components, and upgrades. The same installer command can repair an installation when `agentic-hil upgrade` fails. [Troubleshooting](TROUBLESHOOTING.md) covers startup problems.
 
-A first command that needs no board, in a clone of this repository: `agentic-hil check-plan examples/nucleo-f446re_demo/testconfig.yaml` answers `All 1 test plan(s) load through the reactor's loader.` and exits 0, having loaded no configuration and touched no hardware.
+In a clone of this repository, try a first check without a board:
 
-Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that lets a coding agent develop firmware on the real board. It exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, reports, and logs, all without giving an agent arbitrary host or debugger access. The run on the board is the gate: the work is done when the hardware behaved, and the report that run writes is the evidence a reviewer reads. What it supports is the debug probe with its backend rather than a board, ST-Link through OpenOCD or the STM32CubeProgrammer CLI and CMSIS-DAP probes through pyOCD, so any board behind such a probe runs the same software. Each project has exactly one authoritative configuration stored outside the repository, out of reach of the agent's own file tools.
+```bash
+agentic-hil check-plan examples/nucleo-f446re_demo/testconfig.yaml
+```
 
-## Why
+It answers `All 1 test plan(s) load through the reactor's loader.` and exits 0, without loading a bench configuration or touching hardware.
 
-A green build is not enough in embedded development: firmware has to behave correctly on the real board, so the run on that board is the gate the work has to pass before it is done. Classic tools automate single steps (flash here, read a log there), but the moment real hardware has to respond, a human is back in the loop, which is what stops an agent from developing firmware through to that gate. Handing an agent a raw debugger shell or direct serial access instead is neither safe nor reproducible, and leaves a reviewer nothing to read.
+## Let your agent close the loop
+
+You set the goal. Your agent writes and builds the firmware. Agentic HIL puts it on the board, exercises the device, and checks its responses against the test criteria. When a test fails, the agent gets concrete results it can use to diagnose the problem, change the code, and try again.
+
+Agentic HIL supplies the hardware execution and feedback that make this development loop possible. Much of the flashing, testing, and checking you would do at the bench becomes part of the agent's workflow. You review the code alongside a record of what ran, what passed, and what failed, and focus your attention on requirements, design decisions, and test coverage.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/hero-loop-dark.svg">
-  <img alt="The Agentic HIL loop: build, flash, stimulate, observe, then diagnose and fix, closing back onto build. Flash and stimulate write to the real board on your bench; observe reads back from it. Your agent runs the loop unattended; you review the pull request." src="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/hero-loop.svg">
+  <img alt="Your agent builds firmware. Agentic HIL flashes it, exercises the board, and checks its responses within configured safety boundaries. The agent uses the results to diagnose, fix, and rebuild. You review the code and the hardware test results." src="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/hero-loop.svg">
 </picture>
 
-Agentic HIL closes the gap with a small, auditable gate:
+Agentic Hardware-in-the-Loop (Agentic HIL) connects coding agents to the bench through MCP tools and CI suites through a pytest plugin. Setup is available for Claude Code, Codex, and OpenCode.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/architecture-dark.svg">
-  <img alt="An AI agent or CI reaches Agentic HIL over MCP stdio only. The authoritative configuration, owned by the operator outside the workspace, gates every action. Agentic HIL drives debug probes (OpenOCD, pyOCD, STM32CubeProgrammer), serial ports, and CAN buses shared through the broker, and answers with structured results, reports, and a SHA-256 audit chain." src="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/architecture.svg">
+  <img alt="Your coding agent sends hardware requests through MCP. Agentic HIL enforces the operator's configuration, drives debug probes, serial ports, and CAN buses, and returns structured results and reports. The configuration and audit record stay outside the agent's workspace." src="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/architecture.svg">
 </picture>
 
-Every hardware action is validated against the selected authoritative configuration, executed with timeouts, logged to `.agentic-hil/logs/`, and answered with a structured JSON result (`ok`, `error_type`, `summary`, `likely_causes`, `report_path`, `log_path`) that an agent can act on and a reviewer can read afterwards. What the agent may do at all is per device and per permission, and reaching for a debugger escape hatch is what takes flashing away.
+Each hardware action returns a structured result with its outcome, diagnostics, and report and log paths. Your agent gets feedback it can act on, and you can trace the result back to the recorded run.
 
-## What it drives
+## Bring your bench into the loop
 
-The unit it drives is the probe with its backend, not one board: four debugger backends (OpenOCD, pyOCD, the STM32CubeProgrammer CLI, and esptool, which flashes and resets an ESP32 through the board's USB-UART bridge and opens no debug session), plus serial ports and CAN (PCAN, SocketCAN, or a custom bridge; several runs can share one bus), on Linux, macOS, and Windows, Python 3.10 or newer, all CI-tested. The worked example in [examples/nucleo-f446re_demo/](examples/nucleo-f446re_demo/) runs the whole loop on an ST Nucleo-F446RE, the board this repository proves the path on rather than the boundary of what runs; [installation](docs/installation.md) has every backend and platform in detail.
+Agentic HIL connects to your probe through its backend: ST-Link through OpenOCD or the STM32CubeProgrammer CLI, and CMSIS-DAP probes through pyOCD. It also flashes and resets ESP32 targets through esptool and their USB-UART bridge, without opening a debug session. Hardware support follows the probe and backend.
 
-## The test reactor
+Send commands and read responses over serial ports and CAN buses using PCAN, SocketCAN, or a custom bridge. Several runs can share a CAN bus through the broker.
 
-A plan is how the gate is written down, and one YAML plan drives the whole bench: flash, reset, write, read with a comparator (exact text, a pattern, or a numeric range over a captured value), delays, and sessions that close themselves. Plans name logical devices; the bench configuration binds them to real hardware, so the same plan runs unchanged on every machine that has one. A failing step aborts the run, and the bench recovers itself: reap, reset into halt, probe, all attested in the run result. [How plans work.](docs/testing.md)
+Agentic HIL runs on Linux, macOS, and Windows with Python 3.10 or newer, with CI coverage across all three platforms. The [Nucleo-F446RE example](examples/nucleo-f446re_demo/) takes you through a complete run on the board used to demonstrate the loop. See [installation](docs/installation.md) for backend and platform details.
 
-## Security by construction
+## Put the firmware to the test
 
-A device does not exist on this bench until your configuration declares it, and a call naming any other one is refused before a driver is opened: `unknown_device` where a run declares it, and `com_port_not_configured` or `can_bus_not_configured` where a port tool or a bus tool names it, each of those two naming the ones the configuration does declare. On a device it does declare, a generated configuration grants every permission that has a tool behind it and holds `allow_raw_debugger_commands` and `allow_mass_erase` false, the interlocked pair that refuses flashing while either is true, false by construction when MCP `project_config_create` generates with no loaded configuration, and the default `agentic-hil init` writes unless your `agentic-hil.config.example.yaml` opens one; a `project_config_create` regenerating an existing bench carries the loaded permissions back instead, either interlock included, keyed on the entry name and not on whether a probe was found before, so a pair an operator opened on a named `dut` placeholder survives the very call that first binds a probe to it and only a logical entry whose name the loaded configuration did not carry comes back false. `agentic-hil revoke <key>` takes any single grant back and `agentic-hil grant <key>` reopens it, from your own shell; over MCP an agent narrows its own authority and never widens it. Every hardware action is validated, leased machine-wide, and written to a SHA-256 audit chain. The authoritative configuration lives outside the workspace, where the agent cannot edit it. Enforcement sits in the tool rather than in the agent host on purpose: a host's permission system judges shell strings and differs per host, while the bench's permissions judge the hardware action itself and travel with the bench, so the CLI, pytest, CI and the test reactor all walk the same gate. A failed run still gives the bench back: it aborts with its verdict, the recovery action resets and re-reads the target, and the standing quarantine is kept for the one state no later contact can rebuild, a broken audit trail. [The safety model](docs/safety-model.md) is the short version, [the security design](docs/security-design.md) the long one.
+Write down what the device should do in a reviewable YAML test plan. The test reactor validates the plan before touching hardware, then flashes, resets, and exercises the device in the order you specify. Checks compare actual responses with exact values, patterns, or numeric ranges. A check passes when the device meets that expectation.
 
-## Quickstart: one real run
+Plans name logical devices, and the bench configuration connects them to real hardware. Use the same plan at your desk and in CI. A failed step stops the run; sessions are cleaned up, and configured recovery actions and their outcomes are recorded with the test results. [Write your first hardware test.](docs/testing.md)
 
-The worked example is a firmware project of its own. Plug the board in, build it, and point Agentic HIL at it from that directory:
+## Set boundaries that hold
+
+You decide which devices and actions your agent may use. Agentic HIL rejects undeclared devices before opening a driver. It enforces permissions, validates requests, applies timeouts, and records what happened. The CLI, MCP tools, pytest plugin, and test reactor all pass through the same gate.
+
+The authoritative configuration lives outside the workspace, beyond the agent's own file tools. Review the permissions it grants. Use `agentic-hil revoke <key>` or `agentic-hil grant <key>` from your own shell to change individual grants. Over MCP, an agent can only narrow its authority. Flashing is refused while either `allow_raw_debugger_commands` or `allow_mass_erase` is enabled.
+
+Device leases protect runs from interference across the machine, and a SHA-256 audit chain makes the hardware record tamper-evident. A failed run keeps its failed verdict while configured recovery works to restore the bench and records the outcome. A broken audit trail holds the bench until operator recovery, because another hardware test cannot rebuild missing evidence.
+
+Read [the safety model](docs/safety-model.md) for the overview and [the security design](docs/security-design.md) for the full reasoning.
+
+## Try it on a real board
+
+Start with the Nucleo-F446RE demo. Connect the board, build the firmware, and set up Agentic HIL from the example's directory:
 
 ```bash
 cd examples/nucleo-f446re_demo
@@ -85,36 +109,37 @@ agentic-hil setup --agent claude-code                  # or: codex / opencode
 agentic-hil doctor
 ```
 
-`doctor` checks the configuration against the attached bench and names what it finds (a missing toolchain, an unreachable probe, a target type this host cannot resolve) before anything is flashed. If the board arrived after `setup` ran, `agentic-hil adopt-hardware` fills in the probe serial, the backend executable and the COM device it left unset (`--dry-run` shows the plan first). On a host with OpenOCD and no STM32CubeProgrammer the probe is read from the host's own USB serial inventory, so a lone attached ST-Link binds without anybody retyping its serial; `--probe-id <serial>` names the board where a second probe that publishes no virtual COM port is attached beside it.
+`doctor` checks the configuration against the attached bench and reports missing tools or hardware before you flash. If you connected the board after setup, `agentic-hil adopt-hardware` fills in the probe identity, backend executable, and COM device left unset. Use `--dry-run` to see the proposed changes first. On a host with OpenOCD and no STM32CubeProgrammer, the host's USB inventory can identify an attached ST-Link. Use `--probe-id <serial>` to select one when several probes are attached.
 
-With the MCP host started from that directory, the agent drives four calls:
+Run the example's hardware test plan:
 
-```text
-flash_firmware     {"image_path": "build/Debug/nucleo-f446re_demo.elf"}
-com_session_start  {"port_id": "dut_uart"}
-reset_target       {"mode": "run"}
-com_read           {"port_id": "dut_uart", "wait_timeout_s": 5}
-→ feedback contains "Hello World"
+```bash
+agentic-hil test-reactor --test-config testconfig.yaml
 ```
 
-The same loop runs headless as a pytest regression: `pytest tests/` in that directory flashes the ELF, resets the target and asserts the boot banner on the UART. [examples/nucleo-f446re_demo/](examples/nucleo-f446re_demo/) walks through both, and [docs/testing.md](docs/testing.md) covers writing the run down as a reviewable YAML plan instead.
+The [plan](examples/nucleo-f446re_demo/testconfig.yaml) flashes the firmware, opens the serial port, resets the board, and checks the boot output for `Hello World`. A missing or wrong boot banner fails the test and returns the device output for diagnosis. The run closes the sessions it opened, including when a step fails.
 
-## Where the depth lives
+Your agent can drive the same steps through [MCP tools](docs/mcp-tools.md). Run `pytest tests/` from the example directory to put the boot check in a regression suite. The [example guide](examples/nucleo-f446re_demo/) covers all three paths, and [hardware testing](docs/testing.md) shows how to write plans for your own device.
 
-| If you want | Read |
+## Go deeper
+
+| Your next step | Read |
 |---|---|
-| to install, upgrade, add CAN, pyOCD or esptool, or look up a command | [docs/installation.md](docs/installation.md) |
-| what the authoritative configuration declares and who may change it | [docs/configuration.md](docs/configuration.md) |
-| the complete MCP tool surface and how a run is composed from it | [docs/mcp-tools.md](docs/mcp-tools.md) |
-| to register the server in a specific MCP host | [docs/mcp-hosts.md](docs/mcp-hosts.md) |
-| to write hardware tests (YAML plans or pytest) | [docs/testing.md](docs/testing.md) |
-| why it is safe to leave an agent alone with the bench | [docs/safety-model.md](docs/safety-model.md) and [docs/security-design.md](docs/security-design.md) |
-| a failure diagnosed | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) |
-| to point your agent at this repository | [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) and [AGENTS.md](AGENTS.md) |
+| Install, upgrade, or add CAN, pyOCD, or esptool support | [docs/installation.md](docs/installation.md) |
+| Define the bench and its permissions | [docs/configuration.md](docs/configuration.md) |
+| Drive hardware through MCP | [docs/mcp-tools.md](docs/mcp-tools.md) |
+| Connect a specific MCP host | [docs/mcp-hosts.md](docs/mcp-hosts.md) |
+| Write hardware tests with YAML or pytest | [docs/testing.md](docs/testing.md) |
+| Understand how safety boundaries and recovery work | [docs/safety-model.md](docs/safety-model.md) and [docs/security-design.md](docs/security-design.md) |
+| Find platform and response-time commitments | [docs/support.md](docs/support.md) |
+| Diagnose a failed run | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) |
+| Set up your agent for this project | [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md) and [AGENTS.md](AGENTS.md) |
 
-Names: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
+Use `agentic-hil` for the package installation, CLI command, repository URL, and MCP server name. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 
 ## Development
+
+To work on Agentic HIL itself:
 
 ```bash
 python -m pip install -e '.[dev]'
@@ -124,7 +149,7 @@ python -m build
 twine check dist/*
 ```
 
-The package is configured for PyPI publishing through GitHub trusted publishing in `.github/workflows/workflow.yml`. Contribution guidelines: [CONTRIBUTING.md](CONTRIBUTING.md).
+Releases publish to PyPI through GitHub trusted publishing in `.github/workflows/workflow.yml`. See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute.
 
 ## Security
 
@@ -132,7 +157,11 @@ Policy bypasses are treated as vulnerabilities; see [SECURITY.md](SECURITY.md).
 
 ## Support
 
-Linux, macOS and Windows are supported equally, what is supported is the debug probe with the backend behind it (ST-Link through OpenOCD or the STM32CubeProgrammer CLI, CMSIS-DAP probes through pyOCD, an ESP32 board's USB-UART bridge through esptool) rather than any list of boards, and issues are answered within 24 hours on workdays, security reports within seven days: [docs/support.md](docs/support.md) is the whole promise, including what is not promised. Ask in [Discussions Q&A](https://github.com/agentic-hil/agentic-hil/discussions/categories/q-a), show a run in [Show and tell](https://github.com/agentic-hil/agentic-hil/discussions/categories/show-and-tell), and put a first run on your own bench, green or red, in [the first run report](https://github.com/agentic-hil/agentic-hil/issues/new?template=first-run.yml).
+Linux, macOS, and Windows have equal support. Hardware support follows the probe and backend: ST-Link through OpenOCD or STM32CubeProgrammer, CMSIS-DAP through pyOCD, and ESP32 USB-UART bridges through esptool.
+
+Issues receive a response within 24 hours on workdays, and security reports within seven days. See [the support policy](docs/support.md) for the full scope and commitments.
+
+Ask questions in [Discussions Q&A](https://github.com/agentic-hil/agentic-hil/discussions/categories/q-a), share a run in [Show and tell](https://github.com/agentic-hil/agentic-hil/discussions/categories/show-and-tell), or submit [your first run report](https://github.com/agentic-hil/agentic-hil/issues/new?template=first-run.yml), whether it passed or failed.
 
 ## License
 
