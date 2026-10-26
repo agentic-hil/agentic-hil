@@ -332,7 +332,7 @@ def test_the_image_carries_pyocd_and_curl() -> None:
 
     pyOCD from the package index at one pinned version, named in
     `requirements/container.in` the way uv is and for the same reason: the
-    fixture under tests/fixtures reproduces what pyOCD 0.45.1 printed, a
+    fixture under tests/fixtures reproduces what pyOCD 0.46.0 printed, a
     different release may word its refusal differently, and the drift test in
     the tier should go red on a deliberate bump with a test run behind it, not
     on a rebuild. The reason the distribution's own packages stay unpinned (the

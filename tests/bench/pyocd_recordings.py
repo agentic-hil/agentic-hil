@@ -135,7 +135,7 @@ def pyocd_provenance(environment: dict[str, str]) -> tuple[str, str, str]:
     assert targets_run.returncode == 0, (targets_run.stdout, targets_run.stderr)
     assert packs_run.returncode == 0, (packs_run.stdout, packs_run.stderr)
     targets_document = json.loads(targets_run.stdout)
-    assert targets_document.get("pyocd_version") == "0.45.1", targets_document
+    assert targets_document.get("pyocd_version") == "0.46.0", targets_document
     targets = {
         item.get("name"): item
         for item in targets_document.get("targets", [])

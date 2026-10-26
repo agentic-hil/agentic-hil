@@ -1384,9 +1384,11 @@ class PyOCDBackend:
         # The last two are what pyOCD 0.45.1 prints when spawned with `-W` and
         # nothing is attached: `No connected debug probes`, or `No connected
         # debug probe matches unique ID '<id>'` when a `--uid` was given
-        # (pyocd/core/helpers.py). Ahead of every other rule, because the
-        # commander exits 0 over the first and `flash` follows it with a `No
-        # target device available` line the flash bucket would otherwise claim.
+        # (pyocd/core/helpers.py); 0.46.0 prints the same two. Ahead of every
+        # other rule, because the commander exits 0 over the first in 0.45.1
+        # (3 in 0.46.0, so the status cannot tell the two releases' refusals
+        # apart from a failure) and `flash` follows it with a `No target
+        # device available` line the flash bucket would otherwise claim.
         # And `Error: [Errno 16] Resource busy`, all pyOCD 0.45.1 said when
         # another pyOCD already held the probe (recorded beside a running
         # `pyocd gdbserver`): the probe could not be opened, before the target.

@@ -6,8 +6,9 @@ and `flash_firmware` each waiting out `timeout_s`, being reaped, and opening a
 quarantine for a board nothing had contacted. Two pyOCD facts decide the fix,
 and both are pyOCD's to change between releases: that it waits for a probe
 unless spawned with `-W`, and the exact sentence it prints when told not to.
-The suite's fixture reproduces the recording taken here on 2026-09-06 from
-pyOCD 0.45.1; this module is what notices the next time pyOCD rewords it.
+The suite's fixture reproduces the recordings taken here on 2026-09-06 from
+pyOCD 0.45.1 and on 2026-10-26 from pyOCD 0.46.0; this module is what notices
+the next time pyOCD rewords it.
 
 Nothing here can reach a board. pyOCD is asked to find a probe, finds none, and
 says so; the backend is then asked what it makes of that.
@@ -31,9 +32,14 @@ from .conftest import COMMAND_TIMEOUT_S, CONTAINER_ONLY, coordination_record_sta
 
 pytestmark = [pytest.mark.container, CONTAINER_ONLY]
 
-# pyOCD 0.45.1, 2026-09-06, in this image, with nothing on USB.
+# pyOCD 0.46.0, 2026-10-26, in this image, with nothing on USB: the sentences
+# 0.45.1 printed on 2026-09-06, word for word.
 RECORDED_NO_PROBE = "No connected debug probes\n"
 RECORDED_NO_PROBE_FOR_UID = "No connected debug probe matches unique ID 'NOSUCHPROBE0001'\n"
+# What 0.46.0's commander exits with when it finds no probe: 3, "failed to
+# create session" in `pyocd/commands/commander.py`. 0.45.1 exited 0 over the
+# same sentence, so the sentence, not the status, is what the backend reads.
+RECORDED_COMMANDER_NO_PROBE_EXIT = 3
 
 # Long enough that the real pyOCD's own start-up (a Python interpreter loading
 # its probe drivers) is nowhere near it, short enough that a run which waits it
@@ -118,23 +124,23 @@ def test_the_installed_pyocd_still_refuses_with_the_sentences_the_fixture_record
     `commander --command reset` and `flash --no-reset`), the `--uid` form of
     the first, and the `reset` subcommand the recording listed: five commands,
     two sentences, and the exit codes the fixture reproduces. A release that
-    rewords the refusal, or starts exiting non-zero from the commander, fails
-    here rather than quietly returning `unknown_debugger_error` on a bench
-    again.
+    rewords the refusal, or changes the status the commander exits with over
+    it (0.46.0 did, from 0 to 3), fails here rather than quietly returning
+    `unknown_debugger_error` on a bench again.
     """
     pyocd = real_pyocd()
     image = tmp_path / "x.elf"
     image.write_bytes(b"\x7fELFfake")
 
     commander = subprocess.run([pyocd, "commander", "-W", "--command", "status"], capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=False)
-    assert (commander.stdout, commander.returncode) == (RECORDED_NO_PROBE, 0), commander
+    assert (commander.stdout, commander.returncode) == (RECORDED_NO_PROBE, RECORDED_COMMANDER_NO_PROBE_EXIT), commander
 
     by_uid = subprocess.run([pyocd, "commander", "-W", "--uid", "NOSUCHPROBE0001", "--command", "status"], capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=False)
-    assert (by_uid.stdout, by_uid.returncode) == (RECORDED_NO_PROBE_FOR_UID, 0), by_uid
+    assert (by_uid.stdout, by_uid.returncode) == (RECORDED_NO_PROBE_FOR_UID, RECORDED_COMMANDER_NO_PROBE_EXIT), by_uid
 
-    # What `reset_target` spawns: the commander, which exits 0 over the sentence.
+    # What `reset_target` spawns: the commander, with the same sentence and status.
     reset_through_the_commander = subprocess.run([pyocd, "commander", "-W", "--command", "reset"], capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=False)
-    assert (reset_through_the_commander.stdout, reset_through_the_commander.returncode) == (RECORDED_NO_PROBE, 0), reset_through_the_commander
+    assert (reset_through_the_commander.stdout, reset_through_the_commander.returncode) == (RECORDED_NO_PROBE, RECORDED_COMMANDER_NO_PROBE_EXIT), reset_through_the_commander
 
     # What `flash_firmware` spawns: exit 1, with a second line of its own on stderr.
     flash = subprocess.run([pyocd, "flash", "-W", "--no-reset", str(image)], capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=False)

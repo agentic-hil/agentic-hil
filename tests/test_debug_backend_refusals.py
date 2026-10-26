@@ -402,7 +402,7 @@ def test_debugger_info_reads_the_version_the_real_tool_prints(tmp_path: Path, mo
     result = call(config, "debugger_info")
 
     assert result["ok"] is True, result
-    assert result["version"] == {"openocd": "Open On-Chip Debugger 0.12.0", "pyocd": "0.45.1"}[backend_name], result
+    assert result["version"] == {"openocd": "Open On-Chip Debugger 0.12.0", "pyocd": "0.46.0"}[backend_name], result
     assert result["summary"] == AVAILABLE_SUMMARY[backend_name]
 
 
