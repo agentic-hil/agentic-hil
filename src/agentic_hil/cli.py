@@ -5372,6 +5372,13 @@ def doctor(config_path: str | None = None) -> JsonObject:
     except ConfigError as error:
         result = error.to_dict()
         result["tool"] = "agentic_hil_doctor"
+        # Without a configuration too: `init` takes device locks, so an account
+        # the machine directory refuses is refused there, and doctor is where
+        # that refusal's remediation sends it (#777).
+        device_locks_check = _doctor_device_locks()
+        if device_locks_check.get("ok") is not True:
+            result["device_locks"] = device_locks_check
+            result["summary"] = f"{result['summary']} {device_locks_check['summary']}"
         return result
     state_root_check = _doctor_state_root(config)
     binding_check = _doctor_bench_binding(config)
