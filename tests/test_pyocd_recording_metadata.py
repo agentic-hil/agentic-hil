@@ -58,7 +58,7 @@ def test_pyocd_metadata_commands_use_the_explicit_bench_environment(monkeypatch)
         "AGENTIC_HIL_CONFIG": "/bench-config/config.yaml",
     }
     target_document = {
-        "pyocd_version": "0.45.1",
+        "pyocd_version": "0.46.0",
         "targets": [
             {
                 "name": "stm32f446retx",
@@ -83,7 +83,7 @@ def test_pyocd_metadata_commands_use_the_explicit_bench_environment(monkeypatch)
 
     executable, pyocd_version, pack_version = pyocd_recordings.pyocd_provenance(environment)
 
-    assert (executable, pyocd_version, pack_version) == ("/work/.venv/bin/pyocd", "0.45.1", "3.1.1")
+    assert (executable, pyocd_version, pack_version) == ("/work/.venv/bin/pyocd", "0.46.0", "3.1.1")
     assert len(calls) == 2
     assert all(call.get("env") == environment for call in calls)
 

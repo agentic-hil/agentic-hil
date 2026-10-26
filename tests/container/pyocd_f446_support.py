@@ -37,7 +37,7 @@ def test_pyocd_reports_both_f446_target_types_from_an_installed_pack() -> None:
     assert packs_result.returncode == 0, (packs_result.stdout, packs_result.stderr)
 
     target_document = json.loads(targets_result.stdout)
-    assert target_document["pyocd_version"] == "0.45.1", target_document
+    assert target_document["pyocd_version"] == "0.46.0", target_document
     targets = {
         entry["name"]: entry
         for entry in target_document["targets"]

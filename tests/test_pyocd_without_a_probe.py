@@ -37,13 +37,16 @@ from agentic_hil.tools import AgenticHILToolService
 FAKE_PYOCD_NO_PROBE = Path(__file__).resolve().parent / "fixtures" / "fake_pyocd_no_probe.py"
 
 # pyOCD 0.45.1 with no probe attached, recorded on 2026-09-06 in the container
-# test image. The fixture reproduces these byte for byte and a test below holds
-# it to that.
+# test image, and 0.46.0 on 2026-10-26 in the same image with the same streams.
+# The fixture reproduces these byte for byte and a test below holds it to that.
 RECORDED_NO_PROBE = "No connected debug probes\n"
 RECORDED_NO_PROBE_FOR_UID = "No connected debug probe matches unique ID 'NOSUCHPROBE0001'\n"
 RECORDED_RESET_STDERR = "0000212 E No target device available to reset [reset_cmd]\n"
 RECORDED_FLASH_STDERR = "0000223 E No target device available [load_cmd]\n"
 RECORDED_WAITING = "Waiting for a debug probe to be connected...\n"
+# The one thing the two recordings disagree on: the status the commander exits
+# with over the refusal.
+RECORDED_COMMANDER_NO_PROBE_EXIT = {"0.46.0": 3, "0.45.1": 0}
 
 # `write_config` writes `timeout_s: 5`; a refusal that took that long is the
 # wait the issue measured, not a refusal.
@@ -106,16 +109,24 @@ def run_fixture(*arguments: str, timeout: float = 30.0, env: dict[str, str] | No
     return subprocess.run([sys.executable, str(FAKE_PYOCD_NO_PROBE), *arguments], capture_output=True, text=True, timeout=scaled_time_bound(timeout), env=env, check=False)
 
 
+@pytest.fixture(params=sorted(RECORDED_COMMANDER_NO_PROBE_EXIT))
+def pyocd_release(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Each recorded release in turn, since an installed pyOCD may be either."""
+    monkeypatch.setenv("AGENTIC_HIL_FAKE_PYOCD_RELEASE", request.param)
+    return request.param
+
+
 # ---------------------------------------------------------------------------
 # The fixture is only evidence if it says what the recorded pyOCD said.
 
 
-def test_the_fixture_answers_the_way_the_recorded_pyocd_did(tmp_path: Path) -> None:
+def test_the_fixture_answers_the_way_the_recorded_pyocd_did(tmp_path: Path, pyocd_release: str) -> None:
+    commander_exit = RECORDED_COMMANDER_NO_PROBE_EXIT[pyocd_release]
     commander = run_fixture("commander", "-W", "--command", "status")
-    assert (commander.stdout, commander.stderr, commander.returncode) == (RECORDED_NO_PROBE, "", 0)
+    assert (commander.stdout, commander.stderr, commander.returncode) == (RECORDED_NO_PROBE, "", commander_exit)
 
     by_uid = run_fixture("commander", "-W", "--uid", "NOSUCHPROBE0001", "--command", "status")
-    assert (by_uid.stdout, by_uid.stderr, by_uid.returncode) == (RECORDED_NO_PROBE_FOR_UID, "", 0)
+    assert (by_uid.stdout, by_uid.stderr, by_uid.returncode) == (RECORDED_NO_PROBE_FOR_UID, "", commander_exit)
 
     reset = run_fixture("reset", "-W")
     assert (reset.stdout, reset.stderr, reset.returncode) == (RECORDED_NO_PROBE, RECORDED_RESET_STDERR, 1)
@@ -125,7 +136,7 @@ def test_the_fixture_answers_the_way_the_recorded_pyocd_did(tmp_path: Path) -> N
 
     listing = run_fixture("json", "--probes", "--no-config")
     assert listing.returncode == 0
-    assert json.loads(listing.stdout) == {"pyocd_version": "0.45.1", "version": {"major": 1, "minor": 1}, "status": 0, "boards": []}
+    assert json.loads(listing.stdout) == {"pyocd_version": pyocd_release, "version": {"major": 1, "minor": 1}, "status": 0, "boards": []}
 
 
 def test_the_fixture_waits_for_a_probe_when_it_is_not_told_not_to() -> None:
@@ -162,8 +173,8 @@ def test_pyocds_own_no_probe_sentences_classify_as_a_missing_probe(tmp_path: Pat
     which the reset and flash buckets would otherwise claim; the sentence about
     the probe is the one that says where the run stopped. The `[reset_cmd]`
     line is what `pyocd reset` prints; the backend's `reset_target` runs the
-    commander instead, which prints the sentence alone and exits 0, and the
-    service-level test below carries that real shape. Here the pairing is the
+    commander instead, which prints the sentence alone and exits 3 (0 before
+    0.46.0), and the service-level test below carries that real shape. Here the pairing is the
     harder one for the classifier, a reset-worded line to be outranked.
     """
     backend = PyOCDBackend(config_for(tmp_path))
@@ -184,7 +195,7 @@ def test_the_older_no_probe_phrases_still_classify_the_same_way(tmp_path: Path) 
 
 
 @pytest.mark.parametrize(("tool", "arguments"), THE_THREE_TOOLS)
-def test_a_tool_with_no_probe_attached_refuses_promptly_instead_of_timing_out(tmp_path: Path, tool: str, arguments: dict) -> None:
+def test_a_tool_with_no_probe_attached_refuses_promptly_instead_of_timing_out(tmp_path: Path, tool: str, arguments: dict, pyocd_release: str) -> None:
     """No `probe_id`, which is the field's default and what a one-probe bench is documented to use.
 
     Three things at once, because the issue measured all three going wrong
@@ -222,7 +233,7 @@ def test_a_tool_with_no_probe_attached_refuses_promptly_instead_of_timing_out(tm
     assert len(written_logs(config)) == 1, [path.name for path in written_logs(config)]
 
 
-def test_a_probe_that_vanished_after_its_uid_was_resolved_is_refused_the_same_way(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_probe_that_vanished_after_its_uid_was_resolved_is_refused_the_same_way(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pyocd_release: str) -> None:
     """The other route to the wait: a configured `probe_id` whose enumeration answered.
 
     The fast refusal that existed came from the enumeration, and once a UID has
@@ -271,7 +282,7 @@ def test_a_probe_that_vanished_after_its_uid_was_resolved_is_refused_the_same_wa
         ("debug_dump_symbol_ihex", {"symbol": "boot_counter", "output_path": "build/boot_counter.hex"}),
     ],
 )
-def test_a_sessionless_read_with_no_probe_attached_is_refused_the_same_way(tmp_path: Path, tool: str, arguments: dict) -> None:
+def test_a_sessionless_read_with_no_probe_attached_is_refused_the_same_way(tmp_path: Path, tool: str, arguments: dict, pyocd_release: str) -> None:
     """The two reads the issue does not name, which share the same connection half.
 
     `debug_symbol_value` and `debug_dump_symbol_ihex` spawn one `savemem`
