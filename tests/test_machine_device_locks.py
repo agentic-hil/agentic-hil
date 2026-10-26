@@ -335,6 +335,33 @@ def test_doctor_fails_over_a_machine_directory_that_cannot_be_used(machine_root:
     assert check["summary"] in report["summary"]
 
 
+@ON_LINUX
+def test_doctor_without_a_configuration_still_names_a_machine_directory_that_cannot_be_used(machine_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`init` takes device locks, so an account the machine directory refuses is
+    refused before it has a configuration at all, and that refusal sends it to
+    `doctor`. Found on a bench: an account outside the group heard only that it
+    had no configuration."""
+    shared(machine_root, 0o770)
+    monkeypatch.chdir(tmp_path)
+
+    report = doctor()
+
+    assert report["ok"] is False
+    assert report["error_type"] == "config_file_not_found", report
+    check = report["device_locks"]
+    assert (check["ok"], check["error_type"], check["path"]) == (False, UNUSABLE, str(machine_root))
+    assert check["summary"] in report["summary"]
+
+
+def test_doctor_without_a_configuration_is_unchanged_over_a_usable_lock_directory(machine_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    report = doctor()
+
+    assert report["error_type"] == "config_file_not_found", report
+    assert "device_locks" not in report
+
+
 def test_setup_keeps_the_file_over_the_finding() -> None:
     """The finding is about this account and this machine, never about the document."""
     assert DOCTOR_DEVICE_LOCKS_FINDING in DOCTOR_FINDINGS_SETUP_KEEPS
