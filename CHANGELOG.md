@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- STM32CubeProgrammer 2.23.0's answer for an ST-Link whose USB port has been powered off, `Error: Serial number not found. Wrong parameter: sn=<serial>` with exit status 1, now answers `adapter_not_found` with the ST-Link steps and refuses before contact. It read as `config_file_not_found`, a missing input file, because the generic `not found` rule caught it, and sent the operator to a firmware path that was never wrong. The rule is not specific to a tool. Both transcripts, `probe_target` and the `reset_target` in halt mode that the cleanup after it ran, were captured from STM32CubeProgrammer 2.23.0 through the product with the power cut through a switchable hub; they join the CubeProgrammer failure recordings, each with its own provenance, and the classification test replays both. The exit-0 case of #516, a probeless run that exits 0, is not covered by this change. (#737)
+
 ## [0.25.0] - 2026-10-26
 
 ### Added

@@ -220,6 +220,9 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     # The same for the process table read beside a `pip install --user` server
     # on the bench: it names the release that server was running.
     "tests/fixtures/pip_user_mcp_server_process_recording.json": "the recording names the release that made it",
+    # The same for the two absent-probe CubeProgrammer recordings (#737): each
+    # carries the Agentic HIL release whose probe_target and reset_target made it.
+    "tests/fixtures/stm32cubeprogrammer_2_23_0_failure_recordings.json": "the recordings name the release that made them",
     # NOT_CONTACTED's comment names the release that introduced the shape it
     # generalizes. History, not a pin.
     "src/agentic_hil/backends/common.py": "prose reference to the release a precedent shipped in",

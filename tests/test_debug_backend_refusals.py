@@ -481,6 +481,50 @@ def test_stlink_probe_target_does_not_generalize_a_neighboring_vendor_error_code
     assert backend._classify_output(output, "probe_target") == "config_file_not_found"
 
 
+@pytest.mark.parametrize(
+    ("tool", "arguments", "name"),
+    [
+        ("probe_target", {}, "connect_probe_powered_off"),
+        ("reset_target", {"mode": "halt"}, "reset_halt_probe_powered_off"),
+    ],
+    ids=["connect_probe_powered_off", "reset_halt_probe_powered_off"],
+)
+def test_stlink_reads_cubes_serial_number_not_found_as_an_absent_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str, arguments: dict, name: str) -> None:
+    """`Error: Serial number not found. Wrong parameter: sn=...` is a probe that is not there, not a missing input file (#737).
+
+    STM32CubeProgrammer 2.23.0 prints it, and exits 1, for a configured `sn=` with
+    no ST-Link behind it. Both transcripts were captured through the product with
+    the probe's USB port powered off through a switchable hub: `probe_target`, and
+    the `reset_target` in halt mode that the cleanup after it ran. The generic
+    `not found` rule read both as `config_file_not_found`, which sent the operator
+    to a firmware path that was never wrong. The exit-0 probeless case of #516 is a
+    different transcript and is not covered here.
+    """
+    transcript = cube_failure_recording(name)
+    play_transcript(monkeypatch, stdout=transcript["stdout"], stderr=transcript["stderr"], returncode=transcript["returncode"])
+    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+
+    result = call(config, tool, arguments)
+
+    # Raised rather than asserted, so the message is exactly this and not
+    # pytest's rewrite of the comparison appended to it.
+    if result["backend_error_type"] != "probe_not_found":
+        raise AssertionError(f"{tool} classified {name} as {result['backend_error_type']}")
+    assert result["ok"] is False, result
+    assert result["error_type"] == "adapter_not_found", result
+    assert result.get("remediation") == remediation_fields("adapter_not_found", "stlink")["remediation"], result.get("remediation")
+    assert result["programmer_output"]["stdout"] == transcript["stdout"], result["programmer_output"]
+    assert result["programmer_output"]["returncode"] == transcript["returncode"], result["programmer_output"]
+    assert_refused_before_contact(result, config)
+    assert result.get("target_contacted") is False, result
+
+    classified = call(config, "classify_last_error")
+
+    assert classified["error_type"] == "adapter_not_found", classified
+    assert classified["backend_error_type"] == "probe_not_found", classified
+    assert classified["source_tool"] == tool, classified
+
+
 # A flash that lost its probe part-way through the download. Assembled, not
 # recorded: the download-phase lines are STM32CubeProgrammer 2.23.0's own, in the
 # order the bench flash recording prints them
