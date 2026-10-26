@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from support import scaled_time_bound
 from test_device_access import a_bench_bound_to_the_recorded_probe_and_port
 
 from agentic_hil import bench as bench_module
@@ -287,14 +288,14 @@ def test_two_homes_meet_in_the_machine_directory(machine_root: Path, mutex: Benc
         assert caught.value.result["holder"]["pid"] == other.pid
 
         other.send_signal(signal.SIGKILL)
-        other.wait(timeout=30)
+        other.wait(timeout=scaled_time_bound(30))
         mutex.acquire([BOARD])
         reclaimed = mutex.reclaimed(BOARD)
         assert reclaimed is not None and reclaimed["owner"]["pid"] == other.pid
     finally:
         if other.poll() is None:
             other.kill()
-            other.wait(timeout=30)
+            other.wait(timeout=scaled_time_bound(30))
 
 
 def test_doctor_names_the_home_directory_where_there_is_no_machine_directory(machine_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
