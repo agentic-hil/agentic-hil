@@ -427,12 +427,17 @@ gh workflow run bench-gate.yml -f ref=<commit, branch or tag>
 
 The optional hardware stages are off by default. Enable the status-gated reset
 preflight with `run_recovery_check`, and recordings independently with
-`run_pyocd_recordings`, `run_cubeprogrammer_recordings`,
-`run_usb_reset_reenumeration`, or `run_esp32`:
+`run_pyocd_recordings`, `run_cubeprogrammer_recordings`, or
+`run_usb_reset_reenumeration`:
 
 ```
-gh workflow run bench-gate.yml -f ref=<commit, branch or tag> -f run_pyocd_recordings=true -f run_cubeprogrammer_recordings=true -f run_usb_reset_reenumeration=true -f run_esp32=true
+gh workflow run bench-gate.yml -f ref=<commit, branch or tag> -f run_pyocd_recordings=true -f run_cubeprogrammer_recordings=true -f run_usb_reset_reenumeration=true
 ```
+
+Every stage of the gate drives the board its runner is labelled for and
+nothing else on the machine: the runner's account opens that board's probe and
+the USB-UART adapter wired to it, and no other device. The ESP32 stage is run
+from a terminal on the machine, with `--esp32`.
 
 When selected, the recovery check runs before the standard tier in the default
 image. It reads lease status first and refuses a failed audit or any standing
