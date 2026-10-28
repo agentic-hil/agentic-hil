@@ -1,0 +1,61 @@
+{
+  "cases": [
+    {"id": "f15000", "f_req_hz": 15000, "class": "below_minimum_quotient_266"},
+    {"id": "f15625", "f_req_hz": 15625, "class": "exact_div256_quotient_256"},
+    {"id": "f15686", "f_req_hz": 15686, "class": "quotient_255_last_before_max_divider"},
+    {"id": "f20833", "f_req_hz": 20833, "class": "quotient_192_first_after_limit_191"},
+    {"id": "f20942", "f_req_hz": 20942, "class": "quotient_191_at_limit_191"},
+    {"id": "f31250", "f_req_hz": 31250, "class": "exact_div128_quotient_128"},
+    {"id": "f41666", "f_req_hz": 41666, "class": "quotient_96_first_after_limit_95"},
+    {"id": "f42105", "f_req_hz": 42105, "class": "quotient_95_at_limit_95"},
+    {"id": "f62500", "f_req_hz": 62500, "class": "exact_div64_quotient_64"},
+    {"id": "f83333", "f_req_hz": 83333, "class": "quotient_48_window_above_pattern_47"},
+    {"id": "f85106", "f_req_hz": 85106, "class": "quotient_47_window_above_limit_39"},
+    {"id": "f100000", "f_req_hz": 100000, "class": "quotient_40_first_after_limit_39"},
+    {"id": "f102564", "f_req_hz": 102564, "class": "quotient_39_at_limit_39"},
+    {"id": "f125000", "f_req_hz": 125000, "class": "exact_div32_quotient_32"},
+    {"id": "f166666", "f_req_hz": 166666, "class": "quotient_24_first_after_limit_23"},
+    {"id": "f173913", "f_req_hz": 173913, "class": "quotient_23_at_limit_23"},
+    {"id": "f250000", "f_req_hz": 250000, "class": "exact_div16_quotient_16"},
+    {"id": "f333333", "f_req_hz": 333333, "class": "quotient_12_first_after_limit_11"},
+    {"id": "f363636", "f_req_hz": 363636, "class": "quotient_11_at_limit_11"},
+    {"id": "f500000", "f_req_hz": 500000, "class": "exact_div8_quotient_8"},
+    {"id": "f666666", "f_req_hz": 666666, "class": "quotient_6_first_after_limit_5"},
+    {"id": "f800000", "f_req_hz": 800000, "class": "quotient_5_at_limit_5"},
+    {"id": "f1000000", "f_req_hz": 1000000, "class": "exact_div4_quotient_4"},
+    {"id": "f1333333", "f_req_hz": 1333333, "class": "quotient_3_first_after_limit_2"},
+    {"id": "f1500000", "f_req_hz": 1500000, "class": "linear_tie_between_div2_and_div4"},
+    {"id": "f2000000", "f_req_hz": 2000000, "class": "exact_div2_quotient_2_at_limit_2"},
+    {"id": "f3000000", "f_req_hz": 3000000, "class": "between_half_k_and_k_quotient_1"},
+    {"id": "f4000000", "f_req_hz": 4000000, "class": "equals_k_quotient_1"},
+    {"id": "f4000001", "f_req_hz": 4000001, "class": "above_k_quotient_0"}
+  ],
+  "start_case": "f1000000",
+  "recovery_case": "f1000000",
+  "sequences": {
+    "construct": [
+      "f15000", "f15625", "f15686", "f20833", "f20942", "f31250", "f41666", "f42105",
+      "f62500", "f83333", "f85106", "f100000", "f102564", "f125000", "f166666", "f173913",
+      "f250000", "f333333", "f363636", "f500000", "f666666", "f800000", "f1000000",
+      "f1333333", "f1500000", "f2000000", "f3000000", "f4000000", "f4000001"
+    ],
+    "set_config_ascending": [
+      "f15000", "f15625", "f15686", "f20833", "f20942", "f31250", "f41666", "f42105",
+      "f62500", "f83333", "f85106", "f100000", "f102564", "f125000", "f166666", "f173913",
+      "f250000", "f333333", "f363636", "f500000", "f666666", "f800000", "f1000000",
+      "f1333333", "f1500000", "f2000000", "f3000000", "f4000000", "f4000001"
+    ],
+    "set_config_descending": [
+      "f4000001", "f4000000", "f3000000", "f2000000", "f1500000", "f1333333", "f1000000",
+      "f800000", "f666666", "f500000", "f363636", "f333333", "f250000", "f173913", "f166666",
+      "f125000", "f102564", "f100000", "f85106", "f83333", "f62500", "f42105", "f41666",
+      "f31250", "f20942", "f20833", "f15686", "f15625", "f15000"
+    ],
+    "set_config_revisited": [
+      "f15000", "f4000000", "f15625", "f3000000", "f15686", "f2000000", "f20833", "f1500000",
+      "f20942", "f1333333", "f31250", "f1000000", "f41666", "f800000", "f42105", "f666666",
+      "f62500", "f500000", "f83333", "f363636", "f85106", "f333333", "f100000", "f250000",
+      "f102564", "f173913", "f125000", "f166666", "f4000001", "f15000"
+    ]
+  }
+}

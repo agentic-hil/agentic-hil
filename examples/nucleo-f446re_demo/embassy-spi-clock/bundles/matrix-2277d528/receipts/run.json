@@ -1,0 +1,15 @@
+{
+  "receipt_seq": "00012",
+  "redacted": ["runner_evidence_path"],
+  "request": {"test_config_path": "validation/hq-184d-lokal/plans/instantiated/matrix-81dd772b.json", "detach": true},
+  "ok": true,
+  "tool": "test_reactor_run",
+  "run": "run-2277d528ecfff7f9",
+  "state": "running",
+  "detached": true,
+  "name": "hq184-matrix",
+  "test_config_path": ".agentic-hil/runner-plans/f2f2ee004cd2bf9724db0fc02b157bc1036efa23fee93badeca202753539bf18.json",
+  "report_path": ".agentic-hil/reports/last-report.json",
+  "started_at": "2026-10-28T09:07:53.415Z",
+  "summary": "The run is detached under handle run-2277d528ecfff7f9; call `test_reactor_status` with `run` set to it to see what it is doing, and `test_reactor_stop` with the same `run` to end it early."
+}

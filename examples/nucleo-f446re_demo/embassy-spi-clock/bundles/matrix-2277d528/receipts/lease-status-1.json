@@ -1,0 +1,16 @@
+{
+  "receipt_seq": "00009",
+  "redacted": ["device_holds (the other holder's owner id, process id and host name)", "record.resources and record.owner_marker (a device identity and an owner token)", "leases (a lease id)", "project_resource", "runner_evidence_path"],
+  "request": {},
+  "ok": true,
+  "tool": "hardware_lease_status",
+  "owner_active": true,
+  "bench_held": true,
+  "held_devices": ["the COM port of dut (serial redacted)"],
+  "standing_incidents": [],
+  "blocked": false,
+  "incident_stands": false,
+  "cleanup_reasons": [],
+  "lifecycle_state": "open",
+  "summary": "This bench is held: the COM port of dut under a live session of another owner. No incident is standing."
+}

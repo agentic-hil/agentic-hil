@@ -1,0 +1,15 @@
+{
+  "receipt_seq": "00008",
+  "redacted": ["runner_evidence_path"],
+  "request": {"run": "run-5dbccd03e31c2867"},
+  "ok": true,
+  "tool": "test_reactor_status",
+  "run": "run-5dbccd03e31c2867",
+  "name": "hq184-matrix",
+  "test_config_path": ".agentic-hil/runner-plans/7271b9e106f043968853f2cf01adc2e259de60cd6efdba1c37592110854a8f3c.json",
+  "detached": true,
+  "started_at": "2026-10-27T22:54:14.810Z",
+  "state": "running",
+  "updated_at": "2026-10-27T22:54:14.880Z",
+  "summary": "This run is on its first step."
+}

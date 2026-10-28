@@ -1,0 +1,30 @@
+{
+  "receipt_seq": "00103",
+  "redacted": [
+    "data (text and hex): not copied by hand; the operator fills data.text from the runner's own record of this receipt (finalize_bundle.py --responses)",
+    "config_in_force (a path on the bench host)",
+    "log_path",
+    "resources",
+    "lease_id",
+    "runner_evidence_path"
+  ],
+  "request": {
+    "port_id": "dut",
+    "max_bytes": 12000,
+    "until": "RECOVERY-BOOT seq=0 ",
+    "wait_timeout_s": 60
+  },
+  "ok": true,
+  "tool": "com_read",
+  "port_id": "dut",
+  "bytes_read": 1261,
+  "buffer_remaining_bytes": 72,
+  "overflow_bytes": 0,
+  "until_matched": true,
+  "lease_state": "active",
+  "audit_ok": true,
+  "data": {
+    "encoding": "utf-8",
+    "text": "HQ184 OCC seq=314 sequence=construct position=25 case=f2000000 path=construct f_req=2000000 outcome=accepted cr1=0x0344 reported_hz=2000000 error=none crc32=d8d0fa2f\nHQ184 XSUM seq=315 sequence=construct position=25 case=f2000000 cfg=cfg0 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=65a3361a spans=224:80 spans_dropped=0 crc32=37c7c32c\nHQ184 OCC seq=316 sequence=construct position=26 case=f3000000 path=construct f_req=3000000 outcome=accepted cr1=0x0344 reported_hz=2000000 error=none crc32=c163c0ac\nHQ184 XSUM seq=317 sequence=construct position=26 case=f3000000 cfg=cfg0 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=34810794 spans=224:80 spans_dropped=0 crc32=7c0094fe\nHQ184 OCC seq=318 sequence=construct position=27 case=f4000000 path=construct f_req=4000000 outcome=accepted cr1=0x0344 reported_hz=2000000 error=none crc32=cba4cb7d\nHQ184 XSUM seq=319 sequence=construct position=27 case=f4000000 cfg=cfg0 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=574a6fa8 spans=224:80 spans_dropped=0 crc32=eec8e474\nHQ184 PANIC seq=320 sequence=construct position=28 case=f4000001 crc32=4ef38e19\nHQ184 RECOVERY-BOOT seq=0 "
+  }
+}

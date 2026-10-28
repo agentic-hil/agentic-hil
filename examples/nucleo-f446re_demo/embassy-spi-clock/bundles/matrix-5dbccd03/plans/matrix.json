@@ -1,0 +1,8 @@
+{
+  "version": 4,
+  "name": "hq184-matrix",
+  "steps": [
+    {"action": "flash", "device": "dut", "image_path": ".agentic-hil/artifacts/9216c2e50d111b365b84830e7923c74fa20a9a6f81ec5ddbb056437baf9cd4b3.elf"},
+    {"action": "reset", "device": "dut"}
+  ]
+}

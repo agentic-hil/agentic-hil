@@ -1,0 +1,28 @@
+{
+  "receipt_seq": "00093",
+  "redacted": [
+    "data (text and hex): not copied by hand; the operator fills data.text from the runner's own record of this receipt (finalize_bundle.py --responses)",
+    "config_in_force (a path on the bench host)",
+    "log_path",
+    "resources",
+    "lease_id",
+    "runner_evidence_path"
+  ],
+  "request": {
+    "port_id": "dut",
+    "max_bytes": 12000,
+    "wait_timeout_s": 5
+  },
+  "ok": true,
+  "tool": "com_read",
+  "port_id": "dut",
+  "bytes_read": 0,
+  "buffer_remaining_bytes": 0,
+  "overflow_bytes": 0,
+  "lease_state": "active",
+  "audit_ok": true,
+  "data": {
+    "encoding": "utf-8",
+    "text": ""
+  }
+}

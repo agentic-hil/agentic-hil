@@ -1,0 +1,60 @@
+{
+  "clock": {"hsi_hz": 16000000, "spi_kernel_hz": 4000000},
+  "clock_plan": {
+    "note": "HSI 16 MHz, PLLM 16, PLLN 256, PLLP 4 gives SYSCLK 64 MHz; AHB /1, APB1 /16, APB2 /1. SPI2 kernel clock is PCLK1 = 4 MHz; TIM1 and TIM8 run at 64 MHz. Proposed values, reported by the firmware and re-derived from the raw registers by the analyzer."
+  },
+  "spi": {"instance": "SPI2", "sck_pin": "PB10", "mosi_pin": "PB15"},
+  "capture_configurations": [
+    {"id": "cfg0", "timer": "TIM8", "timer_bus": "apb2", "psc": 0, "arr": 7, "idr_byte": 1, "sck_bit": 5, "mosi_bit": 7, "pwm_timer": "TIM1", "pwm_timer_bus": "apb2",
+     "pwm_steps": [{"psc": 0, "arr": 255}, {"psc": 0, "arr": 127}, {"psc": 0, "arr": 63}, {"psc": 0, "arr": 31}, {"psc": 0, "arr": 15}]},
+    {"id": "cfg1", "timer": "TIM8", "timer_bus": "apb2", "psc": 0, "arr": 7, "idr_byte": 1, "sck_bit": 5, "mosi_bit": 7, "pwm_timer": "TIM1", "pwm_timer_bus": "apb2",
+     "pwm_steps": [{"psc": 0, "arr": 255}, {"psc": 0, "arr": 127}, {"psc": 0, "arr": 63}, {"psc": 0, "arr": 31}, {"psc": 0, "arr": 15}]},
+    {"id": "cfg2", "timer": "TIM8", "timer_bus": "apb2", "psc": 0, "arr": 15, "idr_byte": 1, "sck_bit": 5, "mosi_bit": 7, "pwm_timer": "TIM1", "pwm_timer_bus": "apb2",
+     "pwm_steps": [{"psc": 0, "arr": 511}, {"psc": 0, "arr": 255}, {"psc": 0, "arr": 127}, {"psc": 0, "arr": 63}, {"psc": 0, "arr": 31}]},
+    {"id": "cfg3", "timer": "TIM8", "timer_bus": "apb2", "psc": 0, "arr": 31, "idr_byte": 1, "sck_bit": 5, "mosi_bit": 7, "pwm_timer": "TIM1", "pwm_timer_bus": "apb2",
+     "pwm_steps": [{"psc": 0, "arr": 1023}, {"psc": 0, "arr": 511}, {"psc": 0, "arr": 255}, {"psc": 0, "arr": 127}, {"psc": 0, "arr": 63}]},
+    {"id": "cfg4", "timer": "TIM8", "timer_bus": "apb2", "psc": 0, "arr": 63, "idr_byte": 1, "sck_bit": 5, "mosi_bit": 7, "pwm_timer": "TIM1", "pwm_timer_bus": "apb2",
+     "pwm_steps": [{"psc": 0, "arr": 2047}, {"psc": 0, "arr": 1023}, {"psc": 0, "arr": 511}, {"psc": 0, "arr": 255}, {"psc": 0, "arr": 127}]},
+    {"id": "cfg5", "timer": "TIM8", "timer_bus": "apb2", "psc": 0, "arr": 127, "idr_byte": 1, "sck_bit": 5, "mosi_bit": 7, "pwm_timer": "TIM1", "pwm_timer_bus": "apb2",
+     "pwm_steps": [{"psc": 0, "arr": 4095}, {"psc": 0, "arr": 2047}, {"psc": 0, "arr": 1023}, {"psc": 0, "arr": 511}, {"psc": 0, "arr": 255}]},
+    {"id": "cfg6", "timer": "TIM8", "timer_bus": "apb2", "psc": 0, "arr": 255, "idr_byte": 1, "sck_bit": 5, "mosi_bit": 7, "pwm_timer": "TIM1", "pwm_timer_bus": "apb2",
+     "pwm_steps": [{"psc": 0, "arr": 8191}, {"psc": 0, "arr": 4095}, {"psc": 0, "arr": 2047}, {"psc": 0, "arr": 1023}, {"psc": 0, "arr": 511}]},
+    {"id": "cfg7", "timer": "TIM8", "timer_bus": "apb2", "psc": 0, "arr": 511, "idr_byte": 1, "sck_bit": 5, "mosi_bit": 7, "pwm_timer": "TIM1", "pwm_timer_bus": "apb2",
+     "pwm_steps": [{"psc": 0, "arr": 16383}, {"psc": 0, "arr": 8191}, {"psc": 0, "arr": 4095}, {"psc": 0, "arr": 2047}, {"psc": 0, "arr": 1023}]}
+  ],
+  "qualification_rule": {
+    "min_samples_per_half_period": 2,
+    "max_relative_interval_width": 0.05,
+    "sample_count_tolerance": 1,
+    "edge_count_tolerance": 1
+  },
+  "sampler": {
+    "note": "cfgN samples GPIOB IDR byte 1 at 8 samples per SCK period of divider 2^(N+1), except cfg0, which samples at 4 samples per period (8 MHz, a sample every 8 core cycles) so the capture window stays measurable. DMA2 stream 1 channel 7 on TIM8 update (TIM8_UP, RM0390 Rev 9 Table 29); PB13 carries a TIM1_CH1N PWM ladder during qualification (fs/32, fs/16, fs/8, fs/4, fs/2).",
+    "window_samples": 320,
+    "guard_samples": 4,
+    "occurrences_per_block": 4
+  },
+  "capture_path": {
+    "note": "HQ #340: TIM8_CH2 input capture on PC7 (AF3), fed through the fitted jumper CN10-25 (PB10) to CN10-19 (PC7), qualified against a TIM2_CH3 PWM on PB10 (AF1). TIM8 runs free (PSC 0, ARR 0xFFFF) and DMA2 stream 3 channel 7 copies `captures` rising-edge timestamps of TIM8_CCR2. cfgN uses pwm_arr + 1 = 4 x 2^N, so with TIM2CLK = 2 x PCLK1 = 8 MHz (TIMPRE=0) the reference is K / 2^(N+1), the SCK frequency of divider 2^(N+1). The analyzer takes TIMPRE from the reported RCC_DCKCFGR.",
+    "timer": "TIM8", "timer_bus": "apb2", "channel": 2, "pin": "PC7", "pin_af": 3,
+    "dma": {"controller": "DMA2", "stream": 3, "channel": 7},
+    "reference": {"timer": "TIM2", "channel": 3, "bus": "apb1", "pin": "PB10", "pin_af": 1},
+    "captures": 64,
+    "period_tick_tolerance": 1,
+    "configurations": [
+      {"id": "cfg0", "pwm_psc": 0, "pwm_arr": 3},
+      {"id": "cfg1", "pwm_psc": 0, "pwm_arr": 7},
+      {"id": "cfg2", "pwm_psc": 0, "pwm_arr": 15},
+      {"id": "cfg3", "pwm_psc": 0, "pwm_arr": 31},
+      {"id": "cfg4", "pwm_psc": 0, "pwm_arr": 63},
+      {"id": "cfg5", "pwm_psc": 0, "pwm_arr": 127},
+      {"id": "cfg6", "pwm_psc": 0, "pwm_arr": 255},
+      {"id": "cfg7", "pwm_psc": 0, "pwm_arr": 511}
+    ]
+  },
+  "transfer_length_bytes": 4,
+  "transfers_per_occurrence": 20,
+  "prng_seed": 184,
+  "uart": {"baud": 115200, "block_bytes": 49152},
+  "plan_time_budget_s": 300
+}

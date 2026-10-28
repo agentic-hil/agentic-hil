@@ -1,0 +1,5 @@
+# The bundles, the plans and the patch are checked byte for byte against recorded SHA-256
+# sums: no line-ending conversion.
+bundles/** -text
+plans/** -text
+patches/** -text

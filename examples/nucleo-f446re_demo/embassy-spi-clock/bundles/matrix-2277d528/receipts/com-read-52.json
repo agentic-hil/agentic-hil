@@ -1,0 +1,30 @@
+{
+  "receipt_seq": "00091",
+  "redacted": [
+    "data (text and hex): not copied by hand; the operator fills data.text from the runner's own record of this receipt (finalize_bundle.py --responses)",
+    "config_in_force (a path on the bench host)",
+    "log_path",
+    "resources",
+    "lease_id",
+    "runner_evidence_path"
+  ],
+  "request": {
+    "port_id": "dut",
+    "max_bytes": 12000,
+    "until": "HQ184 END seq=",
+    "wait_timeout_s": 60
+  },
+  "ok": true,
+  "tool": "com_read",
+  "port_id": "dut",
+  "bytes_read": 1299,
+  "buffer_remaining_bytes": 18,
+  "overflow_bytes": 0,
+  "until_matched": true,
+  "lease_state": "active",
+  "audit_ok": true,
+  "data": {
+    "encoding": "utf-8",
+    "text": "rr=0 overcapture=0 timeout=0 min_ticks=1024 max_ticks=1024 data=uQO5B7kLuQ+5E7kXuRu5H7kjuSe5K7kvuTO5N7k7uT+5Q7lHuUu5T7lTuVe5W7lfuWO5Z7lruW+5c7l3uXu5f7mDuYe5i7mPuZO5l7mbuZ+5o7mnuau5r7mzube5u7m/ucO5x7nLuc+507nXudu537njuee567nvufO597n7uf8= crc32=a3e862f3\nHQ184 ICQUAL seq=50 cfg=cfg6 pwm_psc=0 pwm_arr=255 captures=64 ndtr=0 dma_err=0 overcapture=0 timeout=0 min_ticks=2048 max_ticks=2048 data=uQO5C7kTuRu5I7kruTO5O7lDuUu5U7lbuWO5a7lzuXu5g7mLuZO5m7mjuau5s7m7ucO5y7nTudu547nrufO5+7kDuQu5E7kbuSO5K7kzuTu5Q7lLuVO5W7ljuWu5c7l7uYO5i7mTuZu5o7mrubO5u7nDucu507nbueO567nzufs= crc32=034f6027\nHQ184 ICQUAL seq=51 cfg=cfg7 pwm_psc=0 pwm_arr=511 captures=64 ndtr=0 dma_err=0 overcapture=0 timeout=0 min_ticks=4096 max_ticks=4096 data=uQO5E7kjuTO5Q7lTuWO5c7mDuZO5o7mzucO507njufO5A7kTuSO5M7lDuVO5Y7lzuYO5k7mjubO5w7nTueO587kDuRO5I7kzuUO5U7ljuXO5g7mTuaO5s7nDudO547nzuQO5E7kjuTO5Q7lTuWO5c7mDuZO5o7mzucO507njufM= crc32=ae08871f\nHQ184 OCC seq=52 sequence=recovery position=0 case=f1000000 path=construct f_req=1000000 outcome=accepted cr1=0x034c reported_hz=1000000 error=none crc32=a82db130\nHQ184 XSUM seq=53 sequence=recovery position=0 case=f1000000 cfg=cfg1 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=0fe229b5 spans=448:80 spans_dropped=0 crc32=fd24a40a\nHQ184 END seq="
+  }
+}

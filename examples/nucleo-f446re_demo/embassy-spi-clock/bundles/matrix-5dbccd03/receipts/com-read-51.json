@@ -1,0 +1,30 @@
+{
+  "receipt_seq": "00085",
+  "redacted": [
+    "data (text and hex): not copied by hand; the operator fills data.text from the runner's own record of this receipt (finalize_bundle.py --responses)",
+    "config_in_force (a path on the bench host)",
+    "log_path",
+    "resources",
+    "lease_id",
+    "runner_evidence_path"
+  ],
+  "request": {
+    "port_id": "dut",
+    "max_bytes": 12000,
+    "until": "n=25 crc32=",
+    "wait_timeout_s": 30
+  },
+  "ok": true,
+  "tool": "com_read",
+  "port_id": "dut",
+  "bytes_read": 1543,
+  "buffer_remaining_bytes": 9,
+  "overflow_bytes": 0,
+  "until_matched": true,
+  "lease_state": "active",
+  "audit_ok": true,
+  "data": {
+    "encoding": "utf-8",
+    "text": "HQ184 OCC seq=260 sequence=construct position=1 case=f15625 path=construct f_req=15625 outcome=accepted cr1=0x037c reported_hz=15625 error=none crc32=bf454ba0\nHQ184 XSUM seq=261 sequence=construct position=1 case=f15625 cfg=cfg7 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=f85c0e2c spans=28672:80 spans_dropped=0 crc32=257ee1a3\nHQ184 OCC seq=262 sequence=construct position=2 case=f15686 path=construct f_req=15686 outcome=accepted cr1=0x037c reported_hz=15625 error=none crc32=0e74b795\nHQ184 XSUM seq=263 sequence=construct position=2 case=f15686 cfg=cfg7 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=2ab4266c spans=28672:80 spans_dropped=0 crc32=d37c00eb\nHQ184 OCC seq=264 sequence=construct position=3 case=f20833 path=construct f_req=20833 outcome=accepted cr1=0x037c reported_hz=15625 error=none crc32=97403df4\nHQ184 XSUM seq=265 sequence=construct position=3 case=f20833 cfg=cfg7 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=324df5ea spans=28672:80 spans_dropped=0 crc32=02d462bc\nHQ184 OCC seq=266 sequence=construct position=4 case=f20942 path=construct f_req=20942 outcome=accepted cr1=0x0374 reported_hz=31250 error=none crc32=9a25da92\nHQ184 XSUM seq=267 sequence=construct position=4 case=f20942 cfg=cfg6 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=2da91a9d spans=14336:80 spans_dropped=0 crc32=d5dc176f\nHQ184 BLOCK-END seq=268 n=25 crc32="
+  }
+}

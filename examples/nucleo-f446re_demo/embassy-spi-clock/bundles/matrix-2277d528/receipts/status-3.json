@@ -1,0 +1,21 @@
+{
+  "receipt_seq": "00015",
+  "redacted": ["canonical_report_path and the path in summary (a path on the bench host)", "runner_evidence_path"],
+  "request": {"run": "run-2277d528ecfff7f9"},
+  "ok": true,
+  "tool": "test_reactor_status",
+  "run": "run-2277d528ecfff7f9",
+  "name": "hq184-matrix",
+  "test_config_path": ".agentic-hil/runner-plans/f2f2ee004cd2bf9724db0fc02b157bc1036efa23fee93badeca202753539bf18.json",
+  "detached": true,
+  "started_at": "2026-10-28T09:07:53.415Z",
+  "run_ok": true,
+  "error_type": null,
+  "failed_step": null,
+  "stopped_after_step": null,
+  "finished_at": "2026-10-28T09:07:57.895Z",
+  "state": "finished",
+  "updated_at": "2026-10-28T09:07:57.895Z",
+  "stop_requested_at": null,
+  "summary": "This run ended and passed."
+}

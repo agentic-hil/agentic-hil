@@ -1,0 +1,30 @@
+{
+  "receipt_seq": "00088",
+  "redacted": [
+    "data (text and hex): not copied by hand; the operator fills data.text from the runner's own record of this receipt (finalize_bundle.py --responses)",
+    "config_in_force (a path on the bench host)",
+    "log_path",
+    "resources",
+    "lease_id",
+    "runner_evidence_path"
+  ],
+  "request": {
+    "port_id": "dut",
+    "max_bytes": 12000,
+    "until": "RECOVERY-BOOT seq=0 ",
+    "wait_timeout_s": 60
+  },
+  "ok": true,
+  "tool": "com_read",
+  "port_id": "dut",
+  "bytes_read": 1329,
+  "buffer_remaining_bytes": 69,
+  "overflow_bytes": 0,
+  "until_matched": true,
+  "lease_state": "active",
+  "audit_ok": true,
+  "data": {
+    "encoding": "utf-8",
+    "text": "HQ184 OCC seq=251 sequence=set_config_revisited position=27 case=f166666 path=set_config f_req=166666 outcome=accepted cr1=0x0364 reported_hz=125000 error=none crc32=ff36894b\nHQ184 XSUM seq=252 sequence=set_config_revisited position=27 case=f166666 cfg=cfg4 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=5fda2066 spans=3584:80 spans_dropped=0 crc32=c180c135\nHQ184 OCC seq=253 sequence=set_config_revisited position=28 case=f4000001 path=set_config f_req=4000001 outcome=accepted cr1=0x0344 reported_hz=2000000 error=none crc32=382c11c2\nHQ184 XSUM seq=254 sequence=set_config_revisited position=28 case=f4000001 cfg=cfg0 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=9bea7e6f spans=224:80 spans_dropped=0 crc32=e4724b75\nHQ184 OCC seq=255 sequence=set_config_revisited position=29 case=f15000 path=set_config f_req=15000 outcome=rejected cr1=0x0344 reported_hz=2000000 error=FrequencyTooLow crc32=77e89565\nHQ184 XSUM seq=256 sequence=set_config_revisited position=29 case=f15000 cfg=cfg0 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=c7a0338f spans=224:80 spans_dropped=0 crc32=cc5e8d99\nHQ184 PANIC seq=257 sequence=construct position=0 case=f15000 crc32=d06523c1\nHQ184 RECOVERY-BOOT seq=0 "
+  }
+}

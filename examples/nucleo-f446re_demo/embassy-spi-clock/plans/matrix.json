@@ -1,0 +1,8 @@
+{
+  "version": 4,
+  "name": "hq184-matrix",
+  "steps": [
+    {"action": "flash", "device": "dut", "image_path": "hq184-fw.elf"},
+    {"action": "reset", "device": "dut"}
+  ]
+}

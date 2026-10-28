@@ -1,0 +1,12 @@
+{
+  "receipt_seq": "00000",
+  "redacted": ["nothing: the build result names no runner evidence file, so 00000 marks 'no receipt returned'; output_tail is shortened to its last two lines and the build host path is left out"],
+  "request": {},
+  "ok": true,
+  "tool": "runner_build_firmware",
+  "exit_code": 0,
+  "image_path": "validation/hq-184d-lokal/variants/after/target/thumbv7em-none-eabihf/release/hq184-fw",
+  "size": 520068,
+  "sha256": "81dd772b8570440f4dc5bb1676bf255efc9c3b313c9c083f5116f607444b4b69",
+  "output_tail": "   Compiling hq184-fw v0.1.0 (validation/hq-184d-lokal/variants/after)\n    Finished `release` profile [optimized + debuginfo] target(s) in 2.21s\n"
+}

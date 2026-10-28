@@ -1,0 +1,11 @@
+{
+  "receipt_seq": "00006",
+  "redacted": ["artifact.resolved_path (a path on the bench host)", "runner_evidence_path"],
+  "request": {"image_path": "validation/hq-184d-lokal/variants/after/target/thumbv7em-none-eabihf/release/hq184-fw", "sha256": "81dd772b8570440f4dc5bb1676bf255efc9c3b313c9c083f5116f607444b4b69"},
+  "ok": true,
+  "tool": "artifact_upload",
+  "artifact_id": "81dd772b8570440f4dc5bb1676bf255efc9c3b313c9c083f5116f607444b4b69.elf",
+  "artifact": {"source": "upload", "path": ".agentic-hil/artifacts/81dd772b8570440f4dc5bb1676bf255efc9c3b313c9c083f5116f607444b4b69.elf", "sha256": "81dd772b8570440f4dc5bb1676bf255efc9c3b313c9c083f5116f607444b4b69", "integrity_sha256": "81dd772b8570440f4dc5bb1676bf255efc9c3b313c9c083f5116f607444b4b69", "size_bytes": 520068, "artifact_id": "81dd772b8570440f4dc5bb1676bf255efc9c3b313c9c083f5116f607444b4b69.elf", "original_filename": "hq184-fw.elf"},
+  "validation": {"path_traversal_safe": true, "exists": true, "allowed_root": true, "allowed_extension": true, "within_workspace": true, "sha256_computed": true, "require_allowed_root": true, "regular_file": true, "single_link": true, "elf_header": true},
+  "summary": "Firmware artifact uploaded and validated."
+}

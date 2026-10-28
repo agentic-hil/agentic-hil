@@ -1,0 +1,30 @@
+{
+  "receipt_seq": "00073",
+  "redacted": [
+    "data (text and hex): not copied by hand; the operator fills data.text from the runner's own record of this receipt (finalize_bundle.py --responses)",
+    "config_in_force (a path on the bench host)",
+    "log_path",
+    "resources",
+    "lease_id",
+    "runner_evidence_path"
+  ],
+  "request": {
+    "port_id": "dut",
+    "max_bytes": 12000,
+    "until": "n=19 crc32=",
+    "wait_timeout_s": 60
+  },
+  "ok": true,
+  "tool": "com_read",
+  "port_id": "dut",
+  "bytes_read": 1649,
+  "buffer_remaining_bytes": 9,
+  "overflow_bytes": 0,
+  "until_matched": true,
+  "lease_state": "active",
+  "audit_ok": true,
+  "data": {
+    "encoding": "utf-8",
+    "text": "HQ184 OCC seq=206 sequence=set_config_revisited position=7 case=f1500000 path=set_config f_req=1500000 outcome=accepted cr1=0x034c reported_hz=1000000 error=none crc32=30691e10\nHQ184 XSUM seq=207 sequence=set_config_revisited position=7 case=f1500000 cfg=cfg1 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=7805cb40 spans=448:80 spans_dropped=0 crc32=ee0b234f\nHQ184 OCC seq=208 sequence=set_config_revisited position=8 case=f20942 path=set_config f_req=20942 outcome=accepted cr1=0x037c reported_hz=15625 error=none crc32=086e85a1\nHQ184 XSUM seq=209 sequence=set_config_revisited position=8 case=f20942 cfg=cfg7 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=0375308f spans=28672:80 spans_dropped=0 crc32=f13ae343\nHQ184 OCC seq=210 sequence=set_config_revisited position=9 case=f1333333 path=set_config f_req=1333333 outcome=accepted cr1=0x034c reported_hz=1000000 error=none crc32=9e16eaa7\nHQ184 XSUM seq=211 sequence=set_config_revisited position=9 case=f1333333 cfg=cfg1 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=9548bb7a spans=448:80 spans_dropped=0 crc32=72bdc3b5\nHQ184 OCC seq=212 sequence=set_config_revisited position=10 case=f31250 path=set_config f_req=31250 outcome=accepted cr1=0x0374 reported_hz=31250 error=none crc32=e8d49f07\nHQ184 XSUM seq=213 sequence=set_config_revisited position=10 case=f31250 cfg=cfg6 transfers=20 clean=20 ndtr=0 dma_err=0 overcapture=0 timeout=0 drv_err=0 cfg_changes=0 seeds=200708fb spans=14336:80 spans_dropped=0 crc32=21682907\nHQ184 BLOCK-END seq=214 n=19 crc32="
+  }
+}

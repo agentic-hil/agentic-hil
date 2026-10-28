@@ -1,0 +1,17 @@
+{
+  "receipt_seq": "00109",
+  "redacted": ["session.log_path", "config_in_force (a path on the bench host)", "resources", "lease_id", "runner_evidence_path"],
+  "request": {"port_id": "dut"},
+  "ok": true,
+  "tool": "com_session_stop",
+  "port_id": "dut",
+  "was_active": true,
+  "session": {"session_active": false, "started_at": "2026-10-27T22:54:23.336Z", "rx_buffer_bytes": 0, "overflow_bytes": 0},
+  "summary": "COM port session stopped.",
+  "lease_state": "released",
+  "safe_state_confirmed": true,
+  "processes_reaped": true,
+  "audit_ok": true,
+  "cleanup_required": false,
+  "quarantined": false
+}

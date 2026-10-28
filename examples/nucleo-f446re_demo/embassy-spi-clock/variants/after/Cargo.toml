@@ -1,0 +1,50 @@
+# HQ #356: the "after" variant of hq184-fw. The same firmware sources and build script as
+# ../../firmware, built against the corrected Embassy tree in ./embassy (the operator's
+# checkout of c70760de with the patch below applied, git-ignored). Every Embassy git crate the
+# firmware's Cargo.lock names is patched to that checkout, so exactly one Embassy source is in
+# the graph. The image is target/thumbv7em-none-eabihf/release/hq184-fw.
+[package]
+name = "hq184-fw"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "../../firmware/build.rs"
+
+# Read by ../../firmware/build.rs: where the frozen inputs and memory.x are, and the Embassy
+# revision the BOOT record names, "<embassy_rev>+patch.<first 16 hex of the patch's SHA-256>".
+[package.metadata.hq184]
+firmware_dir = "../../firmware"
+embassy_rev = "c70760de42e2c8103138da6ff91626ff5a2688ba"
+patch = "../../patches/hq356-embassy-stm32-spi-clock-contract.diff"
+
+# Its own workspace root, so the image lands in ./target; the Embassy checkout is no member.
+[workspace]
+exclude = ["embassy"]
+
+[[bin]]
+name = "hq184-fw"
+path = "../../firmware/src/main.rs"
+test = false
+bench = false
+
+# The same dependencies as ../../firmware/Cargo.toml.
+[dependencies]
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.3"
+embassy-stm32 = { git = "https://github.com/embassy-rs/embassy", rev = "c70760de42e2c8103138da6ff91626ff5a2688ba", features = ["stm32f446re", "unstable-pac"] }
+
+[patch."https://github.com/embassy-rs/embassy"]
+embassy-crypto = { path = "embassy/embassy-crypto" }
+embassy-embedded-hal = { path = "embassy/embassy-embedded-hal" }
+embassy-futures = { path = "embassy/embassy-futures" }
+embassy-hal-internal = { path = "embassy/embassy-hal-internal" }
+embassy-stm32 = { path = "embassy/embassy-stm32" }
+embassy-sync = { path = "embassy/embassy-sync" }
+embassy-usb-driver = { path = "embassy/embassy-usb-driver" }
+embassy-usb-synopsys-otg = { path = "embassy/embassy-usb-synopsys-otg" }
+
+[profile.release]
+opt-level = 2
+lto = "fat"
+codegen-units = 1
+debug = 1

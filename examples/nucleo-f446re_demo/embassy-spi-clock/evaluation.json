@@ -1,0 +1,4864 @@
+{
+  "capture_path_qualification": {
+    "boot": [
+      {
+        "cfg": "cfg0",
+        "f_ref_hz": "2000000",
+        "interval_hz": [
+          "4032000000/2017",
+          "806400000/403"
+        ],
+        "period_ticks": 32,
+        "pwm_arr": 3,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "2000000",
+        "status": "observed_pass"
+      },
+      {
+        "cfg": "cfg1",
+        "f_ref_hz": "1000000",
+        "interval_hz": [
+          "4032000000/4033",
+          "4032000000/4031"
+        ],
+        "period_ticks": 64,
+        "pwm_arr": 7,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "1000000",
+        "status": "observed_pass"
+      },
+      {
+        "cfg": "cfg2",
+        "f_ref_hz": "500000",
+        "interval_hz": [
+          "806400000/1613",
+          "4032000000/8063"
+        ],
+        "period_ticks": 128,
+        "pwm_arr": 15,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "500000",
+        "status": "observed_pass"
+      },
+      {
+        "cfg": "cfg3",
+        "f_ref_hz": "250000",
+        "interval_hz": [
+          "4032000000/16129",
+          "4032000000/16127"
+        ],
+        "period_ticks": 256,
+        "pwm_arr": 31,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "250000",
+        "status": "observed_pass"
+      },
+      {
+        "cfg": "cfg4",
+        "f_ref_hz": "125000",
+        "interval_hz": [
+          "4032000000/32257",
+          "806400000/6451"
+        ],
+        "period_ticks": 512,
+        "pwm_arr": 63,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "125000",
+        "status": "observed_pass"
+      },
+      {
+        "cfg": "cfg5",
+        "f_ref_hz": "62500",
+        "interval_hz": [
+          "4032000000/64513",
+          "4032000000/64511"
+        ],
+        "period_ticks": 1024,
+        "pwm_arr": 127,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "62500",
+        "status": "observed_pass"
+      },
+      {
+        "cfg": "cfg6",
+        "f_ref_hz": "31250",
+        "interval_hz": [
+          "161280000/5161",
+          "4032000000/129023"
+        ],
+        "period_ticks": 2048,
+        "pwm_arr": 255,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "31250",
+        "status": "observed_pass"
+      },
+      {
+        "cfg": "cfg7",
+        "f_ref_hz": "15625",
+        "interval_hz": [
+          "4032000000/258049",
+          "4032000000/258047"
+        ],
+        "period_ticks": 4096,
+        "pwm_arr": 511,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "15625",
+        "status": "observed_pass"
+      }
+    ],
+    "recovery": [
+      {
+        "cfg": "cfg0",
+        "f_ref_hz": "2000000",
+        "interval_hz": [
+          "4032000000/2017",
+          "806400000/403"
+        ],
+        "period_ticks": 32,
+        "pwm_arr": 3,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "2000000",
+        "status": "observed_pass"
+      },
+      {
+        "cfg": "cfg1",
+        "f_ref_hz": "1000000",
+        "interval_hz": [
+          "4032000000/4033",
+          "4032000000/4031"
+        ],
+        "period_ticks": 64,
+        "pwm_arr": 7,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "1000000",
+        "status": "observed_pass"
+      },
+      {
+        "cfg": "cfg2",
+        "f_ref_hz": "500000",
+        "interval_hz": [
+          "806400000/1613",
+          "4032000000/8063"
+        ],
+        "period_ticks": 128,
+        "pwm_arr": 15,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "500000",
+        "status": "observed_pass"
+      },
+      {
+        "cfg": "cfg3",
+        "f_ref_hz": "250000",
+        "interval_hz": [
+          "4032000000/16129",
+          "4032000000/16127"
+        ],
+        "period_ticks": 256,
+        "pwm_arr": 31,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "250000",
+        "status": "observed_pass"
+      },
+      {
+        "cfg": "cfg4",
+        "f_ref_hz": "125000",
+        "interval_hz": [
+          "4032000000/32257",
+          "806400000/6451"
+        ],
+        "period_ticks": 512,
+        "pwm_arr": 63,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "125000",
+        "status": "observed_pass"
+      },
+      {
+        "cfg": "cfg5",
+        "f_ref_hz": "62500",
+        "interval_hz": [
+          "4032000000/64513",
+          "4032000000/64511"
+        ],
+        "period_ticks": 1024,
+        "pwm_arr": 127,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "62500",
+        "status": "observed_pass"
+      },
+      {
+        "cfg": "cfg6",
+        "f_ref_hz": "31250",
+        "interval_hz": [
+          "161280000/5161",
+          "4032000000/129023"
+        ],
+        "period_ticks": 2048,
+        "pwm_arr": 255,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "31250",
+        "status": "observed_pass"
+      },
+      {
+        "cfg": "cfg7",
+        "f_ref_hz": "15625",
+        "interval_hz": [
+          "4032000000/258049",
+          "4032000000/258047"
+        ],
+        "period_ticks": 4096,
+        "pwm_arr": 511,
+        "pwm_psc": 0,
+        "reasons": [],
+        "serves": true,
+        "serves_hz": "15625",
+        "status": "observed_pass"
+      }
+    ]
+  },
+  "errors": [],
+  "lifecycle": {
+    "end_observed": true,
+    "panic_observed": true,
+    "reading_constructor_panics_where_set_config_rejects": "observed",
+    "recovery_boots": 1,
+    "recovery_occurrence_observed": true,
+    "set_config_sequences_complete": true
+  },
+  "mode": "hardware",
+  "qualification": [
+    {
+      "cfg": "cfg0",
+      "highest_passing_hz": null,
+      "highest_passing_step": null,
+      "phase": "boot",
+      "steps": [
+        {
+          "f_pwm_hz": "250000",
+          "interval_hz": [
+            "72000000/289",
+            "72000000/287"
+          ],
+          "passed": false,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "500000",
+          "interval_hz": [
+            "30400000/61",
+            "152000000/303"
+          ],
+          "passed": false,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "1000000",
+          "interval_hz": [
+            "312000000/313",
+            "312000000/311"
+          ],
+          "passed": false,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "2000000",
+          "interval_hz": [
+            "312000000/157",
+            "2000000"
+          ],
+          "passed": false,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "4000000",
+          "interval_hz": [
+            "1264000000/319",
+            "1264000000/317"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg1",
+      "highest_passing_hz": null,
+      "highest_passing_step": null,
+      "phase": "boot",
+      "steps": [
+        {
+          "f_pwm_hz": "250000",
+          "interval_hz": [
+            "72000000/289",
+            "72000000/287"
+          ],
+          "passed": false,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "500000",
+          "interval_hz": [
+            "30400000/61",
+            "152000000/303"
+          ],
+          "passed": false,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "1000000",
+          "interval_hz": [
+            "312000000/313",
+            "312000000/311"
+          ],
+          "passed": false,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "2000000",
+          "interval_hz": [
+            "632000000/317",
+            "126400000/63"
+          ],
+          "passed": false,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "4000000",
+          "interval_hz": [
+            "1264000000/317",
+            "252800000/63"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg2",
+      "highest_passing_hz": "1000000",
+      "highest_passing_step": 3,
+      "phase": "boot",
+      "steps": [
+        {
+          "f_pwm_hz": "125000",
+          "interval_hz": [
+            "36000000/289",
+            "36000000/287"
+          ],
+          "passed": true,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "250000",
+          "interval_hz": [
+            "15200000/61",
+            "76000000/303"
+          ],
+          "passed": true,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "500000",
+          "interval_hz": [
+            "156000000/313",
+            "156000000/311"
+          ],
+          "passed": true,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "1000000",
+          "interval_hz": [
+            "316000000/317",
+            "63200000/63"
+          ],
+          "passed": true,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "2000000",
+          "interval_hz": [
+            "632000000/317",
+            "126400000/63"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg3",
+      "highest_passing_hz": "500000",
+      "highest_passing_step": 3,
+      "phase": "boot",
+      "steps": [
+        {
+          "f_pwm_hz": "62500",
+          "interval_hz": [
+            "18000000/289",
+            "18000000/287"
+          ],
+          "passed": true,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "125000",
+          "interval_hz": [
+            "7600000/61",
+            "38000000/303"
+          ],
+          "passed": true,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "250000",
+          "interval_hz": [
+            "15200000/61",
+            "76000000/303"
+          ],
+          "passed": true,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "500000",
+          "interval_hz": [
+            "158000000/317",
+            "31600000/63"
+          ],
+          "passed": true,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "1000000",
+          "interval_hz": [
+            "318000000/319",
+            "318000000/317"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg4",
+      "highest_passing_hz": "250000",
+      "highest_passing_step": 3,
+      "phase": "boot",
+      "steps": [
+        {
+          "f_pwm_hz": "31250",
+          "interval_hz": [
+            "9000000/289",
+            "9000000/287"
+          ],
+          "passed": true,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "62500",
+          "interval_hz": [
+            "3800000/61",
+            "19000000/303"
+          ],
+          "passed": true,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "125000",
+          "interval_hz": [
+            "39000000/313",
+            "39000000/311"
+          ],
+          "passed": true,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "250000",
+          "interval_hz": [
+            "78000000/313",
+            "78000000/311"
+          ],
+          "passed": true,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "500000",
+          "interval_hz": [
+            "159000000/319",
+            "159000000/317"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg5",
+      "highest_passing_hz": "125000",
+      "highest_passing_step": 3,
+      "phase": "boot",
+      "steps": [
+        {
+          "f_pwm_hz": "15625",
+          "interval_hz": [
+            "4500000/289",
+            "4500000/287"
+          ],
+          "passed": true,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "31250",
+          "interval_hz": [
+            "1900000/61",
+            "9500000/303"
+          ],
+          "passed": true,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "62500",
+          "interval_hz": [
+            "19500000/313",
+            "19500000/311"
+          ],
+          "passed": true,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "125000",
+          "interval_hz": [
+            "39500000/317",
+            "7900000/63"
+          ],
+          "passed": true,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "250000",
+          "interval_hz": [
+            "79000000/317",
+            "15800000/63"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg6",
+      "highest_passing_hz": "62500",
+      "highest_passing_step": 3,
+      "phase": "boot",
+      "steps": [
+        {
+          "f_pwm_hz": "15625/2",
+          "interval_hz": [
+            "2250000/289",
+            "2250000/287"
+          ],
+          "passed": true,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "15625",
+          "interval_hz": [
+            "950000/61",
+            "4750000/303"
+          ],
+          "passed": true,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "31250",
+          "interval_hz": [
+            "9750000/313",
+            "9750000/311"
+          ],
+          "passed": true,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "62500",
+          "interval_hz": [
+            "19750000/317",
+            "3950000/63"
+          ],
+          "passed": true,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "125000",
+          "interval_hz": [
+            "39500000/317",
+            "7900000/63"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg7",
+      "highest_passing_hz": "31250",
+      "highest_passing_step": 3,
+      "phase": "boot",
+      "steps": [
+        {
+          "f_pwm_hz": "15625/4",
+          "interval_hz": [
+            "1125000/289",
+            "1125000/287"
+          ],
+          "passed": true,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "15625/2",
+          "interval_hz": [
+            "475000/61",
+            "2375000/303"
+          ],
+          "passed": true,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "15625",
+          "interval_hz": [
+            "4875000/313",
+            "4875000/311"
+          ],
+          "passed": true,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "31250",
+          "interval_hz": [
+            "9875000/317",
+            "1975000/63"
+          ],
+          "passed": true,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "62500",
+          "interval_hz": [
+            "19750000/317",
+            "3950000/63"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg0",
+      "highest_passing_hz": null,
+      "highest_passing_step": null,
+      "phase": "recovery",
+      "steps": [
+        {
+          "f_pwm_hz": "250000",
+          "interval_hz": [
+            "72000000/289",
+            "72000000/287"
+          ],
+          "passed": false,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "500000",
+          "interval_hz": [
+            "30400000/61",
+            "152000000/303"
+          ],
+          "passed": false,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "1000000",
+          "interval_hz": [
+            "312000000/313",
+            "312000000/311"
+          ],
+          "passed": false,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "2000000",
+          "interval_hz": [
+            "312000000/157",
+            "2000000"
+          ],
+          "passed": false,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "4000000",
+          "interval_hz": [
+            "1264000000/319",
+            "1264000000/317"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg1",
+      "highest_passing_hz": null,
+      "highest_passing_step": null,
+      "phase": "recovery",
+      "steps": [
+        {
+          "f_pwm_hz": "250000",
+          "interval_hz": [
+            "72000000/289",
+            "72000000/287"
+          ],
+          "passed": false,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "500000",
+          "interval_hz": [
+            "30400000/61",
+            "152000000/303"
+          ],
+          "passed": false,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "1000000",
+          "interval_hz": [
+            "312000000/313",
+            "312000000/311"
+          ],
+          "passed": false,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "2000000",
+          "interval_hz": [
+            "632000000/317",
+            "126400000/63"
+          ],
+          "passed": false,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "4000000",
+          "interval_hz": [
+            "1264000000/317",
+            "252800000/63"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg2",
+      "highest_passing_hz": "1000000",
+      "highest_passing_step": 3,
+      "phase": "recovery",
+      "steps": [
+        {
+          "f_pwm_hz": "125000",
+          "interval_hz": [
+            "36000000/289",
+            "36000000/287"
+          ],
+          "passed": true,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "250000",
+          "interval_hz": [
+            "15200000/61",
+            "76000000/303"
+          ],
+          "passed": true,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "500000",
+          "interval_hz": [
+            "156000000/313",
+            "156000000/311"
+          ],
+          "passed": true,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "1000000",
+          "interval_hz": [
+            "316000000/317",
+            "63200000/63"
+          ],
+          "passed": true,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "2000000",
+          "interval_hz": [
+            "632000000/317",
+            "126400000/63"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg3",
+      "highest_passing_hz": "500000",
+      "highest_passing_step": 3,
+      "phase": "recovery",
+      "steps": [
+        {
+          "f_pwm_hz": "62500",
+          "interval_hz": [
+            "18000000/289",
+            "18000000/287"
+          ],
+          "passed": true,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "125000",
+          "interval_hz": [
+            "7600000/61",
+            "38000000/303"
+          ],
+          "passed": true,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "250000",
+          "interval_hz": [
+            "15200000/61",
+            "76000000/303"
+          ],
+          "passed": true,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "500000",
+          "interval_hz": [
+            "158000000/317",
+            "31600000/63"
+          ],
+          "passed": true,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "1000000",
+          "interval_hz": [
+            "318000000/319",
+            "318000000/317"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg4",
+      "highest_passing_hz": "250000",
+      "highest_passing_step": 3,
+      "phase": "recovery",
+      "steps": [
+        {
+          "f_pwm_hz": "31250",
+          "interval_hz": [
+            "9000000/289",
+            "9000000/287"
+          ],
+          "passed": true,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "62500",
+          "interval_hz": [
+            "3800000/61",
+            "19000000/303"
+          ],
+          "passed": true,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "125000",
+          "interval_hz": [
+            "39000000/313",
+            "39000000/311"
+          ],
+          "passed": true,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "250000",
+          "interval_hz": [
+            "78000000/313",
+            "78000000/311"
+          ],
+          "passed": true,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "500000",
+          "interval_hz": [
+            "159000000/319",
+            "159000000/317"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg5",
+      "highest_passing_hz": "125000",
+      "highest_passing_step": 3,
+      "phase": "recovery",
+      "steps": [
+        {
+          "f_pwm_hz": "15625",
+          "interval_hz": [
+            "4500000/289",
+            "4500000/287"
+          ],
+          "passed": true,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "31250",
+          "interval_hz": [
+            "1900000/61",
+            "9500000/303"
+          ],
+          "passed": true,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "62500",
+          "interval_hz": [
+            "19500000/313",
+            "19500000/311"
+          ],
+          "passed": true,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "125000",
+          "interval_hz": [
+            "39500000/317",
+            "7900000/63"
+          ],
+          "passed": true,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "250000",
+          "interval_hz": [
+            "79000000/317",
+            "15800000/63"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg6",
+      "highest_passing_hz": "62500",
+      "highest_passing_step": 3,
+      "phase": "recovery",
+      "steps": [
+        {
+          "f_pwm_hz": "15625/2",
+          "interval_hz": [
+            "2250000/289",
+            "2250000/287"
+          ],
+          "passed": true,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "15625",
+          "interval_hz": [
+            "950000/61",
+            "4750000/303"
+          ],
+          "passed": true,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "31250",
+          "interval_hz": [
+            "9750000/313",
+            "9750000/311"
+          ],
+          "passed": true,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "62500",
+          "interval_hz": [
+            "19750000/317",
+            "3950000/63"
+          ],
+          "passed": true,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "125000",
+          "interval_hz": [
+            "39500000/317",
+            "7900000/63"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    },
+    {
+      "cfg": "cfg7",
+      "highest_passing_hz": "31250",
+      "highest_passing_step": 3,
+      "phase": "recovery",
+      "steps": [
+        {
+          "f_pwm_hz": "15625/4",
+          "interval_hz": [
+            "1125000/289",
+            "1125000/287"
+          ],
+          "passed": true,
+          "step": 0
+        },
+        {
+          "f_pwm_hz": "15625/2",
+          "interval_hz": [
+            "475000/61",
+            "2375000/303"
+          ],
+          "passed": true,
+          "step": 1
+        },
+        {
+          "f_pwm_hz": "15625",
+          "interval_hz": [
+            "4875000/313",
+            "4875000/311"
+          ],
+          "passed": true,
+          "step": 2
+        },
+        {
+          "f_pwm_hz": "31250",
+          "interval_hz": [
+            "9875000/317",
+            "1975000/63"
+          ],
+          "passed": true,
+          "step": 3
+        },
+        {
+          "f_pwm_hz": "62500",
+          "interval_hz": [
+            "19750000/317",
+            "3950000/63"
+          ],
+          "passed": false,
+          "step": 4
+        }
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "br": 7,
+      "case": "f15000",
+      "ceiling_expected_hz": null,
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 15000,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 0,
+      "reading_ceiling": "accepted_though_unattainable",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f15625",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 15625,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 1,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f15686",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 15686,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 2,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f20833",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 20833,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 3,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 6,
+      "case": "f20942",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x0374",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "31250",
+      "f_req_hz": 20942,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/14337",
+        "89600000/2867"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 4,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 31250,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 6,
+      "case": "f31250",
+      "ceiling_expected_hz": "31250",
+      "cr1": "0x0374",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "31250",
+      "f_req_hz": 31250,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/14337",
+        "89600000/2867"
+      ],
+      "nearest_expected_hz": [
+        "31250"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 5,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 31250,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 6,
+      "case": "f41666",
+      "ceiling_expected_hz": "31250",
+      "cr1": "0x0374",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "31250",
+      "f_req_hz": 41666,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/14337",
+        "89600000/2867"
+      ],
+      "nearest_expected_hz": [
+        "31250"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 6,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 31250,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f42105",
+      "ceiling_expected_hz": "31250",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 42105,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "31250"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 7,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 62500,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f62500",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 62500,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "62500"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 8,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 62500,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f83333",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 83333,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "62500"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 9,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 62500,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f85106",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 85106,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "62500"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 10,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 62500,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f100000",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 100000,
+      "k_hz": "4000000",
+      "matches": "ceiling_only",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 11,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "differs",
+      "reported_hz": 62500,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 4,
+      "case": "f102564",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x0364",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "125000",
+      "f_req_hz": 102564,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "89600000/717",
+        "448000000/3583"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 12,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "conforms",
+      "reported_hz": 125000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 4,
+      "case": "f125000",
+      "ceiling_expected_hz": "125000",
+      "cr1": "0x0364",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "125000",
+      "f_req_hz": 125000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "89600000/717",
+        "448000000/3583"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 13,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 125000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 4,
+      "case": "f166666",
+      "ceiling_expected_hz": "125000",
+      "cr1": "0x0364",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "125000",
+      "f_req_hz": 166666,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "89600000/717",
+        "448000000/3583"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 14,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 125000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 3,
+      "case": "f173913",
+      "ceiling_expected_hz": "125000",
+      "cr1": "0x035c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "250000",
+      "f_req_hz": 173913,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/1793",
+        "448000000/1791"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 15,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 250000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 3,
+      "case": "f250000",
+      "ceiling_expected_hz": "250000",
+      "cr1": "0x035c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "250000",
+      "f_req_hz": 250000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/1793",
+        "448000000/1791"
+      ],
+      "nearest_expected_hz": [
+        "250000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 16,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 250000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 3,
+      "case": "f333333",
+      "ceiling_expected_hz": "250000",
+      "cr1": "0x035c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "250000",
+      "f_req_hz": 333333,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/1793",
+        "448000000/1791"
+      ],
+      "nearest_expected_hz": [
+        "250000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 17,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 250000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 2,
+      "case": "f363636",
+      "ceiling_expected_hz": "250000",
+      "cr1": "0x0354",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "500000",
+      "f_req_hz": 363636,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/897",
+        "89600000/179"
+      ],
+      "nearest_expected_hz": [
+        "250000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 18,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 500000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 2,
+      "case": "f500000",
+      "ceiling_expected_hz": "500000",
+      "cr1": "0x0354",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "500000",
+      "f_req_hz": 500000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/897",
+        "89600000/179"
+      ],
+      "nearest_expected_hz": [
+        "500000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 19,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 500000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 2,
+      "case": "f666666",
+      "ceiling_expected_hz": "500000",
+      "cr1": "0x0354",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "500000",
+      "f_req_hz": 666666,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/897",
+        "89600000/179"
+      ],
+      "nearest_expected_hz": [
+        "500000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 20,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 500000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f800000",
+      "ceiling_expected_hz": "500000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 800000,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 21,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f1000000",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 1000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 22,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f1333333",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 1333333,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 23,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f1500000",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 1500000,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000",
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 24,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "conforms_tie",
+      "reported_hz": 2000000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f2000000",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 2000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 25,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 2000000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f3000000",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 3000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 26,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 2000000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f4000000",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 4000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 27,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 2000000,
+      "sequence": "construct",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": null,
+      "case": "f4000001",
+      "ceiling_expected_hz": "2000000",
+      "cr1": null,
+      "data_bit_errors": null,
+      "electrical": "not_measured",
+      "error": null,
+      "f_br_hz": null,
+      "f_req_hz": 4000001,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": null,
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "panic",
+      "path": "construct",
+      "position": 28,
+      "reading_ceiling": "rejected_though_attainable",
+      "reading_nearest": "rejected_though_attainable",
+      "reported_hz": null,
+      "sequence": "construct",
+      "status": "observed_panic",
+      "tolerance_ticks": null,
+      "transfers_valid": 0,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f1000000",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 1000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": -1,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f15000",
+      "ceiling_expected_hz": null,
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 15000,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 0,
+      "reading_ceiling": "accepted_though_unattainable",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f15625",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 15625,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 1,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f15686",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 15686,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 2,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f20833",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 20833,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 3,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 6,
+      "case": "f20942",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x0374",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "31250",
+      "f_req_hz": 20942,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/14337",
+        "89600000/2867"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 4,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 31250,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 6,
+      "case": "f31250",
+      "ceiling_expected_hz": "31250",
+      "cr1": "0x0374",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "31250",
+      "f_req_hz": 31250,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/14337",
+        "89600000/2867"
+      ],
+      "nearest_expected_hz": [
+        "31250"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 5,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 31250,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 6,
+      "case": "f41666",
+      "ceiling_expected_hz": "31250",
+      "cr1": "0x0374",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "31250",
+      "f_req_hz": 41666,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/14337",
+        "89600000/2867"
+      ],
+      "nearest_expected_hz": [
+        "31250"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 6,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 31250,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f42105",
+      "ceiling_expected_hz": "31250",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 42105,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "31250"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 7,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 62500,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f62500",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 62500,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "62500"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 8,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 62500,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f83333",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 83333,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "62500"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 9,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 62500,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f85106",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 85106,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "62500"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 10,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 62500,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f100000",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 100000,
+      "k_hz": "4000000",
+      "matches": "ceiling_only",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 11,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "differs",
+      "reported_hz": 62500,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 4,
+      "case": "f102564",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x0364",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "125000",
+      "f_req_hz": 102564,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "89600000/717",
+        "448000000/3583"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 12,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "conforms",
+      "reported_hz": 125000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 4,
+      "case": "f125000",
+      "ceiling_expected_hz": "125000",
+      "cr1": "0x0364",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "125000",
+      "f_req_hz": 125000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "89600000/717",
+        "448000000/3583"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 13,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 125000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 4,
+      "case": "f166666",
+      "ceiling_expected_hz": "125000",
+      "cr1": "0x0364",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "125000",
+      "f_req_hz": 166666,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "89600000/717",
+        "448000000/3583"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 14,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 125000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 3,
+      "case": "f173913",
+      "ceiling_expected_hz": "125000",
+      "cr1": "0x035c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "250000",
+      "f_req_hz": 173913,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/1793",
+        "448000000/1791"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 15,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 250000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 3,
+      "case": "f250000",
+      "ceiling_expected_hz": "250000",
+      "cr1": "0x035c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "250000",
+      "f_req_hz": 250000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/1793",
+        "448000000/1791"
+      ],
+      "nearest_expected_hz": [
+        "250000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 16,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 250000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 3,
+      "case": "f333333",
+      "ceiling_expected_hz": "250000",
+      "cr1": "0x035c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "250000",
+      "f_req_hz": 333333,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/1793",
+        "448000000/1791"
+      ],
+      "nearest_expected_hz": [
+        "250000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 17,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 250000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 2,
+      "case": "f363636",
+      "ceiling_expected_hz": "250000",
+      "cr1": "0x0354",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "500000",
+      "f_req_hz": 363636,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/897",
+        "89600000/179"
+      ],
+      "nearest_expected_hz": [
+        "250000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 18,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 500000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 2,
+      "case": "f500000",
+      "ceiling_expected_hz": "500000",
+      "cr1": "0x0354",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "500000",
+      "f_req_hz": 500000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/897",
+        "89600000/179"
+      ],
+      "nearest_expected_hz": [
+        "500000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 19,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 500000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 2,
+      "case": "f666666",
+      "ceiling_expected_hz": "500000",
+      "cr1": "0x0354",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "500000",
+      "f_req_hz": 666666,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/897",
+        "89600000/179"
+      ],
+      "nearest_expected_hz": [
+        "500000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 20,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 500000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f800000",
+      "ceiling_expected_hz": "500000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 800000,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 21,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f1000000",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 1000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 22,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f1333333",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 1333333,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 23,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f1500000",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 1500000,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000",
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 24,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "conforms_tie",
+      "reported_hz": 2000000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f2000000",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 2000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 25,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 2000000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f3000000",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 3000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 26,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 2000000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f4000000",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 4000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 27,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 2000000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f4000001",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "FrequencyTooHigh",
+      "f_br_hz": "2000000",
+      "f_req_hz": 4000001,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "rejected",
+      "path": "set_config",
+      "position": 28,
+      "reading_ceiling": "rejected_though_attainable",
+      "reading_nearest": "rejected_though_attainable",
+      "reported_hz": 2000000,
+      "sequence": "set_config_ascending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f1000000",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 1000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": -1,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f4000001",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "FrequencyTooHigh",
+      "f_br_hz": "1000000",
+      "f_req_hz": 4000001,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "rejected",
+      "path": "set_config",
+      "position": 0,
+      "reading_ceiling": "rejected_though_attainable",
+      "reading_nearest": "rejected_though_attainable",
+      "reported_hz": 1000000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f4000000",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 4000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 1,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 2000000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f3000000",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 3000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 2,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 2000000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f2000000",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 2000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 3,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 2000000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f1500000",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 1500000,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000",
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 4,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "conforms_tie",
+      "reported_hz": 2000000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f1333333",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 1333333,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 5,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f1000000",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 1000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 6,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f800000",
+      "ceiling_expected_hz": "500000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 800000,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 7,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 2,
+      "case": "f666666",
+      "ceiling_expected_hz": "500000",
+      "cr1": "0x0354",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "500000",
+      "f_req_hz": 666666,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/897",
+        "89600000/179"
+      ],
+      "nearest_expected_hz": [
+        "500000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 8,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 500000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 2,
+      "case": "f500000",
+      "ceiling_expected_hz": "500000",
+      "cr1": "0x0354",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "500000",
+      "f_req_hz": 500000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/897",
+        "89600000/179"
+      ],
+      "nearest_expected_hz": [
+        "500000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 9,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 500000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 2,
+      "case": "f363636",
+      "ceiling_expected_hz": "250000",
+      "cr1": "0x0354",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "500000",
+      "f_req_hz": 363636,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/897",
+        "89600000/179"
+      ],
+      "nearest_expected_hz": [
+        "250000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 10,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 500000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 3,
+      "case": "f333333",
+      "ceiling_expected_hz": "250000",
+      "cr1": "0x035c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "250000",
+      "f_req_hz": 333333,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/1793",
+        "448000000/1791"
+      ],
+      "nearest_expected_hz": [
+        "250000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 11,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 250000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 3,
+      "case": "f250000",
+      "ceiling_expected_hz": "250000",
+      "cr1": "0x035c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "250000",
+      "f_req_hz": 250000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/1793",
+        "448000000/1791"
+      ],
+      "nearest_expected_hz": [
+        "250000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 12,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 250000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 3,
+      "case": "f173913",
+      "ceiling_expected_hz": "125000",
+      "cr1": "0x035c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "250000",
+      "f_req_hz": 173913,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/1793",
+        "448000000/1791"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 13,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 250000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 4,
+      "case": "f166666",
+      "ceiling_expected_hz": "125000",
+      "cr1": "0x0364",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "125000",
+      "f_req_hz": 166666,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "89600000/717",
+        "448000000/3583"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 14,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 125000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 4,
+      "case": "f125000",
+      "ceiling_expected_hz": "125000",
+      "cr1": "0x0364",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "125000",
+      "f_req_hz": 125000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "89600000/717",
+        "448000000/3583"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 15,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 125000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 4,
+      "case": "f102564",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x0364",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "125000",
+      "f_req_hz": 102564,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "89600000/717",
+        "448000000/3583"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 16,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "conforms",
+      "reported_hz": 125000,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f100000",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 100000,
+      "k_hz": "4000000",
+      "matches": "ceiling_only",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 17,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "differs",
+      "reported_hz": 62500,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f85106",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 85106,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "62500"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 18,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 62500,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f83333",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 83333,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "62500"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 19,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 62500,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f62500",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 62500,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "62500"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 20,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 62500,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f42105",
+      "ceiling_expected_hz": "31250",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 42105,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "31250"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 21,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 62500,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 6,
+      "case": "f41666",
+      "ceiling_expected_hz": "31250",
+      "cr1": "0x0374",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "31250",
+      "f_req_hz": 41666,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/14337",
+        "89600000/2867"
+      ],
+      "nearest_expected_hz": [
+        "31250"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 22,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 31250,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 6,
+      "case": "f31250",
+      "ceiling_expected_hz": "31250",
+      "cr1": "0x0374",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "31250",
+      "f_req_hz": 31250,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/14337",
+        "89600000/2867"
+      ],
+      "nearest_expected_hz": [
+        "31250"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 23,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 31250,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 6,
+      "case": "f20942",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x0374",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "31250",
+      "f_req_hz": 20942,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/14337",
+        "89600000/2867"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 24,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 31250,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f20833",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 20833,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 25,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f15686",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 15686,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 26,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f15625",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 15625,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 27,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f15000",
+      "ceiling_expected_hz": null,
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 15000,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 28,
+      "reading_ceiling": "accepted_though_unattainable",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "set_config_descending",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f1000000",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 1000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": -1,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f15000",
+      "ceiling_expected_hz": null,
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 15000,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 0,
+      "reading_ceiling": "accepted_though_unattainable",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f4000000",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 4000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 1,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 2000000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f15625",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 15625,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 2,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f3000000",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 3000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 3,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 2000000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f15686",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 15686,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 4,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f2000000",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 2000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 5,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 2000000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f20833",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 20833,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 6,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 0,
+      "case": "f1500000",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x0344",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "2000000",
+      "f_req_hz": 1500000,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "17920000/9",
+        "448000000/223"
+      ],
+      "nearest_expected_hz": [
+        "2000000",
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 7,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "conforms_tie",
+      "reported_hz": 2000000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 6,
+      "case": "f20942",
+      "ceiling_expected_hz": "15625",
+      "cr1": "0x0374",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "31250",
+      "f_req_hz": 20942,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/14337",
+        "89600000/2867"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 8,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 31250,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f1333333",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 1333333,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 9,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 6,
+      "case": "f31250",
+      "ceiling_expected_hz": "31250",
+      "cr1": "0x0374",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "31250",
+      "f_req_hz": 31250,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/14337",
+        "89600000/2867"
+      ],
+      "nearest_expected_hz": [
+        "31250"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 10,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 31250,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f1000000",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 1000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 11,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 6,
+      "case": "f41666",
+      "ceiling_expected_hz": "31250",
+      "cr1": "0x0374",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "31250",
+      "f_req_hz": 41666,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/14337",
+        "89600000/2867"
+      ],
+      "nearest_expected_hz": [
+        "31250"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 12,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 31250,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f800000",
+      "ceiling_expected_hz": "500000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 800000,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 13,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f42105",
+      "ceiling_expected_hz": "31250",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 42105,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "31250"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 14,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 62500,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 2,
+      "case": "f666666",
+      "ceiling_expected_hz": "500000",
+      "cr1": "0x0354",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "500000",
+      "f_req_hz": 666666,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/897",
+        "89600000/179"
+      ],
+      "nearest_expected_hz": [
+        "500000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 15,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 500000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f62500",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 62500,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "62500"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 16,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 62500,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 2,
+      "case": "f500000",
+      "ceiling_expected_hz": "500000",
+      "cr1": "0x0354",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "500000",
+      "f_req_hz": 500000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/897",
+        "89600000/179"
+      ],
+      "nearest_expected_hz": [
+        "500000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 17,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 500000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f83333",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 83333,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "62500"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 18,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 62500,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 2,
+      "case": "f363636",
+      "ceiling_expected_hz": "250000",
+      "cr1": "0x0354",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "500000",
+      "f_req_hz": 363636,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/897",
+        "89600000/179"
+      ],
+      "nearest_expected_hz": [
+        "250000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 19,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 500000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f85106",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 85106,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "62500"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 20,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 62500,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 3,
+      "case": "f333333",
+      "ceiling_expected_hz": "250000",
+      "cr1": "0x035c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "250000",
+      "f_req_hz": 333333,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/1793",
+        "448000000/1791"
+      ],
+      "nearest_expected_hz": [
+        "250000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 21,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 250000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 5,
+      "case": "f100000",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x036c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "62500",
+      "f_req_hz": 100000,
+      "k_hz": "4000000",
+      "matches": "ceiling_only",
+      "measured_interval_hz": [
+        "448000000/7169",
+        "448000000/7167"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 22,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "differs",
+      "reported_hz": 62500,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 3,
+      "case": "f250000",
+      "ceiling_expected_hz": "250000",
+      "cr1": "0x035c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "250000",
+      "f_req_hz": 250000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/1793",
+        "448000000/1791"
+      ],
+      "nearest_expected_hz": [
+        "250000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 23,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 250000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 4,
+      "case": "f102564",
+      "ceiling_expected_hz": "62500",
+      "cr1": "0x0364",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "125000",
+      "f_req_hz": 102564,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "89600000/717",
+        "448000000/3583"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 24,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "conforms",
+      "reported_hz": 125000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 3,
+      "case": "f173913",
+      "ceiling_expected_hz": "125000",
+      "cr1": "0x035c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "250000",
+      "f_req_hz": 173913,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "448000000/1793",
+        "448000000/1791"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 25,
+      "reading_ceiling": "exceeds_request",
+      "reading_nearest": "differs",
+      "reported_hz": 250000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 4,
+      "case": "f125000",
+      "ceiling_expected_hz": "125000",
+      "cr1": "0x0364",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "125000",
+      "f_req_hz": 125000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "89600000/717",
+        "448000000/3583"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 26,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 125000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 4,
+      "case": "f166666",
+      "ceiling_expected_hz": "125000",
+      "cr1": "0x0364",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "125000",
+      "f_req_hz": 166666,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "89600000/717",
+        "448000000/3583"
+      ],
+      "nearest_expected_hz": [
+        "125000"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 27,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 125000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 4,
+      "case": "f4000001",
+      "ceiling_expected_hz": "2000000",
+      "cr1": "0x0364",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "FrequencyTooHigh",
+      "f_br_hz": "125000",
+      "f_req_hz": 4000001,
+      "k_hz": "4000000",
+      "matches": "neither",
+      "measured_interval_hz": [
+        "89600000/717",
+        "448000000/3583"
+      ],
+      "nearest_expected_hz": [
+        "2000000"
+      ],
+      "outcome": "rejected",
+      "path": "set_config",
+      "position": 28,
+      "reading_ceiling": "rejected_though_attainable",
+      "reading_nearest": "rejected_though_attainable",
+      "reported_hz": 125000,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 7,
+      "case": "f15000",
+      "ceiling_expected_hz": null,
+      "cr1": "0x037c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "15625",
+      "f_req_hz": 15000,
+      "k_hz": "4000000",
+      "matches": "nearest_only",
+      "measured_interval_hz": [
+        "448000000/28673",
+        "448000000/28671"
+      ],
+      "nearest_expected_hz": [
+        "15625"
+      ],
+      "outcome": "accepted",
+      "path": "set_config",
+      "position": 29,
+      "reading_ceiling": "accepted_though_unattainable",
+      "reading_nearest": "conforms",
+      "reported_hz": 15625,
+      "sequence": "set_config_revisited",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    },
+    {
+      "br": 1,
+      "case": "f1000000",
+      "ceiling_expected_hz": "1000000",
+      "cr1": "0x034c",
+      "data_bit_errors": null,
+      "electrical": "agrees",
+      "error": "none",
+      "f_br_hz": "1000000",
+      "f_req_hz": 1000000,
+      "k_hz": "4000000",
+      "matches": "both",
+      "measured_interval_hz": [
+        "448000000/449",
+        "448000000/447"
+      ],
+      "nearest_expected_hz": [
+        "1000000"
+      ],
+      "outcome": "accepted",
+      "path": "construct",
+      "position": 0,
+      "reading_ceiling": "conforms",
+      "reading_nearest": "conforms",
+      "reported_hz": 1000000,
+      "sequence": "recovery",
+      "status": "observed_pass",
+      "tolerance_ticks": 1,
+      "transfers_valid": 20,
+      "upstream_code_consistent": true
+    }
+  ],
+  "schema": "hq184-evaluation/1",
+  "synthetic": false
+}

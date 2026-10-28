@@ -1,0 +1,5 @@
+# The operator's checkout of embassy at c70760de, edited in place (HQ #356); the committed
+# record of the edit is ../../patches/hq356-embassy-stm32-spi-clock-contract.diff.
+embassy/
+# Build output of the variant build.
+target/

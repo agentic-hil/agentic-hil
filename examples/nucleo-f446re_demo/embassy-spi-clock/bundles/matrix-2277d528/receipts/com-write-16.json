@@ -1,0 +1,12 @@
+{
+  "receipt_seq": "00066",
+  "redacted": ["data.hex (the same bytes as request.text)", "log_path", "config_in_force (a path on the bench host)", "resources", "lease_id", "runner_evidence_path"],
+  "request": {"port_id": "dut", "text": "GO\n"},
+  "ok": true,
+  "tool": "com_write",
+  "port_id": "dut",
+  "bytes_written": 3,
+  "summary": "Stimulus written to COM port.",
+  "lease_state": "active",
+  "audit_ok": true
+}

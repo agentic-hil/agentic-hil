@@ -1,0 +1,19 @@
+{
+  "receipt_seq": "00016",
+  "redacted": ["identity.device, identity.stable_device, identity.expected_serial_number and identity.found_serial_number (the probe's USB serial and its device path)", "session.log_path", "config_in_force (a path on the bench host)", "resources", "lease_id", "runner_evidence_path"],
+  "request": {"port_id": "dut"},
+  "ok": true,
+  "tool": "com_session_start",
+  "port_id": "dut",
+  "already_active": false,
+  "session": {"session_active": true, "started_at": "2026-10-28T09:08:01.306Z", "rx_buffer_bytes": 0, "overflow_bytes": 0},
+  "identity": {"expected_from": "com_ports.dut.serial_number", "expected_vid": 1155, "expected_pid": 14155, "found_vid": 1155, "found_pid": 14155, "status": "confirmed", "summary": "The port behind this entry is the hardware it names."},
+  "summary": "COM port session started.",
+  "side_effect_committed": true,
+  "side_effect_status": "committed",
+  "first_contact_at": "2026-10-28T09:08:01.306Z",
+  "lease_state": "active",
+  "audit_ok": true,
+  "cleanup_required": false,
+  "quarantined": false
+}

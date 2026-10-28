@@ -1,0 +1,16 @@
+{
+  "receipt_seq": "00110",
+  "redacted": ["record.resources and record.owner_marker (a device identity and an owner token)", "project_resource", "runner_evidence_path"],
+  "request": {},
+  "ok": true,
+  "tool": "hardware_lease_status",
+  "owner_active": false,
+  "bench_held": false,
+  "held_devices": [],
+  "standing_incidents": [],
+  "blocked": false,
+  "incident_stands": false,
+  "cleanup_reasons": [],
+  "lifecycle_state": "open",
+  "summary": "Nothing on this bench is held and no incident is standing."
+}
