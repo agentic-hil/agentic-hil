@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import io
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from conftest import FAKE_GDB, write_config
+from fixtures import fake_gdb
 
 from agentic_hil.backends.gdbdebug import GdbDebugSession
 from agentic_hil.backends.openocd import OpenOCDBackend
@@ -13,6 +17,12 @@ from agentic_hil.gdbmi import stop_result_from_line
 from tests.bench.test_bench_faults import sanitize_gdb_mi_source_paths
 
 FIXTURE = Path(__file__).parent / "fixtures" / "gdb_mi_stop_recordings.json"
+
+
+def recorded_stop(scenario: str, index: int) -> str:
+    """One `*stopped` record of the bench recording, exactly as GDB printed it."""
+    recordings = json.loads(FIXTURE.read_text(encoding="utf-8"))["recordings"]
+    return next(case for case in recordings if case["scenario"] == scenario)["records"][index]
 
 
 def test_source_path_sanitizer_redacts_only_absolute_file_and_fullname_values() -> None:
@@ -75,3 +85,30 @@ def test_real_gdb_stop_recordings_replay_through_the_stop_classifier(tmp_path: P
         else:
             actual_reset_reasons.append(result["stop_reason"])
     assert cases["reset_halt_to_hardfault"]["expected_stop_reasons"] == actual_reset_reasons
+
+
+def test_fake_gdb_continue_under_hardfault_answers_the_recorded_fault_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stop the fake answers a continue with under `hardfault` is the bench's fault stop, byte for byte.
+
+    The line is read where every continue reads it, before the fake schedules its
+    delivery, so the claim is about the bytes and not about the delay."""
+    monkeypatch.setattr(fake_gdb, "behavior_override", "hardfault")
+
+    if fake_gdb.continue_stop_line() != recorded_stop("reset_halt_to_hardfault", 2):
+        raise AssertionError("fake_gdb's continue under hardfault is not reset_halt_to_hardfault records[2] of gdb_mi_stop_recordings.json")
+
+
+def test_fake_gdb_attach_under_stopped_on_attach_hardfault_prints_the_recorded_attach_stop(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A connect under `stopped_on_attach_hardfault` is followed by the bench's attach stop and by no other.
+
+    The fake's own main() reads the commands, so the stop is the one a session
+    started over this fake is handed."""
+    monkeypatch.setattr(fake_gdb, "behavior_override", "stopped_on_attach_hardfault")
+    monkeypatch.setattr(sys, "argv", [str(FAKE_GDB)])
+    monkeypatch.setattr(sys, "stdin", io.StringIO("1-target-select extended-remote localhost:3333\n2-gdb-exit\n"))
+
+    assert fake_gdb.main() == 0
+    stops = [line for line in capsys.readouterr().out.splitlines() if line.startswith("*stopped")]
+
+    if stops != [recorded_stop("attach_hardfault", 0)]:
+        raise AssertionError("fake_gdb's main() under stopped_on_attach_hardfault does not print attach_hardfault records[0] as its only stop")

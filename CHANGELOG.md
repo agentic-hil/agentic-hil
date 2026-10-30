@@ -13,6 +13,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 ### Changed
 
 - The STM32CubeProgrammer failure recordings in `tests/fixtures/stm32cubeprogrammer_2_23_0_failure_recordings.json` are held to their redacted probe serial: a test reads every recording, so the ones added later too, and fails the suite on an `sn=` value or an `ST-LINK SN` banner line in any argv, stdout or stderr that is not `[redacted]`. Nothing the product does changes. (#774)
+- The test suite's fake GDB now answers a HardFault with the stops the bench recorded, not an invented one. A continue under `hardfault` returns the `reset_halt_to_hardfault` fault stop. An attach under `stopped_on_attach_hardfault` returns the `attach_hardfault` stop, which carries no reason field, so the session reports `backend_stop_reason` `unknown` and no `signal` block. Both stops come byte for byte from `tests/fixtures/gdb_mi_stop_recordings.json`: GNU gdb 16.3 over OpenOCD on a Nucleo-F446RE running `tests/bench/firmware/undefined_instruction.c`, with the fixture's path redactions kept. The fake reads the recordings on first use, so a copy of it with no fixture beside it still imports (#742)
 
 ### Removed
 

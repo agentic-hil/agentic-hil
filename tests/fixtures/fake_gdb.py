@@ -99,7 +99,23 @@ target_stopped.set()
 resume_generation = 0
 EXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptno="1",frame={addr="0x08000200",func="test_done",args=[],file="tests.c",fullname="/work/tests.c",line="123"},thread-id="1",stopped-threads="all"'
 UNEXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptno="99",frame={addr="0x08000300",func="assert_failed",args=[],file="assert.c",fullname="/work/assert.c",line="7"},thread-id="1",stopped-threads="all"'
-HARDFAULT_STOP = '*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={addr="0x08000400",func="HardFault_Handler",args=[],file="startup.c",fullname="/work/startup.c",line="88"},thread-id="1",stopped-threads="all"'
+# The two HardFault stops are recordings, replayed from
+# gdb_mi_stop_recordings.json beside this file: `hardfault` answers a continue
+# with scenario `reset_halt_to_hardfault`, record 2, and
+# `stopped_on_attach_hardfault` follows `-target-select` with scenario
+# `attach_hardfault`, record 0. The recording is GNU gdb (Debian 16.3-1) 16.3
+# over OpenOCD on an ST Nucleo-F446RE running
+# tests/bench/firmware/undefined_instruction.c, as its provenance block says,
+# and its redactions are kept: `file` and `fullname` read `<path redacted>` here
+# as they do there. Where each stop is delivered is this fake's own: the fault
+# stop arrives as the continue's own asynchronous stop, ASYNC_STOP_DELAY_S
+# (20 ms) after it, and the attach stop straight after `^done`. On the bench the
+# SIGINT fault stop followed a continue that timed out and the product's
+# `-exec-interrupt --all` (tests/bench/test_bench_faults.py). No fault recorded
+# over arm-none-eabi-gdb exists. The file is read on first use and not at
+# import, so a copy of this fake planted without it still starts.
+GDB_MI_STOP_RECORDING = Path(__file__).with_name("gdb_mi_stop_recordings.json")
+gdb_mi_stop_recordings: list[dict] | None = None
 # The stop records the public `stop_reason` vocabulary maps and the suite had
 # never produced (#506): a target that ran off the end of main, a stop inside
 # the reset vector, a breakpoint instruction nobody set, a fault delivered as a
@@ -107,10 +123,10 @@ HARDFAULT_STOP = '*stopped,reason="signal-received",signal-name="SIGINT",signal-
 # are the GDB/MI `*stopped` records the GDB manual documents (Async Records:
 # `exited-normally`, `signal-received` with `signal-name` and `signal-meaning`,
 # `end-stepping-range`, each with the `frame` tuple OpenOCD's gdbserver
-# populates); a bench recording of a real fault and a real reset over
-# arm-none-eabi-gdb is still owed and would replace these. Each is opted into
-# by name, so the default fake keeps answering the breakpoint hit the rest of
-# the suite relies on.
+# populates). None of them is a recording; the HardFault stops above are, and
+# the reset stop here stays the documented shape. Each is opted into by name,
+# so the default fake keeps answering the breakpoint hit the rest of the suite
+# relies on.
 STOP_EXITED_NORMALLY = "stop_exited_normally"
 STOP_IN_RESET_HANDLER = "stop_in_reset_handler"
 STOP_SIGTRAP = "stop_sigtrap"
@@ -246,6 +262,15 @@ def st_link_recorded_answer(step: str) -> list[str]:
     return list(recorded["records"])
 
 
+def recorded_gdb_mi_stop(scenario: str, index: int) -> str:
+    """One `*stopped` record of the bench's GDB/MI stop recording, exactly as GDB printed it."""
+    global gdb_mi_stop_recordings
+    if gdb_mi_stop_recordings is None:
+        gdb_mi_stop_recordings = json.loads(GDB_MI_STOP_RECORDING.read_text(encoding="utf-8"))["recordings"]
+    recording = next(entry for entry in gdb_mi_stop_recordings if entry["scenario"] == scenario)
+    return recording["records"][index]
+
+
 def emit_recorded_answer(token: str, records: list[str]) -> None:
     """The recorded records, with this command's token on the result line."""
     for record in records:
@@ -314,7 +339,7 @@ def continue_stop_line() -> str:
     if has_behavior("unexpected_breakpoint"):
         return UNEXPECTED_BREAKPOINT_STOP
     if has_behavior("hardfault"):
-        return HARDFAULT_STOP
+        return recorded_gdb_mi_stop("reset_halt_to_hardfault", 2)
     for name, line in STOP_LINES_BY_BEHAVIOR.items():
         if has_behavior(name):
             return line
@@ -476,7 +501,7 @@ def main() -> int:
                 continue
             emit(f"{token}^done")
             if behavior() == "stopped_on_attach_hardfault":
-                emit(HARDFAULT_STOP)
+                emit(recorded_gdb_mi_stop("attach_hardfault", 0))
         elif command.startswith("-file-exec-and-symbols"):
             artifact_path = command[len("-file-exec-and-symbols") :].strip().strip('"').replace("\\\\", "\\")
             image = Path(artifact_path)
