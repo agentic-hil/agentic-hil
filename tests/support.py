@@ -6,6 +6,7 @@ import inspect
 import json
 import math
 import os
+import re
 import shutil
 import time
 from collections.abc import Iterator
@@ -398,3 +399,44 @@ def _windows_process_is_running(pid: int) -> bool:
         return wait_for_object(handle, 0) != _WINDOWS_WAIT_OBJECT_0
     finally:
         close_handle(handle)
+
+
+REDACTED_VALUE = "[redacted]"
+# An `sn=` argument, as STM32CubeProgrammer takes it on its command line and
+# echoes it in its error text. The lookbehind keeps `ssn=` and `port_sn=` out.
+# The value is the run of non-space characters after it, so a value of any
+# shape is read, not only hex.
+CUBEPROGRAMMER_SN_ARGUMENT = re.compile(r"(?<![A-Za-z0-9_])sn=(\S*)", re.IGNORECASE)
+# The banner line the CLI prints with the probe's serial, `ST-LINK SN  : <value>`,
+# with whatever spacing it uses. Matched to the end of its line, so a value that
+# contains spaces is read whole.
+CUBEPROGRAMMER_SN_BANNER = re.compile(r"ST-?LINK[ \t]+SN[ \t]*:[ \t]*(.*)", re.IGNORECASE)
+
+
+def unredacted_serials(recording: dict) -> list[str]:
+    """Each probe serial a CubeProgrammer recording shows that is not `[redacted]`.
+
+    Reads the recording's ``argv``, ``stdout`` and ``stderr``, the fields the
+    probe's serial can reach. An ``sn=`` value other than exactly `[redacted]`
+    is a finding, and so is an ``ST-LINK SN`` banner line whose value is not
+    `[redacted]`. Each finding is labelled by its field, for example
+    ``"argv[5]: sn=..."`` or ``"stdout: ST-LINK SN  : ..."``. Other placeholders,
+    such as ``[staging]``, match neither pattern and are not findings.
+    """
+    argv = recording["argv"]
+    stdout = recording["stdout"]
+    stderr = recording["stderr"]
+    assert isinstance(argv, list) and all(isinstance(item, str) for item in argv), argv
+    assert isinstance(stdout, str), stdout
+    assert isinstance(stderr, str), stderr
+    fields = [(f"argv[{index}]", item) for index, item in enumerate(argv)]
+    fields += [("stdout", stdout), ("stderr", stderr)]
+    findings: list[str] = []
+    for label, text in fields:
+        for match in CUBEPROGRAMMER_SN_ARGUMENT.finditer(text):
+            if match.group(1) != REDACTED_VALUE:
+                findings.append(f"{label}: {match.group(0)}")
+        for match in CUBEPROGRAMMER_SN_BANNER.finditer(text):
+            if match.group(1).strip() != REDACTED_VALUE:
+                findings.append(f"{label}: {match.group(0)}")
+    return findings

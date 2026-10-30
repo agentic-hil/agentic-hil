@@ -10,6 +10,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - Two accounts on one Linux machine can now share a board without driving it at once. Device locks lived in each account's home directory, so a run as one account and a run as another both took the same probe. Where an administrator creates `/var/lib/agentic-hil/device-locks` for the group `agentic-hil` (setgid, nothing for others), every account of the group keeps its device locks there instead, and its lock files and records are created `0660` whatever the umask, so a second account meets the first one's hold as `device_busy` naming its holder, and reclaims it after a crash. A directory that exists and cannot be used, most often by an account not yet in the group, refuses every device lock with `device_lock_root_unusable`, naming the directory, what is wrong and the fix, rather than falling back to the home directory. `agentic-hil doctor` reports which directory the locks are taken in under `device_locks`, and names an unusable one even before the project has a configuration, since `agentic-hil init` takes device locks too; and `tools/bench_in_container.py` mounts the machine directory at its own path. Without the directory nothing changes; macOS and Windows are unchanged. The setup is in TROUBLESHOOTING.md (#777).
 
+### Changed
+
+- The STM32CubeProgrammer failure recordings in `tests/fixtures/stm32cubeprogrammer_2_23_0_failure_recordings.json` are held to their redacted probe serial: a test reads every recording, so the ones added later too, and fails the suite on an `sn=` value or an `ST-LINK SN` banner line in any argv, stdout or stderr that is not `[redacted]`. Nothing the product does changes. (#774)
+
 ### Removed
 
 - The bench gate no longer has the opt-in ESP32 stage or its `run_esp32` input. The gate's runner opens the probe of the board it is labelled for and the USB-UART adapter wired to that board, and no other device on the machine, so the stage would be refused on every dispatch. The stage itself, `tests/bench/esp32_recordings.py`, still runs from a terminal on the machine with `tools/bench_in_container.py --esp32`.
