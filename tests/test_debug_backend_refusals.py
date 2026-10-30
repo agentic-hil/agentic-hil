@@ -25,7 +25,9 @@ What the issue found unpinned, in its order:
   USB-free probe refusals recorded from its licensed optional image.
 * every ST-Link and pyOCD phrase the classifier has a bucket for, driven
   through the tool result, the quarantine it opens or refuses, and the
-  remediation it selects.
+  remediation it selects. pyOCD's verify bucket has no row: pyOCD 0.45.1's
+  flash prints no verify line, and ``fixtures/pyocd_failure_recordings.json``
+  lists the phrase under ``not_in_the_package`` (#740).
 * pyOCD's post-flash reset failure as a partial, non-retry-safe result.
 * a debug server that exits before its GDB port is ready, and a GDB that dies
   under a session.
@@ -120,9 +122,6 @@ TARGET_TYPE = {"openocd": None, "pyocd": "stm32f446re", "stlink": None}
 # ST-Link it opened before it gives up on the target.
 STLINK_NO_TARGET_STDOUT = "ST-LINK SN  : STLINK123\n"
 STLINK_NO_TARGET_STDERR = "Error: No STM32 target found!\n"
-# What the issue's own test names for a `--version` that exits 2: the phrase
-# and the status, for the tool that cannot be recorded here.
-STLINK_VERSION_REFUSED = "Error: no such option\n"
 
 # The two strings OpenOCD's embedded `program` proc echoes about a flash that
 # stopped, present in the installed binary (the recording counts them). A
@@ -278,22 +277,24 @@ def log_of(config, result: dict) -> dict:
 # debugger_info and doctor: the version check that does not answer a version.
 
 
-@pytest.mark.parametrize("backend_name", BACKENDS)
+@pytest.mark.parametrize("backend_name", ["openocd", "pyocd"])
 def test_debugger_info_reports_a_failing_version_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_name: str) -> None:
     """A `--version` that exits non-zero is a classified failure, not `ok` with no version.
 
     OpenOCD and pyOCD refuse an option they do not know with the recorded
-    texts (exit 1 and exit 2); STM32CubeProgrammer with the phrase and status
-    the issue names. None of the three words matches any bucket, so the
+    texts (exit 1 and exit 2). Neither text matches any bucket, so the
     backend's own classification is `unknown_debugger_error`, and the public
     error_type is `debugger_error`, the name the debug-session backend already
     gives an unclassified server failure, so a caller reads one word for "the
     debugger failed and its output says no more" wherever it meets it.
+
+    STM32CubeProgrammer has no row here. Its 2.23.0 `--version` exits 0 and
+    prints its version (the `version` recording, replayed below), and what it
+    prints for an option it does not know has not been recorded, so there is
+    no refusal of its own to play until the licensed image captures one
+    (#740).
     """
-    if backend_name == "stlink":
-        play_transcript(monkeypatch, stderr=STLINK_VERSION_REFUSED, returncode=2)
-    else:
-        play_recording(monkeypatch, f"{backend_name}_unknown_option")
+    play_recording(monkeypatch, f"{backend_name}_unknown_option")
     config = config_for(tmp_path, backend_name, FAKE_TRANSCRIPT)
 
     result = call(config, "debugger_info")
@@ -817,9 +818,6 @@ CLASSIFIER_ROWS = [
     ("pyocd", "probe_target", "0000000:ERROR:Error attempting to connect to target\nError: unable to connect to the target\n", "target_not_detected", "in tree"),
     ("pyocd", "probe_target", pyocd_source_line("swd_no_ack"), "target_not_detected", "pyocd source"),
     ("pyocd", "flash_firmware", "0001042 C Target type stm32f446re not recognized. Use 'pyocd list --targets' to see currently available target types. See <https://pyocd.io/docs/target_support.html> for how to install additional target support. [__main__]\n", "target_type_invalid", "in tree"),
-    # No pyOCD 0.45.1 source: its flash prints no verify line at all. The row
-    # keeps the rule's words pinned for a tool that would print them.
-    ("pyocd", "flash_firmware", "0000900 E Verify failed at 0x08000000 [load_cmd]\n", "verify_failed", "rule"),
     ("pyocd", "flash_firmware", pyocd_recording("pyocd_flash_bin_outside_flash")["stderr"], "flash_failed", "recorded"),
     ("pyocd", "flash_firmware", pyocd_source_line("flash_program_page_failure"), "flash_failed", "pyocd source"),
     ("pyocd", "flash_firmware", pyocd_source_line("flash_program_page_timeout"), "flash_failed", "pyocd source"),
@@ -863,7 +861,6 @@ TOOL_RESULT_ROWS = [
     ("stlink", "flash_firmware", {"image_path": "build/firmware.elf"}, cube_failure_recording("flash_bin_outside_flash")["stdout"], "flash_failed", "flash_failed", "quarantined"),
     ("pyocd", "probe_target", {}, "0000000:ERROR:Error attempting to connect to target\nError: unable to connect to the target\n", "target_not_detected", "target_not_detected", "refused"),
     ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, "0001042 C Target type stm32f446re not recognized. Use 'pyocd list --targets' to see currently available target types. See <https://pyocd.io/docs/target_support.html> for how to install additional target support. [__main__]\n", "target_type_invalid", "target_type_invalid", "refused"),
-    ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, "0000900 E Verify failed at 0x08000000 [load_cmd]\n", "verify_failed", "verify_failed", "quarantined"),
     ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, pyocd_recording("pyocd_flash_bin_outside_flash")["stderr"], "flash_failed", "flash_failed", "quarantined"),
     ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, pyocd_source_line("flash_program_page_failure"), "flash_failed", "flash_failed", "quarantined"),
 ]
@@ -1740,7 +1737,7 @@ def test_the_three_buckets_grow_no_unscoped_entry(bucket: str) -> None:
     assert remediation_fields(bucket) == {}, bucket
 
 
-# The four transcripts the row table already plays for these pairs, driven here
+# The three transcripts the row table already plays for these pairs, driven here
 # for the one thing the row table cannot assert while the catalogue is silent:
 # that the refusal reaching the operator carries this backend's steps and not an
 # empty field.
@@ -1751,7 +1748,6 @@ def test_the_three_buckets_grow_no_unscoped_entry(bucket: str) -> None:
 # call sites in this file and not one.
 SCOPED_REMEDIATION_ROWS = [
     ("stlink", "", "ST-LINK SN  : STLINK123\nMemory Programming ...\nError: Verify failed at address 0x08000000\n", "verify_failed", "STM32CubeProgrammer"),
-    ("pyocd", "", "0000900 E Verify failed at 0x08000000 [load_cmd]\n", "verify_failed", "pyOCD"),
     ("pyocd", "", pyocd_recording("pyocd_flash_bin_outside_flash")["stderr"], "flash_failed", "pyOCD"),
     ("openocd", f"{PROGRAMMING_FAILED}\n", "Error: failed to write memory at 0x08000000\n", "flash_failed", "OpenOCD"),
 ]
