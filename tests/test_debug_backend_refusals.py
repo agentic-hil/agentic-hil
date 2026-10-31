@@ -1369,10 +1369,16 @@ def test_the_transport_answers_an_exited_gdb_in_its_own_words(tmp_path: Path) ->
 
 # (behaviour of the fake, public stop_reason, whether the stop is abnormal, the
 # public error_type an abnormal stop carries, the exception_type a fault carries,
-# the signal name the stop carries).
+# the signal name the stop carries, None for a stop that carries no signal).
+#
+# The `stop_in_reset_handler` row is the recorded reset: the fake answers it with
+# `reset_halt_to_hardfault` records[0] of fixtures/gdb_mi_stop_recordings.json,
+# which carries no reason and no signal. Every other row is manual-shaped: its
+# stop is one of the fake's GDB_MANUAL_SHAPED_STOPS, shaped after the GDB
+# manual's examples with an invented frame, and not a recording.
 STOP_ROWS = [
     ("stop_exited_normally", "target_exit", False, None, None, None),
-    ("stop_in_reset_handler", "reset", False, None, None, "SIGINT"),
+    ("stop_in_reset_handler", "reset", False, None, None, None),
     ("stop_sigtrap", "unexpected_breakpoint", True, "unexpected_breakpoint", None, "SIGTRAP"),
     ("stop_sigsegv", "exception", True, "target_exception", "sigsegv", "SIGSEGV"),
     ("stop_sigusr1", "signal", False, None, None, "SIGUSR1"),
@@ -1406,6 +1412,8 @@ def test_the_stop_reasons_a_plan_branches_on_come_through_the_fake_gdb(tmp_path:
         assert "exception_type" not in continued["stop"], continued["stop"]
     if signal_name is not None:
         assert continued["stop"]["signal"]["name"] == signal_name, continued["stop"]
+    elif "signal" in continued["stop"]:
+        raise AssertionError("the stop carries a signal block; the row expects none")
     if stop_reason == "unexpected_breakpoint":
         assert continued["stop"]["breakpoint_expected"] is False, continued["stop"]
         assert "debug_clear_breakpoints" in " ".join(continued["suggested_actions"]), continued["suggested_actions"]
@@ -1419,12 +1427,19 @@ def stop_reason_of(tmp_path: Path, line: str) -> dict:
     return sessions._stop_reason_from_gdb(session, stop_result_from_line(line))
 
 
+# Manual-shaped, every row: shaped after the GDB manual's Async Records and
+# Program Execution examples, with invented frames, and none of them a recording.
+# The recorded stops are replayed from fixtures/gdb_mi_stop_recordings.json in
+# test_gdb_mi_recordings.py.
 MI_ROWS = [
     ('*stopped,reason="exited-normally"', "target_exit", None),
     ('*stopped,reason="exited",exit-code="01"', "target_exit", None),
     ('*stopped,reason="signal-received",signal-name="SIGTRAP",signal-meaning="Trace/breakpoint trap",frame={addr="0x08000310",func="assert_failed",file="assert.c",line="9"},thread-id="1",stopped-threads="all"', "unexpected_breakpoint", None),
     ('*stopped,reason="signal-received",signal-name="SIGSEGV",signal-meaning="Segmentation fault",frame={addr="0x08000520",func="main",file="main.c",line="77"},thread-id="1",stopped-threads="all"', "exception", "sigsegv"),
     ('*stopped,reason="signal-received",signal-name="SIGBUS",signal-meaning="Bus error",frame={addr="0x08000520",func="main",file="main.c",line="77"},thread-id="1",stopped-threads="all"', "exception", "sigbus"),
+    # A SIGINT in Reset_Handler: pins that the reset handler is read before the
+    # signal. The recorded reset carries no signal, so no recording covers that
+    # order, and this row stays manual-shaped.
     ('*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={addr="0x080001c0",func="Reset_Handler",file="startup_stm32f446xx.s",line="65"},thread-id="1",stopped-threads="all"', "reset", None),
     ('*stopped,reason="signal-received",signal-name="SIGUSR1",signal-meaning="User defined signal 1",frame={addr="0x08000530",func="main",file="main.c",line="80"},thread-id="1",stopped-threads="all"', "signal", None),
 ]
@@ -1455,6 +1470,9 @@ def halt_in(function: str, source: str) -> str:
 
     GDB puts the path in `file` as the debug information names it, which a
     CMake build makes absolute, and in `fullname` always.
+
+    Manual-shaped: shaped after the GDB manual's Async Records examples, with
+    an invented frame, and not a recording.
     """
     return f'*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={{addr="0x08000520",func="{function}",args=[],file="{source}",fullname="{source}",line="77"}},thread-id="1",stopped-threads="all"'
 
@@ -1487,6 +1505,8 @@ def test_a_halt_in_a_function_named_with_a_handler_word_reads_halted(tmp_path: P
     assert "exception_type" not in stop, stop
 
 
+# Manual-shaped, every row: each is a halt_in() record, shaped after the GDB
+# manual's examples with an invented frame, and not a recording.
 HANDLER_ROWS = [
     ("HardFault_Handler", "exception", "hardfault"),
     ("hard_fault_handler", "exception", "hardfault"),
@@ -1526,6 +1546,9 @@ def test_the_end_of_a_step_is_not_read_as_an_error(tmp_path: Path) -> None:
     No tool here steps, so the product documents no name for this stop; what
     it must not do is answer it as an abnormal stop that blocks the session
     or loses what GDB said.
+
+    Manual-shaped: the record is shaped after the GDB manual's Program
+    Execution examples, with an invented frame, and is not a recording.
     """
     stop = stop_reason_of(tmp_path, '*stopped,reason="end-stepping-range",frame={addr="0x08000534",func="main",file="main.c",line="81"},thread-id="1",stopped-threads="all"')
 
