@@ -25,7 +25,9 @@ What the issue found unpinned, in its order:
   USB-free probe refusals recorded from its licensed optional image.
 * every ST-Link and pyOCD phrase the classifier has a bucket for, driven
   through the tool result, the quarantine it opens or refuses, and the
-  remediation it selects.
+  remediation it selects. pyOCD's verify bucket has no row: pyOCD 0.45.1's
+  flash prints no verify line, and ``fixtures/pyocd_failure_recordings.json``
+  lists the phrase under ``not_in_the_package`` (#740).
 * pyOCD's post-flash reset failure as a partial, non-retry-safe result.
 * a debug server that exits before its GDB port is ready, and a GDB that dies
   under a session.
@@ -125,9 +127,6 @@ TARGET_TYPE = {"openocd": None, "pyocd": "stm32f446re", "stlink": None}
 # ST-Link it opened before it gives up on the target.
 STLINK_NO_TARGET_STDOUT = "ST-LINK SN  : STLINK123\n"
 STLINK_NO_TARGET_STDERR = "Error: No STM32 target found!\n"
-# What the issue's own test names for a `--version` that exits 2: the phrase
-# and the status, for the tool that cannot be recorded here.
-STLINK_VERSION_REFUSED = "Error: no such option\n"
 
 # The two strings OpenOCD's embedded `program` proc echoes about a flash that
 # stopped, present in the installed binary (the recording counts them). A
@@ -286,22 +285,24 @@ def log_of(config, result: dict) -> dict:
 # debugger_info and doctor: the version check that does not answer a version.
 
 
-@pytest.mark.parametrize("backend_name", BACKENDS)
+@pytest.mark.parametrize("backend_name", ["openocd", "pyocd"])
 def test_debugger_info_reports_a_failing_version_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_name: str) -> None:
     """A `--version` that exits non-zero is a classified failure, not `ok` with no version.
 
     OpenOCD and pyOCD refuse an option they do not know with the recorded
-    texts (exit 1 and exit 2); STM32CubeProgrammer with the phrase and status
-    the issue names. None of the three words matches any bucket, so the
+    texts (exit 1 and exit 2). Neither text matches any bucket, so the
     backend's own classification is `unknown_debugger_error`, and the public
     error_type is `debugger_error`, the name the debug-session backend already
     gives an unclassified server failure, so a caller reads one word for "the
     debugger failed and its output says no more" wherever it meets it.
+
+    STM32CubeProgrammer has no row here. Its 2.23.0 `--version` exits 0 and
+    prints its version (the `version` recording, replayed below), and what it
+    prints for an option it does not know has not been recorded, so there is
+    no refusal of its own to play until the licensed image captures one
+    (#740).
     """
-    if backend_name == "stlink":
-        play_transcript(monkeypatch, stderr=STLINK_VERSION_REFUSED, returncode=2)
-    else:
-        play_recording(monkeypatch, f"{backend_name}_unknown_option")
+    play_recording(monkeypatch, f"{backend_name}_unknown_option")
     config = config_for(tmp_path, backend_name, FAKE_TRANSCRIPT)
 
     result = call(config, "debugger_info")
@@ -825,9 +826,6 @@ CLASSIFIER_ROWS = [
     ("pyocd", "probe_target", "0000000:ERROR:Error attempting to connect to target\nError: unable to connect to the target\n", "target_not_detected", "in tree"),
     ("pyocd", "probe_target", pyocd_source_line("swd_no_ack"), "target_not_detected", "pyocd source"),
     ("pyocd", "flash_firmware", "0001042 C Target type stm32f446re not recognized. Use 'pyocd list --targets' to see currently available target types. See <https://pyocd.io/docs/target_support.html> for how to install additional target support. [__main__]\n", "target_type_invalid", "in tree"),
-    # No pyOCD 0.45.1 source: its flash prints no verify line at all. The row
-    # keeps the rule's words pinned for a tool that would print them.
-    ("pyocd", "flash_firmware", "0000900 E Verify failed at 0x08000000 [load_cmd]\n", "verify_failed", "rule"),
     ("pyocd", "flash_firmware", pyocd_recording("pyocd_flash_bin_outside_flash")["stderr"], "flash_failed", "recorded"),
     ("pyocd", "flash_firmware", pyocd_source_line("flash_program_page_failure"), "flash_failed", "pyocd source"),
     ("pyocd", "flash_firmware", pyocd_source_line("flash_program_page_timeout"), "flash_failed", "pyocd source"),
@@ -871,7 +869,6 @@ TOOL_RESULT_ROWS = [
     ("stlink", "flash_firmware", {"image_path": "build/firmware.elf"}, cube_failure_recording("flash_bin_outside_flash")["stdout"], "flash_failed", "flash_failed", "quarantined"),
     ("pyocd", "probe_target", {}, "0000000:ERROR:Error attempting to connect to target\nError: unable to connect to the target\n", "target_not_detected", "target_not_detected", "refused"),
     ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, "0001042 C Target type stm32f446re not recognized. Use 'pyocd list --targets' to see currently available target types. See <https://pyocd.io/docs/target_support.html> for how to install additional target support. [__main__]\n", "target_type_invalid", "target_type_invalid", "refused"),
-    ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, "0000900 E Verify failed at 0x08000000 [load_cmd]\n", "verify_failed", "verify_failed", "quarantined"),
     ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, pyocd_recording("pyocd_flash_bin_outside_flash")["stderr"], "flash_failed", "flash_failed", "quarantined"),
     ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, pyocd_source_line("flash_program_page_failure"), "flash_failed", "flash_failed", "quarantined"),
 ]
@@ -1380,10 +1377,16 @@ def test_the_transport_answers_an_exited_gdb_in_its_own_words(tmp_path: Path) ->
 
 # (behaviour of the fake, public stop_reason, whether the stop is abnormal, the
 # public error_type an abnormal stop carries, the exception_type a fault carries,
-# the signal name the stop carries).
+# the signal name the stop carries, None for a stop that carries no signal).
+#
+# The `stop_in_reset_handler` row is the recorded reset: the fake answers it with
+# `reset_halt_to_hardfault` records[0] of fixtures/gdb_mi_stop_recordings.json,
+# which carries no reason and no signal. Every other row is manual-shaped: its
+# stop is one of the fake's GDB_MANUAL_SHAPED_STOPS, shaped after the GDB
+# manual's examples with an invented frame, and not a recording.
 STOP_ROWS = [
     ("stop_exited_normally", "target_exit", False, None, None, None),
-    ("stop_in_reset_handler", "reset", False, None, None, "SIGINT"),
+    ("stop_in_reset_handler", "reset", False, None, None, None),
     ("stop_sigtrap", "unexpected_breakpoint", True, "unexpected_breakpoint", None, "SIGTRAP"),
     ("stop_sigsegv", "exception", True, "target_exception", "sigsegv", "SIGSEGV"),
     ("stop_sigusr1", "signal", False, None, None, "SIGUSR1"),
@@ -1417,6 +1420,8 @@ def test_the_stop_reasons_a_plan_branches_on_come_through_the_fake_gdb(tmp_path:
         assert "exception_type" not in continued["stop"], continued["stop"]
     if signal_name is not None:
         assert continued["stop"]["signal"]["name"] == signal_name, continued["stop"]
+    elif "signal" in continued["stop"]:
+        raise AssertionError("the stop carries a signal block; the row expects none")
     if stop_reason == "unexpected_breakpoint":
         assert continued["stop"]["breakpoint_expected"] is False, continued["stop"]
         assert "debug_clear_breakpoints" in " ".join(continued["suggested_actions"]), continued["suggested_actions"]
@@ -1430,12 +1435,19 @@ def stop_reason_of(tmp_path: Path, line: str) -> dict:
     return sessions._stop_reason_from_gdb(session, stop_result_from_line(line))
 
 
+# Manual-shaped, every row: shaped after the GDB manual's Async Records and
+# Program Execution examples, with invented frames, and none of them a recording.
+# The recorded stops are replayed from fixtures/gdb_mi_stop_recordings.json in
+# test_gdb_mi_recordings.py.
 MI_ROWS = [
     ('*stopped,reason="exited-normally"', "target_exit", None),
     ('*stopped,reason="exited",exit-code="01"', "target_exit", None),
     ('*stopped,reason="signal-received",signal-name="SIGTRAP",signal-meaning="Trace/breakpoint trap",frame={addr="0x08000310",func="assert_failed",file="assert.c",line="9"},thread-id="1",stopped-threads="all"', "unexpected_breakpoint", None),
     ('*stopped,reason="signal-received",signal-name="SIGSEGV",signal-meaning="Segmentation fault",frame={addr="0x08000520",func="main",file="main.c",line="77"},thread-id="1",stopped-threads="all"', "exception", "sigsegv"),
     ('*stopped,reason="signal-received",signal-name="SIGBUS",signal-meaning="Bus error",frame={addr="0x08000520",func="main",file="main.c",line="77"},thread-id="1",stopped-threads="all"', "exception", "sigbus"),
+    # A SIGINT in Reset_Handler: pins that the reset handler is read before the
+    # signal. The recorded reset carries no signal, so no recording covers that
+    # order, and this row stays manual-shaped.
     ('*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={addr="0x080001c0",func="Reset_Handler",file="startup_stm32f446xx.s",line="65"},thread-id="1",stopped-threads="all"', "reset", None),
     ('*stopped,reason="signal-received",signal-name="SIGUSR1",signal-meaning="User defined signal 1",frame={addr="0x08000530",func="main",file="main.c",line="80"},thread-id="1",stopped-threads="all"', "signal", None),
 ]
@@ -1466,6 +1478,9 @@ def halt_in(function: str, source: str) -> str:
 
     GDB puts the path in `file` as the debug information names it, which a
     CMake build makes absolute, and in `fullname` always.
+
+    Manual-shaped: shaped after the GDB manual's Async Records examples, with
+    an invented frame, and not a recording.
     """
     return f'*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={{addr="0x08000520",func="{function}",args=[],file="{source}",fullname="{source}",line="77"}},thread-id="1",stopped-threads="all"'
 
@@ -1498,6 +1513,8 @@ def test_a_halt_in_a_function_named_with_a_handler_word_reads_halted(tmp_path: P
     assert "exception_type" not in stop, stop
 
 
+# Manual-shaped, every row: each is a halt_in() record, shaped after the GDB
+# manual's examples with an invented frame, and not a recording.
 HANDLER_ROWS = [
     ("HardFault_Handler", "exception", "hardfault"),
     ("hard_fault_handler", "exception", "hardfault"),
@@ -1537,6 +1554,9 @@ def test_the_end_of_a_step_is_not_read_as_an_error(tmp_path: Path) -> None:
     No tool here steps, so the product documents no name for this stop; what
     it must not do is answer it as an abnormal stop that blocks the session
     or loses what GDB said.
+
+    Manual-shaped: the record is shaped after the GDB manual's Program
+    Execution examples, with an invented frame, and is not a recording.
     """
     stop = stop_reason_of(tmp_path, '*stopped,reason="end-stepping-range",frame={addr="0x08000534",func="main",file="main.c",line="81"},thread-id="1",stopped-threads="all"')
 
@@ -1923,7 +1943,7 @@ def test_the_three_buckets_grow_no_unscoped_entry(bucket: str) -> None:
     assert remediation_fields(bucket) == {}, bucket
 
 
-# The four transcripts the row table already plays for these pairs, driven here
+# The three transcripts the row table already plays for these pairs, driven here
 # for the one thing the row table cannot assert while the catalogue is silent:
 # that the refusal reaching the operator carries this backend's steps and not an
 # empty field.
@@ -1934,7 +1954,6 @@ def test_the_three_buckets_grow_no_unscoped_entry(bucket: str) -> None:
 # call sites in this file and not one.
 SCOPED_REMEDIATION_ROWS = [
     ("stlink", "", "ST-LINK SN  : STLINK123\nMemory Programming ...\nError: Verify failed at address 0x08000000\n", "verify_failed", "STM32CubeProgrammer"),
-    ("pyocd", "", "0000900 E Verify failed at 0x08000000 [load_cmd]\n", "verify_failed", "pyOCD"),
     ("pyocd", "", pyocd_recording("pyocd_flash_bin_outside_flash")["stderr"], "flash_failed", "pyOCD"),
     ("openocd", f"{PROGRAMMING_FAILED}\n", "Error: failed to write memory at 0x08000000\n", "flash_failed", "OpenOCD"),
 ]

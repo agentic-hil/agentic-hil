@@ -4333,8 +4333,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "verify_failed:pyocd": ErrorRemedy(
         meaning=(
-            "The captured pyOCD output reports a failed verify. pyOCD 0.45.1's flash prints no verify line of its own, "
-            "so the words come from whatever ran it. This service does not independently read "
+            "The captured pyOCD output reports a failed verify. pyOCD does not verify here: the flash this backend "
+            "runs reports `verify: false`, and pyOCD 0.45.1's flash prints no verify line of its own, so the words "
+            "come from whatever ran it. No recorded pyOCD run reaches this entry; it is kept as a guard for a "
+            "transcript that carries such a line anyway. This service does not independently read "
             "flash back, so the transcript alone does not establish what pyOCD compared or how much of the image "
             "reached the device. Treat the image as indeterminate and keep the full transcript under `programmer_output`."
         ),
