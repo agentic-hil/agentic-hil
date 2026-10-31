@@ -4223,18 +4223,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "verify_failed:stlink": ErrorRemedy(
         meaning=(
             "STM32CubeProgrammer wrote the image and then refused to confirm it. The verify is its own step, the `-v` "
-            "this backend passes after `-w`, and it read the flash back and found it different from the file: "
-            "`Error: Verify failed at address <address>` is the line that says so, and the whole transcript travels "
-            "with the result under `programmer_output`.\n\n"
+            "this backend passes after `-w`, and it read the target's memory back and found it different from the "
+            "file. On the legacy verify path the CLI takes for files under 32KB, which it announces as "
+            "`File size < 32KB legacy verify will be used`, STM32CubeProgrammer 2.23.0 says so in two lines: "
+            "`Error: Data mismatch found at address  <address> (byte = <read> instead of <expected>)`, then "
+            "`Error: Download verification failed`. A larger image may take another verify path, whose words have "
+            "not been recorded. The whole transcript travels with the result under `programmer_output`.\n\n"
             "The write happened. This is not one of the refusals that promise the target was never touched: the board "
             "holds an image nothing has vouched for, and how much of it is the file that was flashed is exactly what "
             "the failed verify declined to say."
         ),
         remediation=(
             "Read `programmer_output.stdout` before anything else. It is the programmer's own account of what it "
-            "erased, wrote and verified, and the address in `Error: Verify failed at address <address>` places the "
-            "mismatch inside the image, which is what separates a write that never landed from one sector that would "
-            "not take it.",
+            "erased, wrote and verified. The Data mismatch line carries the address, the byte read back from the "
+            "target and the byte the file holds there, in that order. The address places the mismatch inside the "
+            "image, which is what separates a write that never landed from one sector that would not take it. Check "
+            "the address against the part's memory map too, because an image can place data outside flash, in RAM a "
+            "write does change as well as at locations that are read-only. Only a read-only location, such as the "
+            "Cortex-M CPUID register at 0xE000ED00 where this failure was recorded, means the write could not take "
+            "effect there at all.",
             "If the mismatch is at or near the start of the image, ask whether the core was running while the "
             "programmer wrote. STM32CubeProgrammer connects hot plug here unless it is told otherwise, and a core "
             "executing out of the flash being written corrupts the write rather than refusing it. Setting "
