@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
+import support
 import yaml
 from conftest import (
     DEFAULT_TEST_PERMISSIONS,
@@ -11707,7 +11708,10 @@ time.sleep(30)
         terminate_process_tree(child, 1.0)
 
         assert child.poll() is not None
-        assert not pid_alive(descendant_pid)
+        # Ended, not absent: the descendant was orphaned when the leader took
+        # SIGTERM, so it can stay a zombie until init or a subreaper collects
+        # it, and the pid answers `os.kill(pid, 0)` until then (#746).
+        support.wait_until_process_ended(descendant_pid, scaled_time_bound(5))
     finally:
         if child.poll() is None:
             child.kill()
@@ -11731,7 +11735,13 @@ publish_atomically(sys.argv[1], str(descendant.pid))
 
         terminate_process_tree(child, 1.0)
 
-        assert not pid_alive(descendant_pid)
+        # Ended, not absent. The teardown returns once the group holds nothing
+        # but zombies (#485), and this descendant, orphaned when the leader
+        # exited, is init's or a subreaper's to collect. Until that reaper runs
+        # the pid still answers `os.kill(pid, 0)`. An assertion inside that
+        # moment is the working hypothesis for this node's one failure under
+        # load (#746), whose exception was never read.
+        support.wait_until_process_ended(descendant_pid, scaled_time_bound(5))
     finally:
         if child.poll() is None:
             child.kill()
