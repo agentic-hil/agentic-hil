@@ -4266,6 +4266,78 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "flashing outright, and it answers a question about one address by erasing the whole device.",
         ),
     ),
+    # Written once a failed download had been recorded for each of its two causes
+    # (stm32cubeprogrammer_2_23_0_failure_recordings.json, #743): a raw binary past
+    # the end of a NUCLEO-F446RE's flash under reset, and a NUCLEO-H533RE whose
+    # core was running from the flash being written under hot plug and whose
+    # immediate retry programmed. Both recordings end in the same two `Error:`
+    # lines, so every step has to be true whichever of them the reader has. The
+    # bucket also takes a flash whose transcript carries only a generic failure
+    # word (stlink.py `_classify_output`), so what the entry says about printed
+    # lines is said of the recordings, and what it concludes from a line holds
+    # only where the reader finds that line.
+    "flash_failed:stlink": ErrorRemedy(
+        meaning=(
+            "STM32CubeProgrammer's flash did not finish: the backend read a failed download, or another failure line, "
+            "out of the CLI's transcript. The whole transcript travels with the result under `programmer_output`, and "
+            "which lines the CLI printed is in it and nowhere else.\n\n"
+            "Two failed downloads were recorded, and both ended in the same two lines, `Error: failed to download  "
+            "Sector[0]` and then `Error: failed to download the File`. One was an image, or a `.bin` written at its "
+            "configured address, that lay outside the part's flash: a raw binary based past the end of a "
+            "NUCLEO-F446RE's flash, recorded under reset. The other was a core executing out of the flash being "
+            "written while the programmer connected hot plug: on a NUCLEO-H533RE whose previous firmware was running "
+            "from flash, the first flash of a valid image failed this way and the immediate retry of the same call "
+            "programmed and verified. Those words alone do not tell the two causes apart.\n\n"
+            "Nothing is confirmed about the flash. Both recordings printed `Download in Progress` before their errors, "
+            "a line this programmer prints once the erase for the segment is behind it, and on the NUCLEO-H533RE that "
+            "erase covered sectors [0 1]. Where the transcript carries that line, the board may hold a partially erased "
+            "or partially written image rather than either the old one or the new one; where it does not, the "
+            "transcript does not place the failure, and the image is no more confirmed for that."
+        ),
+        remediation=(
+            "Read `programmer_output.stdout` before anything else; it says which lines STM32CubeProgrammer printed. If "
+            "it ends in the two recorded `Error: failed to download` lines, those are the same for both recorded "
+            "causes, so what separates them is the banner and the header above them: `Connect mode:` says how the "
+            "programmer attached, `NVM size` how much flash the part reports, and `Address` and `Size` under `Memory "
+            "Programming` where the image was to go and how large it is. The log the result names by `log_path` holds "
+            "the command line the backend ran, the address after the file for a `.bin` included.",
+            "Check that the image fits the part's flash before anything else is tried. The flash begins at the part's "
+            "flash base, 0x08000000 on both recorded parts, and is `NVM size` long, so `Address` plus `Size` has to end "
+            "inside it. An ELF carries its own load address, and a wrong one is a linker script written for another "
+            "part. A raw `.bin` is written at `debuggers.<name>.flash_address`, the value the `Address` line and the "
+            "logged command line show; `project_config_set` does not write that key, so report the wrong value and the "
+            "right one to the operator, whose edit of the configuration it is. If the image does not fit, a retry "
+            "cannot fix it and neither can another connect mode: the out-of-range recording was already made under "
+            "reset.",
+            "If the image fits and the banner reads `Connect mode: Hot Plug`, retry the flash once with nothing changed. "
+            "A core still executing from the flash being written can defeat a hot-plug download, and on the bench this "
+            "was recorded on the immediate retry programmed and verified. The durable fix for that cause is connecting "
+            "under reset for the flash: set `debuggers.<name>.connect_mode` to `under_reset` (STM32CubeProgrammer's "
+            "`mode=UR`) with `project_config_set`, which needs the probe's reset line wired to the target's NRST, and "
+            "put it in force with `project_config_reload_description` or a server restart.",
+            "If the image fits and the flash fails the same way once more, look past the two recorded causes as well "
+            "as at them: a hot-plug failure may simply have happened twice, and one recorded success on the next "
+            "attempt does not rule that out. Ask the device what it refuses rather than guessing: read the option "
+            "bytes with STM32CubeProgrammer yourself (`-ob displ`) and look for write protection or a read-out "
+            "protection level over the sectors the image covers. That is a further question, not a recorded cause of "
+            "these words.",
+            "Treat the board as holding an indeterminate image until a flash programs and verifies, whatever the "
+            "transcript shows. If `Download in Progress` appears in it, the segment's sectors may already be erased or "
+            "partly written; if it does not, nothing in the transcript says they were left alone. A reflash writes over "
+            "an unknown image rather than a clean one.",
+        ),
+        do_not=(
+            "Do not take the `Error:` lines, or one retry that succeeded, as having identified the cause. Both recorded "
+            "causes printed the same words, and a retry that programs says the image fits, not which of the two "
+            "stopped the first attempt.",
+            "Do not read this as a reset problem. The banner's `Reset mode` line describes the connect rather than a "
+            "failure, and re-seating the reset line or power-cycling on that theory changes nothing about a stopped "
+            "download.",
+            "Do not grant `allow_mass_erase` to force the image through. That permission makes this service refuse "
+            "flashing outright, and it answers a question about an address or a running core by erasing the whole "
+            "device.",
+        ),
+    ),
     "verify_failed:pyocd": ErrorRemedy(
         meaning=(
             "The captured pyOCD output reports a failed verify. pyOCD does not verify here: the flash this backend "

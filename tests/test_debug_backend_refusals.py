@@ -40,6 +40,8 @@ What the issue found unpinned, in its order:
 
 from __future__ import annotations
 
+import copy
+import itertools
 import json
 import os
 import re
@@ -103,8 +105,10 @@ PYOCD_FAILURES = json.loads((FIXTURES / "pyocd_failure_recordings.json").read_te
 # input file that does not exist, by hand, because the product refuses a missing
 # image before it starts the CLI (#516), on the reference NUCLEO-F446RE; a
 # `probe_target` and a halt reset with the probe's USB port powered off (#737),
-# and a flash whose verify fails at a read-only register (#738), on a
-# NUCLEO-H533RE behind an STLINK-V3.
+# a flash whose verify fails at a read-only register (#738), and a hot-plug
+# flash that failed while the previous firmware ran from flash with the retry
+# that programmed and verified 18 s later (#743), on a NUCLEO-H533RE behind an
+# STLINK-V3.
 CUBE_FAILURES = json.loads((FIXTURES / "stm32cubeprogrammer_2_23_0_failure_recordings.json").read_text(encoding="utf-8"))
 # The verify failure, looked up by the tests that replay it rather than when the
 # module is imported, so that a fixture without it fails those tests alone.
@@ -168,6 +172,9 @@ def cube_recording(name: str) -> dict:
 
 
 def cube_failure_recording(name: str) -> dict:
+    """One CubeProgrammer failure recording, or a failure that names the one the fixture does not hold."""
+    if name not in CUBE_FAILURES["recordings"]:
+        raise AssertionError(f"the CubeProgrammer failure recordings hold no {name}")
     return CUBE_FAILURES["recordings"][name]
 
 
@@ -1738,7 +1745,177 @@ OWED_SCOPED_ENTRIES = [
     # a bare `program` is satisfied by an entry that never names the command.
     ("flash_failed", "openocd", "OpenOCD", "flash", ("target_cfg", "bank", "`program`")),
     ("memory_read_failed", "pyocd", "pyOCD", "read", ("probe", "halt", "address", "memory")),
+    # Written once a failed download was recorded for each of its two causes
+    # (#743): an image past the end of flash under reset, and a core running
+    # from flash under hot plug. The words are the same, so the steps name the
+    # connect the banner reports and the flash size it reports beside it.
+    ("flash_failed", "stlink", "STM32CubeProgrammer", "flash", ("connect_mode", "hot plug", "under_reset", "nvm size", "flash_address")),
 ]
+
+# Advice is read clause by clause. A clause that names a retry or under_reset
+# offers it unless the negation in that same clause governs the action: "do not
+# switch to under_reset", "a retry cannot fix it". A negation in another clause
+# of the sentence decides nothing about it, whether that clause is a condition
+# ("if the image does not fit, retry", "under_reset if that does not work"), a
+# qualifier ("retry without checking the address") or an unrelated instruction
+# ("do not use a different image, but ... retry").
+RETRY_ADVICE = re.compile(r"\b(retry|retries|again)\b", re.IGNORECASE)
+UNDER_RESET_ADVICE = re.compile(r"under_reset|mode=UR\b")
+OUT_OF_RANGE_CAUSE = re.compile(r"(outside|past the end of|beyond|does not fit|doesn't fit|out of range)", re.IGNORECASE)
+CLAUSE_JOIN = re.compile(r"[,;:]|\s+(?:but|and|or|if|unless|when|then)\s+", re.IGNORECASE)
+NEGATED_BEFORE_ACTION = re.compile(r"\b(do not|don't|never|not|cannot|can't|no)\s+(\w+\s+){0,2}(retry|retries|again|switch|set|use)\b", re.IGNORECASE)
+NEGATED_AFTER_ACTION = re.compile(
+    r"(\b(retry|retries|again)\b|under_reset|mode=UR\b).*?\b(cannot|can't|will not|won't|does not|doesn't|do not|did not|never)\s+(\w+\s+)?(fix|help|cure|change|succeed|work)\b",
+    re.IGNORECASE,
+)
+
+
+def step_sentences(text: str) -> list[str]:
+    return [sentence for sentence in re.split(r"(?<=[.;])\s+", text) if sentence.strip()]
+
+
+def offers_an_action(clause: str) -> bool:
+    """A clause naming a retry or under_reset whose own negation does not decline it."""
+    if not (RETRY_ADVICE.search(clause) or UNDER_RESET_ADVICE.search(clause)):
+        return False
+    return not (NEGATED_BEFORE_ACTION.search(clause) or NEGATED_AFTER_ACTION.search(clause))
+
+
+def advice_clauses(sentence: str) -> list[str]:
+    """The clauses of one sentence that offer a retry or under_reset."""
+    return [clause for clause in CLAUSE_JOIN.split(sentence) if offers_an_action(clause)]
+
+
+def advice_sentences(text: str) -> list[str]:
+    """The sentences with at least one clause that offers a retry or under_reset."""
+    return [sentence for sentence in step_sentences(text) if advice_clauses(sentence)]
+
+
+def the_flash_failed_stlink_steps_hold_for_both_recorded_causes(entry: dict) -> None:
+    """The steps have to be true for both recordings, which print the same words (#743).
+
+    `flash_bin_outside_flash` was recorded under reset, so under_reset is no fix
+    for an image that does not fit, and a retry of it fails the same way. The
+    H533RE failure was a core running from flash under hot plug, where the
+    immediate retry programmed and verified. An entry that told the reader to
+    switch to under_reset and retry, whatever the transcript showed, would read
+    well and be wrong for the first recording.
+    """
+    meaning = entry["meaning"]
+    steps = entry["remediation"]
+    everything = " ".join([meaning, *steps, *entry.get("do_not", [])])
+
+    # Both recorded causes, in the meaning.
+    assert re.search(r"(outside|past the end of|beyond|does not fit|doesn't fit)[^.]*flash", meaning, re.IGNORECASE), meaning
+    assert re.search(r"(running|executing)\b[^.]*\b(from|out of)\b[^.]*flash", meaning, re.IGNORECASE), meaning
+    assert re.search(r"hot[ -]?plug", meaning, re.IGNORECASE), meaning
+    # The words do not tell them apart, and the entry says so.
+    assert "failed to download" in everything, everything
+    assert re.search(r"(\bnot\b|\bcannot\b|n't\b)[^.]*\b(tell|separate|distinguish)", everything, re.IGNORECASE), everything
+    # Whether the image fits is asked before any retry is offered.
+    fit_steps = [index for index, step in enumerate(steps) if re.search(r"nvm size|flash_address", step, re.IGNORECASE)]
+    retry_steps = [
+        index for index, step in enumerate(steps) if any(RETRY_ADVICE.search(clause) for sentence in step_sentences(step) for clause in advice_clauses(sentence))
+    ]
+    assert fit_steps, steps
+    assert retry_steps, steps
+    assert min(fit_steps) < min(retry_steps), (fit_steps, retry_steps, steps)
+    # A retry, and under_reset, are offered only for an image that fits under a
+    # hot-plug connect, and never for the out-of-range cause, which was recorded
+    # under reset and which no retry changes: a sentence that names that cause
+    # may decline the action, but no clause of it may offer one.
+    for step in steps:
+        advised = advice_sentences(step)
+        if advised:
+            assert re.search(r"hot[ -]?plug", step, re.IGNORECASE), step
+            assert re.search(r"\bfits?\b|\bwithin\b|\binside\b", step, re.IGNORECASE), step
+        for sentence in advised:
+            assert not OUT_OF_RANGE_CAUSE.search(sentence), sentence
+    # The board holds an image nothing has vouched for until a flash programs and verifies.
+    assert any(re.search(r"indeterminate|unknown|unconfirmed", step, re.IGNORECASE) and re.search(r"verif", step, re.IGNORECASE) for step in steps), steps
+
+
+# What an entry has to say beyond its subjects, where the recordings decide it.
+ENTRY_CONTENT_CHECKS = {"flash_failed:stlink": the_flash_failed_stlink_steps_hold_for_both_recorded_causes}
+
+
+# The check above reaches the real entry only once the catalogue has one, so it
+# is held here to synthetic entries: one written to the decided content, which it
+# has to accept, and the advice that contradicts the out-of-range recording,
+# which it has to refuse. None of these is the product's text.
+SYNTHETIC_FLASH_FAILED_STLINK = {
+    "meaning": (
+        "STM32CubeProgrammer stopped the download with `Error: failed to download  Sector[0]` and `Error: failed to "
+        "download the File`. Two recorded causes print these same words: an image or a `.bin` address outside the "
+        "part's flash, recorded under reset, and a core executing from the flash being written under hot plug, where "
+        "the immediate retry programmed and verified. The words alone do not tell the two causes apart."
+    ),
+    "remediation": [
+        "Read `programmer_output.stdout` first: its `Connect mode:`, `NVM size`, `Address` and `Size` lines are what "
+        "separate the two causes.",
+        "Check that the image fits the part's flash: compare `Address` and `Size` with `NVM size`, and for a `.bin` "
+        "check `debuggers.<name>.flash_address`. If it does not fit, a retry cannot fix it.",
+        "If the image fits and the banner reads `Connect mode: Hot Plug`, retry once without changing the image. The "
+        "durable fix is `debuggers.<name>.connect_mode` set to `under_reset` (the CLI's `mode=UR`) through "
+        "`project_config_set`, which needs NRST wired and takes effect after `project_config_reload_description` or a "
+        "restart.",
+        "Treat the image as indeterminate until a flash programs and verifies.",
+    ],
+    "do_not": [
+        "Do not read this as a reset problem.",
+        "Do not grant `allow_mass_erase`.",
+        "Do not take the error words, or one successful retry, as having identified the cause.",
+    ],
+}
+# The step that offers the retry and under_reset, which each counterexample is
+# written into, so the hot-plug and fit words of that step cannot excuse it.
+HOT_PLUG_STEP = 2
+
+
+def synthetic_entry(*, append_to_hot_plug_step: str = "", append_to_fit_step: str = "", replace_hot_plug_step: str = "") -> dict:
+    entry = copy.deepcopy(SYNTHETIC_FLASH_FAILED_STLINK)
+    steps = entry["remediation"]
+    if replace_hot_plug_step:
+        steps[HOT_PLUG_STEP] = replace_hot_plug_step
+    if append_to_hot_plug_step:
+        steps[HOT_PLUG_STEP] += " " + append_to_hot_plug_step
+    if append_to_fit_step:
+        steps[1] += " " + append_to_fit_step
+    return entry
+
+
+ACCEPTED_FLASH_FAILED_STLINK = {
+    "decided_content": synthetic_entry(),
+    "a_declined_under_reset_for_the_out_of_range_cause": synthetic_entry(
+        append_to_fit_step="Do not switch to under_reset for an image outside flash: that recording was already made under reset."
+    ),
+    "under_reset_as_the_fallback_if_the_retry_does_not_work": synthetic_entry(
+        replace_hot_plug_step="If the image fits and the banner reads `Connect mode: Hot Plug`, retry once, and switch connect_mode to under_reset if that does not work."
+    ),
+}
+REJECTED_FLASH_FAILED_STLINK = {
+    "under_reset_and_retry_for_an_image_that_does_not_fit": synthetic_entry(
+        append_to_hot_plug_step="If the image does not fit flash, switch to under_reset and retry."
+    ),
+    "under_reset_and_retry_for_an_image_outside_flash": synthetic_entry(
+        append_to_hot_plug_step="For an image outside flash, switch to under_reset and retry without checking the address."
+    ),
+    "an_unconditional_under_reset_retry": synthetic_entry(replace_hot_plug_step="Set `debuggers.<name>.connect_mode` to `under_reset` and retry the flash."),
+    "an_unrelated_negation_beside_under_reset_and_retry_for_an_image_outside_flash": synthetic_entry(
+        append_to_hot_plug_step="Do not use a different image, but for an image outside flash switch to under_reset and retry."
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(ACCEPTED_FLASH_FAILED_STLINK))
+def test_the_flash_failed_stlink_content_check_accepts_advice_true_for_both_causes(name: str) -> None:
+    the_flash_failed_stlink_steps_hold_for_both_recorded_causes(ACCEPTED_FLASH_FAILED_STLINK[name])
+
+
+@pytest.mark.parametrize("name", sorted(REJECTED_FLASH_FAILED_STLINK))
+def test_the_flash_failed_stlink_content_check_refuses_advice_the_out_of_range_recording_contradicts(name: str) -> None:
+    with pytest.raises(AssertionError):
+        the_flash_failed_stlink_steps_hold_for_both_recorded_causes(REJECTED_FLASH_FAILED_STLINK[name])
 
 
 @pytest.mark.parametrize(
@@ -1764,9 +1941,10 @@ def test_each_bucket_the_catalogue_left_unanswered_has_its_own_backend_scoped_en
     """
     key = f"{bucket}:{backend_name}"
 
-    assert key in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
     fields = remediation_fields(bucket, backend_name)
-    assert fields.get("remediation"), key
+    if not fields.get("remediation"):
+        raise AssertionError(f"the catalogue hands {key} no remediation")
+    assert key in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
     entry = catalogue_entry(key)
     assert entry["error_type"] == bucket, entry
     assert entry["scope"] == backend_name, entry
@@ -1783,9 +1961,12 @@ def test_each_bucket_the_catalogue_left_unanswered_has_its_own_backend_scoped_en
     erase = remediation_fields("flash_erase_failed", backend_name)
     assert erase.get("remediation"), backend_name
     assert fields["remediation"] != erase["remediation"], key
+    content_check = ENTRY_CONTENT_CHECKS.get(key)
+    if content_check is not None:
+        content_check(entry)
 
 
-SHARED_BUCKETS = {"verify_failed": ("stlink", "pyocd"), "flash_failed": ("pyocd", "openocd")}
+SHARED_BUCKETS = {"verify_failed": ("stlink", "pyocd"), "flash_failed": ("pyocd", "openocd", "stlink")}
 
 
 @pytest.mark.parametrize("bucket", sorted(SHARED_BUCKETS))
@@ -1796,20 +1977,21 @@ def test_the_two_backends_that_share_a_bucket_do_not_share_its_steps(bucket: str
     two backends may not warn against the same thing, and the three
     `flash_erase_failed` entries show `do_not` lists across backends legitimately
     opening with one sentence, so a check over `do_not` would be a gate this
-    design never asked for.
+    design never asked for. A bucket three backends answer is held pair by
+    pair, so no two of them say the same thing.
     """
-    first_backend, second_backend = SHARED_BUCKETS[bucket]
-    first = remediation_fields(bucket, first_backend)
-    second = remediation_fields(bucket, second_backend)
+    fields: dict[str, dict] = {}
+    for backend_name in SHARED_BUCKETS[bucket]:
+        fields[backend_name] = remediation_fields(bucket, backend_name)
+        if not fields[backend_name].get("remediation"):
+            raise AssertionError(f"the catalogue hands {bucket}:{backend_name} no remediation")
 
-    assert first.get("remediation"), (bucket, first_backend)
-    assert second.get("remediation"), (bucket, second_backend)
-    assert first["remediation"] != second["remediation"], bucket
+    for first_backend, second_backend in itertools.combinations(SHARED_BUCKETS[bucket], 2):
+        assert fields[first_backend]["remediation"] != fields[second_backend]["remediation"], (bucket, first_backend, second_backend)
 
 
 SILENT_PAIRS = [
     ("verify_failed", "openocd"),
-    ("flash_failed", "stlink"),
     ("memory_read_failed", "stlink"),
     ("memory_read_failed", "openocd"),
 ]
@@ -1884,6 +2066,37 @@ def test_a_failed_verify_or_flash_hands_the_operator_that_tools_own_steps(tmp_pa
     # entry for these buckets, and a result carrying one would mean somebody
     # wrote the generic entry this design decided against.
     assert remediation_fields(error_type) == {}, error_type
+
+
+# The two recorded failed downloads (#743): a raw binary past the end of a
+# NUCLEO-F446RE's flash under reset, and a valid image on a NUCLEO-H533RE whose
+# core was running from the flash being written under hot plug. They print the
+# same `Error:` lines, so one entry answers both, and both are driven here
+# through the product rather than one standing in for the other. The name is
+# looked up inside the test, so a fixture without it fails this test alone.
+CUBE_DOWNLOAD_FAILURES = ["flash_bin_outside_flash", "flash_elf_hotplug_core_running_from_flash"]
+
+
+@pytest.mark.parametrize("name", CUBE_DOWNLOAD_FAILURES, ids=CUBE_DOWNLOAD_FAILURES)
+def test_a_failed_cubeprogrammer_download_hands_the_operator_its_steps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Each recorded failed download is `flash_failed`, leaves the effect unconfirmed, and carries the stlink steps."""
+    transcript = cube_failure_recording(name)
+    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+    assert STLinkBackend(config)._classify_output(transcript["stdout"] + transcript["stderr"], "flash_firmware") == "flash_failed"
+    play_transcript(monkeypatch, stdout=transcript["stdout"], stderr=transcript["stderr"], returncode=transcript["returncode"])
+
+    result = call(config, "flash_firmware", {"image_path": "build/firmware.elf"})
+
+    assert result["ok"] is False, result
+    assert result["backend_error_type"] == "flash_failed", result
+    assert result["error_type"] == "flash_failed", result
+    assert result["programmer_output"]["stdout"] == transcript["stdout"], result["programmer_output"]
+    assert_effect_unconfirmed(result)
+    steps = remediation_fields("flash_failed", "stlink").get("remediation")
+    if not steps or result.get("remediation") != steps:
+        raise AssertionError(f"a failed STM32CubeProgrammer download ({name}) reached the operator without the flash_failed:stlink steps")
+    assert any("STM32CubeProgrammer" in step for step in steps), steps
+    assert remediation_fields("flash_failed") == {}
 
 
 # pyOCD's own defaults for the two options the `flash_failed:pyocd` steps put to

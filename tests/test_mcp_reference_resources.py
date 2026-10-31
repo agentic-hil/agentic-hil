@@ -876,6 +876,9 @@ SCOPED_ENTRIES_PER_TOOL = [
     ("flash_failed", "pyocd"),
     ("flash_failed", "openocd"),
     ("memory_read_failed", "pyocd"),
+    # Written once STM32CubeProgrammer's failed download was recorded for both
+    # of its causes (#743).
+    ("flash_failed", "stlink"),
 ]
 
 
@@ -883,7 +886,7 @@ def test_the_reference_serves_a_per_tool_entry_for_verify_flash_and_memory_read(
     """The other of the two channels that can answer a caller with no source tree.
 
     The remediation on the result and the reference read one catalogue, so these
-    five arrive here the moment they exist; what this pins is that they are
+    six arrive here the moment they exist; what this pins is that they are
     listed under their own scope, readable one by one through the template, and
     that no unscoped entry was added beside them, which every backend without a
     scoped entry would then be given by the fallback.
@@ -892,7 +895,8 @@ def test_the_reference_serves_a_per_tool_entry_for_verify_flash_and_memory_read(
     by_key = {(entry["error_type"], entry.get("scope")): entry for entry in catalogue["entries"]}
 
     for error_type, scope in SCOPED_ENTRIES_PER_TOOL:
-        assert (error_type, scope) in by_key, sorted(key for key in by_key if key[0] == error_type)
+        if (error_type, scope) not in by_key:
+            raise AssertionError(f"the errors reference lists no {error_type}:{scope}")
         served = by_key[(error_type, scope)]
         assert served["meaning"].strip(), served
         assert served["remediation"], served
