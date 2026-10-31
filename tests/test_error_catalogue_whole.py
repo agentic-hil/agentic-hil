@@ -986,9 +986,6 @@ SILENT_REASON = (
 )
 
 EXCLUDED: dict[Pair, Exclusion] = {
-    ("flash_failed", "stlink"): Exclusion(
-        SILENT_REASON, frozenset({("backends.stlink", "STLinkBackend._failure_result"), ("backends.stlink", "STLinkBackend.info")}), check_silent(("flash_failed", "stlink"))
-    ),
     ("memory_read_failed", "openocd"): Exclusion(
         SILENT_REASON, frozenset({("backends.gdbdebug", "GdbDebugSessions._read_memory_bytes")}), check_silent(("memory_read_failed", "openocd"))
     ),
@@ -1097,7 +1094,12 @@ def unresolved(inventory: Inventory, service: AgenticHILToolService) -> dict[Pai
 
 
 def described(missing: Mapping[Pair, frozenset[tuple[str, str, int]]]) -> str:
-    return "\n".join(f"{error_type}:{scope} written at {sorted(sites)}" if scope else f"{error_type} written at {sorted(sites)}" for (error_type, scope), sites in missing.items())
+    """Each pair with the functions that write it; the line numbers move with every edit and are left out."""
+    lines = []
+    for (error_type, scope), sites in missing.items():
+        written_at = sorted({(module, function) for module, function, _line in sites})
+        lines.append(f"{error_type}:{scope} written at {written_at}" if scope else f"{error_type} written at {written_at}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1107,7 +1109,8 @@ def described(missing: Mapping[Pair, frozenset[tuple[str, str, int]]]) -> str:
 def test_every_type_the_package_writes_resolves_at_its_reference_uri(reference: AgenticHILToolService) -> None:
     missing = unresolved(scanned(), reference)
 
-    assert not missing, "no entry, scoped or bare, for:\n" + described(missing)
+    if missing:
+        raise AssertionError("no entry, scoped or bare, for:\n" + described(missing))
 
 
 def test_the_reference_answers_every_pair_as_the_lookup_does(reference: AgenticHILToolService) -> None:
