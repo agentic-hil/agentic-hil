@@ -9,7 +9,7 @@ import os
 import re
 import shutil
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -399,6 +399,88 @@ def _windows_process_is_running(pid: int) -> bool:
         return wait_for_object(handle, 0) != _WINDOWS_WAIT_OBJECT_0
     finally:
         close_handle(handle)
+
+
+# The process states procfs gives a process that has ended: a zombie, and one
+# whose entry is being torn down at the moment it is read.
+_ENDED_STATES = ("Z", "X")
+_UNREADABLE_STATE = "unknown (its /proc stat could not be read)"
+
+
+def wait_until_process_ended(
+    pid: int,
+    timeout_s: float,
+    *,
+    signal_probe: Callable[[int, int], object] | None = None,
+    read_stat: Callable[[int], str] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Wait until `pid` runs nothing any more, or fail naming the state it was left in.
+
+    Ended is the meaning #485 settled for the product's own teardown: a process
+    the kernel no longer knows, or one that is a zombie. A zombie runs nothing
+    and holds nothing, and `terminate_process_tree` returns as soon as every
+    member of the group it ended is one. A descendant orphaned by a leader that
+    exited first is not this process's to collect, though, so it stays a zombie
+    until init or a subreaper waits for it, and `os.kill(pid, 0)` succeeds on it
+    for that whole moment. Asking "does the pid exist" right after the teardown
+    therefore asked how fast somebody else's reaper was. That is the working
+    hypothesis for the one failure of #746, whose exception was never read, not
+    an observed cause; the question was the wrong one either way. So the state
+    is read out of `/proc/<pid>/stat`, split
+    after the command name's last parenthesis as `agentic_hil.process` reads it,
+    and a `Z` or `X` there counts as ended.
+
+    A host without that file, macOS among them, cannot tell a zombie from a
+    running process, so there an unreadable stat counts as still running and
+    the wait lasts until the reaper has been past and the probe answers that the
+    pid is gone. `timeout_s` is what that wait is allowed; a process still
+    running at the end of it fails, naming the pid and the last state seen.
+
+    This is not `process_is_running`, and must not become it: that one decides
+    whether a directory may be deleted from under its owner, so every uncertain
+    answer there is "running", a zombie included.
+
+    The probes are parameters so the decision can be driven without a process.
+    The default signal probe is `os.kill`, which is not a probe on Windows (see
+    `_WINDOWS_SYNCHRONIZE` above), so a caller there has to pass its own.
+    """
+    if signal_probe is None:
+        if os.name == "nt":
+            raise RuntimeError("wait_until_process_ended needs a signal_probe on Windows, where os.kill terminates the process")
+        signal_probe = os.kill
+    if read_stat is None:
+        read_stat = _read_proc_stat
+    deadline = clock() + timeout_s
+    while True:
+        state = _process_state(pid, signal_probe, read_stat)
+        if state is None or state in _ENDED_STATES:
+            return
+        if clock() >= deadline:
+            raise AssertionError(f"pid {pid} was still running after {timeout_s:g}s, last seen in state {state}")
+        sleep(0.02)
+
+
+def _process_state(pid: int, signal_probe: Callable[[int, int], object], read_stat: Callable[[int], str]) -> str | None:
+    """The state letter `pid` is in, None once the kernel no longer knows it."""
+    try:
+        signal_probe(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        # Somebody else's process under the same number: present, and judged by
+        # its state like any other.
+        pass
+    try:
+        return read_stat(pid).rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return _UNREADABLE_STATE
+
+
+def _read_proc_stat(pid: int) -> str:
+    with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+        return handle.read()
 
 
 REDACTED_VALUE = "[redacted]"
