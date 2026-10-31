@@ -74,6 +74,14 @@ START_TIMEOUT_S = 10.0
 # command timed out instead of the hanging one, and the run reported the wrong
 # phase. These two tests then failed in a full suite run and passed alone.
 TIMEOUT_TEST_CAP_S = 2.0
+# The bench's GDB/MI stop recording, the one the fake's HardFault stops replay.
+GDB_MI_STOP_RECORDINGS = Path(__file__).parent / "fixtures" / "gdb_mi_stop_recordings.json"
+
+
+def recorded_gdb_stop(scenario: str, index: int) -> str:
+    """One `*stopped` record of the bench recording, exactly as GDB printed it."""
+    recordings = json.loads(GDB_MI_STOP_RECORDINGS.read_text(encoding="utf-8"))["recordings"]
+    return next(case for case in recordings if case["scenario"] == scenario)["records"][index]
 
 
 def artifact_bytes(fake_gdb_behavior: str | None = None, elf_symbols: list[tuple] | None = None, big_endian: bool = False) -> bytes:
@@ -204,7 +212,7 @@ def test_debug_continue_reports_target_exception_context(tmp_path: Path) -> None
 
 def test_debug_session_log_retains_actual_mi_stop_line_and_does_not_fabricate_one(tmp_path: Path) -> None:
     service = debug_service(tmp_path, fake_gdb_behavior="hardfault")
-    expected_stop = '*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={addr="0x08000400",func="HardFault_Handler",args=[],file="startup.c",fullname="/work/startup.c",line="88"},thread-id="1",stopped-threads="all"'
+    expected_stop = recorded_gdb_stop("reset_halt_to_hardfault", 2)
     try:
         assert start_debug_session(service)["ok"] is True
         continued = service.call("debug_continue", {"timeout_s": 5})
@@ -213,14 +221,16 @@ def test_debug_session_log_retains_actual_mi_stop_line_and_does_not_fabricate_on
 
         log_path = tmp_path / continued["log_path"]
         recorded = json.loads(log_path.read_text(encoding="utf-8"))
-        assert recorded["gdb_stop_records"] == [expected_stop]
+        if recorded["gdb_stop_records"] != [expected_stop]:
+            raise AssertionError("the session log does not hold reset_halt_to_hardfault records[2] as the stop GDB reported")
 
         already_stopped = service.call("debug_continue", {"timeout_s": 5})
         assert already_stopped["error_type"] == "target_exception", already_stopped
         assert already_stopped["summary"] == "Target is already stopped: exception."
         assert "gdb_stop_records" not in already_stopped
         recorded_again = json.loads(log_path.read_text(encoding="utf-8"))
-        assert recorded_again["gdb_stop_records"] == [expected_stop]
+        if recorded_again["gdb_stop_records"] != [expected_stop]:
+            raise AssertionError("the session log does not hold reset_halt_to_hardfault records[2] as the stop GDB reported")
     finally:
         service.close()
 
@@ -258,6 +268,16 @@ def test_debug_start_records_async_exception_stop(tmp_path: Path) -> None:
         assert status["target_ok"] is False
         assert status["target_error_type"] == "target_exception"
         assert status["session"]["stop_reason"]["stop_reason"] == "exception"
+
+        # The recorded attach stop carries no reason and no signal: the fault is
+        # named from the handler alone, and the log keeps the record as printed.
+        if started["session"]["stop_reason"]["backend_stop_reason"] != "unknown":
+            raise AssertionError("the attach stop names a backend reason; attach_hardfault records[0] carries none")
+        if "signal" in started["session"]["stop_reason"]:
+            raise AssertionError("the attach stop carries a signal block; attach_hardfault records[0] carries none")
+        log = json.loads((tmp_path / started["log_path"]).read_text(encoding="utf-8"))
+        if log["gdb_stop_records"] != [recorded_gdb_stop("attach_hardfault", 0)]:
+            raise AssertionError("the session log does not hold attach_hardfault records[0] as the attach stop")
     finally:
         service.close()
 
