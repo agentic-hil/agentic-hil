@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,19 +11,43 @@ import pytest
 from conftest import FAKE_GDB, write_config
 from fixtures import fake_gdb
 
-from agentic_hil.backends.gdbdebug import GdbDebugSession
+from agentic_hil.backends.gdbdebug import RESET_HANDLER, GdbDebugSession, exception_type_from_handler, handler_name
 from agentic_hil.backends.openocd import OpenOCDBackend
 from agentic_hil.config import load_config
-from agentic_hil.gdbmi import stop_result_from_line
+from agentic_hil.gdbmi import mi_field, stop_result_from_line
 from tests.bench.test_bench_faults import sanitize_gdb_mi_source_paths
 
 FIXTURE = Path(__file__).parent / "fixtures" / "gdb_mi_stop_recordings.json"
+# The literal stops the fake answers, by the names it defines them under, in the
+# order GDB_MANUAL_SHAPED_STOPS lists them. None of them is a recording.
+MANUAL_SHAPED_STOP_NAMES = (
+    "INTERRUPT_STOP",
+    "EXPECTED_BREAKPOINT_STOP",
+    "UNEXPECTED_BREAKPOINT_STOP",
+    "EXITED_NORMALLY_STOP",
+    "SIGTRAP_STOP",
+    "SIGSEGV_STOP",
+    "SIGUSR1_STOP",
+    "END_STEPPING_RANGE_STOP",
+)
 
 
 def recorded_stop(scenario: str, index: int) -> str:
     """One `*stopped` record of the bench recording, exactly as GDB printed it."""
     recordings = json.loads(FIXTURE.read_text(encoding="utf-8"))["recordings"]
     return next(case for case in recordings if case["scenario"] == scenario)["records"][index]
+
+
+def strings_in(value: object) -> Iterator[str]:
+    """Every string a decoded recording holds, whatever its structure."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from strings_in(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings_in(item)
 
 
 def test_source_path_sanitizer_redacts_only_absolute_file_and_fullname_values() -> None:
@@ -112,3 +137,57 @@ def test_fake_gdb_attach_under_stopped_on_attach_hardfault_prints_the_recorded_a
 
     if stops != [recorded_stop("attach_hardfault", 0)]:
         raise AssertionError("fake_gdb's main() under stopped_on_attach_hardfault does not print attach_hardfault records[0] as its only stop")
+
+
+def test_fake_gdb_continue_under_stop_in_reset_handler_answers_the_recorded_reset_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stop the fake answers a continue with under `stop_in_reset_handler` is the bench's reset stop, byte for byte.
+
+    The OpenOCD / Debian GDB 16.3 record of the same bench run as both fault
+    stops: no reason field, Reset_Handler at 0x08000454, line 56, and the
+    fixture's path redactions."""
+    monkeypatch.setattr(fake_gdb, "behavior_override", "stop_in_reset_handler")
+
+    if fake_gdb.continue_stop_line() != recorded_stop("reset_halt_to_hardfault", 0):
+        raise AssertionError("fake_gdb's continue under stop_in_reset_handler is not reset_halt_to_hardfault records[0] of gdb_mi_stop_recordings.json")
+
+
+def test_the_invented_reset_stop_is_gone_from_the_fake() -> None:
+    """The invented SIGINT stop in Reset_Handler at 0x080001c0 is no longer something the fake can answer."""
+    if hasattr(fake_gdb, "RESET_HANDLER_STOP") or fake_gdb.STOP_IN_RESET_HANDLER in fake_gdb.STOP_LINES_BY_BEHAVIOR:
+        raise AssertionError("fake_gdb still defines the invented RESET_HANDLER_STOP or answers stop_in_reset_handler from STOP_LINES_BY_BEHAVIOR")
+
+
+def test_gdb_manual_shaped_stops_are_every_literal_stop_the_fake_answers() -> None:
+    """The label is a tuple naming each literal stop the fake still answers, and nothing else."""
+    expected = tuple(getattr(fake_gdb, name) for name in MANUAL_SHAPED_STOP_NAMES)
+
+    if getattr(fake_gdb, "GDB_MANUAL_SHAPED_STOPS", None) != expected:
+        raise AssertionError("fake_gdb.GDB_MANUAL_SHAPED_STOPS is not the tuple of the eight literal stops the fake answers")
+
+
+def test_every_stop_line_by_behavior_is_labelled_manual_shaped() -> None:
+    """Each stop a behaviour opts into by name is one of the labelled manual-shaped stops."""
+    shaped = getattr(fake_gdb, "GDB_MANUAL_SHAPED_STOPS", ())
+
+    if any(line not in shaped for line in fake_gdb.STOP_LINES_BY_BEHAVIOR.values()):
+        raise AssertionError("a STOP_LINES_BY_BEHAVIOR value of fake_gdb is not in GDB_MANUAL_SHAPED_STOPS")
+
+
+def test_no_manual_shaped_stop_is_a_recording_or_carries_a_handler_frame() -> None:
+    """A manual-shaped stop passes for neither a recording nor a reset or fault stop.
+
+    The recordings are every fixture recording beside the fake, read as data
+    and walked whatever their structure. A handler is what the product's own
+    classifier reads as a fault or a reset, so a renamed or lower-case handler
+    counts as well as Reset_Handler and HardFault_Handler."""
+    shaped = getattr(fake_gdb, "GDB_MANUAL_SHAPED_STOPS", None)
+    if not shaped:
+        raise AssertionError("fake_gdb has no GDB_MANUAL_SHAPED_STOPS to check")
+    recorded = [text for path in sorted(FIXTURE.parent.glob("*recording*.json")) for text in strings_in(json.loads(path.read_text(encoding="utf-8")))]
+
+    for line in shaped:
+        if any(line in text for text in recorded):
+            raise AssertionError(f"a manual-shaped stop of fake_gdb is held by a fixture recording: {line}")
+        handler = handler_name(mi_field(line, "func"))
+        if exception_type_from_handler(handler) is not None or handler.startswith(RESET_HANDLER):
+            raise AssertionError(f"a manual-shaped stop of fake_gdb carries a reset or fault handler frame: {line}")
