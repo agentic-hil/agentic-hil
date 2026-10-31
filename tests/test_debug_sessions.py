@@ -235,6 +235,25 @@ def test_debug_session_log_retains_actual_mi_stop_line_and_does_not_fabricate_on
         service.close()
 
 
+def test_debug_session_log_retains_the_recorded_reset_stop(tmp_path: Path) -> None:
+    """A continue under `stop_in_reset_handler` leaves the bench's reset stop in the log, exactly as GDB printed it."""
+    service = debug_service(tmp_path, fake_gdb_behavior="stop_in_reset_handler")
+    expected_stop = recorded_gdb_stop("reset_halt_to_hardfault", 0)
+    try:
+        assert start_debug_session(service)["ok"] is True
+        continued = service.call("debug_continue", {"timeout_s": 5})
+        assert "gdb_stop_records" not in continued
+
+        recorded = json.loads((tmp_path / continued["log_path"]).read_text(encoding="utf-8"))
+        if recorded["gdb_stop_records"] != [expected_stop]:
+            raise AssertionError("the session log does not hold reset_halt_to_hardfault records[0] as the stop GDB reported")
+        # The recorded reset carries no reason: the reset is read off the frame.
+        if continued["stop"]["backend_stop_reason"] != "unknown":
+            raise AssertionError("the reset stop names a backend reason; reset_halt_to_hardfault records[0] carries none")
+    finally:
+        service.close()
+
+
 def test_synthesized_session_start_halt_does_not_create_a_raw_mi_stop_line(tmp_path: Path) -> None:
     service = debug_service(tmp_path)
     try:

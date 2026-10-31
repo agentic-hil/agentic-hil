@@ -86,6 +86,7 @@ INTERRUPT_LOST_ONCE = "interrupt_lost_once"
 # is still owed.
 MI_ASYNC_UNSUPPORTED = "mi_async_unsupported"
 MI_ASYNC_REFUSAL = 'No symbol \\"mi\\" in current context.'
+# Shaped after the GDB manual and not a recording; see GDB_MANUAL_SHAPED_STOPS.
 INTERRUPT_STOP = '*stopped,reason="signal-received",signal-name="SIGINT",frame={addr="0x08000100",func="main",file="main.c",line="42"}'
 target_running = False
 mi_async = False
@@ -97,6 +98,8 @@ target_stopped.set()
 # delayed stop must not land on the next one, or the product reads a stale
 # breakpoint stop and attributes it to a resume that never reached one.
 resume_generation = 0
+# Both breakpoint hits are shaped after the GDB manual and are not recordings;
+# see GDB_MANUAL_SHAPED_STOPS.
 EXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptno="1",frame={addr="0x08000200",func="test_done",args=[],file="tests.c",fullname="/work/tests.c",line="123"},thread-id="1",stopped-threads="all"'
 UNEXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptno="99",frame={addr="0x08000300",func="assert_failed",args=[],file="assert.c",fullname="/work/assert.c",line="7"},thread-id="1",stopped-threads="all"'
 # The two HardFault stops are recordings, replayed from
@@ -119,14 +122,23 @@ gdb_mi_stop_recordings: list[dict] | None = None
 # The stop records the public `stop_reason` vocabulary maps and the suite had
 # never produced (#506): a target that ran off the end of main, a stop inside
 # the reset vector, a breakpoint instruction nobody set, a fault delivered as a
-# signal, a signal outside every named set, and the end of a step. The shapes
-# are the GDB/MI `*stopped` records the GDB manual documents (Async Records:
-# `exited-normally`, `signal-received` with `signal-name` and `signal-meaning`,
-# `end-stepping-range`, each with the `frame` tuple OpenOCD's gdbserver
-# populates). None of them is a recording; the HardFault stops above are, and
-# the reset stop here stays the documented shape. Each is opted into by name,
-# so the default fake keeps answering the breakpoint hit the rest of the suite
-# relies on.
+# signal, a signal outside every named set, and the end of a step. Each is
+# opted into by name, so the default fake keeps answering the breakpoint hit
+# the rest of the suite relies on.
+#
+# The stop inside the reset vector is a recording: `stop_in_reset_handler`
+# answers a continue with scenario `reset_halt_to_hardfault`, record 0, of the
+# same OpenOCD / GNU gdb (Debian 16.3-1) 16.3 bench run as the HardFault stops
+# above, read the same way on first use and with the same redactions. It
+# carries no reason field and no signal, only the Reset_Handler frame.
+#
+# Every other literal stop this fake answers is listed in
+# GDB_MANUAL_SHAPED_STOPS below: the interrupt stop, both breakpoint hits and
+# the exited-normally, SIGTRAP, SIGSEGV, SIGUSR1 and end-stepping-range stops
+# here. They are shaped after the `*stopped` examples of the GDB manual's Async
+# Records and Program Execution sections. They are not copied from the manual,
+# they are not recordings, and their frames (addresses, functions, files and
+# lines) are invented.
 STOP_EXITED_NORMALLY = "stop_exited_normally"
 STOP_IN_RESET_HANDLER = "stop_in_reset_handler"
 STOP_SIGTRAP = "stop_sigtrap"
@@ -134,14 +146,22 @@ STOP_SIGSEGV = "stop_sigsegv"
 STOP_SIGUSR1 = "stop_sigusr1"
 STOP_END_STEPPING_RANGE = "stop_end_stepping_range"
 EXITED_NORMALLY_STOP = '*stopped,reason="exited-normally"'
-RESET_HANDLER_STOP = '*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={addr="0x080001c0",func="Reset_Handler",args=[],file="startup_stm32f446xx.s",fullname="/work/startup_stm32f446xx.s",line="65"},thread-id="1",stopped-threads="all"'
 SIGTRAP_STOP = '*stopped,reason="signal-received",signal-name="SIGTRAP",signal-meaning="Trace/breakpoint trap",frame={addr="0x08000310",func="assert_failed",args=[],file="assert.c",fullname="/work/assert.c",line="9"},thread-id="1",stopped-threads="all"'
 SIGSEGV_STOP = '*stopped,reason="signal-received",signal-name="SIGSEGV",signal-meaning="Segmentation fault",frame={addr="0x08000520",func="main",args=[],file="main.c",fullname="/work/main.c",line="77"},thread-id="1",stopped-threads="all"'
 SIGUSR1_STOP = '*stopped,reason="signal-received",signal-name="SIGUSR1",signal-meaning="User defined signal 1",frame={addr="0x08000530",func="main",args=[],file="main.c",fullname="/work/main.c",line="80"},thread-id="1",stopped-threads="all"'
 END_STEPPING_RANGE_STOP = '*stopped,reason="end-stepping-range",frame={addr="0x08000534",func="main",args=[],file="main.c",fullname="/work/main.c",line="81"},thread-id="1",stopped-threads="all"'
+GDB_MANUAL_SHAPED_STOPS = (
+    INTERRUPT_STOP,
+    EXPECTED_BREAKPOINT_STOP,
+    UNEXPECTED_BREAKPOINT_STOP,
+    EXITED_NORMALLY_STOP,
+    SIGTRAP_STOP,
+    SIGSEGV_STOP,
+    SIGUSR1_STOP,
+    END_STEPPING_RANGE_STOP,
+)
 STOP_LINES_BY_BEHAVIOR = {
     STOP_EXITED_NORMALLY: EXITED_NORMALLY_STOP,
-    STOP_IN_RESET_HANDLER: RESET_HANDLER_STOP,
     STOP_SIGTRAP: SIGTRAP_STOP,
     STOP_SIGSEGV: SIGSEGV_STOP,
     STOP_SIGUSR1: SIGUSR1_STOP,
@@ -340,6 +360,8 @@ def continue_stop_line() -> str:
         return UNEXPECTED_BREAKPOINT_STOP
     if has_behavior("hardfault"):
         return recorded_gdb_mi_stop("reset_halt_to_hardfault", 2)
+    if has_behavior(STOP_IN_RESET_HANDLER):
+        return recorded_gdb_mi_stop("reset_halt_to_hardfault", 0)
     for name, line in STOP_LINES_BY_BEHAVIOR.items():
         if has_behavior(name):
             return line
