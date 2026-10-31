@@ -7,16 +7,62 @@ failed verify. These read the row tables and the parametrization of
 words no recording or cited source holds fails here instead of standing in for
 the tool. The phrases are read out of the fixtures and not repeated in this
 file, which would otherwise carry the words it refuses.
+
+#738 found the same for STM32CubeProgrammer's failed verify: the
+`verify_failed:stlink` entry quoted a line the CLI never prints. The two lines
+it does print are written here as shapes, because they are the tool's own
+words, and one test holds them to the recording while another holds the entry
+to them.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 
 import test_debug_backend_refusals as refusals
 
 from agentic_hil.knowledge import catalogue_entry
+
+KNOWLEDGE = refusals.ROOT.parent / "src" / "agentic_hil" / "knowledge.py"
+# STM32CubeProgrammer 2.23.0's two lines about a failed verify on its legacy path,
+# as the recording prints them, with each value and each run of spaces left open.
+# The first byte is the one read back and the second the one the file holds.
+CUBE_VERIFY_LINES = (
+    r"Error: Data mismatch found at address{gap}{address}{gap}\(byte = {read} instead of {expected}\)",
+    r"Error: Download verification failed",
+)
+# A value as the CLI printed it.
+RECORDED_VALUE = r"0x[0-9A-F]+"
+# What limits the recorded words to the path they were recorded on: the CLI's own
+# announcement, or a sentence that ties the legacy verify path to files under 32KB.
+LEGACY_PATH_LIMITS = (
+    re.compile(re.escape("File size < 32KB legacy verify will be used")),
+    re.compile(r"legacy verify path\b[^.]*?\b(?:files|images) (?:under|below|smaller than) 32 ?KB\b", re.IGNORECASE),
+)
+
+
+def cube_verify_line_shapes(address: str, read: str, expected: str) -> list[re.Pattern[str]]:
+    """The two verify lines, with each pattern standing for the value in its own slot."""
+    return [re.compile(line.format(gap=r"\s+", address=address, read=read, expected=expected)) for line in CUBE_VERIFY_LINES]
+
+
+def catalogue_slot(role: str) -> str:
+    """A slot as the catalogue may write it: its own placeholder, such as `<read>`, or a value the CLI printed."""
+    return f"(?:<{role}>|{RECORDED_VALUE})"
+
+
+def written_entry(key: str) -> dict:
+    """The fields of one catalogue entry as knowledge.py writes them, read from the source."""
+    tree = ast.parse(KNOWLEDGE.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for name, value in zip(node.keys, node.values, strict=True):
+            if isinstance(name, ast.Constant) and name.value == key and isinstance(value, ast.Call):
+                return {keyword.arg: ast.literal_eval(keyword.value) for keyword in value.keywords}
+    raise AssertionError(f"knowledge.py writes no {key} entry")
 
 
 def pyocd_transcripts() -> list[str]:
@@ -94,3 +140,43 @@ def test_the_pyocd_verify_entry_says_pyocd_does_not_verify() -> None:
     entry = catalogue_entry("verify_failed:pyocd")
     if entry is None or not re.search(r"\bpyOCD does not verify\b", str(entry["meaning"]), re.IGNORECASE):
         raise AssertionError("verify_failed:pyocd does not say that pyOCD does not verify")
+
+
+def test_the_stlink_verify_entry_quotes_the_lines_cubeprogrammer_prints() -> None:
+    """Every `Error:` line the entry quotes is one the CLI prints, and it quotes both (#738).
+
+    The address and the two bytes are on the Data mismatch line, so the entry
+    may write them as placeholders or as recorded values, but each placeholder
+    only in its own slot: `<address>`, then `<read>`, then `<expected>`, the
+    order the CLI prints them in. Swapping the two bytes would send the operator
+    looking for the file's byte on the board. The words were recorded on the
+    legacy verify path the CLI announces for files under 32KB, and the entry has
+    to tie them to that limit rather than claim them for a larger image.
+    """
+    entry = written_entry("verify_failed:stlink")
+    text = "\n".join([entry["meaning"], *entry["remediation"], *entry.get("do_not", ())])
+    shapes = cube_verify_line_shapes(catalogue_slot("address"), catalogue_slot("read"), catalogue_slot("expected"))
+    quoted = re.findall(r"`(Error:[^`]*)`", text)
+    if (
+        any(not any(shape.fullmatch(span) for shape in shapes) for span in quoted)
+        or any(not any(shape.fullmatch(span) for span in quoted) for shape in shapes)
+        or text.count("Error:") != len(quoted)
+        or not any(limit.search(text) for limit in LEGACY_PATH_LIMITS)
+    ):
+        raise AssertionError("verify_failed:stlink quotes a line STM32CubeProgrammer 2.23.0 does not print")
+    # What the source writes is what the catalogue serves.
+    assert catalogue_entry("verify_failed:stlink")["meaning"] == entry["meaning"]
+
+
+def test_the_lines_the_stlink_verify_entry_must_quote_are_the_recorded_ones() -> None:
+    """The shapes the entry is held to are the recording's own `Error:` lines, in order and none besides."""
+    recording = refusals.cube_verify_failure_recording()
+    stdout = recording["stdout"]
+    errors = [line for line in stdout.splitlines() if line.startswith("Error:")]
+
+    shapes = cube_verify_line_shapes(RECORDED_VALUE, RECORDED_VALUE, RECORDED_VALUE)
+    assert [[shape.fullmatch(line) is not None for shape in shapes] for line in errors] == [[True, False], [False, True]], errors
+    assert "\nFile size < 32KB legacy verify will be used\n" in stdout, stdout
+    # The CLI's announcement, which the entry may quote as its limit, is the recording's own line.
+    assert LEGACY_PATH_LIMITS[0].search(stdout), stdout
+    assert recording["returncode"] == 1, recording["returncode"]

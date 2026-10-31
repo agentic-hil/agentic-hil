@@ -98,11 +98,28 @@ RECORDINGS = json.loads(RECORDINGS_PATH.read_text(encoding="utf-8"))
 # prints for the ones no bench can provoke without unplugging the probe or
 # protecting the flash (#516, #561).
 PYOCD_FAILURES = json.loads((FIXTURES / "pyocd_failure_recordings.json").read_text(encoding="utf-8"))
-# STM32CubeProgrammer 2.23.0's flash failures off the same bench: a raw binary
-# based past the end of flash, through the product, and an input file that does
-# not exist, by hand, because the product refuses a missing image before it
-# starts the CLI (#516).
+# STM32CubeProgrammer 2.23.0's failures, each recording with the bench it came
+# off: a raw binary based past the end of flash, through the product, and an
+# input file that does not exist, by hand, because the product refuses a missing
+# image before it starts the CLI (#516), on the reference NUCLEO-F446RE; a
+# `probe_target` and a halt reset with the probe's USB port powered off (#737),
+# and a flash whose verify fails at a read-only register (#738), on a
+# NUCLEO-H533RE behind an STLINK-V3.
 CUBE_FAILURES = json.loads((FIXTURES / "stm32cubeprogrammer_2_23_0_failure_recordings.json").read_text(encoding="utf-8"))
+# The verify failure, looked up by the tests that replay it rather than when the
+# module is imported, so that a fixture without it fails those tests alone.
+CUBE_VERIFY_FAILURE = "flash_elf_verify_read_only_register"
+CUBE_VERIFY_FAILURE_ARGV = [
+    "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+    "-q",
+    "-c",
+    "port=SWD",
+    "mode=HOTPLUG",
+    "sn=[redacted]",
+    "-w",
+    "[staging]/cpuid-ro.elf",
+    "-v",
+]
 TROUBLESHOOTING = ROOT.parent / "TROUBLESHOOTING.md"
 
 BACKENDS = ["openocd", "pyocd", "stlink"]
@@ -152,6 +169,14 @@ def cube_recording(name: str) -> dict:
 
 def cube_failure_recording(name: str) -> dict:
     return CUBE_FAILURES["recordings"][name]
+
+
+def cube_verify_failure_recording() -> dict:
+    """STM32CubeProgrammer 2.23.0's recorded verify failure, or the one refusal that says it is missing (#738)."""
+    recording = CUBE_FAILURES["recordings"].get(CUBE_VERIFY_FAILURE)
+    if recording is None:
+        raise AssertionError("STM32CubeProgrammer 2.23.0's verify failure is not recorded")
+    return recording
 
 
 def cube_bench_image_recording(name: str) -> dict:
@@ -526,6 +551,66 @@ def test_stlink_reads_cubes_serial_number_not_found_as_an_absent_probe(tmp_path:
     assert classified["source_tool"] == tool, classified
 
 
+def test_stlink_reads_cubes_recorded_data_mismatch_as_a_failed_verify(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """STM32CubeProgrammer 2.23.0's own verify failure is `verify_failed`, public and backend (#738).
+
+    Recorded through the product's `flash_firmware` of four zero bytes linked at
+    the read-only CPUID register, so the read-back always differs and nothing in
+    flash or the option bytes changes. The CLI prints `Error: Data mismatch found
+    at address` with the byte read and the byte expected, then `Error: Download
+    verification failed`, on the legacy verify path it announces for files under
+    32KB. This replaces the rows that played a verify line the CLI never prints:
+    the classifier's bucket, the tool result, the incident it opens and the
+    scoped steps it hands over are all asserted here, on the recording.
+    """
+    recording = cube_verify_failure_recording()
+    assert recording["recorded_on"] == "2026-10-23", recording["recorded_on"]
+    assert recording["tool_versions"] == {"stm32cubeprogrammer": "2.23.0", "stm32cubeclt": "1.22.0", "agentic_hil": "0.24.1.dev0"}, recording["tool_versions"]
+    for word in ("NUCLEO-H533RE", "STLINK-V3", "V3J13M4", "Linux"):
+        assert word in recording["bench"], (word, recording["bench"])
+    for word in ("flash_firmware", "1395351c"):
+        assert word in recording["how"], (word, recording["how"])
+    assert recording["argv"] == CUBE_VERIFY_FAILURE_ARGV, recording["argv"]
+    assert recording["stderr"] == "", recording["stderr"]
+    assert recording.get("timed_out", False) is False, recording
+    stdout = recording["stdout"]
+    assert "\nST-LINK SN  : [redacted]\n" in stdout, stdout
+    # The CLI's own spacing: two spaces after `address`, blank lines around each line.
+    assert "\n\nError: Data mismatch found at address  0xE000ED00 (byte = 0x14 instead of 0x00)\n\n\n" in stdout, stdout
+    assert stdout.endswith("\n\nError: Download verification failed\n\n\n"), stdout
+    image = recording["image"]
+    assert image["asm"] == "    .syntax unified\n    .section .text, \"ax\"\n    .global _start\n_start:\n    .word 0x00000000\n", image["asm"]
+    assert image["build"] == "arm-none-eabi-as -mcpu=cortex-m33 -mthumb ro.s -o ro.o && arm-none-eabi-ld -N -Ttext=0xE000ED00 -e _start ro.o -o cpuid-ro.elf", image["build"]
+    assert image["sha256"] == "db23c9e91ff58d4281d1e5df9cbb449a34c74d35e522f4c29f24b3b8145128d6", image["sha256"]
+    for word in ("PT_LOAD", "4-byte", "0xe000ed00"):
+        assert word in image["load"], (word, image["load"])
+    for word in ("-N", "0xE000E000", "NVIC", "CPUID", "read-only", "option bytes", "32KB"):
+        assert word in image["why"], (word, image["why"])
+
+    play_transcript(monkeypatch, stdout=recording["stdout"], stderr=recording["stderr"], returncode=recording["returncode"])
+    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+    assert STLinkBackend(config)._classify_output(recording["stdout"] + recording["stderr"], "flash_firmware") == "verify_failed"
+
+    result = call(config, "flash_firmware", {"image_path": "build/firmware.elf"})
+
+    # Raised rather than asserted, so the message is exactly this and not
+    # pytest's rewrite of the comparison appended to it.
+    if result["backend_error_type"] != "verify_failed":
+        raise AssertionError(f"flash_firmware classified the recorded verify failure as {result['backend_error_type']}")
+    assert result["ok"] is False, result
+    assert result["error_type"] == "verify_failed", result
+    assert result.get("remediation") == remediation_fields("verify_failed", "stlink")["remediation"], result.get("remediation")
+    assert any("STM32CubeProgrammer" in step for step in result["remediation"]), result["remediation"]
+    # The scoped entry is what arrives: there is no unscoped one to fall back to.
+    assert remediation_fields("verify_failed") == {}
+    assert result["programmer_output"]["stdout"] == recording["stdout"], result["programmer_output"]
+    assert result["programmer_output"]["returncode"] == 1, result["programmer_output"]
+    # The write ran before the verify refused it, so the effect is unconfirmed.
+    # The fake answers the cleanup's reset_target with the same transcript, so the
+    # last-error classification is not this recording's.
+    assert_effect_unconfirmed(result)
+
+
 # A flash that lost its probe part-way through the download. Assembled, not
 # recorded: the download-phase lines are STM32CubeProgrammer 2.23.0's own, in the
 # order the bench flash recording prints them
@@ -801,8 +886,11 @@ def test_a_zero_exit_with_error_text_is_a_failure(tmp_path: Path, monkeypatch: p
 # (backend, tool, transcript, expected bucket, where the words come from).
 # `recorded`: a real tool recording. `in tree`: a phrase an existing fixture
 # already prints, typed from the tool by whoever wrote it. `issue`: the phrase
-# #506 quotes. `rule`: the classifier's own table words, with no recording
-# behind them; each of those rows is a recording owed. `pyocd source`: the line
+# #506 quotes. No row plays the classifier's own table words with no recording
+# behind them: the one that did, a STM32CubeProgrammer verify line the CLI never
+# prints, gave way to the recorded verify failure, which
+# test_stlink_reads_cubes_recorded_data_mismatch_as_a_failed_verify replays
+# (#738). `pyocd source`: the line
 # the pyOCD 0.45.1 package prints, with the file and line that print it in
 # tests/fixtures/pyocd_failure_recordings.json, for a failure no bench provokes
 # without unplugging the probe or protecting the flash.
@@ -811,7 +899,6 @@ CLASSIFIER_ROWS = [
     ("stlink", "probe_target", STLINK_NO_TARGET_STDOUT + STLINK_NO_TARGET_STDERR, "target_not_detected", "issue"),
     ("stlink", "probe_target", "ST-LINK SN  : STLINK123\nError: no device found\n", "target_not_detected", "issue"),
     ("stlink", "probe_target", "ST-LINK SN  : STLINK123\nError: unable to connect to target\n", "target_not_detected", "issue"),
-    ("stlink", "flash_firmware", "ST-LINK SN  : STLINK123\nMemory Programming ...\nError: Verify failed at address 0x08000000\n", "verify_failed", "rule"),
     ("stlink", "flash_firmware", cube_failure_recording("flash_input_file_missing")["stdout"], "config_file_not_found", "recorded"),
     ("stlink", "flash_firmware", cube_failure_recording("flash_bin_outside_flash")["stdout"], "flash_failed", "recorded"),
     ("pyocd", "probe_target", recording("pyocd_commander_status_no_probe")["stdout"], "probe_not_found", "recorded"),
@@ -857,7 +944,6 @@ TOOL_RESULT_ROWS = [
     ("stlink", "probe_target", {}, "Error: No ST-LINK detected!\n", "probe_not_found", "adapter_not_found", "refused"),
     ("stlink", "probe_target", {}, "ST-LINK SN  : STLINK123\nError: no device found\n", "target_not_detected", "target_not_detected", "refused"),
     ("stlink", "probe_target", {}, "ST-LINK SN  : STLINK123\nError: unable to connect to target\n", "target_not_detected", "target_not_detected", "refused"),
-    ("stlink", "flash_firmware", {"image_path": "build/firmware.elf"}, "ST-LINK SN  : STLINK123\nMemory Programming ...\nError: Verify failed at address 0x08000000\n", "verify_failed", "verify_failed", "quarantined"),
     ("stlink", "flash_firmware", {"image_path": "build/firmware.elf"}, cube_failure_recording("flash_bin_outside_flash")["stdout"], "flash_failed", "flash_failed", "quarantined"),
     ("pyocd", "probe_target", {}, "0000000:ERROR:Error attempting to connect to target\nError: unable to connect to the target\n", "target_not_detected", "target_not_detected", "refused"),
     ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, "0001042 C Target type stm32f446re not recognized. Use 'pyocd list --targets' to see currently available target types. See <https://pyocd.io/docs/target_support.html> for how to install additional target support. [__main__]\n", "target_type_invalid", "target_type_invalid", "refused"),
@@ -1737,17 +1823,18 @@ def test_the_three_buckets_grow_no_unscoped_entry(bucket: str) -> None:
     assert remediation_fields(bucket) == {}, bucket
 
 
-# The three transcripts the row table already plays for these pairs, driven here
+# The two transcripts the row table already plays for these pairs, driven here
 # for the one thing the row table cannot assert while the catalogue is silent:
 # that the refusal reaching the operator carries this backend's steps and not an
-# empty field.
+# empty field. STM32CubeProgrammer's failed verify is driven the same way, on its
+# recording, by test_stlink_reads_cubes_recorded_data_mismatch_as_a_failed_verify
+# (#738).
 #
 # The OpenOCD row replays the transcript
 # `test_a_flash_that_failed_without_reaching_its_marker_is_flash_failed` owns, so
 # a change to `** Programming Failed **` or to the rule that reads it has two
 # call sites in this file and not one.
 SCOPED_REMEDIATION_ROWS = [
-    ("stlink", "", "ST-LINK SN  : STLINK123\nMemory Programming ...\nError: Verify failed at address 0x08000000\n", "verify_failed", "STM32CubeProgrammer"),
     ("pyocd", "", pyocd_recording("pyocd_flash_bin_outside_flash")["stderr"], "flash_failed", "pyOCD"),
     ("openocd", f"{PROGRAMMING_FAILED}\n", "Error: failed to write memory at 0x08000000\n", "flash_failed", "OpenOCD"),
 ]
