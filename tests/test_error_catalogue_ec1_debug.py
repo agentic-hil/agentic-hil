@@ -897,7 +897,10 @@ def test_every_left_out_pair_is_one_the_debug_paths_answer() -> None:
 
 
 def test_every_debug_refusal_has_a_catalogue_entry() -> None:
-    assert missing_entries() == [], "debug refusals without an ERROR_CATALOGUE entry"
+    missing = missing_entries()
+    # Each pair without its sites, whose line numbers move with every edit.
+    if missing:
+        raise AssertionError("debug refusals without an ERROR_CATALOGUE entry: " + "; ".join(entry.partition(":")[0] for entry in missing))
 
 
 def test_every_pair_written_here_resolves_to_a_key_written_here() -> None:
@@ -1136,6 +1139,10 @@ RESOLVED = sorted(INVENTORY - EXCLUDED, key=str)
 @pytest.mark.parametrize(("error_type", "scope"), RESOLVED, ids=[f"{error_type}-{scope}" for error_type, scope in RESOLVED])
 def test_the_reference_resolves_every_debug_refusal(reference: AgenticHILToolService, error_type: str, scope: str | None) -> None:
     key = catalogue_key(error_type, scope)
+    # A pair with neither its scoped key nor a bare one falls back to a key the
+    # reference does not serve; named here rather than through the response.
+    if catalogue_entry(key) is None:
+        raise AssertionError(f"the errors reference has no entry for {error_type} under {scope}")
     entry = read_resource(reference, key)
 
     assert entry == catalogue_entry(key)
