@@ -1,0 +1,73 @@
+{
+ "redacted": [
+  "bench host name (owner.host)",
+  "ST-LINK serial number (device locks, resources)",
+  "owner.owner_id"
+ ],
+ "started_at": "2026-11-02T23:27:47.939040+00:00",
+ "request": {
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+   "name": "bench_run_start",
+   "arguments": {
+    "devices": [
+     {
+      "kind": "debugger",
+      "id": "dut"
+     },
+     {
+      "kind": "uart",
+      "id": "dut"
+     }
+    ]
+   }
+  }
+ },
+ "completed_at": "2026-11-02T23:27:47.978423+00:00",
+ "response": {
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+   "content": [
+    {
+     "type": "text",
+     "text": "{\"ok\":true,\"tool\":\"bench_run_start\",\"declared_devices\":[\"com:serial:<probe serial>\",\"probe:<probe serial>\"],\"run_started_at\":\"2026-11-02T23:27:48.649Z\",\"owner\":{\"owner_id\":\"<owner id>\",\"pid\":1203659,\"host\":\"<bench host>\",\"frontend\":\"mcp\"},\"summary\":\"2 device(s) are held for this run and released when it ends.\",\"devices\":[{\"kind\":\"uart\",\"id\":\"dut\",\"lock_key\":\"com:serial:<probe serial>\",\"identity_source\":\"serial_number\"},{\"kind\":\"debugger\",\"id\":\"dut\",\"lock_key\":\"probe:<probe serial>\",\"identity_source\":\"probe_id\"}]}"
+    }
+   ],
+   "structuredContent": {
+    "ok": true,
+    "tool": "bench_run_start",
+    "declared_devices": [
+     "com:serial:<probe serial>",
+     "probe:<probe serial>"
+    ],
+    "run_label": null,
+    "run_started_at": "2026-11-02T23:27:48.649Z",
+    "owner": {
+     "owner_id": "<owner id>",
+     "pid": 1203659,
+     "host": "<bench host>",
+     "frontend": "mcp"
+    },
+    "summary": "2 device(s) are held for this run and released when it ends.",
+    "devices": [
+     {
+      "kind": "uart",
+      "id": "dut",
+      "lock_key": "com:serial:<probe serial>",
+      "identity_source": "serial_number"
+     },
+     {
+      "kind": "debugger",
+      "id": "dut",
+      "lock_key": "probe:<probe serial>",
+      "identity_source": "probe_id"
+     }
+    ]
+   },
+   "isError": false
+  }
+ }
+}

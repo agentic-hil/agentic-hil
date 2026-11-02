@@ -1,0 +1,5 @@
+# No line-ending conversion: build.sh and rebuild_runs.sh need their LF line ends, and the
+# receipts and build records stay byte for byte as published.
+firmware/** -text
+builds/** -text
+receipts/** -text

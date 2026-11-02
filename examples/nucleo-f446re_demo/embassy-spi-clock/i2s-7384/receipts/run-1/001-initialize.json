@@ -1,0 +1,41 @@
+{
+ "started_at": "2026-11-02T23:19:36.965120+00:00",
+ "request": {
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+   "protocolVersion": "2024-11-05",
+   "capabilities": {},
+   "clientInfo": {
+    "name": "i2s-7384-evidence",
+    "version": "1"
+   }
+  }
+ },
+ "completed_at": "2026-11-02T23:19:37.463233+00:00",
+ "response": {
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+   "protocolVersion": "2024-11-05",
+   "capabilities": {
+    "tools": {
+     "listChanged": false
+    },
+    "prompts": {
+     "listChanged": false
+    },
+    "resources": {
+     "subscribe": false,
+     "listChanged": false
+    }
+   },
+   "serverInfo": {
+    "name": "agentic-hil",
+    "version": "0.24.1.dev0"
+   },
+   "instructions": "This project's target board is reachable only through these tools. Every request that touches it (flashing, resetting, probing, debugging, UART or CAN traffic, firmware artifacts, test reports) is answered by calling them, before reaching for a shell.\nNever substitute openocd, pyocd, esptool, st-flash, st-info, st-util, JLinkExe, gdb, screen, minicom, picocom, cansend, candump, a Makefile target that runs one of them, or direct access to /dev/tty*, COM* or a SocketCAN interface: they bypass the policy these tools enforce, and the operator cannot audit them.\nA permission_denied result is the answer: report the denied permission and stop. Never edit the authoritative configuration to grant yourself a permission (it belongs to the operator), and never carry out the action another way.\nThe configuration changes only through project_config_describe and project_config_set, never through your own file tools.\nflash_firmware with reset_after_flash and capture flashes, resets and returns the UART output in one call; com_read waits for a pattern with until and can_read for a frame with until_id, so neither needs polling. bench_run_start and bench_run_stop are for a longer sequence driven call by call; a whole test plan runs through test_reactor_run.\nResult text leaves out empty values and fields at their default: an absent side_effect_status is not_started, absent side_effect_committed, cleanup_required and quarantined are false, absent audit_ok, cleanup_ok and target_ok are true, an absent hardware_state is unchanged. Catalogue advice this session already received is left out too; advice_uri says where to read it again.\nFacts about this server are published as resources (resources/list, agentic-hil://reference/...); read them instead of its source or its installed package."
+  }
+ }
+}

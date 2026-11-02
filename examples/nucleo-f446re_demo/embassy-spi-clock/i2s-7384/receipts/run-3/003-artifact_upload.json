@@ -1,0 +1,72 @@
+{
+ "redacted": [
+  "paths on the bench host (config_in_force.path)"
+ ],
+ "started_at": "2026-11-02T23:27:47.982410+00:00",
+ "request": {
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+   "name": "artifact_upload",
+   "arguments": {
+    "filename": "i2s7384-base.elf",
+    "data_base64": "<329488 bytes, sha256 a89d8673a187981c31aabedbc98e2a037d24ad919c6fb22d9b0ff6c955be20d8>"
+   }
+  }
+ },
+ "completed_at": "2026-11-02T23:27:48.091070+00:00",
+ "response": {
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+   "content": [
+    {
+     "type": "text",
+     "text": "{\"ok\":true,\"tool\":\"artifact_upload\",\"artifact_id\":\"a89d8673a187981c31aabedbc98e2a037d24ad919c6fb22d9b0ff6c955be20d8.elf\",\"artifact\":{\"source\":\"upload\",\"path\":\".agentic-hil/artifacts/a89d8673a187981c31aabedbc98e2a037d24ad919c6fb22d9b0ff6c955be20d8.elf\",\"resolved_path\":\"<bench host path>\",\"sha256\":\"a89d8673a187981c31aabedbc98e2a037d24ad919c6fb22d9b0ff6c955be20d8\",\"integrity_sha256\":\"a89d8673a187981c31aabedbc98e2a037d24ad919c6fb22d9b0ff6c955be20d8\",\"size_bytes\":329488,\"validation\":{\"path_traversal_safe\":true,\"exists\":true,\"allowed_root\":true,\"allowed_extension\":true,\"within_workspace\":true,\"sha256_computed\":true,\"require_allowed_root\":true,\"regular_file\":true,\"single_link\":true,\"elf_header\":true},\"artifact_id\":\"a89d8673a187981c31aabedbc98e2a037d24ad919c6fb22d9b0ff6c955be20d8.elf\",\"original_filename\":\"i2s7384-base.elf\"},\"validation\":{\"path_traversal_safe\":true,\"exists\":true,\"allowed_root\":true,\"allowed_extension\":true,\"within_workspace\":true,\"sha256_computed\":true,\"require_allowed_root\":true,\"regular_file\":true,\"single_link\":true,\"elf_header\":true},\"summary\":\"Firmware artifact uploaded and validated.\"}"
+    }
+   ],
+   "structuredContent": {
+    "ok": true,
+    "tool": "artifact_upload",
+    "artifact_id": "a89d8673a187981c31aabedbc98e2a037d24ad919c6fb22d9b0ff6c955be20d8.elf",
+    "artifact": {
+     "source": "upload",
+     "path": ".agentic-hil/artifacts/a89d8673a187981c31aabedbc98e2a037d24ad919c6fb22d9b0ff6c955be20d8.elf",
+     "resolved_path": "<bench host path>",
+     "sha256": "a89d8673a187981c31aabedbc98e2a037d24ad919c6fb22d9b0ff6c955be20d8",
+     "integrity_sha256": "a89d8673a187981c31aabedbc98e2a037d24ad919c6fb22d9b0ff6c955be20d8",
+     "size_bytes": 329488,
+     "validation": {
+      "path_traversal_safe": true,
+      "exists": true,
+      "allowed_root": true,
+      "allowed_extension": true,
+      "within_workspace": true,
+      "sha256_computed": true,
+      "require_allowed_root": true,
+      "regular_file": true,
+      "single_link": true,
+      "elf_header": true
+     },
+     "artifact_id": "a89d8673a187981c31aabedbc98e2a037d24ad919c6fb22d9b0ff6c955be20d8.elf",
+     "original_filename": "i2s7384-base.elf"
+    },
+    "validation": {
+     "path_traversal_safe": true,
+     "exists": true,
+     "allowed_root": true,
+     "allowed_extension": true,
+     "within_workspace": true,
+     "sha256_computed": true,
+     "require_allowed_root": true,
+     "regular_file": true,
+     "single_link": true,
+     "elf_header": true
+    },
+    "summary": "Firmware artifact uploaded and validated."
+   },
+   "isError": false
+  }
+ }
+}

@@ -1,0 +1,9 @@
+{
+ "variant": "after",
+ "embassy_commit": "c8db3be841e271609a2bd3928996d0c6ba188f3a",
+ "elf": "C:/t/i2s-after/thumbv7em-none-eabi/release/i2s7384-after",
+ "bytes": 330652,
+ "sha256": "0fa6da5fcd8821bd1daf181a3159066b34586a1f9e79f218987e9b089c78717f",
+ "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+ "command": "cargo +1.97 build --release --target thumbv7em-none-eabi"
+}

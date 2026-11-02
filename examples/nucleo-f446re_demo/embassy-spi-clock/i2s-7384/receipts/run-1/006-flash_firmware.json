@@ -1,0 +1,102 @@
+{
+ "redacted": [
+  "paths on the bench host (config_in_force.path)",
+  "ST-LINK serial number (device locks, resources)",
+  "lease_id"
+ ],
+ "started_at": "2026-11-02T23:19:45.044930+00:00",
+ "request": {
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "tools/call",
+  "params": {
+   "name": "flash_firmware",
+   "arguments": {
+    "artifact_id": "d4547b3b2629fb491247eae4f2a259fef3dccf7bcad46e70590ec720edb22923.elf",
+    "reset_after_flash": true,
+    "capture": {
+     "port_id": "dut",
+     "until": [
+      "RESULT pass",
+      "RESULT fail",
+      "RESULT panic"
+     ],
+     "wait_timeout_s": 40
+    }
+   }
+  }
+ },
+ "completed_at": "2026-11-02T23:19:46.780791+00:00",
+ "response": {
+  "jsonrpc": "2.0",
+  "id": 6,
+  "result": {
+   "content": [
+    {
+     "type": "text",
+     "text": "{\"ok\":true,\"tool\":\"flash_firmware\",\"backend\":\"openocd\",\"started_at\":\"2026-11-02T23:19:45.897Z\",\"finished_at\":\"2026-11-02T23:19:47.296Z\",\"elapsed_ms\":1399,\"summary\":\"Firmware flashed, verified, and target reset.\",\"log_path\":\".agentic-hil/logs/openocd-20261102T231945898Z-flash_firmware.log\",\"success_confirmed\":true,\"artifact\":{\"source\":\"upload\",\"path\":\".agentic-hil/artifacts/d4547b3b2629fb491247eae4f2a259fef3dccf7bcad46e70590ec720edb22923.elf\",\"sha256\":\"d4547b3b2629fb491247eae4f2a259fef3dccf7bcad46e70590ec720edb22923\"},\"verify\":true,\"reset_after_flash\":true,\"side_effect_committed\":true,\"side_effect_status\":\"committed\",\"retry_safe\":false,\"config_in_force\":{\"path\":\"<bench host path>\",\"digest_algorithm\":\"sha256\",\"digest\":\"sha256:3310c8c7a3304f42e397f6225ac314bb15f96e2d5e506e0c6e873a4a4c3201a1\",\"description_source\":\"startup\",\"file_state\":\"unchanged\",\"file_digest\":\"sha256:3310c8c7a3304f42e397f6225ac314bb15f96e2d5e506e0c6e873a4a4c3201a1\",\"diverged_from_file\":false,\"checked_at\":\"2026-11-02T23:19:47Z\"},\"report_path\":\".agentic-hil/reports/last-report.json\",\"capture\":{\"port_id\":\"dut\",\"bytes_read\":565,\"data\":{\"hex\":\"4932533733383420424f4f542076617269616e743d693273373338342d6265666f726520656d62617373793d35363233643762353663326320626f6172643d4e55434c454f2d4634343652450a4932533733383420434c4f434b53207379733d3138303030303030302070636c6b313d34353030303030302070636c6b323d393030303030303020706c6c6932735f723d36303030303030300a493253373338342052434320636667723d3078303030303934306120706c6c636667723d3078303030303264303820706c6c693273636667723d307832303030306630382064636b636667723d307830303030303030300a4932533733383420434f4e53545255435420626567696e2063616c6c3d4932533a3a6e65775f74786f6e6c795f6e6f6d636b28535049332c5042352c504131352c5042332c444d41315f4348372920666f726d61743d4461746131364368616e6e656c3332206672657175656e63793d3438303030206d61737465725f636c6f636b3d66616c73650a493253373338342050414e4943206d6573736167653d22756e77726170206f662060636f6d707574655f626175645f726174652873656c662e6b65726e656c5f636c6f636b2c20636f6e6669672e6672657175656e63792960206661696c65643a204672657175656e6379546f6f4c6f7722206c6f636174696f6e3d2f656d62617373792f656d62617373792d73746d33322f7372632f7370692f6d6f642e72733a3430380a4932533733383420524553554c542070616e6963\",\"text\":\"I2S7384 BOOT variant=i2s7384-before embassy=5623d7b56c2c board=NUCLEO-F446RE\\nI2S7384 CLOCKS sys=180000000 pclk1=45000000 pclk2=90000000 plli2s_r=60000000\\nI2S7384 RCC cfgr=0x0000940a pllcfgr=0x00002d08 plli2scfgr=0x20000f08 dckcfgr=0x00000000\\nI2S7384 CONSTRUCT begin call=I2S::new_txonly_nomck(SPI3,PB5,PA15,PB3,DMA1_CH7) format=Data16Channel32 frequency=48000 master_clock=false\\nI2S7384 PANIC message=\\\"unwrap of `compute_baud_rate(self.kernel_clock, config.frequency)` failed: FrequencyTooLow\\\" location=/embassy/embassy-stm32/src/spi/mod.rs:408\\nI2S7384 RESULT panic\",\"encoding\":\"utf-8\"},\"until_matched\":true,\"matched\":\"RESULT panic\",\"truncated\":true,\"overflow_bytes\":0,\"log_path\":\".agentic-hil/logs/com-20261102T231945831Z-dut.jsonl\"},\"lease_id\":\"<lease id>\",\"resources\":[\"debugger-discovery:all\",\"probe:<probe serial>\"],\"lease_state\":\"released\",\"safe_state_confirmed\":true,\"processes_reaped\":true}"
+    }
+   ],
+   "structuredContent": {
+    "ok": true,
+    "tool": "flash_firmware",
+    "backend": "openocd",
+    "started_at": "2026-11-02T23:19:45.897Z",
+    "finished_at": "2026-11-02T23:19:47.296Z",
+    "elapsed_ms": 1399,
+    "summary": "Firmware flashed, verified, and target reset.",
+    "log_path": ".agentic-hil/logs/openocd-20261102T231945898Z-flash_firmware.log",
+    "success_confirmed": true,
+    "artifact": {
+     "source": "upload",
+     "path": ".agentic-hil/artifacts/d4547b3b2629fb491247eae4f2a259fef3dccf7bcad46e70590ec720edb22923.elf",
+     "sha256": "d4547b3b2629fb491247eae4f2a259fef3dccf7bcad46e70590ec720edb22923"
+    },
+    "verify": true,
+    "reset_after_flash": true,
+    "side_effect_committed": true,
+    "side_effect_status": "committed",
+    "retry_safe": false,
+    "audit_ok": true,
+    "config_in_force": {
+     "path": "<bench host path>",
+     "digest_algorithm": "sha256",
+     "digest": "sha256:3310c8c7a3304f42e397f6225ac314bb15f96e2d5e506e0c6e873a4a4c3201a1",
+     "description_source": "startup",
+     "file_state": "unchanged",
+     "file_digest": "sha256:3310c8c7a3304f42e397f6225ac314bb15f96e2d5e506e0c6e873a4a4c3201a1",
+     "diverged_from_file": false,
+     "checked_at": "2026-11-02T23:19:47Z"
+    },
+    "report_path": ".agentic-hil/reports/last-report.json",
+    "capture": {
+     "port_id": "dut",
+     "bytes_read": 565,
+     "data": {
+      "hex": "4932533733383420424f4f542076617269616e743d693273373338342d6265666f726520656d62617373793d35363233643762353663326320626f6172643d4e55434c454f2d4634343652450a4932533733383420434c4f434b53207379733d3138303030303030302070636c6b313d34353030303030302070636c6b323d393030303030303020706c6c6932735f723d36303030303030300a493253373338342052434320636667723d3078303030303934306120706c6c636667723d3078303030303264303820706c6c693273636667723d307832303030306630382064636b636667723d307830303030303030300a4932533733383420434f4e53545255435420626567696e2063616c6c3d4932533a3a6e65775f74786f6e6c795f6e6f6d636b28535049332c5042352c504131352c5042332c444d41315f4348372920666f726d61743d4461746131364368616e6e656c3332206672657175656e63793d3438303030206d61737465725f636c6f636b3d66616c73650a493253373338342050414e4943206d6573736167653d22756e77726170206f662060636f6d707574655f626175645f726174652873656c662e6b65726e656c5f636c6f636b2c20636f6e6669672e6672657175656e63792960206661696c65643a204672657175656e6379546f6f4c6f7722206c6f636174696f6e3d2f656d62617373792f656d62617373792d73746d33322f7372632f7370692f6d6f642e72733a3430380a4932533733383420524553554c542070616e6963",
+      "text": "I2S7384 BOOT variant=i2s7384-before embassy=5623d7b56c2c board=NUCLEO-F446RE\nI2S7384 CLOCKS sys=180000000 pclk1=45000000 pclk2=90000000 plli2s_r=60000000\nI2S7384 RCC cfgr=0x0000940a pllcfgr=0x00002d08 plli2scfgr=0x20000f08 dckcfgr=0x00000000\nI2S7384 CONSTRUCT begin call=I2S::new_txonly_nomck(SPI3,PB5,PA15,PB3,DMA1_CH7) format=Data16Channel32 frequency=48000 master_clock=false\nI2S7384 PANIC message=\"unwrap of `compute_baud_rate(self.kernel_clock, config.frequency)` failed: FrequencyTooLow\" location=/embassy/embassy-stm32/src/spi/mod.rs:408\nI2S7384 RESULT panic",
+      "encoding": "utf-8"
+     },
+     "until_matched": true,
+     "matched": "RESULT panic",
+     "truncated": true,
+     "overflow_bytes": 0,
+     "log_path": ".agentic-hil/logs/com-20261102T231945831Z-dut.jsonl"
+    },
+    "lease_id": "<lease id>",
+    "resources": [
+     "debugger-discovery:all",
+     "probe:<probe serial>"
+    ],
+    "lease_state": "released",
+    "safe_state_confirmed": true,
+    "processes_reaped": true,
+    "cleanup_required": false,
+    "quarantined": false,
+    "cleanup_reasons": [],
+    "quarantine_id": null
+   },
+   "isError": false
+  }
+ }
+}

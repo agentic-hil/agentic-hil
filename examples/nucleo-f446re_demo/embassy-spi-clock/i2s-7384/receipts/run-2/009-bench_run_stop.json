@@ -1,0 +1,39 @@
+{
+ "redacted": [
+  "ST-LINK serial number (device locks, resources)"
+ ],
+ "started_at": "2026-11-02T23:26:42.362348+00:00",
+ "request": {
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "tools/call",
+  "params": {
+   "name": "bench_run_stop",
+   "arguments": {}
+  }
+ },
+ "completed_at": "2026-11-02T23:26:42.390869+00:00",
+ "response": {
+  "jsonrpc": "2.0",
+  "id": 9,
+  "result": {
+   "content": [
+    {
+     "type": "text",
+     "text": "{\"ok\":true,\"tool\":\"bench_run_stop\",\"released_devices\":[\"com:serial:<probe serial>\",\"probe:<probe serial>\"],\"run_was_active\":true,\"summary\":\"2 device(s) were released.\"}"
+    }
+   ],
+   "structuredContent": {
+    "ok": true,
+    "tool": "bench_run_stop",
+    "released_devices": [
+     "com:serial:<probe serial>",
+     "probe:<probe serial>"
+    ],
+    "run_was_active": true,
+    "summary": "2 device(s) were released."
+   },
+   "isError": false
+  }
+ }
+}

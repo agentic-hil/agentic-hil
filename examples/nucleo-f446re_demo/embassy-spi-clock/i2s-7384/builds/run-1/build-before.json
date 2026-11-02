@@ -1,0 +1,9 @@
+{
+ "variant": "before",
+ "embassy_commit": "5623d7b56c2c6e1afeafe0a431ddff8e3264db2a",
+ "elf": "C:/t/i2s-before/thumbv7em-none-eabi/release/i2s7384-before",
+ "bytes": 330128,
+ "sha256": "d4547b3b2629fb491247eae4f2a259fef3dccf7bcad46e70590ec720edb22923",
+ "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+ "command": "cargo +1.97 build --release --target thumbv7em-none-eabi"
+}

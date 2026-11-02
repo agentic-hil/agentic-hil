@@ -1,0 +1,17 @@
+{
+ "base": {
+  "artifact_id": "8869671c3d376286a079cca54c4aa0a5d05cdcc5e919be685caeababe2b6bb42.elf",
+  "flash_ok": true,
+  "until_matched": true
+ },
+ "before": {
+  "artifact_id": "4492572c5187392c40b7f2df06cd4257d9eb4234084c75bbe2bb6fdb5ba33004.elf",
+  "flash_ok": true,
+  "until_matched": true
+ },
+ "after": {
+  "artifact_id": "0fa6da5fcd8821bd1daf181a3159066b34586a1f9e79f218987e9b089c78717f.elf",
+  "flash_ok": true,
+  "until_matched": true
+ }
+}

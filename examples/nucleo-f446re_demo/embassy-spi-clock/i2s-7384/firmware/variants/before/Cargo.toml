@@ -1,0 +1,29 @@
+[package]
+name = "i2s7384-before"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "../../build.rs"
+
+# Keeps this crate out of any enclosing workspace.
+[workspace]
+
+[[bin]]
+name = "i2s7384-before"
+path = "../../src/main.rs"
+test = false
+bench = false
+
+# C:/t/e7384-before is a worktree of j4rvisstant/embassy at the commit in the BOOT line.
+[dependencies]
+embassy-stm32 = { path = "C:/t/e7384-before/embassy-stm32", features = ["stm32f446re", "time-driver-any", "memory-x"] }
+embassy-executor = { path = "C:/t/e7384-before/embassy-executor", features = ["platform-cortex-m", "executor-thread"] }
+embassy-time = { path = "C:/t/e7384-before/embassy-time" }
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+debug = 1

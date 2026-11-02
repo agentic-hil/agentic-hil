@@ -650,6 +650,7 @@ checked.
 | [tables.csv](tables.csv), [evaluation.json](evaluation.json), [matrix.txt](matrix.txt) | the evaluation of the before run |
 | [tables-after.csv](tables-after.csv), [evaluation-after.json](evaluation-after.json), [matrix-after.txt](matrix-after.txt) | the evaluation of the after run |
 | [before-after.csv](before-after.csv) | the two runs side by side |
+| [i2s-7384/](i2s-7384/) | a later check, also on a NUCLEO-F446RE: the I2S constructor, which the change made panic, before and after the pull request's I2S fix |
 | [.gitattributes](.gitattributes) | keeps the bundles, the plans and the patch byte for byte as their digests record them |
 
 ## How this was made
