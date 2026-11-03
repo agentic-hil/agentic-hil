@@ -40,6 +40,15 @@ updates:
     # releases above the ceiling too, so a major-only rule would only move the
     # next pull request to 0.12.0; the rule names the ceiling itself instead.
     # Drop it once the locks move to bitstring 5.
+    #
+    # pytest 9.2.0 derives an item's nodeid from its structured id, and
+    # pytest-xdist 3.8.0 still groups by rewriting item._nodeid, so under
+    # --dist loadgroup the group suffix is lost and every xdist_group mark is
+    # scheduled like plain load. The suite's own configuration asks for
+    # loadgroup to keep the step 5 process table tests on one worker, and the
+    # 9.2.0 pull request had those tests straddle two workers on every Windows
+    # leg. The fix is merged upstream (pytest-dev/pytest-xdist#1388) but not
+    # released. Drop this once a pytest-xdist release carries it.
     ignore:
       - dependency-name: "wrapt"
         update-types:
@@ -50,6 +59,9 @@ updates:
       - dependency-name: "tibs"
         versions:
           - ">=0.6"
+      - dependency-name: "pytest"
+        versions:
+          - ">=9.2"
     groups:
       python-dependencies:
         patterns:
