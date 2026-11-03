@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- The two release jobs that run after the upload to PyPI no longer fail on the newest Python: the one that attaches the distributions, the SBOM and their attestations to the GitHub release, and the one that installs the pinned release from PyPI by the hash of the wheel the run built and asks its CLI for every command the CI examples invoke. Both run on the newest Python setup-python installs, 3.15 since the hosted runners added it, and install from the hash-pinned locks `requirements/sbom.txt` and `requirements/runtime.txt`, which pinned rpds-py 0.30.0 for every Python. That release publishes no wheel for 3.15 and its build refuses it, so 0.26.0 reached PyPI and the MCP Registry without either job. Both locks now pin rpds-py 2026.9.1 from Python 3.11 on, which publishes 3.15 wheels, and keep 0.30.0 for 3.10, which the newer release no longer supports.
+
 ## [0.26.0] - 2026-11-03
 
 ### Added
