@@ -516,6 +516,18 @@ queues on the lock itself, as the gate's does, and each distribution's report
 and log are uploaded as `bench-tier-<distribution>`, whatever the run did, and
 kept for fourteen days.
 
+Before the first of those runs, and again after the last whatever the night
+did, the job clears the runner account's image store under the machine's run
+lock: it removes the working containers that stopped builds leave, which Podman
+lists only with `--external`, and then every image without a name that nothing
+builds on. This tool prunes an image it replaces by the label added at the end
+of its build, so the layers under that label stay behind, and night after night
+they filled the runner's disk until the builds failed with
+`no space left on device`. Between the first clearing and the first build the
+job checks that the disk the images are built on has 10 GiB free; with less it
+builds nothing and fails with the free space and the threshold, naming the
+runner's machine rather than the commit as the cause.
+
 ## What is in the image
 
 - The base image, pinned by digest, with the tag it was resolved from on the

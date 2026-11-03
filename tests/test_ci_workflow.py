@@ -41,8 +41,11 @@ from __future__ import annotations
 import posixpath
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -980,6 +983,35 @@ DISTRIBUTION_RESULTS = "bench-results"
 # steps' and room for the checkout and the uploads, which took seconds.
 DISTRIBUTION_STEP_FLOOR_MINUTES = 39
 ROOM_AROUND_THE_DISTRIBUTIONS_MINUTES = 5
+# The check of the room the builds have on the runner's disk, by the id the
+# distributions name it by: each runs unless the run was cancelled, and only
+# once the check has found that room.
+ROOM_STEP_ID = "room"
+DISTRIBUTION_CONDITION = "${{ !cancelled() && steps.room.outcome == 'success' }}"
+# The four images are 1.5 to 2.9 GB each on the bench, and a build copies the
+# layer it commits through a temporary directory before the layer lands in the
+# store. A floor, as the limits above are.
+ROOM_THE_BUILDS_NEED_GIB = 10
+# What clears the runner account's image store, before the first build and after
+# the last. tools/bench_in_container.py prunes the image a build replaces by the
+# label tools/bench/Dockerfile gives it, and that label is added only at the end
+# of the build, so the layers under it carry none and stayed behind; a build
+# stopped part way leaves its working container, which Podman lists only with
+# `--external`, in the state "storage", and the images under it stay as long as
+# it does. So those containers go first, and then every image with no name that
+# nothing builds on. Never `--all`, which would also take the base images and
+# the images the night builds, and with them every layer the next build reuses.
+STOPPED_BUILDS = [
+    "podman",
+    "ps",
+    "--all",
+    "--external",
+    "--no-trunc",
+    "--format",
+    '{{if eq .State "storage"}}{{.ID}}{{end}}',
+]
+REMOVE_THEM = ["xargs", "--no-run-if-empty", "podman", "rm", "--force"]
+PRUNE_UNNAMED_IMAGES = ["podman", "image", "prune", "--force"]
 
 
 def distributions_job() -> dict:
@@ -1007,7 +1039,7 @@ def distribution_steps() -> list[tuple[str, dict, dict]]:
     steps = distributions_job()["steps"]
     found = []
     for index, step in enumerate(steps):
-        if "run" not in step:
+        if DISTRIBUTION_RUNNER not in step.get("run", ""):
             continue
         lines = run_lines({"steps": [step]})
         assert len(lines) == 1, lines
@@ -1043,9 +1075,10 @@ def test_every_distribution_the_runner_builds_runs_its_whole_tier_one_after_anot
     The whole tier each time, so nothing after `--`, and `exec` for the gate's
     reason: the runner is the step's process and the SIGINT a cancelled run
     sends reaches it rather than a shell. After a red distribution the next
-    still runs; after a cancel, none. Each takes the machine's run lock itself,
-    as the gate's run does, and queues for it, and each states, as the gate's
-    does, that the board's USB-UART adapter is there.
+    still runs; after a cancel, none, and none once the check of the runner's
+    disk found no room for the images. Each takes the machine's run lock
+    itself, as the gate's run does, and queues for it, and each states, as the
+    gate's does, that the board's USB-UART adapter is there.
 
     Each names its probe by the directory whose authoritative configuration
     binds it, and that is the demo's directory, the one the job before it
@@ -1065,7 +1098,7 @@ def test_every_distribution_the_runner_builds_runs_its_whole_tier_one_after_anot
             "exec", "python3", DISTRIBUTION_RUNNER, "--distribution", distribution, "--probe-from-config", demo,
             "--require-usb-uart", "--output", f"{DISTRIBUTION_RESULTS}/{distribution}",
         ], command
-        assert step["if"] == "${{ !cancelled() }}", step
+        assert step["if"] == DISTRIBUTION_CONDITION, step
         assert "working-directory" not in step, step
         assert not RAW_HARDWARE.search(line), line
         assert not FETCH_TOOL.search(line), line
@@ -1087,15 +1120,248 @@ def test_the_distributions_run_inside_a_limit_measured_on_the_bench() -> None:
 
     A floor rather than the number itself, as the hosted suite's limit is:
     raising it needs no edit here, lowering it back into the measured range
-    does. The job's limit is the steps' together and the room around them, so
-    no distribution loses its time to the ones before it.
+    does. The job's limit is the steps' together and the room around them, the
+    clearings of the image store and the check of the disk among the steps, so
+    no distribution loses its time to the ones before it or to them.
     """
     ran = distribution_steps()
     limits = [step["timeout-minutes"] for _, step, _ in ran]
+    others = [
+        step.get("timeout-minutes")
+        for step in distributions_job()["steps"]
+        if "run" in step and DISTRIBUTION_RUNNER not in step["run"]
+    ]
 
     for limit in limits:
         assert isinstance(limit, int) and limit >= DISTRIBUTION_STEP_FLOOR_MINUTES, limits
-    assert distributions_job()["timeout-minutes"] >= sum(limits) + ROOM_AROUND_THE_DISTRIBUTIONS_MINUTES, limits
+    for limit in others:
+        assert isinstance(limit, int), others
+    needed = sum(limits) + sum(others) + ROOM_AROUND_THE_DISTRIBUTIONS_MINUTES
+    assert distributions_job()["timeout-minutes"] >= needed, (limits, others)
+
+
+def image_store_clearings() -> list[tuple[int, dict]]:
+    """Each step of the job that prunes the image store: its index and the step."""
+    steps = distributions_job()["steps"]
+    return [(index, step) for index, step in enumerate(steps) if "image prune" in step.get("run", "")]
+
+
+def room_check() -> tuple[int, dict]:
+    """The step that checks the room the images have on the runner's disk: its index and the step."""
+    found = [(index, step) for index, step in enumerate(distributions_job()["steps"]) if step.get("id") == ROOM_STEP_ID]
+    assert len(found) == 1, found
+    return found[0]
+
+
+def test_the_job_runs_the_distributions_the_clearings_and_the_check_and_nothing_else() -> None:
+    """Every step that runs a command is one the tests here hold."""
+    steps = distributions_job()["steps"]
+    held = {index for index, _ in image_store_clearings()} | {room_check()[0]}
+    held |= {index for index, step in enumerate(steps) if DISTRIBUTION_RUNNER in step.get("run", "")}
+
+    assert {index for index, step in enumerate(steps) if "run" in step} == held, steps
+
+
+def test_the_image_store_is_cleared_before_the_first_build_and_after_the_last_whatever_happened() -> None:
+    """Before the check of the room, which measures what the clearing left, and as the job's last step.
+
+    The first clearing runs once the checkout has, so what earlier nights left
+    is gone before the room is measured and anything is built. The last runs
+    whatever the night did, so a red night and a cancelled one do not leave
+    their layers and their stopped builds to the next night's room either.
+    """
+    steps = distributions_job()["steps"]
+    clearings = image_store_clearings()
+    room, _ = room_check()
+    first_build = min(index for index, step in enumerate(steps) if DISTRIBUTION_RUNNER in step.get("run", ""))
+
+    assert len(clearings) == 2, clearings
+    (before, first), (after, last) = clearings
+    assert "if" not in first, first
+    assert before < room < first_build, (before, room, first_build)
+    assert last["if"] == "always()", last
+    assert after == len(steps) - 1, (after, len(steps))
+
+
+def test_each_clearing_removes_the_stopped_builds_then_the_unnamed_images_under_the_machines_run_lock() -> None:
+    """The lock taken, the stopped builds' containers removed, the unnamed images pruned, the lock given back.
+
+    Under the machine's run lock, the one each build queues on: a run of the
+    tier started on the machine itself builds in the same store, and a working
+    container removed under a build is a build that fails. The take follows the
+    step's own shell, `$$`, the process that starts it, so a step that fails
+    before it gives the lock back leaves a record the next build breaks as
+    stale; no `--no-wait`, so it queues behind such a run as the builds do; the
+    state goes where the runner empties before and after every job, each
+    clearing's its own. `bash` for `pipefail`: a listing that failed is a failed
+    step and not one that found nothing to remove.
+    """
+    states = []
+    for _, step in image_store_clearings():
+        commands = [shlex.split(line) for line in run_lines({"steps": [step]})]
+        assert len(commands) == 4, commands
+        take, stopped_builds, prune, give_back = commands
+        state = option_value(take, "--state") or ""
+
+        assert take[:3] == ["python3", RUN_LOCK, "take"], take
+        assert option_value(take, "--for-the-life-of") == "$$", take
+        assert state.startswith("$RUNNER_TEMP/"), take
+        assert option_value(take, "--tool") == ".github/workflows/hardware-bench.yml", take
+        assert option_value(take, "--runs-for"), take
+        assert "--no-wait" not in take, take
+        assert "|" in stopped_builds, stopped_builds
+        bar = stopped_builds.index("|")
+        assert stopped_builds[:bar] == STOPPED_BUILDS, stopped_builds
+        assert stopped_builds[bar + 1 :] == REMOVE_THEM, stopped_builds
+        assert prune == PRUNE_UNNAMED_IMAGES, prune
+        assert give_back == ["python3", RUN_LOCK, "give-back", "--state", state], give_back
+        assert step["shell"] == "bash", step
+        assert isinstance(step["timeout-minutes"], int), step
+        assert "working-directory" not in step, step
+        for command in commands:
+            assert not RAW_HARDWARE.search(shlex.join(command)), command
+            assert not FETCH_TOOL.search(shlex.join(command)), command
+        states.append(state)
+    assert len(set(states)) == 2, states
+
+
+def test_the_room_for_the_images_is_checked_unless_the_run_was_cancelled() -> None:
+    """After the first clearing whatever it did, in Python, with a limit of its own.
+
+    A clearing that failed still leaves the night its builds when the room is
+    there: the check is what decides, and the distributions name it by its id.
+    """
+    _, step = room_check()
+
+    assert step["if"] == "${{ !cancelled() }}", step
+    assert step["shell"] == "python3 {0}", step
+    assert isinstance(step["timeout-minutes"], int), step
+    assert f"steps.{ROOM_STEP_ID}.outcome == 'success'" in DISTRIBUTION_CONDITION
+
+
+GIB = 1024**3
+# Where a rootless store is, for the check to ask about and never print: the
+# path names the runner's account.
+A_STORE = "/home/someone/.local/share/containers/storage"
+
+
+def check_the_room(
+    monkeypatch: pytest.MonkeyPatch, free: dict[str, float], info: Exception | None = None
+) -> tuple[object, list[str]]:
+    """The check's own source, run against a machine with `free` GiB in each place.
+
+    How it exited, None for a check that passed, and every place it asked about.
+    `info` is what `podman info` raises instead of naming the store; a place
+    missing from `free` is a directory that is not there.
+    """
+    asked: list[str] = []
+
+    def podman(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+        assert command == ["podman", "info", "--format", "{{.Store.GraphRoot}}"], command
+        if info is not None:
+            raise info
+        return subprocess.CompletedProcess(command, 0, stdout=f"{A_STORE}\n", stderr="")
+
+    def disk_usage(place: str) -> SimpleNamespace:
+        asked.append(place)
+        if place not in free:
+            raise FileNotFoundError(2, "No such file or directory", place)
+        return SimpleNamespace(total=1000 * GIB, used=0, free=int(free[place] * GIB))
+
+    _, step = room_check()
+    monkeypatch.setattr(subprocess, "run", podman)
+    monkeypatch.setattr(shutil, "disk_usage", disk_usage)
+    try:
+        exec(compile(step["run"], "the room check", "exec"), {"__name__": "__main__"})
+    except SystemExit as stopped:
+        return stopped.code, asked
+    return None, asked
+
+
+@pytest.mark.parametrize("free", [4.3, ROOM_THE_BUILDS_NEED_GIB - 0.1])
+def test_without_room_for_the_images_nothing_is_built_and_the_runners_machine_is_named_as_the_cause(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], free: float
+) -> None:
+    """One line with the room there is and the room the builds need, in place of four builds failing in turn.
+
+    Each of those failed with `no space left on device` part way through its
+    build, and the log left its reader to work out that the commit had nothing
+    to do with it. The store's path is not printed, since it names the runner's
+    account.
+    """
+    monkeypatch.delenv("TMPDIR", raising=False)
+
+    code, asked = check_the_room(monkeypatch, {A_STORE: free, "/var/tmp": free})
+    out = capsys.readouterr().out
+    needed = re.search(r"below the (\d+) GiB", out)
+
+    assert code == 1, out
+    assert out.startswith(f"::error title=Runner disk full::{free:.1f} GiB free on the runner's disk"), out
+    assert needed and int(needed[1]) >= ROOM_THE_BUILDS_NEED_GIB, out
+    assert "The cause is the runner's machine, not the commit." in out, out
+    assert A_STORE not in out, out
+    assert sorted(asked) == sorted([A_STORE, "/var/tmp"]), asked
+
+
+def test_with_room_for_the_images_the_check_says_how_much_and_the_builds_go_ahead(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("TMPDIR", raising=False)
+
+    code, _ = check_the_room(monkeypatch, {A_STORE: 64.0, "/var/tmp": 64.0})
+    out = capsys.readouterr().out
+
+    assert code is None, out
+    assert out.startswith("64.0 GiB free on the runner's disk"), out
+    assert "::error" not in out, out
+    assert A_STORE not in out, out
+
+
+@pytest.mark.parametrize("temporary", [None, "/scratch"])
+def test_the_room_is_the_lesser_of_the_store_and_the_directory_a_build_copies_its_layers_through(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], temporary: str | None
+) -> None:
+    """`$TMPDIR` where the machine sets one and `/var/tmp` otherwise, the directory Podman copies a layer through."""
+    if temporary is None:
+        monkeypatch.delenv("TMPDIR", raising=False)
+    else:
+        monkeypatch.setenv("TMPDIR", temporary)
+    copied_through = temporary or "/var/tmp"
+
+    code, asked = check_the_room(monkeypatch, {A_STORE: 64.0, copied_through: 6.0})
+    out = capsys.readouterr().out
+
+    assert code == 1, out
+    assert out.startswith("::error title=Runner disk full::6.0 GiB free"), out
+    assert sorted(asked) == sorted([A_STORE, copied_through]), asked
+
+
+@pytest.mark.parametrize(
+    ("info", "free"),
+    [
+        (subprocess.CalledProcessError(125, ["podman", "info"]), {}),
+        (subprocess.TimeoutExpired(["podman", "info"], 120), {}),
+        (FileNotFoundError(2, "No such file or directory", "podman"), {}),
+        (None, {"/var/tmp": 64.0}),
+    ],
+    ids=["podman-failed", "podman-hung", "no-podman", "no-store"],
+)
+def test_a_check_that_cannot_read_the_room_builds_nothing_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    info: Exception | None,
+    free: dict[str, float],
+) -> None:
+    """A store nothing could measure is not a store with room, and the cause is still the machine."""
+    monkeypatch.delenv("TMPDIR", raising=False)
+
+    code, _ = check_the_room(monkeypatch, free, info)
+    out = capsys.readouterr().out
+
+    assert code == 1, out
+    assert out.startswith("::error title=Runner disk not checked::"), out
+    assert "The cause is the runner's machine, not the commit." in out, out
+    assert A_STORE not in out, out
 
 
 # The gate: the bench tier, run by tools/bench_in_container.py in its image on
