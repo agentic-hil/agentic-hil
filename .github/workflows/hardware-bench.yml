@@ -253,16 +253,18 @@ jobs:
     # in a fork, for the reason the job above gives.
     if: ${{ !cancelled() && github.repository == 'agentic-hil/agentic-hil' }}
     runs-on: [self-hosted, agentic-hil, nucleo-f446re]
-    # Forty minutes for each distribution and ten for the checkout and the four
-    # uploads, which took seconds on the bench. A step's forty minutes count its
-    # wait for the machine too, as the gate's do. Measured on the bench, the
-    # slowest distribution, Fedora 44, held the machine for 19m26s from the start
-    # of its build to its verdict, so a whole run of the tier started on the
-    # machine itself in front of it still leaves it its own time. A step still
-    # waiting when its limit comes fails with nothing run on the board; one cut
-    # short in the tier is interrupted as a cancelled gate is, which tears the
-    # tier down and puts the demo back on the board.
-    timeout-minutes: 170
+    # Forty minutes for each distribution, thirty for each of the two times the
+    # image store is cleared, five for the check of the room the builds have,
+    # and ten for the checkout and the four uploads, which took seconds on the
+    # bench. A step's forty minutes count its wait for the machine too, as the
+    # gate's do. Measured on the bench, the slowest distribution, Fedora 44, held
+    # the machine for 19m26s from the start of its build to its verdict, so a
+    # whole run of the tier started on the machine itself in front of it still
+    # leaves it its own time. A step still waiting when its limit comes fails
+    # with nothing run on the board; one cut short in the tier is interrupted as
+    # a cancelled gate is, which tears the tier down and puts the demo back on
+    # the board.
+    timeout-minutes: 235
 
     steps:
       # Credentials are not kept in the checkout: the image is built from the
@@ -272,6 +274,83 @@ jobs:
         with:
           persist-credentials: false
 
+      # What earlier builds left in the runner account's image store, cleared
+      # before anything is built. Every night builds the four images again, and
+      # each build replaces the image it builds over: the runner prunes the
+      # replaced image by the label tools/bench/Dockerfile puts on it, and that
+      # label is added only at the end of the build, so the layers under it,
+      # down to the copy of the checkout, carry none and stayed in the store as
+      # images nobody names. A build that is stopped part way leaves its working
+      # container behind as well, a container Podman did not create and lists
+      # only with `--external`, and the images it was built on stay with it.
+      # Both piled up night after night until the builds ran out of room on the
+      # runner's disk.
+      #
+      # So those working containers are removed first, and then every image that
+      # has no name and that nothing builds on, again and again until none is
+      # left, which takes each replaced image's layers down to where they meet an
+      # image still in use. The images the night builds keep their names, and so
+      # do the base images, which are pulled by digest under a name of their own,
+      # so the next build still finds the layers it can reuse.
+      #
+      # Under the machine's run lock, the one each build below queues on, held
+      # for this step's life: a run of the tier started on the machine itself
+      # builds in the same store, and a working container removed under a build
+      # is a build that fails. `$$` is this step's shell, the process that
+      # starts the take; a step that fails before it gives the lock back leaves
+      # a record naming a process that is gone, which the first build below
+      # breaks as stale. Thirty minutes, so a whole run of the tier started on
+      # the machine in front of it still leaves it the minute or two it takes.
+      # `shell: bash` for `pipefail`: a listing that failed would otherwise pass
+      # as one that found nothing to remove.
+      - name: Clear what earlier builds left in the image store
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          python3 tools/run_lock.py take --state "$RUNNER_TEMP/image-store-before.json" --tool .github/workflows/hardware-bench.yml --runs-for "a minute or two" --for-the-life-of $$
+          podman ps --all --external --no-trunc --format '{{if eq .State "storage"}}{{.ID}}{{end}}' | xargs --no-run-if-empty podman rm --force
+          podman image prune --force
+          python3 tools/run_lock.py give-back --state "$RUNNER_TEMP/image-store-before.json"
+
+      # The room the builds have, once the store is cleared, asked before
+      # anything is built. The four images are 1.5 to 2.9 GB each, and a build
+      # copies the layer it is committing through a temporary directory before
+      # the layer lands in the store, so a night whose commit changes what every
+      # image is built from needs about ten gigabytes. Less than that is the
+      # state of the runner's machine and not of the commit, and this says so in
+      # one line, with the room there is and the room it needs, in place of four
+      # builds failing in turn with `no space left on device`. Nothing is built
+      # when it fails; the uploads below find nothing to upload, and the store
+      # is cleared again at the end. Both places a build writes are asked, the
+      # store and the temporary directory, and the store's path is not printed,
+      # since it names the runner's account.
+      - name: Check the runner's disk has room for the images
+        id: room
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        shell: python3 {0}
+        run: |
+          import os
+          import shutil
+          import subprocess
+          import sys
+
+          NEEDED_GIB = 10
+          try:
+              store = subprocess.run(
+                  ["podman", "info", "--format", "{{.Store.GraphRoot}}"],
+                  capture_output=True, text=True, check=True, timeout=120,
+              ).stdout.strip()
+              places = (store, os.environ.get("TMPDIR") or "/var/tmp")
+              free_gib = min(shutil.disk_usage(place).free for place in places) / 1024**3
+          except (OSError, subprocess.SubprocessError) as error:
+              print(f"::error title=Runner disk not checked::The free space on the runner's disk where the images are built could not be read ({type(error).__name__}), so nothing was built. The cause is the runner's machine, not the commit.")
+              sys.exit(1)
+          if free_gib < NEEDED_GIB:
+              print(f"::error title=Runner disk full::{free_gib:.1f} GiB free on the runner's disk where the images are built, below the {NEEDED_GIB} GiB the builds need, so nothing was built. The cause is the runner's machine, not the commit.")
+              sys.exit(1)
+          print(f"{free_gib:.1f} GiB free on the runner's disk where the images are built; the builds need {NEEDED_GIB} GiB.")
+
       # Each step is the gate's command with the distribution named: it queues
       # on the machine's run lock itself, so it waits for anything else on the
       # machine rather than meeting it at the board, builds the image, runs the
@@ -279,8 +358,9 @@ jobs:
       # runner script is the step's process, and the SIGINT a cancelled or timed
       # out step sends reaches it rather than a shell, so the tier tears down and
       # puts the demo back on the board. After a red distribution the next still
-      # runs; after a cancel, none. Each report goes into a directory of its own,
-      # since the runner clears the one it is given of an earlier report.
+      # runs; after a cancel, none, and none when the check above found no room
+      # for the builds or could not ask. Each report goes into a directory of its
+      # own, since the runner clears the one it is given of an earlier report.
       # `--require-usb-uart` for the gate's reason: the board has a USB-UART
       # adapter wired to it, and a run that lost it must not pass with the
       # adapter's tests deselected.
@@ -296,7 +376,7 @@ jobs:
       # moved to another port or another one plugged in beside it changes
       # nothing here.
       - name: Run the bench tier on Ubuntu 22.04
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.room.outcome == 'success' }}
         timeout-minutes: 40
         run: exec python3 tools/bench_in_container.py --distribution ubuntu-22.04 --probe-from-config examples/nucleo-f446re_demo --require-usb-uart --output bench-results/ubuntu-22.04
 
@@ -313,7 +393,7 @@ jobs:
           retention-days: 14
 
       - name: Run the bench tier on Ubuntu 24.04
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.room.outcome == 'success' }}
         timeout-minutes: 40
         run: exec python3 tools/bench_in_container.py --distribution ubuntu-24.04 --probe-from-config examples/nucleo-f446re_demo --require-usb-uart --output bench-results/ubuntu-24.04
 
@@ -327,7 +407,7 @@ jobs:
           retention-days: 14
 
       - name: Run the bench tier on Debian 12
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.room.outcome == 'success' }}
         timeout-minutes: 40
         run: exec python3 tools/bench_in_container.py --distribution debian-12 --probe-from-config examples/nucleo-f446re_demo --require-usb-uart --output bench-results/debian-12
 
@@ -341,7 +421,7 @@ jobs:
           retention-days: 14
 
       - name: Run the bench tier on Fedora 44
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.room.outcome == 'success' }}
         timeout-minutes: 40
         run: exec python3 tools/bench_in_container.py --distribution fedora-44 --probe-from-config examples/nucleo-f446re_demo --require-usb-uart --output bench-results/fedora-44
 
@@ -353,3 +433,19 @@ jobs:
           path: bench-results/fedora-44/
           if-no-files-found: warn
           retention-days: 14
+
+      # The store cleared again after the last distribution, whatever the night
+      # did, the same way and under the same lock as before the first: tonight's
+      # builds replaced the images they built over and left those images' layers
+      # behind, and a build that was stopped or ran out of room left its working
+      # container. A red night and a cancelled one clear up after themselves
+      # too, rather than leaving it all to the next night's room.
+      - name: Clear what tonight's builds left in the image store
+        if: always()
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          python3 tools/run_lock.py take --state "$RUNNER_TEMP/image-store-after.json" --tool .github/workflows/hardware-bench.yml --runs-for "a minute or two" --for-the-life-of $$
+          podman ps --all --external --no-trunc --format '{{if eq .State "storage"}}{{.ID}}{{end}}' | xargs --no-run-if-empty podman rm --force
+          podman image prune --force
+          python3 tools/run_lock.py give-back --state "$RUNNER_TEMP/image-store-after.json"
