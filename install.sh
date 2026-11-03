@@ -19,7 +19,7 @@ set -eu
 # untouched. Deliberately not a capability floor either: step 4 registers the
 # skill out of whatever copy step 1 left in place, so a floor left a returning
 # user on an old package and an old skill at once.
-RELEASE="0.25.0"
+RELEASE="0.26.0"
 
 # The PATH this run was handed, recorded before anything of ours has prepended to
 # it. Step 3's report is about the operator's own shell, and this script edits
@@ -457,8 +457,8 @@ version_matches_request() {
 # makes every install fail, and that is the point. Refreshing them is a release
 # chore, written down in docs/release-strategy.md, not something an install
 # decides on the operator's machine.
-UV_INSTALLER_VERSION="0.13.5"
-UV_INSTALLER_SHA256="1c6e7f025499664633ac2dce43a210800510e9ef0625c52e034a8afdf8bf177a"
+UV_INSTALLER_VERSION="0.13.7"
+UV_INSTALLER_SHA256="d263ee68314cf5bea36b08e6bd9e2c4563240d7adb73756cf33af5c199b92db4"
 
 sha256_of() {
     # The first checksum tool this machine actually has. GNU coreutils spells it

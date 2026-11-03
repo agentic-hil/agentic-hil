@@ -3,7 +3,7 @@
 Agentic Hardware-in-the-Loop (Agentic HIL) exposes the same local MCP stdio server and the same tool semantics in every host. Only the host configuration syntax changes.
 
 Every block below was verified against the linked host documentation on
-2026-10-26. Moving that date is a release chore, described under "The Host
+2026-11-03. Moving that date is a release chore, described under "The Host
 Documentation Check" in [Release Strategy](release-strategy.md), because a date
 nobody moves invites more trust than it can carry.
 
@@ -179,7 +179,7 @@ cwd = "/absolute/path/to/firmware-project"
 enabled = true
 ```
 
-The configured `cwd` enables automatic config discovery. Start Codex with `AGENTIC_HIL_CONFIG` inherited only when an absolute-path override is required. Project-scoped configuration is unnecessary for this registration.
+The configured `cwd` enables automatic config discovery. Only when an absolute-path override is required, start Codex with `AGENTIC_HIL_CONFIG` set and add `env_vars = ["AGENTIC_HIL_CONFIG"]` to the table: Codex starts a stdio server with a default set of variables such as `PATH` and `HOME` and the ones `env_vars` names, so an override it merely inherited never reaches the server. Project-scoped configuration is unnecessary for this registration.
 
 Sources: [Codex MCP setup](https://learn.chatgpt.com/docs/extend/mcp) and [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference). Both moved off `developers.openai.com`, which answers them with a permanent redirect.
 
