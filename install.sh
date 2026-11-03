@@ -457,8 +457,8 @@ version_matches_request() {
 # makes every install fail, and that is the point. Refreshing them is a release
 # chore, written down in docs/release-strategy.md, not something an install
 # decides on the operator's machine.
-UV_INSTALLER_VERSION="0.13.5"
-UV_INSTALLER_SHA256="1c6e7f025499664633ac2dce43a210800510e9ef0625c52e034a8afdf8bf177a"
+UV_INSTALLER_VERSION="0.13.7"
+UV_INSTALLER_SHA256="d263ee68314cf5bea36b08e6bd9e2c4563240d7adb73756cf33af5c199b92db4"
 
 sha256_of() {
     # The first checksum tool this machine actually has. GNU coreutils spells it
