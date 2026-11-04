@@ -3351,6 +3351,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not raise `timeout_s` or loosen the pattern until it passes without reading what arrived.",
         ),
     ),
+    "defmt_expect_timeout": ErrorRemedy(
+        meaning=(
+            "A `defmt_expect` step saw no decoded defmt frame meeting all of its claims (`expected`) within "
+            "`timeout_s`. `last_frames` is the rendered lines of the last frames that did arrive, "
+            "`frames_passed_over` how many decoded frames did not match, and `decode_errors` counts the records "
+            "that could not be decoded at all."
+        ),
+        remediation=(
+            "Read `last_frames`: the frame that is there with another level, format or value is a firmware or plan "
+            "finding; fix whichever is wrong.",
+            "Non-zero `decode_errors`, `unknown_index` above all, means the line does not carry what this table "
+            "describes: flash the ELF the board should run and open the line again.",
+            "No frames and no errors points at the port, the wiring, the baud rate, or a board that did not boot or "
+            "does not log at this level (`DEFMT_LOG` decides at build time which levels are compiled in).",
+        ),
+        do_not=(
+            "Do not raise `timeout_s` or drop claims until the step passes without reading what arrived.",
+        ),
+    ),
     "unexpected_stop": ErrorRemedy(
         meaning=(
             "The target stopped, but not at the breakpoint the step was waiting for. `stop` is where and why it "
@@ -6130,6 +6149,59 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not read symbols out of the rebuilt ELF by hand with GDB. Its addresses describe a build that is not "
             "on the target.",
+        ),
+    ),
+    "defmt_table_not_available": ErrorRemedy(
+        meaning=(
+            "A COM session was asked to decode defmt (`defmt: true` on com_session_start, or a plan's `uart_open` "
+            "with `defmt: true`), and no ELF has been flashed through this service, so no defmt table is known to "
+            "describe the firmware on the board. defmt keeps its format strings in the ELF and sends only indices, "
+            "so without the right table nothing on the line can be read. No flash has succeeded in this session, the "
+            "image was a .hex or a .bin, or the firmware was flashed outside Agentic HIL. No port was opened."
+        ),
+        remediation=(
+            "Flash the `.elf` the build produced with flash_firmware, then start the session with `defmt: true` "
+            "again. flash_firmware with `capture: {{port_id, defmt: true}}` does both and returns the decoded boot "
+            "output.",
+            "If the board was flashed some other way, pass `defmt: {{\"image_path\": \"<the .elf>\"}}`; the answer then "
+            "says `proven: false`, because nothing shows that this ELF is what the board runs.",
+        ),
+        do_not=(
+            "Do not decode the line with another build's ELF to get past this. A table from a different build turns "
+            "every index into a different message, and the frames read as plausible text that is wrong.",
+        ),
+    ),
+    "defmt_table_changed": ErrorRemedy(
+        meaning=(
+            "The ELF whose defmt table a COM session was to decode with is no longer the file that was validated or "
+            "flashed: its digest changed because it was rebuilt or replaced, or it can no longer be read. `reason` "
+            "says which (`changed`, `missing`, `unreadable`, `too_large`). No port was opened."
+        ),
+        remediation=(
+            "Flash the current build with flash_firmware, so the image on the board and the ELF on disk are the same "
+            "file again, then start the session again.",
+        ),
+        do_not=(
+            "Do not decode with the rebuilt ELF while the board still runs the old image. Their tables disagree, and "
+            "the frames would decode into messages the firmware never sent.",
+        ),
+    ),
+    "defmt_table_invalid": ErrorRemedy(
+        meaning=(
+            "The ELF named for defmt decoding has no table this decoder can use. `reason` says why: `elf_unreadable` "
+            "(not an ELF image; a .bin or .hex carries no table), `table_missing` (no `.defmt` section: the firmware "
+            "does not use defmt, or was linked without `-Tdefmt.x`), `version_unsupported` (a defmt wire format "
+            "other than versions 3 and 4, which defmt 0.3 and 1.x write) or `table_invalid` (a `.defmt` section "
+            "whose symbols are not what defmt writes there). No port was opened."
+        ),
+        remediation=(
+            "For `table_missing`, link the firmware with `-C link-arg=-Tdefmt.x`, rebuild and flash the `.elf`.",
+            "For `elf_unreadable`, pass the `.elf` the build produced, not the .bin or .hex made from it.",
+            "For `version_unsupported`, build the firmware with defmt 0.3 or 1.x.",
+        ),
+        do_not=(
+            "Do not open the session without `defmt` and match the raw bytes as text. defmt frames are binary "
+            "indices and arguments, and no text pattern matches them reliably.",
         ),
     ),
     "symbol_source_not_available": ErrorRemedy(

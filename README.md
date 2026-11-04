@@ -78,7 +78,7 @@ Each hardware action returns a structured result with its outcome, diagnostics, 
 
 Agentic HIL connects to your probe through its backend: ST-Link through OpenOCD or the STM32CubeProgrammer CLI, and CMSIS-DAP probes through pyOCD. It also flashes and resets ESP32 targets through esptool and their USB-UART bridge, without opening a debug session. Hardware support follows the probe and backend.
 
-Send commands and read responses over serial ports and CAN buses using PCAN, SocketCAN, or a custom bridge. Several runs can share a CAN bus through the broker.
+Send commands and read responses over serial ports and CAN buses using PCAN, SocketCAN, or a custom bridge. Several runs can share a CAN bus through the broker. Rust firmware that logs with [defmt](https://defmt.ferrous-systems.com/) over a serial line is decoded natively, with the table of the ELF you flashed: reads return frames with level, format string and typed arguments, and plans wait for a frame by what it is rather than by grepping text ([defmt logs as frames](docs/use-cases/defmt.md)).
 
 Agentic HIL runs on Linux, macOS, and Windows with Python 3.10 or newer, with CI coverage across all three platforms. The [Nucleo-F446RE example](examples/nucleo-f446re_demo/) takes you through a complete run on the board used to demonstrate the loop. See [installation](docs/installation.md) for backend and platform details.
 

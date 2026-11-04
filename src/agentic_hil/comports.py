@@ -21,6 +21,7 @@ from agentic_hil.coordination import (
     HardwareCoordinator,
     HardwareLease,
 )
+from agentic_hil.defmt import DefmtBinding, decode_stream, describe_records, error_record
 from agentic_hil.devices import VOLATILE_SERIAL_DEVICE_WARNING, uart_device
 from agentic_hil.knowledge import (
     COM_PORT_BUSY_ERROR,
@@ -792,6 +793,12 @@ class ComPortSession:
         # retried for the lease alone does not close and log the port again.
         self.handle_closed = False
         self.lease = lease or DetachedHardwareLease()
+        # The defmt table this session's bytes decode with, or None for a line
+        # read as text. Set by `com_session_start`, replaced by a repeat start.
+        self.defmt: DefmtBinding | None = None
+        # How many defmt records this session has handed out, so the first one
+        # can say that the session may have opened in the middle of a frame.
+        self.defmt_records_read = 0
         if start_reader:
             self.start_reader()
 
@@ -1056,6 +1063,10 @@ class ComPortService:
         self.coordinator = coordinator or HardwareCoordinator(config, "com-service")
         self._owns_coordinator = coordinator is None
         self.sessions: dict[str, ComPortSession] = {}
+        # Turns a `defmt` argument into the table a session decodes with. The
+        # tool service sets it, because the table comes from the ELF that
+        # service flashed; without it a `defmt` request is refused.
+        self.defmt_resolver: Callable[[object, str], JsonObject] | None = None
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
         # Unreachable with a session open, and kept for the day it is not. The
@@ -1079,6 +1090,23 @@ class ComPortService:
                 self._stop_session(session, "config_reloaded")
                 self.sessions.pop(port_id, None)
         self.config = config
+
+    def _defmt_binding(self, defmt: object, port_id: str, tool: str) -> DefmtBinding | JsonObject | None:
+        """The table a session will decode with, None for a text line, or the refusal.
+
+        Asked before the port is touched, so a missing or unreadable table costs
+        a refusal and never an open: the ELF is a file in the workspace, and the
+        board has nothing to say about it."""
+        if defmt is None or defmt is False or isinstance(defmt, DefmtBinding):
+            return defmt or None
+        if self.defmt_resolver is None:
+            # Only a COM service built without the tool service around it, which
+            # is where a table comes from, has no way to resolve one.
+            return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "field": "defmt", "summary": "This COM service has no source for a defmt table.", "side_effect_committed": False, **remediation_fields("invalid_argument", tool)}
+        resolved = self.defmt_resolver(defmt, tool)
+        if not resolved.get("ok"):
+            return {**resolved, "port_id": port_id, "side_effect_committed": False}
+        return resolved["binding"]
 
     def list_ports(self) -> JsonObject:
         ports: JsonObject = {}
@@ -1112,7 +1140,7 @@ class ComPortService:
             "summary": f"{len(ports)} configured COM port(s), {available_count} available host COM port(s).",
         }
 
-    def session_start(self, port_id: str, clear_buffer: bool = True) -> JsonObject:
+    def session_start(self, port_id: str, clear_buffer: bool = True, defmt: object = None) -> JsonObject:
         if not isinstance(port_id, str) or not isinstance(clear_buffer, bool):
             return self._write_report({"ok": False, "tool": "com_session_start", "error_type": "invalid_argument", "summary": "port_id must be a string and clear_buffer must be a boolean.", "side_effect_committed": False})
         port = self._configured_port(port_id, "com_session_start")
@@ -1130,6 +1158,9 @@ class ComPortService:
         if clear_buffer and not self.config.com_read_allowed(port["port_config"]):
             # Clearing drains the receive buffer, which is a read.
             clear_buffer = False
+        binding = self._defmt_binding(defmt, port_id, "com_session_start")
+        if isinstance(binding, dict):
+            return self._write_report(binding)
 
         # Before the log file, before the lease, before the handle: a mismatch
         # means this name leads to a board nobody meant, and every one of those
@@ -1148,6 +1179,10 @@ class ComPortService:
                 cleared = self._clear_buffers(existing)
                 if not cleared["ok"]:
                     return self._write_report(cleared)
+            # A repeat start says how the line is read from now on: a new
+            # table after a new flash, or none to read it as text again.
+            existing.defmt = binding
+            existing.defmt_records_read = 0
             return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": True, "session": self._session_status(existing), "identity": identity_status, "summary": "COM port session is already active."})
         if existing:
             # Deferred as on the stop path: a close that raised leaves the session
@@ -1204,8 +1239,13 @@ class ComPortService:
                 lease.record_cleanup_event("com_open_cleanup_unconfirmed", opened.get("backend_error"))
             return self._write_unattached_lease_report(opened, lease, release_if_safe=True)
         session = opened["session"]
+        session.defmt = binding
         self.sessions[port_id] = session
-        audit_error = session.append_audit({"event": "start", "port_id": port_id, "device": session.port_config.device}, self.config)
+        start_event: JsonObject = {"event": "start", "port_id": port_id, "device": session.port_config.device}
+        if binding is not None:
+            # The log keeps raw bytes; this is what decodes them again later.
+            start_event["defmt"] = binding.source
+        audit_error = session.append_audit(start_event, self.config)
         if audit_error is not None:
             session.audit_broken = True
             with suppress(BaseException):
@@ -1440,6 +1480,18 @@ class ComPortService:
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "max_bytes must be at least 1."}
         if not math.isfinite(parsed_wait_timeout_s):
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "wait_timeout_s must be finite."}
+        if session.defmt is not None:
+            patterns = None
+            if until is not None:
+                patterns = until_patterns(until, session.port_config.encoding, tool=tool)
+                if not patterns["ok"]:
+                    return {**patterns, "port_id": port_id}
+            wait_s = until_wait_s(None if wait_timeout_s is None else parsed_wait_timeout_s) if until is not None else max(0.0, min(parsed_wait_timeout_s, 60.0))
+            read = self._read_defmt(session, port_id, tool, parsed_max_bytes, wait_s, patterns)
+            if until is None:
+                # Only a read that waited for something reports what and how long.
+                read.pop("until_wait_s", None)
+            return read
         if until is not None:
             patterns = until_patterns(until, session.port_config.encoding, tool=tool)
             if not patterns["ok"]:
@@ -1528,6 +1580,84 @@ class ComPortService:
             result["reader_error"] = session.reader_error
         return {**result, **waited}
 
+    def _read_defmt(self, session: ComPortSession, port_id: str, tool: str, max_bytes: int, wait_s: float, until: JsonObject | None, *, settle: bool = False) -> JsonObject:
+        """`com_read` on a line that carries defmt: whole frames, decoded.
+
+        The bytes are taken off the buffer only up to the end of the last
+        complete frame, so a frame split across two reads is decoded once, whole,
+        by the read that sees its end. The wait ends at the first complete frame,
+        or, with `until`, at the first frame whose rendered line contains one of
+        its entries, literally; frames after that one stay buffered. `settle`
+        waits out the whole window instead, the way a capture without `until`
+        does. A buffer holding `max_bytes` with no complete frame in it is handed
+        out as one `oversized_frame` record: otherwise a line that never sends a
+        separator (a text console, the wrong port) would stall every later read.
+
+        Nothing is decoded on a guess. Bytes that are not a frame of this table
+        come back as records carrying `error` and their bytes, in stream order
+        with the frames, and are counted under `defmt.errors`."""
+        binding = session.defmt
+        assert binding is not None
+        entries = [str(entry) for entry in (until or {}).get("entries", [])]
+        deadline = time.monotonic() + wait_s
+        searched: tuple[int, int] | None = None
+        while self._session_is_active(session):
+            with session.lock:
+                state = (len(session.buffer), session.overflow_bytes)
+                head = bytes(session.buffer[:max_bytes]) if state != searched else None
+            if head is not None:
+                searched = state
+                batch = decode_stream(binding.table, head)
+                if len(head) >= max_bytes or (entries and _defmt_match(batch.records, entries) is not None) or (not entries and not settle and batch.records):
+                    break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        with session.lock:
+            head = bytes(session.buffer[:max_bytes])
+            batch = decode_stream(binding.table, head)
+            oversized = not batch.records and len(head) >= max_bytes
+            if oversized:
+                batch.records.append(error_record("oversized_frame", f"{len(head)} bytes (max_bytes) hold no complete frame, so they are handed out as they are; raise max_bytes if frames this long are expected", head))
+                batch.ends.append(len(head))
+            found = _defmt_match(batch.records, entries) if entries else None
+            count = len(batch.records) if found is None else found[0] + 1
+            count = min(count, DEFMT_MAX_RECORDS_PER_READ)
+            records = batch.records[:count]
+            consumed = batch.ends[count - 1] if count else 0
+            del session.buffer[:consumed]
+            remaining = len(session.buffer)
+            first_of_session = session.defmt_records_read == 0
+            session.defmt_records_read += len(records)
+        if records and first_of_session and "error" in records[0]:
+            # A session opened onto a running board starts wherever the board
+            # was, which is usually inside a frame. Said, so a reader does not
+            # take the first broken record for a table that does not fit.
+            records[0]["at_session_start"] = True
+        found = found if found is not None and found[0] < count else None
+        waited: JsonObject = {"until_wait_s": wait_s}
+        if until is not None:
+            waited["until"] = until["entries"]
+        if not records and session.reader_error is not None:
+            failure = self._active_session(port_id, tool)
+            if not failure["ok"]:
+                return {**failure, **waited}
+        counts = describe_records(records)
+        decoded: JsonObject = {**counts, "table": binding.source}
+        if any(record.get("error") == "unknown_index" for record in records):
+            decoded["advice"] = "An index the table does not carry usually means the board runs another build than the ELF this session decodes with; flash the ELF and start the session again."
+        if count < len(batch.records):
+            decoded["more_frames_buffered"] = True
+        summary = _defmt_summary(counts, records, found is not None, bool(entries), wait_s, session, self._session_is_active(session))
+        result: JsonObject = {"ok": True, "tool": tool, "port_id": port_id, "bytes_read": consumed, "buffer_remaining_bytes": remaining, "overflow_bytes": session.overflow_bytes, "frames": records, "defmt": decoded, "log_path": display_path(self.config, session.log_path), "summary": summary}
+        if entries:
+            result["until_matched"] = found is not None
+            if found is not None:
+                result["matched"] = until["entries"][found[1]] if until else entries[found[1]]
+        if session.reader_error:
+            result["reader_error"] = session.reader_error
+        return {**result, **waited}
+
     def capture_check(self, capture: JsonObject, tool: str) -> JsonObject:
         """Whether a capture of one port may start, asked before anything is touched.
 
@@ -1559,7 +1689,10 @@ class ComPortService:
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "field": "capture.port_id", "summary": f"COM port {port_id} already has a session, and a capture opens its own. Read that session with com_read or stop it with com_session_stop first."}
         max_bytes = capture.get("max_bytes")
         wait_timeout_s = capture.get("wait_timeout_s")
-        return {"ok": True, "port_id": port_id, "until": until, "max_bytes": port_config.max_buffer_bytes if max_bytes is None else int(max_bytes), "wait_s": until_wait_s(None if wait_timeout_s is None else float(wait_timeout_s))}
+        defmt = capture.get("defmt", False)
+        if not isinstance(defmt, bool):
+            return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "field": "capture.defmt", "summary": "capture.defmt must be a boolean: true decodes the boot output with the defmt table of the image being flashed."}
+        return {"ok": True, "port_id": port_id, "until": until, "defmt": defmt, "max_bytes": port_config.max_buffer_bytes if max_bytes is None else int(max_bytes), "wait_s": until_wait_s(None if wait_timeout_s is None else float(wait_timeout_s))}
 
     def capture_finish(self, checked: JsonObject, tool: str, *, wait: bool) -> tuple[JsonObject, JsonObject]:
         """Read a capture's session with `com_read`'s rules, then stop it.
@@ -1578,7 +1711,10 @@ class ComPortService:
         session = self.sessions[port_id]
         until = checked["until"]
         try:
-            read = self._read_until(session, port_id, tool, checked["max_bytes"], checked["wait_s"] if wait else 0.0, until or {"entries": [], "patterns": []})
+            if session.defmt is not None:
+                read = self._read_defmt(session, port_id, tool, checked["max_bytes"], checked["wait_s"] if wait else 0.0, until, settle=until is None)
+            else:
+                read = self._read_until(session, port_id, tool, checked["max_bytes"], checked["wait_s"] if wait else 0.0, until or {"entries": [], "patterns": []})
         except BaseException:
             with suppress(BaseException):
                 self.session_stop(port_id)
@@ -1586,7 +1722,11 @@ class ComPortService:
         stop = self.session_stop(port_id)
         with session.lock:
             remaining = len(session.buffer)
-        capture: JsonObject = {"port_id": port_id, "bytes_read": read.get("bytes_read", 0), "data": read.get("data") or data_result(b"", session.port_config.encoding)}
+        capture: JsonObject = {"port_id": port_id, "bytes_read": read.get("bytes_read", 0)}
+        if session.defmt is not None:
+            capture.update({"frames": read.get("frames", []), "defmt": read.get("defmt") or {}})
+        else:
+            capture["data"] = read.get("data") or data_result(b"", session.port_config.encoding)
         if until is not None:
             capture["until_matched"] = read.get("until_matched") is True
             if "matched" in read:
@@ -1817,6 +1957,8 @@ class ComPortService:
 
     def _session_status(self, session: ComPortSession) -> JsonObject:
         result: JsonObject = {"session_active": self._session_is_active(session), "started_at": session.started_at, "rx_buffer_bytes": len(session.buffer), "overflow_bytes": session.overflow_bytes, "log_path": display_path(self.config, session.log_path)}
+        if session.defmt is not None:
+            result["defmt"] = session.defmt.describe()
         if session.reader_error:
             result["reader_error"] = session.reader_error
         return result
@@ -2278,3 +2420,38 @@ def likely_causes(error_type: str) -> list[str]:
         "serial_write_failed": ["COM port was disconnected", "serial driver write timed out", "target or USB serial adapter stopped responding"],
         "serial_write_incomplete": ["configured write_timeout_s is too short for this payload size and baudrate", "target or USB serial adapter is applying flow control", "COM port was disconnected partway through the write"],
     }.get(error_type, ["inspect the COM port log for details"])
+
+
+# How many defmt records one read hands out. A defmt frame is a few bytes on the
+# wire and a few hundred characters decoded, so a buffer's worth of them would
+# be an answer no agent can read; the rest stays buffered for the next read.
+DEFMT_MAX_RECORDS_PER_READ = 256
+
+
+def _defmt_match(records: list[JsonObject], entries: list[str]) -> tuple[int, int] | None:
+    """The first decoded frame whose line contains an entry: (record, entry)."""
+    for position, record in enumerate(records):
+        text = record.get("text")
+        if not isinstance(text, str):
+            continue
+        for entry_position, entry in enumerate(entries):
+            if entry in text:
+                return position, entry_position
+    return None
+
+
+def _defmt_summary(counts: JsonObject, records: list[JsonObject], matched: bool, waited_for_until: bool, wait_s: float, session: ComPortSession, active: bool) -> str:
+    frames = int(counts["frames"])
+    errors = sum(int(value) for value in counts["errors"].values())
+    told = f"{frames} defmt frame(s) decoded" + (f", {errors} record(s) that did not decode" if errors else "")
+    if matched:
+        return f"{told}, through the first frame matching until."
+    if waited_for_until:
+        if session.reader_error is not None:
+            return f"The COM port reader stopped before a frame matching until was seen; {told}."
+        if not active:
+            return f"The COM port session stopped before a frame matching until was seen; {told}."
+        return f"No frame matching until was seen within {wait_s:g} s; {told}."
+    if not records:
+        return "No complete defmt frame was available."
+    return f"{told}."

@@ -7,7 +7,7 @@
   "required": ["version", "steps"],
   "$comment": "Additions this schema marks `x-since-version` belong to that plan format version and later. A plan is held to what its own `version:` contains, so a version 2 plan reaching for a version 3 action or key is refused by name rather than quietly accepted here and rejected by an older install elsewhere.",
   "properties": {
-    "version": { "enum": [2, 3, 4, 5, 6], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions (a serial line's on `uart_read`, a bus's on `can_read`), `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional. Version 4 adds the `repeat` block step, which runs a nested subset of steps by count or by wall time. Version 5 adds the `read_symbol` action and the numeric `comparator:` it carries, which is the first claim in this format about a value in target memory rather than about text a device sent. Version 6 adds the named `participant:` selector to CAN steps on buses configured with `shares:`." },
+    "version": { "enum": [2, 3, 4, 5, 6, 7], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions (a serial line's on `uart_read`, a bus's on `can_read`), `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional. Version 4 adds the `repeat` block step, which runs a nested subset of steps by count or by wall time. Version 5 adds the `read_symbol` action and the numeric `comparator:` it carries, which is the first claim in this format about a value in target memory rather than about text a device sent. Version 6 adds the named `participant:` selector to CAN steps on buses configured with `shares:`. Version 7 adds `defmt:` on `uart_open`, which decodes the line as defmt frames with the table of the flashed ELF, and the `defmt_expect` action, which waits for a frame by its level, format string, message and typed arguments." },
     "name": { "type": "string", "minLength": 1 },
     "steps": { "$ref": "#/$defs/steps" }
   },
@@ -25,6 +25,7 @@
           { "$ref": "#/$defs/uartWrite" },
           { "$ref": "#/$defs/uartRead" },
           { "$ref": "#/$defs/uartExpect" },
+          { "$ref": "#/$defs/defmtExpect" },
           { "$ref": "#/$defs/uartClose" },
           { "$ref": "#/$defs/canOpen" },
           { "$ref": "#/$defs/canClose" },
@@ -196,7 +197,15 @@
         "device": { "$ref": "#/$defs/device" },
         "port_id": { "$ref": "#/$defs/portId" },
         "action": { "const": "uart_open" },
-        "clear_buffer": { "type": "boolean", "default": true, "description": "Discard whatever the line buffered before this step, so what a later read matches came from this run rather than from a previous one. Opening a port a plan may not read is already refused, so the clear this asks for is always permitted here." }
+        "clear_buffer": { "type": "boolean", "default": true, "description": "Discard whatever the line buffered before this step, so what a later read matches came from this run rather than from a previous one. Opening a port a plan may not read is already refused, so the clear this asks for is always permitted here." },
+        "defmt": {
+          "x-since-version": 7,
+          "anyOf": [
+            { "type": "boolean" },
+            { "type": "object", "additionalProperties": false, "required": ["image_path"], "properties": { "image_path": { "$ref": "#/$defs/path" } } }
+          ],
+          "description": "Read this line as defmt frames, exactly as `com_session_start` with `defmt` does. `true` decodes with the table of the ELF the last `flash` (or `flash_firmware`) wrote, so a plan flashes the `.elf` before it opens the line; `{image_path: ...}` names the ELF of a board flashed some other way. A line opened this way is read with `defmt_expect`, and `uart_read` and `uart_expect` on it are refused before the run starts."
+        }
       }
     },
     "uartWrite": {
@@ -257,6 +266,50 @@
         "pattern": { "type": "string", "minLength": 1, "description": "A Python regular expression the port's output must match, with `re.search` semantics: it is anchored where it is written and nowhere else, so write `^` or `$` when the position is part of the claim. Use this to check that the board answered with the right value (a counter, a measurement, a version string) rather than merely that it answered. A pattern that does not compile is refused before the run starts. Mutually exclusive with `text`." },
         "timeout_s": { "$ref": "#/$defs/positiveTimeout" }
       }
+    },
+    "defmtExpect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "timeout_s"],
+      "x-since-version": 7,
+      "description": "Wait for a defmt frame on a line this plan opened with `defmt:`. Frames are matched as decoded: by `level`, by `format` (the format string as written in the firmware), by `text` or `pattern` against the rendered message, and by `args`, the typed arguments in the order the firmware passed them. Every key given must hold for one and the same frame. Frames before the match are passed over, frames after it stay for the next step, so two expectations met by one burst of output are both met. A step that times out fails with the last frames the line did send, and frames that could not be decoded are counted on either outcome.",
+      "anyOf": [{ "required": ["device"] }, { "required": ["port_id"] }],
+      "properties": {
+        "device": { "$ref": "#/$defs/device" },
+        "port_id": { "$ref": "#/$defs/portId" },
+        "action": { "const": "defmt_expect" },
+        "level": { "enum": ["trace", "debug", "info", "warn", "error"], "description": "The frame's log level, exactly. A `println!` frame has no level and never matches a step that names one." },
+        "format": { "type": "string", "minLength": 1, "description": "The frame's format string, exactly as the firmware wrote it, for example `temperature = {=f32} C`. It identifies the log statement and does not change when the values do." },
+        "text": { "type": "string", "minLength": 1, "description": "A substring of the frame's rendered message: the format string with its arguments filled in, as `defmt-print` shows it after the level. Mutually exclusive with `pattern`." },
+        "pattern": { "type": "string", "minLength": 1, "description": "A Python regular expression searched in the frame's rendered message. A pattern that does not compile is refused before the run starts. Mutually exclusive with `text`." },
+        "args": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "description": "Claims about the frame's arguments, by position: entry 0 is the first argument the firmware passed. `null` places no claim on that argument. A frame with fewer arguments than this list claims does not match.",
+          "items": {
+            "anyOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "minProperties": 1,
+                "properties": {
+                  "equals": { "description": "The argument's decoded value, compared as JSON: a number, a string, a boolean, a list of bytes, or a nested value's object." },
+                  "min": { "type": "number", "description": "Inclusive lower bound for a numeric argument." },
+                  "max": { "type": "number", "description": "Inclusive upper bound for a numeric argument." }
+                },
+                "not": { "anyOf": [{ "required": ["equals", "min"] }, { "required": ["equals", "max"] }] }
+              }
+            ]
+          }
+        },
+        "timeout_s": { "$ref": "#/$defs/positiveTimeout" }
+      },
+      "allOf": [
+        { "anyOf": [{ "required": ["level"] }, { "required": ["format"] }, { "required": ["text"] }, { "required": ["pattern"] }, { "required": ["args"] }] }
+      ],
+      "not": { "required": ["text", "pattern"] }
     },
     "uartClose": {
       "type": "object",

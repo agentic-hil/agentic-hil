@@ -491,6 +491,33 @@ class ArtifactManager:
             "summary": "Firmware artifact uploaded and validated.",
         }
 
+    def read_verified(self, artifact: JsonObject) -> JsonObject:
+        """The bytes of an artifact this manager validated, while they still are those bytes.
+
+        For a reader that needs the content and not only the path: the defmt
+        table a COM session decodes with is read out of the image's own bytes.
+        The file is opened the way validation opened it, inside the workspace,
+        and its digest is compared with the one recorded at validation, so a
+        rebuild that replaced the file since is refused rather than read as if
+        it were the image that was validated (or flashed). Answers `data` and
+        `sha256`, or `reason`: `missing`, `unreadable`, `too_large` or `changed`."""
+        path = Path(str(artifact.get("resolved_path", "")))
+        recorded = artifact.get("integrity_sha256") or artifact.get("sha256")
+        limit = self._max_upload_bytes()
+        try:
+            with safe_open_binary(path, workspace=self.config.work_dir) as handle:
+                data = handle.read(limit + 1)
+        except FileNotFoundError:
+            return {"ok": False, "reason": "missing"}
+        except (ConfigError, OSError) as error:
+            return {"ok": False, "reason": "unreadable", "backend_error": str(error)}
+        if len(data) > limit:
+            return {"ok": False, "reason": "too_large"}
+        digest = hashlib.sha256(data).hexdigest()
+        if not isinstance(recorded, str) or digest != recorded:
+            return {"ok": False, "reason": "changed", "sha256": digest}
+        return {"ok": True, "data": data, "sha256": digest}
+
     def _max_upload_bytes(self) -> int:
         return max(0, self.config.artifacts.max_upload_size_mb) * 1024 * 1024
 

@@ -636,17 +636,22 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # ---------------------------------------------------------------------------
 # What the pins hold.
 
-# `agentic_hil.backends.rs3005p`, the RS-3005P power supply backend (#735), is
+# `agentic_hil.defmt`, the defmt decoder, is the 52nd. It writes no error_type:
+# a frame it cannot decode is a record with `error`, never a refusal.
+# `agentic_hil.backends.rs3005p`, the RS-3005P power supply backend (#735), was
 # the 51st; `agentic_hil.power_supply`, the power-supply config module (#731),
 # was the 50th; `agentic_hil.backends.esptool`, the ESP32 backend, was the 49th.
-SCANNED_MODULE_COUNT = 51
+SCANNED_MODULE_COUNT = 52
 # The power supply tools (#733) add seven, the 220th to the 226th: the six
 # `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
 # `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
 # and `com_port_reserved_for_power_supply`. `can_broker_disconnected`, a broker
 # connection that ended (#664), was the 219th. `device_lock_root_unusable`, a
 # machine device-lock directory this account cannot use (#777), is the 227th.
-COLLECTED_TYPE_COUNT = 227
+# Native defmt decoding adds four, the 228th to the 231st: the three refusals of
+# a COM session's defmt table (`defmt_table_not_available`,
+# `defmt_table_changed`, `defmt_table_invalid`) and `defmt_expect_timeout`.
+COLLECTED_TYPE_COUNT = 231
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -711,7 +716,13 @@ COLLECTED_TYPE_COUNT = 227
 # `power_supply_no_reply` through `RS3005PRefused`, a fault that wrote nothing.
 # The machine device-lock directory (#777) adds one, with its type:
 # `bench._unusable_lock_root` writes `device_lock_root_unusable`.
-PRODUCER_COUNT = 706
+# Native defmt decoding adds six: `AgenticHILToolService._defmt_binding` writes
+# `defmt_table_not_available`, `AgenticHILToolService._artifact_defmt_binding`
+# writes `defmt_table_changed` and `defmt_table_invalid`,
+# `UartRunner._defmt_expect` writes `defmt_expect_timeout` and
+# `invalid_argument`, and `ComPortService._defmt_binding` writes
+# `invalid_argument` for a COM service built without a table source.
+PRODUCER_COUNT = 712
 
 
 def pin_problems(inventory: Inventory) -> list[str]:

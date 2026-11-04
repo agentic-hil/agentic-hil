@@ -212,7 +212,10 @@ def _section_at(handle, table_offset: int, entry_size: int, index: int, elf_clas
     if raw is None:
         return None
     fields = struct.unpack(byte_order + SECTION_HEADER_FORMAT[elf_class], raw)
-    return {"type": fields[1], "offset": fields[4], "size": fields[5], "link": fields[6], "entry_size": fields[9]}
+    # `name` (an offset into the section-name string table) and `address` are
+    # read for the defmt table, which finds its section by name and reads
+    # `bitflags!` values at a symbol's address inside it.
+    return {"name": fields[0], "type": fields[1], "address": fields[3], "offset": fields[4], "size": fields[5], "link": fields[6], "entry_size": fields[9]}
 
 
 def _symbols(handle, section: JsonObject, elf_class: int, byte_order: str, file_size: int):

@@ -73,6 +73,8 @@ steps:
 
 A plan already written against `version: 2`, `version: 3` or `version: 4` keeps loading and behaving exactly as it did; the older `uart_expect` action stays valid too. A plan is held to what its own `version:` contains, so a `version: 3` plan reaching for the version 4 block step, or a `version: 4` plan reaching for the version 5 `read_symbol` action, is refused by name rather than working on one install and failing on an older one for no stated reason.
 
+Firmware that logs with defmt is read with plan version 7: `uart_open` with `defmt: true` decodes the line with the table of the ELF the plan flashed, and `defmt_expect` waits for a frame by its level, format string, message and typed arguments. [defmt logs as frames](use-cases/defmt.md) has the details.
+
 `.agentic-hil/testconfig.yaml` and `--test-config` select only this test plan: ordered test steps and the device names they run on. They contain no hardware resources or permissions. The reactor gets all hardware settings from the discovered authoritative config or its `AGENTIC_HIL_CONFIG` override:
 
 ```text

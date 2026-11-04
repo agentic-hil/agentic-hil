@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -90,6 +91,9 @@ UART_EXPECT_TAIL_BYTES = 512
 # active ends its wait at once), so this paces a line that has stopped talking
 # rather than spinning on it until the step's deadline.
 UART_EXPECT_IDLE_POLL_S = 0.05
+# What a `defmt_expect` that timed out answers with: the rendered lines of the
+# last frames the line did send, capped for the same reason the UART tail is.
+DEFMT_EXPECT_TAIL_FRAMES = 16
 # What a `uart_expect` says about itself, per kind of expectation: (matched,
 # timed out). A plan that waited for a literal and a plan that waited for a
 # pattern fail for different reasons, and a result that called both "expected
@@ -611,6 +615,9 @@ class PlanState:
     debug_session: str | None = None
     # (kind, config entry) of every session the plan has opened and not closed.
     open_sessions: set[tuple[str, str, str | None]] = field(default_factory=set)
+    # The serial lines among them the plan opened with `defmt:`. Those are read
+    # with `defmt_expect`, and only those are.
+    defmt_sessions: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -1673,12 +1680,21 @@ class UartRunner(SessionDevice):
 
     # --- the actions this kind serves ------------------------------------
 
+    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService, **kwargs: Any):
+        super().__init__(config_id, device, service, **kwargs)
+        # defmt frames read off this line and not yet matched by a
+        # `defmt_expect`, in arrival order: the frames a burst brought after the
+        # one a step was waiting for are the next step's to match.
+        self._defmt_pending: deque[JsonObject] = deque()
+
     @step_action("uart_open", schema="uartOpen", tool="com_session_start", defaults={"clear_buffer": True}, role="open")
     def _uart_open(self, step: TestStep) -> JsonObject:
+        self._defmt_pending.clear()
         return self.open_session(step)
 
     @step_action("uart_close", schema="uartClose", tool="com_session_stop", role="close")
     def _uart_close(self, step: TestStep) -> JsonObject:
+        self._defmt_pending.clear()
         return self.close_session(step)
 
     @step_action("uart_write", schema="uartWrite", tool="com_write")
@@ -1696,6 +1712,82 @@ class UartRunner(SessionDevice):
         # the result reports it under.
         field_name = next(name for name in self.expect_fields if step.arguments.get(name) is not None)
         return self._expect(field_name, str(step.arguments[field_name]), float(step.arguments["timeout_s"]))
+
+    @step_action("defmt_expect", schema="defmtExpect", tool="com_read", forwards_arguments=False)
+    def _defmt_expect(self, step: TestStep) -> JsonObject:
+        """Wait for one defmt frame that meets every claim the step makes.
+
+        Each pass is one `com_read` on the plan's own session, which hands out
+        whole decoded frames. They are matched one at a time in arrival order,
+        and the step stops at the first frame that matches: what was read
+        after it stays with this runner for the next `defmt_expect`, so a step
+        never swallows the frame a later step is waiting for. A record that did
+        not decode never matches and is counted, on success and on timeout, so
+        a green step on a line full of undecodable bytes says so."""
+        matcher = DefmtFrameMatcher(step.arguments)
+        timeout_s = float(step.arguments["timeout_s"])
+        deadline = time.monotonic() + timeout_s
+        passed_over = 0
+        errors: dict[str, int] = {}
+        tail: deque[str] = deque(maxlen=DEFMT_EXPECT_TAIL_FRAMES)
+        reads = 0
+        while True:
+            while self._defmt_pending:
+                record = self._defmt_pending.popleft()
+                if "error" in record:
+                    errors[str(record["error"])] = errors.get(str(record["error"]), 0) + 1
+                    tail.append(f"<{record['error']}: {record.get('raw_text') or record.get('raw_hex', '')}>")
+                    continue
+                if matcher.matches(record):
+                    return {
+                        "ok": True,
+                        "tool": "test_reactor_run",
+                        "summary": "A defmt frame matching the step was received.",
+                        "port_id": self.id,
+                        "expected": matcher.claims,
+                        "frame": record,
+                        "frames_passed_over": passed_over,
+                        "decode_errors": errors,
+                        "timeout_s": timeout_s,
+                        "reads": reads,
+                    }
+                passed_over += 1
+                tail.append(str(record.get("text", "")))
+            if time.monotonic() >= deadline:
+                summary = f"No defmt frame matching the step was received within {timeout_s:g} s."
+                if errors:
+                    summary += f" {sum(errors.values())} record(s) could not be decoded; see decode_errors."
+                return {
+                    "ok": False,
+                    "tool": "test_reactor_run",
+                    "error_type": "defmt_expect_timeout",
+                    "summary": summary,
+                    "port_id": self.id,
+                    "expected": matcher.claims,
+                    "frames_passed_over": passed_over,
+                    "decode_errors": errors,
+                    # What the line did say, so a red step is readable without
+                    # reconnecting to the board.
+                    "last_frames": list(tail),
+                    "timeout_s": timeout_s,
+                    "reads": reads,
+                }
+            result = self.service.call("com_read", {"port_id": self.id, "wait_timeout_s": max(0.0, deadline - time.monotonic())})
+            reads += 1
+            if result_failed(result):
+                return result
+            frames = result.get("frames")
+            if not isinstance(frames, list):
+                return {
+                    "ok": False,
+                    "tool": "test_reactor_run",
+                    "error_type": "invalid_argument",
+                    "summary": "defmt_expect reads a line opened with `defmt:`, and this session reads the line as text. Open it with `uart_open` and `defmt: true`.",
+                    "port_id": self.id,
+                }
+            self._defmt_pending.extend(record for record in frames if isinstance(record, dict))
+            if not frames:
+                time.sleep(min(UART_EXPECT_IDLE_POLL_S, max(0.0, deadline - time.monotonic())))
 
     @step_action("uart_read", schema="uartRead", tool="com_read", forwards_arguments=False)
     def _uart_read(self, step: TestStep) -> JsonObject:
@@ -1728,7 +1820,35 @@ class UartRunner(SessionDevice):
         refusal = cls._pattern_refusal(location, step)
         if refusal is not None:
             return refusal
-        return super().preflight(reactor, location, step, state)
+        refusal = super().preflight(reactor, location, step, state)
+        if refusal is not None:
+            return refusal
+        return cls._defmt_refusal(reactor, location, step, state)
+
+    @classmethod
+    def _defmt_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, state: PlanState) -> JsonObject | None:
+        """Keep a line's two readings apart, before the run.
+
+        A line opened with `defmt:` carries binary frames, which no text match
+        means anything against, and a line opened without it hands out no
+        frames for `defmt_expect` to match. Either mix-up would only ever time
+        out, so it is refused here, naming the step that opened the line the
+        other way."""
+        name = str(cls.step_config_id(reactor.config, step))
+        if step.action == cls.open_action:
+            if step.arguments.get("defmt") not in (None, False):
+                state.defmt_sessions.add(name)
+            else:
+                state.defmt_sessions.discard(name)
+            return None
+        if step.action == cls.close_action:
+            state.defmt_sessions.discard(name)
+            return None
+        if step.action == "defmt_expect" and name not in state.defmt_sessions:
+            return preflight_error(location, step, "action", "defmt_expect reads a line opened with `defmt:`, and this plan opened this line without it. Add `defmt: true` to its `uart_open`.")
+        if step.action in ("uart_read", "uart_expect") and name in state.defmt_sessions:
+            return preflight_error(location, step, "action", f"This line was opened with `defmt:`, so it carries binary defmt frames that no text match can read. Use `defmt_expect` instead of `{step.action}`.")
+        return None
 
     @classmethod
     def _pattern_refusal(cls, location: StepLocation, step: TestStep) -> JsonObject | None:
@@ -1742,6 +1862,8 @@ class UartRunner(SessionDevice):
             return pattern_refusal(location, step, "pattern", step.arguments.get("pattern"), "Test step's uart_expect pattern is not a valid Python regular expression.", needs_capture=False)
         if step.action == "uart_read":
             return comparator_pattern_refusal(location, step)
+        if step.action == "defmt_expect":
+            return pattern_refusal(location, step, "pattern", step.arguments.get("pattern"), "Test step's defmt_expect pattern is not a valid Python regular expression.", needs_capture=False)
         return None
 
     # --- reading the line ------------------------------------------------
@@ -1869,6 +1991,67 @@ class UartRunner(SessionDevice):
                 # that is no longer active), so pace the next pass rather than
                 # spinning on a line that has stopped talking.
                 time.sleep(min(UART_EXPECT_IDLE_POLL_S, max(0.0, deadline - time.monotonic())))
+
+
+class DefmtFrameMatcher:
+    """Which decoded defmt frame a `defmt_expect` step waits for.
+
+    Every claim the step makes holds for one and the same frame, or the frame
+    does not match. The claims are about the frame as decoded, not about a line
+    of text: its level, its format string, its rendered message and its
+    arguments as the JSON values `agentic_hil.defmt` gives them. A boolean
+    argument equals only a boolean, never the 1 or 0 Python would let it equal,
+    and a range applies only to a number."""
+
+    def __init__(self, arguments: Mapping[str, Any]):
+        self.level = arguments.get("level")
+        self.format = arguments.get("format")
+        self.text = arguments.get("text")
+        pattern = arguments.get("pattern")
+        self.pattern = None if pattern is None else re.compile(str(pattern))
+        self.args: list[Any] = list(arguments.get("args") or [])
+        self.claims: JsonObject = {key: arguments[key] for key in ("level", "format", "text", "pattern", "args") if arguments.get(key) is not None}
+
+    def matches(self, record: Mapping[str, Any]) -> bool:
+        if self.level is not None and record.get("level") != self.level:
+            return False
+        if self.format is not None and record.get("format") != self.format:
+            return False
+        message = str(record.get("message", ""))
+        if self.text is not None and str(self.text) not in message:
+            return False
+        if self.pattern is not None and self.pattern.search(message) is None:
+            return False
+        values = record.get("args")
+        if self.args and (not isinstance(values, list) or len(values) < len(self.args)):
+            return False
+        for position, claim in enumerate(self.args):
+            if claim is not None and not _defmt_claim_holds(claim, values[position]):
+                return False
+        return True
+
+
+def _defmt_claim_holds(claim: Mapping[str, Any], value: Any) -> bool:
+    if "equals" in claim and not _same_json_value(claim["equals"], value):
+        return False
+    if "min" in claim or "max" in claim:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        if "min" in claim and value < claim["min"]:
+            return False
+        if "max" in claim and value > claim["max"]:
+            return False
+    return True
+
+
+def _same_json_value(expected: Any, value: Any) -> bool:
+    if isinstance(expected, bool) or isinstance(value, bool):
+        return isinstance(expected, bool) and isinstance(value, bool) and expected == value
+    if isinstance(expected, list) and isinstance(value, list):
+        return len(expected) == len(value) and all(_same_json_value(left, right) for left, right in zip(expected, value, strict=True))
+    if isinstance(expected, dict) and isinstance(value, dict):
+        return expected.keys() == value.keys() and all(_same_json_value(expected[key], value[key]) for key in expected)
+    return bool(expected == value)
 
 
 class CanFrameComparator(StepComparator):

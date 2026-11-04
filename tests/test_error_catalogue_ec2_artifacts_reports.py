@@ -387,6 +387,9 @@ EXPECTED_INVENTORY: dict[str, frozenset[str]] = {
             "config_file_not_found",
             "config_invalid",
             "config_write_in_open_run",
+            "defmt_table_changed",
+            "defmt_table_invalid",
+            "defmt_table_not_available",
             "hardware_action_exception",
             "invalid_argument",
             "not_supported",
@@ -494,6 +497,12 @@ OWNED_ELSEWHERE: dict[str, str] = {
     "probe_discovery_failed": "#644",
     "timeout": "#644",
     "unknown_debugger_error": "#644 (classify_last_error's top-level error_type for a failure that recorded none)",
+    # The table a defmt COM session decodes with is read out of an artifact this
+    # module validated, and its refusals are the defmt decoder's, catalogued
+    # and provoked with it in test_defmt_sessions.py.
+    "defmt_table_changed": "defmt (the table of a COM session, read from a validated artifact)",
+    "defmt_table_invalid": "defmt (the table of a COM session, read from a validated artifact)",
+    "defmt_table_not_available": "defmt (the table of a COM session, read from a validated artifact)",
 }
 
 # Every expression a value is computed from rather than written, each pinned on

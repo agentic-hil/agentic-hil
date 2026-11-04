@@ -85,6 +85,7 @@ from agentic_hil.coordination import (
     nothing_standing_result,
 )
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
+from agentic_hil.defmt import DefmtBinding, DefmtTableError, load_table_bytes
 from agentic_hil.devices import (
     Device,
     DeviceError,
@@ -267,6 +268,9 @@ class AgenticHILToolService:
         self._owns_backend = backend is None
         self.artifacts = artifacts or ArtifactManager(self.config)
         self.com_ports = com_ports or ComPortService(self.config, self.coordinator)
+        # A `defmt` session decodes with the table of the ELF this service
+        # flashed, which only this service knows; see `_defmt_binding`.
+        self.com_ports.defmt_resolver = self._defmt_binding
         self.can_buses = can_buses or CanBusService(self.config, self.coordinator)
         # The supply tools see this server's own sessions through these two
         # read-only views, so a write on a board one of them holds is refused
@@ -404,6 +408,14 @@ class AgenticHILToolService:
         validation = self.artifacts.validate_local_path(str(image_path)) if image_path else self.artifacts.resolve_artifact_id(str(artifact_id))
         if not validation["ok"]:
             return validation
+        if checked is not None and checked.get("defmt"):
+            # The boot output decodes with the table of the image this call
+            # writes, read before anything is flashed, so an image without one
+            # is refused while the board still runs what it ran.
+            bound = self._artifact_defmt_binding(validation["artifact"], "flash_firmware", "flashed_image")
+            if not bound["ok"]:
+                return {**bound, "field": "capture.defmt", **NOT_STARTED}
+            checked = {**checked, "defmt_binding": bound["binding"]}
         staged = self.artifacts.stage_for_backend(validation["artifact"], "flash_firmware")
         if not staged["ok"]:
             return staged
@@ -507,7 +519,8 @@ class AgenticHILToolService:
         result, or the refusal of the open."""
         state = self._capture_state if self._capture_state is not None else {"sessions": []}
         port_id = checked["port_id"]
-        opened = self.com_ports.session_start(port_id)
+        binding = checked.get("defmt_binding")
+        opened = self.com_ports.session_start(port_id) if binding is None else self.com_ports.session_start(port_id, True, binding)
         state["sessions"].append(opened)
         if opened.get("ok") is not True or not overall_success(opened):
             # The session's lease fields stay with the session: the debugger
@@ -553,6 +566,10 @@ class AgenticHILToolService:
             return result
         stop = state.get("stop") or {}
         port_id = capture["port_id"]
+        if isinstance(capture.get("defmt"), dict) and not overall_success(result):
+            # The table is the image this call wrote, which is the image on the
+            # board only if the flash is confirmed.
+            capture = {**capture, "defmt": {**capture["defmt"], "table": {**(capture["defmt"].get("table") or {}), "proven": False}}}
         answer: JsonObject = {**result, "capture": capture}
         stop_error = None if stop.get("ok") is True else str(stop.get("backend_error") or stop.get("summary") or "The COM port session could not be stopped.")
         reader_error = capture.get("reader_error")
@@ -577,6 +594,64 @@ class AgenticHILToolService:
         if stop_error is not None:
             answer["cleanup_error"] = stop_error
         return answer
+
+    def _defmt_binding(self, spec: object, tool: str) -> JsonObject:
+        """The defmt table a COM session decodes with, from an ELF this bench can vouch for.
+
+        defmt keeps its format strings in the ELF, not on the wire, so a stream
+        decoded with another build's table reads as wrong messages rather than
+        as an error. `true` therefore means the ELF this service last flashed,
+        and only while it is byte for byte the file that was flashed: the same
+        guarantee the symbol tools give (`symbol_source_not_available`,
+        `symbol_source_changed`). `{"image_path": ...}` names an ELF for a board
+        flashed some other way; it is validated as a flash image is, and the
+        answer says it is not proven to be what the board runs unless it is the
+        flashed file. Nothing here touches a port or the board."""
+        if spec is True:
+            artifact = self._symbol_elf
+            if artifact is None:
+                return {
+                    "ok": False,
+                    "tool": tool,
+                    "error_type": "defmt_table_not_available",
+                    "summary": "No ELF has been flashed through this service, so no defmt table is known to describe the firmware on the board. Flash the ELF with flash_firmware first, or pass defmt as {\"image_path\": ...}.",
+                    "likely_causes": ["no flash_firmware call has succeeded in this session", "the image flashed was a .hex or .bin, which carries no defmt table", "the firmware was flashed outside Agentic HIL"],
+                    **remediation_fields("defmt_table_not_available"),
+                }
+            return self._artifact_defmt_binding(artifact, tool, "flashed_image")
+        if isinstance(spec, dict) and set(spec) == {"image_path"} and isinstance(spec.get("image_path"), str) and spec["image_path"]:
+            validation = self.artifacts.validate_local_path(spec["image_path"])
+            if not validation["ok"]:
+                return {**validation, "tool": tool, "field": "defmt.image_path"}
+            return self._artifact_defmt_binding(validation["artifact"], tool, "image_path")
+        return invalid_argument(tool, "defmt", "type", "defmt must be true, for the ELF flashed through this service, or an object with image_path naming an ELF.")
+
+    def _artifact_defmt_binding(self, artifact: JsonObject, tool: str, table_source: str) -> JsonObject:
+        """Read one validated ELF's defmt table out of the bytes its digest covers."""
+        read = self.artifacts.read_verified(artifact)
+        if not read["ok"]:
+            flashed = table_source == "flashed_image" and artifact is self._symbol_elf
+            return {
+                "ok": False,
+                "tool": tool,
+                "error_type": "defmt_table_changed",
+                "summary": (
+                    "The ELF flashed through this service is no longer the file that was flashed, so its defmt table is not proven to describe the firmware on the board. Flash the current build with flash_firmware."
+                    if flashed
+                    else "The ELF changed or became unreadable between its validation and the read of its defmt table."
+                ),
+                "reason": read["reason"],
+                "image_path": artifact.get("path"),
+                **remediation_fields("defmt_table_changed"),
+            }
+        flashed_digest = None if self._symbol_elf is None else self._symbol_elf.get("integrity_sha256") or self._symbol_elf.get("sha256")
+        proven = table_source == "flashed_image" or read["sha256"] == flashed_digest
+        try:
+            table = load_table_bytes(read["data"])
+        except DefmtTableError as error:
+            return {"ok": False, "tool": tool, "error_type": "defmt_table_invalid", "summary": error.summary, "reason": error.reason, "image_path": artifact.get("path"), **remediation_fields("defmt_table_invalid")}
+        source: JsonObject = {"image_path": artifact.get("path"), "sha256": read["sha256"], "table_source": "flashed_image" if proven else "image_path", "proven": proven}
+        return {"ok": True, "binding": DefmtBinding(table, source)}
 
     def artifact_upload(self, payload: JsonObject | None = None) -> JsonObject:
         return self.artifacts.upload(payload)
@@ -1015,7 +1090,9 @@ class AgenticHILToolService:
             "get_last_report": lambda: self.get_last_report(),
             "classify_last_error": lambda: self.classify_last_error(),
             "com_ports_list": lambda: self.com_ports.list_ports(),
-            "com_session_start": lambda: self.com_ports.session_start(args.get("port_id", ""), args.get("clear_buffer", True)),
+            # `defmt` travels only when asked for, so a session service built
+            # before it existed (a stand-in, an embedding) keeps its signature.
+            "com_session_start": lambda: self.com_ports.session_start(args.get("port_id", ""), args.get("clear_buffer", True), **({"defmt": args["defmt"]} if args.get("defmt") is not None else {})),
             "com_session_stop": lambda: self.com_ports.session_stop(str(args.get("port_id", ""))),
             "com_write": lambda: self.com_ports.write(str(args.get("port_id", "")), {key: value for key, value in args.items() if key in {"text", "hex"}}),
             "com_read": lambda: self.com_ports.read(str(args.get("port_id", "")), args.get("max_bytes"), args.get("wait_timeout_s"), args.get("until")),

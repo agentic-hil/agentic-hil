@@ -1,0 +1,22 @@
+[package]
+name = "defmt-fixture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+defmt = "1"
+defmt-rtt = "1"
+panic-halt = "1"
+
+[profile.release]
+opt-level = "s"
+debug = false
+strip = "debuginfo"
+lto = true
+codegen-units = 1
+
+[features]
+ts = []
+raw = ["defmt/encoding-raw"]

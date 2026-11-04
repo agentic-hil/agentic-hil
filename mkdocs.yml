@@ -12,6 +12,7 @@ nav:
       - Develop on your board: use-cases/develop-on-your-board.md
       - Flash and reset: use-cases/flash-and-reset.md
       - UART and CAN feedback: use-cases/uart-and-can.md
+      - defmt logs as frames: use-cases/defmt.md
       - Plans without a board: use-cases/check-plan.md
   - Configuration: configuration.md
   - Bench power supplies: power-supplies.md

@@ -1441,12 +1441,14 @@ def test_without_capture_a_flash_is_exactly_the_flash_it_was(tmp_path: Path, boa
 
 def test_the_capture_argument_is_the_com_read_shape_and_nothing_more() -> None:
     """`until` and `max_bytes` are `com_read`'s own, so a caller who knows one
-    knows the other, and the object refuses any key it does not name."""
+    knows the other, and the object refuses any key it does not name. `defmt`
+    is the one key `com_read` has no twin for: it decodes the capture with the
+    table of the image being flashed, which only this call has."""
     properties = flash_tool()["inputSchema"]["properties"]
     capture = properties.get("capture")
     assert isinstance(capture, dict), sorted(properties)
     assert capture["type"] == "object", capture
-    assert set(capture["properties"]) == {"port_id", "until", "wait_timeout_s", "max_bytes"}, capture
+    assert set(capture["properties"]) == {"port_id", "until", "wait_timeout_s", "max_bytes", "defmt"}, capture
     assert capture["required"] == ["port_id"], capture
     assert capture["additionalProperties"] is False, capture
     com_read = next(tool for tool in MCP_TOOLS if tool["name"] == "com_read")["inputSchema"]["properties"]

@@ -429,7 +429,7 @@ PINNED_SITES: dict[str, frozenset[tuple[str, str]]] = {
         _at("bench", "validated_wait")
         | _at("coordination", "HardwareCoordinator.begin_run", "_bound_debugger_device")
         | _at("runlifecycle", "validated_run_handle")
-        | _at("test_reactor", "CanRunner.preflight", "StepDevice.schema_refusal", "TestReactor.step_device", "pattern_refusal")
+        | _at("test_reactor", "CanRunner.preflight", "StepDevice.schema_refusal", "TestReactor.step_device", "UartRunner._defmt_expect", "pattern_refusal")
     ),
     "junit_xml_requires_synchronous_run": _at("junit", "detached_junit_refusal"),
     "junit_xml_write_failed": _at("junit", "result_with_junit_xml"),
@@ -472,6 +472,7 @@ PINNED_SITES: dict[str, frozenset[tuple[str, str]]] = {
     "test_config_schema_invalid": _at("test_reactor", "validate_test_config_schema"),
     "test_config_unreadable": _at("test_reactor", "load_test_config"),
     "uart_expect_timeout": _at("test_reactor", "UartRunner._expect"),
+    "defmt_expect_timeout": _at("test_reactor", "UartRunner._defmt_expect"),
     "uart_session_not_owned": _at("test_reactor", "UartRunner"),
     "undeclared_device": _at("coordination", "HardwareCoordinator.acquire"),
     "unexpected_stop": _at("test_reactor", "DebuggerRunner._run_until_breakpoint"),
@@ -593,6 +594,7 @@ REQUIRED_KEYS = (
     "symbol_size_mismatch",
     "symbol_width_not_numeric",
     "uart_expect_timeout",
+    "defmt_expect_timeout",
     "unexpected_stop",
     "breakpoint_cleanup_failed",
     "uart_session_not_owned",
@@ -949,6 +951,12 @@ SAYS: dict[str, Says] = {
         meaning=((r"expected_text|expected_pattern", r"timeout_s"), (r"received_tail",), (r"bytes_received", r"reads")),
         first=(r"received_tail",),
         order=(r"received_tail", r"bytes_received"),
+        do_not=((r"do not raise `timeout_s`",),),
+    ),
+    "defmt_expect_timeout": Says(
+        meaning=((r"defmt_expect", r"timeout_s"), (r"last_frames",), (r"decode_errors",)),
+        first=(r"last_frames",),
+        order=(r"last_frames", r"decode_errors"),
         do_not=((r"do not raise `timeout_s`",),),
     ),
     "unexpected_stop": Says(
