@@ -57,8 +57,6 @@ def test_pyocd_reports_both_f446_target_types_from_an_installed_pack() -> None:
         if len(fields) == 2 and fields[0] == "Keil.STM32F4xx_DFP":
             pack_versions.append(fields[1])
     assert len(pack_versions) == 1, packs_result.stdout
-    # pyOCD's supported pack-install command selects the vendor index's
-    # current release rather than accepting a version selector. Keep that
-    # resolution visible and fail deliberately if the index advances; updating
-    # this expectation then requires reviewing the changed DFP version.
+    # The image installs a hash-pinned archive without resolving the vendor
+    # index. Keep its metadata aligned with that reviewed pack release.
     assert pack_versions == ["3.1.1"], packs_result.stdout

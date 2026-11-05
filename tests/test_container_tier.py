@@ -370,7 +370,7 @@ def test_the_lock_the_image_bootstraps_from_carries_a_hash_for_every_pin() -> No
         elif entries:
             current.append(line)
 
-    assert {"uv", "pyocd", "setuptools", "wheel"} <= entries.keys(), sorted(entries)
+    assert {"uv", "pyocd", "setuptools", "wheel", "pip"} <= entries.keys(), sorted(entries)
     for name, tail in entries.items():
         assert any("--hash=sha256:" in line for line in tail), name
 
