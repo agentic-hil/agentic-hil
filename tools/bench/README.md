@@ -516,17 +516,22 @@ queues on the lock itself, as the gate's does, and each distribution's report
 and log are uploaded as `bench-tier-<distribution>`, whatever the run did, and
 kept for fourteen days.
 
-Before the first of those runs, and again after the last whatever the night
-did, the job clears the runner account's image store under the machine's run
-lock: it removes the working containers that stopped builds leave, which Podman
-lists only with `--external`, and then every image without a name that nothing
-builds on. This tool prunes an image it replaces by the label added at the end
-of its build, so the layers under that label stay behind, and night after night
-they filled the runner's disk until the builds failed with
-`no space left on device`. Between the first clearing and the first build the
-job checks that the disk the images are built on has 10 GiB free; with less it
-builds nothing and fails with the free space and the threshold, naming the
-runner's machine rather than the commit as the cause.
+Before the first run and after the last, the job clears stopped build
+containers, tagged images labelled `agentic-hil.image=bench-tier`, and dangling
+layers, under the machine's run lock. It also removes each distribution's image
+right after uploading its report, whatever the run did. Removal never forces an
+image away from a container using it, and a failed cleanup cannot stop later
+distributions or change a tier's verdict. Base images stay, so later builds do
+not pull them again, but every night rebuilds all bench layers.
+
+The initial room check requires 6 GiB for the largest image, the temporary copy
+of the layer being committed, and slack. With less, it builds nothing and names
+the runner's machine as the cause. `tools/bench_image_store.py` reports free GiB
+for both the image store and layer temporary storage, plus `podman system df`,
+before every build and after its image is removed. Paths that could name the
+runner's account stay out of that report, and a report that fails changes no
+verdict. Per-distribution cleanup uses the same `tools/run_lock.py` lock as the
+builds.
 
 ## What is in the image
 
@@ -545,15 +550,26 @@ runner's machine rather than the commit as the cause.
 - `/etc/agentic-hil/bench-test-image`, written by this build and by nothing
   else, which is the marker a verdict needs.
 
-The image installs the STM32F4 CMSIS pack with pyOCD's supported
-`pyocd pack install stm32f446retx` command. The pack is stored under
-`/bench-home/.local/share/cmsis-pack-manager`, matching the image's runtime
-`HOME`. This installer resolves the current vendor index at build time; an
-offline image check requires the reviewed `Keil.STM32F4xx_DFP` version 3.1.1
-and verifies that both `stm32f446re` and `stm32f446retx` are listed from a
-pack. That check reads software metadata only and opens no probe. A change in
-the vendor index therefore requires reviewing and updating the expected
-version; the install itself is not a hash-pinned pack download.
+The image runs `tools/bench/install_cmsis_pack.py` to download the reviewed
+`Keil.STM32F4xx_DFP` version 3.1.1 directly from its pinned vendor URL, without
+consulting the CMSIS pack index. The script verifies the archive's SHA-256 and
+size before opening the pack cache, registers its local PDSC, and copies the
+archive to the cache's expected filename. Downloads have a timeout and three
+attempts ten seconds apart, each checked against the hash; when none passes, the
+build fails with the store untouched.
+The image's build and runtime `HOME` select the same pack store. The target
+listing and unchanged offline check require both `stm32f446re` and
+`stm32f446retx` from that pack and verify its version. They read software
+metadata only and open no probe. Updating the pack requires reviewing its URL,
+version, hash and size together; no vendor pack content is stored in this
+repository.
+
+The first hashed install, `requirements/container.txt`, also replaces the base
+image's pip before the other locks reach its resolver. CI runs
+`tools/check_image_pip_locks.py` on each digest-pinned base, really installs that
+bootstrap lock, then checks dev, runtime and production with hashes and
+`--dry-run --ignore-installed`. The check uses Docker by default and accepts
+`--runtime podman`; its checkout mount is read-only.
 
 `AGENTIC_HIL_BENCH` is deliberately not set in the image. It is the statement
 that a probe and a board are attached, which an image cannot know, and the

@@ -2638,28 +2638,16 @@ def test_the_image_carries_the_tools_the_tier_builds_and_debugs_with() -> None:
     assert {"openocd", "gcc-arm-none-eabi", "libnewlib-arm-none-eabi", "gdb-multiarch", "cmake", "ninja-build", "tini"} <= packages
 
 
-def test_the_f446_pack_install_checks_its_own_result_and_starts_over_from_an_empty_store() -> None:
-    """pyOCD's pack installer exits 0 whether or not the pack arrived, so the install step checks for the target itself.
-
-    A failed download does not change `pyocd pack install`'s exit status, and a
-    pack file already in the store is not downloaded again, whatever the
-    response that wrote it held. An install step that ran the installer alone
-    passed with only pyOCD's builtin targets and was kept as a cached layer,
-    and only the offline check after it failed the image. The step asks
-    pyOCD's own target listing for the F446, empties the pack store and
-    installs again when it is missing, three times at most, and fails itself
-    when no attempt brought it.
-    """
+def test_the_f446_pack_install_uses_the_verified_archive_and_checks_its_target() -> None:
     text = dockerfile()
-    install = text.index("pyocd pack install stm32f446retx")
+    install = text.index("RUN python tools/bench/install_cmsis_pack.py")
     end = text.index("\n\n", install)
-    step = text[text.rindex("\nRUN ", 0, install) + 1 : end]
+    step = text[install:end]
 
+    assert "pyocd pack install" not in text
+    assert "pyocd pack update" not in text
     assert "pyocd json --targets --no-config" in step, step
     assert '"name": "stm32f446retx"' in step, step
-    assert "pyocd pack clean" in step, step
-    assert "for attempt in 1 2 3" in step, step
-    assert step.rstrip().endswith("exit 1"), step
     check = "RUN --network=none python -m pytest --noconftest -q -p no:cacheprovider tests/container/pyocd_f446_support.py"
     assert text.index(check) > end, "the offline check must follow the install step"
 
@@ -2731,6 +2719,7 @@ def test_the_build_context_is_an_allowlist_of_what_the_tier_reads() -> None:
         "tools/bench/cubeprogrammer-auto-install.xml",
         "build-inputs/cubeclt.zip",
         "tools/bench/extract_cubeclt.py",
+        "tools/bench/install_cmsis_pack.py",
     } <= admitted, admitted
 
 
@@ -2750,6 +2739,7 @@ def test_only_the_named_files_of_the_tools_tree_reach_the_context() -> None:
         "tools/bench/cubeprogrammer-auto-install.xml",
         "build-inputs/cubeprogrammer.zip",
         "tools/bench/extract_cubeclt.py",
+        "tools/bench/install_cmsis_pack.py",
         "build-inputs/cubeclt.zip",
     )
     for path in needed:
@@ -2767,8 +2757,8 @@ def test_only_the_named_files_of_the_tools_tree_reach_the_context() -> None:
         "build-inputs/anything-else.zip",
     ):
         assert reaches_the_daemon(patterns, path) is False, path
-    # And nothing under tools/ that the committed tree actually holds, beyond the
-    # two files the optional stage copies, comes in with it.
+    # Only the named installers and extraction tools enter the image, since
+    # the rest of tools/ is repository tooling rather than tier content.
     tools = REPOSITORY_ROOT / "tools"
     reaching = sorted(
         entry.relative_to(REPOSITORY_ROOT).as_posix()

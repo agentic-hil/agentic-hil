@@ -453,6 +453,20 @@ def test_the_type_check_is_installed_from_its_own_lock_and_blocks_the_merge() ->
     assert "needs.typecheck.result" in "\n".join(step.get("run", "") for step in required["steps"])
 
 
+def test_image_pip_locks_cover_every_base_and_block_the_merge() -> None:
+    workflow = workflow_document(WORKFLOW)
+    job = workflow["jobs"]["image_pip_locks"]
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == 30
+    assert job["strategy"]["fail-fast"] is False
+    assert job["strategy"]["matrix"]["image"] == ["default", *runner_distributions()]
+    assert run_lines(job) == ["python tools/check_image_pip_locks.py --image ${{ matrix.image }}"]
+    assert workflow["permissions"] == {"contents": "read"}
+    required = workflow["jobs"]["required-ci"]
+    assert "image_pip_locks" in required["needs"]
+    assert "needs.image_pip_locks.result" in "\n".join(step.get("run", "") for step in required["steps"])
+
+
 def test_the_audit_reads_the_locked_production_dependency_set() -> None:
     """What is audited is what a bench's install resolves to, pinned.
 
@@ -991,16 +1005,10 @@ DISTRIBUTION_CONDITION = "${{ !cancelled() && steps.room.outcome == 'success' }}
 # The four images are 1.5 to 2.9 GB each on the bench, and a build copies the
 # layer it commits through a temporary directory before the layer lands in the
 # store. A floor, as the limits above are.
-ROOM_THE_BUILDS_NEED_GIB = 10
-# What clears the runner account's image store, before the first build and after
-# the last. tools/bench_in_container.py prunes the image a build replaces by the
-# label tools/bench/Dockerfile gives it, and that label is added only at the end
-# of the build, so the layers under it carry none and stayed behind; a build
-# stopped part way leaves its working container, which Podman lists only with
-# `--external`, in the state "storage", and the images under it stay as long as
-# it does. So those containers go first, and then every image with no name that
-# nothing builds on. Never `--all`, which would also take the base images and
-# the images the night builds, and with them every layer the next build reuses.
+ROOM_THE_BUILDS_NEED_GIB = 6
+# Working containers go before the labelled bench images and dangling layers.
+# Bench images are removed without force so an in-use image is refused; base
+# images keep their names and stay for the next build.
 STOPPED_BUILDS = [
     "podman",
     "ps",
@@ -1011,6 +1019,9 @@ STOPPED_BUILDS = [
     '{{if eq .State "storage"}}{{.ID}}{{end}}',
 ]
 REMOVE_THEM = ["xargs", "--no-run-if-empty", "podman", "rm", "--force"]
+LIST_BENCH_IMAGES = ["podman", "image", "ls", "--quiet", "--filter", "label=agentic-hil.image=bench-tier"]
+REMOVE_BENCH_IMAGES = ["xargs", "--no-run-if-empty", "podman", "image", "rm"]
+IMAGE_STORE_TOOL = "tools/bench_image_store.py"
 PRUNE_UNNAMED_IMAGES = ["podman", "image", "prune", "--force"]
 
 
@@ -1115,6 +1126,23 @@ def test_each_distributions_report_and_log_are_uploaded_under_its_own_name_whate
         assert upload["with"]["retention-days"] == 14, upload
 
 
+def test_each_distribution_reports_space_before_building_and_retires_its_image_after_upload() -> None:
+    steps = distributions_job()["steps"]
+    for distribution, build, upload in distribution_steps():
+        index = steps.index(build)
+        before = steps[index - 1]
+        after = steps[index + 2]
+        assert steps[index + 1] == upload
+        assert before["run"] == f"python3 {IMAGE_STORE_TOOL} before --distribution {distribution}"
+        assert before["if"] == DISTRIBUTION_CONDITION
+        assert before["continue-on-error"] is True
+        assert before["timeout-minutes"] == 5
+        assert after["run"] == f"python3 {IMAGE_STORE_TOOL} after --distribution {distribution}"
+        assert after["if"] == "always()"
+        assert after["continue-on-error"] is True
+        assert after["timeout-minutes"] == 30
+
+
 def test_the_distributions_run_inside_a_limit_measured_on_the_bench() -> None:
     """Each distribution has room for what the slowest one took, and the job for all of them.
 
@@ -1157,6 +1185,7 @@ def test_the_job_runs_the_distributions_the_clearings_and_the_check_and_nothing_
     """Every step that runs a command is one the tests here hold."""
     steps = distributions_job()["steps"]
     held = {index for index, _ in image_store_clearings()} | {room_check()[0]}
+    held |= {index for index, step in enumerate(steps) if IMAGE_STORE_TOOL in step.get("run", "")}
     held |= {index for index, step in enumerate(steps) if DISTRIBUTION_RUNNER in step.get("run", "")}
 
     assert {index for index, step in enumerate(steps) if "run" in step} == held, steps
@@ -1184,7 +1213,7 @@ def test_the_image_store_is_cleared_before_the_first_build_and_after_the_last_wh
 
 
 def test_each_clearing_removes_the_stopped_builds_then_the_unnamed_images_under_the_machines_run_lock() -> None:
-    """The lock taken, the stopped builds' containers removed, the unnamed images pruned, the lock given back.
+    """The run lock covers stopped builds, labelled images and dangling layers.
 
     Under the machine's run lock, the one each build queues on: a run of the
     tier started on the machine itself builds in the same store, and a working
@@ -1196,11 +1225,14 @@ def test_each_clearing_removes_the_stopped_builds_then_the_unnamed_images_under_
     clearing's its own. `bash` for `pipefail`: a listing that failed is a failed
     step and not one that found nothing to remove.
     """
+    import bench_in_container
+
+    assert LIST_BENCH_IMAGES[-1] == f"label={bench_in_container.IMAGE_LABEL}"
     states = []
     for _, step in image_store_clearings():
         commands = [shlex.split(line) for line in run_lines({"steps": [step]})]
-        assert len(commands) == 4, commands
-        take, stopped_builds, prune, give_back = commands
+        assert len(commands) == 5, commands
+        take, stopped_builds, bench_images, prune, give_back = commands
         state = option_value(take, "--state") or ""
 
         assert take[:3] == ["python3", RUN_LOCK, "take"], take
@@ -1213,10 +1245,16 @@ def test_each_clearing_removes_the_stopped_builds_then_the_unnamed_images_under_
         bar = stopped_builds.index("|")
         assert stopped_builds[:bar] == STOPPED_BUILDS, stopped_builds
         assert stopped_builds[bar + 1 :] == REMOVE_THEM, stopped_builds
+        bar = bench_images.index("|")
+        refused = bench_images.index("||")
+        assert bench_images[:bar] == LIST_BENCH_IMAGES, bench_images
+        assert bench_images[bar + 1 : refused] == REMOVE_BENCH_IMAGES, bench_images
+        assert bench_images[refused + 1] == "echo", bench_images
+        assert bench_images[refused + 2].startswith("::warning::"), bench_images
         assert prune == PRUNE_UNNAMED_IMAGES, prune
         assert give_back == ["python3", RUN_LOCK, "give-back", "--state", state], give_back
         assert step["shell"] == "bash", step
-        assert isinstance(step["timeout-minutes"], int), step
+        assert step["timeout-minutes"] == 30, step
         assert "working-directory" not in step, step
         for command in commands:
             assert not RAW_HARDWARE.search(shlex.join(command)), command
@@ -1328,11 +1366,11 @@ def test_the_room_is_the_lesser_of_the_store_and_the_directory_a_build_copies_it
         monkeypatch.setenv("TMPDIR", temporary)
     copied_through = temporary or "/var/tmp"
 
-    code, asked = check_the_room(monkeypatch, {A_STORE: 64.0, copied_through: 6.0})
+    code, asked = check_the_room(monkeypatch, {A_STORE: 64.0, copied_through: 5.9})
     out = capsys.readouterr().out
 
     assert code == 1, out
-    assert out.startswith("::error title=Runner disk full::6.0 GiB free"), out
+    assert out.startswith("::error title=Runner disk full::5.9 GiB free"), out
     assert sorted(asked) == sorted([A_STORE, copied_through]), asked
 
 

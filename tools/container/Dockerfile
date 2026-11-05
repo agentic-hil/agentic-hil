@@ -90,6 +90,8 @@ RUN apt-get update \
 # environment the required container check reaches its verdict in. The mirror
 # argument that leaves the distribution's packages unpinned above does not reach
 # here either: the package index keeps every release.
+# This install also replaces the image's pip, which is why it comes first:
+# the other locks need a resolver that understands their pinned extras.
 COPY requirements/container.txt /tmp/container.txt
 RUN python -m pip install --no-cache-dir --disable-pip-version-check --require-hashes -r /tmp/container.txt
 

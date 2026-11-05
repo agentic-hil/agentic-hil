@@ -8,6 +8,9 @@
 # run behind it, not on a rebuild. setuptools and wheel are the build backend
 # this project declares, and the tests build wheels of the checkout with
 # `--no-isolation`, so the build needs no network of its own.
+# pip replaces the distribution's older resolver before the other hashed
+# locks are installed. Older resolvers can treat a dependency with extras as
+# an unpinned requirement even when the lock pins that same distribution.
 #
 # The lock file beside this one carries the hashes the image installs with, so
 # a compromised release of any of these or of anything they pull in cannot
@@ -27,3 +30,4 @@ uv==0.13.6
 pyocd==0.46.0
 setuptools>=84.1.0
 wheel
+pip

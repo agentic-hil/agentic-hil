@@ -75,6 +75,8 @@ ENV VIRTUAL_ENV=/work/.venv \
 # through, and setuptools and wheel, the build backend this project declares. It
 # also carries uv, which nothing in this tier runs: the lock is installed whole,
 # because a subset of a hashed lock is a second lock nobody regenerates.
+# This install also replaces the image's pip, which is why it comes first:
+# the other locks need a resolver that understands their pinned extras.
 COPY requirements/container.txt /tmp/container.txt
 RUN python -m pip install --no-cache-dir --disable-pip-version-check --require-hashes -r /tmp/container.txt
 
@@ -128,25 +130,11 @@ ENV HOME=/bench-home \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Install the Nucleo-F446RE CMSIS pack through pyOCD's supported installer.
-# The command resolves the vendor index at build time; the offline check below
-# records the expected pack release and target names so index drift is visible.
-#
-# The installer exits 0 whether or not the pack arrived: a failed download does
-# not change its exit status, and a pack file already in the store is not
-# downloaded again, whatever the response that wrote it held. So the step asks
-# pyOCD's own target listing for the F446 and, when it is missing, empties the
-# pack store and installs again, three times at most. It fails itself when no
-# attempt brought the target, so an install that did not work never becomes a
-# cached layer the next build of the same tree would start from.
-RUN for attempt in 1 2 3; do \
-        pyocd pack install stm32f446retx \
-            && pyocd json --targets --no-config | grep -q '"name": "stm32f446retx"' \
-            && exit 0; \
-        pyocd pack clean; \
-        sleep 10; \
-    done; \
-    exit 1
+# Install the reviewed Nucleo-F446RE pack by URL and SHA-256 without reading
+# the vendor index. The cache uses this HOME at build time and at runtime.
+# The target listing and offline check also verify the registered metadata.
+RUN python tools/bench/install_cmsis_pack.py \
+    && pyocd json --targets --no-config | grep -q '"name": "stm32f446retx"'
 
 RUN --network=none python -m pytest --noconftest -q -p no:cacheprovider tests/container/pyocd_f446_support.py
 
