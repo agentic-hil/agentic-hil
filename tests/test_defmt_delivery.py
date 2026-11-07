@@ -196,6 +196,13 @@ def install_audit(root, fixture_root, permitted=None):
     root = Path(root).resolve()
     fixture_root = Path(fixture_root).resolve()
     reads = set()
+    def library_lookup():
+        frame = sys._getframe(1)
+        while frame is not None:
+            if frame.f_globals.get("__name__") == "ctypes.util":
+                return True
+            frame = frame.f_back
+        return False
     def audit(event, args):
         # The unchanged autouse fixture reserves an ephemeral loopback port.
         # Construction and that local bind do not communicate with a peer.
@@ -208,7 +215,11 @@ def install_audit(root, fixture_root, permitted=None):
                 raise AssertionError("packaged replay forbids unaudited subprocesses")
             command = args[1] if isinstance(args[1], str) else tuple(args[1])
             key = (str(Path(args[0]).resolve()) if args[0] is not None else None, command)
-            assert key in permitted, "packaged replay forbids unaudited subprocesses"
+            # Collecting the whole sdist imports pyOCD, whose J-Link probe calls
+            # ctypes.util.find_library at import time. On Linux that lookup runs
+            # ldconfig and the compiler tools, and it is the only caller allowed
+            # through without a key.
+            assert key in permitted or library_lookup(), "packaged replay forbids unaudited subprocesses"
         if event == "import":
             assert not any(name in str(args[0]).lower() for name in ("defmt_reference", "reference-decoder")), "packaged replay forbids regeneration imports"
         if event == "open" and isinstance(args[0], (str, bytes, os.PathLike)):
