@@ -204,6 +204,18 @@ jobs:
           cd sdist-check/agentic_hil-*
           python -m pytest --collect-only -q
 
+      - name: Replay native defmt from the source distribution
+        shell: bash
+        env:
+          PIP_NO_INDEX: '1'
+        run: |
+          replay_python=$(python -c 'import sys; print(sys.executable)')
+          mkdir -p defmt-no-rust
+          export PATH="$PWD/defmt-no-rust"
+          "$replay_python" -c 'import shutil; assert all(shutil.which(tool) is None for tool in ("cargo", "rustc", "rustup"))'
+          cd sdist-check/agentic_hil-*
+          "$replay_python" -m pytest -q tests/test_defmt.py tests/test_defmt_regressions.py
+
   # The tier the matrix above cannot run. Every test in the matrix is written
   # against a fake, so the suite is only ever as right as the person who wrote
   # the fake was about the tool, and four defects reached a bench through that
