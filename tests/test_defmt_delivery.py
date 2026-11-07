@@ -211,10 +211,12 @@ def install_audit(root, fixture_root, permitted=None):
         if event in {"socket.connect", "socket.connect_ex", "socket.sendto", "socket.sendmsg", "socket.getaddrinfo", "urllib.Request"}:
             raise AssertionError("packaged replay must not use a network")
         if event in {"subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "pty.spawn"}:
-            if event != "subprocess.Popen" or permitted is None:
+            # Python 3.13 and later go on from subprocess.Popen to os.posix_spawn
+            # with the same executable and argv, so both meet the same key.
+            if event not in {"subprocess.Popen", "os.posix_spawn"} or permitted is None:
                 raise AssertionError("packaged replay forbids unaudited subprocesses")
             command = args[1] if isinstance(args[1], str) else tuple(args[1])
-            key = (str(Path(args[0]).resolve()) if args[0] is not None else None, command)
+            key = (str(Path(os.fsdecode(args[0])).resolve()) if args[0] is not None else None, command)
             # Collecting the whole sdist imports pyOCD, whose J-Link probe calls
             # ctypes.util.find_library at import time. On Linux that lookup runs
             # ldconfig and the compiler tools, and it is the only caller allowed
