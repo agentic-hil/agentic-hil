@@ -4,6 +4,91 @@ Two entry points drive the same permission-gated tools without an MCP client:
 the test reactor executes a reviewable YAML plan, and the pytest plugin puts the
 bench behind a fixture.
 
+## Native defmt decoder replay
+
+The decoder tests run without a board and without Rust. Replay the committed
+corpus and focused malformed-input regressions from the repository root:
+
+```bash
+python -m pytest -q tests/test_defmt.py tests/test_defmt_regressions.py
+```
+
+`tests/fixtures/defmt/` contains the two firmware ELF tables,
+`stream-rzcobs.bin` and `stream-raw.bin`, and their 46-frame oracles,
+`expected-rzcobs.jsonl` and `expected-raw.jsonl`. `stream-errors.bin` and
+`expected-errors.jsonl` cover broken records and recovery. These committed bytes
+are replay inputs, never generated during collection or ordinary testing.
+
+This example loads the rzCOBS table from retained image bytes and prints exactly
+the lines in `expected-rzcobs.jsonl`:
+
+```python
+import sys
+from pathlib import Path
+from agentic_hil.defmt import decode_stream, load_table_bytes
+
+sys.stdout.reconfigure(encoding="utf-8")
+fixtures = Path("tests/fixtures/defmt")
+table = load_table_bytes((fixtures / "defmt-fixture-rzcobs.elf").read_bytes())
+batch = decode_stream(table, (fixtures / "stream-rzcobs.bin").read_bytes())
+for record in batch.records:
+    print(record["text"])
+```
+
+`load_table(Path(...))` reads a table directly from its ELF path. Load
+`defmt-fixture-raw.elf` and replay `stream-raw.bin` with the same `decode_stream`
+API for raw encoding. Both loading APIs return the same table.
+
+For incremental input, keep the bytes after `batch.consumed` and prepend them to
+the next chunk. Incomplete input stays unconsumed until more bytes arrive.
+With `final=True`, a trailing incomplete frame becomes an `incomplete_frame`
+error and is consumed. In rzCOBS, a separator-complete record with missing
+arguments is `truncated`; invalid encoding is `rzcobs_invalid`. The next
+separator-delimited record can still decode. Raw malformed input consumes the
+entire remaining supplied span once and sets `desynchronized=True`, because
+there is no frame boundary at which to resume. A caller must preserve that
+desynchronization across further chunks until it establishes a new stream.
+`batch.ends` records the input offset after each record, including rzCOBS
+separators. Nonzero decoded bytes left over within an rzCOBS record are reported
+as `unconsumed_hex`.
+
+An error retains full-span byte accounting in `size_bytes`. Its `raw_hex` and,
+for printable input, `raw_text` carry at most the first 64 bytes; a larger span
+sets `raw_truncated`. rzCOBS error diagnostics describe received encoded bytes,
+excluding the separator, rather than the decoded zero-padded payload. Keep the
+original input separately when full rejected-byte retention is needed.
+
+Finite decoder limits bound argument counts (256), format lengths and explicit
+array lengths (65536), numeric padding (4096), nested transitions (64), and
+zero-sized elements (remaining frame bytes plus 4096). Rendered timestamp and
+message together may contain at most 1048576 characters per frame. Exceeding a
+limit produces a bounded malformed record, without suppressing a following
+rzCOBS frame. Dynamic string and byte-slice lengths that exceed the available
+payload remain incomplete or truncated rather than malformed.
+
+The `:cbor` hint shows encoded bytes rather than CBOR diagnostic notation.
+DWARF source locations are not decoded.
+
+Source-distribution validation is also Rust-free:
+
+```bash
+python -m pytest -q tests/test_defmt_delivery.py
+```
+
+This check builds and inspects the sdist and wheel without build isolation,
+runs `twine check`, collects the extracted source distribution's tests, and
+replays both streams and malformed-input regressions with Rust tools absent
+from child `PATH` and package-index access disabled. It needs the project's
+development and build dependencies already installed. CI separately replays
+the focused tests after collecting the extracted sdist.
+
+Optional regeneration uses `python tools/defmt_reference.py`, the Rust sources
+under `tests/fixtures/defmt/firmware/` and `reference-decoder/`, and the pinned
+official `defmt-decoder` harness. It requires Cargo, the
+`thumbv7em-none-eabihf` target, and initial access to crates.io. Regeneration is
+a separate maintenance action that rewrites the corpus; it is never part of
+Rust-free replay or this decoder's acceptance checks.
+
 ## Test Reactor
 
 Write a hardware test as a plan, not a script: one reviewable YAML file describes flash → stimulate → break → dump, and the reactor guarantees it is either executed exactly as written or rejected before the first hardware action. No half-run plans, no leftover breakpoints, no orphaned debug or UART sessions. The same file behaves identically on your bench and in CI, and it diffs like code in a pull request.

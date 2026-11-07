@@ -1,0 +1,46 @@
+{"index":16,"level":"info","line":"0.000000 INFO Hello, world!","message":"Hello, world!","timestamp":"0.000000"}
+{"index":15,"level":"debug","line":"1.000003 DEBUG unsigned 1 2 3 4 5","message":"unsigned 1 2 3 4 5","timestamp":"1.000003"}
+{"index":15,"level":"debug","line":"2.000006 DEBUG unsigned 255 65535 4294967295 18446744073709551615 340282366920938463463374607431768211455","message":"unsigned 255 65535 4294967295 18446744073709551615 340282366920938463463374607431768211455","timestamp":"2.000006"}
+{"index":14,"level":"trace","line":"3.000009 TRACE signed -1 -2 -3 -4 -5","message":"signed -1 -2 -3 -4 -5","timestamp":"3.000009"}
+{"index":14,"level":"trace","line":"4.000012 TRACE signed -128 32767 -2147483648 9223372036854775807 -170141183460469231731687303715884105728","message":"signed -128 32767 -2147483648 9223372036854775807 -170141183460469231731687303715884105728","timestamp":"4.000012"}
+{"index":43,"level":"warn","line":"5.000015 WARN sizes 7 -8","message":"sizes 7 -8","timestamp":"5.000015"}
+{"index":44,"level":"error","line":"6.000018 ERROR floats 1.5 -0.25","message":"floats 1.5 -0.25","timestamp":"6.000018"}
+{"index":44,"level":"error","line":"7.000021 ERROR floats -0.0 0.0","message":"floats -0.0 0.0","timestamp":"7.000021"}
+{"index":19,"level":"info","line":"8.000024 INFO bool true char x","message":"bool true char x","timestamp":"8.000024"}
+{"index":19,"level":"info","line":"9.000027 INFO bool false char \n","message":"bool false char \n","timestamp":"9.000027"}
+{"index":38,"level":"info","line":"10.000030 INFO str dynamic istr interned","message":"str dynamic istr interned","timestamp":"10.000030"}
+{"index":38,"level":"info","line":"11.000033 INFO str  istr interned","message":"str  istr interned","timestamp":"11.000033"}
+{"index":20,"level":"info","line":"12.000036 INFO bytes [1, 2, 3] array [9, 8, 7, 6]","message":"bytes [1, 2, 3] array [9, 8, 7, 6]","timestamp":"12.000036"}
+{"index":28,"level":"info","line":"13.000039 INFO hex beef HEX 0xBEEF bin 0b00000101 oct 10 pad 00042 sx ff","message":"hex beef HEX 0xBEEF bin 0b00000101 oct 10 pad 00042 sx ff","timestamp":"13.000039"}
+{"index":28,"level":"info","line":"14.000042 INFO hex 0 HEX 0xFFFFFFFF bin 0b11111111 oct 177777 pad 57920 sx 7f","message":"hex 0 HEX 0xFFFFFFFF bin 0b11111111 oct 177777 pad 57920 sx 7f","timestamp":"14.000042"}
+{"index":17,"level":"info","line":"15.000045 INFO ascii b\"hi\\n\\x01 \\\"\\\\\\t\\r\\xff~\"","message":"ascii b\"hi\\n\\x01 \\\"\\\\\\t\\r\\xff~\"","timestamp":"15.000045"}
+{"index":40,"level":"info","line":"16.000048 INFO time 01:02:03.000001 secs 1.234 tms 1:01:01:01.001 ts 1:01:01:01","message":"time 01:02:03.000001 secs 1.234 tms 1:01:01:01.001 ts 1:01:01:01","timestamp":"16.000048"}
+{"index":40,"level":"info","line":"17.000051 INFO time 00:00:00.000000 secs 0.000 tms 00:00:00.000 ts 00:00:59","message":"time 00:00:00.000000 secs 0.000 tms 00:00:00.000 ts 00:00:59","timestamp":"17.000051"}
+{"index":22,"level":"info","line":"18.000054 INFO dbg \"q\\\"uote\\\\\\ttab\\u{1}é\"","message":"dbg \"q\\\"uote\\\\\\ttab\\u{1}é\"","timestamp":"18.000054"}
+{"index":39,"level":"info","line":"19.000057 INFO struct Reading { channel: 2, millivolts: -1200 } enum Idle Running { speed: 300 } Fault(4)","message":"struct Reading { channel: 2, millivolts: -1200 } enum Idle Running { speed: 300 } Fault(4)","timestamp":"19.000057"}
+{"index":34,"level":"info","line":"20.000060 INFO option Some(5) None result Ok(9)","message":"option Some(5) None result Ok(9)","timestamp":"20.000060"}
+{"index":34,"level":"info","line":"21.000063 INFO option None Some(0) result Err(-7)","message":"option None Some(0) result Err(-7)","timestamp":"21.000063"}
+{"index":36,"level":"info","line":"22.000066 INFO slice [1, 2] array [Idle, Fault(1), Running { speed: 2 }]","message":"slice [1, 2] array [Idle, Fault(1), Running { speed: 2 }]","timestamp":"22.000066"}
+{"index":32,"level":"info","line":"23.000069 INFO manual Manual(3, ff)","message":"manual Manual(3, ff)","timestamp":"23.000069"}
+{"index":26,"level":"info","line":"24.000072 INFO flags READY | ERROR","message":"flags READY | ERROR","timestamp":"24.000072"}
+{"index":26,"level":"info","line":"25.000075 INFO flags (empty)","message":"flags (empty)","timestamp":"25.000075"}
+{"index":26,"level":"info","line":"26.000078 INFO flags BUSY","message":"flags BUSY","timestamp":"26.000078"}
+{"index":18,"level":"info","line":"27.000081 INFO bitfields 12 5 ab b\"\\n\" next 0x4142","message":"bitfields 12 5 ab b\"\\n\" next 0x4142","timestamp":"27.000081"}
+{"index":42,"level":"info","line":"28.000084 INFO wide bits 15 1","message":"wide bits 15 1","timestamp":"28.000084"}
+{"index":23,"level":"info","line":"29.000087 INFO display 17 debug \"dbg\"","message":"display 17 debug \"dbg\"","timestamp":"29.000087"}
+{"index":30,"level":"info","line":"30.000090 INFO indexed 11 10 b","message":"indexed 11 10 b","timestamp":"30.000090"}
+{"index":35,"level":"info","line":"31.000093 INFO prim format 42 -3 2.5","message":"prim format 42 -3 2.5","timestamp":"31.000093"}
+{"index":27,"level":"info","line":"32.000096 INFO floats 1e-7 NaN inf 123456790.0 1e300 0.1","message":"floats 1e-7 NaN inf 123456790.0 1e300 0.1","timestamp":"32.000096"}
+{"index":27,"level":"info","line":"33.000099 INFO floats 0.1 -inf 3.4028235e38 1e13 1e16 0.00001","message":"floats 0.1 -inf 3.4028235e38 1e13 1e16 0.00001","timestamp":"33.000099"}
+{"index":27,"level":"info","line":"34.000102 INFO floats 0.00001 0.000001 1e-45 16777216.0 123.456 1000000000000000.0","message":"floats 0.00001 0.000001 1e-45 16777216.0 123.456 1000000000000000.0","timestamp":"34.000102"}
+{"index":27,"level":"info","line":"35.000105 INFO floats 9999999000000.0 1000000000000.0 0.3 100.0 5e-324 1.7976931348623157e308","message":"floats 9999999000000.0 1000000000000.0 0.3 100.0 5e-324 1.7976931348623157e308","timestamp":"35.000105"}
+{"index":25,"level":"info","line":"36.000108 INFO escaped {braces} 1","message":"escaped {braces} 1","timestamp":"36.000108"}
+{"index":31,"level":"info","line":"37.000111 INFO iso 2023-11-14T22:13:20.123Z","message":"iso 2023-11-14T22:13:20.123Z","timestamp":"37.000111"}
+{"index":31,"level":"info","line":"38.000114 INFO iso 1970-01-01T00:00:00.000Z","message":"iso 1970-01-01T00:00:00.000Z","timestamp":"38.000114"}
+{"index":21,"level":"info","line":"39.000117 INFO char ä 🦀","message":"char ä 🦀","timestamp":"39.000117"}
+{"index":41,"level":"info","line":"40.000120 INFO tuple (1, -2)","message":"tuple (1, -2)","timestamp":"40.000120"}
+{"index":106,"level":null,"line":"41.000123 println 99","message":"println 99","timestamp":"41.000123"}
+{"index":33,"level":"info","line":"42.000126 INFO nested Some(Some(Fault(2)))","message":"nested Some(Some(Fault(2)))","timestamp":"42.000126"}
+{"index":24,"level":"info","line":"43.000129 INFO empty slice [] empty bytes []","message":"empty slice [] empty bytes []","timestamp":"43.000129"}
+{"index":37,"level":"info","line":"44.000132 INFO str array [a, bc]","message":"str array [a, bc]","timestamp":"44.000132"}
+{"index":29,"level":"info","line":"45.000135 INFO hexbytes [a, ff] [0x01, 0x20]","message":"hexbytes [a, ff] [0x01, 0x20]","timestamp":"45.000135"}

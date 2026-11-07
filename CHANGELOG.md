@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- Complete the native defmt decoder for wire versions 3 and 4, raw and rzCOBS streams, with bounded ELF table reads, parsing, nesting and rendering. Preserve the replay corpus and validate packaged replay without Rust. (#809)
+
+### Pending integration
+
+#809 delivers the decoder only. The serial-session, flash-capture and plan integrations described below remain separate work under #810 and #811. Real-board qualification remains #813. The preserved paragraph records the intended integration, which this decoder-only delivery does not ship or newly verify.
+
+- Native defmt decoding on serial lines. `com_session_start` with `defmt: true` decodes the line with the table of the ELF the last confirmed `flash_firmware` wrote, checked again by its digest, and `defmt: {"image_path": ...}` names the ELF of a board flashed some other way (`proven: false` unless it is the flashed file). `com_read` on such a session hands out whole decoded frames (level, timestamp, format string, typed arguments, rendered message and the line `defmt-print` prints) instead of text and hex, and `until` matches a frame's line. `flash_firmware` takes `capture.defmt` and returns the decoded boot output of the image it flashed. Bytes that do not decode are records with `error` and their bytes, never skipped. Plan format version 7 adds `defmt:` on `uart_open` and the `defmt_expect` action, which waits for a frame by `level`, `format`, `text` or `pattern`, and typed `args`; frames after the match stay for the next step. New error types: `defmt_table_not_available`, `defmt_table_changed`, `defmt_table_invalid`, `defmt_expect_timeout`. The decoder (`agentic_hil.defmt`) is plain Python for defmt wire versions 3 and 4 (defmt 0.3 and 1.x), both the rzCOBS and the raw encoding, every parameter type and display hint, and is held to the official `defmt-decoder` 1.2 on a real cross-compiled image recorded under `tests/fixtures/defmt/` by `tools/defmt_reference.py`.
+
 ### Fixed
 
 - Bench images install the reviewed STM32F4 DFP 3.1.1 archive by URL and SHA-256, without fetching the CMSIS pack index. Downloads get three attempts, each checked against the hash, and the build fails before the pack store is touched when none passes. The existing target listing and offline metadata check still verify F446 support. (#806)

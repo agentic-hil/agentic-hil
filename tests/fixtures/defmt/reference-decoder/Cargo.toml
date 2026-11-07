@@ -1,0 +1,9 @@
+[package]
+name = "defmt-reference-decoder"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+defmt-decoder = "=1.2.0"
+serde_json = "1.0.154"
