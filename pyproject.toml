@@ -79,7 +79,13 @@ dev = [
   # invocation, which CONTRIBUTING.md documents.
   "pytest-xdist>=3.6",
   "ruff>=0.6",
-  "twine>=5.0"
+  # The build backend from [build-system] above. tests/test_defmt_delivery.py
+  # builds the distributions with `python -m build --no-isolation`, which uses
+  # the backend on this interpreter instead of fetching one, and Python 3.12
+  # and later no longer bring setuptools along.
+  "setuptools>=77",
+  "twine>=5.0",
+  "wheel"
 ]
 
 [project.urls]
