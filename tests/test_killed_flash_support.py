@@ -17,6 +17,7 @@ import pytest
 
 from tests.bench.killed_flash_support import (
     debugger_logs_since,
+    port_open_report,
     reaches_its_tty,
     recovery_report,
     reenumerated_fields,
@@ -191,6 +192,61 @@ def test_a_reenumerated_port_this_run_cannot_reach_is_named_for_what_it_is(tmp_p
     assert clock() >= 5.0
 
 
+def test_a_new_sysfs_entry_beside_the_same_node_inode_is_the_removed_node(tmp_path: Path) -> None:
+    """A fixed --device binding keeps the removed inode, and the kernel gives the new tty the same 166:0.
+
+    So the device numbers agree and prove nothing: the sysfs entry is new and
+    the node is not, which makes the node the one the kernel removed (#620).
+    """
+    clock, sleep = clock_and_sleep()
+
+    said = wait_for_the_serial_port(
+        snapshot(), lambda: snapshot(sysfs_inode=12), tty_class(tmp_path, ttyACM0="166:0"), timeout_s=5.0, clock=clock, sleep=sleep
+    )
+
+    assert said is not None
+    assert "re-enumerated" in said
+    assert "sysfs_inode" in said
+    assert "--live-device-tree" in said
+    assert clock() >= 5.0
+
+
+def test_a_node_without_permission_bits_is_the_removed_node(tmp_path: Path) -> None:
+    """devtmpfs clears every permission bit of a node it removes, and a fixed binding keeps showing that node (#620)."""
+    clock, sleep = clock_and_sleep()
+    cleared = {**snapshot(), "node_mode": 0o20000}
+
+    said = wait_for_the_serial_port(snapshot(), lambda: cleared, tty_class(tmp_path, ttyACM0="166:0"), timeout_s=5.0, clock=clock, sleep=sleep)
+
+    assert said is not None
+    assert "re-enumerated" in said
+    assert "node_mode" in said
+    assert "--live-device-tree" in said
+    assert clock() >= 5.0
+
+
 def test_the_wait_bounds_must_be_positive() -> None:
     with pytest.raises(ValueError):
         wait_for_the_serial_port(snapshot(), snapshot, Path("."), timeout_s=0)
+
+
+def test_a_port_that_would_not_open_is_reported_with_its_whole_answer_and_both_snapshots() -> None:
+    """The errno is in `backend_error` and the node's mode in the snapshots, the fields a dict's repr loses (#620)."""
+    answer = {
+        "ok": False,
+        "tool": "com_session_start",
+        "port_id": "dut_uart",
+        "error_type": "com_port_open_failed",
+        "summary": "COM port could not be opened.",
+        "backend_error": "[Errno 13] could not open port /dev/ttyACM0: [Errno 13] Permission denied: '/dev/ttyACM0'",
+        "likely_causes": ["configured COM port device does not exist"] * 4,
+    }
+    now = {**snapshot(sysfs_inode=12), "node_mode": 0o20000}
+
+    report = port_open_report(answer, snapshot(), now)
+
+    assert json.dumps(answer, indent=1, sort_keys=True) in report
+    assert "[Errno 13]" in report
+    assert f'"node_mode": {0o20660}' in report
+    assert f'"node_mode": {0o20000}' in report
+    assert report.index(f"{0o20660}") < report.index(f"{0o20000}")

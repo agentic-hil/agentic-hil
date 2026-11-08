@@ -2,6 +2,10 @@
 
 Select this module explicitly on the Linux bench. It is intentionally not named
 ``test_*.py`` so the normal OpenOCD bench tier never triggers a USB reset.
+
+Its test marked `REENUMERATES_THE_PROBE` forces what a killed flash can leave
+behind (#620), the probe's serial port removed and created again, and runs in
+the killed flash's own stage under `--live-device-tree`.
 """
 
 from __future__ import annotations
@@ -16,8 +20,9 @@ import pytest
 
 from agentic_hil.report import overall_success
 
-from .conftest import BENCH_ONLY, DEMO_IMAGE, Bench, built_where_it_stands
-from .test_bench_faults import Server
+from .conftest import BENCH_ONLY, DEMO_IMAGE, REENUMERATES_THE_PROBE, Bench, built_where_it_stands
+from .killed_flash_support import reenumerated_fields, wait_for_the_serial_port
+from .test_bench_faults import SYS_CLASS_TTY, Server, open_port, serial_port_snapshot
 
 pytestmark = [pytest.mark.bench, BENCH_ONLY]
 
@@ -170,6 +175,56 @@ def available_port_matching(listing: dict, serial: str, vid: str, pid: str) -> d
         and f"{port['pid']:04x}" == pid
     ]
     return matches[0] if len(matches) == 1 else None
+
+
+@getattr(pytest.mark, REENUMERATES_THE_PROBE)
+def test_a_serial_port_the_probe_created_again_is_followed_and_opens(bench: Bench, tmp_path: Path) -> None:
+    """A usbfs reset of the configured probe, then the killed flash's own wait and open (#620).
+
+    `cdc_acm` has no post-reset handler, so the reset unbinds it and binds it
+    again: the tty comes back under its name and device number with a new
+    sysfs entry and a new node, which is what a killed flash can leave behind
+    and cannot be made to leave on purpose. Under `--live-device-tree` the
+    port's name leads to the new node, so `wait_for_the_serial_port` finds the
+    port it reaches, and the product opens it.
+    """
+    from . import usb_reset_support as usb
+
+    configuration = bench.configuration()
+    serial = str(configuration["debuggers"][bench.debugger_name()].get("probe_id") or "")
+    if not serial:
+        pytest.fail("the bench configuration lacks its ST-Link serial", pytrace=False)
+    private_values = (serial,)
+    port = bench.com_port_name()
+    port_snapshot = serial_port_snapshot(bench, port)
+    before = port_snapshot()
+    if before.get("name") is None:
+        pytest.fail("the configured port is not a tty here, so nothing can watch it being created again", pytrace=False)
+
+    server = Server(bench, tmp_path / "usb-reset-reopen-mcp.stderr")
+    try:
+        server.greet()
+        _, listed = server.call("debugger_probes_list")
+        require_product_success(listed, "debugger_probes_list", private_values)
+        vid, pid = stlink_identity(listed, serial)
+        identity = {"expected_serial": serial, "expected_vid": vid, "expected_pid": pid}
+        device = usb.find_usb_device(sysfs_root=USB_SYSFS, device_root=USBFS_ROOT, **identity)
+        try:
+            usb.reset_usb_device(device)
+        except OSError as error:
+            pytest.fail(f"usbfs reset failed: {type(error).__name__}, errno={error.errno}", pytrace=False)
+        usb.wait_for_usb_device(sysfs_root=USB_SYSFS, device_root=USBFS_ROOT, timeout_s=VISIBILITY_TIMEOUT_S, **identity)
+
+        reenumerated = wait_for_the_serial_port(before, port_snapshot, SYS_CLASS_TTY)
+        assert reenumerated is None, reenumerated
+        assert reenumerated_fields(before, port_snapshot()), "the USB reset left the probe's serial port as it was"
+        # udev corrects the new node's group after the kernel made it, as in the test below.
+        wait_for_the_configured_uart(server, serial, vid, pid, private_values)
+        open_port(server, port)
+        _, stopped = server.call("com_session_stop", {"port_id": port})
+        require_product_success(stopped, "com_session_stop after the USB reset", private_values)
+    finally:
+        server.close()
 
 
 def test_usbdevfs_reset_is_recovered_by_the_same_mcp_server_and_demo_uart(
