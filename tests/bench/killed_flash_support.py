@@ -11,9 +11,13 @@ a failure there now carries:
   the recovery block does not;
 * a serial port the kill made the in-circuit debugger remove and create again,
   named for what it is. A container started with fixed `--device` bindings
-  keeps the node it was given, so a port that came back under another device
-  number is out of its reach, and the product's `com_port_open_failed` that
-  follows is about the binding, not about the product.
+  keeps the node it was given, the one the kernel removed, also when the new
+  tty comes back under the same name and device number, and the product's
+  `com_port_open_failed` that follows is about the binding, not about the
+  product;
+* the port's open answer whole when the open fails anyway, beside the port as
+  the run started with it and as it is now, so the errno and the node's mode
+  reach the log.
 
 Nothing here opens a device: the port is looked at through sysfs and `stat`.
 """
@@ -113,6 +117,35 @@ def reaches_its_tty(snapshot: dict[str, Any], sysfs_root: Path) -> bool:
     return number == f"{snapshot.get('major')}:{snapshot.get('minor')}"
 
 
+def is_the_removed_node(before: dict[str, Any], after: dict[str, Any], changed: list[str]) -> bool:
+    """Whether the node the port's name leads to is the one the kernel removed (#620).
+
+    The kernel gives the new tty the number the old one had, so the device
+    numbers cannot tell the two nodes apart. Two facts can: a sysfs entry that
+    is new while the node kept its inode, and a node with no permission bits
+    left, which is what devtmpfs leaves on a node it removes.
+    """
+    mode = after.get("node_mode")
+    if isinstance(mode, int) and mode & 0o777 == 0:
+        return True
+    renewed = "sysfs_inode" in changed or "sysfs_link_inode" in changed
+    return renewed and after.get("node_inode") is not None and after.get("node_inode") == before.get("node_inode")
+
+
+def port_open_report(answer: Any, before: dict[str, Any] | None, after: dict[str, Any]) -> str:
+    """The port's open answer whole, then the port as the run started with it and as it is now."""
+    return "\n".join(
+        [
+            "com_session_start did not open the port; its answer, whole:",
+            json.dumps(answer, indent=1, sort_keys=True, default=str),
+            "The port when the test started:",
+            json.dumps(before, indent=1, sort_keys=True, default=str),
+            "The port now:",
+            json.dumps(after, indent=1, sort_keys=True, default=str),
+        ]
+    )
+
+
 def wait_for_the_serial_port(
     before: dict[str, Any],
     snapshot: Callable[[], dict[str, Any]],
@@ -129,7 +162,9 @@ def wait_for_the_serial_port(
     waited on for the same bound the USB reset stage gives a re-enumerated node
     (`usb_reset_support.wait_for_usb_device`): under a live device tree the
     stable name leads to the new node once udev has made it, and the test goes
-    on. Under fixed bindings it never does, and the answer names that.
+    on. Under fixed bindings it never does, and the answer names that. A node
+    that is the removed one (`is_the_removed_node`) is never reached, whatever
+    its device number says.
     """
     if timeout_s <= 0 or poll_interval_s <= 0:
         raise ValueError("the serial port wait bounds must be positive")
@@ -137,10 +172,13 @@ def wait_for_the_serial_port(
     while True:
         after = snapshot()
         changed = reenumerated_fields(before, after)
-        if not changed or reaches_its_tty(after, sysfs_root):
+        removed = is_the_removed_node(before, after, changed)
+        if not removed and (not changed or reaches_its_tty(after, sysfs_root)):
             return None
         remaining = deadline - clock()
         if remaining <= 0:
+            if before.get("node_mode") != after.get("node_mode"):
+                changed.append("node_mode")
             return (
                 f"the killed flash left the in-circuit debugger's serial port {before.get('name')} re-enumerated, "
                 f"removed and created again ({', '.join(changed)} changed), and the node this run reaches the port through "

@@ -17,6 +17,7 @@ import pytest
 
 from tests.bench.killed_flash_support import (
     debugger_logs_since,
+    port_open_report,
     reaches_its_tty,
     recovery_report,
     reenumerated_fields,
@@ -227,3 +228,25 @@ def test_a_node_without_permission_bits_is_the_removed_node(tmp_path: Path) -> N
 def test_the_wait_bounds_must_be_positive() -> None:
     with pytest.raises(ValueError):
         wait_for_the_serial_port(snapshot(), snapshot, Path("."), timeout_s=0)
+
+
+def test_a_port_that_would_not_open_is_reported_with_its_whole_answer_and_both_snapshots() -> None:
+    """The errno is in `backend_error` and the node's mode in the snapshots, the fields a dict's repr loses (#620)."""
+    answer = {
+        "ok": False,
+        "tool": "com_session_start",
+        "port_id": "dut_uart",
+        "error_type": "com_port_open_failed",
+        "summary": "COM port could not be opened.",
+        "backend_error": "[Errno 13] could not open port /dev/ttyACM0: [Errno 13] Permission denied: '/dev/ttyACM0'",
+        "likely_causes": ["configured COM port device does not exist"] * 4,
+    }
+    now = {**snapshot(sysfs_inode=12), "node_mode": 0o20000}
+
+    report = port_open_report(answer, snapshot(), now)
+
+    assert json.dumps(answer, indent=1, sort_keys=True) in report
+    assert "[Errno 13]" in report
+    assert f'"node_mode": {0o20660}' in report
+    assert f'"node_mode": {0o20000}' in report
+    assert report.index(f"{0o20660}") < report.index(f"{0o20000}")

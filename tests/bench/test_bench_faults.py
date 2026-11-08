@@ -55,7 +55,7 @@ from agentic_hil.config import load_config
 from agentic_hil.gdbmi import unescape_mi_string
 
 from .conftest import BENCH_ONLY, DEMO_IMAGE, REENUMERATES_THE_PROBE, Bench, BoardImages, child_command
-from .killed_flash_support import debugger_logs_since, recovery_report, wait_for_the_serial_port
+from .killed_flash_support import debugger_logs_since, port_open_report, recovery_report, wait_for_the_serial_port
 from .usb_reset_support import tty_device_snapshot
 
 pytestmark = [pytest.mark.bench, BENCH_ONLY]
@@ -1330,7 +1330,10 @@ def test_a_flash_killed_mid_write_is_recovered_by_the_product_and_a_second_flash
         if reenumerated is not None:
             pytest.fail(reenumerated, pytrace=False)
     try:
-        open_port(server, port)
+        # Whole, as `why` is: the errno and the node's mode are what tell a
+        # removed node from a refusal of the product's own (#620).
+        errored, opened = server.call("com_session_start", {"port_id": port, "clear_buffer": True})
+        assert errored is False and opened.get("ok") is True, port_open_report(opened, before, port_snapshot())
         settle_and_discard(server, port)
         flash_the_demo_over(server, port)
     except AssertionError as failed:
