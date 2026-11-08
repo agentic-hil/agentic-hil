@@ -241,7 +241,7 @@ def test_usb_reset_reenumeration_is_an_opt_in_stage_after_all_other_gates():
     inputs = workflow["on"]["workflow_dispatch"]["inputs"]
     job = workflow["jobs"]["bench-tier"]
     steps = job["steps"]
-    usb_steps = [step for step in steps if "tests/bench/usb_reset_reenumeration.py" in step.get("run", "")]
+    usb_steps = [step for step in steps if step.get("run", "").endswith("-- tests/bench/usb_reset_reenumeration.py")]
 
     assert inputs["run_usb_reset_reenumeration"]["type"] == "boolean"
     assert inputs["run_usb_reset_reenumeration"]["default"] == "false"
@@ -274,7 +274,8 @@ def test_usb_reset_reenumeration_is_an_opt_in_stage_after_all_other_gates():
             )
         )
     ]
-    assert len(live_tree_runs) == 3
+    # The fourth is the killed flash's stage, which names the module for its forced USB reset (#620).
+    assert len(live_tree_runs) == 4
     assert all("--live-device-tree" in step["run"] for step in live_tree_runs)
     other_bench_runs = [step for step in steps if "bench_in_container.py" in step.get("run", "") and step not in live_tree_runs]
     assert other_bench_runs

@@ -1211,6 +1211,8 @@ def test_a_flash_killed_mid_write_is_recovered_by_the_product_and_a_second_flash
     first open after the kill (#620), and a container started with fixed
     `--device` bindings keeps the old node. The test then fails under a message
     that names the re-enumeration, and no test after it inherits the binding.
+    The workflows run it in a stage of its own under `--live-device-tree`,
+    which follows the new node.
 
     What is asserted is the documented answer, in order. The call fails, as the
     single-action run it is, and that run aborts into the recovery action:

@@ -167,9 +167,9 @@ after it, and the run says which probes it hides by where they sit. Docker has
 no way to mask a path, so a run under Docker with another probe attached is
 refused with exit status 2.
 
-The USB reset re-enumeration stage, pyOCD discovery diagnostic, and opt-in
-incident recovery check are the exceptions to static device-node mounts. They
-run with
+The killed-flash stage, USB reset re-enumeration stage, pyOCD discovery
+diagnostic, and opt-in incident recovery check are the exceptions to static
+device-node mounts. They run with
 `--runtime podman --live-device-tree`: the rootless
 container receives the host `/dev` directory as a read-only bind mount, so a
 kernel-recreated tty node and updated `/dev/serial/by-id` links can be resolved

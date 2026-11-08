@@ -1001,6 +1001,15 @@ ROOM_AROUND_THE_DISTRIBUTIONS_MINUTES = 5
 # distributions name it by: each runs unless the run was cancelled, and only
 # once the check has found that room.
 ROOM_STEP_ID = "room"
+# The killed flash (#620): its own stage after each distribution's tier, under
+# the live device tree, with the forced USB reset beside it; the tier leaves
+# both out by the mark they carry.
+REENUMERATES_THE_PROBE = "reenumerates_the_probe"
+LIVE_DEVICE_TREE = "--live-device-tree"
+TIER_ARGUMENTS = ["--", "tests/bench", "-v", "-m", f"not {REENUMERATES_THE_PROBE}"]
+KILLED_FLASH_ARGUMENTS = [
+    "--", "-v", "-m", REENUMERATES_THE_PROBE, "tests/bench/test_bench_faults.py", "tests/bench/usb_reset_reenumeration.py",
+]
 DISTRIBUTION_CONDITION = "${{ !cancelled() && steps.room.outcome == 'success' }}"
 # The four images are 1.5 to 2.9 GB each on the bench, and a build copies the
 # layer it commits through a temporary directory before the layer lands in the
@@ -1046,18 +1055,18 @@ def runner_distributions() -> tuple[str, ...]:
 
 
 def distribution_steps() -> list[tuple[str, dict, dict]]:
-    """Each distribution the job runs, in order: its name, its run step, and the step after it."""
+    """Each distribution the job runs, in order: its name, its tier's run step, and the step after its killed flash."""
     steps = distributions_job()["steps"]
     found = []
     for index, step in enumerate(steps):
-        if DISTRIBUTION_RUNNER not in step.get("run", ""):
+        if DISTRIBUTION_RUNNER not in step.get("run", "") or LIVE_DEVICE_TREE in step["run"]:
             continue
         lines = run_lines({"steps": [step]})
         assert len(lines) == 1, lines
         command = shlex.split(lines[0])
         distribution = option_value(command, "--distribution")
         assert distribution, command
-        following = steps[index + 1] if index + 1 < len(steps) else {}
+        following = steps[index + 2] if index + 2 < len(steps) else {}
         found.append((distribution, step, following))
     return found
 
@@ -1107,12 +1116,34 @@ def test_every_distribution_the_runner_builds_runs_its_whole_tier_one_after_anot
         command = shlex.split(line)
         assert command == [
             "exec", "python3", DISTRIBUTION_RUNNER, "--distribution", distribution, "--probe-from-config", demo,
-            "--require-usb-uart", "--output", f"{DISTRIBUTION_RESULTS}/{distribution}",
+            "--require-usb-uart", "--output", f"{DISTRIBUTION_RESULTS}/{distribution}", *TIER_ARGUMENTS,
         ], command
         assert step["if"] == DISTRIBUTION_CONDITION, step
         assert "working-directory" not in step, step
         assert not RAW_HARDWARE.search(line), line
         assert not FETCH_TOOL.search(line), line
+
+
+def test_each_distribution_runs_the_killed_flash_right_after_its_tier_under_the_live_device_tree() -> None:
+    """The killed flash and the forced USB reset, on the tier's image, in a stage of their own (#620).
+
+    Under `--live-device-tree` the port's name leads to the node the kernel
+    created again, where the tier's fixed bindings keep the one it removed. The
+    report goes into a directory inside the distribution's, which its upload
+    takes along.
+    """
+    steps = distributions_job()["steps"]
+    demo = bench_job()["defaults"]["run"]["working-directory"]
+    for distribution, tier, _ in distribution_steps():
+        killed = steps[steps.index(tier) + 1]
+        line = run_lines({"steps": [killed]})[0]
+        assert shlex.split(line) == [
+            "exec", "python3", DISTRIBUTION_RUNNER, "--distribution", distribution, "--runtime", "podman",
+            LIVE_DEVICE_TREE, "--probe-from-config", demo,
+            "--output", f"{DISTRIBUTION_RESULTS}/{distribution}/live-device-tree", *KILLED_FLASH_ARGUMENTS,
+        ], line
+        assert killed["if"] == DISTRIBUTION_CONDITION, killed
+        assert "working-directory" not in killed, killed
 
 
 def test_each_distributions_report_and_log_are_uploaded_under_its_own_name_whatever_happened() -> None:
@@ -1131,8 +1162,8 @@ def test_each_distribution_reports_space_before_building_and_retires_its_image_a
     for distribution, build, upload in distribution_steps():
         index = steps.index(build)
         before = steps[index - 1]
-        after = steps[index + 2]
-        assert steps[index + 1] == upload
+        after = steps[index + 3]
+        assert steps[index + 2] == upload
         assert before["run"] == f"python3 {IMAGE_STORE_TOOL} before --distribution {distribution}"
         assert before["if"] == DISTRIBUTION_CONDITION
         assert before["continue-on-error"] is True
@@ -1152,8 +1183,7 @@ def test_the_distributions_run_inside_a_limit_measured_on_the_bench() -> None:
     clearings of the image store and the check of the disk among the steps, so
     no distribution loses its time to the ones before it or to them.
     """
-    ran = distribution_steps()
-    limits = [step["timeout-minutes"] for _, step, _ in ran]
+    limits = [step["timeout-minutes"] for step in distributions_job()["steps"] if DISTRIBUTION_RUNNER in step.get("run", "")]
     others = [
         step.get("timeout-minutes")
         for step in distributions_job()["steps"]
@@ -1412,6 +1442,7 @@ GATE_RUNNER = "tools/bench_in_container.py"
 # directory of its own inside it.
 GATE_RESULTS = "$BENCH_RESULTS"
 GATE_STAGE_RESULTS = f"{GATE_RESULTS}/without-device-group"
+GATE_KILLED_FLASH = "Run the killed flash under the live device tree"
 GATE_UPLOAD_RESULTS = "${{ env.BENCH_RESULTS }}/"
 # The directory whose authoritative configuration names the probe, as the run
 # steps spell it from the named commit's checkout they work in: the demo's
@@ -1437,6 +1468,7 @@ def gate_run_steps() -> list[dict]:
         and "pyocd_recordings.py" not in step.get("run", "")
         and "cubeprogrammer_recordings.py" not in step.get("run", "")
         and "usb_reset_reenumeration.py" not in step.get("run", "")
+        and LIVE_DEVICE_TREE not in step.get("run", "")
     ]
     assert len(running) == 2, running
     return running
@@ -1557,7 +1589,7 @@ def test_the_gate_runs_the_runner_and_nothing_else() -> None:
             assert word not in command, command
     source_args = ["--source", "../under-test", "--expected-commit", "$(git -C ../under-test rev-parse HEAD)"]
     probe_args = ["--probe-from-config", GATE_PROBE_CONFIG]
-    assert tier[3:] == [*source_args, *probe_args, "--require-usb-uart", "--output", GATE_RESULTS], tier
+    assert tier[3:] == [*source_args, *probe_args, "--require-usb-uart", "--output", GATE_RESULTS, *TIER_ARGUMENTS], tier
     assert stage[3:] == [
         *source_args, *probe_args, "--without-device-group", "--require-usb-uart", "--output", GATE_STAGE_RESULTS,
     ], stage
@@ -1579,6 +1611,30 @@ def test_the_stage_without_the_device_group_runs_after_the_tier_unless_the_run_w
         chr(36)
         + "{{ !cancelled() && !inputs.diagnose_only && (!inputs.run_recovery_check || steps.recovery_check.outcome == 'success') }}"
     ), stage
+
+
+def test_the_gate_runs_the_killed_flash_after_the_stage_without_the_device_group_under_the_live_device_tree() -> None:
+    """The killed flash and the forced USB reset the tier leaves out, in a stage of their own (#620).
+
+    After a red tier too, as the stage before it, and ahead of the opt-in
+    recordings, which a red one still holds back.
+    """
+    steps = gate_job()["steps"]
+    names = [step.get("name") for step in steps]
+    killed = steps[names.index(GATE_KILLED_FLASH)]
+    _, stage = gate_run_steps()
+
+    assert names.index(GATE_KILLED_FLASH) == steps.index(stage) + 1, names
+    assert names.index(GATE_KILLED_FLASH) < names.index("Run pyOCD hardware recordings"), names
+    assert killed["if"] == stage["if"], killed
+    assert killed["working-directory"] == stage["working-directory"], killed
+    command = shlex.split(run_lines({"steps": [killed]})[0])
+    assert command[:3] == shlex.split(run_lines({"steps": [stage]})[0])[:3], command
+    assert command[3:] == [
+        "--runtime", "podman", LIVE_DEVICE_TREE, "--source", "../under-test",
+        "--expected-commit", "$(git -C ../under-test rev-parse HEAD)", "--probe-from-config", GATE_PROBE_CONFIG,
+        "--output", f"{GATE_RESULTS}/killed-flash", *KILLED_FLASH_ARGUMENTS,
+    ], command
 
 
 def test_the_commit_under_test_runs_only_inside_the_container() -> None:
@@ -1636,6 +1692,7 @@ def test_the_gates_board_stages_name_the_probe_the_nightlys_demo_job_drives() ->
         "Run the opt-in incident recovery check",
         "Run the bench tier in its container",
         "Run the stage without the probe's device group",
+        GATE_KILLED_FLASH,
         "Run pyOCD hardware recordings",
         "Run CubeProgrammer hardware recordings",
         "Run USB reset and re-enumeration recording",
@@ -1699,6 +1756,7 @@ def test_every_gate_stage_writes_under_the_one_run_scoped_upload_root() -> None:
     expected = {
         "Run the bench tier in its container": GATE_RESULTS,
         "Run the stage without the probe's device group": GATE_STAGE_RESULTS,
+        GATE_KILLED_FLASH: f"{GATE_RESULTS}/killed-flash",
         "Run the opt-in incident recovery check": f"{GATE_RESULTS}/recovery-check",
         "Run pyOCD hardware recordings": f"{GATE_RESULTS}/pyocd",
         "Run CubeProgrammer hardware recordings": f"{GATE_RESULTS}/cubeprogrammer",
@@ -1724,10 +1782,11 @@ def test_pyocd_recording_stage_gets_live_device_tree_for_bounded_usb_reset_diagn
     pyocd = runner_steps["Run pyOCD hardware recordings"]
     recovery = runner_steps["Run the opt-in incident recovery check"]
     usb_reset = runner_steps["Run USB reset and re-enumeration recording"]
+    killed_flash = runner_steps[GATE_KILLED_FLASH]
     default_tier = runner_steps["Run the bench tier in its container"]
     cube = runner_steps["Run CubeProgrammer hardware recordings"]
 
-    for step in (pyocd, usb_reset, recovery):
+    for step in (pyocd, usb_reset, recovery, killed_flash):
         command = shlex.split(run_lines({"steps": [step]})[0])
         assert command[command.index("--runtime") + 1] == "podman", command
         assert "--live-device-tree" in command, command
