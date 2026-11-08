@@ -1111,24 +1111,28 @@ def error_record(error: str, detail: str, raw: bytes) -> JsonObject:
     return record
 
 
-def decode_stream(table: DefmtTable, data: bytes, *, final: bool = False) -> DecodeBatch:
+def decode_stream(table: DefmtTable, data: bytes, *, final: bool = False, limit: int | None = None) -> DecodeBatch:
     """Every complete frame at the start of `data`, in order.
 
     `consumed` is how many bytes those frames took; what follows is an
     incomplete frame that waits for more bytes, unless `final` says no more are
     coming, in which case it is reported as `incomplete_frame` and consumed.
+
+    `limit` stops after that many records, so the work one call does is bounded
+    by what it hands out rather than by the length of `data`. What follows the
+    last of them is left unconsumed and undecoded, as an incomplete frame is.
     """
     if table.encoding == "rzcobs":
-        return _decode_rzcobs(table, data, final)
-    return _decode_raw(table, data, final)
+        return _decode_rzcobs(table, data, final, limit)
+    return _decode_raw(table, data, final, limit)
 
 
-def _decode_rzcobs(table: DefmtTable, data: bytes, final: bool) -> DecodeBatch:
+def _decode_rzcobs(table: DefmtTable, data: bytes, final: bool, limit: int | None = None) -> DecodeBatch:
     records: list[JsonObject] = []
     ends: list[int] = []
     position = 0
     length = len(data)
-    while True:
+    while limit is None or len(records) < limit:
         while position < length and data[position] == 0:
             position += 1
         if position >= length:
@@ -1161,12 +1165,12 @@ def _decode_rzcobs_frame(table: DefmtTable, raw: bytes) -> JsonObject:
         return error_record(error.error, error.detail, raw)
 
 
-def _decode_raw(table: DefmtTable, data: bytes, final: bool) -> DecodeBatch:
+def _decode_raw(table: DefmtTable, data: bytes, final: bool, limit: int | None = None) -> DecodeBatch:
     records: list[JsonObject] = []
     ends: list[int] = []
     position = 0
     reader = _Reader(data)
-    while position < len(data):
+    while position < len(data) and (limit is None or len(records) < limit):
         try:
             frame = _decode_frame(table, reader)
             record = frame.record()

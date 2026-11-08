@@ -14,6 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentic_hil import defmt
 from agentic_hil.config import ADOPT_HARDWARE_COMMAND, ConfigError, display_path, safe_append_text
 from agentic_hil.coordination import (
     CoordinationError,
@@ -755,6 +756,124 @@ def serial_port_busy(error: BaseException, port_id: str, port_config: ComPortCon
 RECEIVED_LOG_WAIT_S = 0.05
 
 
+# How many records one read of a decoding session hands out. A board in a log
+# burst can fill the whole buffer with frames, and decoding every one of them
+# in one call would make the cost of a read the size of the buffer rather than
+# of the answer; the rest stays buffered, undecoded, for the next read. A design
+# bound, not a measurement.
+DEFMT_MAX_FRAMES_PER_READ = 256
+# `session_start`'s `defmt` when the call does not name it: the session keeps
+# whatever mode it is in. `None` turns decoding off.
+KEEP_DEFMT_MODE = object()
+
+
+@dataclass
+class DefmtStream:
+    """How one COM session decodes: the table, and what the stream has lost.
+
+    `identity` is the resolved path and digest of the ELF the table was read
+    from, compared with the confirmed programming whenever that changes, so
+    `proven` follows the board rather than the moment the session started. The
+    stream itself lives in the session's byte buffer: whatever a read does not
+    hand out, a partial frame or the frames past the bound, stays there."""
+
+    binding: defmt.DefmtBinding
+    identity: tuple[str, str] | None
+    # The raw encoding has no frame boundary to resume at once a frame fails
+    # to decode or bytes are dropped, so this stays set until a clearing start.
+    desynchronized: bool = False
+    # `overflow_bytes` as this stream last saw it; more than that means the
+    # buffer cap dropped bytes out of the middle of the stream.
+    overflow_seen: int = 0
+
+    @property
+    def proven(self) -> bool:
+        return self.binding.source.get("proven") is True
+
+    def prove(self, proven: bool) -> None:
+        self.binding = defmt.DefmtBinding(self.binding.table, {**self.binding.source, "proven": proven})
+
+    def describe(self) -> JsonObject:
+        return {**self.binding.describe(), "desynchronized": self.desynchronized}
+
+
+# How many fresh copies of its head a read decodes before it decodes under the
+# lock instead: a commit only lands on the buffer its copy was taken from.
+DEFMT_COMMIT_ATTEMPTS = 3
+DEFMT_DESYNCHRONIZED_DETAIL = (
+    "the raw stream lost a frame boundary to an undecodable frame, a frame cut off, or bytes the buffer dropped, "
+    "so these bytes cannot be decoded; a com_session_start with clear_buffer: true starts the stream again"
+)
+# What a decode of one head answers: the records, the bytes they took, the
+# `until` entry the last one matched, and whether the stream is desynchronized.
+DefmtTake = tuple[list[JsonObject], int, int | None, bool]
+
+
+def _defmt_snapshot(session: ComPortSession, max_bytes: int) -> tuple[DefmtStream, bytes, int, int, bool, bool] | None:
+    """What a decode of the head of a decoding session needs, copied. Under `session.lock`.
+
+    None once decoding is off. A head may be forced out as an incomplete frame
+    only when it is the whole buffer and the buffer is at its cap: a head that
+    is short because the caller asked for few bytes would cut a frame that is
+    still arriving whole. Desynchronization belongs to the raw encoding alone;
+    an rzCOBS stream finds its next frame at the next separator."""
+    stream = session.defmt
+    if stream is None:
+        return None
+    head = bytes(session.buffer[:max_bytes])
+    full = len(session.buffer) >= session.port_config.max_buffer_bytes and len(head) == len(session.buffer)
+    raw = stream.binding.table.encoding == "raw"
+    desynchronized = raw and (stream.desynchronized or session.overflow_bytes > stream.overflow_seen)
+    return stream, head, session.overflow_bytes, session.buffer_epoch, full, desynchronized
+
+
+def _decode_head(table: defmt.DefmtTable, head: bytes, entries: list[str], desynchronized: bool, full: bool) -> DefmtTake:
+    """The records a read takes from a copy of the head. Touches no session state.
+
+    At most `DEFMT_MAX_FRAMES_PER_READ` are decoded, whatever the encoding, and
+    nothing past an `until` match is taken. On the raw encoding, every byte of
+    a desynchronized stream is handed out as one `desynchronized` error record,
+    never guessed at, and so are the bytes consumed as an incomplete frame,
+    because the next frame's start is then unknown too."""
+    if not head:
+        return [], 0, None, desynchronized
+    if desynchronized:
+        return [defmt.error_record("desynchronized", DEFMT_DESYNCHRONIZED_DETAIL, head)], len(head), None, True
+    batch = defmt.decode_stream(table, head, limit=DEFMT_MAX_FRAMES_PER_READ)
+    if not batch.records and full:
+        # A full buffer that holds no whole frame would hold every later read
+        # up behind it, and the buffer cap is about to drop its front anyway;
+        # it is reported and consumed.
+        batch = defmt.decode_stream(table, head, final=True, limit=DEFMT_MAX_FRAMES_PER_READ)
+    raw = table.encoding == "raw"
+    desynchronized = raw and (batch.desynchronized or any(record.get("error") == "incomplete_frame" for record in batch.records))
+    count = len(batch.records)
+    matched: int | None = None
+    for index, record in enumerate(batch.records):
+        matched = _matching_entry(record, entries)
+        if matched is not None:
+            count = index + 1
+            break
+    return batch.records[:count], batch.ends[count - 1] if count else 0, matched, desynchronized
+
+
+def _commit_frames(session: ComPortSession, stream: DefmtStream, overflow: int, taken: DefmtTake) -> DefmtTake:
+    """Take what a decode consumed out of the buffer and record the stream's state. Under `session.lock`."""
+    _, consumed, _, desynchronized = taken
+    stream.desynchronized = desynchronized
+    stream.overflow_seen = overflow
+    del session.buffer[:consumed]
+    return taken
+
+
+def _matching_entry(record: JsonObject, entries: list[str]) -> int | None:
+    """The index of the first `until` entry a decoded frame's text holds, matched literally."""
+    text = record.get("text")
+    if not isinstance(text, str):
+        return None
+    return next((index for index, entry in enumerate(entries) if entry in text), None)
+
+
 class ComPortSession:
     def __init__(self, port_id: str, port_config: ComPortConfig, serial_handle: object, log_path: str, lease: HardwareLease | None = None, *, start_reader: bool = True, contact: ContactMarker | None = None):
         self.port_id = port_id
@@ -772,6 +891,11 @@ class ComPortSession:
         self.active = True
         self.buffer = bytearray()
         self.overflow_bytes = 0
+        # Set while the session decodes defmt; changed only under `lock`.
+        self.defmt: DefmtStream | None = None
+        # Counts the clears of `buffer`, so a decode of a copy commits only to
+        # the buffer it was copied from.
+        self.buffer_epoch = 0
         self.reader_error: JsonObject | None = None
         self.lock = threading.Lock()
         self.io_lock = threading.Lock()
@@ -1112,7 +1236,14 @@ class ComPortService:
             "summary": f"{len(ports)} configured COM port(s), {available_count} available host COM port(s).",
         }
 
-    def session_start(self, port_id: str, clear_buffer: bool = True) -> JsonObject:
+    def session_start(self, port_id: str, clear_buffer: bool = True, defmt: object = KEEP_DEFMT_MODE) -> JsonObject:
+        """Open the port, or answer for the session already open on it.
+
+        `defmt` is a `DefmtStream` whose table the caller has already validated,
+        `None` to stop decoding, or left out to keep the mode the session is in.
+        On an active session it changes the mode in place, after any clear, and
+        the port stays open; the caller refuses an invalid table before this is
+        reached, so a refused change never touches the session."""
         if not isinstance(port_id, str) or not isinstance(clear_buffer, bool):
             return self._write_report({"ok": False, "tool": "com_session_start", "error_type": "invalid_argument", "summary": "port_id must be a string and clear_buffer must be a boolean.", "side_effect_committed": False})
         port = self._configured_port(port_id, "com_session_start")
@@ -1127,6 +1258,10 @@ class ComPortService:
         port_permissions = port["port_config"].permissions
         if not self.config.com_read_allowed(port["port_config"]) and not port_permissions.allow_write:
             return self._write_report(self._permission_denied("com_session_start", "Reading and writing this COM port are disabled by the authoritative config.", port_id, "allow_read"))
+        if isinstance(defmt, DefmtStream) and not self.config.com_read_allowed(port["port_config"]):
+            # Decoding is reading: the frames are what the board sent. A port
+            # that may only be written answers to the grant `com_read` names.
+            return self._write_report(self._permission_denied("com_session_start", "Decoding defmt reads this COM port, and reading it is disabled by the authoritative config.", port_id, "allow_read"))
         if clear_buffer and not self.config.com_read_allowed(port["port_config"]):
             # Clearing drains the receive buffer, which is a read.
             clear_buffer = False
@@ -1148,7 +1283,11 @@ class ComPortService:
                 cleared = self._clear_buffers(existing)
                 if not cleared["ok"]:
                     return self._write_report(cleared)
-            return self._write_report({"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": True, "session": self._session_status(existing), "identity": identity_status, "summary": "COM port session is already active."})
+            active: JsonObject = {"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": True}
+            if defmt is not KEEP_DEFMT_MODE:
+                active["defmt"] = self._change_defmt_mode(existing, defmt)
+            active.update({"session": self._session_status(existing), "identity": identity_status, "summary": "COM port session is already active."})
+            return self._write_report(active)
         if existing:
             # Deferred as on the stop path: a close that raised leaves the session
             # registered with its lease, so the retried stop finds both. Nothing
@@ -1204,6 +1343,10 @@ class ComPortService:
                 lease.record_cleanup_event("com_open_cleanup_unconfirmed", opened.get("backend_error"))
             return self._write_unattached_lease_report(opened, lease, release_if_safe=True)
         session = opened["session"]
+        if isinstance(defmt, DefmtStream):
+            # Before the reader starts, so the first byte is already one of the
+            # stream's.
+            session.defmt = DefmtStream(defmt.binding, defmt.identity, overflow_seen=session.overflow_bytes)
         self.sessions[port_id] = session
         audit_error = session.append_audit({"event": "start", "port_id": port_id, "device": session.port_config.device}, self.config)
         if audit_error is not None:
@@ -1256,6 +1399,8 @@ class ComPortService:
                 raise error
             return recommit_report_with_status(self.config, written, session.lease.status())
         result = {"ok": True, "tool": "com_session_start", "port_id": port_id, "already_active": False, "session": self._session_status(session), "identity": identity_status, "summary": "COM port session started."}
+        if defmt is not KEEP_DEFMT_MODE:
+            result["defmt"] = session.defmt.describe() if session.defmt is not None else None
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
 
     def session_stop(self, port_id: str) -> JsonObject:
@@ -1446,13 +1591,25 @@ class ComPortService:
                 return {**patterns, "port_id": port_id}
             return self._read_until(session, port_id, tool, parsed_max_bytes, until_wait_s(None if wait_timeout_s is None else parsed_wait_timeout_s), patterns)
         deadline = time.monotonic() + max(0.0, min(parsed_wait_timeout_s, 60.0))
+        decoded: tuple[int, int] | None = None
         while self._session_is_active(session):
             with session.lock:
-                if session.buffer:
+                state = (len(session.buffer), session.overflow_bytes)
+            if state[0]:
+                if session.defmt is None:
                     break
+                # A decoding session waits for a whole record rather than for
+                # the first byte of one, and decodes again only once the
+                # buffer has changed.
+                if state != decoded:
+                    decoded = state
+                    if self._take_frames(session, parsed_max_bytes, [], commit=False)[0]:
+                        break
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.01)
+        if session.defmt is not None:
+            return self._read_frames(session, port_id, tool, parsed_max_bytes)
         with session.lock:
             data = bytes(session.buffer[:parsed_max_bytes])
             del session.buffer[:parsed_max_bytes]
@@ -1487,13 +1644,22 @@ class ComPortService:
             with session.lock:
                 state = (len(session.buffer), session.overflow_bytes)
                 head = bytes(session.buffer[:max_bytes]) if state != searched else None
+            # On a decoding session `until` is a claim about a frame's text, so
+            # the buffer is asked through the decoder: a match, a read's worth of
+            # frames, or a full head ends the wait.
+            complete = self._frames_ready(session, max_bytes, until["entries"]) if head is not None and session.defmt is not None else None
             if head is not None:
                 searched = state
-                if len(head) >= max_bytes or find_until(head, patterns) is not None:
+                if complete is not None:
+                    if complete:
+                        break
+                elif len(head) >= max_bytes or find_until(head, patterns) is not None:
                     break
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.01)
+        if session.defmt is not None:
+            return self._read_frames(session, port_id, tool, max_bytes, until, wait_s)
         with session.lock:
             head = bytes(session.buffer[:max_bytes])
             found = find_until(head, patterns)
@@ -1524,6 +1690,90 @@ class ComPortService:
         result: JsonObject = {"ok": True, "tool": tool, "port_id": port_id, "bytes_read": len(data), "buffer_remaining_bytes": remaining, "overflow_bytes": session.overflow_bytes, "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": summary, "until_matched": found is not None}
         if found is not None:
             result["matched"] = until["entries"][found[1]]
+        if session.reader_error:
+            result["reader_error"] = session.reader_error
+        return {**result, **waited}
+
+    def _take_frames(self, session: ComPortSession, max_bytes: int, entries: list[str], *, commit: bool) -> tuple[list[JsonObject], int, int | None, bool]:
+        """The records at the head of a decoding session's buffer, and the bytes they took.
+
+        Called without `session.lock`, which it takes itself only to copy the
+        head and to commit: the decode runs on the copy, so the drain is never
+        kept from buffering input while frames are rendered, and a burst cannot
+        stall the port into losing bytes `overflow_bytes` would not count.
+        Answers the records, the bytes they were decoded from, the index of the
+        `until` entry the last one matched (or None), and whether the stream is
+        desynchronized after them. At most `DEFMT_MAX_FRAMES_PER_READ` records
+        are decoded and nothing past a match is taken, and only their bytes
+        leave the buffer: the frames after them, and a frame still arriving,
+        wait there for the next read. With `commit` false nothing is changed,
+        which is how a waiting read asks whether it is done.
+
+        A commit lands only on the buffer the copy was taken from. Bytes the cap
+        dropped from its front in between, or a mode change, move what the
+        consumed count refers to, so the decode is repeated on a fresh copy."""
+        for _ in range(DEFMT_COMMIT_ATTEMPTS):
+            with session.lock:
+                snapshot = _defmt_snapshot(session, max_bytes)
+            if snapshot is None:
+                return [], 0, None, False
+            stream, head, overflow, epoch, full, desynchronized = snapshot
+            taken = _decode_head(stream.binding.table, head, entries, desynchronized, full)
+            if not commit:
+                return taken
+            with session.lock:
+                if session.defmt is stream and session.overflow_bytes == overflow and session.buffer_epoch == epoch:
+                    return _commit_frames(session, stream, overflow, taken)
+        # The buffer kept moving under the decode. One bounded decode under the
+        # lock settles it: the cap keeps it to a read's worth of frames.
+        with session.lock:
+            snapshot = _defmt_snapshot(session, max_bytes)
+            if snapshot is None:
+                return [], 0, None, False
+            stream, head, overflow, _, full, desynchronized = snapshot
+            taken = _decode_head(stream.binding.table, head, entries, desynchronized, full)
+            return _commit_frames(session, stream, overflow, taken) if commit else taken
+
+    def _frames_ready(self, session: ComPortSession, max_bytes: int, entries: list[str]) -> bool:
+        """Whether a waiting read on a decoding session has its answer. Not under `session.lock`."""
+        records, _, matched, _ = self._take_frames(session, max_bytes, entries, commit=False)
+        with session.lock:
+            buffered = len(session.buffer)
+        return matched is not None or len(records) >= DEFMT_MAX_FRAMES_PER_READ or buffered >= min(max_bytes, session.port_config.max_buffer_bytes)
+
+    def _read_frames(self, session: ComPortSession, port_id: str, tool: str, max_bytes: int, until: JsonObject | None = None, wait_s: float | None = None) -> JsonObject:
+        """`com_read` on a decoding session: whole decoded records in place of text and hex.
+
+        `bytes_read` counts the bytes the records were decoded from; what they
+        leave in the buffer is `buffer_remaining_bytes`. With `until`, the read
+        ends with the first record whose text holds an entry. The session log
+        records every raw byte either way, as it does without defmt."""
+        entries: list[str] = list(until["entries"]) if until is not None else []
+        records, consumed, matched, _ = self._take_frames(session, max_bytes, entries, commit=True)
+        with session.lock:
+            remaining = len(session.buffer)
+            stream = session.defmt
+            described: JsonObject = {**(stream.describe() if stream is not None else {}), **defmt.describe_records(records)}
+        waited: JsonObject = {"until": until["entries"], "until_wait_s": wait_s} if until is not None else {}
+        if not records and session.reader_error is not None:
+            # As without defmt: a reader that stopped with nothing buffered is a
+            # failed read, not a quiet line.
+            failure = self._active_session(port_id, tool)
+            if not failure["ok"]:
+                return {**failure, **waited}
+        if matched is not None:
+            summary = "Decoded defmt frames read from COM port through the first frame matching until."
+        elif session.reader_error is not None:
+            summary = "The COM port reader stopped; the defmt frames it buffered are returned."
+        elif records:
+            summary = "Decoded defmt frames read from COM port."
+        else:
+            summary = "No complete defmt frame was available on the COM port."
+        result: JsonObject = {"ok": True, "tool": tool, "port_id": port_id, "bytes_read": consumed, "buffer_remaining_bytes": remaining, "overflow_bytes": session.overflow_bytes, "frames": records, "defmt": described, "log_path": display_path(self.config, session.log_path), "summary": summary}
+        if until is not None:
+            result["until_matched"] = matched is not None
+            if matched is not None:
+                result["matched"] = until["entries"][matched]
         if session.reader_error:
             result["reader_error"] = session.reader_error
         return {**result, **waited}
@@ -1586,7 +1836,14 @@ class ComPortService:
         stop = self.session_stop(port_id)
         with session.lock:
             remaining = len(session.buffer)
-        capture: JsonObject = {"port_id": port_id, "bytes_read": read.get("bytes_read", 0), "data": read.get("data") or data_result(b"", session.port_config.encoding)}
+        capture: JsonObject = {"port_id": port_id, "bytes_read": read.get("bytes_read", 0)}
+        if session.defmt is not None:
+            # A decoding capture hands out what `com_read` on its session would:
+            # the records, and the table they were decoded with.
+            capture["frames"] = read.get("frames") or []
+            capture["defmt"] = read.get("defmt") or session.defmt.describe()
+        else:
+            capture["data"] = read.get("data") or data_result(b"", session.port_config.encoding)
         if until is not None:
             capture["until_matched"] = read.get("until_matched") is True
             if "matched" in read:
@@ -1817,9 +2074,45 @@ class ComPortService:
 
     def _session_status(self, session: ComPortSession) -> JsonObject:
         result: JsonObject = {"session_active": self._session_is_active(session), "started_at": session.started_at, "rx_buffer_bytes": len(session.buffer), "overflow_bytes": session.overflow_bytes, "log_path": display_path(self.config, session.log_path)}
+        if session.defmt is not None:
+            result["defmt"] = session.defmt.describe()
         if session.reader_error:
             result["reader_error"] = session.reader_error
         return result
+
+    def _change_defmt_mode(self, session: ComPortSession, stream: object) -> JsonObject | None:
+        """Enable, replace or disable decoding on an open session, and say what is in force.
+
+        Whatever the session has buffered stays: the next read decodes it with
+        the table now in force, or hands it out as text and hex once decoding
+        is off. A raw table that replaces another without a clear keeps a raw
+        desynchronization, because the bytes the boundary was lost in are still
+        the stream. An rzCOBS table never inherits one: that encoding finds its
+        next frame at the next separator."""
+        with session.lock:
+            if not isinstance(stream, DefmtStream):
+                session.defmt = None
+                return None
+            previous = session.defmt
+            raw = stream.binding.table.encoding == "raw"
+            session.defmt = DefmtStream(
+                stream.binding,
+                stream.identity,
+                desynchronized=raw and previous is not None and previous.desynchronized,
+                overflow_seen=previous.overflow_seen if previous is not None else session.overflow_bytes,
+            )
+            return session.defmt.describe()
+
+    def reprove_defmt(self, confirmed: tuple[str, str] | None) -> None:
+        """Say again, for every decoding session, whether its ELF is the confirmed programming.
+
+        Called whenever the confirmed programming changes. A flash of the named
+        file proves a session; a flash of anything else, or one nobody can
+        confirm, takes the proof back. The table is not touched either way."""
+        for session in list(self.sessions.values()):
+            with session.lock:
+                if session.defmt is not None:
+                    session.defmt.prove(session.defmt.identity is not None and session.defmt.identity == confirmed)
 
     def _session_is_active(self, session: ComPortSession) -> bool:
         if session.reader_error is not None:
@@ -1837,6 +2130,12 @@ class ComPortService:
                 with session.lock:
                     session.buffer.clear()
                     session.overflow_bytes = 0
+                    session.buffer_epoch += 1
+                    if session.defmt is not None:
+                        # A cleared buffer is a new stream: the one way a raw
+                        # desynchronization ends.
+                        session.defmt.desynchronized = False
+                        session.defmt.overflow_seen = 0
         except BaseException as error:
             result: JsonObject = {"ok": False, "tool": "com_session_start", "port_id": session.port_id, "error_type": "com_buffer_clear_failed", "summary": "COM input buffers could not be cleared.", "backend_error": str(error), "side_effect_committed": reset_started, "side_effect_status": "unknown" if reset_started else "not_started", "retry_safe": not reset_started, **remediation_fields("com_buffer_clear_failed")}
             if reset_started:

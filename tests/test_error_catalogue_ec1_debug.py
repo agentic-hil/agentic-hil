@@ -178,6 +178,7 @@ TOOLS_OTHER_AREAS: dict[str, str] = {
     "_capture_result": "#635: the COM capture a flash opens",
     **dict.fromkeys(("hardware_recover", "test_reactor_run", "_lock_cleanup_refusal"), "#646: runs, coordination and recovery"),
     "unbound_power_supply_error": "#733: a supply type this build has no backend for",
+    "_defmt_binding": "#810: the defmt table a COM session or a flash capture decodes with",
 }
 
 # Expressions the scan cannot evaluate from the source alone, each pinned by

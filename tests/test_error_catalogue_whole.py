@@ -646,7 +646,10 @@ SCANNED_MODULE_COUNT = 52
 # and `com_port_reserved_for_power_supply`. `can_broker_disconnected`, a broker
 # connection that ended (#664), was the 219th. `device_lock_root_unusable`, a
 # machine device-lock directory this account cannot use (#777), is the 227th.
-COLLECTED_TYPE_COUNT = 227
+# The defmt table a COM session or a flash capture decodes with (#810) adds
+# three, the 228th to the 230th: `defmt_table_not_available`,
+# `defmt_table_changed` and `defmt_table_invalid`.
+COLLECTED_TYPE_COUNT = 230
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -711,7 +714,10 @@ COLLECTED_TYPE_COUNT = 227
 # `power_supply_no_reply` through `RS3005PRefused`, a fault that wrote nothing.
 # The machine device-lock directory (#777) adds one, with its type:
 # `bench._unusable_lock_root` writes `device_lock_root_unusable`.
-PRODUCER_COUNT = 706
+# The defmt table (#810) adds three, one function writing each of its three new
+# types: `AgenticHILToolService._defmt_binding` resolves the table a COM session
+# or a flash capture decodes with, and is the only writer of all three.
+PRODUCER_COUNT = 709
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
@@ -1143,7 +1149,9 @@ def test_every_computed_type_is_pinned_with_what_it_carries() -> None:
 
 def test_the_scan_reads_every_module_and_the_pinned_number_of_types() -> None:
     assert scanned().modules == module_names()
-    assert pin_problems(scanned()) == []
+    problems = pin_problems(scanned())
+    if problems:
+        raise AssertionError("; ".join(problems))
 
 
 def test_a_module_left_out_of_the_scan_fails_the_pins() -> None:
@@ -1171,8 +1179,8 @@ def test_a_producer_the_scan_stops_reading_fails_the_pins() -> None:
     problems = pin_problems(inventory)
 
     assert dropped not in inventory.producers
-    assert len(problems) == 1, problems
-    assert f"found {PRODUCER_COUNT - 1} producers" in problems[0]
+    if problems != [f"the scan found {PRODUCER_COUNT - 1} producers (a type and a function that writes it), and {PRODUCER_COUNT} are pinned"]:
+        raise AssertionError("; ".join(problems))
 
 
 def test_every_function_that_takes_an_error_type_is_read() -> None:

@@ -801,7 +801,7 @@ def test_nothing_on_this_surface_erases_the_chip_and_both_flash_interlocks_arriv
 
     assert [name for name in names if "erase" in name] == [], names
     assert set(schema["properties"]) == {"image_path", "artifact_id", "reset_after_flash", "capture"}, schema["properties"]
-    assert set(schema["properties"]["capture"]["properties"]) == {"port_id", "until", "wait_timeout_s", "max_bytes"}, schema["properties"]["capture"]
+    assert set(schema["properties"]["capture"]["properties"]) == {"port_id", "until", "wait_timeout_s", "max_bytes", "defmt"}, schema["properties"]["capture"]
     assert answered["ok"] is False, answered
     assert answered["error_type"] == "unknown_tool", answered
 

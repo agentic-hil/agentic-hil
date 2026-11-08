@@ -68,6 +68,41 @@ Debuggers
 - The firmware image has to sit under the configured artifact roots with an
   allowed extension. It is validated, rechecked and copied to private staging
   before it is flashed, and the result records its SHA-256.
+- A confirmed flash of an `.elf` makes that file, by path and digest, the
+  image this server knows the board runs. A `.hex` or `.bin` carries no symbols
+  and no defmt table, so flashing one ends that knowledge, and so does a flash
+  that could not be confirmed.
+
+## Boot output decoded as defmt
+
+`flash_firmware` with `capture` opens the serial port before the flash, resets
+the board after it and returns what the board printed. With `capture.defmt:
+true` the boot output is decoded with the defmt table of the ELF the same call
+flashes, and the capture carries decoded `frames` in place of `data`:
+
+```json
+{"image_path": "build/firmware.elf", "reset_after_flash": true,
+ "capture": {"port_id": "dut_uart", "defmt": true, "until": "ready"}}
+```
+
+- The table is read out of the validated image before anything is staged,
+  before the port is opened and before the board is touched. An image without
+  one (a `.hex`, a `.bin`, or an ELF not linked for defmt) is refused as
+  `defmt_table_invalid`, with nothing flashed and nothing opened.
+- `capture.defmt.proven` is true only when the flash was confirmed: then the
+  board runs the file the table came from.
+- A read that fails after a good flash fails the call and keeps every field of
+  the flash, the frames the board had already sent and the session's cleanup,
+  as a plain capture does. A flash that could not be confirmed keeps its
+  incident and its recovery, and the frames are not proven.
+- `until` matches a decoded frame's text, and the capture ends with that frame.
+  The session log keeps every raw byte.
+- Without `capture.defmt` a capture answers as it always has.
+
+[UART and CAN feedback](uart-and-can.md#defmt-on-the-serial-line) has the same
+decoding on a session the agent opens itself, including an ELF named for a
+board flashed some other way. This is specified and held by the repository's
+tests against a faked probe and serial line; neither run below used it.
 
 ## The plan
 

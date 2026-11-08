@@ -139,10 +139,60 @@ reported the same failure the same way, in text and in hex.
   exclusivity carries that load: a run holds the port for its whole duration,
   so no second reader consumes the answer a claim was waiting for.
 - Writes are size-capped and reads are buffer-capped.
+- A session can decode defmt frames instead of handing out text and hex; the
+  next section says how.
 - `agentic-hil test-reactor --junit-xml <path>` (from 0.21.2) writes one JUnit
   test case per step beside the JSON report, so a CI dashboard shows the read
   above as a failure of type `comparator_unmet` and the steps after it as
   skipped. [Testing](../testing.md#a-junit-report-for-ci) has the mapping.
+
+### defmt on the serial line
+
+Firmware that logs with defmt sends a
+table index and raw arguments rather than text, and the format strings live in
+the ELF. `com_session_start` decodes such a line when it is given `defmt`, and
+`com_read` then hands out whole decoded frames (level, timestamp, format
+string, typed arguments, the rendered message and the line `defmt-print`
+prints) under `frames`, in place of `data`:
+
+```json
+{"port_id": "dut_uart", "defmt": true}
+{"port_id": "dut_uart", "defmt": {"image_path": "build/firmware.elf"}}
+```
+
+- `defmt: true` reads the table of the ELF the last confirmed `flash_firmware`
+  of this server wrote. The file is validated again and its digest compared
+  with the one that was flashed, so a rebuild on that path is refused as
+  `defmt_table_changed`. With no such ELF (nothing flashed here, or a `.hex` or
+  `.bin` flashed last) the start is refused as `defmt_table_not_available`.
+- `defmt: {"image_path": ...}` names an ELF for a board flashed some other way.
+  It meets the same artifact policy a flash does, decodes whether or not this
+  server ever flashed anything, and says `proven: false` unless its path and
+  digest are the confirmed programming's. A later flash moves `proven` on an
+  open session either way.
+- An ELF without a usable table is refused as `defmt_table_invalid`, with the
+  decoder's reason in `table_error`. Every refusal comes before the port is
+  opened, and on a session that is already open it changes nothing, not even
+  the clear `clear_buffer` asks for.
+- On an open session `defmt` enables, replaces or (`false`) disables decoding
+  without reopening the port, and whatever was buffered is decoded with the
+  table now in force.
+- A read decodes and hands out at most 256 records; the rest, and a frame
+  still arriving, stay buffered for the next read, also across a start with
+  `clear_buffer: false`. A `max_bytes` smaller than the next frame returns no
+  record rather than part of one. `until` matches a frame's text, and the
+  frames after the match stay buffered.
+- Bytes that do not decode are records with `error` and their bytes, never
+  skipped. The raw encoding has no frame boundary to resume at, so after a
+  frame that does not decode, a frame cut off by a full buffer, or bytes the
+  buffer cap dropped (counted in `overflow_bytes`), it stays `desynchronized`
+  until a start with `clear_buffer: true`. The rzCOBS encoding recovers at the
+  next frame, also when an rzCOBS table replaces a raw one.
+- The session log keeps every raw byte, decoded or not.
+
+This is specified and held by the repository's tests against a faked serial
+line and the cross-compiled image under `tests/fixtures/defmt/`. No published
+record shows it on a board yet.
 
 ## CAN: what is enforced, and what this page cannot show yet
 

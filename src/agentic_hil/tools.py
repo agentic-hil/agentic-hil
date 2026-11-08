@@ -13,7 +13,7 @@ from urllib.parse import unquote, urlsplit
 
 import yaml
 
-from agentic_hil import __version__
+from agentic_hil import __version__, defmt
 from agentic_hil.adopt import (
     PROJECT_CONFIG_ADOPT,
     configured_device_resources,
@@ -33,7 +33,7 @@ from agentic_hil.bootstrap import (
     discover_attached_hardware,
 )
 from agentic_hil.can import CanBusService
-from agentic_hil.comports import ComPortService
+from agentic_hil.comports import ComPortService, DefmtStream
 from agentic_hil.config import (
     CONFIG_ENV,
     DEFAULT_CONFIG_TEMPLATE,
@@ -401,9 +401,22 @@ class AgenticHILToolService:
         checked = None if payload.get("capture") is None else self._capture_check(payload["capture"], reset_after_flash)
         if checked is not None and not checked["ok"]:
             return checked
-        validation = self.artifacts.validate_local_path(str(image_path)) if image_path else self.artifacts.resolve_artifact_id(str(artifact_id))
+        decoding = checked is not None and payload["capture"].get("defmt") is True
+        # The bytes are asked for only by a decoding capture, so every other
+        # flash calls the policy exactly as it always has.
+        kept: JsonObject = {"keep_bytes": True} if decoding else {}
+        validation = self.artifacts.validate_local_path(str(image_path), **kept) if image_path else self.artifacts.resolve_artifact_id(str(artifact_id), **kept)
         if not validation["ok"]:
             return validation
+        image_bytes = validation.pop("data", None)
+        if checked is not None and decoding:
+            # The table is read out of the bytes the policy just validated, and
+            # refused before anything is staged, the port opened or the board
+            # flashed. Staging then copies only bytes with this same digest.
+            resolved = self._defmt_binding(True, "flash_firmware", {"artifact": validation["artifact"], "data": image_bytes})
+            if not resolved["ok"]:
+                return resolved
+            checked = {**checked, "defmt": resolved["stream"]}
         staged = self.artifacts.stage_for_backend(validation["artifact"], "flash_firmware")
         if not staged["ok"]:
             return staged
@@ -420,10 +433,13 @@ class AgenticHILToolService:
             # Only a returned result that proves the flash never started keeps the
             # old source (see `_remember_symbol_elf`).
             self._symbol_elf = None
+            self._reprove_defmt_sessions()
             raise
         finally:
             self.artifacts.release_stage(staged["artifact"])
         self._remember_symbol_elf(validation["artifact"], result)
+        if checked is not None and isinstance(checked.get("defmt"), DefmtStream):
+            self._prove_capture(checked["defmt"])
         return result if checked is None else self._capture_result(result)
 
     def _remember_symbol_elf(self, artifact: JsonObject, result: JsonObject) -> None:
@@ -459,9 +475,20 @@ class AgenticHILToolService:
         the result still claims the flashed image's bytes."""
         if overall_success(result):
             self._symbol_elf = artifact if Path(str(artifact["resolved_path"])).suffix.lower() == ".elf" else None
-            return
-        if result.get("side_effect_status") != "not_started":
+        elif result.get("side_effect_status") != "not_started":
             self._symbol_elf = None
+        # The same fact decides what a defmt session may claim: an open session
+        # is proven exactly while its ELF is this confirmed programming.
+        self._reprove_defmt_sessions()
+
+    def _reprove_defmt_sessions(self) -> None:
+        """Tell the COM service's decoding sessions what the confirmed programming now is.
+
+        A COM service injected by a caller that predates defmt decoding has no
+        decoding sessions to tell, and is left alone."""
+        reprove = getattr(self.com_ports, "reprove_defmt", None)
+        if callable(reprove):
+            reprove(elf_identity(self._symbol_elf))
 
     def _capture_check(self, capture: object, reset_after_flash: bool) -> JsonObject:
         """What refuses a capture, asked before the board is touched.
@@ -507,7 +534,7 @@ class AgenticHILToolService:
         result, or the refusal of the open."""
         state = self._capture_state if self._capture_state is not None else {"sessions": []}
         port_id = checked["port_id"]
-        opened = self.com_ports.session_start(port_id)
+        opened = self.com_ports.session_start(port_id, defmt=checked["defmt"]) if "defmt" in checked else self.com_ports.session_start(port_id)
         state["sessions"].append(opened)
         if opened.get("ok") is not True or not overall_success(opened):
             # The session's lease fields stay with the session: the debugger
@@ -578,6 +605,111 @@ class AgenticHILToolService:
             answer["cleanup_error"] = stop_error
         return answer
 
+    def _prove_capture(self, stream: DefmtStream) -> None:
+        """Say whether a decoding capture's frames are proven to be the image this call flashed.
+
+        The capture's session is stopped by the time the flash's outcome is
+        known, so `reprove_defmt` no longer reaches it; the capture is told here,
+        by the same rule: proven only when the flash was confirmed and the
+        confirmed programming is the ELF the table was read from."""
+        capture = (self._capture_state or {}).get("capture")
+        if isinstance(capture, dict) and isinstance(capture.get("defmt"), dict):
+            capture["defmt"] = {**capture["defmt"], "proven": stream.identity is not None and stream.identity == elf_identity(self._symbol_elf)}
+
+    def com_session_start(self, args: JsonObject | None = None) -> JsonObject:
+        """Open or answer for a COM session, decoding defmt when `defmt` says so.
+
+        Without `defmt` this is the session start it always was. With it, the
+        table is resolved and validated first, and a refusal returns here,
+        before the port is opened or an open session is changed in any way,
+        including the clear `clear_buffer` would otherwise make. `false` turns
+        decoding off on an open session."""
+        if self._dispatch_depth == 0:
+            return self.call("com_session_start", args)
+        args = args or {}
+        port_id = args.get("port_id", "")
+        clear_buffer = args.get("clear_buffer", True)
+        if "defmt" not in args:
+            return self.com_ports.session_start(port_id, clear_buffer)
+        if args["defmt"] is False:
+            return self.com_ports.session_start(port_id, clear_buffer, defmt=None)
+        resolved = self._defmt_binding(args["defmt"], "com_session_start")
+        if not resolved["ok"]:
+            return resolved
+        return self.com_ports.session_start(port_id, clear_buffer, defmt=resolved["stream"])
+
+    def _defmt_binding(self, spec: object, tool: str, flashing: JsonObject | None = None) -> JsonObject:
+        """The table a COM session or a flash capture decodes with, or the refusal of it.
+
+        Three sources, each through the existing artifact policy and nothing
+        weaker:
+
+        * `flashing`, the image a `flash_firmware` with `capture.defmt` is about
+          to write, already validated by that call with its bytes kept. Not
+          proven until the flash is confirmed (`_prove_capture`).
+        * `spec` true, the ELF the last confirmed `flash_firmware` of this
+          service wrote. It is validated again and its digest compared with the
+          one that was flashed, so a rebuild on that path is
+          `defmt_table_changed` rather than a table that describes another build.
+        * `spec` `{"image_path": ...}`, an ELF named outright, for a board
+          flashed some other way. It decodes whether or not anything was flashed
+          here, and is proven only when its path and digest are the confirmed
+          programming's.
+
+        The table is read from the bytes the policy hashed, never from the path
+        again. Every refusal comes before any hardware is touched. Answers
+        `{"ok": True, "stream": DefmtStream}`."""
+        refused: JsonObject = {"ok": False, "tool": tool, **NOT_STARTED, "retry_safe": True}
+        identity: tuple[str, str] | None
+        if flashing is not None:
+            artifact, data, origin = flashing["artifact"], flashing.get("data"), "capture"
+            identity = elf_identity(artifact)
+        elif spec is True:
+            flashed = self._symbol_elf
+            if flashed is None:
+                return {
+                    **refused,
+                    "error_type": "defmt_table_not_available",
+                    "summary": "defmt: true reads the table of the ELF the last confirmed flash_firmware of this server wrote, and there is none: nothing was flashed here, the flash was a .hex or .bin, or it was not confirmed.",
+                    **remediation_fields("defmt_table_not_available"),
+                }
+            validation = self.artifacts.validate_local_path(str(flashed["resolved_path"]), keep_bytes=True)
+            if not validation["ok"] or validation["artifact"].get("integrity_sha256") != (flashed.get("integrity_sha256") or flashed.get("sha256")):
+                changed: JsonObject = {
+                    **refused,
+                    "error_type": "defmt_table_changed",
+                    "summary": "The ELF the last confirmed flash_firmware wrote is no longer the file on disk: it was rebuilt, replaced or removed since, so its table is not the one of the image on the board.",
+                    "image_path": flashed.get("path"),
+                    **remediation_fields("defmt_table_changed"),
+                }
+                if not validation["ok"]:
+                    changed["artifact_refusal"] = {key: value for key, value in validation.items() if key not in {"ok", "tool"}}
+                return changed
+            artifact, data, origin = {**validation["artifact"], "path": flashed.get("path")}, validation["data"], "flashed"
+            identity = elf_identity(flashed)
+        else:
+            image_path = spec.get("image_path") if isinstance(spec, dict) else None
+            validation = self.artifacts.validate_local_path(str(image_path), keep_bytes=True)
+            if not validation["ok"]:
+                # The policy's own refusal, as a flash of the same path gets it.
+                return {**validation, "tool": tool}
+            artifact, data, origin = validation["artifact"], validation["data"], "image_path"
+            identity = elf_identity(artifact)
+        try:
+            table = defmt.load_table_bytes(data if isinstance(data, bytes) else b"")
+        except defmt.DefmtTableError as error:
+            return {
+                **refused,
+                "error_type": "defmt_table_invalid",
+                "summary": f"{artifact.get('path')} carries no defmt table this server can decode with: {error.summary}",
+                "table_error": error.reason,
+                "image_path": artifact.get("path"),
+                **remediation_fields("defmt_table_invalid"),
+            }
+        proven = flashing is None and identity is not None and identity == elf_identity(self._symbol_elf)
+        source: JsonObject = {"origin": origin, "path": artifact.get("path"), "sha256": artifact.get("integrity_sha256"), "proven": proven}
+        return {"ok": True, "stream": DefmtStream(defmt.DefmtBinding(table, source), identity)}
+
     def artifact_upload(self, payload: JsonObject | None = None) -> JsonObject:
         return self.artifacts.upload(payload)
 
@@ -606,11 +738,22 @@ class AgenticHILToolService:
         staged = self.artifacts.stage_for_backend(artifact, "debug_start_session")
         if not staged["ok"]:
             return staged
+        mode = str(payload.get("mode", "attach"))
         try:
-            result = self.backend.debug_start_session(staged["artifact"], str(payload.get("mode", "attach")), number_argument(payload.get("timeout_s")))
+            result = self.backend.debug_start_session(staged["artifact"], mode, number_argument(payload.get("timeout_s")))
         except BaseException:
             self.artifacts.release_stage(staged["artifact"])
+            if mode == "load":
+                # A load that raised may have written part of this image, so
+                # no image is proven to be on the board any more.
+                self._symbol_elf = None
+                self._reprove_defmt_sessions()
             raise
+        if mode == "load":
+            # A load programs the board as a flash does, and the same rule
+            # decides what that leaves proven: the loaded ELF once the load is
+            # confirmed, nothing where it may have reached the target unconfirmed.
+            self._remember_symbol_elf(artifact, result)
         if result.get("ok") or result.get("cleanup_required"):
             self._debug_artifact = staged["artifact"]
         else:
@@ -1015,7 +1158,7 @@ class AgenticHILToolService:
             "get_last_report": lambda: self.get_last_report(),
             "classify_last_error": lambda: self.classify_last_error(),
             "com_ports_list": lambda: self.com_ports.list_ports(),
-            "com_session_start": lambda: self.com_ports.session_start(args.get("port_id", ""), args.get("clear_buffer", True)),
+            "com_session_start": lambda: self.com_session_start(args),
             "com_session_stop": lambda: self.com_ports.session_stop(str(args.get("port_id", ""))),
             "com_write": lambda: self.com_ports.write(str(args.get("port_id", "")), {key: value for key, value in args.items() if key in {"text", "hex"}}),
             "com_read": lambda: self.com_ports.read(str(args.get("port_id", "")), args.get("max_bytes"), args.get("wait_timeout_s"), args.get("until")),
@@ -3010,6 +3153,22 @@ _CAPTURE_SESSION_FIELDS = frozenset({"lease_id", "resources", "lease_state", "sa
 # The calls an esptool entry makes over its serial port, which a COM session of
 # this server on that port refuses (`_name_the_session_holding_the_port`).
 ESPTOOL_PORT_TOOLS = frozenset({"probe_target", "flash_firmware", "reset_target"})
+
+
+def elf_identity(artifact: JsonObject | None) -> tuple[str, str] | None:
+    """Which file a validated artifact is: where it resolves on this host, and its digest.
+
+    Both halves, because each alone claims too much: the flashed path holding
+    a rebuild is not the flashed image, and the flashed bytes copied elsewhere
+    are not the flashed file. `proven` on a defmt table is this tuple compared
+    with the confirmed programming's."""
+    if artifact is None:
+        return None
+    digest = artifact.get("integrity_sha256") or artifact.get("sha256")
+    path = artifact.get("resolved_path")
+    if not isinstance(digest, str) or not isinstance(path, str) or not path:
+        return None
+    return os.path.normcase(os.path.normpath(path)), digest
 
 
 def _flash_capture_advice(answer: JsonObject, *, fallback: bool = False) -> JsonObject:
