@@ -258,7 +258,6 @@ def test_usb_reset_reenumeration_is_an_opt_in_stage_after_all_other_gates():
     assert '--output "$BENCH_RESULTS/usb-reset"' in usb["run"]
     assert "--runtime podman" in usb["run"]
     assert "--live-device-tree" in usb["run"]
-    assert usb["run"].endswith("-- tests/bench/usb_reset_reenumeration.py")
     assert "--cubeprogrammer-archive" not in usb["run"]
 
     live_tree_runs = [
@@ -274,9 +273,15 @@ def test_usb_reset_reenumeration_is_an_opt_in_stage_after_all_other_gates():
             )
         )
     ]
-    # The fourth is the killed flash's stage, which names the module for its forced USB reset (#620).
+    # The fourth is the killed flash's stage, which names the module for its forced USB reset (#620)
+    # and so runs only when the USB reset stage is selected.
     assert len(live_tree_runs) == 4
     assert all("--live-device-tree" in step["run"] for step in live_tree_runs)
+    assert all(
+        "&& inputs.run_usb_reset_reenumeration }}" in step["if"]
+        for step in live_tree_runs
+        if "tests/bench/usb_reset_reenumeration.py" in step["run"]
+    )
     other_bench_runs = [step for step in steps if "bench_in_container.py" in step.get("run", "") and step not in live_tree_runs]
     assert other_bench_runs
     assert all("--live-device-tree" not in step["run"] for step in other_bench_runs)

@@ -1133,13 +1133,12 @@ def test_each_distribution_runs_the_killed_flash_right_after_its_tier_under_the_
     takes along.
     """
     steps = distributions_job()["steps"]
-    demo = bench_job()["defaults"]["run"]["working-directory"]
     for distribution, tier, _ in distribution_steps():
         killed = steps[steps.index(tier) + 1]
         line = run_lines({"steps": [killed]})[0]
         assert shlex.split(line) == [
             "exec", "python3", DISTRIBUTION_RUNNER, "--distribution", distribution, "--runtime", "podman",
-            LIVE_DEVICE_TREE, "--probe-from-config", demo,
+            LIVE_DEVICE_TREE, "--probe-from-config", DEMO_DIRECTORY,
             "--output", f"{DISTRIBUTION_RESULTS}/{distribution}/live-device-tree", *KILLED_FLASH_ARGUMENTS,
         ], line
         assert killed["if"] == DISTRIBUTION_CONDITION, killed
@@ -1468,7 +1467,6 @@ def gate_run_steps() -> list[dict]:
         and "pyocd_recordings.py" not in step.get("run", "")
         and "cubeprogrammer_recordings.py" not in step.get("run", "")
         and "usb_reset_reenumeration.py" not in step.get("run", "")
-        and LIVE_DEVICE_TREE not in step.get("run", "")
     ]
     assert len(running) == 2, running
     return running
@@ -1616,8 +1614,10 @@ def test_the_stage_without_the_device_group_runs_after_the_tier_unless_the_run_w
 def test_the_gate_runs_the_killed_flash_after_the_stage_without_the_device_group_under_the_live_device_tree() -> None:
     """The killed flash and the forced USB reset the tier leaves out, in a stage of their own (#620).
 
-    After a red tier too, as the stage before it, and ahead of the opt-in
-    recordings, which a red one still holds back.
+    Only when the USB reset stage is selected, since the stage hands the named
+    commit the whole host /dev and a reset. Then after a red tier too, as the
+    stage before it, and ahead of the opt-in recordings, which a red one still
+    holds back.
     """
     steps = gate_job()["steps"]
     names = [step.get("name") for step in steps]
@@ -1626,7 +1626,7 @@ def test_the_gate_runs_the_killed_flash_after_the_stage_without_the_device_group
 
     assert names.index(GATE_KILLED_FLASH) == steps.index(stage) + 1, names
     assert names.index(GATE_KILLED_FLASH) < names.index("Run pyOCD hardware recordings"), names
-    assert killed["if"] == stage["if"], killed
+    assert killed["if"] == stage["if"].removesuffix(" }}") + " && inputs.run_usb_reset_reenumeration }}", killed
     assert killed["working-directory"] == stage["working-directory"], killed
     command = shlex.split(run_lines({"steps": [killed]})[0])
     assert command[:3] == shlex.split(run_lines({"steps": [stage]})[0])[:3], command
@@ -1692,7 +1692,6 @@ def test_the_gates_board_stages_name_the_probe_the_nightlys_demo_job_drives() ->
         "Run the opt-in incident recovery check",
         "Run the bench tier in its container",
         "Run the stage without the probe's device group",
-        GATE_KILLED_FLASH,
         "Run pyOCD hardware recordings",
         "Run CubeProgrammer hardware recordings",
         "Run USB reset and re-enumeration recording",
@@ -1782,11 +1781,10 @@ def test_pyocd_recording_stage_gets_live_device_tree_for_bounded_usb_reset_diagn
     pyocd = runner_steps["Run pyOCD hardware recordings"]
     recovery = runner_steps["Run the opt-in incident recovery check"]
     usb_reset = runner_steps["Run USB reset and re-enumeration recording"]
-    killed_flash = runner_steps[GATE_KILLED_FLASH]
     default_tier = runner_steps["Run the bench tier in its container"]
     cube = runner_steps["Run CubeProgrammer hardware recordings"]
 
-    for step in (pyocd, usb_reset, recovery, killed_flash):
+    for step in (pyocd, usb_reset, recovery):
         command = shlex.split(run_lines({"steps": [step]})[0])
         assert command[command.index("--runtime") + 1] == "podman", command
         assert "--live-device-tree" in command, command
