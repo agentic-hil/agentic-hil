@@ -387,6 +387,11 @@ EXPECTED_INVENTORY: dict[str, frozenset[str]] = {
             "config_file_not_found",
             "config_invalid",
             "config_write_in_open_run",
+            # The defmt table a COM session or a flash capture decodes with,
+            # refused by `AgenticHILToolService._defmt_binding` (#810).
+            "defmt_table_changed",
+            "defmt_table_invalid",
+            "defmt_table_not_available",
             "hardware_action_exception",
             "invalid_argument",
             "not_supported",
@@ -494,6 +499,9 @@ OWNED_ELSEWHERE: dict[str, str] = {
     "probe_discovery_failed": "#644",
     "timeout": "#644",
     "unknown_debugger_error": "#644 (classify_last_error's top-level error_type for a failure that recorded none)",
+    "defmt_table_changed": "#810 (the defmt table of a COM session or a flash capture; tests/test_defmt_sessions.py holds its entry)",
+    "defmt_table_invalid": "#810 (the defmt table of a COM session or a flash capture; tests/test_defmt_sessions.py holds its entry)",
+    "defmt_table_not_available": "#810 (the defmt table of a COM session or a flash capture; tests/test_defmt_sessions.py holds its entry)",
 }
 
 # Every expression a value is computed from rather than written, each pinned on
@@ -591,12 +599,18 @@ def sites() -> list[Site]:
     return scan_all()
 
 
-def test_the_scan_finds_the_pinned_inventory(sites: list[Site]) -> None:
-    assert inventory_problems(sites) == []
+def test_the_scan_finds_the_pinned_inventory() -> None:
+    # Scanned here rather than through the module fixture, so the source is
+    # read by this test itself and a gap shows as this test's own failure.
+    problems = inventory_problems(scan_all())
+    if problems:
+        raise AssertionError("; ".join(problems))
 
 
-def test_every_value_is_classified_exactly_once(sites: list[Site]) -> None:
-    assert classification_problems(sites) == []
+def test_every_value_is_classified_exactly_once() -> None:
+    problems = classification_problems(scan_all())
+    if problems:
+        raise AssertionError("; ".join(problems))
     for reason in (*OWNED_ELSEWHERE.values(), *EXCLUDED_SITES.values(), *DYNAMIC_SITES.values(), *FORWARDING_SITES.values(), *DEAD_SITES.values()):
         assert reason.strip()
 
@@ -644,7 +658,9 @@ def test_the_guards_fail_a_refusal_added_through(name: str) -> None:
 
 
 def test_the_guards_pass_the_unmutated_source_read_the_same_way() -> None:
-    assert all_problems(scan_all({"report": report_source()})) == []
+    problems = all_problems(scan_all({"report": report_source()}))
+    if problems:
+        raise AssertionError("; ".join(problems))
 
 
 def test_the_entries_this_issue_relies_on_are_there() -> None:

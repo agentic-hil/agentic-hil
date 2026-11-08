@@ -6149,6 +6149,59 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not flash a .hex or a .bin to get symbols. Neither carries a symbol table, and the reads stay refused.",
         ),
     ),
+    "defmt_table_not_available": ErrorRemedy(
+        meaning=(
+            "com_session_start was asked for defmt: true, which decodes with the table of the ELF the last confirmed "
+            "flash_firmware of this server wrote, and there is no such ELF: nothing was flashed through this server, "
+            "the last flash wrote a .hex or a .bin, which carry no table, or it was not confirmed. Nothing was opened "
+            "and an open session kept the mode it had."
+        ),
+        remediation=(
+            "Flash the ELF the build produced with flash_firmware, then call com_session_start with defmt: true again.",
+            "For a board flashed some other way, pass the ELF it runs as defmt with its image_path instead. That "
+            "session decodes, and says proven: false, because nothing here confirms the board runs that file.",
+        ),
+        do_not=(
+            "Do not decode the line by hand or with another tool's table. Frames read against a table that does not "
+            "describe the image on the board decode to the wrong messages.",
+        ),
+    ),
+    "defmt_table_changed": ErrorRemedy(
+        meaning=(
+            "com_session_start was asked for defmt: true, and the ELF the last confirmed flash_firmware wrote is no "
+            "longer the file on disk: it was rebuilt or replaced since (its digest no longer matches), or it no "
+            "longer passes the artifact policy. Its table is not proven to describe the image on the board, so "
+            "nothing was opened and an open session kept the mode it had."
+        ),
+        remediation=(
+            "Flash the current build with flash_firmware, so the board and the ELF on disk are the same file again, "
+            "then call com_session_start with defmt: true.",
+            "If the board still runs the earlier build, name the ELF of that build as defmt with its image_path; the "
+            "session decodes with it and says proven: false.",
+        ),
+        do_not=(
+            "Do not name the rebuilt ELF for a board that was not flashed with it. Its table indexes another build's "
+            "log statements.",
+        ),
+    ),
+    "defmt_table_invalid": ErrorRemedy(
+        meaning=(
+            "The image named for a defmt table carries none this server can decode with. table_error says why: "
+            "elf_unreadable (not an ELF, or a .hex or .bin), table_missing (no .defmt section: the firmware does not "
+            "log with defmt, or was linked without -Tdefmt.x), table_invalid (the section is not what defmt writes) "
+            "or version_unsupported (a defmt wire format other than versions 3 and 4). Nothing was opened, nothing "
+            "was flashed, and an open session kept the mode it had."
+        ),
+        remediation=(
+            "Name the ELF the firmware was linked into, built with defmt 0.3 or 1.x and linked with -Tdefmt.x, not a "
+            ".hex or a .bin.",
+            "Then call com_session_start, or flash_firmware with capture.defmt, again.",
+        ),
+        do_not=(
+            "Do not read the line without defmt and match the bytes by hand. Without the table the frames are "
+            "indexes and raw arguments, not messages.",
+        ),
+    ),
     "cleanup_failed": ErrorRemedy(
         meaning=(
             "A cleanup could not finish. In debug_stop_session it is the session's processes: GDB or the debug server "

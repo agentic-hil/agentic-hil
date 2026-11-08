@@ -44,7 +44,7 @@ from support import scaled_time_bound
 from agentic_hil.bench import BenchMutex
 from agentic_hil.comports import data_result
 from agentic_hil.config import load_config
-from agentic_hil.contracts import MCP_TOOLS
+from agentic_hil.contracts import MCP_TOOLS, validate_tool_arguments
 from agentic_hil.coordination import com_resource
 from agentic_hil.knowledge import permission_key
 from agentic_hil.mcp import handle_mcp_message
@@ -1446,7 +1446,11 @@ def test_the_capture_argument_is_the_com_read_shape_and_nothing_more() -> None:
     capture = properties.get("capture")
     assert isinstance(capture, dict), sorted(properties)
     assert capture["type"] == "object", capture
-    assert set(capture["properties"]) == {"port_id", "until", "wait_timeout_s", "max_bytes"}, capture
+    # #810: `defmt` is the one key beside the com_read shape, and the schema
+    # takes it.
+    refusal = validate_tool_arguments("flash_firmware", {"image_path": "build/app.elf", "reset_after_flash": True, "capture": {"port_id": "uart", "defmt": True}})
+    if refusal is not None or set(capture["properties"]) != {"port_id", "until", "wait_timeout_s", "max_bytes", "defmt"}:
+        raise AssertionError("the capture argument does not take defmt beside the com_read shape")
     assert capture["required"] == ["port_id"], capture
     assert capture["additionalProperties"] is False, capture
     com_read = next(tool for tool in MCP_TOOLS if tool["name"] == "com_read")["inputSchema"]["properties"]

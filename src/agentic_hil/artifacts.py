@@ -85,7 +85,14 @@ class ArtifactManager:
             return decoded
         return self._store_uploaded_data(decoded["data"], str(filename["filename"]))
 
-    def validate_local_path(self, image_path: str) -> JsonObject:
+    def validate_local_path(self, image_path: str, *, keep_bytes: bool = False) -> JsonObject:
+        """The artifact policy for one workspace file, the one every image meets.
+
+        ``keep_bytes`` hands back, under ``data``, the exact bytes the policy read
+        and ``integrity_sha256`` covers, so a caller that reads more out of the
+        file (a defmt table) reads it from the copy the digest describes rather
+        than from a path a rebuild may have replaced since. The caller pops it:
+        it never belongs in a result."""
         resolved = configured_work_path(self.config, image_path)
         validation: JsonObject = {
             "path_traversal_safe": not has_traversal_segment(image_path),
@@ -165,7 +172,7 @@ class ArtifactManager:
         if failed_plausibility:
             return self._validation_error("Firmware artifact failed basic format plausibility checks.", validation)
 
-        return {
+        accepted: JsonObject = {
             "ok": True,
             "artifact": {
                 "source": "path",
@@ -178,6 +185,9 @@ class ArtifactManager:
             },
             "validation": validation,
         }
+        if keep_bytes:
+            accepted["data"] = data
+        return accepted
 
     def stage_for_backend(self, artifact: JsonObject, tool: str) -> JsonObject:
         """Copy a validated artifact into private staging for the backend.
@@ -349,7 +359,7 @@ class ArtifactManager:
             return False
         return True
 
-    def resolve_artifact_id(self, artifact_id: str, tool: str = "flash_firmware") -> JsonObject:
+    def resolve_artifact_id(self, artifact_id: str, tool: str = "flash_firmware", *, keep_bytes: bool = False) -> JsonObject:
         if not self.config.artifacts.allow_upload:
             return {
                 "ok": False,
@@ -378,7 +388,7 @@ class ArtifactManager:
                 **remediation_fields("artifact_not_found"),
             }
 
-        validation = self.validate_local_path(str(resolved))
+        validation = self.validate_local_path(str(resolved), keep_bytes=keep_bytes)
         if not validation["ok"]:
             validation["artifact_id"] = artifact_id
             validation["tool"] = tool
@@ -386,7 +396,10 @@ class ArtifactManager:
         artifact = validation["artifact"]
         artifact["source"] = "upload"
         artifact["artifact_id"] = artifact_id
-        return {"ok": True, "artifact": artifact, "validation": validation["validation"]}
+        accepted: JsonObject = {"ok": True, "artifact": artifact, "validation": validation["validation"]}
+        if keep_bytes:
+            accepted["data"] = validation["data"]
+        return accepted
 
     def validate_output_path(
         self,

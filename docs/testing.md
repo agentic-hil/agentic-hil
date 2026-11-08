@@ -41,6 +41,8 @@ API for raw encoding. Both loading APIs return the same table.
 
 For incremental input, keep the bytes after `batch.consumed` and prepend them to
 the next chunk. Incomplete input stays unconsumed until more bytes arrive.
+`decode_stream(..., limit=N)` stops after N records and leaves what follows
+unconsumed, so the work of one call is bounded by what it hands out.
 With `final=True`, a trailing incomplete frame becomes an `incomplete_frame`
 error and is consumed. In rzCOBS, a separator-complete record with missing
 arguments is `truncated`; invalid encoding is `rzcobs_invalid`. The next
