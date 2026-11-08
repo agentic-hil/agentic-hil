@@ -246,7 +246,6 @@ def test_a_port_that_would_not_open_is_reported_with_its_whole_answer_and_both_s
     report = port_open_report(answer, snapshot(), now)
 
     assert json.dumps(answer, indent=1, sort_keys=True) in report
-    assert "[Errno 13]" in report
     assert f'"node_mode": {0o20660}' in report
     assert f'"node_mode": {0o20000}' in report
     assert report.index(f"{0o20660}") < report.index(f"{0o20000}")

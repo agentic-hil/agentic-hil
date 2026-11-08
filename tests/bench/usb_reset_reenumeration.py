@@ -218,7 +218,6 @@ def test_a_serial_port_the_probe_created_again_is_followed_and_opens(bench: Benc
         reenumerated = wait_for_the_serial_port(before, port_snapshot, SYS_CLASS_TTY)
         assert reenumerated is None, reenumerated
         assert reenumerated_fields(before, port_snapshot()), "the USB reset left the probe's serial port as it was"
-        # udev corrects the new node's group after the kernel made it, as in the test below.
         wait_for_the_configured_uart(server, serial, vid, pid, private_values)
         open_port(server, port)
         _, stopped = server.call("com_session_stop", {"port_id": port})

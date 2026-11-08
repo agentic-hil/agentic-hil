@@ -162,9 +162,7 @@ def wait_for_the_serial_port(
     waited on for the same bound the USB reset stage gives a re-enumerated node
     (`usb_reset_support.wait_for_usb_device`): under a live device tree the
     stable name leads to the new node once udev has made it, and the test goes
-    on. Under fixed bindings it never does, and the answer names that. A node
-    that is the removed one (`is_the_removed_node`) is never reached, whatever
-    its device number says.
+    on. Under fixed bindings it never does, and the answer names that.
     """
     if timeout_s <= 0 or poll_interval_s <= 0:
         raise ValueError("the serial port wait bounds must be positive")

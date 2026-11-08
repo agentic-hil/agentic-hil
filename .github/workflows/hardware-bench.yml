@@ -388,15 +388,10 @@ jobs:
         timeout-minutes: 40
         run: exec python3 tools/bench_in_container.py --distribution ubuntu-22.04 --probe-from-config examples/nucleo-f446re_demo --require-usb-uart --output bench-results/ubuntu-22.04 -- tests/bench -v -m "not reenumerates_the_probe"
 
-      # The killed flash in a stage of its own, on the image the step above
-      # built: the in-circuit debugger can remove its serial port and create it
-      # again on the first open after the kill (#620), and a container started
-      # with fixed `--device` bindings keeps the node the kernel removed.
-      # `--live-device-tree` hands the container the live /dev, so the port's
-      # name leads to the new node. The forced USB reset beside it makes that
-      # happen on every run. The tier above runs without both, and with its own
-      # bindings; this report goes into a directory of its own inside the
-      # distribution's, so the upload below takes it too.
+      # The killed flash and a forced USB reset, on the image the step above
+      # built (#620): the probe can create its serial port again, and fixed
+      # `--device` bindings keep the removed node, so this stage gets the live
+      # /dev. Its report sits inside the distribution's, for the upload below.
       - name: Run the killed flash on Ubuntu 22.04 under the live device tree
         if: ${{ !cancelled() && steps.room.outcome == 'success' }}
         timeout-minutes: 40

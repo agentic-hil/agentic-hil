@@ -193,9 +193,11 @@ jobs:
       # with fixed `--device` bindings keeps the node the kernel removed.
       # `--live-device-tree` hands the container the live /dev, so the port's
       # name leads to the new node. The forced USB reset beside it makes that
-      # happen on every run. After a red tier too, as the stage above.
+      # happen on every run. Since that is the whole host /dev and a reset for
+      # the named commit, only when the USB reset stage is selected; then after
+      # a red tier too, as the stage above.
       - name: Run the killed flash under the live device tree
-        if: ${{ !cancelled() && !inputs.diagnose_only && (!inputs.run_recovery_check || steps.recovery_check.outcome == 'success') }}
+        if: ${{ !cancelled() && !inputs.diagnose_only && (!inputs.run_recovery_check || steps.recovery_check.outcome == 'success') && inputs.run_usb_reset_reenumeration }}
         working-directory: under-test
         run: exec python3 ../harness/tools/bench_in_container.py --runtime podman --live-device-tree --source ../under-test --expected-commit "$(git -C ../under-test rev-parse HEAD)" --probe-from-config ../examples/nucleo-f446re_demo --output "$BENCH_RESULTS/killed-flash" -- -v -m reenumerates_the_probe tests/bench/test_bench_faults.py tests/bench/usb_reset_reenumeration.py
 
