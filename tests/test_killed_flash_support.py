@@ -191,6 +191,39 @@ def test_a_reenumerated_port_this_run_cannot_reach_is_named_for_what_it_is(tmp_p
     assert clock() >= 5.0
 
 
+def test_a_new_sysfs_entry_beside_the_same_node_inode_is_the_removed_node(tmp_path: Path) -> None:
+    """A fixed --device binding keeps the removed inode, and the kernel gives the new tty the same 166:0.
+
+    So the device numbers agree and prove nothing: the sysfs entry is new and
+    the node is not, which makes the node the one the kernel removed (#620).
+    """
+    clock, sleep = clock_and_sleep()
+
+    said = wait_for_the_serial_port(
+        snapshot(), lambda: snapshot(sysfs_inode=12), tty_class(tmp_path, ttyACM0="166:0"), timeout_s=5.0, clock=clock, sleep=sleep
+    )
+
+    assert said is not None
+    assert "re-enumerated" in said
+    assert "sysfs_inode" in said
+    assert "--live-device-tree" in said
+    assert clock() >= 5.0
+
+
+def test_a_node_without_permission_bits_is_the_removed_node(tmp_path: Path) -> None:
+    """devtmpfs clears every permission bit of a node it removes, and a fixed binding keeps showing that node (#620)."""
+    clock, sleep = clock_and_sleep()
+    cleared = {**snapshot(), "node_mode": 0o20000}
+
+    said = wait_for_the_serial_port(snapshot(), lambda: cleared, tty_class(tmp_path, ttyACM0="166:0"), timeout_s=5.0, clock=clock, sleep=sleep)
+
+    assert said is not None
+    assert "re-enumerated" in said
+    assert "node_mode" in said
+    assert "--live-device-tree" in said
+    assert clock() >= 5.0
+
+
 def test_the_wait_bounds_must_be_positive() -> None:
     with pytest.raises(ValueError):
         wait_for_the_serial_port(snapshot(), snapshot, Path("."), timeout_s=0)
