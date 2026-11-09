@@ -106,6 +106,7 @@ Before creating a release:
 13. Attach the one-line installers *and* their checksums to the release, all four taken from the tagged commit: `install.sh`, `install.ps1`, and `sha256sum install.sh > install.sh.sha256` and `sha256sum install.ps1 > install.ps1.sha256`, uploaded under those names, in that format, because the verify-first path in docs/installation.md feeds them straight to `sha256sum -c`. The scripts belong there because the checksum can only speak for the file published beside it: the default branch moves between releases, so a recipe that pairs a release checksum with a default-branch script fails on the first fix that lands after a release.
 14. Start from GitHub auto-generated release notes, then edit for clarity.
 15. Move the tree to the next development version in pyproject.toml and src/agentic_hil/__init__.py, in the first commit after the release. Every other position keeps naming the release just published, the CI examples and their recorded command surface included.
+16. In that same commit, bring the TLS-proxy eval's released installer forward: set `INSTALLER_RELEASE` in evals/tls_proxy/container/entrypoint.sh to the release just published and `INSTALLER_SHA256` to the digest in that release's `install.sh.sha256` asset, never one without the other. The version gate leaves this pair alone on purpose, because a version moved without its digest makes proof 3 refuse the download; a stale pair is safe, it measures an older published installer.
 ```
 
 ## The uv Installer Pin

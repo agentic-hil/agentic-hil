@@ -10,8 +10,9 @@
 #          environment and run on the same proxy. Its first attempt meets the
 #          same failure, and its own retry against this machine's store gets past
 #          it -- the code under review, exercised live rather than through a stub.
-# Proof 3: the released one-line installer meets the same failure, recognises
-#          it, switches to this machine's own store and finishes the install.
+# Proof 3: the released one-line installer, checked against the SHA-256 this
+#          file pins before it runs, meets the same failure, recognises it,
+#          switches to this machine's own store and finishes the install.
 # Proof 4: the one-line installer *in this checkout*, on the same bench, met by
 #          a machine that has none of it yet. Proof 3 measures the installer as
 #          it was published; this measures the file that gets published next,
@@ -37,7 +38,23 @@ set -u
 SEED_VERSION=0.16.0
 SEED_REQUIREMENT="agentic-hil==$SEED_VERSION"
 RELEASES_LATEST=https://github.com/agentic-hil/agentic-hil/releases/latest
-INSTALLER_URL="$RELEASES_LATEST/download/install.sh"
+
+# The released installer proof 3 runs: one release, named in the URL, and the
+# SHA-256 of exactly the install.sh published with it. Proof 3 downloads the
+# file, checks it against this digest, and runs it only if the bytes match,
+# which is the verify-first path docs/installation.md gives operators and the
+# rule this project's installers keep for Astral's uv installer. Piping a
+# download nobody checked into a shell is what they refuse to do, and a
+# mismatch here ends the run instead of executing what arrived.
+#
+# The pair moves together, as a release chore (docs/release-strategy.md): the
+# digest is that release's own install.sh.sha256, which is also `sha256sum` of
+# install.sh at its tag. A version without its digest fails proof 3, which is
+# the intended failure mode and not a thing to work around.
+INSTALLER_RELEASE=0.26.0
+INSTALLER_SHA256=5fd18175d6934f281febb95c7a25c00a55158288bc6fdda23ce36aa97ca51522
+INSTALLER_URL="https://github.com/agentic-hil/agentic-hil/releases/download/v$INSTALLER_RELEASE/install.sh"
+INSTALLER_SCRIPT=/tmp/released-install.sh
 
 PROXY_LOG=/tmp/mitmdump.log
 SEED_LOG=/tmp/seed.log
@@ -334,8 +351,21 @@ if [ "$reseeded" != "$SEED_VERSION" ]; then
 fi
 printf 'setup: the bench is back on the released %s, the version the installer upgrades from\n' "$SEED_VERSION"
 
-printf 'command: curl -LsSf %s | sh\n' "$INSTALLER_URL"
-curl -LsSf "$INSTALLER_URL" | sh >"$INSTALLER_LOG" 2>&1
+printf 'command: curl -LsSf -o %s %s\n' "$INSTALLER_SCRIPT" "$INSTALLER_URL"
+if ! curl -LsSf -o "$INSTALLER_SCRIPT" "$INSTALLER_URL"; then
+    fail "proof 3, the released installer $INSTALLER_RELEASE could not be downloaded" \
+        "nothing was run; $INSTALLER_URL did not answer through the proxy"
+fi
+printf 'command: sha256sum -c -, expecting %s\n' "$INSTALLER_SHA256"
+if ! printf '%s  %s\n' "$INSTALLER_SHA256" "$INSTALLER_SCRIPT" | sha256sum -c - >/dev/null 2>&1; then
+    found_sha256=$(sha256sum "$INSTALLER_SCRIPT" | cut -d ' ' -f 1)
+    fail "proof 3, the downloaded installer is not the $INSTALLER_RELEASE release this eval pins" \
+        "expected SHA-256 $INSTALLER_SHA256, found $found_sha256; nothing was run, and the pin may be stale"
+fi
+printf 'setup: the installer is the one published with %s, SHA-256 %s\n' "$INSTALLER_RELEASE" "$INSTALLER_SHA256"
+
+printf 'command: sh %s\n' "$INSTALLER_SCRIPT"
+sh "$INSTALLER_SCRIPT" >"$INSTALLER_LOG" 2>&1
 installer_status=$?
 verbatim "installer output" "$INSTALLER_LOG"
 printf 'exit status: %s\n' "$installer_status"

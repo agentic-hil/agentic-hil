@@ -223,6 +223,12 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     # The same for the two absent-probe CubeProgrammer recordings (#737): each
     # carries the Agentic HIL release whose probe_target and reset_target made it.
     "tests/fixtures/stm32cubeprogrammer_2_23_0_failure_recordings.json": "the recordings name the release that made them",
+    # The TLS-proxy eval's proof 3 runs one published install.sh, named by its
+    # release and pinned by the SHA-256 of exactly those bytes. A release stamp
+    # that moved the version without the digest would make proof 3 refuse the
+    # download, so the pair is brought forward together by hand, as the release
+    # chore in docs/release-strategy.md says.
+    "evals/tls_proxy/container/entrypoint.sh": "a published installer pinned by its digest; the version moves only with the digest",
     # NOT_CONTACTED's comment names the release that introduced the shape it
     # generalizes. History, not a pin.
     "src/agentic_hil/backends/common.py": "prose reference to the release a precedent shipped in",

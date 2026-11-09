@@ -1,11 +1,36 @@
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{compiler_fence, AtomicU32, Ordering};
 use cortex_m_rt::entry;
-use cortex_m as _;
 use defmt_rtt as _;
 use panic_halt as _;
+
+// defmt-rtt takes a critical section around every write. This is the
+// single-core one cortex-m 0.7.10's `critical-section-single-core` feature
+// provided, instruction for instruction: save PRIMASK whole, mask interrupts,
+// and write the saved value back on release. It is written out here because
+// every cortex-m 0.7 release depends on the deprecated bare-metal crate
+// (RUSTSEC-2026-0110), and this one critical section is all the image took
+// from cortex-m.
+struct SingleCoreCriticalSection;
+critical_section::set_impl!(SingleCoreCriticalSection);
+
+unsafe impl critical_section::Impl for SingleCoreCriticalSection {
+    unsafe fn acquire() -> critical_section::RawRestoreState {
+        let restore_state: u32;
+        core::arch::asm!("mrs {}, PRIMASK", out(reg) restore_state, options(nomem, nostack, preserves_flags));
+        core::arch::asm!("cpsid i", options(nostack, preserves_flags));
+        compiler_fence(Ordering::SeqCst);
+        restore_state
+    }
+
+    unsafe fn release(restore_state: critical_section::RawRestoreState) {
+        compiler_fence(Ordering::SeqCst);
+        core::arch::asm!("msr PRIMASK, {}", "isb", in(reg) restore_state, options(nostack, preserves_flags));
+        compiler_fence(Ordering::SeqCst);
+    }
+}
 
 static COUNT: AtomicU32 = AtomicU32::new(0);
 
