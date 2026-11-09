@@ -26,6 +26,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from packaging.version import Version
 
 from agentic_hil.backends.common import NOT_CONTACTED
 from agentic_hil.config import load_config
@@ -73,10 +74,18 @@ def blocking_record_states(config) -> set[str]:
 def test_the_installed_tools_are_the_ones_the_recording_names() -> None:
     """The premise of every comparison below, asserted rather than noted.
 
-    All three strings are compared for equality, the package revision included.
-    OpenOCD's own banner says `0.12.0` for every Debian build of that release,
-    so the banner alone cannot notice a rebuild that reworded a message, and the
-    revision the recording names is only a claim as long as nothing reads it.
+    OpenOCD's two strings are compared for equality, the package revision
+    included. OpenOCD's own banner says `0.12.0` for every Debian build of that
+    release, so the banner alone cannot notice a rebuild that reworded a
+    message, and the revision the recording names is only a claim as long as
+    nothing reads it.
+
+    pyOCD only has to be the recorded release or a later one. The lock holds it
+    at one release, so a different one arrives only with a deliberate bump, and
+    the comparisons below re-run every recorded pyOCD command against it: a
+    release that rewords a refusal or changes a status still turns this tier
+    red, and one that changes nothing the classifier reads passes without a new
+    recording.
     """
     versions = RECORDINGS["tool_versions"]
     openocd = subprocess.run([shutil.which("openocd"), "--version"], capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=False)
@@ -85,7 +94,7 @@ def test_the_installed_tools_are_the_ones_the_recording_names() -> None:
 
     assert versions["openocd"] == openocd.stderr.splitlines()[0], (versions["openocd"], openocd.stderr)
     assert versions["openocd_debian_package"] == package.stdout.strip(), (versions["openocd_debian_package"], package.stdout, package.stderr)
-    assert versions["pyocd"] == pyocd.stdout.strip(), (versions["pyocd"], pyocd.stdout)
+    assert Version(pyocd.stdout.strip()) >= Version(versions["pyocd"]), (versions["pyocd"], pyocd.stdout)
 
 
 def test_a_missing_target_cfg_is_target_config_not_found(tmp_path: Path) -> None:
