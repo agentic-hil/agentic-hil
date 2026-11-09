@@ -349,9 +349,9 @@ cryptography==50.0.2 \
     --hash=sha256:fa8f5efb344d6908a1ce62f4a24e2e5780f825d6f53f5f50ec5ffacac72936cb \
     --hash=sha256:fdd28f912fccfec1846a94e2e1e8f9b0012f557f0c46fe4f3eb0d7a87afcf90b
     # via esptool
-esp-pylib==1.2.0 \
-    --hash=sha256:51f0c44a0f7a92fdded9cab54bde92441b22b464f7d684ed179afb57000bed70 \
-    --hash=sha256:581fd31eb20db4b80519fe883eaeacf5b3c6a2c0b7cce353a7d326ae7cbd4f5f
+esp-pylib==1.2.1 \
+    --hash=sha256:c0854cc57b86e2745e9f7ac820d5d5e8a9f2c2d93caf12623c419b8d08d852f6 \
+    --hash=sha256:fb05017676200e38dc182013c994e62d9088d377081c88562e14a2f5aaae6456
     # via esptool
 esptool==5.6.0 \
     --hash=sha256:86c7249e9cc3a824e032ede9ba20abad057a2c49e231418cc4f02b177bb36f42
@@ -540,9 +540,9 @@ pylink-square==1.7.0 \
     --hash=sha256:9a4c4b1cf0cffedd15e00f82c3e23745252a5094c96b27560daac25a0d08aa36 \
     --hash=sha256:f418db3479b3b86e45f821f88cea5397357beed382eb441ab2fd11e1d4d9e1e3
     # via pyocd
-pyocd==0.46.0 \
-    --hash=sha256:b1403d71bfc67481bd8991f5383295521c5e6d0d2ea568e766b581553ccaa396 \
-    --hash=sha256:f37c1ef65a1e78b42c9bccf4f34fbde98c4ea225e87534ee872e324aae230ba5
+pyocd==0.46.1 \
+    --hash=sha256:82e44dfff3ee00c525256249ace4ebd74da3aa8ec2e10a8d0d3909b58b1b9f7e \
+    --hash=sha256:869ca848e876caaad6212c708d3444b00b95782af3a00e9f191ae6f38c9fffba
     # via agentic-hil (pyproject.toml)
 pyserial==3.5 \
     --hash=sha256:3c77e014170dfffbd816e6ffc205e9842efb10be9f58ec16d3e8675b4925cddb \
