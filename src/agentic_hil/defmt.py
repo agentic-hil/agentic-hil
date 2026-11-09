@@ -1,4 +1,4 @@
-"""Native defmt decoding: from the bytes a board sends to structured log frames.
+"""Native defmt decoding, from the bytes a board sends to structured log frames.
 
 defmt ("deferred formatting") keeps every format string out of the firmware
 image. The board sends a 16-bit index into a table plus the raw arguments, and
