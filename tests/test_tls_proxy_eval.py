@@ -253,17 +253,52 @@ def test_the_eval_asserts_the_certificate_error_by_its_own_words() -> None:
     assert "upgrade_failed" in entrypoint, entrypoint
 
 
+def _pinned_installer(entrypoint: str) -> tuple[str, str]:
+    """The release proof 3 fetches its installer from, and the digest it holds it to."""
+    release = re.search(r"^INSTALLER_RELEASE=(\d+\.\d+\.\d+)$", entrypoint, re.MULTILINE)
+    digest = re.search(r"^INSTALLER_SHA256=([0-9a-f]{64})$", entrypoint, re.MULTILINE)
+    assert release is not None and digest is not None, "proof 3 no longer names one release and its SHA-256"
+    return release.group(1), digest.group(1)
+
+
 def test_the_installer_proof_runs_the_released_anchor() -> None:
     """Proof 3 measures the anchor operators actually get, off the releases page.
 
     Proof 2 runs this checkout's own upgrade; proof 3 is the separate,
-    released-artifact scenario, and it fetches and runs the one-line installer
-    exactly as an operator would rather than anything from the working tree.
+    released-artifact scenario, and it fetches the one-line installer from one
+    release's assets rather than anything from the working tree.
+    """
+    entrypoint = _code_only(_entrypoint())
+    _pinned_installer(entrypoint)
+
+    assert 'INSTALLER_URL="https://github.com/agentic-hil/agentic-hil/releases/download/v$INSTALLER_RELEASE/install.sh"' in entrypoint
+
+
+def test_the_released_installer_runs_only_after_its_digest_matched() -> None:
+    """The verify-first path docs/installation.md gives operators, and nothing looser.
+
+    Piping a download straight into a shell runs whatever arrived, which is the
+    one thing this project's installers refuse to do with Astral's uv installer.
+    Proof 3 holds the released installer to the same rule: it downloads the file
+    to disk, checks it against the pinned SHA-256, stops the run if the check
+    failed, and only then hands it to `sh`.
     """
     entrypoint = _code_only(_entrypoint())
 
-    assert "https://github.com/agentic-hil/agentic-hil/releases/latest" in entrypoint
-    assert "curl -LsSf \"$INSTALLER_URL\" | sh" in entrypoint
+    download = entrypoint.index('curl -LsSf -o "$INSTALLER_SCRIPT" "$INSTALLER_URL"')
+    check = entrypoint.index("printf '%s  %s\\n' \"$INSTALLER_SHA256\" \"$INSTALLER_SCRIPT\" | sha256sum -c -")
+    refusal = entrypoint.index('"proof 3, the downloaded installer is not the $INSTALLER_RELEASE release this eval pins"')
+    run = entrypoint.index('sh "$INSTALLER_SCRIPT"')
+    assert download < check < refusal < run
+    assert not re.search(r"\|\s*(?:ba|da|z)?sh\b", entrypoint), "a download is piped into a shell"
+
+
+def test_the_pinned_installer_is_a_published_release() -> None:
+    """A digest for a release CHANGELOG.md never dated pins nothing anyone can fetch."""
+    release, _ = _pinned_installer(_code_only(_entrypoint()))
+    changelog = (REPOSITORY_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert re.search(rf"^## \[{re.escape(release)}\] - \d{{4}}-\d{{2}}-\d{{2}}\s*$", changelog, re.MULTILINE), release
 
 
 def test_proof_two_runs_this_checkouts_upgrade_and_asserts_the_retry() -> None:

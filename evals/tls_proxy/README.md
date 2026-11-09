@@ -73,13 +73,19 @@ fails:
    force-installed latest release, so the bench is first returned to the seeded
    0.16.0, receipt and files alike, the version an operator from before the
    retry would still be on and the one the installer has a real upgrade to make
-   from. Then the released one-line installer, fetched and run exactly as an
-   operator would type it:
-   `curl -LsSf https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh | sh`.
-   The run asserts that the installer met the same certificate failure, said it
-   was switching to this machine's own store, exited zero, and left the current
-   release installed and answering `--version`. It is the way through for an
-   operator still on a version from before the retry landed.
+   from. Then the released one-line installer, fetched the way the verify-first
+   path in [docs/installation.md](../../docs/installation.md) fetches it: the
+   entrypoint names one release (`INSTALLER_RELEASE`) and the SHA-256 of the
+   `install.sh` published with it (`INSTALLER_SHA256`, that release's own
+   `install.sh.sha256`), downloads the file from that release's assets, checks
+   it against the digest, and runs it with `sh` only if the bytes match. A
+   mismatch ends the run without executing anything, and nothing the eval
+   downloads is piped into a shell. The pair is brought forward together after
+   each release, as [docs/release-strategy.md](../../docs/release-strategy.md)
+   describes. The run asserts that the installer met the same certificate
+   failure, said it was switching to this machine's own store, exited zero, and
+   left the current release installed and answering `--version`. It is the way
+   through for an operator still on a version from before the retry landed.
 5. **Proof 4, the installer under review does it too.** Proof 3 measures the
    installer as it was published, so a change to the retry in this working tree
    would reach an operator's proxy before any run of this eval had met it.
