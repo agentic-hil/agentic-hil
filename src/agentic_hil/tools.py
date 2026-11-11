@@ -620,10 +620,11 @@ class AgenticHILToolService:
         """Open or answer for a COM session, decoding defmt when `defmt` says so.
 
         Without `defmt` this is the session start it always was. With it, the
-        table is resolved and validated first, and a refusal returns here,
-        before the port is opened or an open session is changed in any way,
-        including the clear `clear_buffer` would otherwise make. `false` turns
-        decoding off on an open session."""
+        port configuration, power-supply reservation, permissions and identity
+        are checked before the table is resolved. A table refusal comes before
+        the port is opened or an open session is changed, including the clear
+        `clear_buffer` would otherwise make. `false` turns decoding off on an
+        open session."""
         if self._dispatch_depth == 0:
             return self.call("com_session_start", args)
         args = args or {}
@@ -633,10 +634,11 @@ class AgenticHILToolService:
             return self.com_ports.session_start(port_id, clear_buffer)
         if args["defmt"] is False:
             return self.com_ports.session_start(port_id, clear_buffer, defmt=None)
-        resolved = self._defmt_binding(args["defmt"], "com_session_start")
-        if not resolved["ok"]:
-            return resolved
-        return self.com_ports.session_start(port_id, clear_buffer, defmt=resolved["stream"])
+        return self.com_ports.session_start(
+            port_id,
+            clear_buffer,
+            defmt_resolver=lambda: self._defmt_binding(args["defmt"], "com_session_start"),
+        )
 
     def _defmt_binding(self, spec: object, tool: str, flashing: JsonObject | None = None) -> JsonObject:
         """The table a COM session or a flash capture decodes with, or the refusal of it.
