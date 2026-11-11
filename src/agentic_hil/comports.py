@@ -1236,14 +1236,20 @@ class ComPortService:
             "summary": f"{len(ports)} configured COM port(s), {available_count} available host COM port(s).",
         }
 
-    def session_start(self, port_id: str, clear_buffer: bool = True, defmt: object = KEEP_DEFMT_MODE) -> JsonObject:
+    def session_start(
+        self,
+        port_id: str,
+        clear_buffer: bool = True,
+        defmt: object = KEEP_DEFMT_MODE,
+        defmt_resolver: Callable[[], JsonObject] | None = None,
+    ) -> JsonObject:
         """Open the port, or answer for the session already open on it.
 
         `defmt` is a `DefmtStream` whose table the caller has already validated,
         `None` to stop decoding, or left out to keep the mode the session is in.
-        On an active session it changes the mode in place, after any clear, and
-        the port stays open; the caller refuses an invalid table before this is
-        reached, so a refused change never touches the session."""
+        `defmt_resolver` defers table validation until after the port and read
+        permissions and identity have been checked. A table refusal therefore
+        never clears or changes an active session."""
         if not isinstance(port_id, str) or not isinstance(clear_buffer, bool):
             return self._write_report({"ok": False, "tool": "com_session_start", "error_type": "invalid_argument", "summary": "port_id must be a string and clear_buffer must be a boolean.", "side_effect_committed": False})
         port = self._configured_port(port_id, "com_session_start")
@@ -1258,9 +1264,11 @@ class ComPortService:
         port_permissions = port["port_config"].permissions
         if not self.config.com_read_allowed(port["port_config"]) and not port_permissions.allow_write:
             return self._write_report(self._permission_denied("com_session_start", "Reading and writing this COM port are disabled by the authoritative config.", port_id, "allow_read"))
-        if isinstance(defmt, DefmtStream) and not self.config.com_read_allowed(port["port_config"]):
+        if (isinstance(defmt, DefmtStream) or defmt_resolver is not None) and not self.config.com_read_allowed(port["port_config"]):
             # Decoding is reading: the frames are what the board sent. A port
             # that may only be written answers to the grant `com_read` names.
+            # A deferred resolver also expresses this read intent, before its
+            # table is loaded.
             return self._write_report(self._permission_denied("com_session_start", "Decoding defmt reads this COM port, and reading it is disabled by the authoritative config.", port_id, "allow_read"))
         if clear_buffer and not self.config.com_read_allowed(port["port_config"]):
             # Clearing drains the receive buffer, which is a read.
@@ -1276,6 +1284,12 @@ class ComPortService:
         if not identity["ok"]:
             return self._write_report(identity)
         identity_status = identity["identity"]
+
+        if defmt_resolver is not None:
+            resolved = defmt_resolver()
+            if not resolved.get("ok"):
+                return self._write_report(resolved)
+            defmt = resolved["stream"]
 
         existing = self.sessions.get(port_id)
         if existing and self._session_is_active(existing):
