@@ -61,8 +61,9 @@ SERVER_INSTRUCTIONS = (
 # configuration exists arrives with the result that created it and with each
 # refusal after that.
 UNPROVISIONED_SERVER_INSTRUCTIONS = (
-    "This project has no Agentic HIL configuration yet. A request that touches a target board starts with "
-    "project_config_create and then goes through these tools, before reaching for a shell. Never substitute openocd, "
+    "This project has no Agentic HIL configuration yet. `debugger_probes_list` lists attached probes; call "
+    "`project_config_create` with a listed `probe_id` for multiple probes. One probe needs no selector. Then use "
+    "these tools before reaching for a shell. Never substitute openocd, "
     "pyocd, st-flash, JLinkExe, gdb, screen, minicom, candump, a Makefile target that runs one of them, or direct "
     "/dev/tty* or COM* access."
 )
