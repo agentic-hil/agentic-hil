@@ -5,7 +5,7 @@
   "description": "Pinned agent CLIs for the containerised Claude/Codex review loop.",
   "license": "Apache-2.0",
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.218",
+    "@anthropic-ai/claude-code": "2.1.251",
     "@openai/codex": "0.159.3"
   }
 }
