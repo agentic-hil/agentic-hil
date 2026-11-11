@@ -436,8 +436,9 @@ def test_the_tool_surface_cannot_take_the_configuration_away() -> None:
 
     Regenerating one costs a human their settings, so the surface offers no way
     to bring that about: no delete, no move, no path argument anywhere. The tool
-    that regenerates the file takes no arguments at all, and the one that changes
-    it takes named keys with scalar values: never a document, never a path.
+    that regenerates the file accepts at most an attached-probe selector, and
+    the one that changes it takes named keys with scalar values: never a
+    document, never a path.
     """
     assert sorted(name for name in MCP_TOOL_NAMES if "config" in name) == [
         PROJECT_CONFIG_ADOPT,
@@ -447,7 +448,15 @@ def test_the_tool_surface_cannot_take_the_configuration_away() -> None:
         PROJECT_CONFIG_SET,
     ]
     assert not [name for name in MCP_TOOL_NAMES if any(verb in name for verb in ("delete", "remove", "move", "rename"))]
-    assert TOOL_SCHEMAS[PROJECT_CONFIG_CREATE] == {"type": "object", "properties": {}, "additionalProperties": False}
+    create_schema = TOOL_SCHEMAS[PROJECT_CONFIG_CREATE]
+    assert create_schema["type"] == "object"
+    assert create_schema["additionalProperties"] is False
+    create_properties = create_schema["properties"]
+    assert set(create_properties) <= {"probe_id"}
+    assert create_schema.get("required", []) in (None, [])
+    if "probe_id" in create_properties:
+        assert create_properties["probe_id"]["type"] == "string"
+        assert create_properties["probe_id"]["minLength"] >= 1
     assert TOOL_SCHEMAS[PROJECT_CONFIG_DESCRIBE] == {"type": "object", "properties": {}, "additionalProperties": False}
     # No argument at all, and that is what keeps the reload from becoming a
     # second door onto the permissions: there is no flag for one to arrive under.

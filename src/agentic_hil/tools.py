@@ -27,10 +27,12 @@ from agentic_hil.backends.openocd import OpenOCDBackend, openocd_probe_reenumera
 from agentic_hil.bench import BenchMutex, DeviceBusyError, validated_wait
 from agentic_hil.bootstrap import (
     DEFAULT_PROJECT_PROFILE,
+    PROBE_NAMED_BY_CALLER,
     PROBE_NAMED_BY_CONFIGURATION,
     apply_discovery_to_template,
     bound_off_incomplete_inventory,
     discover_attached_hardware,
+    enumerate_attached_probes,
 )
 from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService, DefmtStream
@@ -1200,7 +1202,7 @@ class AgenticHILToolService:
             # board, so it goes in with this service's own coordinator and is
             # refused while this service holds a run or a session, exactly like
             # the adoption call below.
-            PROJECT_CONFIG_CREATE: lambda: project_config_create(Path(self.config.work_dir), self.config, coordinator=self.coordinator, open_holds=self.open_hardware_holds()),
+            PROJECT_CONFIG_CREATE: lambda: project_config_create(Path(self.config.work_dir), self.config, probe_id=args.get("probe_id"), coordinator=self.coordinator, open_holds=self.open_hardware_holds()),
             PROJECT_CONFIG_DESCRIBE: lambda: project_config_describe(Path(self.config.work_dir), self.config, open_holds=self.open_hardware_holds()),
             PROJECT_CONFIG_SET: lambda: project_config_set(Path(self.config.work_dir), self.config, args.get("changes"), open_holds=self.open_hardware_holds()),
             # This one reads a board, so it goes in with this service's own
@@ -3775,6 +3777,11 @@ def _create_discovery_next_step(discovery: JsonObject, current: AgenticHILConfig
             "this call then binds on its own, or to install STM32CubeProgrammer for an authoritative probe count, then "
             "call this tool again. Nothing was written."
         )
+    if current is None and discovery.get("error_type") == "ambiguous_hardware":
+        return (
+            "Read the listed probe serials, ask which board belongs to this workspace, then call "
+            f"`{PROJECT_CONFIG_CREATE}` with that serial as `probe_id`. No configuration was written."
+        )
     return str(discovery.get("next_step") or "Attach exactly one supported probe and target, then call this tool again. Nothing was written.")
 
 
@@ -3782,6 +3789,7 @@ def project_config_create(
     workspace: Path,
     existing: AgenticHILConfig | None,
     *,
+    probe_id: str | None = None,
     coordinator: HardwareCoordinator | None = None,
     open_holds: JsonObject | None = None,
 ) -> JsonObject:
@@ -3802,7 +3810,7 @@ def project_config_create(
     and there is nothing for it to coordinate against: no policy, no state root,
     no lease directory, and no run that could be holding anything."""
     try:
-        return _project_config_create(workspace, existing, coordinator=coordinator, open_holds=open_holds)
+        return _project_config_create(workspace, existing, probe_id=probe_id, coordinator=coordinator, open_holds=open_holds)
     except ConfigError as error:
         return {"tool": PROJECT_CONFIG_CREATE, **error.to_dict(), "side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged"}
 
@@ -3811,6 +3819,7 @@ def _project_config_create(
     workspace: Path,
     existing: AgenticHILConfig | None,
     *,
+    probe_id: str | None,
     coordinator: HardwareCoordinator | None,
     open_holds: JsonObject | None,
 ) -> JsonObject:
@@ -3834,6 +3843,13 @@ def _project_config_create(
         # the lock, so two of them racing cannot both conclude "no configuration"
         # and have the second overwrite what the first wrote.
         current = existing if existing is not None else _configuration_on_disk(workspace)
+        if current is not None and probe_id is not None:
+            return invalid_argument(
+                PROJECT_CONFIG_CREATE,
+                "probe_id",
+                "not",
+                "probe_id selects an attached probe only during initial configuration creation. Omit it to regenerate the existing configuration.",
+            )
         if current is not None and not current.permissions.allow_config_write:
             return _config_write_denied(current, target_path)
         # Read-only, and the values it returns are the only ones the agent side
@@ -3847,7 +3863,13 @@ def _project_config_create(
         # controller, so over MCP the target is still read off the board or left
         # unnamed; a workspace profile does not decide it here, exactly as it
         # decides no permission here.
-        discovery, refusal, unaudited = discover_for_generation(current, coordinator, generation_bench=generation_bench, profile=GENERATED_PROJECT_PROFILE)
+        discovery, refusal, unaudited = discover_for_generation(
+            current,
+            coordinator,
+            generation_bench=generation_bench,
+            profile=GENERATED_PROJECT_PROFILE,
+            probe_id=probe_id,
+        )
         if refusal is not None:
             return refusal
         if not overall_success(discovery):
@@ -3861,6 +3883,16 @@ def _project_config_create(
                 # `before_connect`, and telling that caller to attach a probe
                 # would be advice about the one thing that is not the problem.
                 "next_step": _create_discovery_next_step(discovery, current),
+                **(
+                    {
+                        "remediation": [
+                            "Ask which attached board this new workspace should use.",
+                            "Call `debugger_probes_list` to read the available serials, then call `project_config_create` with the selected serial as `probe_id`.",
+                        ]
+                    }
+                    if current is None and discovery.get("error_type") == "ambiguous_hardware"
+                    else {}
+                ),
             }
         # Decided from where the file is going, so the two roots this call writes
         # cannot disagree about the profile they are both describing (#387).
@@ -4062,6 +4094,7 @@ def discover_for_generation(
     frontend: str = "mcp",
     generation_bench: BenchMutex | None = None,
     profile: JsonObject | None = None,
+    probe_id: str | None = None,
 ) -> tuple[JsonObject, JsonObject | None, str | None]:
     """Read what is attached, holding everything a probe read holds.
 
@@ -4138,7 +4171,16 @@ def discover_for_generation(
         # No third answer here: the caller handed the None and already holds a
         # better reason than this function could invent for it. Nothing is bound
         # yet either, so there is no configured probe to carry into the read.
-        return (*_discover_without_policy(tool=tool, frontend=frontend, profile=profile), None)
+        return (
+            *_discover_without_policy(
+                tool=tool,
+                frontend=frontend,
+                profile=profile,
+                probe_id=probe_id,
+                probe_named_by=PROBE_NAMED_BY_CALLER if probe_id is not None else PROBE_NAMED_BY_CONFIGURATION,
+            ),
+            None,
+        )
     # The board this file already binds, when it binds exactly one, carried into
     # discovery as the selection it is. Regeneration reads a single board, and a
     # file that names one probe names the board this project is about; passing it
@@ -4549,6 +4591,31 @@ def _config_write_denied(existing: AgenticHILConfig, target_path: Path) -> JsonO
     }
 
 
+def unprovisioned_debugger_probes_list(workspace: Path) -> JsonObject:
+    """List probes before configuration exists under the machine-wide lock."""
+    bench = BenchMutex(frontend="mcp")
+    try:
+        try:
+            bench.acquire_named(DEBUGGER_DISCOVERY_RESOURCE)
+        except DeviceBusyError as busy:
+            return _bootstrap_device_busy(busy.result, "debugger_probes_list")
+        listed = enumerate_attached_probes()
+        result: JsonObject = {
+            **listed,
+            "tool": "debugger_probes_list",
+            "source": "bootstrap",
+            "workspace_root": str(workspace),
+        }
+        if result.get("ok") is True:
+            result["next_step"] = (
+                "Ask which attached board belongs to this workspace, then call `project_config_create` with its listed "
+                "serial as `probe_id`. With one probe, `probe_id` may be omitted."
+            )
+        return result
+    finally:
+        bench.release_all()
+
+
 def unprovisioned_tool_error(tool: str, workspace: Path) -> JsonObject:
     """Refuse a hardware call on a server that has no configuration yet."""
     return {
@@ -4561,10 +4628,11 @@ def unprovisioned_tool_error(tool: str, workspace: Path) -> JsonObject:
         ),
         "workspace_root": str(workspace),
         "next_step": (
-            f"Call `{PROJECT_CONFIG_CREATE}`. It takes no arguments and writes a configuration from what is attached to "
-            "this machine, with every permission granted but the two that refuse flashing while they are true, so the "
-            "bench is workable straight away, flashing included. Report what it granted and ask the operator which "
-            "permissions to take back."
+            "Call `debugger_probes_list` to read attached serials before creating the configuration. If several probes "
+            f"are listed, ask which board belongs to this workspace and call `{PROJECT_CONFIG_CREATE}` with that serial "
+            "as `probe_id`; with one probe, the selector may be omitted. Creation writes this workspace's configuration "
+            "with every permission granted but the two that refuse flashing while true. Report what it granted and ask "
+            "the operator which permissions to take back."
         ),
         **remediation_fields("config_file_not_found"),
         "side_effect_committed": False,
@@ -4679,18 +4747,28 @@ class UnprovisionedToolService:
         if service is not None:
             return service.call(name, arguments)
         if name == PROJECT_CONFIG_CREATE:
+            if arguments is not None and not isinstance(arguments, dict):
+                return invalid_argument(name, "$", "type", "Tool arguments must be an object.")
             validation_error = validate_tool_arguments(name, arguments if isinstance(arguments, dict) else {})
             if validation_error is not None:
                 return validation_error
             # The genuinely unprovisioned case, and the only one that bootstraps:
             # there is no configuration to be gated by, so the gate is the path
             # re-read under the lock inside `project_config_create`.
-            result = project_config_create(self.workspace, None)
+            args = arguments if isinstance(arguments, dict) else {}
+            result = project_config_create(self.workspace, None, probe_id=args.get("probe_id"))
             if overall_success(result):
                 # Bind what this call just wrote, so the tools it unblocks are
                 # usable from the session that unblocked them.
                 self._bind()
             return result
+        if name == "debugger_probes_list":
+            if arguments is not None and not isinstance(arguments, dict):
+                return invalid_argument(name, "$", "type", "Tool arguments must be an object.")
+            validation_error = validate_tool_arguments(name, arguments if isinstance(arguments, dict) else {})
+            if validation_error is not None:
+                return validation_error
+            return unprovisioned_debugger_probes_list(self.workspace)
         if name not in MCP_TOOL_NAMES:
             return {"ok": False, "tool": name, "error_type": "unknown_tool", "summary": "Unknown Agentic HIL tool.", **remediation_fields("unknown_tool")}
         return unprovisioned_tool_error(name, self.workspace)
