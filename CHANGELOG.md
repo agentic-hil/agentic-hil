@@ -19,6 +19,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Fixed
 
+- MCP `tools/list` schemas omit root-level `oneOf`, `allOf` and `anyOf` for Claude compatibility, while server-side validation continues enforcing the input alternatives. (#830)
 - MCP can list attached probe serials before a workspace has a configuration. Initial `project_config_create` accepts an enumerated `probe_id` to select a probe and its matching COM port when available; an unselected multi-probe setup remains ambiguous and an unknown serial is refused before target contact. (#831)
 - `com_session_start` with `defmt` now checks the port configuration, power-supply reservation, permissions and identity before it resolves the table. (#819)
 - CodeQL analyzes `src/agentic_hil/defmt.py` again. The first line of its docstring, `Native defmt decoding: from the bytes ...`, reads to CodeQL's Python extractor as a PEP 263 encoding declaration naming `from`, so every analysis since the decoder landed reported the module as a parse error and checked none of it. CPython only reads a declaration from a comment and never minded. The line now says `decoding,`, and `tests/test_codeql_encoding_declaration.py` holds the first two lines of every Python file to the reading CPython gives them.
