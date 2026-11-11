@@ -252,6 +252,20 @@ def test_defmt_true_with_no_confirmed_flash_is_refused_before_the_port_opens(tmp
         service.close()
 
 
+def test_an_unconfigured_port_is_refused_before_resolving_a_defmt_table(tmp_path: Path, board: Board) -> None:
+    workspace = tmp_path / "workspace"
+    config = config_for(workspace)
+    service, backend = service_for(config, board)
+    try:
+        refused = service.call("com_session_start", {"port_id": "unknown", "defmt": True})
+
+        check(refused.get("error_type") == "com_port_not_configured", "a defmt start on an unconfigured port was not refused as com_port_not_configured")
+        check_nothing_opened(service, board, refused, "a defmt start on an unconfigured port", says_not_started=False)
+        check(backend.calls == [], f"the refusal made a call on the probe: {backend.calls}")
+    finally:
+        service.close()
+
+
 def test_defmt_true_after_the_flashed_elf_changed_is_refused_before_the_port_opens(tmp_path: Path, board: Board) -> None:
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
@@ -420,6 +434,22 @@ def test_a_defmt_start_on_a_port_whose_read_permission_is_off_is_refused_before_
         check(refused.get("error_type") == "permission_denied", "a defmt start on a port whose read permission is off was not refused as permission_denied")
         check(refused.get("permission") == permission_key("com_ports", PORT_ID, "allow_read"), f"the refusal does not name the port's read permission: {refused}")
         check_nothing_opened(service, board, refused, "a defmt start without the read permission", says_not_started=False)
+        check(backend.calls == [], f"the refusal made a call on the probe: {backend.calls}")
+    finally:
+        service.close()
+
+
+def test_a_read_disabled_port_is_refused_before_resolving_an_invalid_defmt_table(tmp_path: Path, board: Board) -> None:
+    workspace = tmp_path / "workspace"
+    config = config_for(workspace, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_com_read": False})
+    place(workspace, INVALID_TABLES["table_missing"](), "build/broken.elf")
+    service, backend = service_for(config, board)
+    try:
+        refused = start(service, defmt={"image_path": "build/broken.elf"})
+
+        check(refused.get("error_type") == "permission_denied", "a defmt start with an invalid table on a read-disabled port was not refused as permission_denied")
+        check(refused.get("permission") == permission_key("com_ports", PORT_ID, "allow_read"), f"the refusal does not name the port's read permission: {refused}")
+        check_nothing_opened(service, board, refused, "a defmt start on a read-disabled port", says_not_started=False)
         check(backend.calls == [], f"the refusal made a call on the probe: {backend.calls}")
     finally:
         service.close()
