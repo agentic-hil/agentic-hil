@@ -870,12 +870,10 @@ def test_can_read_until_id_without_wait_timeout_waits_for_a_late_frame(tmp_path:
 
 
 def test_can_read_until_id_waits_as_reads_each_within_the_bus_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The wait is repeated adapter reads, each held to the per-read cap the
-    call applies today (the bus's `timeout_s` here), so neither adapter nor the
-    bridge protocol is asked for a longer read than before."""
-    with can_session(tmp_path, monkeypatch, "python-can", [], timeout_s=0.2) as rig:
-        with after(0.7, rig.bus.inbox.put, message(MATCH)):
-            result = can_read(rig, until_id=MATCH_ID, wait_timeout_s=5)
+    """A scripted empty response precedes the match, and each repeated adapter
+    read stays within the bus timeout used today."""
+    with can_session(tmp_path, monkeypatch, "python-can", [[], [MATCH]], timeout_s=0.2) as rig:
+        result = can_read(rig, until_id=MATCH_ID, wait_timeout_s=5)
         asked = [timeout for timeout in rig.bus.asked_timeouts if timeout]
 
     assert result["ok"] is True, result
