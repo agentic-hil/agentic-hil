@@ -212,9 +212,12 @@ HIL projects directory, never inside the repository; `AGENTIC_HIL_CONFIG` may
 give an explicit absolute-path override. `agentic-hil init` creates it and
 prints its path; ask the operator to review any permission change.
 
-When a project has none, every tool answers `config_file_not_found` and
-`project_config_create` is the way out. It takes no arguments and generates the
-file from the hardware attached to this machine, with every permission `true`
+When a project has no configuration, hardware calls answer `config_file_not_found`,
+while `debugger_probes_list` can list attached probes before configuration exists.
+Initial `project_config_create` generates this workspace's file from attached
+hardware and optionally accepts a listed serial as `probe_id` to select its probe
+and matching COM port when available. It still accepts no configuration content
+or workspace path, and writes every permission `true`
 (flashing, reset, COM and CAN writes, and all three `permissions.allow_config_*`
 grants) except `allow_raw_debugger_commands` and `allow_mass_erase`, which it
 writes `false`. Neither of those is a capability you are missing: there is no
