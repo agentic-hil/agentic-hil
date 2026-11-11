@@ -612,8 +612,9 @@ INSTALL_THE_PROXY_CA = (
 # of. Written so that either route reads correctly first or second: neither
 # opens by referring to the other.
 _CONFIG_MISSING_MCP_ROUTE = (
-    "Over MCP, call `project_config_create` once. It takes no arguments and writes this workspace's authoritative "
-    "configuration out of the hardware attached to this machine."
+    "Over MCP, call `project_config_create` once. It takes no arguments when only one probe is attached. With several, "
+    "call `debugger_probes_list` to see serials, then call `project_config_create` with the selected listed serial as "
+    "`probe_id`. Creation writes this workspace's authoritative configuration."
 )
 _CONFIG_MISSING_SHELL_ROUTE = (
     "At a shell, run `agentic-hil init` from the project root; it writes that same file, and it is the operator's own "
@@ -4905,7 +4906,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Ask the operator which board this project is about.",
-            "Call `project_config_adopt_hardware` with its serial as `probe_id`.",
+            "Before a configuration exists, call `debugger_probes_list`, then call `project_config_create` with the selected listed serial as `probe_id`.",
+            "With an existing configuration, call `project_config_adopt_hardware` with its serial as `probe_id`.",
             "Or leave only that one connected and run the same discovery again.",
         ),
         do_not=(

@@ -5,7 +5,7 @@
   "description": "Pinned agent CLIs under test in the Agentic HIL installation evaluation.",
   "license": "Apache-2.0",
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.218",
+    "@anthropic-ai/claude-code": "2.1.251",
     "@openai/codex": "0.145.0",
     "opencode-ai": "1.18.3"
   }
