@@ -4345,7 +4345,10 @@ def _windows_launcher(path: Path, version: str, marker: Path | None = None, answ
     `agent-install` answer what the test decided. `agent_install` is the exit
     status, stdout and stderr of the latter.
     """
-    from pip._vendor import distlib
+    distlib = pytest.importorskip(
+        "pip._vendor.distlib",
+        reason="pip's vendored distlib is required to build Windows test launchers",
+    )
 
     stub = {"AMD64": "t64.exe", "ARM64": "t64-arm.exe", "x86": "t32.exe"}[platform.machine()]
     launcher = (Path(distlib.__file__).parent / stub).read_bytes()
