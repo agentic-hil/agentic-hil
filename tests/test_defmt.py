@@ -6,12 +6,10 @@ printing text first. Its rendering has to agree with `defmt-decoder`, the
 crate behind `defmt-print` and `probe-rs`, or a plan written against what a
 developer sees in their terminal would not match what the bench sees.
 
-The evidence is recorded under `tests/fixtures/defmt/` by
-`tools/defmt_reference.py`: a real image cross-compiled from
-`firmware/src/main.rs` (never run, only read for its table), the frames its
-statements produce, and what `defmt-decoder` 1.2 printed for exactly those
-bytes. The tests here hold the Python decoder to that record, so they need no
-Rust and no board.
+The firmware source and the recorded streams and expectations are under
+`tests/fixtures/defmt/`. The tests build each firmware variant from that source,
+then hold the Python decoder to the records `defmt-decoder` 1.2 printed for
+those bytes, without using a board.
 """
 
 from __future__ import annotations
@@ -32,9 +30,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "defmt"
 sys.path.insert(0, str(FIXTURES))
 import scenario  # noqa: E402
 
-RZCOBS_ELF = FIXTURES / "defmt-fixture-rzcobs.elf"
-RAW_ELF = FIXTURES / "defmt-fixture-raw.elf"
-STREAMS = [pytest.param(RZCOBS_ELF, "rzcobs", id="rzcobs"), pytest.param(RAW_ELF, "raw", id="raw")]
+STREAMS = [pytest.param("rzcobs", id="rzcobs"), pytest.param("raw", id="raw")]
 
 
 def expected(name: str) -> list[dict]:
@@ -62,15 +58,15 @@ def synthetic(entries: dict[int, tuple[str, str]], *, timestamp: str | None = No
 # The table.
 
 
-def test_the_table_of_a_real_image_names_its_encoding_timestamp_and_statements():
-    table = load_table(RZCOBS_ELF)
+def test_the_table_of_a_real_image_names_its_encoding_timestamp_and_statements(defmt_images: dict[str, Path]):
+    table = load_table(defmt_images["rzcobs"])
     assert table.describe() == {
         "wire_version": "4",
         "encoding": "rzcobs",
         "timestamp_format": "{=u64:us}",
         "log_statements": {"trace": 1, "debug": 1, "info": 27, "warn": 1, "error": 1, "println": 1},
     }
-    raw = load_table(RAW_ELF)
+    raw = load_table(defmt_images["raw"])
     assert (raw.encoding, raw.timestamp) == ("raw", None)
     # `bitflags!` values are read out of the section's own bytes, in definition order.
     assert [flags for flags in table.bitflags.values()] == [[("READY", 1), ("BUSY", 2), ("ERROR", 128)]]
@@ -131,23 +127,23 @@ def test_the_quoted_version_symbol_lld_leaves_is_read(tmp_path):
 # Agreement with defmt-decoder on a real image.
 
 
-@pytest.mark.parametrize(("elf", "name"), STREAMS)
-def test_every_frame_decodes_to_the_line_defmt_decoder_printed(elf, name):
-    table = load_table(elf)
+@pytest.mark.parametrize("name", STREAMS)
+def test_every_frame_decodes_to_the_line_defmt_decoder_printed(defmt_images: dict[str, Path], name: str):
+    table = load_table(defmt_images[name])
     data = (FIXTURES / f"stream-{name}.bin").read_bytes()
     batch = decode_stream(table, data)
     assert batch.consumed == len(data)
     assert [as_reference(record) for record in batch.records] == expected(name)
 
 
-@pytest.mark.parametrize(("elf", "name"), STREAMS)
-def test_the_suite_encoder_writes_the_recorded_stream(elf, name):
+@pytest.mark.parametrize("name", STREAMS)
+def test_the_suite_encoder_writes_the_recorded_stream(defmt_images: dict[str, Path], name: str):
     """The frames the integration tests feed a fake port are the recorded ones."""
-    assert scenario.stream(load_table(elf)) == (FIXTURES / f"stream-{name}.bin").read_bytes()
+    assert scenario.stream(load_table(defmt_images[name])) == (FIXTURES / f"stream-{name}.bin").read_bytes()
 
 
-def test_broken_frames_are_errors_exactly_where_defmt_decoder_found_them():
-    table = load_table(RZCOBS_ELF)
+def test_broken_frames_are_errors_exactly_where_defmt_decoder_found_them(defmt_images: dict[str, Path]):
+    table = load_table(defmt_images["rzcobs"])
     data = (FIXTURES / "stream-errors.bin").read_bytes()
     batch = decode_stream(table, data)
     assert [as_reference(record) for record in batch.records] == expected("errors")
@@ -173,11 +169,11 @@ def test_broken_frames_are_errors_exactly_where_defmt_decoder_found_them():
 
 
 @pytest.mark.parametrize(
-    ("elf", "name", "chunk"),
-    [pytest.param(elf, name, chunk, id=f"{name}-{chunk}") for chunk in (1, 3, 7, 64) for elf, name in ((RZCOBS_ELF, "rzcobs"), (RAW_ELF, "raw"))],
+    ("name", "chunk"),
+    [pytest.param(name, chunk, id=f"{name}-{chunk}") for chunk in (1, 3, 7, 64) for name in ("rzcobs", "raw")],
 )
-def test_a_stream_that_arrives_in_pieces_decodes_to_the_same_frames(elf, name, chunk):
-    table = load_table(elf)
+def test_a_stream_that_arrives_in_pieces_decodes_to_the_same_frames(defmt_images: dict[str, Path], name: str, chunk: int):
+    table = load_table(defmt_images[name])
     data = (FIXTURES / f"stream-{name}.bin").read_bytes()
     pending = b""
     records: list[dict] = []
@@ -194,43 +190,43 @@ def test_a_stream_that_arrives_in_pieces_decodes_to_the_same_frames(elf, name, c
 # Structured arguments.
 
 
-def frame_for(format_string: str) -> dict:
-    table = load_table(RZCOBS_ELF)
+def frame_for(format_string: str, images: dict[str, Path]) -> dict:
+    table = load_table(images["rzcobs"])
     for record in decode_stream(table, (FIXTURES / "stream-rzcobs.bin").read_bytes()).records:
         if record.get("format") == format_string:
             return record
     raise KeyError(format_string)
 
 
-def test_arguments_are_json_values_in_the_order_the_firmware_passed_them():
-    record = frame_for("unsigned {=u8} {=u16} {=u32} {=u64} {=u128}")
+def test_arguments_are_json_values_in_the_order_the_firmware_passed_them(defmt_images: dict[str, Path]):
+    record = frame_for("unsigned {=u8} {=u16} {=u32} {=u64} {=u128}", defmt_images)
     assert record["args"] == [1, 2, 3, 4, 5]
     assert (record["level"], record["timestamp"], record["timestamp_value"]) == ("debug", "1.000003", 1_000_003)
-    assert frame_for("bytes {=[u8]} array {=[u8; 4]}")["args"] == [[1, 2, 3], [9, 8, 7, 6]]
-    assert frame_for("bool {=bool} char {=char}")["args"] == [True, "x"]
-    assert frame_for("str {=str} istr {=istr}")["args"] == ["dynamic", "interned"]
+    assert frame_for("bytes {=[u8]} array {=[u8; 4]}", defmt_images)["args"] == [[1, 2, 3], [9, 8, 7, 6]]
+    assert frame_for("bool {=bool} char {=char}", defmt_images)["args"] == [True, "x"]
+    assert frame_for("str {=str} istr {=istr}", defmt_images)["args"] == ["dynamic", "interned"]
     # A bitfield's argument is the whole value the firmware passed, once.
-    assert frame_for("bitfields {0=0..4} {0=4..8} {0=8..16:x} {0=12..16:a} next {1=u16:#x}")["args"] == [0xAB5C, 0x4142]
+    assert frame_for("bitfields {0=0..4} {0=4..8} {0=8..16:x} {0=12..16:a} next {1=u16:#x}", defmt_images)["args"] == [0xAB5C, 0x4142]
 
 
-def test_a_float_reads_as_the_number_it_prints_and_a_non_finite_one_as_its_name():
-    record = frame_for("floats {=f32} {=f32} {=f32} {=f32} {=f64} {=f64}")
+def test_a_float_reads_as_the_number_it_prints_and_a_non_finite_one_as_its_name(defmt_images: dict[str, Path]):
+    record = frame_for("floats {=f32} {=f32} {=f32} {=f32} {=f64} {=f64}", defmt_images)
     assert record["args"] == [1e-7, "NaN", "inf", 123456790.0, 1e300, 0.1]
     assert json.dumps(record, allow_nan=False)
 
 
-def test_nested_values_keep_their_format_and_primitives_unwrap():
-    record = frame_for("struct {} enum {} {} {}")
+def test_nested_values_keep_their_format_and_primitives_unwrap(defmt_images: dict[str, Path]):
+    record = frame_for("struct {} enum {} {} {}", defmt_images)
     assert record["args"] == [
         {"format": "Reading {{ channel: {=u8:?}, millivolts: {=i32:?} }}", "args": [2, -1200], "text": "Reading { channel: 2, millivolts: -1200 }"},
         {"format": "Idle", "args": [], "text": "Idle"},
         {"format": "Running {{ speed: {=u16:?} }}", "args": [300], "text": "Running { speed: 300 }"},
         {"format": "Fault({=u8})", "args": [4], "text": "Fault(4)"},
     ]
-    assert frame_for("prim format {} {} {}")["args"] == [42, -3, 2.5]
-    assert frame_for("slice {=[?]} array {=[?; 3]}")["args"][0] == [1, 2]
-    assert frame_for("println {=u8}")["println"] is True
-    assert frame_for("println {=u8}")["level"] is None
+    assert frame_for("prim format {} {} {}", defmt_images)["args"] == [42, -3, 2.5]
+    assert frame_for("slice {=[?]} array {=[?; 3]}", defmt_images)["args"][0] == [1, 2]
+    assert frame_for("println {=u8}", defmt_images)["println"] is True
+    assert frame_for("println {=u8}", defmt_images)["level"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -266,8 +262,8 @@ def test_rzcobs_matches_the_defmt_crates_own_vectors(plain, encoded):
     assert decoded[: len(plain)] == plain and not decoded[len(plain) :].strip(b"\x00")
 
 
-def test_a_raw_stream_that_loses_sync_says_so_once_and_consumes_the_rest():
-    table = load_table(RAW_ELF)
+def test_a_raw_stream_that_loses_sync_says_so_once_and_consumes_the_rest(defmt_images: dict[str, Path]):
+    table = load_table(defmt_images["raw"])
     data = (FIXTURES / "stream-raw.bin").read_bytes()
     corrupted = data[:2] + b"\xee\xee" + data[4:]
     batch = decode_stream(table, corrupted)
@@ -277,8 +273,8 @@ def test_a_raw_stream_that_loses_sync_says_so_once_and_consumes_the_rest():
     assert "no frame boundaries" in batch.records[-1]["detail"]
 
 
-def test_a_raw_stream_waits_for_the_rest_of_a_frame():
-    table = load_table(RAW_ELF)
+def test_a_raw_stream_waits_for_the_rest_of_a_frame(defmt_images: dict[str, Path]):
+    table = load_table(defmt_images["raw"])
     data = (FIXTURES / "stream-raw.bin").read_bytes()
     # "Hello, world!" is its two index bytes alone; the next frame needs 33.
     first = decode_stream(table, data[:5])
@@ -385,13 +381,13 @@ def test_a_frame_names_its_unknown_display_hint_and_still_renders():
     assert decode_stream(table, rzcobs_stream([struct.pack("<H", 1) + b"\x07"])).records[0]["message"] == "7"
 
 
-def test_counts_describe_what_a_batch_holds():
-    table = load_table(RZCOBS_ELF)
+def test_counts_describe_what_a_batch_holds(defmt_images: dict[str, Path]):
+    table = load_table(defmt_images["rzcobs"])
     batch = decode_stream(table, (FIXTURES / "stream-errors.bin").read_bytes())
     assert defmt.describe_records(batch.records) == {"frames": 3, "errors": {"unknown_index": 2, "malformed": 2, "truncated": 1, "rzcobs_invalid": 1}}
 
 
-def test_the_suite_encoder_round_trips_a_nested_enum():
-    table = load_table(RZCOBS_ELF)
+def test_the_suite_encoder_round_trips_a_nested_enum(defmt_images: dict[str, Path]):
+    table = load_table(defmt_images["rzcobs"])
     frame = encode_frame(table, "nested {}", [Nested(scenario.OPTION, [Nested(scenario.OPTION, [], 0)], 1)], timestamp=[5])
     assert decode_stream(table, rzcobs_stream([frame])).records[0]["text"] == "0.000005 INFO nested Some(None)"
