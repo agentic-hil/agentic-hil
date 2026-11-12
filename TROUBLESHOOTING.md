@@ -255,6 +255,8 @@ Likely cause: the image does not match the target memory layout, flash is locked
 
 Fix: inspect `log_path`, confirm the artifact matches the target, power-cycle the board, then retry probe before retrying flash. Increase `debuggers.<name>.timeout_s` only when the operation is valid but consistently slow.
 
+An ST-Link `flash_failed` can describe either a first hot-plug download failure after erase messages or an image outside the part's memory range. Both recorded cases can end with `Error: failed to download  Sector[0]` and `Error: failed to download the File`, so those words alone cannot distinguish them. Inspect `programmer_output` and follow the result's own `remediation`; treat the board as holding an indeterminate image until programming and verification succeed.
+
 Not this: `error_type: "debugger_command_rejected"`, which carries `target_contacted: false` and the `rejected_commands` OpenOCD would not run. OpenOCD stopped inside its own interpreter, before it opened the probe, so the board was never driven and there is nothing on it to inspect, power-cycle or recover. The named commands are either unknown to the installed OpenOCD or belong to its run stage and were reached before `init`; check the version `debugger_info` reports, and the scripts named by `interface_cfg` and `target_cfg`.
 
 Not this either: `error_type: "flash_erase_failed"`, which is section 10a.
