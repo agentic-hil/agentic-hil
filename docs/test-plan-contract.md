@@ -23,7 +23,7 @@ The plan schema is
 [`src/agentic_hil/schemas/testconfig.schema.json`](https://github.com/agentic-hil/agentic-hil/blob/master/src/agentic_hil/schemas/testconfig.schema.json),
 and it is closed: `additionalProperties: false` at the root and on every step,
 so a key the schema does not name is a refusal rather than something ignored.
-A plan document has exactly three root keys: `version:` (2, 3, 4 or 5), an optional
+A plan document has exactly three root keys: `version:` (2, 3, 4, 5, 6 or 7), an optional
 `name` (defaulting to the file's stem), and `steps`, between 1 and 128 of them.
 
 A step is a route field, an action, and that action's arguments. One step is
@@ -41,7 +41,7 @@ wrong board gets flashed.
 **Actions are the ones the device classes declare.** `flash` and `reset` on a
 probe; `debug_start`, `run_until_breakpoint`, `dump_memory`, `read_symbol` and
 `debug_stop` for a debug session; `uart_open`, `uart_write`, `uart_read`,
-`uart_expect` and `uart_close` on a serial line; `can_open`, `can_send`,
+`uart_expect`, `defmt_expect` and `uart_close` on a serial line; `can_open`, `can_send`,
 `can_read` and `can_close` on a bus; and `delay`, declared once on the base
 class and served by every kind. Each action is declared on the method that
 implements it, so the authoritative list is the set of declarations; an action a
@@ -58,7 +58,7 @@ and its data bytes, a frame budget, a deadline. Paths are resolved inside
 the repository: it is a statement about the build layout, which travels with
 the repository, not about a filesystem, which does not.
 
-**Expectations are a `comparator`.** A feedback action (`uart_read` on a serial
+**Text and bus expectations use a `comparator`.** A feedback action (`uart_read` on a serial
 line, `can_read` on a bus) takes an optional `comparator:` object: `equals` for
 a complete decoded match, `pattern` for a Python regular expression (`re.search`
 semantics over what the step has read, so the start of a line is `(?m)^`), or `pattern` with a single capture group plus `range: {min, max}` to
@@ -80,9 +80,29 @@ only the verdict: a serial comparator that was met records `matched_text` (the
 line that equalled the value, or the span the pattern matched, in the same
 `{hex, text, encoding}` shape and under the same cap as the `received_tail` an
 unmet one answers with, with `matched_text_truncated` when the cap applied), and
-a bus comparator that was met records the whole `frame` that met it. Every other
-step states its expectation by existing: the step must succeed, and the plan
-stops at the first one that does not.
+a bus comparator that was met records the whole `frame` that met it. The plan
+stops at the first step that does not succeed.
+
+**Decoded defmt frames have their own selectors.** From plan format v7,
+`uart_open` accepts `defmt: true` to decode with the confirmed flashed ELF,
+`defmt: {image_path: ...}` to select an explicit ELF, or `defmt: false` to
+disable decoding. An explicit ELF is not proof that it was flashed. The path
+follows the workspace rules above. The schema and the generated
+`agentic-hil://reference/test-plan` resource describe the complete plan format.
+
+On an open decoding UART session, `defmt_expect` waits for a decoded frame with
+a positive `timeout_s`. Its selectors may be combined: `level` and `format` use
+exact equality, `text` matches a substring, and `pattern` uses a regular expression
+search on the rendered text. Argument selectors in `args` are positional: `null`
+leaves that position unconstrained without shifting later selectors. Each object
+uses exactly one of `equals` or `range`. Equality compares recursive JSON values,
+distinguishing booleans from numbers. A range has finite numeric `min` and `max`
+bounds, with `min` no greater than `max`, and both bounds are inclusive.
+
+After a matching defmt frame, following decoded frames remain available to later
+assertions. A session, source or buffer change invalidates retained frames, so a
+later assertion cannot consume frames from the old binding. On a timeout, examine
+the selectors, received output and ELF source before increasing `timeout_s`.
 
 **A value in target memory is its own claim.** From plan format v5, `read_symbol`
 reads what one allowed symbol currently holds, through the debug session the plan
