@@ -9,6 +9,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 ### Added
 
 - Verify fresh defmt output against the official decoder in an isolated rebuild and retain reproducible parity evidence. (#812)
+- Build the raw and rzCOBS defmt test images from the checked-in firmware source once per pytest session, and keep the generated ELFs outside the repository. CI installs the Rust toolchain and embedded target required by those tests. (#842)
 - Execute version 7 defmt assertions, retaining decoded frames across non-clearing opens and invalidating them when the session, source or buffer changes. (#837)
 - Build the raw and rzCOBS defmt test images from the checked-in firmware source once per pytest session, and keep the generated ELFs outside the repository. CI installs the Rust toolchain and embedded target required by those tests. (#842)
 - Complete the native defmt decoder for wire versions 3 and 4, raw and rzCOBS streams, with bounded ELF table reads, parsing, nesting and rendering. Preserve the replay corpus and validate packaged replay without Rust. (#809)

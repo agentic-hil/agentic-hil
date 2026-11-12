@@ -186,6 +186,33 @@ def test_a_stream_that_arrives_in_pieces_decodes_to_the_same_frames(defmt_images
     assert records == decode_stream(table, data).records
 
 
+@pytest.mark.parametrize("name", STREAMS)
+def test_decode_stream_limit_preserves_unconsumed_frames(defmt_images: dict[str, Path], name: str):
+    table = load_table(defmt_images[name])
+    frames = [
+        encode_frame(table, "escaped {{braces}} {=u8}", [number], timestamp=[number * 1_000])
+        for number in range(3)
+    ]
+    data = b"".join(frames) if name == "raw" else rzcobs_stream(frames)
+    frame_ends = (
+        [sum(map(len, frames[:count])) for count in range(1, len(frames) + 1)]
+        if name == "raw"
+        else [len(rzcobs_stream(frames[:count])) for count in range(1, len(frames) + 1)]
+    )
+    expected_records = decode_stream(table, data).records
+
+    first = decode_stream(table, data, limit=1)
+
+    assert len(first.records) <= 1
+    assert first.records == expected_records[:1]
+    assert first.ends == frame_ends[:1]
+    assert first.consumed == frame_ends[0]
+    assert 0 < first.consumed < len(data)
+    remainder = decode_stream(table, data[frame_ends[0] :])
+    assert remainder.records == expected_records[1:]
+    assert remainder.consumed == len(data) - first.consumed
+
+
 # ---------------------------------------------------------------------------
 # Structured arguments.
 

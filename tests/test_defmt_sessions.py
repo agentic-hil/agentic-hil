@@ -149,6 +149,12 @@ def read(service: AgenticHILToolService, **arguments: object) -> dict:
     return service.call("com_read", {"port_id": PORT_ID, **arguments})
 
 
+def buffer_input(service: AgenticHILToolService, data: bytes) -> None:
+    session = service.com_ports.sessions[PORT_ID]
+    with session.lock:
+        session.buffer.extend(data)
+
+
 def flash(service: AgenticHILToolService, image: str = IMAGE) -> dict:
     return service.call("flash_firmware", {"image_path": image})
 
@@ -641,6 +647,38 @@ def test_complete_and_partial_frames_survive_a_non_clearing_start(tmp_path: Path
         service.close()
 
 
+@pytest.mark.parametrize("name", ["raw", "rzcobs"])
+def test_max_bytes_smaller_than_frame_preserves_buffer(tmp_path: Path, board: Board, defmt_images: dict[str, Path], name: str) -> None:
+    workspace = tmp_path / "workspace"
+    image = defmt_images[name]
+    table = table_of(image)
+    frame = hello(table)
+    data = frame if name == "raw" else rzcobs_stream([frame])
+    short_limit = len(data) - (2 if name == "rzcobs" else 1)
+    if name == "rzcobs":
+        check(data[short_limit] != 0, "the short rzCOBS limit does not end inside the encoded payload")
+    config = config_for(workspace, port_yaml=f"    max_buffer_bytes: {len(data)}\n")
+    place(workspace, image)
+    service, backend = service_for(config, board)
+    try:
+        started = start(service, defmt={"image_path": IMAGE})
+        check(decoding(started), f"the {name} decoding session could not be started")
+        buffer_input(service, data)
+
+        short = read(service, max_bytes=short_limit, wait_timeout_s=0)
+
+        check(frames_of(short) == [], f"the short {name} read returned part of a frame: {short}")
+        check(short.get("bytes_read") == 0, f"the short {name} read consumed frame bytes: {short}")
+        check(short.get("buffer_remaining_bytes") == len(data), f"the short {name} read did not preserve the frame: {short}")
+
+        whole = read(service, max_bytes=len(data), wait_timeout_s=0)
+        check(frames_of(whole) == records(table, data), f"the complete {name} frame was not recovered: {whole}")
+        check(whole.get("bytes_read") == len(data), f"the complete {name} frame was not consumed: {whole}")
+        check(whole.get("buffer_remaining_bytes") == 0, f"bytes remained after the complete {name} frame: {whole}")
+    finally:
+        service.close()
+
+
 def test_raw_desynchronization_persists_until_a_clearing_start(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """The raw encoding has no frame boundary to resume at, so a frame that does
     not decode leaves every later byte unreadable until the stream starts over."""
@@ -684,6 +722,67 @@ def test_raw_desynchronization_persists_until_a_clearing_start(tmp_path: Path, b
         service.close()
 
 
+def test_consumed_raw_incomplete_frame_desynchronizes_until_clear(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
+    workspace = tmp_path / "workspace"
+    table = table_of(defmt_images["raw"])
+    incomplete = statement(table, 7)[:-1]
+    good = hello(table)
+    config = config_for(workspace, port_yaml=f"    max_buffer_bytes: {len(incomplete)}\n")
+    place(workspace, defmt_images["raw"])
+    service, backend = service_for(config, board)
+    try:
+        started = start(service, defmt={"image_path": IMAGE})
+        check(decoding(started), "the raw decoding session could not be started")
+        buffer_input(service, incomplete)
+
+        partial = read(service, wait_timeout_s=0)
+
+        partial_frames = frames_of(partial)
+        check(len(partial_frames) == 1 and partial_frames[0].get("error") == "incomplete_frame", f"the partial raw frame was not consumed as incomplete: {partial}")
+        check(partial.get("bytes_read") == len(incomplete) and partial.get("buffer_remaining_bytes") == 0, f"the incomplete raw frame was not consumed: {partial}")
+        check(partial["defmt"].get("desynchronized") is True, f"the consumed incomplete raw frame did not desynchronize the stream: {partial}")
+
+        buffer_input(service, good)
+        refused = read(service, wait_timeout_s=0)
+        refused_frames = frames_of(refused)
+        check(len(refused_frames) == 1 and refused_frames[0].get("error") == "desynchronized", f"a valid frame decoded before the raw stream was cleared: {refused}")
+        check(refused["defmt"].get("desynchronized") is True, f"the raw stream did not stay desynchronized: {refused}")
+
+        cleared = start(service, clear_buffer=True)
+        check(cleared.get("ok") is True, f"the clearing start failed: {cleared}")
+        buffer_input(service, good)
+        recovered = read(service, wait_timeout_s=0)
+        check(frames_of(recovered) == records(table, good), f"a clearing start did not recover the raw stream: {recovered}")
+        check(recovered["defmt"].get("desynchronized") is False, f"the recovered raw stream still reports desynchronization: {recovered}")
+    finally:
+        service.close()
+
+
+def test_rzcobs_table_replacement_recovers_without_clear(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
+    workspace = tmp_path / "workspace"
+    config = config_for(workspace)
+    place(workspace, defmt_images["raw"])
+    place(workspace, defmt_images["rzcobs"], "build/rzcobs.elf")
+    rzcobs_table = table_of(defmt_images["rzcobs"])
+    service, backend = service_for(config, board)
+    try:
+        started = start(service, defmt={"image_path": IMAGE})
+        check(decoding(started), "the raw decoding session could not be started")
+        buffer_input(service, (0x7777).to_bytes(2, "little") + bytes(4))
+        desynchronized = read(service, wait_timeout_s=0)
+        check(desynchronized["defmt"].get("desynchronized") is True, f"the raw session did not desynchronize: {desynchronized}")
+
+        replaced = start(service, clear_buffer=False, defmt={"image_path": "build/rzcobs.elf"})
+        check(decoding(replaced), f"the rzCOBS table could not replace the raw table: {replaced}")
+        data = rzcobs_stream([statement(rzcobs_table, 8)])
+        buffer_input(service, data)
+        answered = read(service, wait_timeout_s=0)
+        check(frames_of(answered) == records(rzcobs_table, data), f"the rzCOBS frames did not decode after replacement: {answered}")
+        check(answered["defmt"].get("desynchronized") is False, f"the rzCOBS session inherited raw desynchronization: {answered}")
+    finally:
+        service.close()
+
+
 def test_a_burst_is_decoded_in_bounded_reads(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """More frames than one read decodes: each read hands out at most the bound,
     and the rest stays buffered for the next, in order and complete."""
@@ -709,6 +808,71 @@ def test_a_burst_is_decoded_in_bounded_reads(tmp_path: Path, board: Board, defmt
         check(reads[0].get("buffer_remaining_bytes", 0) > 0, f"the frames past the bound were not left buffered: {reads[0]}")
         check([record for answered in reads for record in answered["frames"]] == expected, "the bounded reads lost, reordered or changed frames")
         check(reads[2].get("buffer_remaining_bytes") == 0, f"bytes were left after the last frame: {reads[2]}")
+    finally:
+        service.close()
+
+
+def test_raw_burst_decoding_is_bounded_and_preserves_tail(
+    tmp_path: Path,
+    board: Board,
+    defmt_images: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    buffer_bytes = 1048576
+    config = config_for(workspace, port_yaml=f"    max_buffer_bytes: {buffer_bytes}\n")
+    image = defmt_images["raw"]
+    place(workspace, image)
+    table = table_of(image)
+    service, backend = service_for(config, board)
+    try:
+        started = start(service, defmt={"image_path": IMAGE})
+        check(decoding(started), "the raw decoding session for the bounded burst could not be started")
+
+        bound = comports.DEFMT_MAX_FRAMES_PER_READ
+        check(isinstance(bound, int) and bound >= 1, f"the burst bound is not a positive frame count: {bound!r}")
+        frames = [hello(table, number) for number in range(2 * bound + 1)]
+        stream = b"".join(frames)
+        frame_ends = [sum(map(len, frames[:count])) for count in range(1, len(frames) + 1)]
+        expected = records(table, stream)
+        check(len(expected) == 2 * bound + 1, f"the planted raw frames do not decode independently: {len(expected)}")
+        check(len(stream) <= buffer_bytes, f"the raw burst does not fit the port's buffer: {len(stream)} bytes")
+        buffer_input(service, stream)
+
+        original_decode_frame = defmt._decode_frame
+        decode_calls = 0
+
+        def counted_decode_frame(frame_table, reader):
+            nonlocal decode_calls
+            decode_calls += 1
+            return original_decode_frame(frame_table, reader)
+
+        monkeypatch.setattr(defmt, "_decode_frame", counted_decode_frame)
+        first = read(service, wait_timeout_s=0)
+        first_decode_calls = decode_calls
+
+        check(first_decode_calls >= bound, f"the raw burst decoded fewer than {bound} frame attempts: {first_decode_calls}")
+        check(first_decode_calls <= 2 * bound, f"the raw burst decoded beyond the preview and committed read budget: {first_decode_calls}")
+        check(frames_of(first) == expected[:bound], f"the first raw burst read did not return the first {bound} records: {first}")
+        check(first.get("bytes_read") == frame_ends[bound - 1], f"the first raw burst read cut a frame or consumed too few: {first}")
+        check(first.get("buffer_remaining_bytes") == len(stream) - frame_ends[bound - 1], f"the first raw burst read left an unexpected byte count: {first}")
+        session = service.com_ports.sessions[PORT_ID]
+        with session.lock:
+            first_tail = bytes(session.buffer)
+        check(first_tail == stream[frame_ends[bound - 1] :], "the first raw burst read changed or cut the buffered suffix")
+
+        second = read(service, wait_timeout_s=0)
+        third = read(service, wait_timeout_s=0)
+        check(frames_of(second) == expected[bound : 2 * bound], f"the second raw burst read lost or changed frames: {second}")
+        check(frames_of(third) == expected[2 * bound :], f"the final raw burst read lost or changed frames: {third}")
+        check(second.get("bytes_read") == frame_ends[2 * bound - 1] - frame_ends[bound - 1], f"the second raw burst read cut a frame: {second}")
+        check(third.get("bytes_read") == frame_ends[-1] - frame_ends[2 * bound - 1], f"the final raw burst read cut a frame: {third}")
+        check(second.get("buffer_remaining_bytes") == len(stream) - frame_ends[2 * bound - 1], f"the second raw burst read left an unexpected byte count: {second}")
+        check(third.get("buffer_remaining_bytes") == 0, f"bytes remained after the raw burst was recovered: {third}")
+        check(
+            [record for answer in (first, second, third) for record in answer["frames"]] == expected,
+            "the bounded raw burst reads lost, reordered, changed or cut frames",
+        )
     finally:
         service.close()
 
@@ -789,6 +953,56 @@ def test_a_later_flash_reproves_an_active_session(tmp_path: Path, board: Board, 
         unproven = read(service)
         check(frames_of(unproven) == records(table, stream), f"the session stopped decoding after the second flash: {unproven}")
         check(unproven["defmt"].get("proven") is False, f"a flash of another image left the session proven: {unproven}")
+    finally:
+        service.close()
+
+
+def test_debug_load_reproves_open_defmt_session(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
+    class LoadBackend(BoardBackend):
+        def debug_start_session(self, artifact, mode="attach", timeout_s=None):
+            self.calls.append(f"debug_start_session:{mode}")
+            return {
+                "ok": True,
+                "tool": "debug_start_session",
+                "mode": mode,
+                "session": {"status": "halted"},
+                "success_confirmed": True,
+                "side_effect_committed": True,
+                "side_effect_status": "committed",
+                "retry_safe": False,
+            }
+
+        def debug_stop_session(self, timeout_s=None):
+            self.calls.append("debug_stop_session")
+            return {"ok": True, "tool": "debug_stop_session", "active": False, "status": "stopped"}
+
+    workspace = tmp_path / "workspace"
+    config = config_for(workspace)
+    place(workspace, defmt_images["rzcobs"])
+    place(workspace, defmt_images["raw"], "build/other.elf")
+    backend = LoadBackend(board, banner=b"")
+    service = AgenticHILToolService(config, backend=backend)
+    board.watch = service.coordinator.bench.held_resources
+    try:
+        flashed = flash(service)
+        check(flashed.get("ok") is True, f"the confirmed flash failed: {flashed}")
+        started = start(service, defmt=True)
+        check(decoding(started) and started["defmt"].get("proven") is True, f"the flashed defmt session did not start proven: {started}")
+        session = service.com_ports.sessions[PORT_ID]
+
+        different = service.call("debug_start_session", {"image_path": "build/other.elf", "mode": "load"})
+        check(different.get("ok") is True, f"the debug load of a different ELF failed: {different}")
+        after_different = read(service, wait_timeout_s=0)
+        check(service.com_ports.sessions.get(PORT_ID) is session, "the COM session changed during the different-ELF load")
+        check(after_different.get("defmt", {}).get("proven") is False, f"the open defmt session remained proven after loading a different ELF: {after_different}")
+
+        stopped = service.call("debug_stop_session")
+        check(stopped.get("ok") is True, f"the debug session could not be stopped: {stopped}")
+        own = service.call("debug_start_session", {"image_path": IMAGE, "mode": "load"})
+        check(own.get("ok") is True, f"the debug load of the defmt session's ELF failed: {own}")
+        after_own = read(service, wait_timeout_s=0)
+        check(service.com_ports.sessions.get(PORT_ID) is session, "the COM session changed during the own-ELF load")
+        check(after_own.get("defmt", {}).get("proven") is True, f"the open defmt session was not proven after loading its own ELF: {after_own}")
     finally:
         service.close()
 
