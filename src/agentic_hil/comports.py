@@ -863,6 +863,8 @@ def _commit_frames(session: ComPortSession, stream: DefmtStream, overflow: int, 
     stream.desynchronized = desynchronized
     stream.overflow_seen = overflow
     del session.buffer[:consumed]
+    if consumed > 0:
+        session.buffer_epoch += 1
     return taken
 
 
@@ -893,8 +895,8 @@ class ComPortSession:
         self.overflow_bytes = 0
         # Set while the session decodes defmt; changed only under `lock`.
         self.defmt: DefmtStream | None = None
-        # Counts the clears of `buffer`, so a decode of a copy commits only to
-        # the buffer it was copied from.
+        # Counts buffer clears and committed prefix consumption, so a decode
+        # of a copy commits only to the buffer it was copied from.
         self.buffer_epoch = 0
         self.reader_error: JsonObject | None = None
         self.lock = threading.Lock()
@@ -1724,8 +1726,9 @@ class ComPortService:
         which is how a waiting read asks whether it is done.
 
         A commit lands only on the buffer the copy was taken from. Bytes the cap
-        dropped from its front in between, or a mode change, move what the
-        consumed count refers to, so the decode is repeated on a fresh copy."""
+        dropped from its front, another reader consumed, or a mode change can
+        move what the consumed count refers to, so the decode is repeated on a
+        fresh copy."""
         for _ in range(DEFMT_COMMIT_ATTEMPTS):
             with session.lock:
                 snapshot = _defmt_snapshot(session, max_bytes)
