@@ -6054,6 +6054,42 @@ def test_defmt_selector_validation_precedes_hardware(tmp_path: Path) -> None:
         assert dispatch_service.calls == []
 
 
+@pytest.mark.parametrize(
+    "timeout_s",
+    [pytest.param(math.inf, id="inf"), pytest.param(-math.inf, id="neg-inf"), pytest.param(math.nan, id="nan")],
+)
+def test_defmt_nonfinite_timeout_loading(tmp_path: Path, timeout_s: float) -> None:
+    import yaml
+
+    step = {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": timeout_s}
+    plan_path = write_test_config(tmp_path, yaml.safe_dump({"version": 7, "steps": [step]}, sort_keys=False))
+
+    with pytest.raises(ConfigError) as invalid_plan:
+        load_test_config(str(plan_path), str(tmp_path))
+
+    assert invalid_plan.value.error_type == "test_config_invalid"
+    assert invalid_plan.value.details["field"] == "steps[0].timeout_s"
+
+
+@pytest.mark.parametrize(
+    "timeout_s",
+    [pytest.param(math.inf, id="inf"), pytest.param(-math.inf, id="neg-inf"), pytest.param(math.nan, id="nan")],
+)
+def test_defmt_nonfinite_timeout_direct_dispatch(tmp_path: Path, timeout_s: float) -> None:
+    from agentic_hil.test_reactor import build_test_step
+
+    config = uart_config(tmp_path)
+    service = RecordingService(fail_call="com_read")
+    step = build_test_step({"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": timeout_s})
+    result = TestReactor(config, service).execute_step(step)  # type: ignore[arg-type]
+
+    if result.get("error_type") != "invalid_argument":
+        raise AssertionError("Nonfinite defmt timeout_s must return invalid_argument before hardware access.")
+    assert result["ok"] is False
+    assert result["field"] == "timeout_s"
+    assert service.calls == []
+
+
 def test_valid_defmt_plan_is_not_executable_yet(tmp_path: Path) -> None:
     from agentic_hil.test_reactor import TestConfig, build_test_step
 
