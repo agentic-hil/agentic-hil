@@ -6073,20 +6073,14 @@ def test_valid_defmt_plan_is_not_executable_yet(tmp_path: Path) -> None:
     direct_plan = TestConfig(path="direct-v7-defmt", name="v7-defmt", steps=[build_test_step(step) for step in steps])
 
     result = TestReactor(config, service).run(direct_plan)  # type: ignore[arg-type]
-    if result.get("error_type") != "not_supported":
-        raise AssertionError("valid defmt plans must be refused as not_supported before hardware calls")
-    assert result["ok"] is False
-    assert result["error_type"] == "not_supported"
-    assert result["failed_step"] == 2
-    assert result["validation_error"]["field"] == "steps[1].steps[0].defmt"
-    assert result["validation_error"]["summary"] == "Defmt plan assertions are not executable in this version yet."
-    assert result["steps"] == []
-    assert result["cleanup"] == []
-    assert service.calls == []
+    assert result.get("error_type") != "not_supported"
+    assert [record["action"] for record in result["steps"]] == ["reset", "repeat"]
+    nested = result["steps"][1]["iterations"][0]["steps"]
+    assert [record["action"] for record in nested] == ["uart_open", "defmt_expect"]
+    assert nested[1]["result"].get("error_type") != "not_supported"
+    assert [name for name, _ in service.calls[:2]] == ["reset_target", "com_session_start"]
 
     for step in steps[1]["steps"]:
         dispatch_service = RecordingService()
         dispatched = TestReactor(config, dispatch_service).execute_step(build_test_step(step))  # type: ignore[arg-type]
-        assert dispatched["ok"] is False
-        assert dispatched["error_type"] == "not_supported"
-        assert dispatch_service.calls == []
+        assert dispatched.get("error_type") != "not_supported"
