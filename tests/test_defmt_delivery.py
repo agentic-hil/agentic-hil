@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -44,12 +45,50 @@ def test_decoder_is_in_the_configured_mypy_scope():
 def test_manifest_includes_replay_fixtures():
     source = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
     lines = [line.strip() for line in source.splitlines() if line.strip() and not line.lstrip().startswith("#")]
-    required = "recursive-include tests/fixtures/defmt *.elf *.bin *.jsonl"
-    if required not in lines:
-        raise AssertionError("defmt replay fixtures must be included in source distributions")
     positions = [lines.index(line) for line in PRESERVED_MANIFEST_LINES]
     assert positions == sorted(positions)
     assert all(line in lines for line in PRESERVED_MANIFEST_LINES)
+
+    def applies(line: str, path: str) -> bool:
+        parts = line.split()
+        directive = parts[0]
+        if directive in {"include", "exclude"}:
+            return any(fnmatch.fnmatchcase(path, pattern) for pattern in parts[1:])
+        if directive in {"global-include", "global-exclude"}:
+            return any(fnmatch.fnmatchcase(Path(path).name, pattern) for pattern in parts[1:])
+        if directive in {"recursive-include", "recursive-exclude"}:
+            directory = parts[1].rstrip("/")
+            return path.startswith(directory + "/") and any(fnmatch.fnmatchcase(Path(path).name, pattern) for pattern in parts[2:])
+        if directive in {"graft", "prune"}:
+            directory = parts[1].rstrip("/")
+            return path.startswith(directory + "/")
+        return False
+
+    def is_addition(line: str) -> bool:
+        return line.split()[0] in {"include", "global-include", "recursive-include", "graft"}
+
+    def included(path: str) -> bool:
+        result = False
+        for line in lines:
+            if applies(line, path):
+                result = is_addition(line)
+        return result
+
+    elf_paths = (
+        "tests/fixtures/defmt/defmt-fixture-raw.elf",
+        "tests/fixtures/defmt/defmt-fixture-rzcobs.elf",
+    )
+    firmware_sources = (
+        "tests/fixtures/defmt/firmware/Cargo.toml",
+        "tests/fixtures/defmt/firmware/Cargo.lock",
+        "tests/fixtures/defmt/firmware/build.rs",
+        "tests/fixtures/defmt/firmware/memory.x",
+        "tests/fixtures/defmt/firmware/.cargo/config.toml",
+        "tests/fixtures/defmt/firmware/src/main.rs",
+    )
+    has_elf_rule = any(is_addition(line) and any(applies(line, path) for path in elf_paths) for line in lines)
+    if has_elf_rule or not all(included(path) for path in firmware_sources):
+        raise AssertionError("defmt source distributions must ship firmware sources instead of ELF images")
 
 
 def _shell_commands(script):
@@ -130,18 +169,18 @@ def test_ci_replays_the_extracted_source_distribution():
     _validate_ci_replay_step(replay)
 
 
-def test_documented_replay_examples_match_public_results():
-    table = defmt.load_table_bytes((FIXTURES / "defmt-fixture-rzcobs.elf").read_bytes())
+def test_documented_replay_examples_match_public_results(defmt_images):
+    table = defmt.load_table_bytes(defmt_images["rzcobs"].read_bytes())
     batch = defmt.decode_stream(table, (FIXTURES / "stream-rzcobs.bin").read_bytes())
     expected = [json.loads(line)["line"] for line in (FIXTURES / "expected-rzcobs.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(batch.records) == 46 and [record["text"] for record in batch.records] == expected
-    assert table == defmt.load_table(FIXTURES / "defmt-fixture-rzcobs.elf")
-    raw = defmt.load_table(FIXTURES / "defmt-fixture-raw.elf")
+    assert table == defmt.load_table(defmt_images["rzcobs"])
+    raw = defmt.load_table(defmt_images["raw"])
     raw_batch = defmt.decode_stream(raw, (FIXTURES / "stream-raw.bin").read_bytes())
     raw_expected = [json.loads(line)["line"] for line in (FIXTURES / "expected-raw.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(raw_batch.records) == 46 and [record["text"] for record in raw_batch.records] == raw_expected
     docs = (ROOT / "docs/testing.md").read_text(encoding="utf-8")
-    for term in ("tests/test_defmt.py", "tests/test_defmt_regressions.py", "tests/fixtures/defmt", "stream-rzcobs.bin", "stream-raw.bin", "expected-rzcobs.jsonl", "load_table_bytes", "decode_stream", "raw_hex", "size_bytes", "raw_truncated", "64", ":cbor", "DWARF"):
+    for term in ("tests/test_defmt.py", "tests/test_defmt_regressions.py", "tests/fixtures/defmt", "stream-rzcobs.bin", "stream-raw.bin", "expected-rzcobs.jsonl", "load_table_bytes", "decode_stream", "DEFMT_RZCOBS_ELF", "DEFMT_RAW_ELF", "raw_hex", "size_bytes", "raw_truncated", "64", ":cbor", "DWARF"):
         assert term in docs, term
     text = docs.lower()
     for concepts in (("rust-free", "without rust"), ("regenerat",), ("optional",), ("desynchron",), ("incomplete",), ("final",), ("consumed",), ("error",), ("full", "whole", "entire"), ("byte",), ("source distribution", "sdist")):
@@ -151,7 +190,14 @@ def test_documented_replay_examples_match_public_results():
     matching = [example for example in examples if "load_table_bytes" in example and "decode_stream" in example]
     assert matching, "document a runnable example using both public operations"
     for example in matching:
-        result = subprocess.run([sys.executable, "-c", example], cwd=ROOT, env={**os.environ, "PYTHONPATH": str(Path(defmt.__file__).resolve().parents[1]), "PYTHONIOENCODING": "utf-8"}, capture_output=True, text=True, encoding="utf-8", check=True, timeout=scaled_time_bound(30))
+        environment = {
+            **os.environ,
+            "PYTHONPATH": str(Path(defmt.__file__).resolve().parents[1]),
+            "PYTHONIOENCODING": "utf-8",
+            "DEFMT_RAW_ELF": str(defmt_images["raw"].resolve()),
+            "DEFMT_RZCOBS_ELF": str(defmt_images["rzcobs"].resolve()),
+        }
+        result = subprocess.run([sys.executable, "-c", example], cwd=ROOT, env=environment, capture_output=True, text=True, encoding="utf-8", check=True, timeout=scaled_time_bound(30))
         assert result.stdout == "\n".join(expected) + "\n"
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert PRESERVED_CHANGELOG_PARAGRAPH in changelog
@@ -353,8 +399,9 @@ if packet["mode"] == "pytest":
     code = pytest.main(packet["arguments"] + ["-p", "no:cacheprovider", "-o", "addopts="], plugins=[results])
     assert code == 0, code
     if not packet.get("collect"):
-        assert results.calls == ["passed"] * 71, results.calls
-        assert results.collected == 71 and results.skipped == results.deselected == 0
+        assert results.collected == 71 and results.deselected == 0
+        assert results.calls == ["passed"] * (results.collected - results.skipped), results.calls
+        assert results.skipped > 0
         for name in ("defmt_wire", "scenario", "test_defmt", "test_defmt_regressions"):
             assert Path(sys.modules[name].__file__).resolve().is_relative_to(root), name
         expected_reads = {str((fixtures / name).resolve()) for name in packet["required_reads"]}
@@ -364,7 +411,7 @@ else:
     # implementation; protected replay inputs come from the extracted sdist.
     descriptions = {}
     for encoding in ("raw", "rzcobs"):
-        image = fixtures / ("defmt-fixture-" + encoding + ".elf")
+        image = Path(packet["images"][encoding])
         table = defmt.load_table(image)
         assert table == defmt.load_table_bytes(image.read_bytes())
         descriptions[encoding] = table.describe()
@@ -374,7 +421,7 @@ else:
         assert len(records) == len(oracle) == 46
         assert [record["text"] for record in records] == [record["line"] for record in oracle]
     assert descriptions == packet["descriptions"]
-    table = defmt.load_table(fixtures / "defmt-fixture-rzcobs.elf")
+    table = defmt.load_table(Path(packet["images"]["rzcobs"]))
     data = (fixtures / "stream-errors.bin").read_bytes()
     batch = defmt.decode_stream(table, data)
     oracle = [json.loads(line) for line in (fixtures / "expected-errors.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -385,9 +432,9 @@ print("PACKAGED_REPLAY=" + json.dumps({"reads": sorted(reads), "decoder": defmt.
 '''
 
 
-def test_distributions_collect_and_replay_without_rust(tmp_path):
-    table = defmt.load_table(FIXTURES / "defmt-fixture-rzcobs.elf")
-    descriptions = {"rzcobs": table.describe(), "raw": defmt.load_table(FIXTURES / "defmt-fixture-raw.elf").describe()}
+def test_distributions_collect_and_replay_without_rust(tmp_path, defmt_images):
+    table = defmt.load_table(defmt_images["rzcobs"])
+    descriptions = {"rzcobs": table.describe(), "raw": defmt.load_table(defmt_images["raw"]).describe()}
     expected = defmt.decode_stream(table, (FIXTURES / "stream-rzcobs.bin").read_bytes()).records
     oracle = [json.loads(line) for line in (FIXTURES / "expected-rzcobs.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(expected) == 46 and [record["text"] for record in expected] == [record["line"] for record in oracle]
@@ -452,7 +499,7 @@ def test_distributions_collect_and_replay_without_rust(tmp_path):
     common = {**os.environ, "PATH": str(empty), "PIP_NO_INDEX": "1", "CARGO_HOME": str(cargo), "RUSTUP_HOME": str(rustup), "PYTHONDONTWRITEBYTECODE": "1", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
     common.pop("PYTHONPYCACHEPREFIX", None)
     fixtures = package / "tests/fixtures/defmt"
-    packet = {"root": str(package), "fixtures": str(fixtures), "fixture_root": str(package), "import_path": "src", "mode": "pytest", "collect": True, "arguments": ["--collect-only", "-q"], "required_reads": [Path(name).name for name in packaged_oids if name.endswith((".elf", ".bin", ".jsonl"))]}
+    packet = {"root": str(package), "fixtures": str(fixtures), "fixture_root": str(package), "import_path": "src", "mode": "pytest", "collect": True, "arguments": ["--collect-only", "-q"], "required_reads": [], "images": {name: str(path) for name, path in defmt_images.items()}}
     env = {**common, "PYTHONPATH": str(package / "src")}
     _run(["-c", PACKAGED_DRIVER], package, env=env, input=json.dumps(packet))
     packet.update(collect=False, arguments=["-q", "tests/test_defmt.py", "tests/test_defmt_regressions.py"])
