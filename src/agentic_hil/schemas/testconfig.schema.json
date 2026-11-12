@@ -7,7 +7,7 @@
   "required": ["version", "steps"],
   "$comment": "Additions this schema marks `x-since-version` belong to that plan format version and later. A plan is held to what its own `version:` contains, so a version 2 plan reaching for a version 3 action or key is refused by name rather than quietly accepted here and rejected by an older install elsewhere.",
   "properties": {
-    "version": { "enum": [2, 3, 4, 5, 6], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions (a serial line's on `uart_read`, a bus's on `can_read`), `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional. Version 4 adds the `repeat` block step, which runs a nested subset of steps by count or by wall time. Version 5 adds the `read_symbol` action and the numeric `comparator:` it carries, which is the first claim in this format about a value in target memory rather than about text a device sent. Version 6 adds the named `participant:` selector to CAN steps on buses configured with `shares:`." },
+    "version": { "enum": [2, 3, 4, 5, 6, 7], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions (a serial line's on `uart_read`, a bus's on `can_read`), `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional. Version 4 adds the `repeat` block step, which runs a nested subset of steps by count or by wall time. Version 5 adds the `read_symbol` action and the numeric `comparator:` it carries, which is the first claim in this format about a value in target memory rather than about text a device sent. Version 6 adds the named `participant:` selector to CAN steps on buses configured with `shares:`. Version 7 adds the `defmt:` source to `uart_open` and the `defmt_expect` action for matching decoded frames." },
     "name": { "type": "string", "minLength": 1 },
     "steps": { "$ref": "#/$defs/steps" }
   },
@@ -36,9 +36,59 @@
           { "$ref": "#/$defs/readSymbol" },
           { "$ref": "#/$defs/debugStop" },
           { "$ref": "#/$defs/delay" },
-          { "$ref": "#/$defs/repeat" }
+          { "$ref": "#/$defs/repeat" },
+          { "$ref": "#/$defs/defmtExpect" }
         ]
       }
+    },
+    "defmtSource": {
+      "oneOf": [
+        { "type": "boolean" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["image_path"],
+          "properties": { "image_path": { "$ref": "#/$defs/path", "minLength": 1 } }
+        }
+      ]
+    },
+    "defmtValue": {
+      "description": "A JSON value compared with one typed defmt argument. Recursive values retain their JSON types, including the distinction between booleans and numbers.",
+      "anyOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/defmtValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/defmtValue" } }
+      ]
+    },
+    "defmtRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "max"],
+      "description": "Inclusive finite bounds for one numeric defmt argument. The minimum must not exceed the maximum.",
+      "properties": {
+        "min": { "type": "number" },
+        "max": { "type": "number" }
+      }
+    },
+    "defmtArgumentSelector": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "oneOf": [
+            { "required": ["equals"], "not": { "required": ["range"] } },
+            { "required": ["range"], "not": { "required": ["equals"] } }
+          ],
+          "properties": {
+            "equals": { "$ref": "#/$defs/defmtValue" },
+            "range": { "$ref": "#/$defs/defmtRange" }
+          }
+        }
+      ]
     },
     "device": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "x-since-version": 3, "description": "Name of the configured entry this step drives: a `debuggers`, `com_ports` or `can_buses` entry. The one routing key of format version 3: the configuration knows which section a name belongs to, so the step does not have to spell it. The version 2 keys below stay valid as readable aliases; a step writes one or the other, never both." },
     "debugger": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a debuggers.<name> entry. Optional when the project configures exactly one debugger; required when it configures several." },
@@ -196,7 +246,27 @@
         "device": { "$ref": "#/$defs/device" },
         "port_id": { "$ref": "#/$defs/portId" },
         "action": { "const": "uart_open" },
+        "defmt": { "$ref": "#/$defs/defmtSource", "x-since-version": 7, "description": "Decode using the confirmed flashed ELF (`true`), an explicitly named ELF (`{image_path: ...}`), or disable defmt decoding (`false`)." },
         "clear_buffer": { "type": "boolean", "default": true, "description": "Discard whatever the line buffered before this step, so what a later read matches came from this run rather than from a previous one. Opening a port a plan may not read is already refused, so the clear this asks for is always permitted here." }
+      }
+    },
+    "defmtExpect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "timeout_s"],
+      "x-since-version": 7,
+      "description": "Wait for a decoded defmt frame on an open UART session. Selectors are independent and may be combined. Argument selectors are positional; null leaves a slot unconstrained, while each object selects exactly one of `equals` and inclusive `range`. Frames after the match remain available to later assertions.",
+      "anyOf": [{ "required": ["device"] }, { "required": ["port_id"] }],
+      "properties": {
+        "device": { "$ref": "#/$defs/device" },
+        "port_id": { "$ref": "#/$defs/portId" },
+        "action": { "const": "defmt_expect" },
+        "timeout_s": { "$ref": "#/$defs/positiveTimeout" },
+        "level": { "type": "string", "enum": ["trace", "debug", "info", "warn", "error"] },
+        "format": { "type": "string" },
+        "text": { "type": "string" },
+        "pattern": { "type": "string", "description": "A Python regular expression matched against the rendered defmt frame text." },
+        "args": { "type": "array", "items": { "$ref": "#/$defs/defmtArgumentSelector" } }
       }
     },
     "uartWrite": {
