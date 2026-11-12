@@ -10,6 +10,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - Verify fresh defmt output against the official decoder in an isolated rebuild and retain reproducible parity evidence. (#812)
 - Build the raw and rzCOBS defmt test images from the checked-in firmware source once per pytest session, and keep the generated ELFs outside the repository. CI installs the Rust toolchain and embedded target required by those tests. (#842)
+- Execute version 7 defmt assertions, retaining decoded frames across non-clearing opens and invalidating them when the session, source or buffer changes. (#837)
 - Complete the native defmt decoder for wire versions 3 and 4, raw and rzCOBS streams, with bounded ELF table reads, parsing, nesting and rendering. Preserve the replay corpus and validate packaged replay without Rust. (#809)
 - Decode defmt on COM sessions and flash boot captures. `com_session_start` takes `defmt: true` (the ELF the last confirmed `flash_firmware` wrote, validated again and checked by its digest), `defmt: {"image_path": ...}` (an ELF validated by the artifact policy, which decodes with no flash in the server session and is `proven: false` unless its path and digest are the confirmed programming's) or `defmt: false`, also on an active session; a refused change leaves the session as it was. The table is validated before the port is opened, and `flash_firmware` with `capture.defmt` validates it before anything is staged or flashed. `com_read` on such a session returns decoded `frames`, at most 256 per read, keeps partial frames buffered, keeps a raw desynchronization until a clearing start, counts overflow and matches `until` against a frame's text. New error types `defmt_table_not_available`, `defmt_table_changed` and `defmt_table_invalid`. Specified and tested against fakes; not yet qualified on a board. (#810)
 - Add the version 7 defmt test-plan contract for `uart_open.defmt` and `defmt_expect`, validate selectors and nested version markers, and refuse plan execution before any hardware step. Frame matching remains separate work. (#836)
@@ -23,6 +24,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 ### Fixed
 
 - Clarified the recorded ST-Link download failures, their identical CubeProgrammer wording, and the limits of under-reset guidance. (#751)
+- Reject nonfinite `defmt_expect.timeout_s` values before hardware access during direct dispatch. (#847)
 - MCP `tools/list` schemas omit root-level `oneOf`, `allOf` and `anyOf` for Claude compatibility, while server-side validation continues enforcing the input alternatives. (#830)
 - MCP can list attached probe serials before a workspace has a configuration. Initial `project_config_create` accepts an enumerated `probe_id` to select a probe and its matching COM port when available; an unselected multi-probe setup remains ambiguous and an unknown serial is refused before target contact. (#831)
 - `com_session_start` with `defmt` now checks the port configuration, power-supply reservation, permissions and identity before it resolves the table. (#819)
