@@ -6054,6 +6054,42 @@ def test_defmt_selector_validation_precedes_hardware(tmp_path: Path) -> None:
         assert dispatch_service.calls == []
 
 
+@pytest.mark.parametrize(
+    "timeout_s",
+    [pytest.param(math.inf, id="inf"), pytest.param(-math.inf, id="neg-inf"), pytest.param(math.nan, id="nan")],
+)
+def test_defmt_nonfinite_timeout_loading(tmp_path: Path, timeout_s: float) -> None:
+    import yaml
+
+    step = {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": timeout_s}
+    plan_path = write_test_config(tmp_path, yaml.safe_dump({"version": 7, "steps": [step]}, sort_keys=False))
+
+    with pytest.raises(ConfigError) as invalid_plan:
+        load_test_config(str(plan_path), str(tmp_path))
+
+    assert invalid_plan.value.error_type == "test_config_invalid"
+    assert invalid_plan.value.details["field"] == "steps[0].timeout_s"
+
+
+@pytest.mark.parametrize(
+    "timeout_s",
+    [pytest.param(math.inf, id="inf"), pytest.param(-math.inf, id="neg-inf"), pytest.param(math.nan, id="nan")],
+)
+def test_defmt_nonfinite_timeout_direct_dispatch(tmp_path: Path, timeout_s: float) -> None:
+    from agentic_hil.test_reactor import build_test_step
+
+    config = uart_config(tmp_path)
+    service = RecordingService(fail_call="com_read")
+    step = build_test_step({"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": timeout_s})
+    result = TestReactor(config, service).execute_step(step)  # type: ignore[arg-type]
+
+    if result.get("error_type") != "invalid_argument":
+        raise AssertionError("Nonfinite defmt timeout_s must return invalid_argument before hardware access.")
+    assert result["ok"] is False
+    assert result["field"] == "timeout_s"
+    assert service.calls == []
+
+
 def test_valid_defmt_plan_is_not_executable_yet(tmp_path: Path) -> None:
     from agentic_hil.test_reactor import TestConfig, build_test_step
 
@@ -6073,20 +6109,14 @@ def test_valid_defmt_plan_is_not_executable_yet(tmp_path: Path) -> None:
     direct_plan = TestConfig(path="direct-v7-defmt", name="v7-defmt", steps=[build_test_step(step) for step in steps])
 
     result = TestReactor(config, service).run(direct_plan)  # type: ignore[arg-type]
-    if result.get("error_type") != "not_supported":
-        raise AssertionError("valid defmt plans must be refused as not_supported before hardware calls")
-    assert result["ok"] is False
-    assert result["error_type"] == "not_supported"
-    assert result["failed_step"] == 2
-    assert result["validation_error"]["field"] == "steps[1].steps[0].defmt"
-    assert result["validation_error"]["summary"] == "Defmt plan assertions are not executable in this version yet."
-    assert result["steps"] == []
-    assert result["cleanup"] == []
-    assert service.calls == []
+    assert result.get("error_type") != "not_supported"
+    assert [record["action"] for record in result["steps"]] == ["reset", "repeat"]
+    nested = result["steps"][1]["iterations"][0]["steps"]
+    assert [record["action"] for record in nested] == ["uart_open", "defmt_expect"]
+    assert nested[1]["result"].get("error_type") != "not_supported"
+    assert [name for name, _ in service.calls[:2]] == ["reset_target", "com_session_start"]
 
     for step in steps[1]["steps"]:
         dispatch_service = RecordingService()
         dispatched = TestReactor(config, dispatch_service).execute_step(build_test_step(step))  # type: ignore[arg-type]
-        assert dispatched["ok"] is False
-        assert dispatched["error_type"] == "not_supported"
-        assert dispatch_service.calls == []
+        assert dispatched.get("error_type") != "not_supported"

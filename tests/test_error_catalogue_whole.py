@@ -649,7 +649,8 @@ SCANNED_MODULE_COUNT = 52
 # The defmt table a COM session or a flash capture decodes with (#810) adds
 # three, the 228th to the 230th: `defmt_table_not_available`,
 # `defmt_table_changed` and `defmt_table_invalid`.
-COLLECTED_TYPE_COUNT = 230
+# Defmt plan assertions (#837) add the defmt_expect_timeout type.
+COLLECTED_TYPE_COUNT = 231
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -717,7 +718,8 @@ COLLECTED_TYPE_COUNT = 230
 # The defmt table (#810) adds three, one function writing each of its three new
 # types: `AgenticHILToolService._defmt_binding` resolves the table a COM session
 # or a flash capture decodes with, and is the only writer of all three.
-PRODUCER_COUNT = 709
+# UartRunner._defmt_expect is the one producer of that type.
+PRODUCER_COUNT = 710
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
