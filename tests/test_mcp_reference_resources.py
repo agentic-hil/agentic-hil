@@ -242,6 +242,97 @@ def test_the_nine_shell_calls_that_recovered_the_plan_format_are_answered(servic
     assert "`mask:` is refused beside `signed`." in document
 
 
+def test_defmt_plan_timeout_and_generated_references(service: AgenticHILToolService) -> None:
+    """The public resources and contract explain the same version 7 plan."""
+    errors = json.loads(read_text(service, ERRORS_URI))
+    timeout = json.loads(read_text(service, ERROR_URI_PREFIX + "defmt_expect_timeout"))
+    matching = [entry for entry in errors["entries"] if entry["error_type"] == "defmt_expect_timeout" and "scope" not in entry]
+    assert matching == [timeout]
+    assert "decoded frame" in timeout["meaning"]
+    assert "timeout_s" in timeout["meaning"] and "reads" in timeout["meaning"]
+    remedy = " ".join(timeout["remediation"]).lower()
+    assert all(term in remedy for term in ("selectors", "received output", "elf"))
+    warning = " ".join(timeout["do_not"]).lower()
+    assert all(term in warning for term in ("do not raise", "timeout_s", "selectors", "received output"))
+
+    plan = read_text(service, TEST_PLAN_URI)
+    schema = json.loads(read_text(service, TEST_PLAN_SCHEMA_URI))
+    definitions = schema["$defs"]
+    assert 7 in schema["properties"]["version"]["enum"]
+    source = definitions["uartOpen"]["properties"]["defmt"]
+    assert source["x-since-version"] == 7 and source["$ref"] == "#/$defs/defmtSource"
+    source_choices = definitions["defmtSource"]["oneOf"]
+    assert any(choice.get("type") == "boolean" for choice in source_choices)
+    explicit_source = next(choice for choice in source_choices if choice.get("type") == "object")
+    assert "image_path" in explicit_source["required"] and "image_path" in explicit_source["properties"]
+
+    expect = definitions["defmtExpect"]
+    assert expect["x-since-version"] == 7 and "timeout_s" in expect["required"]
+    fields = expect["properties"]
+    assert fields["timeout_s"]["$ref"] == "#/$defs/positiveTimeout"
+    assert definitions["positiveTimeout"]["exclusiveMinimum"] == 0
+    selectors = ("level", "format", "text", "pattern", "args")
+    assert all(name in fields for name in selectors)
+    assert fields["args"]["items"]["$ref"] == "#/$defs/defmtArgumentSelector"
+    argument_choices = definitions["defmtArgumentSelector"]["oneOf"]
+    assert any(choice.get("type") == "null" for choice in argument_choices)
+    argument = next(choice for choice in argument_choices if choice.get("type") == "object")
+    assert {tuple(choice["required"]) for choice in argument["oneOf"]} == {("equals",), ("range",)}
+    assert {tuple(choice["not"]["required"]) for choice in argument["oneOf"]} == {("equals",), ("range",)}
+    assert argument["properties"]["equals"]["$ref"] == "#/$defs/defmtValue"
+    assert argument["properties"]["range"]["$ref"] == "#/$defs/defmtRange"
+    values = definitions["defmtValue"]
+    assert {choice["type"] for choice in values["anyOf"]} == {"null", "boolean", "number", "string", "array", "object"}
+    assert "distinction between booleans and numbers" in values["description"]
+    array_value = next(choice for choice in values["anyOf"] if choice["type"] == "array")
+    object_value = next(choice for choice in values["anyOf"] if choice["type"] == "object")
+    assert array_value["items"]["$ref"] == object_value["additionalProperties"]["$ref"] == "#/$defs/defmtValue"
+    bounds = definitions["defmtRange"]
+    assert set(bounds["required"]) == {"min", "max"}
+    assert all(bounds["properties"][key]["type"] == "number" for key in ("min", "max"))
+    assert "Inclusive finite bounds" in bounds["description"]
+    assert "minimum must not exceed the maximum" in bounds["description"]
+
+    opened = plan.split("### `uart_open`\n", 1)[1].split("\n### ", 1)[0].split("\n## ", 1)[0]
+    asserted = plan.split("### `defmt_expect`\n", 1)[1].split("\n### ", 1)[0].split("\n## ", 1)[0]
+    assert source["description"] in opened
+    assert all(term in source["description"] for term in ("confirmed flashed ELF", "`true`", "image_path", "`false`"))
+    assert f"Version {expect['x-since-version']} on." in asserted
+    assert expect["description"] in asserted
+    assert all(f"| `{name}` |" in asserted for name in selectors)
+    assert all(term in expect["description"] for term in (
+        "may be combined", "positional", "null leaves a slot unconstrained", "exactly one",
+        "`equals`", "inclusive `range`", "Frames after the match remain available",
+    ))
+
+    contract = (Path(__file__).resolve().parents[1] / "docs" / "test-plan-contract.md").read_text(encoding="utf-8")
+    if "`version:` (2, 3, 4, 5, 6 or 7)" not in contract:
+        raise AssertionError("contract page omits supported plan versions 6 and 7")
+
+    paragraphs = re.split(r"\n\s*\n", contract)
+    actions = [paragraph for paragraph in paragraphs if "`uart_open`" in paragraph and "`uart_write`" in paragraph]
+    assert any("`defmt_expect`" in paragraph and "serial" in paragraph for paragraph in actions)
+    relevant = [paragraph for paragraph in paragraphs if re.search(r"defmt|`args`|selectors", paragraph, re.IGNORECASE)]
+    details = " ".join(" ".join(relevant).replace("`", "").lower().split())
+    assert all(term in details for term in ("uart_open", "defmt_expect", "image_path", "true", "false", "elf"))
+    assert "confirmed" in details and ("flashed" in details or "flash" in details)
+    assert "explicit" in details and ("disable" in details or "disabled" in details)
+    assert all(term in details for term in ("level", "format", "text", "pattern", "args"))
+    assert re.search(r"(?:combin|independent)", details)
+    assert re.search(r"(?:level.{0,100}format|format.{0,100}level).{0,100}(?:equal|exact)", details)
+    assert re.search(r"text.{0,100}substring", details)
+    assert re.search(r"pattern.{0,100}(?:regular expression|regex)", details) and "search" in details
+    assert re.search(r"positional|position", details) and "null" in details
+    assert re.search(r"null.{0,100}(?:unconstrained|any|ignore|skip)", details)
+    assert "equals" in details and "range" in details and "inclusive" in details
+    assert re.search(r"(?:one|either).{0,100}(?:equals|range)", details)
+    assert re.search(r"recursive|nested", details) and "bool" in details and "number" in details
+    assert "frame" in details and re.search(r"(?:retain|remain|available)", details)
+    assert all(term in details for term in ("session", "source", "buffer"))
+    assert re.search(r"(?:session|source|buffer).{0,120}(?:invalid|clear|discard|chang)", details)
+    assert "testconfig.schema.json" in contract and "agentic-hil://reference/test-plan" in contract
+
+
 def test_the_plan_schema_resource_serves_the_shipped_file_unchanged(service: AgenticHILToolService) -> None:
     """Served the way the configuration schema is: the file, not a rendering of it.
 
