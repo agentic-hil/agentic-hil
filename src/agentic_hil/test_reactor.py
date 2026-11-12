@@ -2066,10 +2066,12 @@ class UartRunner(SessionDevice):
             reads += 1
             if result_failed(result):
                 return result
-            # A concurrent clear, replacement or source change invalidates the
-            # read as well as any previously retained records.
+            # A consuming read advances the epoch itself. Accept that one step;
+            # a concurrent clear, replacement or source change still invalidates
+            # the read as well as any previously retained records.
             current = self._sync_defmt()
-            if live is not None and current is not None and live[:3] == current[:3]:
+            if (live is not None and current is not None and live[:2] == current[:2]
+                    and current[2] == live[2] + (result.get("bytes_read", 0) > 0)):
                 self._defmt_frames.extend(frame for frame in result.get("frames", []) if isinstance(frame, dict))
             if not result.get("frames") and time.monotonic() < deadline:
                 time.sleep(min(UART_EXPECT_IDLE_POLL_S, max(0.0, deadline - time.monotonic())))

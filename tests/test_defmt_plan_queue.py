@@ -35,7 +35,9 @@ def _reference(record: dict) -> dict:
 
 
 def test_committed_burst_survives_nonclearing_repeat_opens(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defmt_images: dict[str, Path]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    defmt_images: dict[str, Path],
 ) -> None:
     """One reset feeds all 46 frames; repeat opens do not discard queued records."""
     board = Board()
