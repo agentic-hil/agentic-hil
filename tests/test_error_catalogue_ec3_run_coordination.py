@@ -949,7 +949,7 @@ SAYS: dict[str, Says] = {
         do_not=((r"do not treat this as a failed assertion",),),
     ),
     "defmt_expect_timeout": Says(
-        meaning=((r"defmt_expect", r"decoded frame", r"timeout_s"), (r"reads",)),
+        meaning=((r"defmt_expect", r"decoded frame"), (r"timeout_s|timeout",), (r"reads",)),
         first=(r"selectors", r"received output"),
         do_not=((r"do not raise `timeout_s`",),),
     ),
