@@ -66,7 +66,7 @@ class Runtime:
 
 
 @pytest.fixture
-def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Runtime]:
+def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defmt_images: dict[str, Path]) -> Iterator[Runtime]:
     board = Board()
     monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=board.construct))
     workspace = tmp_path / "workspace"
@@ -76,7 +76,7 @@ def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Runtime
     )
     image = workspace / "build" / "app.elf"
     image.parent.mkdir(parents=True, exist_ok=True)
-    image.write_bytes((FIXTURES / "defmt-fixture-rzcobs.elf").read_bytes())
+    image.write_bytes(defmt_images["rzcobs"].read_bytes())
     (workspace / "build" / "other.elf").write_bytes(image.read_bytes())
     config = load_config(str(config_path))
     service = AgenticHILToolService(config, backend=BoardBackend(board, banner=b""))
