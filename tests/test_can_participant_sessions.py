@@ -204,7 +204,7 @@ def test_reactor_plan_declares_the_named_participant_and_gates_new_plan_syntax(t
     assert outdated.value.details["plan_version"] == 5
     assert outdated.value.details["requires_plan_version"] == 6
 
-    plan_path.write_text("version: 7\nsteps:\n  - {device: dut, action: delay, duration_ms: 1}\n", encoding="utf-8")
+    plan_path.write_text("version: 8\nsteps:\n  - {device: dut, action: delay, duration_ms: 1}\n", encoding="utf-8")
     with pytest.raises(ConfigError) as unsupported:
         load_test_config(str(plan_path), str(workspace))
     assert "version" in unsupported.value.details["field"]

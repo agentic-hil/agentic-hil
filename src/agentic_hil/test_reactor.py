@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import time
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
 import yaml
-from jsonschema import Draft202012Validator, SchemaError
+from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
 from agentic_hil.backends.common import DEBUG_SESSION_WAY_OUT
 from agentic_hil.backends.gdbdebug import INTEGER_VALUE_WIDTHS
@@ -698,6 +700,7 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
     reject_superseded_plan_version(raw, str(path))
     validate_test_config_schema(raw, str(path))
     reject_features_newer_than_plan_version(raw, str(path))
+    validate_loaded_defmt_plan(raw["steps"], str(path))
     return TestConfig(path=str(path), name=str(raw.get("name") or path.stem), steps=[build_test_step(step) for step in raw["steps"]], sha256=digest)
 
 
@@ -771,6 +774,34 @@ def resolve_schema_node(node: Any, schema: JsonObject) -> JsonObject:
     return node
 
 
+def plan_action_schemas(schema: JsonObject | None = None) -> dict[str, str]:
+    """Action names admitted by the recursive plan schema, including contracts
+    that are intentionally not executable device actions.
+
+    `ACTION_SCHEMAS` remains the executable declaration projection. Plan
+    validation has a different job: it must recognize a schema-only action so
+    its shape and version marker can be checked without inventing a device
+    implementation for it.
+    """
+    document = schema or test_config_schema()
+    definitions = document.get("$defs", {})
+    steps = definitions.get("steps", {})
+    items = steps.get("items", {}) if isinstance(steps, dict) else {}
+    alternatives = items.get("oneOf", ()) if isinstance(items, dict) else ()
+    result: dict[str, str] = {}
+    for alternative in alternatives:
+        reference = alternative.get("$ref") if isinstance(alternative, dict) else None
+        if not isinstance(reference, str) or not reference.startswith("#/$defs/"):
+            continue
+        schema_name = reference.rsplit("/", 1)[-1]
+        definition = definitions.get(schema_name, {})
+        properties = definition.get("properties", {}) if isinstance(definition, dict) else {}
+        action = properties.get("action", {}).get("const") if isinstance(properties, dict) else None
+        if isinstance(action, str):
+            result[action] = schema_name
+    return result
+
+
 def reject_features_newer_than_plan_version(raw: JsonObject, path: str | None = None) -> None:
     """Refuse a plan that uses a step format its own `version` predates.
 
@@ -794,8 +825,9 @@ def reject_newer_features_in_steps(steps: list[Any], version: int, schema: JsonO
     `repeat`, which would be exactly the plan that runs here and is refused on
     an older install for no stated reason. Reached only after schema validation,
     so every step is a mapping and every action is one the schema knows."""
+    action_schemas = plan_action_schemas(schema)
     for index, step in enumerate(steps):
-        definition = schema["$defs"][ACTION_SCHEMAS[step["action"]]]
+        definition = schema["$defs"][action_schemas[step["action"]]]
         introduced = definition.get(PLAN_FEATURE_VERSION_KEY)
         if isinstance(introduced, int) and version < introduced:
             raise_outdated_plan_version(path, f"{prefix}[{index}].action", step["action"], version, introduced)
@@ -847,12 +879,33 @@ def validate_test_config_schema(raw: JsonObject, path: str | None = None) -> Non
     validate_test_steps_schema(raw["steps"], blanked, path, ["steps"])
 
 
+def deepest_schema_error(errors: Sequence[Any]) -> Any:
+    """Choose the most specific leaf from an aggregate schema failure."""
+    leaves: list[Any] = []
+
+    def collect(error: Any) -> None:
+        if error.context:
+            for child in error.context:
+                collect(child)
+        else:
+            leaves.append(error)
+
+    for error in errors:
+        collect(error)
+    candidates = leaves or list(errors)
+    return sorted(candidates, key=lambda item: (-len(item.absolute_path), tuple(str(part) for part in item.absolute_path)))[0]
+
+
 def validate_test_steps_schema(steps: list[Any], schema: JsonObject, path: str | None, prefix: list[str]) -> None:
     """Hold one list of steps to the schema, and descend into the nested lists.
 
     `prefix` is the field path of the list, so a step inside a block step is
     named where it actually is (`steps[2].steps[1].action`) rather than at the
     top level, where a reader would count down the file and find another step."""
+    # `schema` here is the validation copy whose recursive step items are
+    # blanked so each nested action can be reported at its own field path.
+    # Read action names from the intact bundled schema, not that copy.
+    action_schemas = plan_action_schemas(test_config_schema())
     for index, step in enumerate(steps):
         if not isinstance(step, dict):
             raise ConfigError(
@@ -861,7 +914,7 @@ def validate_test_steps_schema(steps: list[Any], schema: JsonObject, path: str |
                 {"path": path, "field": format_test_config_field([*prefix, str(index)]), "value": step},
             )
         action = step.get("action")
-        if action not in ACTION_SCHEMAS:
+        if action not in action_schemas:
             raise ConfigError(
                 "test_config_invalid",
                 "Test reactor action has an unsupported value.",
@@ -869,19 +922,176 @@ def validate_test_steps_schema(steps: list[Any], schema: JsonObject, path: str |
                     "path": path,
                     "field": format_test_config_field([*prefix, str(index), "action"]),
                     "value": action,
-                    "allowed_values": list(ACTION_SCHEMAS),
+                    "allowed_values": sorted(action_schemas),
                 },
             )
-        step_schema = {**schema["$defs"][ACTION_SCHEMAS[action]], "$defs": schema["$defs"]}
+        step_schema = {**schema["$defs"][action_schemas[action]], "$defs": schema["$defs"]}
         step_errors = sorted(Draft202012Validator(step_schema).iter_errors(step), key=lambda item: list(item.absolute_path))
         if step_errors:
-            raise_test_config_validation_error(step_errors[0], path, [*prefix, str(index)])
+            error = deepest_schema_error(step_errors) if action == "defmt_expect" else step_errors[0]
+            raise_test_config_validation_error(error, path, [*prefix, str(index)])
         nested = step.get("steps")
         if action == REPEAT_ACTION and isinstance(nested, list):
             validate_test_steps_schema(nested, schema, path, [*prefix, str(index), "steps"])
 
 
-def raise_test_config_validation_error(error: Any, path: str | None, prefix: list[str] | None = None) -> None:
+def defmt_step_contract_issue(document: Mapping[str, Any], schema: JsonObject | None = None) -> JsonObject | None:
+    """Return the first invalid field in a defmt-bearing plan step.
+
+    The schema handles the structural contract. A few properties that JSON
+    Schema cannot express, such as compiling Python regular expressions and
+    comparing arbitrary recursive JSON values without coercion, are checked
+    here as well. This same function serves loading, whole-plan preflight and
+    direct dispatch.
+    """
+    action = document.get("action")
+    if action == "uart_open":
+        if "defmt" not in document:
+            return None
+    elif action != "defmt_expect":
+        return None
+
+    plan_schema = schema or test_config_schema()
+    action_schema = plan_action_schemas(plan_schema).get(str(action))
+    if action_schema is None:
+        return {"field_parts": ["action"], "summary": "Defmt plan action is absent from the bundled schema.", "validator": "schema"}
+    definition = plan_schema["$defs"][action_schema]
+    validator = Draft202012Validator({**definition, "$defs": plan_schema["$defs"]})
+    errors = sorted(validator.iter_errors(dict(document)), key=lambda item: tuple(str(part) for part in item.absolute_path))
+    if errors:
+        error = deepest_schema_error(errors)
+        field_parts = [str(part) for part in error.absolute_path]
+        if error.validator == "required":
+            missing = next((name for name in error.validator_value if name not in error.instance), None)
+            if missing is not None:
+                field_parts.append(str(missing))
+        elif error.validator == "additionalProperties":
+            match = re.search(r"'([^']+)' was unexpected", error.message)
+            if match:
+                field_parts.append(match.group(1))
+        return {
+            "field_parts": field_parts or ["action"],
+            "summary": "Defmt plan step does not satisfy its version 7 contract.",
+            "validator": str(error.validator),
+        }
+
+    if action == "defmt_expect":
+        pattern = document.get("pattern")
+        if isinstance(pattern, str):
+            try:
+                re.compile(pattern)
+            except re.error as error:
+                return {
+                    "field_parts": ["pattern"],
+                    "summary": "Defmt pattern is not a valid Python regular expression.",
+                    "validator": "regex",
+                    "regex_error": str(error),
+                }
+
+        args = document.get("args")
+        if isinstance(args, list):
+            for index, selector in enumerate(args):
+                if not isinstance(selector, dict):
+                    continue
+                if "equals" in selector:
+                    invalid_path = non_json_value_path(selector["equals"], ["args", str(index), "equals"])
+                    if invalid_path is not None:
+                        return {
+                            "field_parts": invalid_path,
+                            "summary": "Defmt equality selectors must contain only finite JSON values with string object keys.",
+                            "validator": "json_value",
+                        }
+                range_value = selector.get("range")
+                if isinstance(range_value, dict):
+                    minimum, maximum = range_value.get("min"), range_value.get("max")
+                    for bound_name, bound_value in (("min", minimum), ("max", maximum)):
+                        if type(bound_value) is float and not math.isfinite(bound_value):
+                            return {
+                                "field_parts": ["args", str(index), "range", bound_name],
+                                "summary": "Defmt range bounds must be finite.",
+                                "validator": "finite",
+                            }
+                    if type(minimum) in (int, float) and type(maximum) in (int, float) and minimum > maximum:
+                        return {
+                            "field_parts": ["args", str(index), "range"],
+                            "summary": "Defmt range minimum must not exceed its maximum.",
+                            "validator": "ordered_range",
+                        }
+    return None
+
+
+def non_json_value_path(value: Any, path: list[str]) -> list[str] | None:
+    """Find an invalid or non-finite value without converting its type."""
+    if value is None or type(value) in (bool, int, str):
+        return None
+    if type(value) is float:
+        return None if math.isfinite(value) else path
+    if type(value) is list:
+        for index, item in enumerate(value):
+            invalid = non_json_value_path(item, [*path, str(index)])
+            if invalid is not None:
+                return invalid
+        return None
+    if type(value) is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                return path
+            invalid = non_json_value_path(item, [*path, key])
+            if invalid is not None:
+                return invalid
+        return None
+    return path
+
+
+def test_step_document(step: TestStep) -> JsonObject:
+    """Reconstruct the public plan shape held by a directly built step."""
+    document: JsonObject = {"action": step.action, **step.arguments}
+    for route_field in ROUTE_FIELDS:
+        route_value = getattr(step, route_field)
+        if route_value is not None:
+            document[route_field] = route_value
+    if step.action == REPEAT_ACTION:
+        document["steps"] = [test_step_document(nested) for nested in step.steps]
+    return document
+
+
+def located_test_steps(steps: Sequence[TestStep], locate: Callable[[int], StepLocation]) -> Iterator[tuple[StepLocation, TestStep]]:
+    """Yield a plan's steps in document order, including nested repeats."""
+    for index, step in enumerate(steps, start=1):
+        location = locate(index)
+        yield location, step
+        if step.action == REPEAT_ACTION:
+            yield from located_test_steps(step.steps, location.nested)
+
+
+def validate_loaded_defmt_plan(steps: list[Any], path: str, prefix: list[str] | None = None) -> None:
+    """Apply semantic defmt checks to each loaded step, including repeats."""
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        issue = defmt_step_contract_issue(step)
+        if issue is not None:
+            error = ValidationError(
+                str(issue["summary"]),
+                validator=str(issue.get("validator", "schema")),
+                instance={},
+                path=issue["field_parts"],
+            )
+            error.regex_error = issue.get("regex_error")
+            raise_test_config_validation_error(
+                error,
+                path,
+                [*(prefix or ["steps"]), str(index)],
+                schema_error=str(issue["summary"]),
+            )
+        nested = step.get("steps")
+        if step.get("action") == REPEAT_ACTION and isinstance(nested, list):
+            validate_loaded_defmt_plan(nested, path, [*(prefix or ["steps"]), str(index), "steps"])
+
+
+def raise_test_config_validation_error(
+    error: Any, path: str | None, prefix: list[str] | None = None, *, schema_error: str | None = None
+) -> None:
     parts = [*(prefix or []), *(str(part) for part in error.absolute_path)]
     if error.validator == "required":
         missing = next((name for name in error.validator_value if name not in error.instance), None)
@@ -895,13 +1105,15 @@ def raise_test_config_validation_error(error: Any, path: str | None, prefix: lis
     details: JsonObject = {
         "path": path,
         "field": field,
-        "schema_error": "Value does not satisfy the test configuration schema.",
+        "schema_error": schema_error or "Value does not satisfy the test configuration schema.",
         "validator": error.validator,
     }
     if isinstance(error.instance, (str, int, float, bool)) or error.instance is None:
         details["value"] = error.instance[:128] if isinstance(error.instance, str) else error.instance
     if error.validator in {"enum", "const"}:
         details["allowed_values"] = error.validator_value if error.validator == "enum" else [error.validator_value]
+    if getattr(error, "regex_error", None) is not None:
+        details["regex_error"] = error.regex_error
     if error.validator == "oneOf":
         # A step whose alternatives are "exactly one of these keys": the shape
         # `uart_expect` uses for `text` / `pattern`. Bare, a oneOf failure names
@@ -1363,13 +1575,19 @@ class StepDevice:
 
     # --- run time --------------------------------------------------------
 
-    def execute(self, step: TestStep) -> JsonObject:
+    def execute(
+        self: StepDevice | None,
+        step: TestStep,
+        *,
+        contract_issue: JsonObject | None = None,
+    ) -> JsonObject:
         """Dispatch, written exactly once for every device kind there is.
 
         Look the action string up among this device's declarations, hold the step
         to that action's own schema, call the method. A string this kind does not
         declare is `not_supported` naming the kind by construction. There is no
         table to forget to add it to."""
+        assert self is not None
         bound = self.actions.get(step.action)
         if bound is None:
             return {
@@ -1381,7 +1599,7 @@ class StepDevice:
                 "action": step.action,
                 "supported_actions": sorted(self.actions),
             }
-        invalid = self.schema_refusal(bound.spec, step)
+        invalid = self.schema_refusal(bound.spec, step, route_id=self.id)
         if invalid is not None:
             return invalid
         if bound.spec.touches_device:
@@ -1391,13 +1609,39 @@ class StepDevice:
             self.drove_device = True
         return bound.call(step)
 
-    def schema_refusal(self, spec: StepActionSpec, step: TestStep) -> JsonObject | None:
+    @classmethod
+    def schema_refusal(
+        cls,
+        spec: StepActionSpec | None,
+        step: TestStep,
+        *,
+        route_id: str | None = None,
+        contract_issue: JsonObject | None = None,
+    ) -> JsonObject | None:
         """The step, put back together and held to its action's schema.
 
         `load_test_config` already does this for a plan it read; this is the same
         check on the dispatch path, so a step some other caller assembled cannot
         reach a device method carrying arguments the format never allowed."""
-        errors = action_schema_errors(spec.schema, {"action": spec.name, self.route_field: self.id, **step.arguments})
+        if contract_issue is not None:
+            result: JsonObject = {
+                "ok": False,
+                "tool": "test_reactor_run",
+                "error_type": "invalid_argument",
+                "summary": contract_issue["summary"],
+                "action": step.action,
+                "field": format_test_config_field(contract_issue["field_parts"]),
+                "validator": contract_issue.get("validator", "schema"),
+            }
+            if contract_issue.get("regex_error") is not None:
+                result["regex_error"] = contract_issue["regex_error"]
+            if cls.route_field:
+                result[cls.route_field] = route_id or getattr(step, cls.route_field) or step.device
+            return result
+        assert spec is not None
+        route_field = cls.route_field
+        resolved_route_id = route_id or getattr(step, route_field) or step.device
+        errors = action_schema_errors(spec.schema, {"action": spec.name, route_field: resolved_route_id, **step.arguments})
         if not errors:
             return None
         return {
@@ -1405,7 +1649,7 @@ class StepDevice:
             "tool": "test_reactor_run",
             "error_type": "invalid_argument",
             "summary": "Test step does not satisfy its action's schema.",
-            self.route_field: self.id,
+            route_field: resolved_route_id,
             "action": step.action,
             "field": format_test_config_field([str(part) for part in errors[0].absolute_path]),
             "validator": errors[0].validator,
@@ -1591,6 +1835,48 @@ class SessionDevice(StepDevice):
         return records
 
 
+def defmt_json_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values without equating booleans with numbers."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, list):
+        return len(left) == len(right) and all(defmt_json_equal(a, b) for a, b in zip(left, right, strict=True))
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(defmt_json_equal(left[key], right[key]) for key in left)
+    return left == right
+
+
+def defmt_frame_matches(frame: JsonObject, selectors: JsonObject, pattern: re.Pattern[str] | None) -> bool:
+    if "error" in frame:
+        return False
+    if any(key in selectors and frame.get(key) != selectors[key] for key in ("level", "format")):
+        return False
+    rendered = frame.get("text")
+    if "text" in selectors and (not isinstance(rendered, str) or selectors["text"] not in rendered):
+        return False
+    if pattern is not None and (not isinstance(rendered, str) or pattern.search(rendered) is None):
+        return False
+    selected = selectors.get("args", [])
+    values = frame.get("args", [])
+    if not isinstance(values, list) or len(values) < len(selected):
+        return False
+    for selector, value in zip(selected, values, strict=False):
+        if selector is None:
+            continue
+        if "equals" in selector:
+            if not defmt_json_equal(value, selector["equals"]):
+                return False
+        else:
+            bounds = selector["range"]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not bounds["min"] <= value <= bounds["max"]:
+                return False
+    return True
+
+
 class UartRunner(SessionDevice):
     """A configured serial line, as a plan opens it, waits on it and closes it."""
 
@@ -1609,6 +1895,39 @@ class UartRunner(SessionDevice):
     session_noun: ClassVar[str] = "UART"
     not_owned_error: ClassVar[str] = "uart_session_not_owned"
     not_owned_summary: ClassVar[str] = "A test plan cannot close a UART session it did not open."
+
+    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService, **kwargs: Any):
+        super().__init__(config_id, device, service, **kwargs)
+        self._defmt_frames: deque[JsonObject] = deque()
+        self._defmt_session: object | None = None
+        self._defmt_identity: tuple[str, str] | None = None
+        self._defmt_epoch: int | None = None
+
+    def _live_defmt(self) -> tuple[Any, tuple[str, str], int, JsonObject] | None:
+        """Read the current decoding binding, including its current proof."""
+        ports = getattr(self.service, "com_ports", None)
+        if ports is None:
+            return None
+        active = ports._active_session(self.id, "com_read")
+        if not active.get("ok"):
+            return None
+        session = active["session"]
+        with session.lock:
+            stream = session.defmt
+            if stream is None or stream.identity is None:
+                return None
+            return session, stream.identity, session.buffer_epoch, stream.describe()
+
+    def _sync_defmt(self) -> tuple[Any, tuple[str, str], int, JsonObject] | None:
+        live = self._live_defmt()
+        if (live is None or live[0] is not self._defmt_session
+                or live[1] != self._defmt_identity or live[2] != self._defmt_epoch):
+            self._defmt_frames.clear()
+        if live is None:
+            self._defmt_session = self._defmt_identity = self._defmt_epoch = None
+        else:
+            self._defmt_session, self._defmt_identity, self._defmt_epoch = live[:3]
+        return live
 
     @classmethod
     def config_entries(cls, config: AgenticHILConfig) -> Mapping[str, Any]:
@@ -1675,11 +1994,22 @@ class UartRunner(SessionDevice):
 
     @step_action("uart_open", schema="uartOpen", tool="com_session_start", defaults={"clear_buffer": True}, role="open")
     def _uart_open(self, step: TestStep) -> JsonObject:
-        return self.open_session(step)
+        # Only a retained frame needs a binding check. Ordinary UART opens do
+        # not depend on a decoding session being available.
+        if self._defmt_frames:
+            self._sync_defmt()
+        result = self.open_session(step)
+        if self._defmt_frames:
+            self._sync_defmt()
+        return result
 
     @step_action("uart_close", schema="uartClose", tool="com_session_stop", role="close")
     def _uart_close(self, step: TestStep) -> JsonObject:
-        return self.close_session(step)
+        result = self.close_session(step)
+        if result.get("ok") is True:
+            self._defmt_frames.clear()
+            self._defmt_session = None
+        return result
 
     @step_action("uart_write", schema="uartWrite", tool="com_write")
     def _uart_write(self, step: TestStep) -> JsonObject:
@@ -1696,6 +2026,54 @@ class UartRunner(SessionDevice):
         # the result reports it under.
         field_name = next(name for name in self.expect_fields if step.arguments.get(name) is not None)
         return self._expect(field_name, str(step.arguments[field_name]), float(step.arguments["timeout_s"]))
+
+    @step_action("defmt_expect", schema="defmtExpect", tool="com_read", forwards_arguments=False)
+    def _defmt_expect(self, step: TestStep) -> JsonObject:
+        """Match decoded frames in order, retaining those after the match."""
+        timeout_s = float(step.arguments["timeout_s"])
+        deadline = time.monotonic() + timeout_s
+        reads = 0
+        pattern = re.compile(step.arguments["pattern"]) if "pattern" in step.arguments else None
+        while True:
+            if self.stop_requested():
+                return {"ok": True, "tool": "test_reactor_run", "port_id": self.id,
+                        "summary": "Defmt assertion stopped on request.", "stop_requested": True, "reads": reads}
+            live = self._sync_defmt()
+            while self._defmt_frames:
+                if self.stop_requested():
+                    return {"ok": True, "tool": "test_reactor_run", "port_id": self.id,
+                            "summary": "Defmt assertion stopped on request.", "stop_requested": True, "reads": reads}
+                live = self._sync_defmt()
+                if not self._defmt_frames:
+                    break
+                frame = self._defmt_frames.popleft()
+                if defmt_frame_matches(frame, step.arguments, pattern):
+                    return {"ok": True, "tool": "test_reactor_run", "port_id": self.id,
+                            "summary": "A matching defmt frame was received.", "frame": frame,
+                            "reads": reads, "timeout_s": timeout_s, "defmt": live[3] if live else {}}
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 and reads:
+                break
+            result = self.service.call("com_read", {"port_id": self.id, "wait_timeout_s": max(0.0, min(remaining, 0.1))})
+            reads += 1
+            if result_failed(result):
+                return result
+            # A concurrent clear, replacement or source change invalidates the
+            # read as well as any previously retained records.
+            current = self._sync_defmt()
+            if live is not None and current is not None and live[:3] == current[:3]:
+                self._defmt_frames.extend(frame for frame in result.get("frames", []) if isinstance(frame, dict))
+            if not result.get("frames") and time.monotonic() < deadline:
+                time.sleep(min(UART_EXPECT_IDLE_POLL_S, max(0.0, deadline - time.monotonic())))
+        return {
+            "ok": False,
+            "tool": "test_reactor_run",
+            "error_type": "defmt_expect_timeout",
+            "summary": f"No defmt frame matching the step was received within {timeout_s} s.",
+            "port_id": self.id,
+            "timeout_s": timeout_s,
+            "reads": reads,
+        }
 
     @step_action("uart_read", schema="uartRead", tool="com_read", forwards_arguments=False)
     def _uart_read(self, step: TestStep) -> JsonObject:
@@ -2997,6 +3375,12 @@ class TestReactor:
         The device supplies its own config-entry name, so a step cannot address
         one entry and reach another, and the reactor does not need to know which
         kind of thing it just asked."""
+        if step.action == "defmt_expect" or (step.action == "uart_open" and "defmt" in step.arguments):
+            issue = defmt_step_contract_issue(test_step_document(step))
+            if issue is not None:
+                refusal = StepDevice.schema_refusal(None, step, contract_issue=issue)
+                assert refusal is not None
+                return refusal
         try:
             device = self.step_device(step)
         except DeviceError as error:
@@ -3376,6 +3760,24 @@ class TestReactor:
         The walk is device-kind-blind: each step is handed to the class that
         serves its action, which answers for its own config entry, its own
         permissions and its own session. Nothing here is built: see PlanState."""
+        located = list(located_test_steps(test_config.steps, StepLocation.top))
+        # Validate every defmt addition before any step can drive hardware.
+        for location, step in located:
+            issue = defmt_step_contract_issue(test_step_document(step))
+            if issue is not None:
+                refusal = StepDevice.schema_refusal(None, step, contract_issue=issue)
+                details = {
+                    key: value
+                    for key, value in refusal.items()
+                    if key not in {"ok", "tool", "action", "field", "summary", *ROUTE_FIELDS}
+                }
+                return preflight_error(
+                    location,
+                    step,
+                    format_test_config_field(issue["field_parts"]),
+                    issue["summary"],
+                    details,
+                )
         state = PlanState()
         return self._preflight_steps(test_config.steps, StepLocation.top, state)
 
