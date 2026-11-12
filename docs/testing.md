@@ -84,12 +84,45 @@ from child `PATH` and package-index access disabled. It needs the project's
 development and build dependencies already installed. CI separately replays
 the focused tests after collecting the extracted sdist.
 
-Optional regeneration uses `python tools/defmt_reference.py`, the Rust sources
-under `tests/fixtures/defmt/firmware/` and `reference-decoder/`, and the pinned
-official `defmt-decoder` harness. It requires Cargo, the
-`thumbv7em-none-eabihf` target, and initial access to crates.io. Regeneration is
-a separate maintenance action that rewrites the corpus; it is never part of
-Rust-free replay or this decoder's acceptance checks.
+### Fresh defmt parity verification
+
+From the repository root, fetch both locked dependency sets while crates.io is
+available. The verification builds run offline, so they cannot fetch missing
+crates. Then generate the retained evidence and verify it:
+
+```bash
+cargo fetch --locked --manifest-path tests/fixtures/defmt/reference-decoder/Cargo.toml
+cargo fetch --locked --manifest-path tests/fixtures/defmt/firmware/Cargo.toml
+python tools/defmt_reference.py --verify --target-dir /tmp/defmt-reference-target --evidence tools/defmt_reference_parity.json --write
+python tools/defmt_reference.py --verify --target-dir /tmp/defmt-reference-target --evidence tools/defmt_reference_parity.json
+```
+
+For each of `rzcobs`, `raw` and `errors`, verification compares official
+output decoded from the committed image and stream, Python output projected
+from that same committed image and stream, the committed JSONL expectation,
+and official output decoded from the rebuilt image and regenerated stream.
+It requires regenerated stream bytes to equal their committed counterparts
+and exactly 46 `rzcobs`, 46 `raw` and 9 `errors` records. Comparisons are exact
+and ordered. It hashes the committed images, streams, expectations and Cargo
+locks before and after the run, and fails if any committed input changes.
+
+The generated `tools/defmt_reference_parity.json` records the Rust and Python
+tool versions, host and firmware target, locked decoder version, input and
+rebuilt-image digests, per-source record counts and JSONL digests, stream byte
+equality and discrepancies. The ordinary verification command omits
+`--write`; it recomputes the evidence and requires byte-for-byte equality with
+the retained file as well as zero discrepancies. Verification writes only the
+evidence file in the repository; build products and regenerated streams stay
+in the isolated workspace and Cargo target directory. Verification needs
+Cargo, the `thumbv7em-none-eabihf` target and the dependencies fetched by the
+two locked fetch commands. The first fetch needs crates.io access. Evidence
+describes the recorded toolchain and pinned crates;
+rebuilt image bytes can vary with the Rust toolchain. The firmware is never
+run, so this check does not establish board runtime or transport behavior.
+
+Plain `python tools/defmt_reference.py` remains the separate maintenance
+command that regenerates and rewrites the committed corpus. Neither fresh
+verification nor regeneration is part of Rust-free replay or ordinary CI.
 
 ## Test Reactor
 
