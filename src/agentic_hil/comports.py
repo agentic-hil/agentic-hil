@@ -1021,6 +1021,7 @@ class ComPortSession:
                             if overflow > 0:
                                 del self.buffer[:overflow]
                                 self.overflow_bytes += overflow
+                                self.buffer_epoch += 1
                             self.received.append(chunk)
                         self.received_ready.set()
                 if not data:
