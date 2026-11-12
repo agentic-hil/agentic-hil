@@ -399,7 +399,7 @@ if packet["mode"] == "pytest":
     code = pytest.main(packet["arguments"] + ["-p", "no:cacheprovider", "-o", "addopts="], plugins=[results])
     assert code == 0, code
     if not packet.get("collect"):
-        assert results.collected == 71 and results.deselected == 0
+        assert results.collected == 73 and results.deselected == 0
         assert results.calls == ["passed"] * (results.collected - results.skipped), results.calls
         assert results.skipped > 0
         for name in ("defmt_wire", "scenario", "test_defmt", "test_defmt_regressions"):
