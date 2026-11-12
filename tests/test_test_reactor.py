@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -2508,11 +2509,18 @@ def test_every_device_kind_answers_for_its_own_actions() -> None:
         # shape in the bundled schema, and no device kind claiming it.
         assert schema_name in schema["$defs"], f"{action} names a schema $def that does not exist"
         assert step_device_classes(action) == ()
-    # Every step shape the schema offers is served, and every action has a
-    # shape. A `$def` nobody dispatches is a step a plan can be written against
-    # and nothing will run.
+    # Every executable step shape is served, with the one version-7 defmt
+    # contract action kept in the schema vocabulary before runtime dispatch is
+    # implemented.
     offered = {str(branch["$ref"]).rsplit("/", 1)[-1] for branch in schema["$defs"]["steps"]["items"]["oneOf"]}
-    assert offered == set(ACTION_SCHEMAS.values())
+    executable_schemas = set(ACTION_SCHEMAS.values())
+    assert executable_schemas <= offered
+    contract_only = offered - executable_schemas
+    assert contract_only <= {"defmtExpect"}
+    if "defmtExpect" in contract_only:
+        defmt_expect = schema["$defs"]["defmtExpect"]
+        assert defmt_expect["properties"]["action"]["const"] == "defmt_expect"
+        assert defmt_expect["x-since-version"] == 7
 
 
 def test_the_schema_is_exported_without_building_a_single_device() -> None:
@@ -5871,3 +5879,214 @@ def test_a_read_free_bench_admits_a_sessionless_read_with_no_allow_probe(tmp_pat
 
     assert result["ok"] is True, result
     assert [name for name, _ in service.calls] == ["debug_symbol_value"]
+
+
+def test_v7_defmt_contract_and_nested_version_gates(tmp_path: Path) -> None:
+    from agentic_hil.test_reactor import test_config_schema
+
+    # This is deliberately the first assertion in the test: version 7 must
+    # load through the public plan loader before any schema introspection.
+    plan_document = {
+        "version": 7,
+        "name": "defmt-contract",
+        "steps": [
+            {"port_id": "dut_uart", "action": "uart_open", "defmt": True},
+            {
+                "port_id": "dut_uart",
+                "action": "defmt_expect",
+                "timeout_s": 1.0,
+                "level": "info",
+                "format": "boot {=bool} value {=u32}",
+                "text": "ready",
+                "pattern": r"ready.*",
+                "args": [
+                    None,
+                    {"equals": None},
+                    {
+                        "equals": {
+                            "null": None,
+                            "string": "ready",
+                            "boolean": True,
+                            "integer": 1,
+                            "fraction": 1.25,
+                            "array": [False, 2, None],
+                            "object": {"nested": {"enabled": False, "count": 3}},
+                        }
+                    },
+                    {"range": {"min": 5.0, "max": 5.0}},
+                ],
+            },
+            {
+                "action": "repeat",
+                "count": 1,
+                "steps": [{"port_id": "dut_uart", "action": "uart_open", "defmt": {"image_path": "build/app.elf"}}],
+            },
+        ],
+    }
+    plan_path = write_test_config(tmp_path, json.dumps(plan_document))
+    loaded = load_test_config(str(plan_path), str(tmp_path))
+
+    expectation = loaded.steps[1]
+    assert expectation.arguments["level"] == "info"
+    assert expectation.arguments["format"] == "boot {=bool} value {=u32}"
+    assert expectation.arguments["text"] == "ready"
+    assert expectation.arguments["pattern"] == r"ready.*"
+    args = expectation.arguments["args"]
+    assert args[0] is None
+    assert args[1] == {"equals": None}
+    recursive = args[2]["equals"]
+    expected_recursive = {
+        "null": None,
+        "string": "ready",
+        "boolean": True,
+        "integer": 1,
+        "fraction": 1.25,
+        "array": [False, 2, None],
+        "object": {"nested": {"enabled": False, "count": 3}},
+    }
+    assert json.dumps(recursive, sort_keys=True) == json.dumps(expected_recursive, sort_keys=True)
+    assert (type(recursive["boolean"]), type(recursive["integer"]), type(recursive["fraction"])) == (bool, int, float)
+    assert args[3] == {"range": {"min": 5.0, "max": 5.0}}
+    assert loaded.steps[2].steps[0].arguments["defmt"] == {"image_path": "build/app.elf"}
+
+    for source_index, source in enumerate((False, {"image_path": "build/other.elf"})):
+        alternative = json.loads(json.dumps(plan_document))
+        alternative["steps"][0]["defmt"] = source
+        alternative_path = write_test_config(tmp_path / f"source-{source_index}", json.dumps(alternative))
+        source_plan = load_test_config(str(alternative_path), str(alternative_path.parent.parent))
+        assert source_plan.steps[0].arguments["defmt"] == source
+
+    for level in ("trace", "debug", "info", "warn", "error"):
+        alternative = json.loads(json.dumps(plan_document))
+        alternative["steps"][1]["level"] = level
+        alternative_path = write_test_config(tmp_path / f"level-{level}", json.dumps(alternative))
+        level_plan = load_test_config(str(alternative_path), str(alternative_path.parent.parent))
+        assert level_plan.steps[1].arguments["level"] == level
+
+    schema = test_config_schema()
+    assert 7 in schema["properties"]["version"]["enum"]
+    uart_open = schema["$defs"]["uartOpen"]
+    assert uart_open["properties"]["defmt"]["x-since-version"] == 7
+    steps = schema["$defs"]["steps"]["items"]["oneOf"]
+    defmt_expect_ref = next(branch["$ref"] for branch in steps if branch["$ref"].endswith("/defmtExpect"))
+    defmt_expect = schema["$defs"][defmt_expect_ref.rsplit("/", 1)[-1]]
+    assert defmt_expect["properties"]["action"]["const"] == "defmt_expect"
+    assert defmt_expect["x-since-version"] == 7
+
+    for step, expected_field in (
+        ({"port_id": "dut_uart", "action": "uart_open", "defmt": True}, "steps[0].steps[0].defmt"),
+        (
+            {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "level": "info"},
+            "steps[0].steps[0].action",
+        ),
+    ):
+        older_plan = {"version": 6, "steps": [{"action": "repeat", "count": 1, "steps": [step]}]}
+        older_path = write_test_config(tmp_path / "older" / expected_field.rsplit(".", 1)[-1], json.dumps(older_plan))
+        with pytest.raises(ConfigError) as outdated:
+            load_test_config(str(older_path), str(older_path.parent.parent.parent))
+        assert outdated.value.error_type == "test_config_invalid"
+        assert outdated.value.details["plan_version"] == 6
+        assert outdated.value.details["requires_plan_version"] == 7
+        assert outdated.value.details["field"] == expected_field
+        assert "version: 7" in outdated.value.details["migration"]
+
+
+def test_defmt_selector_validation_precedes_hardware(tmp_path: Path) -> None:
+    import yaml
+
+    from agentic_hil.test_reactor import TestConfig, build_test_step
+
+    malformed = [
+        {"name": "numeric-level", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "level": 23}, "field": "level"},
+        {"name": "invalid-source-type", "loadable": True, "step": {"port_id": "dut_uart", "action": "uart_open", "defmt": "build/app.elf"}, "field": "defmt"},
+        {"name": "empty-image-path", "loadable": True, "step": {"port_id": "dut_uart", "action": "uart_open", "defmt": {"image_path": ""}}, "field": "defmt"},
+        {"name": "wrong-format-type", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "format": 1}, "field": "format"},
+        {"name": "wrong-text-type", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "text": ["ready"]}, "field": "text"},
+        {"name": "wrong-pattern-type", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "pattern": 1}, "field": "pattern"},
+        {"name": "bad-pattern", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "pattern": "["}, "field": "pattern"},
+        {"name": "wrong-args-type", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "args": "one"}, "field": "args"},
+        {"name": "wrong-argument-slot", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "args": ["one"]}, "field": "args[0]"},
+        {"name": "empty-argument-selector", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "args": [{}]}, "field": "args[0]"},
+        {"name": "equals-and-range", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "args": [{"equals": 1, "range": {"min": 1, "max": 2}}]}, "field": "args[0]"},
+        {"name": "missing-range-bound", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "args": [{"range": {"min": 1}}]}, "field": "args[0].range"},
+        {"name": "non-numeric-bound", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "args": [{"range": {"min": "one", "max": 2}}]}, "field": "args[0].range"},
+        {"name": "boolean-bound", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "args": [{"range": {"min": True, "max": 2}}]}, "field": "args[0].range"},
+        {"name": "reversed-range", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "args": [{"range": {"min": 3, "max": 2}}]}, "field": "args[0].range"},
+        {"name": "infinite-bound", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "args": [{"range": {"min": 1, "max": math.inf}}]}, "field": "args[0].range"},
+        {"name": "infinite-equality", "loadable": True, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "args": [{"equals": {"nested": [math.inf]}}]}, "field": "args[0].equals"},
+        {"name": "set-equality", "loadable": False, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "args": [{"equals": {1, 2}}]}, "field": "args[0].equals"},
+        {"name": "bytes-equality", "loadable": False, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "args": [{"equals": b"data"}]}, "field": "args[0].equals"},
+        {"name": "non-string-key-equality", "loadable": False, "step": {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "args": [{"equals": {1: "one"}}]}, "field": "args[0].equals"},
+    ]
+    config = uart_config(tmp_path)
+    reset = {"debugger": "dut", "action": "reset"}
+    valid_defmt_open = {"port_id": "dut_uart", "action": "uart_open", "defmt": True}
+
+    for case in malformed:
+        direct_steps = [build_test_step(reset), build_test_step(valid_defmt_open), build_test_step(case["step"])]
+        direct_plan = TestConfig(path=f"direct-{case['name']}", name=case["name"], steps=direct_steps)
+        service = RecordingService()
+        result = TestReactor(config, service).run(direct_plan)  # type: ignore[arg-type]
+        if case["name"] == "numeric-level" and result.get("error_type") != "invalid_argument":
+            raise AssertionError("defmt selectors must be validated before hardware calls")
+        assert result["ok"] is False
+        assert result["error_type"] == "invalid_argument"
+        assert result["steps"] == []
+        assert service.calls == []
+        direct_field = result["validation_error"]["field"]
+        assert direct_field.startswith(f"steps[2].{case['field']}")
+
+        if case["loadable"]:
+            case_root = tmp_path / case["name"]
+            document = {"version": 7, "steps": [case["step"]]}
+            plan_path = write_test_config(case_root, yaml.safe_dump(document, sort_keys=False))
+            with pytest.raises(ConfigError) as invalid_plan:
+                load_test_config(str(plan_path), str(case_root))
+            assert invalid_plan.value.error_type == "test_config_invalid"
+            field = invalid_plan.value.details["field"]
+            assert field == f"steps[0].{case['field']}" or field.startswith(f"steps[0].{case['field']}.") or field.startswith(f"steps[0].{case['field']}[")
+
+        dispatch_service = RecordingService()
+        dispatched = TestReactor(config, dispatch_service).execute_step(build_test_step(case["step"]))  # type: ignore[arg-type]
+        assert dispatched["ok"] is False
+        assert dispatched["error_type"] == "invalid_argument"
+        assert dispatched["field"].startswith(case["field"])
+        assert dispatch_service.calls == []
+
+
+def test_valid_defmt_plan_is_not_executable_yet(tmp_path: Path) -> None:
+    from agentic_hil.test_reactor import TestConfig, build_test_step
+
+    config = uart_config(tmp_path)
+    service = RecordingService()
+    steps = [
+        {"debugger": "dut", "action": "reset"},
+        {
+            "action": "repeat",
+            "count": 1,
+            "steps": [
+                {"port_id": "dut_uart", "action": "uart_open", "defmt": True},
+                {"port_id": "dut_uart", "action": "defmt_expect", "timeout_s": 1.0, "level": "info", "format": "boot", "args": [None]},
+            ],
+        },
+    ]
+    direct_plan = TestConfig(path="direct-v7-defmt", name="v7-defmt", steps=[build_test_step(step) for step in steps])
+
+    result = TestReactor(config, service).run(direct_plan)  # type: ignore[arg-type]
+    if result.get("error_type") != "not_supported":
+        raise AssertionError("valid defmt plans must be refused as not_supported before hardware calls")
+    assert result["ok"] is False
+    assert result["error_type"] == "not_supported"
+    assert result["failed_step"] == 2
+    assert result["validation_error"]["field"] == "steps[1].steps[0].defmt"
+    assert result["validation_error"]["summary"] == "Defmt plan assertions are not executable in this version yet."
+    assert result["steps"] == []
+    assert result["cleanup"] == []
+    assert service.calls == []
+
+    for step in steps[1]["steps"]:
+        dispatch_service = RecordingService()
+        dispatched = TestReactor(config, dispatch_service).execute_step(build_test_step(step))  # type: ignore[arg-type]
+        assert dispatched["ok"] is False
+        assert dispatched["error_type"] == "not_supported"
+        assert dispatch_service.calls == []
