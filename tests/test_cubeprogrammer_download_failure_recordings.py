@@ -70,6 +70,13 @@ def connect_mode_lines(transcript: str) -> list[str]:
     return [line.strip() for line in transcript.splitlines() if line.strip().startswith("Connect mode:")]
 
 
+def test_h533_download_recordings_have_their_own_flash_memory_map() -> None:
+    recordings = json.loads(FIXTURE.read_text(encoding="utf-8"))["recordings"]
+    expected = "NVM size 512 KBytes: flash 0x08000000-0x0807FFFF."
+    if any(recordings[name].get("memory_map") != expected for name in (FAILED, RETRY)):
+        raise AssertionError("H533 download recordings must each declare flash 0x08000000-0x0807FFFF (512 KBytes)")
+
+
 def test_the_h533re_hot_plug_pair_joins_the_recordings_with_its_provenance() -> None:
     failed = recording(FAILED)
     retry = recording(RETRY)
