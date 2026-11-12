@@ -100,10 +100,10 @@ def _section(data, index):
     return struct.unpack_from("<10I", data, shoff + index * 40)
 
 
-def test_load_table_bytes_agrees_with_path_and_is_path_independent(tmp_path):
-    retained = load_table_bytes((FIXTURES / "defmt-fixture-rzcobs.elf").read_bytes())
+def test_load_table_bytes_agrees_with_path_and_is_path_independent(tmp_path, defmt_images):
+    retained = load_table_bytes(defmt_images["rzcobs"].read_bytes())
     for encoding in ("rzcobs", "raw"):
-        source = FIXTURES / f"defmt-fixture-{encoding}.elf"
+        source = defmt_images[encoding]
         from_bytes = retained if encoding == "rzcobs" else load_table_bytes(source.read_bytes())
         from_path = load_table(source)
         assert from_bytes == from_path

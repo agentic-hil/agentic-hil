@@ -21,10 +21,10 @@ The teeth here:
 * a session without `defmt` answers exactly as it always has.
 
 The board is faked at the serial boundary with the `Board` of
-`tests/test_flash_capture.py`. The tables are the cross-compiled fixture images
-under `tests/fixtures/defmt/`, copied into each test's own workspace; the
-frames are encoded for them by `tests/defmt_wire.py` and are invented for
-these tests, not recorded from any board. What a frame decodes to is asked of
+`tests/test_flash_capture.py`. The tables are built from
+`tests/fixtures/defmt/firmware/` and copied into each test's own workspace; the
+frames are encoded for them by `tests/defmt_wire.py` and are invented for these
+tests, not recorded from any board. What a frame decodes to is asked of
 `agentic_hil.defmt.decode_stream` on the same bytes.
 
 Every check raises `AssertionError` with its own message, so the first one a
@@ -57,8 +57,6 @@ PORT_ID = "defmt_sessions_uart"
 DEVICE = "/dev/ttyDEFMTSESSIONS0"
 
 FIXTURES = Path(__file__).parent / "fixtures" / "defmt"
-RZCOBS_ELF = FIXTURES / "defmt-fixture-rzcobs.elf"
-RAW_ELF = FIXTURES / "defmt-fixture-raw.elf"
 IMAGE = "build/app.elf"
 
 TABLE_ERRORS = ("defmt_table_not_available", "defmt_table_changed", "defmt_table_invalid")
@@ -207,11 +205,11 @@ def check_nothing_opened(service: AgenticHILToolService, board: Board, result: d
 # Provenance: where the table comes from, and what `proven` claims.
 
 
-def test_defmt_true_after_a_confirmed_flash_decodes_frames_and_is_proven(tmp_path: Path, board: Board) -> None:
+def test_defmt_true_after_a_confirmed_flash_decodes_frames_and_is_proven(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    image = place(workspace, RZCOBS_ELF)
-    table = table_of(RZCOBS_ELF)
+    image = place(workspace, defmt_images["rzcobs"])
+    table = table_of(defmt_images["rzcobs"])
     stream = rzcobs_stream([statement(table, 1), hello(table, 2), statement(table, 3)])
     service, backend = service_for(config, board)
     try:
@@ -237,10 +235,10 @@ def test_defmt_true_after_a_confirmed_flash_decodes_frames_and_is_proven(tmp_pat
         service.close()
 
 
-def test_defmt_true_with_no_confirmed_flash_is_refused_before_the_port_opens(tmp_path: Path, board: Board) -> None:
+def test_defmt_true_with_no_confirmed_flash_is_refused_before_the_port_opens(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF)
+    place(workspace, defmt_images["rzcobs"])
     service, backend = service_for(config, board)
     try:
         refused = start(service, defmt=True)
@@ -266,17 +264,17 @@ def test_an_unconfigured_port_is_refused_before_resolving_a_defmt_table(tmp_path
         service.close()
 
 
-def test_defmt_true_after_the_flashed_elf_changed_is_refused_before_the_port_opens(tmp_path: Path, board: Board) -> None:
+def test_defmt_true_after_the_flashed_elf_changed_is_refused_before_the_port_opens(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF)
+    place(workspace, defmt_images["rzcobs"])
     service, backend = service_for(config, board)
     try:
         flashed = flash(service)
         check(flashed.get("ok") is True, f"the plain flash before the rebuild failed: {flashed}")
         # A rebuild lands on the flashed path: the file is a valid ELF with a
         # valid table, and it is not the image on the board.
-        place(workspace, RAW_ELF)
+        place(workspace, defmt_images["raw"])
 
         refused = start(service, defmt=True)
 
@@ -286,11 +284,11 @@ def test_defmt_true_after_the_flashed_elf_changed_is_refused_before_the_port_ope
         service.close()
 
 
-def test_defmt_true_after_a_hex_flash_has_no_table(tmp_path: Path, board: Board) -> None:
+def test_defmt_true_after_a_hex_flash_has_no_table(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """A .hex carries no table, so the ELF flashed before it no longer describes the board."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF)
+    place(workspace, defmt_images["rzcobs"])
     place(workspace, b":00000001FF\n", "build/app.hex")
     service, backend = service_for(config, board)
     try:
@@ -305,12 +303,12 @@ def test_defmt_true_after_a_hex_flash_has_no_table(tmp_path: Path, board: Board)
         service.close()
 
 
-def test_an_explicit_elf_decodes_with_no_flash_in_the_server_session(tmp_path: Path, board: Board) -> None:
+def test_an_explicit_elf_decodes_with_no_flash_in_the_server_session(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """The owner's case: a board flashed some other way, and an ELF named for its table."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    image = place(workspace, RZCOBS_ELF)
-    table = table_of(RZCOBS_ELF)
+    image = place(workspace, defmt_images["rzcobs"])
+    table = table_of(defmt_images["rzcobs"])
     stream = rzcobs_stream([hello(table, 1), statement(table, 2)])
     service, backend = service_for(config, board)
     try:
@@ -330,11 +328,11 @@ def test_an_explicit_elf_decodes_with_no_flash_in_the_server_session(tmp_path: P
         service.close()
 
 
-def test_an_explicit_elf_that_is_the_flashed_file_is_proven(tmp_path: Path, board: Board) -> None:
+def test_an_explicit_elf_that_is_the_flashed_file_is_proven(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    image = place(workspace, RZCOBS_ELF)
-    table = table_of(RZCOBS_ELF)
+    image = place(workspace, defmt_images["rzcobs"])
+    table = table_of(defmt_images["rzcobs"])
     stream = rzcobs_stream([statement(table, 4)])
     service, backend = service_for(config, board)
     try:
@@ -352,16 +350,17 @@ def test_an_explicit_elf_that_is_the_flashed_file_is_proven(tmp_path: Path, boar
 
 
 @pytest.mark.parametrize(
-    ("named", "source_image"),
-    [pytest.param(IMAGE, RAW_ELF, id="other_bytes"), pytest.param("build/copy.elf", RZCOBS_ELF, id="same_bytes_other_path")],
+    ("named", "source_encoding"),
+    [pytest.param(IMAGE, "raw", id="other_bytes"), pytest.param("build/copy.elf", "rzcobs", id="same_bytes_other_path")],
 )
-def test_an_explicit_elf_other_than_the_flashed_file_is_not_proven(tmp_path: Path, board: Board, named: str, source_image: Path) -> None:
+def test_an_explicit_elf_other_than_the_flashed_file_is_not_proven(tmp_path: Path, board: Board, named: str, source_encoding: str, defmt_images: dict[str, Path]) -> None:
     """Identity and digest both: the flashed path holding other bytes is not the
     flashed image, and a copy of the flashed bytes elsewhere is not the flashed
     file. Either still decodes, with the table of the file it names."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF)
+    place(workspace, defmt_images["rzcobs"])
+    source_image = defmt_images[source_encoding]
     case = f"{named} holding {source_image.name}"
     service, backend = service_for(config, board)
     try:
@@ -384,11 +383,11 @@ def test_an_explicit_elf_other_than_the_flashed_file_is_not_proven(tmp_path: Pat
         service.close()
 
 
-def test_an_explicit_elf_outside_the_artifact_policy_is_refused_by_that_policy(tmp_path: Path, board: Board) -> None:
+def test_an_explicit_elf_outside_the_artifact_policy_is_refused_by_that_policy(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """The artifact roots are the flash's own rule, and an ELF read for its table meets the same one."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF, "elsewhere/app.elf")
+    place(workspace, defmt_images["rzcobs"], "elsewhere/app.elf")
     service, backend = service_for(config, board)
     try:
         refused = start(service, defmt={"image_path": "elsewhere/app.elf"})
@@ -421,12 +420,12 @@ def test_an_invalid_table_is_refused_before_the_port_opens(tmp_path: Path, board
         service.close()
 
 
-def test_a_defmt_start_on_a_port_whose_read_permission_is_off_is_refused_before_the_port_opens(tmp_path: Path, board: Board) -> None:
+def test_a_defmt_start_on_a_port_whose_read_permission_is_off_is_refused_before_the_port_opens(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """Decoding is reading, so a port that may only be written answers to
     allow_read, with the key `com_read` names, before anything is opened."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_com_read": False})
-    place(workspace, RZCOBS_ELF)
+    place(workspace, defmt_images["rzcobs"])
     service, backend = service_for(config, board)
     try:
         refused = start(service, defmt={"image_path": IMAGE})
@@ -455,14 +454,14 @@ def test_a_read_disabled_port_is_refused_before_resolving_an_invalid_defmt_table
         service.close()
 
 
-def test_a_defmt_start_on_a_port_whose_identity_does_not_match_is_refused_before_the_port_opens(tmp_path: Path, board: Board, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_defmt_start_on_a_port_whose_identity_does_not_match_is_refused_before_the_port_opens(tmp_path: Path, board: Board, monkeypatch: pytest.MonkeyPatch, defmt_images: dict[str, Path]) -> None:
     """A valid table does not let a session past the identity check: the name
     leads to another board, and the refusal is the one a plain start gets."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace, port_yaml='    serial_number: "DEFMT-SESSIONS-A"\n')
     host = {"ok": True, "tool": "com_ports_available", "ports": [{"device": DEVICE, "serial_number": "DEFMT-SESSIONS-B"}], "summary": "1 available COM port(s)."}
     monkeypatch.setattr(comports, "list_available_com_ports", lambda tool="com_ports_available": host)
-    place(workspace, RZCOBS_ELF)
+    place(workspace, defmt_images["rzcobs"])
     service, backend = service_for(config, board)
     try:
         reference = start(service)
@@ -487,12 +486,12 @@ MALFORMED_DEFMT = {
 
 
 @pytest.mark.parametrize("shape", sorted(MALFORMED_DEFMT))
-def test_a_malformed_defmt_argument_is_refused_by_the_schema_before_anything_is_touched(tmp_path: Path, board: Board, shape: str) -> None:
+def test_a_malformed_defmt_argument_is_refused_by_the_schema_before_anything_is_touched(tmp_path: Path, board: Board, shape: str, defmt_images: dict[str, Path]) -> None:
     """`defmt` is `true`, `false` or `{"image_path": ...}` and nothing else, and
     the published schema says so before any table, port or probe is reached."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF)
+    place(workspace, defmt_images["rzcobs"])
     service, backend = service_for(config, board)
     try:
         refused = start(service, defmt=MALFORMED_DEFMT[shape])
@@ -509,12 +508,12 @@ def test_a_malformed_defmt_argument_is_refused_by_the_schema_before_anything_is_
 # An active session: enabling, replacing and disabling, and a change refused.
 
 
-def test_defmt_can_be_enabled_replaced_and_disabled_on_an_active_session(tmp_path: Path, board: Board) -> None:
+def test_defmt_can_be_enabled_replaced_and_disabled_on_an_active_session(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    rzcobs_image = place(workspace, RZCOBS_ELF)
-    raw_image = place(workspace, RAW_ELF, "build/raw.elf")
-    rzcobs_table, raw_table = table_of(RZCOBS_ELF), table_of(RAW_ELF)
+    rzcobs_image = place(workspace, defmt_images["rzcobs"])
+    raw_image = place(workspace, defmt_images["raw"], "build/raw.elf")
+    rzcobs_table, raw_table = table_of(defmt_images["rzcobs"]), table_of(defmt_images["raw"])
     service, backend = service_for(config, board)
     try:
         plain = start(service)
@@ -548,13 +547,13 @@ def test_defmt_can_be_enabled_replaced_and_disabled_on_an_active_session(tmp_pat
         service.close()
 
 
-def test_a_failed_change_keeps_the_working_mode(tmp_path: Path, board: Board) -> None:
+def test_a_failed_change_keeps_the_working_mode(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """A refused replacement leaves the table, the session and what it had buffered."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    image = place(workspace, RZCOBS_ELF)
+    image = place(workspace, defmt_images["rzcobs"])
     place(workspace, INVALID_TABLES["table_missing"](), "build/broken.elf")
-    table = table_of(RZCOBS_ELF)
+    table = table_of(defmt_images["rzcobs"])
     stream = rzcobs_stream([statement(table, 7), hello(table, 8)])
     service, backend = service_for(config, board)
     try:
@@ -612,11 +611,11 @@ def test_a_failed_enable_keeps_a_plain_session_plain(tmp_path: Path, board: Boar
 # The stream.
 
 
-def test_complete_and_partial_frames_survive_a_non_clearing_start(tmp_path: Path, board: Board) -> None:
+def test_complete_and_partial_frames_survive_a_non_clearing_start(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF)
-    table = table_of(RZCOBS_ELF)
+    place(workspace, defmt_images["rzcobs"])
+    table = table_of(defmt_images["rzcobs"])
     encoder = RzcobsEncoder()
     chunks = [encoder.frame(statement(table, number)) for number in (10, 11, 12)]
     stream = b"".join(chunks)
@@ -642,13 +641,13 @@ def test_complete_and_partial_frames_survive_a_non_clearing_start(tmp_path: Path
         service.close()
 
 
-def test_raw_desynchronization_persists_until_a_clearing_start(tmp_path: Path, board: Board) -> None:
+def test_raw_desynchronization_persists_until_a_clearing_start(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """The raw encoding has no frame boundary to resume at, so a frame that does
     not decode leaves every later byte unreadable until the stream starts over."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RAW_ELF)
-    table = table_of(RAW_ELF)
+    place(workspace, defmt_images["raw"])
+    table = table_of(defmt_images["raw"])
     check(table.encoding == "raw", "the raw fixture is not raw-encoded")
     good = hello(table)
     unknown = (0x7777).to_bytes(2, "little") + bytes(4)
@@ -685,14 +684,14 @@ def test_raw_desynchronization_persists_until_a_clearing_start(tmp_path: Path, b
         service.close()
 
 
-def test_a_burst_is_decoded_in_bounded_reads(tmp_path: Path, board: Board) -> None:
+def test_a_burst_is_decoded_in_bounded_reads(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """More frames than one read decodes: each read hands out at most the bound,
     and the rest stays buffered for the next, in order and complete."""
     workspace = tmp_path / "workspace"
     buffer_bytes = 1048576
     config = config_for(workspace, port_yaml=f"    max_buffer_bytes: {buffer_bytes}\n")
-    place(workspace, RZCOBS_ELF)
-    table = table_of(RZCOBS_ELF)
+    place(workspace, defmt_images["rzcobs"])
+    table = table_of(defmt_images["rzcobs"])
     service, backend = service_for(config, board)
     try:
         started = start(service, defmt={"image_path": IMAGE})
@@ -714,13 +713,13 @@ def test_a_burst_is_decoded_in_bounded_reads(tmp_path: Path, board: Board) -> No
         service.close()
 
 
-def test_overflow_on_a_raw_decoding_session_is_counted_and_desynchronizes(tmp_path: Path, board: Board) -> None:
+def test_overflow_on_a_raw_decoding_session_is_counted_and_desynchronizes(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """Bytes the buffer had to drop are counted, and on the raw encoding they take
     the frame boundary with them. The log still holds every byte."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace, port_yaml="    max_buffer_bytes: 64\n")
-    place(workspace, RAW_ELF)
-    table = table_of(RAW_ELF)
+    place(workspace, defmt_images["raw"])
+    table = table_of(defmt_images["raw"])
     payload = b"".join(hello(table) for _ in range(100))
     check(len(payload) == 200, "the planted raw payload is not 200 bytes")
     service, backend = service_for(config, board)
@@ -741,11 +740,11 @@ def test_overflow_on_a_raw_decoding_session_is_counted_and_desynchronizes(tmp_pa
         service.close()
 
 
-def test_until_returns_through_the_matching_frame_and_keeps_the_tail(tmp_path: Path, board: Board) -> None:
+def test_until_returns_through_the_matching_frame_and_keeps_the_tail(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF)
-    table = table_of(RZCOBS_ELF)
+    place(workspace, defmt_images["rzcobs"])
+    table = table_of(defmt_images["rzcobs"])
     stream = rzcobs_stream([statement(table, number) for number in (1, 2, 3, 4)])
     expected = records(table, stream)
     until = expected[2]["message"]
@@ -765,14 +764,14 @@ def test_until_returns_through_the_matching_frame_and_keeps_the_tail(tmp_path: P
         service.close()
 
 
-def test_a_later_flash_reproves_an_active_session(tmp_path: Path, board: Board) -> None:
+def test_a_later_flash_reproves_an_active_session(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """`proven` follows the confirmed programming: a flash of the named file
     proves the session, and a flash of anything else takes the proof back."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF)
-    place(workspace, RAW_ELF, "build/other.elf")
-    table = table_of(RZCOBS_ELF)
+    place(workspace, defmt_images["rzcobs"])
+    place(workspace, defmt_images["raw"], "build/other.elf")
+    table = table_of(defmt_images["rzcobs"])
     service, backend = service_for(config, board)
     try:
         started = start(service, defmt={"image_path": IMAGE})
@@ -794,14 +793,14 @@ def test_a_later_flash_reproves_an_active_session(tmp_path: Path, board: Board) 
         service.close()
 
 
-def test_an_unconfirmed_flash_takes_the_proof_back(tmp_path: Path, board: Board) -> None:
+def test_an_unconfirmed_flash_takes_the_proof_back(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """A flash the backend cannot confirm may have written part of another
     image, so nothing proven before it stays proven. The named ELF still
     decodes; it claims nothing."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF)
-    table = table_of(RZCOBS_ELF)
+    place(workspace, defmt_images["rzcobs"])
+    table = table_of(defmt_images["rzcobs"])
     service, backend = service_for(config, board)
     try:
         check(flash(service).get("ok") is True, "the confirmed flash before the session failed")
@@ -857,10 +856,10 @@ def test_each_table_error_has_a_remedy(tmp_path: Path, error_type: str) -> None:
         service.close()
 
 
-def test_a_session_without_defmt_answers_as_before(tmp_path: Path, board: Board) -> None:
+def test_a_session_without_defmt_answers_as_before(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF)
+    place(workspace, defmt_images["rzcobs"])
     service, backend = service_for(config, board)
     try:
         started = start(service)

@@ -107,6 +107,9 @@ jobs:
       - name: Install package
         run: python -m pip install --no-deps -e .
 
+      - name: Install Rust firmware toolchain
+        run: rustup toolchain install 1.97.0 --profile minimal --target thumbv7em-none-eabihf
+
       - name: Lint
         run: ruff check src tests evals tools
 
@@ -147,6 +150,7 @@ jobs:
         timeout-minutes: 40
         env:
           AGENTIC_HIL_TEST_LEDGER: ${{ runner.temp }}/suite-ledger
+          RUSTUP_TOOLCHAIN: "1.97.0"
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}

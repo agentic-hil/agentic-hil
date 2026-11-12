@@ -13,10 +13,31 @@ from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
+import defmt_fixtures
 import pytest
 import yaml
 
 pytest_plugins = ["pytester", "suite_ledger", "tdqs_model_selection"]
+
+
+def _require_defmt_toolchain() -> None:
+    missing = defmt_fixtures.missing_toolchain_prerequisite()
+    if missing is not None:
+        pytest.skip(missing)
+
+
+@pytest.fixture(scope="session")
+def defmt_images(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """Build and share raw and rzCOBS images across this pytest session."""
+    _require_defmt_toolchain()
+    worker_base = Path(tmp_path_factory.getbasetemp())
+    base = worker_base.parent if worker_base.name.startswith("popen-gw") else worker_base
+    output = base / "defmt-fixtures"
+    images = {name: output / "images" / f"defmt-fixture-{name}.elf" for name in ("rzcobs", "raw")}
+    with defmt_fixtures.exclusive_file_lock(output / "build.lock"):
+        if not all(image.is_file() for image in images.values()):
+            images = defmt_fixtures.build_images(output)
+    return images
 
 from support import (  # noqa: E402
     hold_the_process_table,

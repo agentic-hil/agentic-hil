@@ -1,9 +1,9 @@
 """Rebuild the defmt corpus or verify fresh output against its preserved oracle.
 
 `agentic_hil.defmt` decodes defmt frames in Python. This tool can regenerate
-the committed fixture corpus for maintenance, or independently rebuild the
-firmware and official `defmt-decoder` harness in an isolated workspace and
-retain exact parity evidence without changing that corpus.
+the recorded streams and expectations for maintenance, or independently build
+the firmware images and official `defmt-decoder` harness and retain exact
+parity evidence without changing the recorded corpus.
 """
 
 from __future__ import annotations
@@ -24,12 +24,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "defmt"
 TARGET = "thumbv7em-none-eabihf"
-# (stream name, cargo features, image file name)
-VARIANTS = [("rzcobs", "ts", "defmt-fixture-rzcobs.elf"), ("raw", "raw", "defmt-fixture-raw.elf")]
+# (stream name, cargo features)
+VARIANTS = [("rzcobs", "ts"), ("raw", "raw")]
 EXPECTED_COUNTS = {"rzcobs": 46, "raw": 46, "errors": 9}
 ORACLE_FILES = {
-    "image_rzcobs": FIXTURES / "defmt-fixture-rzcobs.elf",
-    "image_raw": FIXTURES / "defmt-fixture-raw.elf",
     "stream_rzcobs": FIXTURES / "stream-rzcobs.bin",
     "stream_raw": FIXTURES / "stream-raw.bin",
     "stream_errors": FIXTURES / "stream-errors.bin",
@@ -215,32 +213,26 @@ def verify(evidence_path: Path, target_dir: Path, *, write: bool) -> int:
             isolated_tests = scratch / "tests"
             isolated_tests.mkdir()
             shutil.copyfile(ROOT / "tests" / "defmt_wire.py", isolated_tests / "defmt_wire.py")
-            sys.path[:0] = [str(ROOT / "src"), str(isolated_tests), str(isolated_fixtures)]
+            sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests"), str(isolated_tests), str(isolated_fixtures)]
             try:
+                import defmt_fixtures
                 import scenario
 
-                for name, features, _ in VARIANTS:
-                    cargo_environment = {
-                        **os.environ,
-                        "CARGO_NET_OFFLINE": "true",
-                        "DEFMT_LOG": "trace",
-                        "CARGO_TARGET_DIR": str(target_dir / "firmware" / name),
-                    }
-                    run_command(
-                        [cargo, "build", "--offline", "--release", "--locked", "--features", features],
-                        cwd=isolated_fixtures / "firmware",
-                        environment=cargo_environment,
-                    )
+                previous_offline = os.environ.get("CARGO_NET_OFFLINE")
+                os.environ["CARGO_NET_OFFLINE"] = "true"
+                try:
+                    rebuilt_images = defmt_fixtures.build_images(target_dir / "fixture-build")
+                finally:
+                    if previous_offline is None:
+                        os.environ.pop("CARGO_NET_OFFLINE", None)
+                    else:
+                        os.environ["CARGO_NET_OFFLINE"] = previous_offline
 
                 decoder_target = target_dir / "decoder"
                 decoder_environment = {**os.environ, "CARGO_NET_OFFLINE": "true", "CARGO_TARGET_DIR": str(decoder_target)}
                 run_command([cargo, "build", "--offline", "--release", "--locked"], cwd=isolated_fixtures / "reference-decoder", environment=decoder_environment)
                 decoder = decoder_target / "release" / ("defmt-reference-decoder" + (".exe" if os.name == "nt" else ""))
 
-                rebuilt_images = {
-                    name: target_dir / "firmware" / name / TARGET / "release" / "defmt-fixture"
-                    for name, _, _ in VARIANTS
-                }
                 for name, image in rebuilt_images.items():
                     if not image.is_file():
                         raise RuntimeError(f"firmware build did not produce the {name} image")
@@ -248,7 +240,7 @@ def verify(evidence_path: Path, target_dir: Path, *, write: bool) -> int:
                 from agentic_hil.defmt import load_table
 
                 regenerated_streams = {
-                    name: scenario.stream(load_table(rebuilt_images[name])) for name, _, _ in VARIANTS
+                    name: scenario.stream(load_table(rebuilt_images[name])) for name, _ in VARIANTS
                 }
                 regenerated_streams["errors"] = scenario.error_stream(load_table(rebuilt_images["rzcobs"]))
                 for name, data in regenerated_streams.items():
@@ -258,20 +250,20 @@ def verify(evidence_path: Path, target_dir: Path, *, write: bool) -> int:
                 all_discrepancies = []
                 for stream_name in ("rzcobs", "raw", "errors"):
                     image_name = "rzcobs" if stream_name == "errors" else stream_name
-                    committed_image = isolated_fixtures / f"defmt-fixture-{image_name}.elf"
+                    rebuilt_image = rebuilt_images[image_name]
                     committed_stream = (isolated_fixtures / f"stream-{stream_name}.bin").read_bytes()
                     regenerated_stream = regenerated_streams[stream_name]
                     committed_stream_path = isolated_fixtures / f"stream-{stream_name}.bin"
                     regenerated_stream_path = scratch / f"stream-{stream_name}.bin"
                     expected_records = json_records((isolated_fixtures / f"expected-{stream_name}.jsonl").read_text(encoding="utf-8"))
-                    official_committed = official_records(decoder, committed_image, committed_stream_path)
-                    python_committed = python_records(committed_image, committed_stream)
-                    official_rebuilt = official_records(decoder, rebuilt_images[image_name], regenerated_stream_path)
+                    official_recorded_stream = official_records(decoder, rebuilt_image, committed_stream_path)
+                    python_recorded_stream = python_records(rebuilt_image, committed_stream)
+                    official_regenerated_stream = official_records(decoder, rebuilt_image, regenerated_stream_path)
                     sources = {
                         "expected": expected_records,
-                        "official_committed": official_committed,
-                        "python_committed": python_committed,
-                        "official_rebuilt": official_rebuilt,
+                        "official_recorded_stream": official_recorded_stream,
+                        "python_recorded_stream": python_recorded_stream,
+                        "official_regenerated_stream": official_regenerated_stream,
                     }
                     discrepancies = compare_records(stream_name, sources)
                     expected_count = EXPECTED_COUNTS[stream_name]
@@ -328,10 +320,11 @@ def verify(evidence_path: Path, target_dir: Path, *, write: bool) -> int:
                 }
                 evidence_bytes = (json.dumps(evidence, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
             finally:
-                for entry in (str(isolated_fixtures), str(isolated_tests)):
+                for entry in (str(ROOT / "tests"), str(isolated_fixtures), str(isolated_tests)):
                     with contextlib.suppress(ValueError):
                         sys.path.remove(entry)
                 sys.modules.pop("scenario", None)
+                sys.modules.pop("defmt_fixtures", None)
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
         print(f"fresh verification failed: {error}", file=sys.stderr)
         return 1
@@ -370,30 +363,30 @@ def regenerate(target_dir: Path | None) -> int:
         return 2
     sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests"), str(FIXTURES)]
     import scenario
+    from defmt_fixtures import build_images
 
     from agentic_hil.defmt import load_table
 
     with tempfile.TemporaryDirectory(prefix="defmt-reference-") as scratch:
         build_dir = target_dir or Path(scratch)
-        environment = {**os.environ, "DEFMT_LOG": "trace", "CARGO_TARGET_DIR": str(build_dir / "firmware")}
-        for _, features, image in VARIANTS:
-            subprocess.run([cargo, "build", "--release", "--locked", "--features", features], cwd=FIXTURES / "firmware", env=environment, check=True)
-            shutil.copyfile(build_dir / "firmware" / TARGET / "release" / "defmt-fixture", FIXTURES / image)
+        images = build_images(build_dir)
         decoder_environment = {**os.environ, "CARGO_TARGET_DIR": str(build_dir / "decoder")}
         subprocess.run([cargo, "build", "--release", "--locked"], cwd=FIXTURES / "reference-decoder", env=decoder_environment, check=True)
         decoder = build_dir / "decoder" / "release" / ("defmt-reference-decoder" + (".exe" if os.name == "nt" else ""))
 
-        streams: list[tuple[str, str, bytes]] = []
-        for name, _, image in VARIANTS:
-            table = load_table(FIXTURES / image)
+        streams: list[tuple[str, Path, bytes]] = []
+        for name, _ in VARIANTS:
+            image = images[name]
+            table = load_table(image)
             streams.append((name, image, scenario.stream(table)))
-        streams.append(("errors", VARIANTS[0][2], scenario.error_stream(load_table(FIXTURES / VARIANTS[0][2]))))
+        rzcobs_image = images["rzcobs"]
+        streams.append(("errors", rzcobs_image, scenario.error_stream(load_table(rzcobs_image))))
         for name, image, data in streams:
             stream_path = FIXTURES / f"stream-{name}.bin"
             stream_path.write_bytes(data)
-            printed = subprocess.run([str(decoder), str(FIXTURES / image), str(stream_path)], capture_output=True, text=True, encoding="utf-8", check=True).stdout
+            printed = subprocess.run([str(decoder), str(image), str(stream_path)], capture_output=True, text=True, encoding="utf-8", check=True).stdout
             (FIXTURES / f"expected-{name}.jsonl").write_text(printed, encoding="utf-8", newline="\n")
-            print(f"{name}: {len(data)} bytes, {len(printed.splitlines())} records from {image}")
+            print(f"{name}: {len(data)} bytes, {len(printed.splitlines())} records from {image.name}")
     return 0
 
 

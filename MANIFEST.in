@@ -18,7 +18,8 @@ recursive-include tests *.py
 # them read the file at import, so a distribution without them cannot even
 # collect the tests it does ship.
 recursive-include tests/fixtures *.json
-recursive-include tests/fixtures/defmt *.elf *.bin *.jsonl
+recursive-include tests/fixtures/defmt *.bin *.jsonl
+recursive-include tests/fixtures/defmt/firmware *.toml *.lock *.rs *.x
 # The evaluation harness is repository tooling, not package content, so the
 # tests that import it would fail to collect in a source distribution.
 exclude tests/test_install_eval*.py
