@@ -1,0 +1,103 @@
+{
+  "input_sha256_after": {
+    "decoder_cargo_lock": "b6ed8101d7c8304ce41645807ac565ae42190a44262c5ed37bd2b50852896cfc",
+    "expected_errors": "2c28a63ca1c31b07a2738b85be3f886f66a28fb6678996dcbab1992994f4a51e",
+    "expected_raw": "c98222f3d614ecc34221d5e6c9027e5e85fe711ceadefdd94c0deecea731d608",
+    "expected_rzcobs": "419e994f10a48645d1ea4ac1641f1cea89757530889a67dcbcba33cd67fc98d3",
+    "firmware_cargo_lock": "a84e59c637af140a7c8f58ca92558e50cf13a45a6cbbdda621bdb0f7a0c63fd6",
+    "stream_errors": "1e73890e64d14cd12851060e5577215e8a840af23156cc0579584b43c32f189e",
+    "stream_raw": "d3ccbb4ac8b0f4d55472e2e752f7a1a3cc73d3776fa7f387efb83b1d9337f74b",
+    "stream_rzcobs": "029b997d9d1bc55d9fa514a6b2c24fe1b582a2dec8a922bd277fce2ff7d7c212"
+  },
+  "input_sha256_before": {
+    "decoder_cargo_lock": "b6ed8101d7c8304ce41645807ac565ae42190a44262c5ed37bd2b50852896cfc",
+    "expected_errors": "2c28a63ca1c31b07a2738b85be3f886f66a28fb6678996dcbab1992994f4a51e",
+    "expected_raw": "c98222f3d614ecc34221d5e6c9027e5e85fe711ceadefdd94c0deecea731d608",
+    "expected_rzcobs": "419e994f10a48645d1ea4ac1641f1cea89757530889a67dcbcba33cd67fc98d3",
+    "firmware_cargo_lock": "a84e59c637af140a7c8f58ca92558e50cf13a45a6cbbdda621bdb0f7a0c63fd6",
+    "stream_errors": "1e73890e64d14cd12851060e5577215e8a840af23156cc0579584b43c32f189e",
+    "stream_raw": "d3ccbb4ac8b0f4d55472e2e752f7a1a3cc73d3776fa7f387efb83b1d9337f74b",
+    "stream_rzcobs": "029b997d9d1bc55d9fa514a6b2c24fe1b582a2dec8a922bd277fce2ff7d7c212"
+  },
+  "oracle_unchanged": true,
+  "rebuilt_image_sha256": {
+    "raw": "38d4ee43a03a06c87b148da54aded099d6fd2ab49acbfc72179c325d3f044c9d",
+    "rzcobs": "f8843c92a36cf38d48d944b1dba7c0ca7879ff913a7bc1166b50bc2a3dd6ba7b"
+  },
+  "streams": {
+    "errors": {
+      "discrepancies": [],
+      "regenerated_matches_committed": true,
+      "sources": {
+        "expected": {
+          "jsonl_sha256": "2c28a63ca1c31b07a2738b85be3f886f66a28fb6678996dcbab1992994f4a51e",
+          "record_count": 9
+        },
+        "official_recorded_stream": {
+          "jsonl_sha256": "2c28a63ca1c31b07a2738b85be3f886f66a28fb6678996dcbab1992994f4a51e",
+          "record_count": 9
+        },
+        "official_regenerated_stream": {
+          "jsonl_sha256": "2c28a63ca1c31b07a2738b85be3f886f66a28fb6678996dcbab1992994f4a51e",
+          "record_count": 9
+        },
+        "python_recorded_stream": {
+          "jsonl_sha256": "2c28a63ca1c31b07a2738b85be3f886f66a28fb6678996dcbab1992994f4a51e",
+          "record_count": 9
+        }
+      }
+    },
+    "raw": {
+      "discrepancies": [],
+      "regenerated_matches_committed": true,
+      "sources": {
+        "expected": {
+          "jsonl_sha256": "c98222f3d614ecc34221d5e6c9027e5e85fe711ceadefdd94c0deecea731d608",
+          "record_count": 46
+        },
+        "official_recorded_stream": {
+          "jsonl_sha256": "c98222f3d614ecc34221d5e6c9027e5e85fe711ceadefdd94c0deecea731d608",
+          "record_count": 46
+        },
+        "official_regenerated_stream": {
+          "jsonl_sha256": "c98222f3d614ecc34221d5e6c9027e5e85fe711ceadefdd94c0deecea731d608",
+          "record_count": 46
+        },
+        "python_recorded_stream": {
+          "jsonl_sha256": "c98222f3d614ecc34221d5e6c9027e5e85fe711ceadefdd94c0deecea731d608",
+          "record_count": 46
+        }
+      }
+    },
+    "rzcobs": {
+      "discrepancies": [],
+      "regenerated_matches_committed": true,
+      "sources": {
+        "expected": {
+          "jsonl_sha256": "419e994f10a48645d1ea4ac1641f1cea89757530889a67dcbcba33cd67fc98d3",
+          "record_count": 46
+        },
+        "official_recorded_stream": {
+          "jsonl_sha256": "419e994f10a48645d1ea4ac1641f1cea89757530889a67dcbcba33cd67fc98d3",
+          "record_count": 46
+        },
+        "official_regenerated_stream": {
+          "jsonl_sha256": "419e994f10a48645d1ea4ac1641f1cea89757530889a67dcbcba33cd67fc98d3",
+          "record_count": 46
+        },
+        "python_recorded_stream": {
+          "jsonl_sha256": "419e994f10a48645d1ea4ac1641f1cea89757530889a67dcbcba33cd67fc98d3",
+          "record_count": 46
+        }
+      }
+    }
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "defmt_decoder": "1.2.0",
+    "host": "x86_64-pc-windows-msvc",
+    "python": "3.13.14",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "target": "thumbv7em-none-eabihf"
+  }
+}

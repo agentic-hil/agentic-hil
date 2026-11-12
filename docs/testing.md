@@ -6,38 +6,52 @@ bench behind a fixture.
 
 ## Native defmt decoder replay
 
-The decoder tests run without a board and without Rust. Replay the committed
-corpus and focused malformed-input regressions from the repository root:
+The decoder tests need no board. They build the raw and rzCOBS firmware images
+from `tests/fixtures/defmt/firmware/`, so install Rust with Cargo and the
+`thumbv7em-none-eabihf` target before running them. If Cargo, `rustc` or that
+target is missing, the image-dependent tests skip with a reason naming the
+missing prerequisite. Run the replay corpus and focused malformed-input
+regressions from the repository root:
 
 ```bash
 python -m pytest -q tests/test_defmt.py tests/test_defmt_regressions.py
 ```
 
-`tests/fixtures/defmt/` contains the two firmware ELF tables,
-`stream-rzcobs.bin` and `stream-raw.bin`, and their 46-frame oracles,
-`expected-rzcobs.jsonl` and `expected-raw.jsonl`. `stream-errors.bin` and
-`expected-errors.jsonl` cover broken records and recovery. These committed bytes
-are replay inputs, never generated during collection or ordinary testing.
+`tests/fixtures/defmt/` contains the firmware source, `stream-rzcobs.bin` and
+`stream-raw.bin` with their 46-frame oracles, `expected-rzcobs.jsonl` and
+`expected-raw.jsonl`. `stream-errors.bin` and `expected-errors.jsonl` cover
+broken records and recovery. The session-scoped `defmt_images` fixture builds
+both images once per test run and shares them across pytest-xdist workers. It
+places them under `<pytest basetemp>/defmt-fixtures/images/`, outside the
+checkout, instead of storing generated ELFs in the fixture directory.
 
-This example loads the rzCOBS table from retained image bytes and prints exactly
-the lines in `expected-rzcobs.jsonl`:
+This example reads the generated rzCOBS image and prints the lines in
+`expected-rzcobs.jsonl`. The `defmt_images` session fixture returns both paths
+as `rzcobs` and `raw`; it performs the shared build once for the test run. The
+replay example receives those paths through `DEFMT_RZCOBS_ELF` and
+`DEFMT_RAW_ELF`:
 
 ```python
+import os
 import sys
 from pathlib import Path
 from agentic_hil.defmt import decode_stream, load_table_bytes
 
 sys.stdout.reconfigure(encoding="utf-8")
+
 fixtures = Path("tests/fixtures/defmt")
-table = load_table_bytes((fixtures / "defmt-fixture-rzcobs.elf").read_bytes())
+table = load_table_bytes(Path(os.environ["DEFMT_RZCOBS_ELF"]).read_bytes())
 batch = decode_stream(table, (fixtures / "stream-rzcobs.bin").read_bytes())
 for record in batch.records:
     print(record["text"])
 ```
 
-`load_table(Path(...))` reads a table directly from its ELF path. Load
-`defmt-fixture-raw.elf` and replay `stream-raw.bin` with the same `decode_stream`
-API for raw encoding. Both loading APIs return the same table.
+For the raw variant, use `DEFMT_RAW_ELF` with `stream-raw.bin`. When running the
+example outside pytest, set both variables to the image paths returned by the
+existing `defmt_images` session fixture or by
+`tests.defmt_fixtures.build_images(target_dir)`. Both outputs live under the
+chosen target directory, outside `tests/fixtures/defmt/`; the replay code does
+not start another build.
 
 For incremental input, keep the bytes after `batch.consumed` and prepend them to
 the next chunk. Incomplete input stays unconsumed until more bytes arrive.
@@ -78,18 +92,55 @@ python -m pytest -q tests/test_defmt_delivery.py
 ```
 
 This check builds and inspects the sdist and wheel without build isolation,
-runs `twine check`, collects the extracted source distribution's tests, and
-replays both streams and malformed-input regressions with Rust tools absent
-from child `PATH` and package-index access disabled. It needs the project's
-development and build dependencies already installed. CI separately replays
-the focused tests after collecting the extracted sdist.
+runs `twine check`, and collects and replays the extracted source distribution's
+tests with Rust tools absent from child `PATH` and package-index access
+disabled. Tests that need generated images skip with a named prerequisite
+reason, while image-independent replay and malformed-input checks still run. It
+needs the project's development and build dependencies already installed. CI
+also collects and replays the focused tests after extracting the sdist.
 
-Optional regeneration uses `python tools/defmt_reference.py`, the Rust sources
-under `tests/fixtures/defmt/firmware/` and `reference-decoder/`, and the pinned
-official `defmt-decoder` harness. It requires Cargo, the
-`thumbv7em-none-eabihf` target, and initial access to crates.io. Regeneration is
-a separate maintenance action that rewrites the corpus; it is never part of
-Rust-free replay or this decoder's acceptance checks.
+### Fresh defmt parity verification
+
+From the repository root, fetch both locked dependency sets while crates.io is
+available. The verification builds run offline, so they cannot fetch missing
+crates. Then generate the retained evidence and verify it:
+
+```bash
+cargo fetch --locked --manifest-path tests/fixtures/defmt/reference-decoder/Cargo.toml
+cargo fetch --locked --manifest-path tests/fixtures/defmt/firmware/Cargo.toml
+python tools/defmt_reference.py --verify --target-dir /tmp/defmt-reference-target --evidence tools/defmt_reference_parity.json --write
+python tools/defmt_reference.py --verify --target-dir /tmp/defmt-reference-target --evidence tools/defmt_reference_parity.json
+```
+
+For each of `rzcobs`, `raw` and `errors`, verification compares official and
+Python output decoded from a freshly built image with the recorded stream, the
+recorded JSONL expectation, and official output decoded from the same image
+with the regenerated stream. It requires regenerated stream bytes to equal
+their recorded counterparts and exactly 46 `rzcobs`, 46 `raw` and 9 `errors`
+records. Comparisons are exact and ordered. It hashes the recorded streams,
+expectations and Cargo lockfiles before and after the run, and fails if any
+recorded input changes.
+
+The generated `tools/defmt_reference_parity.json` records the Rust and Python
+tool versions, host and firmware target, locked decoder version, input and
+rebuilt-image digests, per-source record counts and JSONL digests, stream byte
+equality and discrepancies. The ordinary verification command omits
+`--write`; it recomputes the evidence and requires byte-for-byte equality with
+the retained file as well as zero discrepancies. Verification writes only the
+evidence file in the repository; generated images and build products stay
+under the Cargo target directory, and regenerated streams stay in the isolated
+workspace. Verification needs
+Cargo, the `thumbv7em-none-eabihf` target and the dependencies fetched by the
+two locked fetch commands. The first fetch needs crates.io access. Evidence
+describes the recorded toolchain and pinned crates;
+rebuilt image bytes can vary with the Rust toolchain. The firmware is never
+run, so this check does not establish board runtime or transport behavior.
+
+Plain `python tools/defmt_reference.py --target-dir /tmp/defmt-reference-target`
+remains the separate maintenance command that regenerates and rewrites the
+recorded streams and expectations. Generated firmware images stay under that
+target directory and are not copied into `tests/fixtures/defmt/`. Neither fresh
+verification nor regeneration is part of source-distribution replay.
 
 ## Test Reactor
 

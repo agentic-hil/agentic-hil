@@ -9,9 +9,9 @@ happened, the frames the board had sent, and the session's cleanup.
 
 The board is faked at the hardware boundary with the `Board` and
 `BoardBackend` of `tests/test_flash_capture.py`: the probe flashes and resets,
-and the reset puts the boot output on the board's UART. The image is a
-cross-compiled fixture under `tests/fixtures/defmt/`, copied into each test's
-own workspace; the boot frames are encoded for its table by
+and the reset puts the boot output on the board's UART. The image is built from
+`tests/fixtures/defmt/firmware/` and copied into each test's own workspace; the
+boot frames are encoded for its table by
 `tests/defmt_wire.py`, invented for these tests and not recorded from any
 board. What they decode to is asked of `agentic_hil.defmt.decode_stream` on
 the same bytes.
@@ -43,7 +43,6 @@ PORT_ID = "defmt_capture_uart"
 DEVICE = "/dev/ttyDEFMTCAPTURE0"
 
 FIXTURES = Path(__file__).parent / "fixtures" / "defmt"
-RZCOBS_ELF = FIXTURES / "defmt-fixture-rzcobs.elf"
 IMAGE = "build/app.elf"
 
 # Images the decoder reads no table from, each confirmed against the decoder
@@ -125,11 +124,12 @@ def check_bench_free(service: AgenticHILToolService, what: str) -> None:
     check(not service.coordinator.leases, f"{what} left a lease held: {sorted(service.coordinator.leases)}")
 
 
-def test_a_capture_with_defmt_returns_the_decoded_boot_frames_of_the_flashed_image(tmp_path: Path, board: Board) -> None:
+def test_a_capture_with_defmt_returns_the_decoded_boot_frames_of_the_flashed_image(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF.read_bytes())
-    table = defmt.load_table_bytes(RZCOBS_ELF.read_bytes())
+    image = defmt_images["rzcobs"].read_bytes()
+    place(workspace, image)
+    table = defmt.load_table_bytes(image)
     banner = rzcobs_stream(boot_frames(table))
     service, backend = service_for(config, board, banner=banner)
     try:
@@ -170,14 +170,15 @@ def test_an_invalid_table_flashes_nothing_and_opens_no_port(tmp_path: Path, boar
         service.close()
 
 
-def test_a_read_failure_after_a_good_flash_keeps_the_flash_and_its_cleanup(tmp_path: Path, board: Board) -> None:
+def test_a_read_failure_after_a_good_flash_keeps_the_flash_and_its_cleanup(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """The board was flashed and reset, and then the port died. The failed call
     still says the flash committed and proves the image, keeps the frames the
     board had sent, and leaves the session stopped and logged."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF.read_bytes())
-    table = defmt.load_table_bytes(RZCOBS_ELF.read_bytes())
+    image = defmt_images["rzcobs"].read_bytes()
+    place(workspace, image)
+    table = defmt.load_table_bytes(image)
     partial = rzcobs_stream(boot_frames(table)[:2])
     service, backend = service_for(config, board, banner=b"")
     try:
@@ -206,14 +207,15 @@ def test_a_read_failure_after_a_good_flash_keeps_the_flash_and_its_cleanup(tmp_p
         service.close()
 
 
-def test_an_unconfirmed_flash_with_a_defmt_capture_keeps_its_incident(tmp_path: Path, board: Board) -> None:
+def test_an_unconfirmed_flash_with_a_defmt_capture_keeps_its_incident(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """A flash the backend cannot confirm is the incident it is without a
     capture: the run aborts into recovery, the session is stopped, the frames
     the board had sent are kept, and nothing claims the image is proven."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF.read_bytes())
-    table = defmt.load_table_bytes(RZCOBS_ELF.read_bytes())
+    image = defmt_images["rzcobs"].read_bytes()
+    place(workspace, image)
+    table = defmt.load_table_bytes(image)
     during = rzcobs_stream(boot_frames(table)[:1])
     service, backend = service_for(config, board, during_flash=during, unconfirmed=True)
     try:
@@ -235,13 +237,14 @@ def test_an_unconfirmed_flash_with_a_defmt_capture_keeps_its_incident(tmp_path: 
         service.close()
 
 
-def test_a_capture_with_defmt_and_until_ends_at_the_matching_frame(tmp_path: Path, board: Board) -> None:
+def test_a_capture_with_defmt_and_until_ends_at_the_matching_frame(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """`until` matches a decoded frame's text, and the capture ends with that
     frame. The log still holds every byte the board sent."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF.read_bytes())
-    table = defmt.load_table_bytes(RZCOBS_ELF.read_bytes())
+    image = defmt_images["rzcobs"].read_bytes()
+    place(workspace, image)
+    table = defmt.load_table_bytes(image)
     banner = rzcobs_stream(boot_frames(table))
     expected = defmt.decode_stream(table, banner).records
     until = expected[1]["message"]
@@ -259,12 +262,12 @@ def test_a_capture_with_defmt_and_until_ends_at_the_matching_frame(tmp_path: Pat
         service.close()
 
 
-def test_a_malformed_capture_defmt_is_refused_by_the_schema_before_anything_is_touched(tmp_path: Path, board: Board) -> None:
+def test_a_malformed_capture_defmt_is_refused_by_the_schema_before_anything_is_touched(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     """`capture.defmt` is a boolean, and the published schema says so before the
     image is read, the port opened or the probe driven."""
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF.read_bytes())
+    place(workspace, defmt_images["rzcobs"].read_bytes())
     service, backend = service_for(config, board)
     try:
         result = service.call("flash_firmware", capture_args(defmt="x"))
@@ -278,10 +281,10 @@ def test_a_malformed_capture_defmt_is_refused_by_the_schema_before_anything_is_t
         service.close()
 
 
-def test_a_capture_without_defmt_is_unchanged(tmp_path: Path, board: Board) -> None:
+def test_a_capture_without_defmt_is_unchanged(tmp_path: Path, board: Board, defmt_images: dict[str, Path]) -> None:
     workspace = tmp_path / "workspace"
     config = config_for(workspace)
-    place(workspace, RZCOBS_ELF.read_bytes())
+    place(workspace, defmt_images["rzcobs"].read_bytes())
     banner = b"\r\nboot: demo firmware 1.0\r\nREADY\r\n"
     service, backend = service_for(config, board, banner=banner)
     try:
