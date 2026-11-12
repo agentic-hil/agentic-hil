@@ -1023,6 +1023,7 @@ class ComPortSession:
                             if overflow > 0:
                                 del self.buffer[:overflow]
                                 self.overflow_bytes += overflow
+                                self.buffer_epoch += 1
                             self.received.append(chunk)
                         self.received_ready.set()
                 if not data:
@@ -1629,6 +1630,8 @@ class ComPortService:
         with session.lock:
             data = bytes(session.buffer[:parsed_max_bytes])
             del session.buffer[:parsed_max_bytes]
+            if data:
+                session.buffer_epoch += 1
             remaining = len(session.buffer)
         if not data and session.reader_error is not None:
             # Empty, and against a reader that is no longer running: either it
@@ -1681,6 +1684,8 @@ class ComPortService:
             found = find_until(head, patterns)
             data = head if found is None else head[: found[0]]
             del session.buffer[: len(data)]
+            if data:
+                session.buffer_epoch += 1
             remaining = len(session.buffer)
         # Not repeated to the caller: `read` keeps these for the report only.
         waited: JsonObject = {"until": until["entries"], "until_wait_s": wait_s}
