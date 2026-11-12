@@ -23,6 +23,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 ### Fixed
 
 - Clarified the recorded ST-Link download failures, their identical CubeProgrammer wording, and the limits of under-reset guidance. (#751)
+- Concurrent defmt reads now invalidate stale snapshots when they consume buffered frames. (#818)
 - Reject nonfinite `defmt_expect.timeout_s` values before hardware access during direct dispatch. (#847)
 - MCP `tools/list` schemas omit root-level `oneOf`, `allOf` and `anyOf` for Claude compatibility, while server-side validation continues enforcing the input alternatives. (#830)
 - MCP can list attached probe serials before a workspace has a configuration. Initial `project_config_create` accepts an enumerated `probe_id` to select a probe and its matching COM port when available; an unselected multi-probe setup remains ambiguous and an unknown serial is refused before target contact. (#831)

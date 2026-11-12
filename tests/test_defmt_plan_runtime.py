@@ -121,6 +121,25 @@ def test_unmet_defmt_expect_reports_timeout(runtime: Runtime) -> None:
         raise AssertionError("An unmet defmt_expect must read the live UART and report defmt_expect_timeout.")
 
 
+def test_concurrent_clear_invalidates_a_just_read_batch(runtime: Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+    original_call = runtime.service.call
+    cleared = False
+
+    def clear_after_read(name: str, arguments: dict | None = None) -> dict:
+        nonlocal cleared
+        result = original_call(name, arguments)
+        if name == "com_read" and result.get("frames") and not cleared:
+            cleared = True
+            opened = original_call("com_session_start", {"port_id": PORT_ID, "clear_buffer": True})
+            assert opened.get("ok") is True, opened
+        return result
+
+    monkeypatch.setattr(runtime.service, "call", clear_after_read)
+    runtime.board.transmit(runtime.stream)
+    runtime.require_fresh_timeout(runtime.oracle[0]["message"])
+    assert cleared
+
+
 @pytest.mark.parametrize("replacement", ["session", "source"], ids=["session", "source"])
 def test_retained_frames_require_live_session_and_source(runtime: Runtime, replacement: str) -> None:
     stale = runtime.prime()
@@ -132,8 +151,9 @@ def test_retained_frames_require_live_session_and_source(runtime: Runtime, repla
     if replacement == "session":
         stopped = runtime.service.call("com_session_stop", {"port_id": PORT_ID})
         assert stopped.get("ok") is True, stopped
+        # Match the consumed epoch so this checks session identity independently.
         opened = runtime.service.call(
-            "com_session_start", {"port_id": PORT_ID, "clear_buffer": False, "defmt": {"image_path": "build/app.elf"}}
+            "com_session_start", {"port_id": PORT_ID, "clear_buffer": True, "defmt": {"image_path": "build/app.elf"}}
         )
         assert opened.get("ok") is True, opened
         current = runtime.service.com_ports.sessions[PORT_ID]
