@@ -976,6 +976,14 @@ def defmt_step_contract_issue(document: Mapping[str, Any], schema: JsonObject | 
         }
 
     if action == "defmt_expect":
+        timeout_s = document.get("timeout_s")
+        if type(timeout_s) is float and not math.isfinite(timeout_s):
+            return {
+                "field_parts": ["timeout_s"],
+                "summary": "Defmt timeout must be finite.",
+                "validator": "finite",
+            }
+
         pattern = document.get("pattern")
         if isinstance(pattern, str):
             try:
