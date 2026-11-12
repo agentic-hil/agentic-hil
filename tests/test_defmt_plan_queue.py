@@ -34,7 +34,11 @@ def _reference(record: dict) -> dict:
     }
 
 
-def test_committed_burst_survives_nonclearing_repeat_opens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_committed_burst_survives_nonclearing_repeat_opens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    defmt_images: dict[str, Path],
+) -> None:
     """One reset feeds all 46 frames; repeat opens do not discard queued records."""
     board = Board()
     monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=board.construct))
@@ -45,7 +49,7 @@ def test_committed_burst_survives_nonclearing_repeat_opens(tmp_path: Path, monke
     )
     image = workspace / "build" / "app.elf"
     image.parent.mkdir(parents=True, exist_ok=True)
-    image.write_bytes((FIXTURES / "defmt-fixture-rzcobs.elf").read_bytes())
+    image.write_bytes(defmt_images["rzcobs"].read_bytes())
     stream = (FIXTURES / "stream-rzcobs.bin").read_bytes()
     oracle = [json.loads(line) for line in (FIXTURES / "expected-rzcobs.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(oracle) == 46
