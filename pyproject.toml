@@ -71,7 +71,9 @@ pyocd = ["pyocd>=0.36"]
 esptool = ["esptool>=5,<6"]
 dev = [
   "build>=1.2",
-  "pytest>=8.0",
+  # See .github/dependabot.yml for the pytest-xdist grouping incompatibility.
+  # Drop this ceiling once a pytest-xdist release carries pytest-dev/pytest-xdist#1388.
+  "pytest>=8.0,<9.2",
   # Required rather than a convenience: `addopts` below asks for `--dist
   # loadgroup`, so an environment without this plugin refuses every session with
   # "unrecognized arguments: --dist". The worker count stays off `addopts`, so a
