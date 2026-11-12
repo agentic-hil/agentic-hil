@@ -4,6 +4,7 @@ import hashlib
 import math
 import re
 import time
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -975,6 +976,14 @@ def defmt_step_contract_issue(document: Mapping[str, Any], schema: JsonObject | 
         }
 
     if action == "defmt_expect":
+        timeout_s = document.get("timeout_s")
+        if type(timeout_s) is float and not math.isfinite(timeout_s):
+            return {
+                "field_parts": ["timeout_s"],
+                "summary": "Defmt timeout must be finite.",
+                "validator": "finite",
+            }
+
         pattern = document.get("pattern")
         if isinstance(pattern, str):
             try:
@@ -1579,7 +1588,6 @@ class StepDevice:
         step: TestStep,
         *,
         contract_issue: JsonObject | None = None,
-        contract_only: bool = False,
     ) -> JsonObject:
         """Dispatch, written exactly once for every device kind there is.
 
@@ -1587,17 +1595,6 @@ class StepDevice:
         to that action's own schema, call the method. A string this kind does not
         declare is `not_supported` naming the kind by construction. There is no
         table to forget to add it to."""
-        if contract_only:
-            if contract_issue is not None:
-                return StepDevice.schema_refusal(None, step, contract_issue=contract_issue)
-            return {
-                "ok": False,
-                "tool": "test_reactor_run",
-                "error_type": "not_supported",
-                "action": step.action,
-                "field": "defmt" if step.action == "uart_open" else "action",
-                "summary": "Defmt plan assertions are not executable in this version yet.",
-            }
         assert self is not None
         bound = self.actions.get(step.action)
         if bound is None:
@@ -1846,6 +1843,48 @@ class SessionDevice(StepDevice):
         return records
 
 
+def defmt_json_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values without equating booleans with numbers."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, list):
+        return len(left) == len(right) and all(defmt_json_equal(a, b) for a, b in zip(left, right, strict=True))
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(defmt_json_equal(left[key], right[key]) for key in left)
+    return left == right
+
+
+def defmt_frame_matches(frame: JsonObject, selectors: JsonObject, pattern: re.Pattern[str] | None) -> bool:
+    if "error" in frame:
+        return False
+    if any(key in selectors and frame.get(key) != selectors[key] for key in ("level", "format")):
+        return False
+    rendered = frame.get("text")
+    if "text" in selectors and (not isinstance(rendered, str) or selectors["text"] not in rendered):
+        return False
+    if pattern is not None and (not isinstance(rendered, str) or pattern.search(rendered) is None):
+        return False
+    selected = selectors.get("args", [])
+    values = frame.get("args", [])
+    if not isinstance(values, list) or len(values) < len(selected):
+        return False
+    for selector, value in zip(selected, values, strict=False):
+        if selector is None:
+            continue
+        if "equals" in selector:
+            if not defmt_json_equal(value, selector["equals"]):
+                return False
+        else:
+            bounds = selector["range"]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not bounds["min"] <= value <= bounds["max"]:
+                return False
+    return True
+
+
 class UartRunner(SessionDevice):
     """A configured serial line, as a plan opens it, waits on it and closes it."""
 
@@ -1864,6 +1903,39 @@ class UartRunner(SessionDevice):
     session_noun: ClassVar[str] = "UART"
     not_owned_error: ClassVar[str] = "uart_session_not_owned"
     not_owned_summary: ClassVar[str] = "A test plan cannot close a UART session it did not open."
+
+    def __init__(self, config_id: str, device: Device, service: AgenticHILToolService, **kwargs: Any):
+        super().__init__(config_id, device, service, **kwargs)
+        self._defmt_frames: deque[JsonObject] = deque()
+        self._defmt_session: object | None = None
+        self._defmt_identity: tuple[str, str] | None = None
+        self._defmt_epoch: int | None = None
+
+    def _live_defmt(self) -> tuple[Any, tuple[str, str], int, JsonObject] | None:
+        """Read the current decoding binding, including its current proof."""
+        ports = getattr(self.service, "com_ports", None)
+        if ports is None:
+            return None
+        active = ports._active_session(self.id, "com_read")
+        if not active.get("ok"):
+            return None
+        session = active["session"]
+        with session.lock:
+            stream = session.defmt
+            if stream is None or stream.identity is None:
+                return None
+            return session, stream.identity, session.buffer_epoch, stream.describe()
+
+    def _sync_defmt(self) -> tuple[Any, tuple[str, str], int, JsonObject] | None:
+        live = self._live_defmt()
+        if (live is None or live[0] is not self._defmt_session
+                or live[1] != self._defmt_identity or live[2] != self._defmt_epoch):
+            self._defmt_frames.clear()
+        if live is None:
+            self._defmt_session = self._defmt_identity = self._defmt_epoch = None
+        else:
+            self._defmt_session, self._defmt_identity, self._defmt_epoch = live[:3]
+        return live
 
     @classmethod
     def config_entries(cls, config: AgenticHILConfig) -> Mapping[str, Any]:
@@ -1930,11 +2002,22 @@ class UartRunner(SessionDevice):
 
     @step_action("uart_open", schema="uartOpen", tool="com_session_start", defaults={"clear_buffer": True}, role="open")
     def _uart_open(self, step: TestStep) -> JsonObject:
-        return self.open_session(step)
+        # Only a retained frame needs a binding check. Ordinary UART opens do
+        # not depend on a decoding session being available.
+        if self._defmt_frames:
+            self._sync_defmt()
+        result = self.open_session(step)
+        if self._defmt_frames:
+            self._sync_defmt()
+        return result
 
     @step_action("uart_close", schema="uartClose", tool="com_session_stop", role="close")
     def _uart_close(self, step: TestStep) -> JsonObject:
-        return self.close_session(step)
+        result = self.close_session(step)
+        if result.get("ok") is True:
+            self._defmt_frames.clear()
+            self._defmt_session = None
+        return result
 
     @step_action("uart_write", schema="uartWrite", tool="com_write")
     def _uart_write(self, step: TestStep) -> JsonObject:
@@ -1951,6 +2034,54 @@ class UartRunner(SessionDevice):
         # the result reports it under.
         field_name = next(name for name in self.expect_fields if step.arguments.get(name) is not None)
         return self._expect(field_name, str(step.arguments[field_name]), float(step.arguments["timeout_s"]))
+
+    @step_action("defmt_expect", schema="defmtExpect", tool="com_read", forwards_arguments=False)
+    def _defmt_expect(self, step: TestStep) -> JsonObject:
+        """Match decoded frames in order, retaining those after the match."""
+        timeout_s = float(step.arguments["timeout_s"])
+        deadline = time.monotonic() + timeout_s
+        reads = 0
+        pattern = re.compile(step.arguments["pattern"]) if "pattern" in step.arguments else None
+        while True:
+            if self.stop_requested():
+                return {"ok": True, "tool": "test_reactor_run", "port_id": self.id,
+                        "summary": "Defmt assertion stopped on request.", "stop_requested": True, "reads": reads}
+            live = self._sync_defmt()
+            while self._defmt_frames:
+                if self.stop_requested():
+                    return {"ok": True, "tool": "test_reactor_run", "port_id": self.id,
+                            "summary": "Defmt assertion stopped on request.", "stop_requested": True, "reads": reads}
+                live = self._sync_defmt()
+                if not self._defmt_frames:
+                    break
+                frame = self._defmt_frames.popleft()
+                if defmt_frame_matches(frame, step.arguments, pattern):
+                    return {"ok": True, "tool": "test_reactor_run", "port_id": self.id,
+                            "summary": "A matching defmt frame was received.", "frame": frame,
+                            "reads": reads, "timeout_s": timeout_s, "defmt": live[3] if live else {}}
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 and reads:
+                break
+            result = self.service.call("com_read", {"port_id": self.id, "wait_timeout_s": max(0.0, min(remaining, 0.1))})
+            reads += 1
+            if result_failed(result):
+                return result
+            # A concurrent clear, replacement or source change invalidates the
+            # read as well as any previously retained records.
+            current = self._sync_defmt()
+            if live is not None and current is not None and live[:3] == current[:3]:
+                self._defmt_frames.extend(frame for frame in result.get("frames", []) if isinstance(frame, dict))
+            if not result.get("frames") and time.monotonic() < deadline:
+                time.sleep(min(UART_EXPECT_IDLE_POLL_S, max(0.0, deadline - time.monotonic())))
+        return {
+            "ok": False,
+            "tool": "test_reactor_run",
+            "error_type": "defmt_expect_timeout",
+            "summary": f"No defmt frame matching the step was received within {timeout_s} s.",
+            "port_id": self.id,
+            "timeout_s": timeout_s,
+            "reads": reads,
+        }
 
     @step_action("uart_read", schema="uartRead", tool="com_read", forwards_arguments=False)
     def _uart_read(self, step: TestStep) -> JsonObject:
@@ -3254,7 +3385,10 @@ class TestReactor:
         kind of thing it just asked."""
         if step.action == "defmt_expect" or (step.action == "uart_open" and "defmt" in step.arguments):
             issue = defmt_step_contract_issue(test_step_document(step))
-            return StepDevice.execute(None, step, contract_issue=issue, contract_only=True)
+            if issue is not None:
+                refusal = StepDevice.schema_refusal(None, step, contract_issue=issue)
+                assert refusal is not None
+                return refusal
         try:
             device = self.step_device(step)
         except DeviceError as error:
@@ -3437,13 +3571,6 @@ class TestReactor:
                 "summary": "Test reactor preflight raised an exception.",
                 **exception_result("test_reactor_run", "preflight_exception", "Test reactor preflight raised an exception.", error),
             }
-        contract_only = (
-            validation_error
-            if validation_error is not None and isinstance(validation_error.get("contract_only_step"), TestStep)
-            else None
-        )
-        if contract_only is not None:
-            validation_error = None
         if validation_error is not None:
             # The catalogue's own fix, on the refusal itself, from the same
             # source the MCP error reference serves. A plan refused here is the
@@ -3498,8 +3625,7 @@ class TestReactor:
         aborted: StepOutcome | None = None
         primary_error: BaseException | None = None
         try:
-            steps_to_execute = [contract_only["contract_only_step"]] if contract_only is not None else test_config.steps
-            aborted = self.execute_steps(steps_to_execute, completed, top_level=True)
+            aborted = self.execute_steps(test_config.steps, completed, top_level=True)
         except BaseException as error:
             primary_error = error
         finally:
@@ -3515,21 +3641,6 @@ class TestReactor:
             interrupt = cleanup_interrupts[0]
             interrupt.agentic_hil_cleanup = cleanup
             raise interrupt
-
-        if contract_only is not None and completed:
-            refusal = completed[0].get("result")
-            if isinstance(refusal, dict):
-                return {
-                    **refusal,
-                    "name": test_config.name,
-                    "test_config_path": test_config.path,
-                    **plan_digest_field(test_config),
-                    "validation_error": {key: value for key, value in contract_only.items() if key != "contract_only_step"},
-                    "steps": [],
-                    "cleanup": [],
-                    "cleanup_ok": True,
-                    "failed_step": contract_only["step"],
-                }
 
         cleanup_errors = [item for item in cleanup if result_failed(item["result"])]
         cleanup_ok = not cleanup_errors
@@ -3658,10 +3769,7 @@ class TestReactor:
         serves its action, which answers for its own config entry, its own
         permissions and its own session. Nothing here is built: see PlanState."""
         located = list(located_test_steps(test_config.steps, StepLocation.top))
-        # Validate every defmt addition before deciding that the contract-only
-        # operation is not executable. Otherwise a malformed late selector
-        # could be hidden by an earlier valid defmt opening after the plan's
-        # reset step, which would fail to prove the no-hardware boundary.
+        # Validate every defmt addition before any step can drive hardware.
         for location, step in located:
             issue = defmt_step_contract_issue(test_step_document(step))
             if issue is not None:
@@ -3678,21 +3786,6 @@ class TestReactor:
                     issue["summary"],
                     details,
                 )
-        for location, step in located:
-            if step.action == "defmt_expect":
-                return {
-                    "contract_only_step": step,
-                    "step": location.step,
-                    "field": f"{location.path}.action",
-                    "summary": "Defmt plan assertions are not executable in this version yet.",
-                }
-            if step.action == "uart_open" and "defmt" in step.arguments:
-                return {
-                    "contract_only_step": step,
-                    "step": location.step,
-                    "field": f"{location.path}.defmt",
-                    "summary": "Defmt plan assertions are not executable in this version yet.",
-                }
         state = PlanState()
         return self._preflight_steps(test_config.steps, StepLocation.top, state)
 

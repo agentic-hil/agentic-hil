@@ -3337,6 +3337,18 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not treat this as a failed assertion about the firmware. The comparison never happened.",
         ),
     ),
+    "defmt_expect_timeout": ErrorRemedy(
+        meaning=(
+            "A defmt_expect step did not receive a matching decoded frame within `timeout_s`. "
+            "`reads` says how many COM reads the step made."
+        ),
+        remediation=(
+            "Examine the step's selectors and received output, and check the ELF source before changing the plan.",
+        ),
+        do_not=(
+            "Do not raise `timeout_s` until the selectors and received output have been examined.",
+        ),
+    ),
     "uart_expect_timeout": ErrorRemedy(
         meaning=(
             "A serial expect step did not see `expected_text` or `expected_pattern` within `timeout_s`. "
