@@ -471,6 +471,8 @@ PINNED_SITES: dict[str, frozenset[tuple[str, str]]] = {
     "test_config_not_found": _at("test_reactor", "load_test_config"),
     "test_config_schema_invalid": _at("test_reactor", "validate_test_config_schema"),
     "test_config_unreadable": _at("test_reactor", "load_test_config"),
+    # Defmt plan assertions have one timeout producer (#837).
+    "defmt_expect_timeout": _at("test_reactor", "UartRunner._defmt_expect"),
     "uart_expect_timeout": _at("test_reactor", "UartRunner._expect"),
     "uart_session_not_owned": _at("test_reactor", "UartRunner"),
     "undeclared_device": _at("coordination", "HardwareCoordinator.acquire"),
@@ -592,6 +594,7 @@ REQUIRED_KEYS = (
     "comparator_unmet",
     "symbol_size_mismatch",
     "symbol_width_not_numeric",
+    "defmt_expect_timeout",
     "uart_expect_timeout",
     "unexpected_stop",
     "breakpoint_cleanup_failed",
@@ -944,6 +947,11 @@ SAYS: dict[str, Says] = {
         meaning=((r"integer_widths",), (r"nothing was judged",)),
         first=(r"integer_widths",),
         do_not=((r"do not treat this as a failed assertion",),),
+    ),
+    "defmt_expect_timeout": Says(
+        meaning=((r"defmt_expect", r"decoded frame"), (r"timeout_s|timeout",), (r"reads",)),
+        first=(r"selectors", r"received output"),
+        do_not=((r"do not raise `timeout_s`",),),
     ),
     "uart_expect_timeout": Says(
         meaning=((r"expected_text|expected_pattern", r"timeout_s"), (r"received_tail",), (r"bytes_received", r"reads")),

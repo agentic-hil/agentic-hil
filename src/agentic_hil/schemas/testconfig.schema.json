@@ -7,7 +7,7 @@
   "required": ["version", "steps"],
   "$comment": "Additions this schema marks `x-since-version` belong to that plan format version and later. A plan is held to what its own `version:` contains, so a version 2 plan reaching for a version 3 action or key is refused by name rather than quietly accepted here and rejected by an older install elsewhere.",
   "properties": {
-    "version": { "enum": [2, 3, 4, 5, 6, 7], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions (a serial line's on `uart_read`, a bus's on `can_read`), `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional. Version 4 adds the `repeat` block step, which runs a nested subset of steps by count or by wall time. Version 5 adds the `read_symbol` action and the numeric `comparator:` it carries, which is the first claim in this format about a value in target memory rather than about text a device sent. Version 6 adds the named `participant:` selector to CAN steps on buses configured with `shares:`. Version 7 adds the `defmt:` source to `uart_open` and the `defmt_expect` selector contract; plans using these additions are validated but cannot execute them yet." },
+    "version": { "enum": [2, 3, 4, 5, 6, 7], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions (a serial line's on `uart_read`, a bus's on `can_read`), `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional. Version 4 adds the `repeat` block step, which runs a nested subset of steps by count or by wall time. Version 5 adds the `read_symbol` action and the numeric `comparator:` it carries, which is the first claim in this format about a value in target memory rather than about text a device sent. Version 6 adds the named `participant:` selector to CAN steps on buses configured with `shares:`. Version 7 adds the `defmt:` source to `uart_open` and the `defmt_expect` action for matching decoded frames." },
     "name": { "type": "string", "minLength": 1 },
     "steps": { "$ref": "#/$defs/steps" }
   },
@@ -246,7 +246,7 @@
         "device": { "$ref": "#/$defs/device" },
         "port_id": { "$ref": "#/$defs/portId" },
         "action": { "const": "uart_open" },
-        "defmt": { "$ref": "#/$defs/defmtSource", "x-since-version": 7, "description": "Enable the version 7 defmt plan contract with the confirmed flashed ELF (`true`), an explicitly named ELF (`{image_path: ...}`), or no defmt source (`false`). Plan execution using this property is currently refused before hardware access." },
+        "defmt": { "$ref": "#/$defs/defmtSource", "x-since-version": 7, "description": "Decode using the confirmed flashed ELF (`true`), an explicitly named ELF (`{image_path: ...}`), or disable defmt decoding (`false`)." },
         "clear_buffer": { "type": "boolean", "default": true, "description": "Discard whatever the line buffered before this step, so what a later read matches came from this run rather than from a previous one. Opening a port a plan may not read is already refused, so the clear this asks for is always permitted here." }
       }
     },
@@ -255,7 +255,7 @@
       "additionalProperties": false,
       "required": ["action", "timeout_s"],
       "x-since-version": 7,
-      "description": "The version 7 contract for waiting for a decoded defmt frame on an open UART session. Selectors are independent and may be combined. Argument selectors are positional; null leaves a slot unconstrained, while each object selects exactly one of `equals` and inclusive `range`. This contract is validated, but plan execution is currently refused before hardware access.",
+      "description": "Wait for a decoded defmt frame on an open UART session. Selectors are independent and may be combined. Argument selectors are positional; null leaves a slot unconstrained, while each object selects exactly one of `equals` and inclusive `range`. Frames after the match remain available to later assertions.",
       "anyOf": [{ "required": ["device"] }, { "required": ["port_id"] }],
       "properties": {
         "device": { "$ref": "#/$defs/device" },
