@@ -3,17 +3,29 @@ from __future__ import annotations
 import json
 import math
 import re
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from conftest import DEFAULT_TEST_PERMISSIONS, FAKE_GDB, FAKE_OPENOCD, write_authoritative_config, write_config
+from defmt_wire import build_elf, defmt_symbol, encode_frame, rzcobs_stream
+from support import scaled_time_bound
+from test_flash_capture import Board, BoardBackend
 
 from agentic_hil.backends.gdbdebug import decode_symbol_value
 from agentic_hil.cli import build_parser, entrypoint
 from agentic_hil.config import ConfigError, load_config
+from agentic_hil.defmt import load_table
 from agentic_hil.knowledge import LISTEN_ONLY_MODE_ERROR
-from agentic_hil.test_reactor import DebuggerRunner, TestReactor, UartRunner, load_test_config, merge_result_status
+from agentic_hil.test_reactor import (
+    DebuggerRunner,
+    TestReactor,
+    UartRunner,
+    build_test_step,
+    load_test_config,
+    merge_result_status,
+)
 from agentic_hil.tools import AgenticHILToolService
 
 
@@ -162,6 +174,86 @@ def reactor_service(tmp_path: Path, behavior: str | None = None) -> tuple[Agenti
     com_ports = FakeComPortService()
     service = AgenticHILToolService(load_config(str(config_path)), com_ports=com_ports)  # type: ignore[arg-type]
     return service, com_ports
+
+
+def test_defmt_retained_frame_is_invalidated_after_buffer_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    port_id = "reactor_defmt_clear_uart"
+    priming, stale = "priming frame", "stale frame"
+    workspace = tmp_path / "workspace"
+    config_path = write_config(workspace, com_ports_yaml=f'com_ports:\n  {port_id}:\n    device: "COM_REACTOR_DEFMT_CLEAR"\n')
+    image = workspace / "build" / "app.elf"
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(build_elf(
+        [("_defmt_version_ = 4", 1, 0, ".defmt"), ("_defmt_encoding_ = rzcobs", 2, 0, ".defmt"),
+         (defmt_symbol("defmt_info", priming), 3, 1, ".defmt"), (defmt_symbol("defmt_info", stale), 4, 1, ".defmt")],
+        {".defmt": bytes(5)},
+    ))
+    table = load_table(image)
+    burst = rzcobs_stream([encode_frame(table, priming, []), encode_frame(table, stale, [])])
+    board = Board()
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=board.construct))
+    service = AgenticHILToolService(load_config(str(config_path)), backend=BoardBackend(board, banner=b""))
+    reactor = TestReactor(service.config, service)
+    board.watch = service.coordinator.bench.held_resources
+    reads: list[dict] = []
+    original_call = service.call
+
+    def observe(name: str, arguments: dict | None = None) -> dict:
+        result = original_call(name, arguments)
+        if name == "com_read":
+            reads.append(result)
+        return result
+
+    monkeypatch.setattr(service, "call", observe)
+
+    def step(action: str, **arguments: object) -> dict:
+        return reactor.execute_step(build_test_step({"action": action, "port_id": port_id, **arguments}))
+
+    try:
+        opened = step("uart_open", clear_buffer=False, defmt={"image_path": "build/app.elf"})
+        assert opened.get("ok") is True, opened
+        board.transmit(burst)
+        first = step("defmt_expect", text=priming, timeout_s=scaled_time_bound(0.1))
+        assert first.get("ok") is True and first.get("frame", {}).get("message") == priming, first
+        assert len(reads) == 1
+        assert [frame["message"] for frame in reads[0]["frames"]] == [priming, stale]
+        runner = reactor.devices[("uart", port_id)]
+        assert isinstance(runner, UartRunner)
+        assert [frame["message"] for frame in runner._defmt_frames] == [stale]
+
+        session = service.com_ports.sessions[port_id]
+        assert session.defmt is not None
+        identity, epoch = session.defmt.identity, session.buffer_epoch
+        clear_count = board.events.count("clear")
+        cleared = service.call("com_session_start", {"port_id": port_id, "clear_buffer": True})
+        assert cleared.get("ok") is True and cleared.get("already_active") is True, cleared
+        current = service.com_ports.sessions[port_id]
+        assert current is session
+        assert current.defmt is not None and current.defmt.identity == identity
+        assert current.buffer_epoch > epoch
+        assert board.events.count("clear") == clear_count + 1
+
+        before = len(reads)
+        result = step("defmt_expect", text=stale, timeout_s=scaled_time_bound(0.1))
+        if result.get("ok") is True and result.get("frame", {}).get("message") == stale:
+            raise AssertionError("A retained defmt frame survived successful COM buffer clearing.")
+        assert result.get("ok") is False, result
+        assert result.get("error_type") == "defmt_expect_timeout", result
+        assert len(reads) - before >= 1
+        assert result.get("reads") == len(reads) - before, result
+    finally:
+        try:
+            if port_id in service.com_ports.sessions:
+                closed = step("uart_close")
+                assert closed.get("ok") is True, closed
+        finally:
+            try:
+                reactor.close()
+            finally:
+                try:
+                    service.close()
+                finally:
+                    board.finish()
 
 
 def write_test_config(tmp_path: Path, text: str) -> Path:
