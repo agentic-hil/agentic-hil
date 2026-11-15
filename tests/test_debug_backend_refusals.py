@@ -21,8 +21,8 @@ What the issue found unpinned, in its order:
 * OpenOCD's missing target script named as ``target_config_not_found`` and as
   the field, a generic missing script as ``config_file_not_found``, and a
   flash that failed without reaching its marker as ``flash_failed``.
-* STM32CubeProgrammer exiting 0 while printing an error, plus version and
-  USB-free probe refusals recorded from its licensed optional image.
+* STM32CubeProgrammer's recorded exit-1 silent-target refusals, plus version
+  and USB-free probe refusals recorded from its licensed optional image.
 * every ST-Link and pyOCD phrase the classifier has a bucket for, driven
   through the tool result, the quarantine it opens or refuses, and the
   remediation it selects. pyOCD's verify bucket has no row: pyOCD 0.45.1's
@@ -107,8 +107,8 @@ PYOCD_FAILURES = json.loads((FIXTURES / "pyocd_failure_recordings.json").read_te
 # `probe_target` and a halt reset with the probe's USB port powered off (#737),
 # a flash whose verify fails at a read-only register (#738), and a hot-plug
 # flash that failed while the previous firmware ran from flash with the retry
-# that programmed and verified 18 s later (#743), on a NUCLEO-H533RE behind an
-# STLINK-V3.
+# that programmed and verified 18 s later (#743), and four silent-target calls
+# (#739), on a NUCLEO-H533RE behind an STLINK-V3.
 CUBE_FAILURES = json.loads((FIXTURES / "stm32cubeprogrammer_2_23_0_failure_recordings.json").read_text(encoding="utf-8"))
 # The verify failure, looked up by the tests that replay it rather than when the
 # module is imported, so that a fixture without it fails those tests alone.
@@ -135,14 +135,56 @@ AVAILABLE_SUMMARY = {"openocd": "OpenOCD is available.", "pyocd": "pyOCD is avai
 # their target from a script or from the probe.
 TARGET_TYPE = {"openocd": None, "pyocd": "stm32f446re", "stlink": None}
 
-# The one STM32CubeProgrammer transcript the issue quotes, and the exit status
-# it says the CLI returns for it. Not a recording: the CLI does not run in the
-# container image, and the bench recording of `STM32_Programmer_CLI -c port=SWD`
-# with no board attached is owed. The probe line beside it is the one the
-# in-tree fake_stlink_no_target.py prints, because the real CLI names the
-# ST-Link it opened before it gives up on the target.
-STLINK_NO_TARGET_STDOUT = "ST-LINK SN  : STLINK123\n"
-STLINK_NO_TARGET_STDERR = "Error: No STM32 target found!\n"
+# Independent expectations from #739's 2026-10-23 capture comment. Only the
+# serial and staging placeholder have the fixture's documented replacements.
+# Recording names remain data until a test call, including classifier rows.
+CUBE_SILENT_TARGET_SOURCE = "https://github.com/agentic-hil/agentic-hil/issues/739#issuecomment-6365097626"
+CUBE_SILENT_TARGET_CASES = {
+    "connect_silent_target": (
+        "probe_target",
+        {},
+        ["/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI", "-q", "-c", "port=SWD", "mode=HOTPLUG", "sn=[redacted]"],
+    ),
+    "reset_run_silent_target": (
+        "reset_target",
+        {"mode": "run"},
+        ["/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI", "-q", "-c", "port=SWD", "mode=NORMAL", "sn=[redacted]", "-rst"],
+    ),
+    "reset_halt_silent_target": (
+        "reset_target",
+        {"mode": "halt"},
+        ["/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI", "-q", "-c", "port=SWD", "mode=NORMAL", "sn=[redacted]", "-halt"],
+    ),
+    "flash_elf_silent_target": (
+        "flash_firmware",
+        {"image_path": "build/firmware.elf"},
+        ["/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI", "-q", "-c", "port=SWD", "mode=HOTPLUG", "sn=[redacted]", "-w", "[staging]/hil-smoke-h533re.elf", "-v"],
+    ),
+}
+CUBE_SILENT_TARGET_TOOL_VERSIONS = {"stm32cubeprogrammer": "2.23.0", "stm32cubeclt": "1.22.0", "agentic_hil": "0.24.1.dev0"}
+CUBE_SILENT_TARGET_STDOUT = (
+    "      -------------------------------------------------------------------\n"
+    "                        STM32CubeProgrammer v2.23.0                  \n"
+    "      -------------------------------------------------------------------\n"
+    "\n"
+    "ST-LINK SN  : [redacted]\n"
+    "ST-LINK FW  : V3J13M4\n"
+    "Board       : NUCLEO-H533RE\n"
+    "Voltage     : 3.29V\n"
+    "Error: Unable to get core ID\n"
+    "Error: No STM32 target found! If your product embeds Debug Authentication, please perform a discovery using Debug Authentication\n"
+    "2nd connect tentative with frequency (8MHz)\n"
+    "ST-LINK SN  : [redacted]\n"
+    "ST-LINK FW  : V3J13M4\n"
+    "Board       : NUCLEO-H533RE\n"
+    "Voltage     : 3.29V\n"
+    "Error: Unable to get core ID\n"
+    "Error: No STM32 target found! If your product embeds Debug Authentication, please perform a discovery using Debug Authentication\n"
+)
+CUBE_SILENT_TARGET_DIAGNOSTICS = {
+    "core_id": "Error: Unable to get core ID\n",
+    "target_not_found": "Error: No STM32 target found! If your product embeds Debug Authentication, please perform a discovery using Debug Authentication\n",
+}
 
 # The two strings OpenOCD's embedded `program` proc echoes about a flash that
 # stopped, present in the installed binary (the recording counts them). A
@@ -859,41 +901,68 @@ def test_a_flash_that_failed_without_reaching_its_marker_is_flash_failed(tmp_pat
 
 
 # ---------------------------------------------------------------------------
-# A tool that exits 0 while printing an error.
+# An answering probe with a silent target: four recorded exit-1 refusals (#739).
 
 
-def test_a_zero_exit_with_error_text_is_a_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """STM32CubeProgrammer returns 0 for some failures; the words decide, not the status.
+@pytest.mark.parametrize("name", list(CUBE_SILENT_TARGET_CASES), ids=list(CUBE_SILENT_TARGET_CASES))
+def test_stlink_silent_target_recording_fidelity(name: str) -> None:
+    """Keep the captured commands, streams, status and provenance independent of the replay fake."""
+    path = FIXTURES / "stm32cubeprogrammer_2_23_0_failure_recordings.json"
+    recordings = json.loads(path.read_text(encoding="utf-8"))["recordings"]
+    recorded = recordings.get(name)
+    if recorded is None:
+        raise AssertionError(f"CubeProgrammer silent-target recording is missing: {name}")
+    tool, arguments, argv = CUBE_SILENT_TARGET_CASES[name]
 
-    `Error: No STM32 target found!` with exit 0 is neither a confirmed success
-    nor an unconfirmed one: it is the CLI's own report that a probe was opened
-    and nothing answered behind it, classified as such, with no
-    `success_confirmed` anywhere on the result. pyOCD's own exit-0 refusal
-    (`No connected debug probes`) is pinned the same way in
-    tests/test_pyocd_without_a_probe.py and is not repeated here.
-    """
-    play_transcript(monkeypatch, stdout=STLINK_NO_TARGET_STDOUT, stderr=STLINK_NO_TARGET_STDERR, returncode=0)
+    assert recorded["argv"] == argv
+    assert type(recorded["returncode"]) is int
+    assert recorded["returncode"] == 1
+    assert recorded["timed_out"] is False
+    assert recorded["stdout"] == CUBE_SILENT_TARGET_STDOUT
+    assert recorded["stderr"] == ""
+    assert recorded["recorded_on"] == "2026-10-23"
+    assert recorded["source_url"] == CUBE_SILENT_TARGET_SOURCE
+    assert recorded["tool_versions"] == CUBE_SILENT_TARGET_TOOL_VERSIONS
+    provenance = recorded["bench"] + " " + recorded["how"]
+    for token in ("Linux", "STLINK-V3", "V3J13M4", "NUCLEO-H533RE", "STM32CubeCLT 1.22.0", "1395351c"):
+        assert token in provenance, (name, token, provenance)
+    how = recorded["how"]
+    assert tool in how
+    if "mode" in arguments:
+        assert f"mode {arguments['mode']}" in how
+    for token in ("about a minute after reset", "PA13/PA14", "GPIO outputs", "answering probe", "silent target"):
+        assert token in how, (name, token, how)
+
+
+@pytest.mark.parametrize("name", list(CUBE_SILENT_TARGET_CASES), ids=list(CUBE_SILENT_TARGET_CASES))
+def test_stlink_silent_target_recorded_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Replay both recorded connection attempts, without inferring contact or recovery policy."""
+    recorded = cube_failure_recording(name)
+    tool, arguments, _ = CUBE_SILENT_TARGET_CASES[name]
+    play_transcript(monkeypatch, stdout=recorded["stdout"], stderr=recorded["stderr"], returncode=recorded["returncode"])
     config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
 
-    result = call(config, "probe_target")
+    result = call(config, tool, arguments)
 
     assert result["ok"] is False, result
     assert result["backend_error_type"] == "target_not_detected", result
     assert result["error_type"] == "target_not_detected", result
-    assert "success_confirmed" not in result, result
-    assert result.get("target_detected") is not True, result
-    assert result["programmer_output"]["returncode"] == 0, result["programmer_output"]
-    assert log_of(config, result)["returncode"] == 0
-    assert_refused_before_contact(result, config)
+    for key in ("stdout", "stderr", "returncode"):
+        assert result["programmer_output"][key] == recorded[key], result["programmer_output"]
+    log = log_of(config, result)
+    for key in ("stdout", "stderr", "returncode", "timed_out"):
+        assert log[key] == recorded[key], log
+    assert log["timed_out"] is False
 
 
 # ---------------------------------------------------------------------------
-# Every phrase the two classifiers have a bucket for.
+# Recorded diagnostic lines and existing classifier buckets.
 
 # (backend, tool, transcript, expected bucket, where the words come from).
-# `recorded`: a real tool recording. `in tree`: a phrase an existing fixture
-# already prints, typed from the tool by whoever wrote it. `issue`: the phrase
-# #506 quotes. No row plays the classifier's own table words with no recording
+# `recorded`: a real tool recording. `recorded silent target`: a complete line
+# selected at test-call time from #739's capture, with both occurrences checked.
+# `in tree`: a phrase an existing fixture already prints, typed from the tool
+# by whoever wrote it. No row plays the classifier's own table words with no recording
 # behind them: the one that did, a STM32CubeProgrammer verify line the CLI never
 # prints, gave way to the recorded verify failure, which
 # test_stlink_reads_cubes_recorded_data_mismatch_as_a_failed_verify replays
@@ -902,10 +971,6 @@ def test_a_zero_exit_with_error_text_is_a_failure(tmp_path: Path, monkeypatch: p
 # tests/fixtures/pyocd_failure_recordings.json, for a failure no bench provokes
 # without unplugging the probe or protecting the flash.
 CLASSIFIER_ROWS = [
-    ("stlink", "probe_target", "Error: No ST-LINK detected!\n", "probe_not_found", "in tree"),
-    ("stlink", "probe_target", STLINK_NO_TARGET_STDOUT + STLINK_NO_TARGET_STDERR, "target_not_detected", "issue"),
-    ("stlink", "probe_target", "ST-LINK SN  : STLINK123\nError: no device found\n", "target_not_detected", "issue"),
-    ("stlink", "probe_target", "ST-LINK SN  : STLINK123\nError: unable to connect to target\n", "target_not_detected", "issue"),
     ("stlink", "flash_firmware", cube_failure_recording("flash_input_file_missing")["stdout"], "config_file_not_found", "recorded"),
     ("stlink", "flash_firmware", cube_failure_recording("flash_bin_outside_flash")["stdout"], "flash_failed", "recorded"),
     ("pyocd", "probe_target", recording("pyocd_commander_status_no_probe")["stdout"], "probe_not_found", "recorded"),
@@ -920,18 +985,35 @@ CLASSIFIER_ROWS = [
     ("pyocd", "flash_firmware", pyocd_source_line("flash_erase_sector_timed_out"), "flash_erase_failed", "pyocd source"),
     ("pyocd", "flash_firmware", pyocd_source_line("flash_erase_not_within_a_sector"), "flash_erase_failed", "pyocd source"),
     ("pyocd", "debug_symbol_value", pyocd_recording("pyocd_read_unmapped_address")["stdout"], "memory_read_failed", "recorded"),
+    ("stlink", "probe_target", ("connect_silent_target", "core_id"), "target_not_detected", "recorded silent target"),
+    ("stlink", "probe_target", ("connect_silent_target", "target_not_found"), "target_not_detected", "recorded silent target"),
+    ("stlink", "reset_target", ("reset_run_silent_target", "core_id"), "target_not_detected", "recorded silent target"),
+    ("stlink", "reset_target", ("reset_run_silent_target", "target_not_found"), "target_not_detected", "recorded silent target"),
+    ("stlink", "flash_firmware", ("flash_elf_silent_target", "core_id"), "target_not_detected", "recorded silent target"),
+    ("stlink", "flash_firmware", ("flash_elf_silent_target", "target_not_found"), "target_not_detected", "recorded silent target"),
 ]
 
 
 @pytest.mark.parametrize(
     ("backend_name", "tool", "transcript", "expected", "source"),
     CLASSIFIER_ROWS,
-    ids=[f"{row[0]}-{row[3]}-{index}" for index, row in enumerate(CLASSIFIER_ROWS)],
+    ids=[f"{row[0]}-{row[1]}-{row[2][1]}" if isinstance(row[2], tuple) else f"{row[0]}-{row[3]}-{index}" for index, row in enumerate(CLASSIFIER_ROWS)],
 )
-def test_classifier_buckets_from_recorded_tool_output(tmp_path: Path, backend_name: str, tool: str, transcript: str, expected: str, source: str) -> None:
+def test_classifier_buckets_from_recorded_tool_output(tmp_path: Path, backend_name: str, tool: str, transcript: str | tuple[str, str], expected: str, source: str) -> None:
     """Each phrase lands in its own bucket, and in no other."""
     config = load_config(str(write_config(tmp_path, debugger_type=backend_name, target_type=TARGET_TYPE[backend_name])))
     backend = BACKEND_CLASS[backend_name](config)
+
+    if isinstance(transcript, tuple):
+        recording_name, diagnostic_id = transcript
+        recorded = cube_failure_recording(recording_name)
+        diagnostic = CUBE_SILENT_TARGET_DIAGNOSTICS[diagnostic_id]
+        lines = [line for line in recorded["stdout"].splitlines(keepends=True) if line == diagnostic]
+        assert lines == [diagnostic, diagnostic], (source, recorded["stdout"])
+        bucket = backend._classify_output(lines[0], tool)
+        if bucket != "target_not_detected":
+            raise AssertionError(f"{tool} did not classify the recorded {diagnostic_id} diagnostic as target_not_detected")
+        return
 
     assert backend._classify_output(transcript, tool) == expected, (source, transcript)
 
@@ -948,9 +1030,6 @@ def test_classifier_buckets_from_recorded_tool_output(tmp_path: Path, backend_na
 # five entries these rows once pinned as absent are written at the bottom of
 # this file (#516).
 TOOL_RESULT_ROWS = [
-    ("stlink", "probe_target", {}, "Error: No ST-LINK detected!\n", "probe_not_found", "adapter_not_found", "refused"),
-    ("stlink", "probe_target", {}, "ST-LINK SN  : STLINK123\nError: no device found\n", "target_not_detected", "target_not_detected", "refused"),
-    ("stlink", "probe_target", {}, "ST-LINK SN  : STLINK123\nError: unable to connect to target\n", "target_not_detected", "target_not_detected", "refused"),
     ("stlink", "flash_firmware", {"image_path": "build/firmware.elf"}, cube_failure_recording("flash_bin_outside_flash")["stdout"], "flash_failed", "flash_failed", "quarantined"),
     ("pyocd", "probe_target", {}, "0000000:ERROR:Error attempting to connect to target\nError: unable to connect to the target\n", "target_not_detected", "target_not_detected", "refused"),
     ("pyocd", "flash_firmware", {"image_path": "build/firmware.elf"}, "0001042 C Target type stm32f446re not recognized. Use 'pyocd list --targets' to see currently available target types. See <https://pyocd.io/docs/target_support.html> for how to install additional target support. [__main__]\n", "target_type_invalid", "target_type_invalid", "refused"),

@@ -1,5 +1,5 @@
 {
-  "what": "Failures of STM32CubeProgrammer 2.23.0 recorded on the reference bench with the demo firmware running, which booted and printed its banner after each of them. `flash_bin_outside_flash` is `flash_firmware` of a sixteen-byte raw binary whose `flash_address` lies past the end of the part's flash, run through `agentic-hil mcp-stdio` on the bench image's CLI with `connect_mode: under_reset`; the argv and the output are the product's own action log. The CLI connects, prints its erase and download headers for the segment, and then gives up on the download. tests/bench/cubeprogrammer_recordings.py re-runs it through the product in the optional CubeProgrammer bench stage and compares the `Error:` lines. `flash_input_file_missing` is the argv the stlink backend builds for `flash_firmware` of an ELF under reset, with an input path that does not exist, run by hand under the bench lock in the same image, from the CLI's own directory as the backend runs it. It is run by hand because no product run can provoke it: the product checks and stages the image before it starts the CLI, and refuses a missing one there with `artifact_not_found`.",
+  "what": "Failures of STM32CubeProgrammer 2.23.0 from several captures. The top-level recorded_on, bench, tool_versions and memory_map describe only flash_bin_outside_flash and flash_input_file_missing on the reference NUCLEO-F446RE, with demo firmware that booted and printed its banner after each of those calls. Later NUCLEO-H533RE captures, including the four silent-target calls from #739, carry their own provenance in each entry. `flash_bin_outside_flash` is `flash_firmware` of a sixteen-byte raw binary whose `flash_address` lies past the end of the part's flash, run through `agentic-hil mcp-stdio` on the bench image's CLI with `connect_mode: under_reset`; the argv and the output are the product's own action log. The CLI connects, prints its erase and download headers for the segment, and then gives up on the download. tests/bench/cubeprogrammer_recordings.py re-runs it through the product in the optional CubeProgrammer bench stage and compares the `Error:` lines. `flash_input_file_missing` is the argv the stlink backend builds for `flash_firmware` of an ELF under reset, with an input path that does not exist, run by hand under the bench lock in the same image, from the CLI's own directory as the backend runs it. It is run by hand because no product run can provoke it: the product checks and stages the image before it starts the CLI, and refuses a missing one there with `artifact_not_found`.",
   "recorded_on": "2026-10-12",
   "bench": "NUCLEO-F446RE (STM32F446xx, device ID 0x421, revision A) through its on-board in-circuit debugger, ST-LINK firmware V2J30M19, Linux bench image, demo firmware running",
   "tool_versions": {
@@ -169,6 +169,103 @@
       "returncode": 0,
       "timed_out": false,
       "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Hot Plug\nReset mode  : Software reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: hil-smoke-h533re.elf\n\n\nMemory Programming ...\n  File          : hil-smoke-h533re.elf\n  Size          : 10.69 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 1]\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:00.168\n\n\n\nVerifying...\n\n\n\n\nTime elapsed during verifying operation: 00:00:00.063\n\n\nDownload verified successfully\n\n\n",
+      "stderr": ""
+    },
+    "connect_silent_target": {
+      "how": "Through the product, probe_target, Agentic HIL 0.24.1.dev0 at commit 1395351c. The test image waits about a minute after reset before changing PA13/PA14 to GPIO outputs, leaving an answering probe and silent target; debugger_probes_list still listed the probe. Capture recovery context only: a power cycle of the Nucleo switchable hub port followed by hot-plug flash_firmware of the normal image inside the minute worked twice, with no connect under reset or button press.",
+      "recorded_on": "2026-10-23",
+      "source_url": "https://github.com/agentic-hil/agentic-hil/issues/739#issuecomment-6365097626",
+      "bench": "NUCLEO-H533RE through an STLINK-V3, ST-LINK firmware V3J13M4, Linux, the CLI of STM32CubeCLT 1.22.0",
+      "tool_versions": {
+        "stm32cubeprogrammer": "2.23.0",
+        "stm32cubeclt": "1.22.0",
+        "agentic_hil": "0.24.1.dev0"
+      },
+      "argv": [
+        "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+        "-q",
+        "-c",
+        "port=SWD",
+        "mode=HOTPLUG",
+        "sn=[redacted]"
+      ],
+      "returncode": 1,
+      "timed_out": false,
+      "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nError: Unable to get core ID\nError: No STM32 target found! If your product embeds Debug Authentication, please perform a discovery using Debug Authentication\n2nd connect tentative with frequency (8MHz)\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nError: Unable to get core ID\nError: No STM32 target found! If your product embeds Debug Authentication, please perform a discovery using Debug Authentication\n",
+      "stderr": ""
+    },
+    "reset_run_silent_target": {
+      "how": "Through the product, reset_target, mode run, Agentic HIL 0.24.1.dev0 at commit 1395351c. The test image waits about a minute after reset before changing PA13/PA14 to GPIO outputs, leaving an answering probe and silent target; debugger_probes_list still listed the probe. Capture recovery context only: a power cycle of the Nucleo switchable hub port followed by hot-plug flash_firmware of the normal image inside the minute worked twice, with no connect under reset or button press.",
+      "recorded_on": "2026-10-23",
+      "source_url": "https://github.com/agentic-hil/agentic-hil/issues/739#issuecomment-6365097626",
+      "bench": "NUCLEO-H533RE through an STLINK-V3, ST-LINK firmware V3J13M4, Linux, the CLI of STM32CubeCLT 1.22.0",
+      "tool_versions": {
+        "stm32cubeprogrammer": "2.23.0",
+        "stm32cubeclt": "1.22.0",
+        "agentic_hil": "0.24.1.dev0"
+      },
+      "argv": [
+        "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+        "-q",
+        "-c",
+        "port=SWD",
+        "mode=NORMAL",
+        "sn=[redacted]",
+        "-rst"
+      ],
+      "returncode": 1,
+      "timed_out": false,
+      "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nError: Unable to get core ID\nError: No STM32 target found! If your product embeds Debug Authentication, please perform a discovery using Debug Authentication\n2nd connect tentative with frequency (8MHz)\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nError: Unable to get core ID\nError: No STM32 target found! If your product embeds Debug Authentication, please perform a discovery using Debug Authentication\n",
+      "stderr": ""
+    },
+    "reset_halt_silent_target": {
+      "how": "Through the product, reset_target, mode halt, Agentic HIL 0.24.1.dev0 at commit 1395351c. The test image waits about a minute after reset before changing PA13/PA14 to GPIO outputs, leaving an answering probe and silent target; debugger_probes_list still listed the probe. Capture recovery context only: a power cycle of the Nucleo switchable hub port followed by hot-plug flash_firmware of the normal image inside the minute worked twice, with no connect under reset or button press.",
+      "recorded_on": "2026-10-23",
+      "source_url": "https://github.com/agentic-hil/agentic-hil/issues/739#issuecomment-6365097626",
+      "bench": "NUCLEO-H533RE through an STLINK-V3, ST-LINK firmware V3J13M4, Linux, the CLI of STM32CubeCLT 1.22.0",
+      "tool_versions": {
+        "stm32cubeprogrammer": "2.23.0",
+        "stm32cubeclt": "1.22.0",
+        "agentic_hil": "0.24.1.dev0"
+      },
+      "argv": [
+        "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+        "-q",
+        "-c",
+        "port=SWD",
+        "mode=NORMAL",
+        "sn=[redacted]",
+        "-halt"
+      ],
+      "returncode": 1,
+      "timed_out": false,
+      "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nError: Unable to get core ID\nError: No STM32 target found! If your product embeds Debug Authentication, please perform a discovery using Debug Authentication\n2nd connect tentative with frequency (8MHz)\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nError: Unable to get core ID\nError: No STM32 target found! If your product embeds Debug Authentication, please perform a discovery using Debug Authentication\n",
+      "stderr": ""
+    },
+    "flash_elf_silent_target": {
+      "how": "Through the product, flash_firmware of a valid image, Agentic HIL 0.24.1.dev0 at commit 1395351c. The test image waits about a minute after reset before changing PA13/PA14 to GPIO outputs, leaving an answering probe and silent target; debugger_probes_list still listed the probe. Capture recovery context only: a power cycle of the Nucleo switchable hub port followed by hot-plug flash_firmware of the normal image inside the minute worked twice, with no connect under reset or button press.",
+      "recorded_on": "2026-10-23",
+      "source_url": "https://github.com/agentic-hil/agentic-hil/issues/739#issuecomment-6365097626",
+      "bench": "NUCLEO-H533RE through an STLINK-V3, ST-LINK firmware V3J13M4, Linux, the CLI of STM32CubeCLT 1.22.0",
+      "tool_versions": {
+        "stm32cubeprogrammer": "2.23.0",
+        "stm32cubeclt": "1.22.0",
+        "agentic_hil": "0.24.1.dev0"
+      },
+      "argv": [
+        "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+        "-q",
+        "-c",
+        "port=SWD",
+        "mode=HOTPLUG",
+        "sn=[redacted]",
+        "-w",
+        "[staging]/hil-smoke-h533re.elf",
+        "-v"
+      ],
+      "returncode": 1,
+      "timed_out": false,
+      "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nError: Unable to get core ID\nError: No STM32 target found! If your product embeds Debug Authentication, please perform a discovery using Debug Authentication\n2nd connect tentative with frequency (8MHz)\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nError: Unable to get core ID\nError: No STM32 target found! If your product embeds Debug Authentication, please perform a discovery using Debug Authentication\n",
       "stderr": ""
     }
   }

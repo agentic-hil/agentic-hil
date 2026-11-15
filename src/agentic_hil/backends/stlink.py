@@ -1243,7 +1243,9 @@ class STLinkBackend:
         # file.
         if "serial number not found" in lower:
             return "probe_not_found"
-        if contains_any(lower, ["no stm32 target found", "cannot connect to target", "can not connect to target", "failed to connect"]):
+        # The core-ID refusal precedes the target-not-found line in the recorded
+        # 2.23.0 silent-target captures (#739), and names the same failure alone.
+        if contains_any(lower, ["unable to get core id", "no stm32 target found", "cannot connect to target", "can not connect to target", "failed to connect"]):
             return "target_not_detected"
         if contains_any(lower, ["no device found", "device not found", "unable to connect"]):
             return "target_not_detected"
