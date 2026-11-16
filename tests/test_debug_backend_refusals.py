@@ -956,6 +956,51 @@ def test_stlink_silent_target_recorded_refusal(tmp_path: Path, monkeypatch: pyte
 
 
 # ---------------------------------------------------------------------------
+# Recorded pyOCD ST-Link IDCODE failure and its source-derived status boundary (#741).
+
+
+def test_pyocd_stlink_idcode_recorded_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The recorded exit-zero connect failure refuses without leaving cleanup work."""
+    recorded = json.loads((FIXTURES / "pyocd_failure_recordings.json").read_text(encoding="utf-8"))["recordings"]["pyocd_probe_stlink_idcode_error"]
+    play_transcript(monkeypatch, stdout=recorded["stdout"], stderr=recorded["stderr"], returncode=recorded["returncode"])
+    config = load_config(str(write_config(
+        tmp_path, debugger_type="pyocd", debugger_executable=FAKE_TRANSCRIPT,
+        target_type=None, probe_id=None, auto_probe_ids=False,
+    )))
+
+    result = call(config, "probe_target")
+
+    if result.get("error_type") != "target_not_detected" or result.get("backend_error_type") != "target_not_detected":
+        raise AssertionError("recorded pyOCD ST-Link IDCODE failure is not target_not_detected")
+    assert result["ok"] is False, result
+    assert result.get("remediation") == remediation_fields("target_not_detected", "pyocd").get("remediation"), result
+    assert result["programmer_output"] == {key: recorded[key] for key in ("stdout", "stderr", "returncode")}
+    log = log_of(config, result)
+    assert {key: log[key] for key in ("stdout", "stderr", "returncode", "timed_out")} == {
+        key: recorded[key] for key in ("stdout", "stderr", "returncode", "timed_out")
+    }
+    assert_refused_before_contact(result, config)
+
+
+def test_pyocd_other_stlink_status_does_not_prove_no_contact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Code 18 is source-derived; this synthetic exit status is not a bench recording."""
+    transcript = pyocd_source_line("stlink_status")
+    play_transcript(monkeypatch, stderr=transcript, returncode=1)
+    config = load_config(str(write_config(
+        tmp_path, debugger_type="pyocd", debugger_executable=FAKE_TRANSCRIPT,
+        target_type=None, probe_id=None, auto_probe_ids=False,
+    )))
+
+    result = PyOCDBackend(config)._run_pyocd("probe_target", ["commander", "--command", "status"])
+
+    assert result["ok"] is False, result
+    assert result["backend_error_type"] == "unknown_debugger_error", result
+    assert result["error_type"] == "debugger_error", result
+    assert result.get("target_contacted") is not False, result
+    assert result.get("retry_safe") is not True, result
+
+
+# ---------------------------------------------------------------------------
 # Recorded diagnostic lines and existing classifier buckets.
 
 # (backend, tool, transcript, expected bucket, where the words come from).

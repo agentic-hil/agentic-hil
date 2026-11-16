@@ -18,9 +18,11 @@ to them.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 
+import pytest
 import test_debug_backend_refusals as refusals
 
 from agentic_hil.knowledge import catalogue_entry
@@ -87,6 +89,89 @@ def test_no_pyocd_row_plays_a_phrase_pyocd_does_not_print() -> None:
         raise AssertionError("a pyOCD row plays a phrase pyOCD 0.45.1 does not print")
     assert absent, refusals.PYOCD_FAILURES["phrases_in_the_pyocd_source"]
     assert transcripts, "the three tables hold no pyOCD row"
+
+
+def test_pyocd_stlink_idcode_recording_fidelity() -> None:
+    """The capture keeps its own provenance and the fixture's probe-ID redaction (#741)."""
+    document = json.loads((refusals.FIXTURES / "pyocd_failure_recordings.json").read_text(encoding="utf-8"))
+    recorded = document["recordings"].get("pyocd_probe_stlink_idcode_error")
+    if recorded is None:
+        raise AssertionError("pyOCD ST-Link IDCODE recording is missing")
+
+    # Fixed digests of the supplied comment's command (with --uid redacted) and
+    # complete decoded stderr, including its literal backslash-caret notation.
+    assert hashlib.sha256(recorded["command"].encode("utf-8")).hexdigest() == "9522fec302b5a1eaeb19b1583446b427d67fb95a52387075edea6a7f6214345a"
+    assert hashlib.sha256(recorded["stderr"].encode("utf-8")).hexdigest() == "e676e8e23da9dcc3fe8dd336fb53ac6ca5ded23b50ee3ccd239fa39e3beadf68"
+    assert type(recorded["returncode"]) is int
+    assert recorded["returncode"] == 0
+    assert recorded["timed_out"] is False
+    assert recorded["stdout"] == ""
+    assert recorded["command"].split("--uid ", 1)[1].split()[0] == "[redacted]"
+    assert "<venv>" in recorded["command"]
+    assert "<site-packages>" in recorded["stderr"]
+    assert all(token in recorded["redaction"].lower() for token in ("probe id", "redacted", "[redacted]"))
+    assert all(token in recorded["redaction"] for token in ("<venv>", "<site-packages>", "backslash-caret"))
+    assert recorded["recorded_on"] == "2026-10-23"
+    assert recorded["source_url"] == "https://github.com/agentic-hil/agentic-hil/issues/741#issuecomment-6365098084"
+    assert all(token in recorded["bench"] for token in ("NUCLEO-H533RE", "STLINK-V3", "V3J13M4"))
+    assert recorded["tool_versions"]["pyocd"] == "0.45.1"
+    assert recorded["tool_versions"]["stlink_firmware"] == "V3J13M4"
+    assert recorded["target_type"] is None
+    assert recorded["effective_target_type"] == "cortex_m"
+    assert all(token in recorded["how"] for token in ("probe_target", "SWD", "GPIO", "unset"))
+
+    scope = document["what"]
+    assert all(token in scope for token in (
+        "top-level", "recorded_on", "bench", "tool_versions", "memory_map", "only", "older",
+        "pyocd_read_unmapped_address", "pyocd_flash_bin_outside_flash", "NUCLEO-F446RE",
+    ))
+    source_status = document["phrases_in_the_pyocd_source"]["phrases"]["stlink_status"]
+    assert source_status["line"] == "0000934 C STLink error (18): AP error [__main__]"
+    assert "pyocd/probe/stlink/constants.py:165" in source_status["source"]
+
+
+@pytest.mark.parametrize(
+    "scenario_id",
+    ["cmsis_dap_no_ack", "program_page_failure", "post_flash_reset"],
+    ids=["cmsis_dap_no_ack", "program_page_failure", "post_flash_reset"],
+)
+def test_pyocd_source_derived_capture_scenarios(scenario_id: str) -> None:
+    """Unrecorded failures say which source they derive from and how to capture them."""
+    document = json.loads((refusals.FIXTURES / "pyocd_failure_recordings.json").read_text(encoding="utf-8"))
+    source = document["phrases_in_the_pyocd_source"]
+    scenario = source.get("capture_scenarios", {}).get(scenario_id)
+    if scenario is None:
+        raise AssertionError("pyOCD source-derived capture scenario is missing: " + scenario_id)
+
+    assert scenario["status"] == "source-derived"
+    capture = scenario["scenario"].lower()
+    if scenario_id == "cmsis_dap_no_ack":
+        assert scenario["operation"] == "probe_target"
+        assert scenario["pyocd_version"] == "0.45.1"
+        assert scenario["phrase_refs"] == ["swd_no_ack"]
+        phrase = source["phrases"]["swd_no_ack"]
+        assert "SWD/JTAG communication failure (No ACK)" in phrase["line"]
+        assert "pyocd/probe/pydapaccess/dap_access_cmsis_dap.py:372" in phrase["source"]
+        assert all(token in capture for token in ("cmsis-dap", "probe", "unpowered", "or", "swd", "open"))
+    elif scenario_id == "program_page_failure":
+        assert scenario["operation"] == "flash_firmware"
+        assert set(scenario["phrase_refs"]) == {"flash_program_page_failure", "flash_program_page_timeout", "flash_init_failure"}
+        for name in scenario["phrase_refs"]:
+            assert source["phrases"][name]["line"]
+            assert "pyocd/flash/" in source["phrases"][name]["source"]
+        assert all(token in capture for token in ("sectors", "write-protected", "option bytes", "owner", "authorization", "restore", "afterwards"))
+    else:
+        assert scenario["operation"] == "flash_firmware(reset_after_flash=true)"
+        assert set(scenario["source_refs"]) == {
+            "tests/fixtures/fake_pyocd_reset_refused.py", "recordings.pyocd_read_unmapped_address",
+            "pyocd/commands/commander.py:125", "pyocd/subcommands/commander_cmd.py:77",
+        }
+        assert scenario["line"] == "Error: memory transfer failed"
+        assert type(scenario["returncode"]) is int
+        assert scenario["returncode"] == 0
+        assert any("savemem" in arg for arg in document["recordings"]["pyocd_read_unmapped_address"]["argv"])
+        assert all(token in scenario["derivation"].lower() for token in ("commander", "recorded savemem", "not a reset recording"))
+        assert all(token in capture for token in ("power or link", "between", "flash", "reset", "larger image", "or", "precise", "switch"))
 
 
 def version_check_backends() -> list[str]:
