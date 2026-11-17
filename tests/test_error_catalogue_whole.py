@@ -650,7 +650,8 @@ SCANNED_MODULE_COUNT = 52
 # three, the 228th to the 230th: `defmt_table_not_available`,
 # `defmt_table_changed` and `defmt_table_invalid`.
 # Defmt plan assertions (#837) add the defmt_expect_timeout type.
-COLLECTED_TYPE_COUNT = 231
+# ST-Link's recorded DEV_TARGET_CMD_ERR (#870) adds target_command_error.
+COLLECTED_TYPE_COUNT = 232
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -719,7 +720,8 @@ COLLECTED_TYPE_COUNT = 231
 # types: `AgenticHILToolService._defmt_binding` resolves the table a COM session
 # or a flash capture decodes with, and is the only writer of all three.
 # UartRunner._defmt_expect is the one producer of that type.
-PRODUCER_COUNT = 710
+# STLinkBackend._failure_result and STLinkBackend.info produce target_command_error (#870).
+PRODUCER_COUNT = 712
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
@@ -1150,8 +1152,9 @@ def test_every_computed_type_is_pinned_with_what_it_carries() -> None:
 
 
 def test_the_scan_reads_every_module_and_the_pinned_number_of_types() -> None:
-    assert scanned().modules == module_names()
-    problems = pin_problems(scanned())
+    inventory = scan()
+    assert inventory.modules == module_names()
+    problems = pin_problems(inventory)
     if problems:
         raise AssertionError("; ".join(problems))
 
