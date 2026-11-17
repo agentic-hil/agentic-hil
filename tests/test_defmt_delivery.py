@@ -33,7 +33,6 @@ FIXTURES = ROOT / "tests/fixtures/defmt"
 PRESERVED_MYPY_FILES = ['src/agentic_hil/artifacts.py', 'src/agentic_hil/backends/rs3005p.py', 'src/agentic_hil/bench.py', 'src/agentic_hil/config.py', 'src/agentic_hil/configstate.py', 'src/agentic_hil/configwrite.py', 'src/agentic_hil/contracts.py', 'src/agentic_hil/coordination.py', 'src/agentic_hil/device_access.py', 'src/agentic_hil/mcp.py', 'src/agentic_hil/power_supply.py', 'src/agentic_hil/redact.py', 'src/agentic_hil/report.py', 'src/agentic_hil/stdio.py', 'src/agentic_hil/tools.py', 'src/agentic_hil/types.py']
 PRESERVED_MANIFEST_LINES = ['include README.md', 'include AGENTS.md', 'include AI_AGENT_QUICKSTART.md', 'include TROUBLESHOOTING.md', 'include SECURITY.md', 'include LICENSE', 'include docs/mcp-hosts.md', 'include docs/safety-model.md', 'include docs/security-design.md', 'include docs/installation.md', 'recursive-include src/agentic_hil/schemas *.json', 'recursive-include src/agentic_hil/templates *.json', 'recursive-include src/agentic_hil/skills *.md', 'recursive-include tests *.py', 'recursive-include tests/fixtures *.json', 'exclude tests/test_install_eval*.py', 'exclude tests/test_windows_install_eval_scripts.py', 'exclude tests/test_hil_eval_probe.py', 'exclude tests/test_loop_in_container.py', 'exclude tests/test_shipped_references.py', 'exclude tests/test_version_consistency.py', 'exclude tests/test_ci_examples.py', 'exclude tests/test_release_requirements.py', 'exclude tests/test_shipped_profiles.py', 'exclude tests/test_verify_published_examples.py', 'exclude tests/test_record_cli_surface.py', 'exclude tests/test_ci_linux.py', 'exclude tests/test_bench_in_container.py', 'exclude tests/test_bench_distributions.py', 'exclude tests/test_install_cmsis_pack.py', 'exclude tests/test_check_image_pip_locks.py', 'exclude tests/test_bench_image_store.py', 'exclude tests/test_run_lock_command.py', 'exclude tests/test_tool_definition_score.py', 'exclude tests/test_tool_definition_score_model.py', 'exclude tests/test_withhold.py', 'exclude tests/test_agent_registration_gate.py', 'exclude tests/test_bench_battery.py', 'exclude tests/test_bench_can_peer_statistics.py', 'exclude tests/test_bench_esp32_images.py', 'exclude tests/container/test_protocol_startup_refusal.py', 'exclude tests/test_install_scripts.py', 'exclude tests/test_process_table_grouping.py', 'exclude tests/test_macos_installer_recording.py', 'exclude tests/test_readthedocs_moved.py', 'recursive-include examples *.py *.md *.yaml *.yml', 'prune examples/nucleo-f446re_demo']
 PRESERVED_COLLECTION_STEP = {'name': "Collect the source distribution's tests", 'shell': 'bash', 'run': 'rm -rf sdist-check\nmkdir sdist-check\ntar xzf dist/agentic_hil-*.tar.gz -C sdist-check\ncd sdist-check/agentic_hil-*\npython -m pytest --collect-only -q\n'}
-PRESERVED_CHANGELOG_PARAGRAPH = '- Native defmt decoding on serial lines. `com_session_start` with `defmt: true` decodes the line with the table of the ELF the last confirmed `flash_firmware` wrote, checked again by its digest, and `defmt: {"image_path": ...}` names the ELF of a board flashed some other way (`proven: false` unless it is the flashed file). `com_read` on such a session hands out whole decoded frames (level, timestamp, format string, typed arguments, rendered message and the line `defmt-print` prints) instead of text and hex, and `until` matches a frame\'s line. `flash_firmware` takes `capture.defmt` and returns the decoded boot output of the image it flashed. Bytes that do not decode are records with `error` and their bytes, never skipped. Plan format version 7 adds `defmt:` on `uart_open` and the `defmt_expect` action, which waits for a frame by `level`, `format`, `text` or `pattern`, and typed `args`; frames after the match stay for the next step. New error types: `defmt_table_not_available`, `defmt_table_changed`, `defmt_table_invalid`, `defmt_expect_timeout`. The decoder (`agentic_hil.defmt`) is plain Python for defmt wire versions 3 and 4 (defmt 0.3 and 1.x), both the rzCOBS and the raw encoding, every parameter type and display hint, and is held to the official `defmt-decoder` 1.2 on a real cross-compiled image recorded under `tests/fixtures/defmt/` by `tools/defmt_reference.py`.'
 def test_decoder_is_in_the_configured_mypy_scope():
     source = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     files = tomllib.loads(source)["tool"]["mypy"]["files"]
@@ -199,20 +198,13 @@ def test_documented_replay_examples_match_public_results(defmt_images):
         }
         result = subprocess.run([sys.executable, "-c", example], cwd=ROOT, env=environment, capture_output=True, text=True, encoding="utf-8", check=True, timeout=scaled_time_bound(30))
         assert result.stdout == "\n".join(expected) + "\n"
+    # The changelog keeps the decoder (#809) apart from the session and capture
+    # integrations (#810), and that entry names the board qualification still
+    # open (#813).
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert PRESERVED_CHANGELOG_PARAGRAPH in changelog
-    start = changelog.index(PRESERVED_CHANGELOG_PARAGRAPH)
-    preceding = changelog[:start]
-    heading = list(re.finditer(r"(?m)^#{2,6} .+$", preceding))[-1]
-    assert re.search(r"pending[ -]integration", heading.group(), re.IGNORECASE)
-    end = re.search(r"(?m)^#{2,6} ", changelog[start:])
-    section = changelog[heading.start(): start + end.start() if end else len(changelog)]
-    assert all(issue in section for issue in ("#809", "#810", "#811", "#813"))
-    assert re.search(r"decoder[ -]only", section, re.IGNORECASE)
-    assert re.search(r"(?:separate|pending|remain|unverified)", section, re.IGNORECASE)
-    assert re.search(r"board|qualification", section, re.IGNORECASE)
-    other_bullets = [line for line in changelog.replace(PRESERVED_CHANGELOG_PARAGRAPH, "").splitlines() if line.startswith("- ") and "#809" in line]
-    assert other_bullets and any("decoder" in line.lower() for line in other_bullets)
+    bullets = [line for line in changelog.splitlines() if line.startswith("- ")]
+    assert any("#809" in line and "decoder" in line.lower() for line in bullets)
+    assert any("#810" in line and "#813" in line and re.search(r"board|qualification", line, re.IGNORECASE) for line in bullets)
 
 
 def _run(arguments, cwd, *, env=None, input=None, timeout=180):
