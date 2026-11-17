@@ -43,8 +43,10 @@ def test_troubleshooting_names_flash_failed_output_and_remediation() -> None:
         for paragraph in section.split("\n\n")
     )
 
-    unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
-    fixed = unreleased.split("### Fixed", 1)[1].split("\n### ", 1)[0]
+    # The newest section: `## [Unreleased]` between releases, the release's own
+    # heading on a release commit, which has no Unreleased section.
+    newest = changelog.split("\n## [", 1)[1].split("\n## [", 1)[0]
+    fixed = newest.split("### Fixed", 1)[1].split("\n### ", 1)[0]
     issue_bullets = [
         line for line in fixed.splitlines() if line.startswith("- ") and line.endswith("(#751)")
     ]
