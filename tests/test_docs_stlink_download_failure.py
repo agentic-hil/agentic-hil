@@ -43,12 +43,17 @@ def test_troubleshooting_names_flash_failed_output_and_remediation() -> None:
         for paragraph in section.split("\n\n")
     )
 
-    # The newest section: `## [Unreleased]` between releases, the release's own
-    # heading on a release commit, which has no Unreleased section.
-    newest = changelog.split("\n## [", 1)[1].split("\n## [", 1)[0]
-    fixed = newest.split("### Fixed", 1)[1].split("\n### ", 1)[0]
+    # Every Fixed list in the file, so the guard reads the same on a release
+    # commit and under an `## [Unreleased]` section added after it.
+    fixed_lists = [
+        part.split("\n## ", 1)[0].split("\n### ", 1)[0]
+        for part in changelog.split("\n### Fixed")[1:]
+    ]
     issue_bullets = [
-        line for line in fixed.splitlines() if line.startswith("- ") and line.endswith("(#751)")
+        line
+        for fixed in fixed_lists
+        for line in fixed.splitlines()
+        if line.startswith("- ") and line.endswith("(#751)")
     ]
 
     if not has_guidance or len(issue_bullets) != 1:
