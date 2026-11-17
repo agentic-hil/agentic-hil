@@ -1394,7 +1394,10 @@ class PyOCDBackend:
         # `pyocd gdbserver`): the probe could not be opened, before the target.
         if contains_any(lower, ["no available debug probes", "no debug probes are connected", "unable to open probe", "probe not found", "no probe with uid", "no connected debug probes", "no connected debug probe matches unique id", "[errno 16] resource busy"]):
             return "probe_not_found"
-        if contains_any(lower, ["unable to connect", "failed to connect", "target is not responding", "no ack", "error connecting"]):
+        # Recorded on a silent target through an answering ST-Link (#741).
+        # Match the code and message: other ST-Link status errors do not prove
+        # that the target could not be reached.
+        if contains_any(lower, ["unable to connect", "failed to connect", "target is not responding", "no ack", "error connecting", "stlink error (9): get idcode error"]):
             return "target_not_detected"
         if contains_any(lower, TARGET_TYPE_INVALID_PHRASES) or TARGET_TYPE_INVALID_DOC in lower:
             return "target_type_invalid"

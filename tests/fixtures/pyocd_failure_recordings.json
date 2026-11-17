@@ -1,5 +1,5 @@
 {
-  "what": "Failures of pyOCD 0.45.1 recorded on the reference bench (NUCLEO-F446RE through its on-board in-circuit debugger), each one provoked without writing the board: a memory read of an address no region of the part decodes, and a raw-binary flash whose base address lies past the end of flash, which pyOCD refuses while it loads the file and before it programs anything. Both commands are the argv the pyOCD backend builds for `debug_symbol_value` and for `flash_firmware` of a `.bin`, run by hand under the bench lock. The flash one is re-run through the product by tests/bench/test_bench_pyocd_failures.py, which compares the decisive line. A probe that loses the target, an erase the device refuses and a program step the flash algorithm fails cannot be provoked without unplugging the probe or protecting the flash, so their words are in `phrases_in_the_pyocd_source` with the file and line that print them, not recorded.",
+  "what": "Failures of pyOCD 0.45.1. The top-level recorded_on, bench, tool_versions and memory_map cover only the two older recordings, pyocd_read_unmapped_address and pyocd_flash_bin_outside_flash, on the reference NUCLEO-F446RE through its on-board in-circuit debugger. Each was provoked without writing the board: a memory read of an address no region of the part decodes, and a raw-binary flash whose base address lies past the end of flash, which pyOCD refuses while it loads the file and before it programs anything. Both commands are the argv the pyOCD backend builds for `debug_symbol_value` and for `flash_firmware` of a `.bin`, run by hand under the bench lock. The flash one is re-run through the product by tests/bench/test_bench_pyocd_failures.py, which compares the decisive line. The later NUCLEO-H533RE ST-Link connect recording carries its own provenance. Unrecorded failures remain in `phrases_in_the_pyocd_source` with their source references and capture scenarios.",
   "recorded_on": "2026-10-05",
   "bench": "NUCLEO-F446RE, on-board in-circuit debugger, Linux, demo firmware running",
   "tool_versions": {
@@ -10,6 +10,24 @@
   "redaction": "The probe's unique ID is `[redacted]` and the private staging directory of the read is `[staging]`, as in the other pyOCD recordings.",
   "memory_map": "Flash 0x08000000-0x0807ffff and SRAM 0x20000000-0x2001ffff, as `pyocd commander --command \"show map\"` listed them in the same sitting; 0x30000000 and 0x08100000 are outside both.",
   "recordings": {
+    "pyocd_probe_stlink_idcode_error": {
+      "how": "Recorded through the product's probe_target. The NUCLEO-H533RE target had turned its SWD pins into GPIO, leaving an answering STLINK-V3 and a silent target. target_type was unset, so pyOCD used the generic cortex_m.",
+      "recorded_on": "2026-10-23",
+      "source_url": "https://github.com/agentic-hil/agentic-hil/issues/741#issuecomment-6365098084",
+      "bench": "NUCLEO-H533RE through an STLINK-V3, firmware V3J13M4",
+      "tool_versions": {
+        "pyocd": "0.45.1",
+        "stlink_firmware": "V3J13M4"
+      },
+      "target_type": null,
+      "effective_target_type": "cortex_m",
+      "redaction": "The probe ID passed to --uid was redacted as [redacted]. The supplied <venv> and <site-packages> placeholders and displayed backslash-caret terminal notation are retained; no ESC characters were reconstructed.",
+      "command": "<venv>/bin/pyocd commander --command status -O debug.traceback=true -O pack.debug_sequences.disabled_sequences=DebugCoreStart --uid [redacted] -W",
+      "returncode": 0,
+      "timed_out": false,
+      "stdout": "",
+      "stderr": "0000345 W Generic 'cortex_m' target type is selected by default; is this intentional? You will be able to debug most devices, but not program flash. To set the target type use the '--target' argument or 'target_override' option. Use 'pyocd list --targets' to see available targets types. [board]\n0000349 E Error while initing target: STLink error (9): Get IDCODE error [commander]\n\\^[[2mTraceback (most recent call last):\n  File \"<site-packages>/pyocd/commands/commander.py\", line 252, in _post_connect\n    self.session.open(init_board=not self.args.no_init)\n  File \"<site-packages>/pyocd/core/session.py\", line 662, in open\n    self._board.init()\n  File \"<site-packages>/pyocd/board/board.py\", line 152, in init\n    self.target.init()\n  File \"<site-packages>/pyocd/coresight/coresight_target.py\", line 127, in init\n    super().init()\n  File \"<site-packages>/pyocd/core/soc_target.py\", line 174, in init\n    seq.invoke()\n  File \"<site-packages>/pyocd/utility/sequencer.py\", line 213, in invoke\n    resultSequence.invoke()\n  File \"<site-packages>/pyocd/utility/sequencer.py\", line 208, in invoke\n    resultSequence = call()\n                     ^^^^^^\n  File \"<site-packages>/pyocd/coresight/dap.py\", line 462, in _connect\n    probe_conn.connect(self._protocol)\n  File \"<site-packages>/pyocd/coresight/dap.py\", line 175, in connect\n    self._connect_probe(protocol)\n  File \"<site-packages>/pyocd/coresight/dap.py\", line 192, in _connect_probe\n    self._probe.connect(protocol)\n  File \"<site-packages>/pyocd/probe/shared_probe_proxy.py\", line 66, in connect\n    self._probe.connect(protocol)\n  File \"<site-packages>/pyocd/probe/stlink_probe.py\", line 184, in connect\n    self._link.enter_debug(STLink.Protocol.SWD)\n  File \"<site-packages>/pyocd/probe/stlink/stlink.py\", line 343, in enter_debug\n    self._check_status(response)\n  File \"<site-packages>/pyocd/probe/stlink/stlink.py\", line 381, in _check_status\n    raise exceptions.ProbeError(error_message)\npyocd.core.exceptions.ProbeError: STLink error (9): Get IDCODE error\\^[[0m\n"
+    },
     "pyocd_read_unmapped_address": {
       "argv": [
         "pyocd",
@@ -84,6 +102,41 @@
       "stlink_status": {
         "line": "0000934 C STLink error (18): AP error [__main__]",
         "source": "pyocd/probe/stlink/constants.py:165 formats every STLink status as `STLink error (<code>): <message>`"
+      }
+    },
+    "capture_scenarios": {
+      "cmsis_dap_no_ack": {
+        "status": "source-derived",
+        "operation": "probe_target",
+        "pyocd_version": "0.45.1",
+        "phrase_refs": [
+          "swd_no_ack"
+        ],
+        "scenario": "Capture through probe_target using a CMSIS-DAP probe with the target unpowered or its SWD lines open. This scenario has not been recorded."
+      },
+      "program_page_failure": {
+        "status": "source-derived",
+        "operation": "flash_firmware",
+        "phrase_refs": [
+          "flash_program_page_failure",
+          "flash_program_page_timeout",
+          "flash_init_failure"
+        ],
+        "scenario": "Proposed capture: flash_firmware onto sectors made write-protected through option bytes. Changing option bytes requires the bench owner's authorization; restore the original option bytes afterwards. This scenario has not been recorded and does not establish that each diagnostic will be produced."
+      },
+      "post_flash_reset": {
+        "status": "source-derived",
+        "operation": "flash_firmware(reset_after_flash=true)",
+        "source_refs": [
+          "tests/fixtures/fake_pyocd_reset_refused.py",
+          "recordings.pyocd_read_unmapped_address",
+          "pyocd/commands/commander.py:125",
+          "pyocd/subcommands/commander_cmd.py:77"
+        ],
+        "line": "Error: memory transfer failed",
+        "returncode": 0,
+        "derivation": "The fake reset refusal derives this exit-0 result from the commander handler and the recorded savemem failure, not a reset recording.",
+        "scenario": "Cut the target's power or link between the flash and the reset. Capturing this requires a larger image or a power switch with sufficiently precise timing."
       }
     },
     "not_in_the_package": [
