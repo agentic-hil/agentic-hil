@@ -1909,7 +1909,7 @@ class UartRunner(SessionDevice):
         self._defmt_frames: deque[JsonObject] = deque()
         self._defmt_session: object | None = None
         self._defmt_identity: tuple[str, str] | None = None
-        self._defmt_epoch: int | None = None
+        self._defmt_clear_generation: int | None = None
 
     def _live_defmt(self) -> tuple[Any, tuple[str, str], int, JsonObject] | None:
         """Read the current decoding binding, including its current proof."""
@@ -1924,17 +1924,17 @@ class UartRunner(SessionDevice):
             stream = session.defmt
             if stream is None or stream.identity is None:
                 return None
-            return session, stream.identity, session.buffer_epoch, stream.describe()
+            return session, stream.identity, session.buffer_clear_generation, stream.describe()
 
     def _sync_defmt(self) -> tuple[Any, tuple[str, str], int, JsonObject] | None:
         live = self._live_defmt()
         if (live is None or live[0] is not self._defmt_session
-                or live[1] != self._defmt_identity or live[2] != self._defmt_epoch):
+                or live[1] != self._defmt_identity or live[2] != self._defmt_clear_generation):
             self._defmt_frames.clear()
         if live is None:
-            self._defmt_session = self._defmt_identity = self._defmt_epoch = None
+            self._defmt_session = self._defmt_identity = self._defmt_clear_generation = None
         else:
-            self._defmt_session, self._defmt_identity, self._defmt_epoch = live[:3]
+            self._defmt_session, self._defmt_identity, self._defmt_clear_generation = live[:3]
         return live
 
     @classmethod
@@ -2066,12 +2066,11 @@ class UartRunner(SessionDevice):
             reads += 1
             if result_failed(result):
                 return result
-            # A consuming read advances the epoch itself. Accept that one step;
-            # a concurrent clear, replacement or source change still invalidates
-            # the read as well as any previously retained records.
+            # Reads and overflow preserve decoded frames. A concurrent clear,
+            # replacement or source change invalidates the returned batch as well
+            # as any previously retained records.
             current = self._sync_defmt()
-            if (live is not None and current is not None and live[:2] == current[:2]
-                    and current[2] == live[2] + (result.get("bytes_read", 0) > 0)):
+            if live is not None and current is not None and live[:3] == current[:3]:
                 self._defmt_frames.extend(frame for frame in result.get("frames", []) if isinstance(frame, dict))
             if not result.get("frames") and time.monotonic() < deadline:
                 time.sleep(min(UART_EXPECT_IDLE_POLL_S, max(0.0, deadline - time.monotonic())))

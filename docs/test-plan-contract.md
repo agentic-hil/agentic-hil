@@ -100,9 +100,11 @@ distinguishing booleans from numbers. A range has finite numeric `min` and `max`
 bounds, with `min` no greater than `max`, and both bounds are inclusive.
 
 After a matching defmt frame, following decoded frames remain available to later
-assertions. A session, source or buffer change invalidates retained frames, so a
-later assertion cannot consume frames from the old binding. On a timeout, examine
-the selectors, received output and ELF source before increasing `timeout_s`.
+assertions. A deliberate buffer clear or a session/source change invalidates
+retained frames, so a later assertion cannot consume frames from the old binding.
+Buffer overflow drops unread bytes but preserves frames already decoded. On a
+timeout, examine the selectors, received output and ELF source before increasing
+`timeout_s`.
 
 **A value in target memory is its own claim.** From plan format v5, `read_symbol`
 reads what one allowed symbol currently holds, through the debug session the plan
