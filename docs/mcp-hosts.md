@@ -3,7 +3,9 @@
 Agentic Hardware-in-the-Loop (Agentic HIL) exposes the same local MCP stdio server and the same tool semantics in every host. Only the host configuration syntax changes.
 
 Every block below was verified against the linked host documentation on
-2026-11-03. Moving that date is a release chore, described under "The Host
+2026-11-17. Two of them print a shape their host still reads but now documents
+as the older one, VS Code's user-profile `servers` format and OpenCode's V1
+`mcp` entries, and their sections say so. Moving that date is a release chore, described under "The Host
 Documentation Check" in [Release Strategy](release-strategy.md), because a date
 nobody moves invites more trust than it can carry.
 
@@ -127,6 +129,8 @@ Put this server in the operator-controlled VS Code user-profile MCP configuratio
 
 Run **MCP: List Servers** and start `agentic-hil`. VS Code starts a user-profile server in the home directory, where there is no project, so the server asks VS Code which folder it has open (the MCP `roots/list` request) and serves that folder's configuration; with several folders open, it serves the one that has a configuration. Leave `cwd` out: VS Code resolves no `${workspaceFolder}` in the user profile and does not start the server with it. VS Code's own `mcp.json` uses `servers`, not `mcpServers`; the `mcpServers` shape it also reads belongs to the portable `.mcp.json` and `~/.copilot/mcp-config.json`, a different file.
 
+VS Code now documents this user-profile `servers` format as the configuration of its Local harness, which it marks deprecated and plans to remove in February 2027. Its Copilot harness reads `mcpServers` from `~/.copilot/mcp-config.json` instead, and this guide does not print a block for it yet.
+
 Sources: [VS Code MCP configuration reference](https://code.visualstudio.com/docs/agents/reference/mcp-configuration) and [GitHub Copilot MCP setup](https://docs.github.com/en/copilot/how-tos/copilot-in-your-ide/customize-copilot/extend-copilot-with-tools-and-context/extend-copilot-chat-with-mcp).
 
 ## JetBrains AI Assistant in CLion
@@ -232,9 +236,9 @@ Add this server to the operator-controlled `~/.config/opencode/opencode.json` an
 }
 ```
 
-OpenCode uses `mcp`, `type: "local"`, and one command array. For an operator-controlled registration, use `~/.config/opencode/opencode.json`; its `cwd` enables automatic config discovery. If an override is needed, inherit `AGENTIC_HIL_CONFIG` from the parent environment rather than placing its machine-specific value in project configuration. Managed configuration is preferable on unattended benches because project configuration has higher precedence than normal global configuration.
+OpenCode uses `mcp`, `type: "local"`, and one command array. This is OpenCode's V1 shape, which V2 still reads; V2's own documentation places each server under `mcp.servers` and replaces `enabled` with `disabled`. For an operator-controlled registration, use `~/.config/opencode/opencode.json`; its `cwd` enables automatic config discovery. If an override is needed, inherit `AGENTIC_HIL_CONFIG` from the parent environment rather than placing its machine-specific value in project configuration. Managed configuration is preferable on unattended benches because project configuration has higher precedence than normal global configuration.
 
-Sources: [OpenCode MCP servers](https://opencode.ai/docs/mcp-servers/) and [OpenCode configuration locations](https://opencode.ai/docs/config/).
+Sources: [OpenCode MCP servers](https://opencode.ai/docs/mcp-servers/), [OpenCode V1 MCP servers](https://opencode.ai/v1/docs/mcp-servers/), [OpenCode migration from V1](https://opencode.ai/docs/migrate-v1/) and [OpenCode configuration locations](https://opencode.ai/docs/config/).
 
 ## Generic MCP Host
 

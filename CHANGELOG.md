@@ -24,6 +24,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 ### Changed
 
 - Both one-line installers pin Astral's uv installer at 0.13.9 and carry the SHA-256 of exactly those bytes, `ccc888115ac831bd9c30855c1d4abeae32fce679701d2aac8e72eb0beffb41c2` for the POSIX installer and `43b64ed13b8abfcdb3bcfc6ad6a1600dec0849d9e656c18f8ad81305b5d6d4a2` for the PowerShell one, and the TLS-proxy eval image carries the POSIX pair. Read against 0.13.7, the new installers differ only in the version strings and the per-artifact checksums: Astral's POSIX installer still verifies each archive it downloads against a per-artifact SHA-256 and their PowerShell installer still unpacks with no checksum step at all, so the comment in `install.ps1` that says so names 0.13.9 and keeps its claim.
+- `docs/mcp-hosts.md` was checked against every host page it links on 2026-11-17 and says where two hosts moved: VS Code now documents the user-profile `servers` format its block prints as the configuration of its deprecated Local harness, to be removed in February 2027, and OpenCode's V2 documentation places servers under `mcp.servers` with `disabled` in place of `enabled`, while V2 still reads the V1 `mcp` entries the block and `agent-install` write. The blocks are unchanged.
 
 ### Fixed
 
