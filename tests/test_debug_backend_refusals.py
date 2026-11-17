@@ -2556,3 +2556,137 @@ def test_a_read_that_timed_out_carries_the_openocd_timeout_entry(tmp_path: Path,
     assert value["summary"] == "GDB/MI command timed out.", value
     assert value.get("remediation") == advice["remediation"], value
     assert value.get("do_not") == advice.get("do_not"), value
+
+
+# DEV_TARGET_CMD_ERR after OpenOCD probing in the committed direct stop cycles.
+STLINK_TARGET_COMMAND_CYCLES = ((7, 8), (15, 16), (22, 23), (24, 25), (26, 27), (27, 28), (28, 29), (34, 35))
+STLINK_TARGET_COMMAND_PHASES = (
+    ("cli_after_openocd_open", "first-open"),
+    ("cli_after_second_openocd_open", "second-open"),
+)
+STLINK_TARGET_COMMAND_DIAGNOSTIC = "Error: ST-LINK error (DEV_TARGET_CMD_ERR)"
+
+
+def stlink_session_stop_cycles() -> list[dict]:
+    path = FIXTURES / "st_link_gdbserver_7_14_0_linux_session_stops_recordings.json"
+    return json.loads(path.read_text(encoding="utf-8"))["rounds"]["direct"]["scenarios"]["session_stops"]
+
+
+def stlink_target_command_log(given_back: dict, phase: str) -> dict:
+    return json.loads("\n".join(given_back[phase]["log"]))
+
+
+@pytest.mark.parametrize(
+    ("index", "cycle_number", "phase"),
+    [
+        pytest.param(index, cycle, phase, id=f"cycle-{cycle:02d}-{suffix}")
+        for index, cycle in STLINK_TARGET_COMMAND_CYCLES
+        for phase, suffix in STLINK_TARGET_COMMAND_PHASES
+    ],
+)
+def test_stlink_target_command_error_recorded_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, index: int, cycle_number: int, phase: str) -> None:
+    """Replay each paired diagnostic without claiming the failed call never contacted the target."""
+    cycle = stlink_session_stop_cycles()[index]
+    assert cycle["cycle"] == cycle_number
+    recorded = stlink_target_command_log(cycle["given_back"], phase)
+    assert "Error: Unable to get core ID\n" in recorded["stdout"]
+    assert STLINK_TARGET_COMMAND_DIAGNOSTIC in recorded["stdout"].splitlines()
+    assert recorded["returncode"] == 1
+    assert recorded["timed_out"] is False
+    assert recorded["stderr"] == ""
+    play_transcript(monkeypatch, stdout=recorded["stdout"], stderr=recorded["stderr"], returncode=recorded["returncode"])
+    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+
+    result = call(config, "probe_target")
+
+    if result.get("backend_error_type") != "target_command_error" or result.get("error_type") != "target_command_error":
+        raise AssertionError("DEV_TARGET_CMD_ERR replay must classify as target_command_error")
+    assert result["ok"] is False, result
+    assert "target_contacted" not in result, result
+    assert result["retry_safe"] is False, result
+    for key in ("stdout", "stderr", "returncode"):
+        assert result["programmer_output"][key] == recorded[key], result["programmer_output"]
+    log = log_of(config, result)
+    for key in ("stdout", "stderr", "returncode", "timed_out"):
+        assert log[key] == recorded[key], log
+    advice = remediation_fields("target_command_error", "stlink")
+    assert result.get("remediation"), result
+    assert result["remediation"] == advice["remediation"], result
+    assert result.get("do_not") == advice.get("do_not"), result
+
+
+def target_command_advice_clauses(steps: list[str]) -> list[str]:
+    return [" ".join(clause.lower().split()) for step in steps for clause in re.split(r"(?<=[.;])\s+", step) if clause.strip()]
+
+
+def test_stlink_target_command_error_guidance_matches_recorded_recovery() -> None:
+    """The recorded recovery is evidence for the advice, not proof of contact during each refusal."""
+    advice = remediation_fields("target_command_error", "stlink")
+    if not advice.get("remediation"):
+        raise AssertionError("DEV_TARGET_CMD_ERR recovery guidance is missing")
+
+    cycles = stlink_session_stop_cycles()
+    captured = []
+    for index, cycle in enumerate(cycles):
+        given_back = cycle.get("given_back", {})
+        phases = [
+            phase for phase, _suffix in STLINK_TARGET_COMMAND_PHASES
+            if phase in given_back and STLINK_TARGET_COMMAND_DIAGNOSTIC in stlink_target_command_log(given_back, phase)["stdout"]
+        ]
+        if not phases:
+            continue
+        captured.append((index, cycle["cycle"]))
+        assert phases == [phase for phase, _suffix in STLINK_TARGET_COMMAND_PHASES]
+        for phase in phases:
+            assert given_back[phase]["ok"] is False
+            log = stlink_target_command_log(given_back, phase)
+            assert log["returncode"] == 1
+            assert log["timed_out"] is False
+        for probe in ("openocd_probe_target", "openocd_probe_target_again"):
+            assert given_back[probe]["ok"] is True
+        assert given_back["openocd_reset_target"]["ok"] is False
+        assert given_back["openocd_reset_target"]["error_type"] == "target_not_detected"
+        for recovered in ("cli_after_openocd_reset", "start_after_openocd_reset", "stop_after_openocd_reset"):
+            assert given_back[recovered]["ok"] is True
+        assert given_back["stop_after_openocd_reset"]["safe_state_confirmed"] is True
+    assert captured == list(STLINK_TARGET_COMMAND_CYCLES)
+
+    entry = catalogue_entry("target_command_error:stlink")
+    assert entry is not None
+    assert entry["error_type"] == "target_command_error"
+    assert entry["scope"] == "stlink"
+    clauses = target_command_advice_clauses(entry["remediation"])
+    wrong_fixes = target_command_advice_clauses(entry.get("do_not", []))
+    assert any(
+        "openocd" in clause and "reset_target" in clause
+        and re.search(r"\brun\b", clause) and re.search(r"\b(same|this)\s+(physical\s+)?probe\b", clause)
+        for clause in clauses
+    ), entry
+    assert any(
+        "probe_target" in clause and "openocd" in clause
+        and re.search(r"\b(alone|only|without.*reset)\b", clause)
+        and re.search(r"\b(not|never|failed|unsuccessful|insufficient|cannot|didn't|doesn't)\b", clause)
+        for clause in clauses + wrong_fixes
+    ), entry
+    assert any(
+        "target_not_detected" in clause and "reset" in clause
+        and re.search(r"\b(reported|returned|answered|failed|failure)\b", clause)
+        for clause in clauses
+    ), entry
+    assert any(
+        re.search(r"\b(st-link|stlink|cubeprogrammer|stm32_programmer_cli)\b", clause)
+        and re.search(r"\b(after|following|subsequent|then)\b", clause)
+        and re.search(r"\b(successful|succeeded|successfully|confirmed|worked|detected|recovered)\b", clause)
+        for clause in clauses
+    ), entry
+    assert any(re.search(r"\b(recorded|observed|captured)\b", clause) for clause in clauses), entry
+    assert any(
+        re.search(r"\b(retry|retries|retrying|repeat|repeating)\b", clause)
+        and re.search(r"\b(unchanged|same|identical)\b", clause)
+        for clause in wrong_fixes
+    ), entry
+    assert any(re.search(r"\b(lease|quarantine|quarantined|recovery)\b", clause) for clause in clauses), entry
+    for clause in clauses + wrong_fixes:
+        assert not re.search(r"\b(always|guaranteed|guarantees)\b", clause), clause
+        if "usb" in clause and re.search(r"reconnect|replug|unplug", clause):
+            assert re.search(r"(?:not|never|wasn't|was not|has not been)\s+(?:been\s+)?(?:measured|tested|verified|recorded)", clause), clause

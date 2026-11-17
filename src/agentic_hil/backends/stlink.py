@@ -1019,6 +1019,10 @@ class STLinkBackend:
             # it was printed: see `_proves_no_contact` for the flash phase that
             # takes the claim back.
             result.update(NOT_CONTACTED)
+        elif backend_error_type == "target_command_error":
+            # DEV_TARGET_CMD_ERR does not place the abort point before contact,
+            # even when it accompanies the generic core-ID refusal (#870).
+            result.update(CONTACT_UNPROVEN)
         return result
 
     def _backend_error_from_output(self, output: str, tool: str) -> str | None:
@@ -1232,6 +1236,10 @@ class STLinkBackend:
         # st_link_gdbserver_7_14_0_linux_session_stops_recordings.json).
         if "st-link error (dev_usb_comm_err)" in lower:
             return "adapter_usb_error"
+        # The paired core-ID diagnostic in the recorded post-OpenOCD refusals
+        # does not establish that no target was contacted (#870).
+        if "st-link error (dev_target_cmd_err)" in lower:
+            return "target_command_error"
         if contains_any(lower, ["no st-link", "no stlink", "st-link not found", "stlink not found", "no debug probe"]):
             return "probe_not_found"
         # STM32CubeProgrammer 2.23.0's answer for a configured `sn=` with no
@@ -1290,6 +1298,8 @@ class STLinkBackend:
         return BACKEND_ERROR_TO_PUBLIC_ERROR.get(backend_error_type, backend_error_type)
 
     def _summary_for_error(self, error_type: str) -> str:
+        if error_type == "target_command_error":
+            return "STM32CubeProgrammer reported an ST-Link target command failure."
         return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "adapter_usb_error": "The in-circuit debugger or programmer enumerates, but its USB link refused communication.", "probe_server_open_failed": "stlink-server could not open the in-circuit debugger or programmer for the session's GDB server.", "target_not_detected": "Debugger could not detect the target.", "target_state_unconfirmed": "STM32CubeProgrammer exited without confirming the operation, so the target's state is unknown.", "flash_failed": "Debugger failed to flash the firmware.", "flash_erase_failed": "STM32CubeProgrammer could not erase the target's flash, so its contents are unconfirmed.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "memory_read_failed": "Debugger failed to read the requested target memory.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
 
     def _erase_failure_summary(self, reading: str) -> str:

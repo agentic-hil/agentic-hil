@@ -731,6 +731,8 @@ INVENTORY_BY_TYPE: dict[str, tuple[str | None, ...]] = {
     "symbol_resolution_failed": BACKENDS,
     "symbol_source_changed": ("pyocd", "stlink"),
     "symbol_source_not_available": ("pyocd", "stlink"),
+    # ST-Link's recorded DEV_TARGET_CMD_ERR (#870) adds this scoped refusal.
+    "target_command_error": ("stlink",),
     "target_exception": BACKENDS,
     "target_not_detected": EVERY_BACKEND,
     "target_state_unconfirmed": ("esptool", "openocd", "stlink"),

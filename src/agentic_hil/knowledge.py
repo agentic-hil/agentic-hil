@@ -3915,6 +3915,29 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "STM32_Programmer_CLI call were refused again until the reset.",
         ),
     ),
+    "target_command_error:stlink": ErrorRemedy(
+        meaning=(
+            "STM32CubeProgrammer reported `ST-LINK error (DEV_TARGET_CMD_ERR)`, recorded together with "
+            "`Unable to get core ID` after OpenOCD use. This diagnostic does not establish where the call stopped, "
+            "so target contact is unproven and an unchanged retry is not declared safe."
+        ),
+        remediation=(
+            "Read `quarantine_guidance` and the current lease state first, and follow the existing recovery constraints.",
+            "If this matches the recorded failure after OpenOCD use, call reset_target with mode=run through an "
+            "OpenOCD debugger entry for the same probe only when the lease and recovery state permit it.",
+            "OpenOCD probe_target alone did not recover the recorded condition: the subsequent "
+            "STM32_Programmer_CLI attempts still reported DEV_TARGET_CMD_ERR.",
+            "In the eight recorded cycles, the OpenOCD reset returned `target_not_detected`; subsequent ST-Link "
+            "CLI detection, session start and session stop succeeded, and the final stop confirmed a safe state.",
+            "Confirm recovery from the subsequent operation results and safe-state confirmation, rather than "
+            "treating the reset's reported failure as success or assuming the same recovery will work elsewhere.",
+            "USB reconnection was not measured as recovery in these cycles.",
+        ),
+        do_not=(
+            "Do not retry the same call unchanged as the demonstrated remedy; the recorded probe-only sequence "
+            "did not recover the condition.",
+        ),
+    ),
     # stlink-server could not open the probe for a GDB server reaching it through
     # stlink-server: recorded on the reference board when stlink-server had been
     # ended or restarted right after the previous session's GDB server was
