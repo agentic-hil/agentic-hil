@@ -895,9 +895,11 @@ class ComPortSession:
         self.overflow_bytes = 0
         # Set while the session decodes defmt; changed only under `lock`.
         self.defmt: DefmtStream | None = None
-        # Counts buffer clears and committed prefix consumption, so a decode
-        # of a copy commits only to the buffer it was copied from.
+        # Counts buffer clears, overflow trims and committed prefix consumption,
+        # so a decode of a copy commits only to the buffer it was copied from.
         self.buffer_epoch = 0
+        # Only deliberate clears invalidate frames already decoded from this session.
+        self.buffer_clear_generation = 0
         self.reader_error: JsonObject | None = None
         self.lock = threading.Lock()
         self.io_lock = threading.Lock()
@@ -2153,6 +2155,7 @@ class ComPortService:
                     session.buffer.clear()
                     session.overflow_bytes = 0
                     session.buffer_epoch += 1
+                    session.buffer_clear_generation += 1
                     if session.defmt is not None:
                         # A cleared buffer is a new stream: the one way a raw
                         # desynchronization ends.

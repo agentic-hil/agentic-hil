@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import write_config
+from defmt_fixtures import missing_toolchain_prerequisite
 from support import scaled_time_bound
 from test_flash_capture import Board, BoardBackend
 
@@ -174,6 +176,113 @@ def test_retained_frames_require_live_session_and_source(runtime: Runtime, repla
 
     assert current.buffer_epoch == old_epoch
     runtime.require_fresh_timeout(stale)
+
+
+@pytest.fixture(scope="session")
+def defmt_toolchain_environment() -> dict[str, str]:
+    # Capture Rust's locations before the per-test application sandbox moves
+    # HOME and USERPROFILE. Do not undo that sandbox to resolve the toolchain.
+    toolchain_profile = Path.home()
+    return {
+        "CARGO_HOME": os.environ.get("CARGO_HOME", str(toolchain_profile / ".cargo")),
+        "RUSTUP_HOME": os.environ.get("RUSTUP_HOME", str(toolchain_profile / ".rustup")),
+    }
+
+
+def _required_overflow_runtime(request: pytest.FixtureRequest, toolchain_environment: dict[str, str]) -> Runtime:
+    with pytest.MonkeyPatch.context() as toolchain:
+        for name, value in toolchain_environment.items():
+            toolchain.setenv(name, value)
+        missing = missing_toolchain_prerequisite()
+        if missing is not None:
+            pytest.fail(f"Required defmt toolchain unavailable: {missing}")
+        return request.getfixturevalue("runtime")
+
+
+def _overflow_serial_buffer(runtime: Runtime) -> None:
+    session = runtime.service.com_ports.sessions[PORT_ID]
+    with session.lock:
+        stream = session.defmt
+        assert stream is not None and stream.identity is not None
+        identity = stream.identity
+        overflow_before = session.overflow_bytes
+        capacity = session.port_config.max_buffer_bytes
+    board = runtime.board
+    with board.guard:
+        handle = board.handle
+        lifecycle = [event for event in board.events if event in {"open", "clear", "close"}]
+    assert handle is not None and handle.is_open
+
+    # Separators contain no target frame. The real drain must trim these bytes.
+    board.transmit(b"\0" * (capacity + 1))
+
+    with board.guard:
+        assert not board.line
+        assert "reader_stalled" not in board.events
+        assert board.handle is handle and handle.is_open
+        assert [event for event in board.events if event in {"open", "clear", "close"}] == lifecycle
+    assert runtime.service.com_ports.sessions[PORT_ID] is session
+    with session.lock:
+        assert session.active and session.reader_error is None
+        assert session.defmt is stream and stream.identity == identity
+        assert session.overflow_bytes > overflow_before
+        assert len(session.buffer) <= capacity
+
+
+def test_overflow_during_com_read_preserves_decoded_frames(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    defmt_toolchain_environment: dict[str, str],
+) -> None:
+    scenario = _required_overflow_runtime(request, defmt_toolchain_environment)
+    target = scenario.oracle[0]["message"]
+    session = scenario.service.com_ports.sessions[PORT_ID]
+    stream = session.defmt
+    original_call = scenario.service.call
+    injected_batch: dict | None = None
+
+    def overflow_after_read(name: str, arguments: dict | None = None) -> dict:
+        nonlocal injected_batch
+        result = original_call(name, arguments)
+        if (name == "com_read" and result.get("ok") is True and injected_batch is None
+                and any(frame.get("message") == target and "error" not in frame for frame in result.get("frames", []))):
+            injected_batch = result
+            _overflow_serial_buffer(scenario)
+        return result
+
+    monkeypatch.setattr(scenario.service, "call", overflow_after_read)
+    scenario.board.transmit(scenario.stream)
+    result = scenario.expect(target)
+
+    assert injected_batch is not None
+    assert injected_batch is scenario.reads()[0]
+    assert injected_batch["bytes_read"] > 0
+    matching = [frame for frame in injected_batch["frames"] if frame.get("message") == target and "error" not in frame]
+    assert len(matching) == 1
+    assert scenario.service.com_ports.sessions[PORT_ID] is session and session.defmt is stream
+    if result.get("ok") is not True:
+        raise AssertionError("overflow during com_read discarded a valid decoded frame")
+    assert result["frame"] == matching[0]
+    assert result["reads"] == 1
+
+
+def test_overflow_between_defmt_expect_calls_preserves_retained_frames(
+    request: pytest.FixtureRequest, defmt_toolchain_environment: dict[str, str],
+) -> None:
+    scenario = _required_overflow_runtime(request, defmt_toolchain_environment)
+    target = scenario.prime()
+    matching = [frame for frame in scenario.reads()[0]["frames"] if frame.get("message") == target and "error" not in frame]
+    assert len(matching) == 1
+    _overflow_serial_buffer(scenario)
+    reads_before = len(scenario.reads())
+
+    result = scenario.expect(target)
+
+    if result.get("ok") is not True:
+        raise AssertionError("overflow between defmt_expect calls discarded a valid retained frame")
+    assert result["frame"] == matching[0]
+    assert result["reads"] == 0
+    assert len(scenario.reads()) == reads_before
 
 
 @pytest.mark.parametrize("clearer", ["uart_open", "com_session_start"], ids=["uart_open", "com_session_start"])
