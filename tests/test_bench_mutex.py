@@ -6,19 +6,30 @@ configuration, state_root, or process the other side came from.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 import yaml
 from conftest import write_config
-from support import PUBLISH_ATOMICALLY_SOURCE, publish_atomically, published, read_when_published, scaled_time_bound
+from support import (
+    PUBLISH_ATOMICALLY_SOURCE,
+    process_is_running,
+    publish_atomically,
+    published,
+    read_when_published,
+    scaled_time_bound,
+)
 from test_test_reactor import RecordingService
 
 from agentic_hil import bench as bench_module
@@ -744,3 +755,270 @@ def test_a_holder_that_stopped_heartbeating_still_reads_as_stale(tmp_path: Path,
         hung = False
         coordinator.end_run()
         coordinator.close()
+
+
+# A pending set must not monopolize its free members or stop an existing hold's
+# heartbeat (#880). The child signals from the real poll sleep, not from startup.
+MUTEX_WAIT_CHILD_SOURCE = PUBLISH_ATOMICALLY_SOURCE + """
+import json
+import os
+import sys
+import threading
+import time
+from dataclasses import replace
+from pathlib import Path
+
+directory = Path(sys.argv[1])
+mode = sys.argv[2]
+wait_s = float(sys.argv[3])
+handshake_s = float(sys.argv[4])
+publish_atomically(str(directory / 'actual-pid'), str(os.getpid()))
+
+from agentic_hil import bench
+
+owner = bench.BenchMutex(root=directory / 'locks', frontend='child', label=mode)
+if mode == 'crashed':
+    owner.acquire(['com:a'])
+    # No release or record rewrite: the kernel alone frees the lock.
+    os._exit(0)
+if mode == 'availability':
+    # Diagnostic metadata is deterministic; actual-pid above is the real process.
+    owner.owner = replace(owner.owner, pid=880, host='issue-880-test',
+                          frontend='waiter', label='waiting-set')
+else:
+    bench.HEARTBEAT_INTERVAL_S = 0.1
+    owner.acquire(['com:a'])
+
+real_sleep = time.sleep
+waiting_thread = threading.get_ident()
+announced = False
+in_wait = False
+deadline = time.monotonic() + wait_s
+
+def announce_wait(seconds):
+    global announced
+    if in_wait and threading.get_ident() == waiting_thread and not announced:
+        announced = True
+        publish_atomically(str(directory / 'waiting'), json.dumps({'deadline': deadline}))
+    real_sleep(seconds)
+
+try:
+    time.sleep = announce_wait
+    in_wait = True
+    try:
+        if mode == 'named':
+            taken = owner.acquire_named('com:b', wait_s=wait_s)
+        else:
+            taken = owner.acquire(['com:a', 'com:b'], wait_s=wait_s)
+    finally:
+        in_wait = False
+        time.sleep = real_sleep
+    publish_atomically(str(directory / 'acquired'),
+                       json.dumps({'taken': taken, 'held': sorted(owner.held_resources())}))
+    release_deadline = time.monotonic() + handshake_s
+    while not (directory / 'release').exists():
+        if time.monotonic() >= release_deadline:
+            raise AssertionError('parent did not acknowledge the acquired mutex set')
+        real_sleep(0.02)
+    owner.release(['com:b'] if mode == 'named' else ['com:a', 'com:b'])
+    after_request = sorted(owner.held_resources())
+    if mode != 'availability':
+        owner.release(['com:a'])
+    publish_atomically(str(directory / 'released'),
+                       json.dumps({'after_request': after_request,
+                                   'final': sorted(owner.held_resources())}))
+finally:
+    owner.release_all()
+"""
+
+
+@contextmanager
+def _mutex_wait_child(directory: Path, mode: str) -> Iterator[subprocess.Popen]:
+    """Own the real child even when a Windows venv launches a redirector."""
+    actual_pid: int | None = None
+    with (directory / "child.log").open("w", encoding="utf-8") as log:
+        child = subprocess.Popen(
+            [sys.executable, "-c", MUTEX_WAIT_CHILD_SOURCE, str(directory), mode,
+             str(min(scaled_time_bound(60), 900.0)), str(scaled_time_bound(20))],
+            env=child_environment(directory / "child-state"),
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            _mutex_child_publication(directory, child, "actual-pid")
+            actual_pid = holder_pid(directory / "actual-pid")
+            yield child
+        finally:
+            if child.poll() is None:
+                # Never use the synthetic holder pid for lifecycle handling.
+                if actual_pid is None and published(directory / "actual-pid"):
+                    actual_pid = holder_pid(directory / "actual-pid")
+                if actual_pid is not None:
+                    with suppress(ProcessLookupError):
+                        os.kill(actual_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                else:
+                    child.kill()
+            child.wait(timeout=scaled_time_bound(20))
+            if os.name == "nt" and actual_pid is not None:
+                assert not process_is_running(actual_pid), "mutex helper survived its redirector"
+
+
+def _mutex_child_publication(directory: Path, child: subprocess.Popen, name: str) -> str:
+    path = directory / name
+    if not wait_for_file(path, child, timeout_s=scaled_time_bound(20)):
+        output = (directory / "child.log").read_text(encoding="utf-8")
+        raise AssertionError(f"mutex helper did not publish {name}: exit={child.poll()}\n{output}")
+    return read_when_published(path)
+
+
+def _assert_mutex_child_pending(directory: Path, child: subprocess.Popen, deadline: float) -> None:
+    assert child.poll() is None, "mutex helper exited before the blocking device was released"
+    assert not published(directory / "acquired"), "mutex helper acquired a device held by the blocker"
+    assert time.monotonic() < deadline, "mutex helper exhausted its wait before the observation"
+
+
+def _release_mutex_child(directory: Path, child: subprocess.Popen) -> dict:
+    publish_atomically(str(directory / "release"), "release")
+    result = json.loads(_mutex_child_publication(directory, child, "released"))
+    assert child.wait(timeout=scaled_time_bound(20)) == 0
+    return result
+
+
+def test_waiting_set_releases_partial_locks_and_then_acquires_all(tmp_path: Path) -> None:
+    root = tmp_path / "locks"
+    root.mkdir()
+    blocker = BenchMutex(root=root, frontend="blocker")
+    contender = BenchMutex(root=root, frontend="contender")
+    try:
+        blocker.acquire(["com:b"])
+        with _mutex_wait_child(tmp_path, "availability") as child:
+            marker = json.loads(_mutex_child_publication(tmp_path, child, "waiting"))
+            deadline = marker["deadline"]
+            _assert_mutex_child_pending(tmp_path, child, deadline)
+            assert time.monotonic() + scaled_time_bound(3) < deadline
+            # Unhandled on the old product: this is its real busy refusal.
+            assert contender.acquire(["com:a"], wait_s=scaled_time_bound(3)) == ["com:a"]
+            assert contender.held_resources() == frozenset({"com:a"})
+            assert blocker.holds("com:b")
+            _assert_mutex_child_pending(tmp_path, child, deadline)
+            contender.release(["com:a"])
+            blocker.release(["com:b"])
+            acquired = json.loads(_mutex_child_publication(tmp_path, child, "acquired"))
+            assert acquired == {"taken": ["com:a", "com:b"], "held": ["com:a", "com:b"]}
+            for resource in ("com:a", "com:b"):
+                with pytest.raises(DeviceBusyError):
+                    contender.acquire([resource])
+            assert _release_mutex_child(tmp_path, child) == {"after_request": [], "final": []}
+        assert contender.acquire(["com:a", "com:b"]) == ["com:a", "com:b"]
+    finally:
+        contender.release_all()
+        blocker.release_all()
+
+
+def test_failed_set_attempt_preserves_holder_record_and_reclamation(tmp_path: Path) -> None:
+    root = tmp_path / "locks"
+    root.mkdir()
+    with _mutex_wait_child(tmp_path, "crashed") as child:
+        assert child.wait(timeout=scaled_time_bound(20)) == 0
+    requester = BenchMutex(root=root, frontend="requester")
+    blocker = BenchMutex(root=root, frontend="blocker")
+    observer = BenchMutex(root=root, frontend="observer")
+    try:
+        original = requester.holder("com:a")
+        assert original is not None and original["state"] == "held"
+        holder_path = root / f"{resource_digest('com:a')}.holder.json"
+        original_bytes = holder_path.read_bytes()
+        blocker.acquire(["com:b"])
+        with pytest.raises(DeviceBusyError) as refusal:
+            requester.acquire(["com:a", "com:b"], wait_s=scaled_time_bound(0.3))
+        assert refusal.value.result["resource"] == "com:b"
+        assert refusal.value.result["holder"] == blocker.owner.as_json()
+        assert requester.held_resources() == frozenset()
+        after = requester.holder("com:a")
+        if after != original or holder_path.read_bytes() != original_bytes:
+            raise AssertionError("failed acquisition changed the earlier holder record")
+        blocker.release(["com:b"])
+        assert requester.acquire(["com:a", "com:b"]) == ["com:a", "com:b"]
+        reclaimed = requester.reclaimed("com:a")
+        assert reclaimed is not None
+        assert reclaimed["owner"] == original["owner"]
+        assert reclaimed["reason"] == "owner_process_exited_without_release"
+        requester.release(["com:a", "com:b"])
+        assert observer.acquire(["com:a", "com:b"]) == ["com:a", "com:b"]
+    finally:
+        observer.release_all()
+        requester.release_all()
+        blocker.release_all()
+
+
+@pytest.mark.parametrize("mode", ["set", "named"], ids=["set", "named"])
+def test_existing_hold_heartbeats_while_owner_waits(tmp_path: Path, mode: str) -> None:
+    root = tmp_path / "locks"
+    root.mkdir()
+    blocker = BenchMutex(root=root, frontend="blocker")
+    observer = BenchMutex(root=root, frontend="observer")
+    try:
+        blocker.acquire(["com:b"])
+        with _mutex_wait_child(tmp_path, mode) as child:
+            marker = json.loads(_mutex_child_publication(tmp_path, child, "waiting"))
+            deadline = marker["deadline"]
+            _assert_mutex_child_pending(tmp_path, child, deadline)
+            baseline = observer.holder("com:a")
+            assert baseline is not None and baseline["state"] == "held"
+            last_heartbeat = _heartbeat_time(baseline)
+            advances = 0
+            observation_deadline = time.monotonic() + scaled_time_bound(5)
+            assert observation_deadline < deadline
+            while advances < 2 and time.monotonic() < observation_deadline:
+                _assert_mutex_child_pending(tmp_path, child, deadline)
+                assert blocker.holds("com:b")
+                record = observer.holder("com:a")
+                if record is not None:
+                    heartbeat = _heartbeat_time(record)
+                    if heartbeat > last_heartbeat:
+                        advances += 1
+                        last_heartbeat = heartbeat
+                if advances < 2:
+                    time.sleep(0.02)
+            _assert_mutex_child_pending(tmp_path, child, deadline)
+            if advances < 2:
+                raise AssertionError("held device heartbeat did not advance twice during acquisition wait")
+            blocker.release(["com:b"])
+            acquired = json.loads(_mutex_child_publication(tmp_path, child, "acquired"))
+            assert acquired["held"] == ["com:a", "com:b"]
+            if mode == "set":
+                assert acquired["taken"] == ["com:b"]
+            else:
+                assert acquired["taken"] is True
+            assert _release_mutex_child(tmp_path, child) == {"after_request": ["com:a"], "final": []}
+        assert observer.acquire(["com:a", "com:b"]) == ["com:a", "com:b"]
+    finally:
+        observer.release_all()
+        blocker.release_all()
+
+
+def test_bench_run_start_docstring_describes_rollback_before_waiting() -> None:
+    source_path = Path(__file__).resolve().parents[1] / "src" / "agentic_hil" / "tools.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    service = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AgenticHILToolService")
+    method = next(node for node in service.body if isinstance(node, ast.FunctionDef) and node.name == "bench_run_start")
+    text = " ".join((ast.get_docstring(method) or "").lower().split())
+    sentences = text.split(".")
+    rollback_before_wait = any(
+        re.search(r"\b(partial|incomplete|tentative)\b", sentence)
+        and re.search(r"\b(releas\w*|drop\w*|given back|gives? back)\b", sentence)
+        and re.search(r"\b(before|prior to)\b.*\b(wait\w*|retry\w*|retries)\b", sentence)
+        for sentence in sentences
+    )
+    complete_before_run = any(
+        re.search(r"\b(whole|complete|entire|every|all)\b", sentence)
+        and re.search(r"\b(set|devices|locks)\b", sentence)
+        and re.search(r"\b(only after|only when|once|until|after)\b", sentence)
+        and re.search(r"\b(acquir\w*|secur\w*|taken|obtain\w*|succeed\w*)\b", sentence)
+        and re.search(r"\b(run|start\w*|begin\w*|retain\w*|hold\w*)\b", sentence)
+        for sentence in sentences
+    )
+    never_held = re.search(r"\bnever held (its |the )?first two\b", text)
+    if never_held or not rollback_before_wait or not complete_before_run:
+        raise AssertionError("bench_run_start docstring does not describe rollback before waiting")

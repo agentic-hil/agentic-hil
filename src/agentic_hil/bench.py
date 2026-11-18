@@ -40,7 +40,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterable
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -462,8 +462,7 @@ class BenchMutex:
                 self._root = device_lock_root()
             return self._root
 
-    def _lock(self, resource: str) -> _LifetimeLock:
-        root = self.root
+    def _lock(self, resource: str, root: Path) -> _LifetimeLock:
         return _LifetimeLock(root / f"{resource_digest(resource)}.lock", lock_file_mode(root))
 
     def held_resources(self) -> frozenset[str]:
@@ -482,6 +481,10 @@ class BenchMutex:
         the whole point: silent waiting hides a collision, so a wait happens only
         when the caller asked for one and it is bounded.
 
+        Each attempt takes the complete set or releases its tentative locks
+        before waiting again. Existing holds keep their counts until a complete
+        attempt succeeds, and their heartbeats continue during the wait.
+
         ``stop_requested`` is asked on every turn of the wait, and a wait it
         answers yes to ends at once with DeviceWaitStoppedError, everything this
         call had taken given back. It is how a run that is still waiting for its
@@ -492,22 +495,7 @@ class BenchMutex:
         if not wanted:
             return []
         deadline = time.monotonic() + validated_wait(wait_s)
-        with self._guard:
-            taken: list[str] = []
-            counted: list[str] = []
-            try:
-                for resource in wanted:
-                    if self._take(resource, deadline, stop_requested):
-                        taken.append(resource)
-                    counted.append(resource)
-            except BaseException:
-                # Every hold this call counted goes back, a device this owner
-                # already held included: `_take` counted that one once more, and
-                # a refused call has no release to come that would count it down.
-                for resource in reversed(counted):
-                    self._drop(resource)
-                raise
-            return taken
+        return self._take(wanted, deadline, stop_requested)
 
     def acquire_named(self, resource: str, *, wait_s: float = 0.0) -> bool:
         """Hold one machine-wide lock by name, whether or not it is a device.
@@ -524,8 +512,7 @@ class BenchMutex:
         split it by spelling and the holder record names whoever holds it. Raises
         DeviceBusyError naming the holder, exactly as `acquire` does."""
         deadline = time.monotonic() + validated_wait(wait_s)
-        with self._guard:
-            return self._take(fold_resource_name(resource), deadline)
+        return bool(self._take([fold_resource_name(resource)], deadline))
 
     def release(self, resources: list[str] | tuple[str, ...]) -> None:
         with self._guard:
@@ -640,56 +627,78 @@ class BenchMutex:
         result.update(remediation_fields("device_busy"))
         return result
 
-    def _take(self, resource: str, deadline: float, stop_requested: Callable[[], bool] | None = None) -> bool:
-        held = self._held.get(resource)
-        if held is not None:
-            held.holders += 1
-            return False
+    def _take(self, resources: list[str], deadline: float, stop_requested: Callable[[], bool] | None = None) -> list[str]:
+        """Retry complete sets, publishing ownership only after all locks are ours."""
         started = time.monotonic()
-        lock = self._lock(resource)
         while True:
-            try:
-                lock.acquire()
-                break
-            except (BlockingIOError, OSError) as error:
-                # Asked before the deadline is judged: a run told to stop while
-                # it waits is a stopped run, whether or not the wait was about
-                # to run out, and the answer must not depend on which came
-                # first by a poll interval.
-                if stop_requested is not None and stop_requested():
-                    raise DeviceWaitStoppedError(
-                        {
-                            "ok": False,
-                            "error_type": "run_stopped",
-                            "stopped": True,
-                            "stopped_after_step": 0,
-                            "summary": f"A stop was requested while this run waited for {resource}, so it ended before taking any device.",
-                            "resource": resource,
-                            "waited_s": round(time.monotonic() - started, 3),
-                            "retry_safe": True,
-                            "side_effect_committed": False,
-                        }
-                    ) from error
-                if time.monotonic() >= deadline:
-                    result = self.busy_result(resource, waited_s=time.monotonic() - started)
-                    if isinstance(error, OSError) and not isinstance(error, BlockingIOError):
-                        result.update(filesystem_error_detail(error))
-                    raise DeviceBusyError(result) from error
-                time.sleep(min(WAIT_POLL_INTERVAL_S, max(deadline - time.monotonic(), 0.0)))
-                lock = self._lock(resource)
-        # The lock is ours, so any record still claiming the device belongs to an
-        # owner the OS already reaped. Say so instead of quietly overwriting it:
-        # "the previous run died" is exactly what an operator needs to hear, and
-        # it is the evidence that a crash frees the bench without a manual step.
-        previous = self._read_holder(resource, lock.path.parent)
-        reclaimed = previous if isinstance(previous, dict) and previous.get("state") == "held" else None
-        self._held[resource] = _HeldDevice(resource=resource, lock=lock, acquired_at=utc_now_iso(), reclaimed_from=_reclaim_detail(reclaimed))
-        # A device whose record cannot be written is still exclusively ours; only
-        # the ability to name us to a contender is lost.
-        with suppress(ConfigError, OSError):
-            self._write_holder(resource, "held")
-        self._ensure_heartbeat_pump()
-        return True
+            with self._guard:
+                # Pin one root for this attempt, even while _held is empty.
+                root = self.root
+                locks: dict[str, _LifetimeLock] = {}
+                failure: tuple[str, OSError] | None = None
+                with ExitStack() as rollback:
+                    for resource in resources:
+                        if resource in self._held:
+                            continue
+                        lock = self._lock(resource, root)
+                        try:
+                            lock.acquire()
+                        except OSError as error:
+                            failure = (resource, error)
+                            break
+                        rollback.callback(lock.release)
+                        locks[resource] = lock
+                    if failure is None:
+                        # Read reclamation evidence only after the whole set is
+                        # secured. A failed attempt must not overwrite a dead
+                        # owner's record with its own held/released pair.
+                        taken: dict[str, _HeldDevice] = {}
+                        for resource, lock in locks.items():
+                            previous = self._read_holder(resource, lock.path.parent)
+                            reclaimed = previous if isinstance(previous, dict) and previous.get("state") == "held" else None
+                            taken[resource] = _HeldDevice(resource=resource, lock=lock, acquired_at=utc_now_iso(), reclaimed_from=_reclaim_detail(reclaimed))
+                        for resource in resources:
+                            if resource in self._held:
+                                self._held[resource].holders += 1
+                        self._held.update(taken)
+                        rollback.pop_all()
+                        try:
+                            # Unwritable advisory records do not drop OS locks.
+                            for resource in taken:
+                                with suppress(ConfigError, OSError):
+                                    self._write_holder(resource, "held")
+                            if taken:
+                                self._ensure_heartbeat_pump()
+                        except BaseException:
+                            for resource in reversed(resources):
+                                self._drop(resource)
+                            raise
+                        return list(taken)
+                # ExitStack released every tentative lock without touching the
+                # holder records, _held, existing counts or the heartbeat pump.
+            resource, blocked_error = failure
+            # A cooperative stop wins over expiry, as on the single-device path.
+            if stop_requested is not None and stop_requested():
+                raise DeviceWaitStoppedError(
+                    {
+                        "ok": False,
+                        "error_type": "run_stopped",
+                        "stopped": True,
+                        "stopped_after_step": 0,
+                        "summary": f"A stop was requested while this run waited for {resource}, so it ended before taking any device.",
+                        "resource": resource,
+                        "waited_s": round(time.monotonic() - started, 3),
+                        "retry_safe": True,
+                        "side_effect_committed": False,
+                    }
+                ) from blocked_error
+            if time.monotonic() >= deadline:
+                result = self.busy_result(resource, waited_s=time.monotonic() - started)
+                if not isinstance(blocked_error, BlockingIOError):
+                    result.update(filesystem_error_detail(blocked_error))
+                raise DeviceBusyError(result) from blocked_error
+            # Heartbeats and releases need _guard while this call waits.
+            time.sleep(min(WAIT_POLL_INTERVAL_S, max(deadline - time.monotonic(), 0.0)))
 
     def _drop(self, resource: str) -> None:
         held = self._held.get(resource)

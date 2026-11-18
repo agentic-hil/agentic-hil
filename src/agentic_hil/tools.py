@@ -1789,9 +1789,9 @@ class AgenticHILToolService:
         (every device a run names is held for the run's duration), and that
         promise only held for `agentic-hil test-reactor` until now.
 
-        The devices are resolved completely before anything is locked, and the
-        whole set is then taken in one all-or-nothing acquisition, so a run whose
-        third device is busy has never held its first two."""
+        The devices are resolved completely before anything is locked. Each
+        attempt releases its tentative locks before waiting for a busy device
+        and retrying. The run starts only after the complete set is acquired."""
         payload = payload or {}
         try:
             devices = resolve_devices(self.config, payload.get("devices"))
