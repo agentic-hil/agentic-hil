@@ -51,8 +51,8 @@ RELEASES_LATEST=https://github.com/agentic-hil/agentic-hil/releases/latest
 # digest is that release's own install.sh.sha256, which is also `sha256sum` of
 # install.sh at its tag. A version without its digest fails proof 3, which is
 # the intended failure mode and not a thing to work around.
-INSTALLER_RELEASE=0.26.0
-INSTALLER_SHA256=5fd18175d6934f281febb95c7a25c00a55158288bc6fdda23ce36aa97ca51522
+INSTALLER_RELEASE=0.27.0
+INSTALLER_SHA256=0763ff4817ead5a6e1a6bef343cdd9894d59955fea132bdb2dda0533a3e333fd
 INSTALLER_URL="https://github.com/agentic-hil/agentic-hil/releases/download/v$INSTALLER_RELEASE/install.sh"
 INSTALLER_SCRIPT=/tmp/released-install.sh
 
