@@ -17,6 +17,67 @@ A configured path is checked for what it *is*: every component is opened without
 
 `%APPDATA%` and `%LOCALAPPDATA%` are the discovered defaults, and `%USERPROFILE%\.agentic-hil` is the second root discovery falls to on its own: `agentic-hil init` writes both the configuration and the generated `state_root` there when the default cannot be written, and nothing has to be set for that to happen. A redirected profile directory is already covered by that. `AGENTIC_HIL_CONFIG` is the separate fact, an operator's manual binding, and what it is for is a location neither root reaches (a roaming share, a volume chosen to keep this bench's files off the system disk); set the `state_root` inside that file to match. It is a supported binding and not a workaround: a configuration reached that way is read exactly like a discovered one, with the same schema, validation and permissions. Set it in the host's user-level or managed environment, never in a repository-controlled file. Where each file lives: `agentic-hil://reference/platform-paths`. Per-host registration syntax is in [MCP host configuration](mcp-hosts.md).
 
+## Bench job configuration (version 4)
+
+An authoritative bench configuration can opt into job execution with
+`version: 4` and a `server` block. Versions 1 through 3 retain their existing
+rules and refuse this block as an unknown top-level field. Local configuration
+generation still writes version 3. Omitting `server` leaves local execution
+unchanged, including in a version 4 document.
+
+```yaml
+server:
+  job_root: /var/lib/agentic-hil/jobs  # required, absolute
+  listen: 127.0.0.1:8765
+  hostnames: []
+  allowed_origins: []
+  limits:
+    max_upload_mb: 64
+    max_artifact_wait_s: 600
+    max_job_runtime_s: 900
+    max_queue_s: 86400
+    reserve_after_s: 600
+    max_queued_jobs_per_user: 5
+  retention_days: 14
+```
+
+The values shown are the defaults, except `job_root`, which has no default.
+`listen` accepts a host and port from 1 through 65535, including bracketed IPv6.
+Validation does not resolve the host or open a socket. Limits and retention
+are positive integers, with zero also accepted for `reserve_after_s`; booleans
+are refused. Unknown keys in `server` or `server.limits` are refused.
+Hostnames represent additional accepted Host headers and allowed origins
+represent browser origins. Empty origins represent no browser access.
+
+These settings are represented and validated in this foundation only. It does
+not open a listener, receive uploads, enforce these limits, schedule jobs or
+delete retained workspaces. `max_upload_mb` represents the plan plus artifacts;
+`max_artifact_wait_s` represents waiting for later artifacts; `max_job_runtime_s`
+and `max_queue_s` represent runtime and queue bounds; `reserve_after_s` represents
+the threshold after which later jobs cannot pass (zero means strict ordering).
+`max_queued_jobs_per_user` represents a per-client queue bound and
+`retention_days` represents retention. Existing artifact validation and hardware
+permissions remain effective. All server settings require a restart;
+description reload does not adopt them.
+
+The trusted launcher prepares a fresh `<job_root>/<job_id>/workspace/`, places
+the original plan and artifact bytes at their requested nested names, and starts
+the module worker with the bench configuration path, bench workspace, job ID,
+client submitter claim and relative plan name. The worker derives its policy in
+memory from that authoritative bench configuration. A plan referencing
+`build/app.elf` therefore runs unchanged. Artifact roots and output paths are
+rebased into the job workspace, while hardware, executables, permissions and
+configuration provenance remain those of the bench. The workspace must remain
+outside trusted state and must not contain the authoritative configuration.
+Preparing bytes does not invoke the artifact upload API or require its grant.
+
+Job reports and ledger lines carry `job_id`, `submitted_by` and
+`submitted_by_source: client`. The submitter is a client claim, not an identity
+verified by authentication. Incidents retain bench ownership, so bench-side
+`agentic-hil lease-status` and
+`agentic-hil recover --confirm-safe-state --quarantine-id <id>` use the existing
+recovery rules. Bench commands and local runs carry no job attribution.
+
 ## What it declares
 
 Reading a device needs no permission. What protects a read is exclusivity: every device a test plan names is locked machine-wide for the duration of the run, a device the plan does not name is refused, and a second session is turned away with the holder named. That covers opening a debug session and inspecting it while the target sits halted, the same way it covers a probe attach: both halt the core the way any read on this bench can, and exclusivity rather than a grant answers for it. Everything that writes or changes state, or that lifts a halted target back into running (flash, reset, serial and CAN sends, resuming a debug session, mass erase, raw debugger commands), is declared per device, and a generated configuration grants all of it except `allow_raw_debugger_commands` and `allow_mass_erase`. Those two are false because of what they can reach: both act on flash outside the path this server validates (a raw debugger command writes whatever it is given, a mass erase clears whatever a flash has just written), so once either is allowed, a flash report's claim about what is on the device is no longer one this server can stand behind. That is the mutual exclusion between validated flashing and unrestricted debugger access: while either is true, `flash_firmware` on that probe is refused, and so is a debug session. Neither has a tool behind it here to trade for that, so setting one true withholds flashing rather than granting anything. The example below is what a generation writes:

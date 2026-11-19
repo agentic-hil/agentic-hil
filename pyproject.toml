@@ -193,7 +193,8 @@ files = [
   "src/agentic_hil/report.py",
   "src/agentic_hil/stdio.py",
   "src/agentic_hil/tools.py",
-  "src/agentic_hil/types.py"
+  "src/agentic_hil/types.py",
+  "src/agentic_hil/windows_device_lock.py"
 ]
 follow_imports = "silent"
 check_untyped_defs = true

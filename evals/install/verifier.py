@@ -89,7 +89,7 @@ PROJECT_PERMISSION_FLAGS = ("allow_config_write", "allow_config_description_writ
 # same test, for the same reason.
 LEGACY_CONFIG_VERSION = 1
 READ_FREE_CONFIG_VERSION = 2
-SUPPORTED_CONFIG_VERSIONS = (1, 2, 3)
+SUPPORTED_CONFIG_VERSIONS = (1, 2, 3, 4)
 # The hardware tool the wrong-workspace probe asks for. Any of them would do,
 # because a server with no configuration refuses all of them; this one is named
 # because it touches a probe, so a server that answered it would be a server
