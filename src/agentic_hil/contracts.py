@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -790,8 +791,10 @@ for _tool in MCP_TOOLS:
     _tool["inputSchema"] = {key: value for key, value in _schema.items() if key not in _ROOT_SCHEMA_COMBINATORS}
 
 
-def validate_tool_arguments(name: str, arguments: JsonObject) -> JsonObject | None:
-    validator = TOOL_VALIDATORS.get(name)
+def validate_tool_arguments(
+    name: str, arguments: JsonObject, validators: Mapping[str, Draft202012Validator] = TOOL_VALIDATORS,
+) -> JsonObject | None:
+    validator = validators.get(name)
     if validator is None:
         return None
     nonfinite_field = find_nonfinite(arguments)

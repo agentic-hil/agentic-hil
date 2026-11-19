@@ -640,8 +640,9 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # the 51st; `agentic_hil.power_supply`, the power-supply config module (#731),
 # was the 50th; `agentic_hil.backends.esptool`, the ESP32 backend, was the 49th.
 # The HTTP transport (#888) adds `agentic_hil.httpapi` and
-# `agentic_hil.httpserver` to the previous 52 modules.
-SCANNED_MODULE_COUNT = 54
+# `agentic_hil.httpserver` to the previous 52 modules. The MCP transport at
+# /mcp (#890) adds `agentic_hil.mcp_http`, the 55th.
+SCANNED_MODULE_COUNT = 55
 # The power supply tools (#733) add seven, the 220th to the 226th: the six
 # `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
 # `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
@@ -654,7 +655,8 @@ SCANNED_MODULE_COUNT = 54
 # Defmt plan assertions (#837) add the defmt_expect_timeout type.
 # ST-Link's recorded DEV_TARGET_CMD_ERR (#870) adds target_command_error.
 # The completed HTTP transport (#888) adds nine collected error types.
-COLLECTED_TYPE_COUNT = 241
+# The MCP transport at /mcp (#890) adds `bench_reads_unavailable`, the 242nd.
+COLLECTED_TYPE_COUNT = 242
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -725,7 +727,10 @@ COLLECTED_TYPE_COUNT = 241
 # UartRunner._defmt_expect is the one producer of that type.
 # STLinkBackend._failure_result and STLinkBackend.info produce target_command_error (#870).
 # The completed HTTP transport and serve command (#888) add fourteen producers.
-PRODUCER_COUNT = 726
+# The MCP transport at /mcp (#890) adds three, one function in `mcp_http` for
+# each: `_unknown_tool` writes `unknown_tool`, `_job_token` writes
+# `job_token_missing` and `_reads` writes `bench_reads_unavailable`.
+PRODUCER_COUNT = 729
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
