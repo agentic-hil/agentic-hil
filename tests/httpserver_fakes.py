@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import dataclass
-from http.client import HTTPConnection
+from http.client import HTTPConnection, HTTPException
 from http.server import ThreadingHTTPServer
 from threading import Event, Lock, Thread
 from typing import Any
@@ -18,11 +19,13 @@ from support import scaled_time_bound
 from agentic_hil import httpserver
 from agentic_hil.httpapi import (
     ByteRange,
+    DeviceActivity,
     JobContent,
     JobEvents,
     JobServiceError,
     JobStatus,
     LogRead,
+    QueueSnapshot,
     ServerSettings,
 )
 from agentic_hil.types import JsonObject
@@ -117,6 +120,74 @@ class ScriptedJobService:
     ) -> LogRead:
         return self._call("log", job_id, n, job_token=job_token, byte_range=byte_range, follow=follow, timeout_s=timeout_s)
 
+    def jobs(self, *, state: str | None, device: str | None, user: str | None, since: str | None) -> tuple[JsonObject, ...]:
+        return self._call("jobs", state=state, device=device, user=user, since=since)
+
+    def queue(self) -> QueueSnapshot:
+        return self._call("queue")
+
+    def device_activity(self) -> Mapping[str, DeviceActivity]:
+        return self._call("device_activity")
+
+    def metrics(self) -> str:
+        return self._call("metrics")
+
+    def drain(self, device: str) -> JsonObject:
+        return self._call("drain", device)
+
+    def recover(self, device: str, *, operator_statement: str, accept_config_change: bool) -> JsonObject:
+        return self._call("recover", device, operator_statement=operator_statement, accept_config_change=accept_config_change)
+
+
+class ScriptedBenchReads:
+    """The inventory seam's double: planted replies only, every call recorded."""
+
+    def __init__(self) -> None:
+        self.calls: list[Call] = []
+        self.scripts: dict[str, deque[Any]] = defaultdict(deque)
+        self.lock = Lock()
+
+    def script(self, method: str, *replies: Any) -> None:
+        with self.lock:
+            self.scripts[method].extend(replies)
+
+    def _call(self, method: str, *args: Any) -> Any:
+        call = Call(method, args, {})
+        with self.lock:
+            self.calls.append(call)
+            assert self.scripts[method], f"Unexpected BenchReads call: {call}"
+            reply = self.scripts[method].popleft()
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+    def server_info(self) -> JsonObject:
+        return self._call("server_info")
+
+    def devices(self) -> JsonObject:
+        return self._call("devices")
+
+    def device(self, name: str) -> JsonObject:
+        return self._call("device", name)
+
+    def probes(self) -> JsonObject:
+        return self._call("probes")
+
+    def ports(self) -> JsonObject:
+        return self._call("ports")
+
+    def backends(self) -> JsonObject:
+        return self._call("backends")
+
+    def leases(self) -> JsonObject:
+        return self._call("leases")
+
+    def ledger(self) -> JsonObject:
+        return self._call("ledger")
+
+    def doctor(self) -> JsonObject:
+        return self._call("doctor")
+
 
 class WaitReply:
     """A test publishes a reply only after the request is inside its wait."""
@@ -203,9 +274,9 @@ def short_settings(**overrides: Any) -> ServerSettings:
 
 
 @contextmanager
-def running_http(service: ScriptedJobService, settings: ServerSettings | None = None) -> Iterator[ThreadingHTTPServer]:
+def running_http(service: ScriptedJobService, settings: ServerSettings | None = None, *, bench: Any = None) -> Iterator[ThreadingHTTPServer]:
     # Deliberately called here, when a test enters the context, never in setup.
-    server = httpserver.create_http_server(settings or short_settings(), service)
+    server = httpserver.create_http_server(settings or short_settings(), service, bench=bench)
     worker = Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
     worker.start()
     try:
@@ -219,6 +290,65 @@ def running_http(service: ScriptedJobService, settings: ServerSettings | None = 
         worker.join(scaled_time_bound(15))
         assert not stopper.is_alive(), "HTTP shutdown did not finish"
         assert not worker.is_alive(), "HTTP server thread did not finish"
+
+
+# A peer outside loopback, from the RFC 5737 documentation range: what a request
+# from another machine looks like once the listener reports its address.
+FOREIGN_PEER = "192.0.2.10"
+
+
+@contextmanager
+def running_reads(service: ScriptedJobService, bench: Any = None, settings: ServerSettings | None = None) -> Iterator[ThreadingHTTPServer]:
+    """`running_http` whose handler failures reach the test that sent the request.
+
+    socketserver reports an exception escaping a handler on stderr and closes
+    the connection, so the client sees only a dropped connection. Recorded here
+    and raised again by `answer`, the failure is the test's own, with the frames
+    of the server thread that raised it."""
+    with running_http(service, settings, bench=bench) as server:
+        failures: list[BaseException] = []
+
+        def record(request: object, client_address: object) -> None:
+            failure = sys.exc_info()[1]
+            if failure is not None:
+                failures.append(failure)
+
+        server.handle_error = record  # type: ignore[method-assign]
+        server.handler_failures = failures  # type: ignore[attr-defined]
+        yield server
+
+
+def answer(server: ThreadingHTTPServer, method: str, path: str, **kwargs: Any) -> Response:
+    """`request` against a `running_reads` server, raising what its handler raised."""
+    failures: list[BaseException] = server.handler_failures  # type: ignore[attr-defined]
+    try:
+        response = request(server, method, path, **kwargs)
+    except (HTTPException, OSError):
+        if failures:
+            raise failures[0] from None
+        raise
+    if failures:
+        raise failures[0] from None
+    return response
+
+
+@contextmanager
+def foreign_peer(server: ThreadingHTTPServer, host: str = FOREIGN_PEER) -> Iterator[None]:
+    """Have the listener report every connection it accepts as coming from `host`.
+
+    The socket stays on loopback; only the address the handler is told changes,
+    which is the address any admin check can see."""
+    accepted = server.get_request
+
+    def rewritten() -> tuple[Any, Any]:
+        connection, address = accepted()
+        return connection, (host, address[1])
+
+    server.get_request = rewritten  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        server.get_request = accepted  # type: ignore[method-assign]
 
 
 def multipart() -> tuple[bytes, str]:

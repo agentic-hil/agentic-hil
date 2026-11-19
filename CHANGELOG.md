@@ -9,6 +9,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 ### Added
 
 - Add `agentic-hil serve` and a standard-library HTTP job transport on `127.0.0.1`, with multipart submission, bearer-protected uploads and results, conditional status reads, resumable events and browser request checks. The settings adapter and job-service factory are integration seams; startup refuses until server configuration and the job store are integrated. Server settings also enable the startup and doctor warning when other accounts cannot see the server's device locks. (#888)
+- Add open read endpoints to the bench server that reach no device: `/v1/server`, `/v1/devices` and `/v1/devices/{name}`, `/v1/probes`, `/v1/ports`, `/v1/backends`, `/v1/leases`, `/v1/queue`, `/v1/jobs` (filtered by `state`, `device`, `user` and `since`), `/v1/ledger`, `/v1/doctor`, `/v1/errors`, `/v1/schema/plan` and `/v1/metrics`. Devices are named by their logical names only, never by serial number, device path or CAN channel. Another submitter's job shows its metadata and none of its content. A probe listing runs only while no debugger is held, and `/v1/probes` and `/v1/ports` carry `Cache-Control: max-age=5` and an ETag. `POST /v1/devices/{name}/drain` and `/recover` answer only a client connected from 127.0.0.1. New error types `admin_loopback_only`, `device_not_found` and `bench_view_unavailable`. (#889)
 
 ## [0.27.0] - 2026-11-18
 

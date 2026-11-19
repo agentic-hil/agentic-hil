@@ -640,8 +640,9 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # the 51st; `agentic_hil.power_supply`, the power-supply config module (#731),
 # was the 50th; `agentic_hil.backends.esptool`, the ESP32 backend, was the 49th.
 # The HTTP transport (#888) adds `agentic_hil.httpapi` and
-# `agentic_hil.httpserver` to the previous 52 modules.
-SCANNED_MODULE_COUNT = 54
+# `agentic_hil.httpserver` to the previous 52 modules. The open read endpoints
+# (#889) add `agentic_hil.httpread` and `agentic_hil.benchview`.
+SCANNED_MODULE_COUNT = 56
 # The power supply tools (#733) add seven, the 220th to the 226th: the six
 # `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
 # `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
@@ -654,7 +655,9 @@ SCANNED_MODULE_COUNT = 54
 # Defmt plan assertions (#837) add the defmt_expect_timeout type.
 # ST-Link's recorded DEV_TARGET_CMD_ERR (#870) adds target_command_error.
 # The completed HTTP transport (#888) adds nine collected error types.
-COLLECTED_TYPE_COUNT = 241
+# The open read endpoints (#889) add three: `admin_loopback_only`,
+# `device_not_found` and `bench_view_unavailable`.
+COLLECTED_TYPE_COUNT = 244
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -725,7 +728,11 @@ COLLECTED_TYPE_COUNT = 241
 # UartRunner._defmt_expect is the one producer of that type.
 # STLinkBackend._failure_result and STLinkBackend.info produce target_command_error (#870).
 # The completed HTTP transport and serve command (#888) add fourteen producers.
-PRODUCER_COUNT = 726
+# The open read endpoints (#889) add five: one function each writing
+# `admin_loopback_only`, `bench_view_unavailable` and `device_not_found`, and
+# two writing `invalid_argument`, one for the job filters and one for the
+# recover body.
+PRODUCER_COUNT = 731
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
