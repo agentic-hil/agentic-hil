@@ -674,6 +674,111 @@ READ_VALIDATION_NEXT_STEP = (
 # from the scoped key to the bare one, so a scope nobody wrote an entry for still
 # gets the general fix instead of nothing.
 ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
+    "server_not_configured": ErrorRemedy(
+        meaning="The authoritative configuration has no server block, so this bench serves no jobs.",
+        remediation=("Use a bench configuration with a server block after the server-configuration integration is installed.",),
+        do_not=("Do not submit configuration or permissions over HTTP or bypass configuration validation.",),
+    ),
+    "server_listen_refused": ErrorRemedy(
+        meaning="This transport accepts only the loopback listen address.",
+        remediation=("Use 127.0.0.1 as the listen address. Non-loopback listening belongs to #891.",),
+        do_not=("Do not expose this listener through another bind address.",),
+    ),
+    "job_store_unavailable": ErrorRemedy(
+        meaning="The job-store implementation is missing, so serve refuses before listening.",
+        remediation=("Install the integrated job store and scheduler before starting serve.",),
+        do_not=("Do not treat the HTTP transport alone as an executing bench server.",),
+    ),
+    "origin_refused": ErrorRemedy(
+        meaning="The request carries an Origin that the server does not allow.",
+        remediation=("Use a permitted client origin, or a command-line client that sends no Origin header.",),
+        do_not=("Do not assume loopback access makes a browser form a trusted request.",),
+    ),
+    "host_refused": ErrorRemedy(
+        meaning="The request Host is neither the listener nor a configured hostname.",
+        remediation=("Address the listener directly or use a hostname listed in server.hostnames.",),
+        do_not=("Do not reuse an unrelated site's Host header for a bench request.",),
+    ),
+    "job_token_missing": ErrorRemedy(
+        meaning="This job resource requires the token returned on submission.",
+        remediation=("Send that job's token in Authorization: Bearer for uploads, withdrawal and private results.",),
+        do_not=("Do not place the token in a URL or query string.",),
+    ),
+    "job_token_invalid": ErrorRemedy(
+        meaning="The supplied bearer token does not belong to this job.",
+        remediation=("Use the job ID and token from the same submission response.",),
+        do_not=("Do not use another submitter's job token or retry the same incorrect token.",),
+    ),
+    "job_not_found": ErrorRemedy(
+        meaning="The requested job resource is not available.",
+        remediation=("Use the resource Location from the submission response and check the job ID.",),
+        do_not=("Do not invent a job ID or assume a missing resource has run successfully.",),
+    ),
+    "queue_full": ErrorRemedy(
+        meaning="The job queue has no admission capacity at present.",
+        remediation=("Wait for Retry-After before retrying the submission with the same Idempotency-Key.",),
+        do_not=("Do not flood the queue with new keys for the same submission.",),
+    ),
+    "per_user_limit": ErrorRemedy(
+        meaning="The submitter's configured job limit has been reached.",
+        remediation=("Wait for Retry-After and for existing jobs to end before retrying.",),
+        do_not=("Do not change the self-declared submitter to evade the limit.",),
+    ),
+    "artifact_unreferenced": ErrorRemedy(
+        meaning="The submitted plan does not reference this artifact path.",
+        remediation=("Upload a missing relative artifact path named by the plan and submission response.",),
+        do_not=("Do not send configuration files or arbitrary workspace contents as artifacts.",),
+    ),
+    "artifact_already_uploaded": ErrorRemedy(
+        meaning="An artifact has already been accepted for this job path.",
+        remediation=("Continue with the existing upload, or submit a new plan when different bytes are required.",),
+        do_not=("Do not try to overwrite accepted job artifacts.",),
+    ),
+    "artifact_missing": ErrorRemedy(
+        meaning="The job did not receive all required artifacts within its allowed upload time.",
+        remediation=("Submit the plan again with all required artifacts available.",),
+        do_not=("Do not assume a partly uploaded job held a queue position or ran.",),
+    ),
+    "job_finished": ErrorRemedy(
+        meaning="The job has already ended and cannot be withdrawn.",
+        remediation=("Fetch its report with the job token to inspect the outcome.",),
+        do_not=("Do not retry withdrawal on an ended job.",),
+    ),
+    "job_withdrawn": ErrorRemedy(
+        meaning="The job has already been withdrawn.",
+        remediation=("Inspect its status and any report; submit a new job if another execution is needed.",),
+        do_not=("Do not treat withdrawal as a successful hardware result.",),
+    ),
+    "job_expired": ErrorRemedy(
+        meaning="The job has expired and cannot be withdrawn or resumed.",
+        remediation=("Inspect the recorded reason and submit a new job if it is still needed.",),
+        do_not=("Do not assume expiry means any hardware step passed.",),
+    ),
+    "job_runtime_exceeded": ErrorRemedy(
+        meaning="The job exceeded its allowed runtime.",
+        remediation=("Read its report and logs with the job token before adjusting the plan or bench runtime allowance.",),
+        do_not=("Do not infer cleanup or hardware success from the runtime limit alone.",),
+    ),
+    "blocked_by_incident": ErrorRemedy(
+        meaning="A bench incident prevents the job from using its devices.",
+        remediation=("Read the incident's recovery guidance and resolve it through the existing bench recovery flow.",),
+        do_not=("Do not clear lock or incident records to force execution.",),
+    ),
+    "request_too_large": ErrorRemedy(
+        meaning="The HTTP request exceeds the configured upload size limit.",
+        remediation=("Reduce the submission size or use an appropriate bench upload allowance.",),
+        do_not=("Do not omit Content-Length to evade the upload bound.",),
+    ),
+    "unsupported_media_type": ErrorRemedy(
+        meaning="The endpoint does not accept the request's content type.",
+        remediation=("Submit application/yaml or multipart/form-data for plans, and application/octet-stream for artifact PUTs.",),
+        do_not=("Do not send a submission manifest or bundle instead of the plan and artifact parts.",),
+    ),
+    "range_not_satisfiable": ErrorRemedy(
+        meaning="The requested log byte range cannot be read.",
+        remediation=("Read Content-Range for the current size and request an available byte range.",),
+        do_not=("Do not assume the log contains bytes beyond its reported size.",),
+    ),
     CONFIG_STALE_ERROR: ErrorRemedy(
         meaning=(
             "The authoritative configuration on disk is not the one this MCP server is enforcing, so the backend it "
@@ -4626,10 +4731,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "relaxes), `allowed_root` (enforced under `validation.require_allowed_root`), `allowed_extension` "
             "(enforced under `validation.require_allowed_extension`), `regular_file` and `single_link`, and the "
             "format checks `elf_header`, `hex_parseable` and `bin_size_plausible`. A debug session also refuses an "
-            "image that is not an `.elf`, because it needs the symbols."
+            "image that is not an `.elf`, because it needs the symbols. An HTTP artifact upload also refuses a "
+            "Content-Digest that does not match its bytes, before the job service receives them."
         ),
         remediation=(
             "Read `validation` and the summary; the summary says which check stopped it.",
+            "For an HTTP Content-Digest failure, send the intended bytes and their matching SHA-256 digest.",
             "A format check that is false means the file is not the image its extension claims: rebuild it, or point "
             "at the build's real output. `regular_file` or `single_link` false means a link, a directory or a second "
             "hard link: use the plain file the build wrote.",

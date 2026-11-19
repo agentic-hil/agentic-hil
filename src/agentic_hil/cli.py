@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from agentic_hil import __version__, upgrade
+from agentic_hil import __version__, httpapi, httpserver, upgrade
 from agentic_hil.adopt import discovery_remedy, enumerated_stlink_ports, is_unset, project_config_adopt_hardware
 from agentic_hil.bench import (
     BENCH_ROOT_NAME,
@@ -589,6 +589,9 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser("doctor", help="validate config, check debugger availability, and say whether this bench is bound to hardware yet: a configuration whose devices name no hardware exits non-zero and names the command that binds them, because no test plan can run against it; off Windows it also asks whether this account may open the probe and the serial port, and exits non-zero naming the node and its group where it may not")
     doctor_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
 
+    serve_parser = subparsers.add_parser("serve", help="serve bench jobs over loopback HTTP")
+    serve_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
+
     config_reload_parser = subparsers.add_parser(
         "config-reload",
         help="check what a running MCP server's project_config_reload_description would take from this file: which device description it adopts and what still needs a restart",
@@ -752,6 +755,8 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return change_permission(args.command, args.keys)
     if args.command == "doctor":
         return doctor(args.config)
+    if args.command == "serve":
+        return serve(args.config)
     if args.command == "config-reload":
         return config_reload(args.config)
     if args.command == "debugger-probes":
@@ -5373,6 +5378,31 @@ def _doctor_bench_binding(config: AgenticHILConfig) -> JsonObject:
     }
 
 
+def serve(config_path: str | None = None) -> int:
+    """Serve plans through the configured loopback job transport."""
+    config = load_cli_authoritative_config(config_path)
+    settings = httpapi.load_server_settings(config)
+    if settings is None:
+        raise httpapi.JobServiceError(
+            "server_not_configured",
+            f"No server block in {config.config_path}; without one the bench serves no jobs and nothing else changes.",
+            {"config_path": config.config_path},
+        )
+    httpserver.validate_listen_address(settings)
+    with httpapi.open_job_service(config, settings) as service:
+        warning = httpserver.server_lock_warning()
+        server = httpserver.create_http_server(settings, service)
+        try:
+            if warning:
+                print(f"Warning: {warning}", file=sys.stderr)
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.server_close()
+    return 0
+
+
 def doctor(config_path: str | None = None) -> JsonObject:
     try:
         config = load_cli_authoritative_config(config_path)
@@ -5573,6 +5603,10 @@ def doctor(config_path: str | None = None) -> JsonObject:
     missing_extras = missing_configured_extras(config)
     if missing_extras is not None:
         identity_warnings = [*identity_warnings, f"{missing_extras['summary']} Reinstall with: {missing_extras['reinstall_command']}"]
+    if httpapi.load_server_settings(config) is not None and device_locks_check.get("ok") is True:
+        server_warning = httpserver.server_lock_warning()
+        if server_warning is not None:
+            identity_warnings = [*identity_warnings, server_warning]
     if identity_warnings:
         report["warnings"] = identity_warnings
     # The same list of grants `init` reports for the file it wrote and the same

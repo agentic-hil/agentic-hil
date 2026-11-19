@@ -138,7 +138,8 @@ IDENTIFIED_COM_PORT_CONFIG_VERSION = 3
 CURRENT_CONFIG_VERSION = IDENTIFIED_COM_PORT_CONFIG_VERSION
 # Every version this release loads, in order. One tuple, so the loader's check,
 # the schema's enum and every refusal that lists them cannot disagree.
-SUPPORTED_CONFIG_VERSIONS = (LEGACY_CONFIG_VERSION, READ_FREE_CONFIG_VERSION, IDENTIFIED_COM_PORT_CONFIG_VERSION)
+SERVER_CONFIG_VERSION = 4
+SUPPORTED_CONFIG_VERSIONS = (LEGACY_CONFIG_VERSION, READ_FREE_CONFIG_VERSION, IDENTIFIED_COM_PORT_CONFIG_VERSION, SERVER_CONFIG_VERSION)
 
 
 @dataclass(frozen=True)
@@ -591,6 +592,35 @@ class RecoveryConfig:
 
 
 @dataclass(frozen=True)
+class ServerLimitsConfig:
+    max_upload_mb: int = 64
+    max_artifact_wait_s: int = 600
+    max_job_runtime_s: int = 900
+    max_queue_s: int = 86400
+    reserve_after_s: int = 600
+    max_queued_jobs_per_user: int = 5
+
+
+@dataclass(frozen=True)
+class ServerConfig:
+    job_root: str
+    listen: str = "127.0.0.1:8765"
+    hostnames: tuple[str, ...] = ()
+    allowed_origins: tuple[str, ...] = ()
+    limits: ServerLimitsConfig = field(default_factory=ServerLimitsConfig)
+    retention_days: int = 14
+
+
+@dataclass(frozen=True)
+class BenchOwnership:
+    """Trusted coordination identity captured before deriving a job workspace."""
+
+    project_resource: str
+    workspace: str
+    config_path: str
+
+
+@dataclass(frozen=True)
 class AgenticHILConfig:
     config_path: str
     work_dir: str
@@ -656,6 +686,9 @@ class AgenticHILConfig:
     # The bench power supplies. Only a restart adopts this section: a description
     # reload carries the supplies parsed at startup over unchanged.
     power_supplies: dict[str, PowerSupplyConfig] = field(default_factory=dict)
+    server: ServerConfig | None = None
+    # Runtime only, supplied by the trusted job launcher, never by YAML.
+    bench_ownership: BenchOwnership | None = None
 
     @property
     def read_free(self) -> bool:

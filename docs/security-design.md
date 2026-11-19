@@ -16,6 +16,49 @@ The primary risks are:
 - Concurrent or crashed frontends leaving physical hardware ownership or safe state ambiguous.
 - Leaking host paths, serial logs, hardware identifiers, or local configuration details in reports.
 
+## Bench job boundary
+
+Version 4 can represent optional server settings and prepare isolated job
+workspaces. The trusted launcher supplies the authoritative bench configuration,
+bench workspace and job identity. A worker derives its in-memory configuration
+from that bench policy and runs the existing reactor and artifact manager.
+Hardware, executable bindings and permissions come exclusively from the bench.
+Configuration-looking files among submitted files are data and are never loaded
+as policy. Submitted content cannot introduce devices, widen permissions or
+select commands to execute. The worker runs no repository build, test runner,
+hook or script.
+
+Each job receives a fresh `<job_root>/<id>/workspace/`. Artifact roots and report
+and log paths are rebased there, preserving the existing workspace/state and
+external-authoritative-config separation checks. Submitted plan bytes stay
+unchanged. Guarded placement and artifact reads retain the local path errors:
+traversal, an absolute path outside the workspace, and links escaping it are
+refused. An absolute artifact path inside its own workspace remains valid.
+The production artifact manager retains format validation, digest verification
+and private backend staging. Ownership by the server account does not make
+submitted bytes trusted.
+
+Workers carry the original bench coordination identity, captured before
+workspace derivation. Incident records name the bench workspace and config;
+canonical reports remain isolated by job. A standing audit-broken incident
+therefore blocks later jobs and is recoverable by the bench's existing recovery
+command with its current quarantine ID. Configuration-change acknowledgement,
+live-owner exclusion, foreign-project incidents and quarantine narrowing retain
+their existing rules. No job attribution is stored in incident records.
+
+During worker execution, runtime context adds `job_id`, `submitted_by` and
+`submitted_by_source: client` before report and ledger redaction, serialization
+and audit hashing. Runtime values override payload claims. Passive UART feedback
+captures that context for its reader thread without changing where feedback is
+logged. These fields are client claims, not authentication. Local outputs and
+later bench-side recovery retain their existing attribution.
+
+Listener, origins, upload and queue limits, runtime bounds and retention settings
+are represented only. This foundation creates no listener, HTTP service,
+authentication, scheduler, job store or retention worker and enforces none of
+those new limits. See [configuration](configuration.md#bench-job-configuration-version-4)
+for their defaults and restart behavior.
+
 ## Where Enforcement Sits
 
 A reader who scopes database and Kubernetes access to the credential expects the same shape here, and that analogy carries the answer rather than contradicting it: in that world the server enforces, through grants and RBAC, and never the client or the shell around it. A debug probe, a serial port and a CAN adapter have no such server and no permission model of their own, so any process that can open the device can do anything to it, and the enforcement point has to be the thing directly in front of the hardware. This tool is that thing, in the role the database engine or the API server plays elsewhere; putting the policy into the MCP host would be putting the grants into the client. The host's own permission system stays and is complementary, but it answers a different question: it judges a shell string or a tool name and decides whether the agent may call at all, it is spelled differently by every host, and it cannot hold a machine-wide device lock across processes. The bench's permissions judge the hardware action itself, against the envelope the operator configured (which probe is pinned, which CAN ids may be sent, which firmware validates, which interlocks refuse), and they travel with the bench rather than with the host: MCP is one entry point, and `doctor`, `com-stdio`, pytest, CI and the test reactor walk the same gate. The credential in this model is a file, deliberately outside the workspace the agent can edit, where a host's settings sit inside it: a device the file does not declare does not exist here (`unknown_device` to a run that declares it, `com_port_not_configured` or `can_bus_not_configured` to a port or a bus tool that names it), a device it declares carries its own grants, and "read-only on production" is `listen_only` plus reads that need no grant at all. Both layers are worth having, and this is the one this product can vouch for.
