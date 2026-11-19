@@ -8,16 +8,18 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict, dataclass
+from http.server import ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path, PurePath
 from typing import Any
 
 import yaml
 
-from agentic_hil import __version__, benchview, httpapi, httpserver, upgrade
+from agentic_hil import __version__, benchview, httpapi, httpserver, remote, upgrade
 from agentic_hil.adopt import discovery_remedy, enumerated_stlink_ports, is_unset, project_config_adopt_hardware
 from agentic_hil.bench import (
     BENCH_ROOT_NAME,
@@ -512,6 +514,14 @@ class SubcommandParser(argparse.ArgumentParser):
         return parsed, extras
 
 
+class WholeWordHelpFormatter(argparse.HelpFormatter):
+    """argparse's help, wrapped between words only, so a hyphenated word such as
+    self-declared never reaches a reader split across two lines."""
+
+    def _split_lines(self, text: str, width: int) -> list[str]:
+        return textwrap.wrap(" ".join(text.split()), width, break_on_hyphens=False)
+
+
 def refuse_an_unknown_agent_without_a_target(parser: argparse.ArgumentParser, parsed: argparse.Namespace) -> None:
     """`skill-install` without `--target` writes to the agent's own skill
     directory, so it refuses an agent that has none the way every other
@@ -589,8 +599,41 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser("doctor", help="validate config, check debugger availability, and say whether this bench is bound to hardware yet: a configuration whose devices name no hardware exits non-zero and names the command that binds them, because no test plan can run against it; off Windows it also asks whether this account may open the probe and the serial port, and exits non-zero naming the node and its group where it may not")
     doctor_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
 
-    serve_parser = subparsers.add_parser("serve", help="serve bench jobs over loopback HTTP")
+    serve_parser = subparsers.add_parser("serve", help="run the bench server: serve test plans as jobs over HTTP, on 127.0.0.1 unless the server block's listen names another address")
     serve_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
+
+    # The thin client of a shared bench. It reads no configuration of its own,
+    # so a machine that only submits needs none.
+    remote_parser = subparsers.add_parser("remote", help="submit a test plan to a shared bench and follow it from another machine")
+    remote_actions = remote_parser.add_subparsers(dest="remote_command", parser_class=SubcommandParser, required=True)
+    bench_help = f"the shared bench's address, such as http://<bench>:8765; without it, {remote.BENCH_URL_ENV}"
+    remote_submit = remote_actions.add_parser(
+        "submit",
+        help="send the plan and every artifact it names to the bench in one submission",
+        check_parsed=remote.check_arguments,
+        formatter_class=WholeWordHelpFormatter,
+    )
+    remote_submit.add_argument("--bench", default=None, help=bench_help)
+    remote_submit.add_argument("--plan", default=DEFAULT_TEST_CONFIG_PATH, help=f"the plan to submit (default: {DEFAULT_TEST_CONFIG_PATH})")
+    remote_submit.add_argument("--wait", action="store_true", help="follow the job to its end, fetch its report and exit with the run's own verdict, as a local test-reactor does")
+    remote_submit.add_argument("--junit-xml", default=None, help="with --wait, write the run's JUnit file to this path")
+    remote_submit.add_argument(
+        "--user",
+        default=None,
+        help="the name the job is submitted under; without it, the job goes under this machine's login name. The name is self-declared, so nothing verifies it, and everyone who can reach the bench's port sees it in the queue and in the job's report",
+    )
+    for action_name, action_help in (("status", "show a job's status, which needs no token"), ("withdraw", "take a job this machine submitted out of the queue, or stop it")):
+        remote_job = remote_actions.add_parser(action_name, help=action_help, check_parsed=remote.check_arguments)
+        remote_job.add_argument("--bench", default=None, help=bench_help)
+        remote_job.add_argument("--job", required=True, help="the job id submit answered with")
+    remote_queue = remote_actions.add_parser("queue", help="show the jobs waiting on the bench and what each waits for", check_parsed=remote.check_arguments)
+    remote_queue.add_argument("--bench", default=None, help=bench_help)
+    remote_fetch = remote_actions.add_parser("fetch", help="write a job's report, JUnit file and evidence bundle into a directory", check_parsed=remote.check_arguments)
+    remote_fetch.add_argument("--bench", default=None, help=bench_help)
+    remote_fetch.add_argument("--job", required=True, help="the job id submit answered with")
+    remote_fetch.add_argument("--into", required=True, help="the directory the three files are written into")
+    for remote_action in remote_actions.choices.values():
+        remote_action.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help=JSON_FLAG_HELP)
 
     config_reload_parser = subparsers.add_parser(
         "config-reload",
@@ -757,6 +800,8 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return doctor(args.config)
     if args.command == "serve":
         return serve(args.config)
+    if args.command == "remote":
+        return remote.run(args)
     if args.command == "config-reload":
         return config_reload(args.config)
     if args.command == "debugger-probes":
@@ -5378,10 +5423,17 @@ def _doctor_bench_binding(config: AgenticHILConfig) -> JsonObject:
     }
 
 
-def serve(config_path: str | None = None) -> int:
-    """Serve plans through the configured loopback job transport."""
-    config = load_cli_authoritative_config(config_path)
-    settings = httpapi.load_server_settings(config)
+@contextmanager
+def bench_server(config: AgenticHILConfig, *, settings: httpapi.ServerSettings | None = None) -> Iterator[ThreadingHTTPServer]:
+    """The bench server's listener, built the way `serve` builds it, for as long as the context lasts.
+
+    The settings are the `server` block's unless they are given. The listener
+    answers the jobs from the bench's job service, the open reads from a bench
+    view over the same configuration, and the read tools at /mcp from that
+    view and that service; all of it is wired before the socket is handed out,
+    and closed after it."""
+    if settings is None:
+        settings = httpapi.load_server_settings(config)
     if settings is None:
         raise httpapi.JobServiceError(
             "server_not_configured",
@@ -5390,19 +5442,24 @@ def serve(config_path: str | None = None) -> int:
         )
     httpserver.validate_listen_address(settings)
     with httpapi.open_job_service(config, settings) as service, benchview.BenchView(config, settings, activity=service.device_activity) as view:
+        server = httpserver.create_http_server(settings, service, bench=view, bench_reads=benchview.McpBenchView(view, service))
+        try:
+            yield server
+        finally:
+            server.server_close()
+
+
+def serve(config_path: str | None = None) -> int:
+    """Run the bench server on the configured listener until it is interrupted."""
+    config = load_cli_authoritative_config(config_path)
+    with bench_server(config) as server:
         warning = httpserver.server_lock_warning()
-        server = httpserver.create_http_server(settings, service)
-        # The open reads (#889): the listener answers them from this view, which
-        # reads no device and closes after the listener does.
-        server.bench = view
         try:
             if warning:
                 print(f"Warning: {warning}", file=sys.stderr)
             server.serve_forever()
         except KeyboardInterrupt:
             pass
-        finally:
-            server.server_close()
     return 0
 
 

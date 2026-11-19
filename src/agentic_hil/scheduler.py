@@ -112,7 +112,16 @@ WORKER_LOG_NAME = "worker.log"
 
 
 class WorkspacePreparer(Protocol):
+    """Where a job runs and under which configuration.
+
+    ``prepare`` is idempotent: admission calls it before preflight, and the
+    start calls it again, so a second call checks what the first placed.
+    ``config_for`` names the configuration the job is admitted, run and
+    reported under, without placing anything.
+    """
+
     def prepare(self, job: Job) -> tuple[AgenticHILConfig, Path]: ...
+    def config_for(self, job: Job) -> AgenticHILConfig: ...
 
 
 class IncidentSource(Protocol):
@@ -149,6 +158,9 @@ class ExistingWorkspacePreparer:
 
     def __init__(self, config: AgenticHILConfig):
         self.config = config
+
+    def config_for(self, job: Job) -> AgenticHILConfig:
+        return self.config
 
     def prepare(self, job: Job) -> tuple[AgenticHILConfig, Path]:
         for relative, staged in sorted(job.artifacts.items()):
@@ -401,6 +413,19 @@ class Scheduler:
         # says held, and a standing incident.
         self._holders: dict[str, JsonObject] = {}
         self._incidents: dict[str, JsonObject] = {}
+        # The lock keys an operator drained: granted to no new job until the
+        # scheduler starts again. Held in memory and nowhere else.
+        self.drained: set[str] = set()
+
+    @property
+    def holders(self) -> Mapping[str, JsonObject]:
+        """The last tick's holder records that say held, by lock key."""
+        return self._holders
+
+    @property
+    def incidents(self) -> Mapping[str, JsonObject]:
+        """The last tick's standing incidents, by lock key."""
+        return self._incidents
 
     # -- Submission --------------------------------------------------------
 
@@ -412,9 +437,26 @@ class Scheduler:
 
         The answer is the job; its status says which of the three it is.
         """
-        now = self._now()
         source = Path(plan) if Path(plan).is_absolute() else Path(self.config.work_dir) / plan
-        job = self.store.create(source.name)
+        return self._submit(source.name, source, artifacts, submitter_label, max_queue_s, None)
+
+    def submit_content(
+        self, *, plan_name: str, plan: bytes, artifacts: Mapping[str, bytes], submitter_label: str,
+        max_queue_s: float | None = None, record: Mapping[str, Any] | None = None,
+    ) -> Job:
+        """`submit` for a plan and artifacts handed over as bytes, as a submission over the network carries them.
+
+        `record` holds fields merged into the job's record before it is first
+        saved, which is how a caller keeps what it knows of the job with it.
+        """
+        return self._submit(plan_name, plan, artifacts, submitter_label, max_queue_s, record)
+
+    def _submit(
+        self, plan_name: str, plan: Path | bytes, artifacts: Mapping[str, Path] | Mapping[str, bytes],
+        submitter_label: str, max_queue_s: float | None, record: Mapping[str, Any] | None,
+    ) -> Job:
+        now = self._now()
+        job = self.store.create(plan_name)
         data: JsonObject = {
             "job_id": job.job_id,
             "state": REJECTED,
@@ -434,10 +476,11 @@ class Scheduler:
             "attempts": 0,
             "started": False,
         }
+        data.update(record or {})
         try:
             data["submitter_label"] = _validated_label(submitter_label)
             data["queue_deadline"] = now + self._queue_bound(max_queue_s)
-            content = _read_input(source, "plan", self.config.work_dir)
+            content = plan if isinstance(plan, bytes) else _read_input(plan, "plan", self.config.work_dir)
             atomic_write_bytes(job.plan_path, content)
             data["plan_digest"] = hashlib.sha256(content).hexdigest()
             loaded = self._load_plan(data)
@@ -456,6 +499,15 @@ class Scheduler:
         self, job_id: str, *, artifacts: Mapping[str, Path], submitter_label: str,
     ) -> Job:
         """Stage the artifacts a waiting job's plan names, and admit it once none is missing."""
+        return self._provide(job_id, artifacts, submitter_label)
+
+    def provide_content(
+        self, job_id: str, *, artifacts: Mapping[str, bytes], submitter_label: str,
+    ) -> Job:
+        """`provide_artifacts` for artifacts handed over as bytes."""
+        return self._provide(job_id, artifacts, submitter_label)
+
+    def _provide(self, job_id: str, artifacts: Mapping[str, Path] | Mapping[str, bytes], submitter_label: str) -> Job:
         data = self.store.get(job_id)
         self._require_submitter(data, submitter_label)
         if data["state"] != AWAITING_ARTIFACTS:
@@ -491,13 +543,17 @@ class Scheduler:
         return self.store.job(data)
 
     def _load_plan(self, data: JsonObject) -> TestConfig:
-        loaded = load_test_config(str(data["plan_path"]), str(self.config.work_dir))
+        # The stored copy is read inside the job's own plan directory: the
+        # submitted file was held to the workspace when it was read, and the
+        # job root need not be inside it.
+        stored = Path(str(data["plan_path"]))
+        loaded = load_test_config(str(stored), str(stored.parent))
         data["plan_name"] = loaded.name
         data["lock_keys"] = list(plan_devices(self.config, loaded).lock_keys)
         data["lower_bound_s"] = plan_lower_bound_s(loaded.steps)
         return loaded
 
-    def _stage(self, data: JsonObject, loaded: TestConfig, artifacts: Mapping[str, Path]) -> None:
+    def _stage(self, data: JsonObject, loaded: TestConfig, artifacts: Mapping[str, Path] | Mapping[str, bytes]) -> None:
         """Copy each provided artifact into the job, under the path its plan names it by."""
         named = set(plan_artifact_paths(loaded.steps))
         directory = self.store.directory(str(data["job_id"])) / "artifacts"
@@ -505,14 +561,15 @@ class Scheduler:
             relative = _validated_artifact_name(name)
             if relative not in named:
                 raise invalid_input("The plan names no artifact at this path.", {"field": "artifacts", "artifact": relative})
-            content = _read_input(Path(source), "artifact", self.config.work_dir)
+            content = source if isinstance(source, bytes) else _read_input(Path(source), "artifact", self.config.work_dir)
             destination = directory.joinpath(*PurePosixPath(relative.replace("\\", "/")).parts)
             safe_directory(destination.parent)
             atomic_write_bytes(destination, content)
             data["artifacts"][relative] = {"path": str(destination), "sha256": hashlib.sha256(content).hexdigest(), "size_bytes": len(content)}
 
     def _advance(self, data: JsonObject, loaded: TestConfig) -> None:
-        missing = [path for path in plan_artifact_paths(loaded.steps) if path not in data["artifacts"] and not self._present(path)]
+        config = self.workspace_preparer.config_for(self.store.job(data))
+        missing = [path for path in plan_artifact_paths(loaded.steps) if path not in data["artifacts"] and not self._present(config, path)]
         data["missing_artifacts"] = missing
         if missing:
             data["state"] = AWAITING_ARTIFACTS
@@ -523,7 +580,9 @@ class Scheduler:
     def _admit(self, data: JsonObject, loaded: TestConfig) -> None:
         """Refuse the plan as the reactor would, then hold it to the runtime cap and the quota, then queue it."""
         now = self._now()
-        refusal = self._preflight(loaded)
+        # Preflight reads the plan where it will run, so the job is placed first.
+        config, _plan = self.workspace_preparer.prepare(self.store.job(data))
+        refusal = self._preflight(loaded, config)
         if refusal is not None:
             data["error_type"] = refusal.get("error_type", "test_config_invalid")
             data["refusal_field"] = refusal.get("field")
@@ -539,12 +598,12 @@ class Scheduler:
             return
         data.update({"state": QUEUED, "sequence": self.store.take_sequence(), "queued_at": now, "summary": None})
 
-    def _preflight(self, loaded: TestConfig) -> JsonObject | None:
-        service = _AdmissionService(self.config)
+    def _preflight(self, loaded: TestConfig, config: AgenticHILConfig) -> JsonObject | None:
+        service = _AdmissionService(config)
         try:
             # A factory is what lets preflight accept a step on a probe other
             # than the bound one. Preflight never calls it.
-            reactor = TestReactor(self.config, cast("AgenticHILToolService", service), service_factory=lambda _bound: cast("AgenticHILToolService", service))
+            reactor = TestReactor(config, cast("AgenticHILToolService", service), service_factory=lambda _bound: cast("AgenticHILToolService", service))
             return reactor.preflight(loaded)
         except Exception as error:
             return {"summary": "The plan's preflight raised before it could answer.", "exception_type": type(error).__name__}
@@ -562,6 +621,14 @@ class Scheduler:
         for data in self._jobs(ACTIVE_JOB_STATES):
             if data["state"] in ACTIVE_JOB_STATES:
                 self._reconcile(data, now)
+        for data in self._jobs({AWAITING_ARTIFACTS}):
+            if now >= float(data["submitted_at"]) + self.settings.max_artifact_wait_s:
+                data.update({
+                    "state": EXPIRED,
+                    "finished_at": now,
+                    "error_type": "artifact_missing",
+                    "summary": "The artifacts the plan names did not all arrive within max_artifact_wait_s, so the job never entered the queue.",
+                })
         for data in self._jobs({AWAITING_ARTIFACTS, QUEUED}):
             if data.get("queue_deadline") is not None and now >= data["queue_deadline"]:
                 data.update({"state": EXPIRED, "finished_at": now, "summary": "The job waited until its queue deadline without starting."})
@@ -581,6 +648,8 @@ class Scheduler:
             state = data["state"]
             if state in {AWAITING_ARTIFACTS, QUEUED}:
                 due.append(data.get("queue_deadline"))
+            if state == AWAITING_ARTIFACTS:
+                due.append(float(data["submitted_at"]) + self.settings.max_artifact_wait_s)
             if state == QUEUED:
                 aging = None if data.get("queued_at") is None else data["queued_at"] + self.settings.reserve_after_s
                 due.extend(moment for moment in (data.get("retry_at"), data.get("hold_retry_at"), aging) if moment is not None and moment > now)
@@ -711,6 +780,8 @@ class Scheduler:
             state = str(run_state)
         data["state"] = state
         data["finished_at"] = now
+        # The run's own verdict, as its worker recorded it: what a job's `ok` is read from.
+        data["run_ok"] = record is not None and record.get("run_ok") is True
         if record is not None and "error_type" in record:
             data["error_type"] = record["error_type"]
         if state == RUNTIME_EXCEEDED:
@@ -729,14 +800,17 @@ class Scheduler:
         directory = self.store.directory(str(data["job_id"]))
         canonical: Path | None = None
         if isinstance(handle, str):
+            # The run reported under the configuration it ran under.
             try:
-                canonical = canonical_run_report_path(self.config, handle)
+                config = self.workspace_preparer.config_for(self.store.job(data))
+                canonical = canonical_run_report_path(config, handle)
             except (ConfigError, OSError):
+                config = self.config
                 canonical = None
             # The worker's own output, kept with the job: the runs directory
             # prunes it with the run's record.
             with suppress(ConfigError, OSError):
-                atomic_write_bytes(directory / "logs" / WORKER_LOG_NAME, safe_read_bytes(runlifecycle.worker_log_path(self.config, handle)))
+                atomic_write_bytes(directory / "logs" / WORKER_LOG_NAME, safe_read_bytes(runlifecycle.worker_log_path(config, handle)))
         canonical_report = _read_json(canonical) if canonical is not None else None
         report = {
             "job_id": data["job_id"],
@@ -807,7 +881,7 @@ class Scheduler:
     def _blocked(self, data: JsonObject, keys: list[str], occupied: set[str], claimed: Mapping[str, str], now: float) -> bool:
         if data.get("retry_at") is not None and now < data["retry_at"]:
             return True
-        if any(key in occupied or key in self._incidents or claimed.get(key, data["job_id"]) != data["job_id"] for key in keys):
+        if any(key in occupied or key in self._incidents or key in self.drained or claimed.get(key, data["job_id"]) != data["job_id"] for key in keys):
             return True
         if not any(key in self._holders for key in keys):
             data["hold_retry_at"] = None
@@ -937,9 +1011,11 @@ class Scheduler:
     def _open_jobs(self, label: str) -> int:
         return sum(1 for data in self.store.jobs.values() if data.get("submitter_label") == label and data["state"] in QUOTA_JOB_STATES)
 
-    def _present(self, path: str) -> bool:
+    @staticmethod
+    def _present(config: AgenticHILConfig, path: str) -> bool:
+        """Whether the workspace the job runs in already holds the artifact, so it need not be provided."""
         try:
-            return configured_work_path(self.config, path).is_file()
+            return configured_work_path(config, path).is_file()
         except (OSError, ValueError):
             return False
 

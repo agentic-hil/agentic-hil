@@ -177,8 +177,6 @@ def refuse_every_device_path(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     for backend in (OpenOCDBackend, PyOCDBackend, STLinkBackend, EsptoolBackend):
         for method in ("probe_target", "flash_firmware", "reset_target"):
             monkeypatch.setattr(backend, method, refuse(f"reached the target through {backend.__name__}.{method}", refused), raising=False)
-    if not hasattr(power_supply, "POWER_SUPPLY_BACKENDS"):
-        monkeypatch.setattr(power_supply, "POWER_SUPPLY_BACKENDS", {}, raising=False)
     monkeypatch.setitem(power_supply.POWER_SUPPLY_BACKENDS, THRESHOLD_TYPE, refuse("connected a power supply", refused))
     return refused
 
@@ -220,7 +218,7 @@ def test_no_answer_carries_a_serial_number_or_a_device_path(tmp_path: Path, monk
             answers = {
                 "server": view.server_info(),
                 "devices": view.devices(),
-                **{f"device {name}": view.device(name) for name in ("dut", "psu", "console", "bus")},
+                **{f"device {name}": view.device(name) for name in LOGICAL_NAMES},
                 "probes": view.probes(),
                 "ports": view.ports(),
                 "backends": view.backends(),

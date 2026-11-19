@@ -1,6 +1,6 @@
 # Security Design
 
-Agentic Hardware-in-the-Loop (Agentic HIL) is a local MCP stdio server for agent-driven embedded hardware workflows. Its security design focuses on keeping host and hardware actions explicit, narrow, configured, and auditable.
+Agentic Hardware-in-the-Loop (Agentic HIL) is a local MCP stdio server for agent-driven embedded hardware workflows, with an optional bench server, `agentic-hil serve`, that takes test plans over HTTP from a trusted network. Its security design focuses on keeping host and hardware actions explicit, narrow, configured, and auditable.
 
 ## Threat Model
 
@@ -53,11 +53,53 @@ captures that context for its reader thread without changing where feedback is
 logged. These fields are client claims, not authentication. Local outputs and
 later bench-side recovery retain their existing attribution.
 
-Listener, origins, upload and queue limits, runtime bounds and retention settings
-are represented only. This foundation creates no listener, HTTP service,
-authentication, scheduler, job store or retention worker and enforces none of
-those new limits. See [configuration](configuration.md#bench-job-configuration-version-4)
+The upload, queue, runtime and retention limits are enforced by the bench
+server's job service. See [configuration](configuration.md#bench-job-configuration-version-4)
 for their defaults and restart behavior.
+
+## The shared bench
+
+`agentic-hil serve` is the only part of Agentic HIL that listens on the
+network. Without `server.listen` it listens on 127.0.0.1 alone; an operator who
+wants other machines to submit names one of the bench's IPv4 addresses or
+`0.0.0.0`, and a name or an IPv6 address is refused at startup, so the listener
+is never wherever a name happened to resolve. [Shared bench](shared-bench.md)
+is the operator's guide.
+
+There is no authentication in this release. Anybody who reaches the port can
+submit a plan and read the queue, the job list, the inventory and the
+self-declared submitter names. What the boundary rests on instead is that a
+submission carries nothing but a plan and its artifacts, read by the bench under
+its own policy:
+
+- **Who is answered.** A connection whose socket peer is outside
+  `allowed_networks` (the private ranges by default, loopback always) is closed
+  before a byte of it is read. A request whose `Host` header names neither the
+  listen address, nor for a wildcard listener the address the connection arrived
+  on, nor a configured hostname is refused, which keeps a DNS-rebinding page in
+  a browser on the network out. A request carrying an `Origin` outside
+  `allowed_origins`, empty by default, is refused before its body is read, and
+  no answer carries a CORS header. None of these reads a forwarding header.
+- **What a job may do.** The plan is admitted against the bench's
+  authoritative configuration exactly as a local run is, uploads are stored as
+  bytes and never built, imported or executed, and the worker derives its
+  policy from the bench as described above. `max_job_runtime_s` bounds how long
+  one job holds its devices, and the per-submitter queue limit bounds a queue
+  only as far as names are honest.
+- **Who may change a job.** Each job has a token, answered once at submission
+  and stored only as its SHA-256. Withdrawing a job and reading its report, logs
+  and evidence take the token; its status does not.
+- **Who may change the bench.** Draining and recovering a device are answered
+  only to the socket peer 127.0.0.1, so they are reachable from the bench
+  machine alone, and not at all through a listener bound to one LAN address.
+
+What this does not protect against is named rather than implied. The traffic is
+plain HTTP, so a plan, an artifact or a token on the wire can be read and a
+token replayed by anybody on the path. A submitter name is a claim. And every
+account on the bench machine reaches loopback, so a CI runner sharing that
+machine needs a per-account firewall rule to keep it from the admin requests.
+A shared bench belongs on a network the operator trusts, behind a host
+firewall; `allowed_networks` is the server's own refusal, not a firewall.
 
 ## Where Enforcement Sits
 
@@ -101,7 +143,7 @@ A reader who scopes database and Kubernetes access to the credential expects the
 
 ## Cryptography Scope
 
-Agentic HIL does not implement authentication, password storage, encryption protocols, key agreement, or custom cryptographic primitives. It uses the Python standard library (`hashlib`) for SHA-256 artifact metadata. Release integrity is handled by PyPI delivery over HTTPS, GitHub Actions OIDC trusted publishing, and GitHub artifact attestations.
+Agentic HIL does not implement authentication, password storage, encryption protocols, key agreement, or custom cryptographic primitives. It uses the Python standard library (`hashlib`) for SHA-256 artifact metadata, and (`secrets`, `hashlib`, `hmac`) for the bench server's job tokens: random, stored as their SHA-256 and compared in constant time. Release integrity is handled by PyPI delivery over HTTPS, GitHub Actions OIDC trusted publishing, and GitHub artifact attestations.
 
 ## Secure Development Practices
 

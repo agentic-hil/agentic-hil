@@ -81,7 +81,9 @@ decide, so a board is not something this project certifies. Where the probe and
 backend are supported and your configuration binds the target, the board
 follows; where they are not, no entry in a table would have made it work.
 
-**No remote bench.** Agentic HIL drives hardware you own and have plugged in.
-There is no board to borrow here and nothing that reaches a board over the
-network on your behalf, so a report that needs hardware to reproduce needs your
-hardware.
+**No hosted bench.** Agentic HIL drives hardware you own and have plugged in.
+There is no board to borrow here and no bench this project runs for you, so a
+report that needs hardware to reproduce needs your hardware. A bench of your own
+can be shared with the other machines on your network by running
+`agentic-hil serve` on the machine it is plugged into; see
+[Shared bench](shared-bench.md).

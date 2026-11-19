@@ -19,6 +19,7 @@ import math
 import re
 import secrets
 import shutil
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +42,11 @@ JOB_ID_PATTERN = re.compile(r"^job-[0-9a-f]{16}$")
 JOB_DIRECTORIES = ("plan", "artifacts", "workspace", "report", "logs")
 # How many finished durations of one plan digest the estimate is made from.
 HISTORY_SAMPLES_KEPT = 20
+# Windows refuses a rename over a file somebody has open, and a reader of the
+# snapshot holds it open for the moment it reads it, so the replace is tried
+# again for a moment before the refusal stands.
+SAVE_ATTEMPTS = 20
+SAVE_RETRY_DELAY_S = 0.01
 
 AWAITING_ARTIFACTS = "awaiting_artifacts"
 QUEUED = "queued"
@@ -61,8 +67,8 @@ ACTIVE_JOB_STATES = frozenset({STARTING, RUNNING, WITHDRAWING, STOPPING})
 # Nothing more happens to a job in these except retention.
 TERMINAL_JOB_STATES = frozenset({FINISHED, STOPPED, WITHDRAWN, EXPIRED, REJECTED, RUNTIME_EXCEEDED, WORKER_GONE, FAILED_TO_START})
 
-_DURATION_SETTINGS = ("reserve_after_s", "max_queue_s", "max_job_runtime_s", "stop_grace_s", "retry_interval_s")
-_POSITIVE_DURATION_SETTINGS = ("max_queue_s", "max_job_runtime_s", "stop_grace_s", "retry_interval_s")
+_DURATION_SETTINGS = ("reserve_after_s", "max_queue_s", "max_artifact_wait_s", "max_job_runtime_s", "stop_grace_s", "retry_interval_s")
+_POSITIVE_DURATION_SETTINGS = ("max_queue_s", "max_artifact_wait_s", "max_job_runtime_s", "stop_grace_s", "retry_interval_s")
 
 
 def invalid_input(summary: str, details: JsonObject | None = None) -> ConfigError:
@@ -76,7 +82,8 @@ class SchedulerSettings:
 
     ``reserve_after_s`` is how long a job waits before the devices it needs are
     claimed for it, and zero makes the queue strictly first in, first out.
-    ``max_queue_s`` caps how long any job may wait, ``max_job_runtime_s`` how
+    ``max_queue_s`` caps how long any job may wait, ``max_artifact_wait_s`` how
+    long a job waits for the artifacts its plan names, ``max_job_runtime_s`` how
     long an attempt may run, and ``stop_grace_s`` how long a stopped worker has
     before it is ended. ``retry_interval_s`` is how long a job waits before it
     tries again past a holder record, or after a worker found its devices held.
@@ -85,6 +92,7 @@ class SchedulerSettings:
     job_root: Path
     reserve_after_s: float = 600.0
     max_queue_s: float = 86400.0
+    max_artifact_wait_s: float = 600.0
     max_job_runtime_s: float = 900.0
     max_queued_jobs_per_user: int = 5
     retention_days: int = 14
@@ -190,7 +198,14 @@ class JobStore:
         text = json.dumps({"version": JOB_STORE_VERSION, "next_sequence": self.next_sequence, "jobs": self.jobs, "history": self.history}, indent=2, sort_keys=True) + "\n"
         if text == self._written:
             return
-        atomic_write_text(self.path, text)
+        for attempt in range(SAVE_ATTEMPTS):
+            try:
+                atomic_write_text(self.path, text)
+                break
+            except PermissionError:
+                if attempt == SAVE_ATTEMPTS - 1:
+                    raise
+                time.sleep(SAVE_RETRY_DELAY_S)
         self._written = text
 
     def take_sequence(self) -> int:

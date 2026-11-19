@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import importlib
+import ipaddress
 import json
 import math
 import os
@@ -36,6 +37,7 @@ from agentic_hil.knowledge import (
 )
 from agentic_hil.types import (
     COM_PORT_IDENTITY_SOURCES,
+    DEFAULT_ALLOWED_NETWORKS,
     IDENTIFIED_COM_PORT_CONFIG_VERSION,
     LEGACY_CONFIG_VERSION,
     READ_FREE_CONFIG_VERSION,
@@ -312,7 +314,7 @@ def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
 
 
 def server_config(raw: Any, config_path: str) -> ServerConfig | None:
-    """Parse represented server settings without DNS or listener operations."""
+    """Parse the bench server's settings without DNS or listener operations."""
     if raw is None:
         return None
     job_root = str(raw["job_root"])
@@ -324,6 +326,15 @@ def server_config(raw: Any, config_path: str) -> ServerConfig | None:
     if match is None or not 1 <= int(match[1]) <= 65535:
         raise ConfigError("config_invalid", "server.listen must be host:port with a port in 1..65535.",
                           {"path": config_path, "field": "server.listen", "value": listen})
+    # The source addresses the listener answers: IPv4 networks in CIDR form,
+    # read as written and nothing resolved. Loopback is answered beside them.
+    networks: list[str] = []
+    for value in raw.get("allowed_networks", DEFAULT_ALLOWED_NETWORKS):
+        try:
+            networks.append(str(ipaddress.IPv4Network(str(value), strict=True)))
+        except ValueError as error:
+            raise ConfigError("config_invalid", "server.allowed_networks takes IPv4 networks in CIDR form, such as 192.168.0.0/16, with no host bits set.",
+                              {"path": config_path, "field": "server.allowed_networks", "value": str(value)}) from error
     return ServerConfig(
         job_root=job_root,
         listen=listen,
@@ -331,6 +342,7 @@ def server_config(raw: Any, config_path: str) -> ServerConfig | None:
         allowed_origins=tuple(raw.get("allowed_origins", ())),
         retention_days=raw.get("retention_days", 14),
         limits=ServerLimitsConfig(**raw.get("limits", {})),
+        allowed_networks=tuple(networks),
     )
 
 

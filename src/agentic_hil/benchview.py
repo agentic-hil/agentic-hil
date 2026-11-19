@@ -37,7 +37,8 @@ from agentic_hil.coordination import (
 )
 from agentic_hil.debugger import DebuggerBackend, create_debugger_backend
 from agentic_hil.devices import CanDevice, DebuggerDevice, PowerSupplyDevice, UartDevice
-from agentic_hil.httpapi import INVENTORY_MAX_AGE_S, DeviceActivity, JobServiceError, ServerSettings
+from agentic_hil.httpapi import INVENTORY_MAX_AGE_S, DeviceActivity, JobService, JobServiceError, ServerSettings
+from agentic_hil.httpread import public_job_record, public_queue_entry
 from agentic_hil.power_supply import supply_secrets
 from agentic_hil.redact import redact_sensitive, redact_values
 from agentic_hil.report import utc_now_iso
@@ -327,30 +328,7 @@ class BenchView:
         }, _access_nodes(report))
 
     def _configured(self) -> list[_Device]:
-        config = self.config
-        granted = permission_summary(config)
-        devices: list[_Device] = []
-        for name, debugger in config.debuggers.items():
-            devices.append(_Device(name, DebuggerDevice.kind, DebuggerDevice(config_id=name, debugger=debugger).lock_keys, {
-                "backend": debugger.type, "target_type": debugger.target_type, "permissions": granted["debuggers"][name],
-            }))
-        for name, port in config.com_ports.items():
-            devices.append(_Device(name, UartDevice.kind, UartDevice(config_id=name, port=port).lock_keys, {
-                "baudrate": port.baudrate, "bound": not com_port_is_unbound(port), "permissions": granted["com_ports"][name],
-            }))
-        for name, bus in config.can_buses.items():
-            devices.append(_Device(name, CanDevice.kind, CanDevice(config_id=name, bus=bus).lock_keys, {
-                "adapter": bus.adapter, "bitrate": bus.bitrate, "fd": bus.fd, "listen_only": bus.listen_only,
-                "participants": sorted(bus.shares), "permissions": granted["can_buses"][name],
-            }))
-        for name, supply in config.power_supplies.items():
-            # A supply is locked by its port: the two are one unit and take one key.
-            supply_port = config.com_ports.get(supply.com_port)
-            keys = UartDevice(config_id=supply.com_port, port=supply_port).lock_keys if supply_port is not None else ()
-            devices.append(_Device(name, PowerSupplyDevice.kind, keys, {
-                "supply_type": supply.type, "com_port": supply.com_port, "powers": list(supply.powers),
-            }))
-        return devices
+        return _configured_devices(self.config)
 
     def _situation(self, devices: list[_Device]) -> _Situation:
         names = _names_by_key(devices)
@@ -500,6 +478,112 @@ class BenchView:
     def _answer(self, answer: JsonObject, extra: Iterable[str] = ()) -> JsonObject:
         """`answer` with every credential-shaped field and every hardware identifier masked."""
         return redact_values(redact_sensitive(answer), self._identifiers(extra))
+
+
+class McpBenchView:
+    """Implements httpapi.McpBenchReads from one bench view and the job service beside it.
+
+    Every answer is built from what the view and the service already answer, so
+    it reads no device the view does not read and carries nothing the view
+    masked. The five tools that also exist locally answer in the local tools'
+    field names."""
+
+    def __init__(self, view: BenchView, service: JobService) -> None:
+        self.view = view
+        self.service = service
+
+    def bench_describe(self) -> JsonObject:
+        return {
+            "ok": True,
+            "tool": "bench_describe",
+            "server": self.view.server_info(),
+            "devices": self.view.devices().get("devices", []),
+            "plan_schema": "/v1/schema/plan",
+        }
+
+    def bench_queue_status(self) -> JsonObject:
+        return {
+            "ok": True,
+            "tool": "bench_queue_status",
+            "devices": self.view.devices().get("devices", []),
+            "queue": [public_queue_entry(entry) for entry in self.service.queue().entries],
+            "holds": self.view.leases().get("holds", []),
+        }
+
+    def bench_jobs_list(self, *, state: str | None, device: str | None, user: str | None, since: str | None) -> JsonObject:
+        jobs = self.service.jobs(state=state, device=device, user=user, since=since)
+        return {"ok": True, "tool": "bench_jobs_list", "jobs": [public_job_record(job) for job in jobs]}
+
+    def debugger_probes_list(self) -> JsonObject:
+        listed = self.view.probes()
+        return {
+            "ok": True,
+            "tool": "debugger_probes_list",
+            "probes": listed.get("probes", {}),
+            "present_not_configured": listed.get("present_not_configured"),
+        }
+
+    def debugger_info(self) -> JsonObject:
+        return {"ok": True, "tool": "debugger_info", "debuggers": self.view.backends().get("backends", {})}
+
+    def com_ports_list(self) -> JsonObject:
+        listed = self.view.ports()
+        return {
+            "ok": True,
+            "tool": "com_ports_list",
+            "ports": listed.get("ports", {}),
+            "present_not_configured": listed.get("present_not_configured"),
+            "observed_at": listed.get("observed_at"),
+        }
+
+    def can_buses_list(self) -> JsonObject:
+        devices = self.view.devices().get("devices", [])
+        buses = [device for device in devices if isinstance(device, dict) and device.get("kind") == CanDevice.kind]
+        return {"ok": True, "tool": "can_buses_list", "buses": buses}
+
+    def hardware_lease_status(self) -> JsonObject:
+        leases = self.view.leases()
+        holds = leases.get("holds", [])
+        incidents = leases.get("incidents", [])
+        return {
+            "ok": True,
+            "tool": "hardware_lease_status",
+            "bench_held": bool(holds),
+            "device_holds": holds,
+            "incidents": incidents,
+            "incident_stands": bool(incidents),
+        }
+
+
+def configured_device_keys(config: AgenticHILConfig) -> dict[str, tuple[str, ...]]:
+    """The lock keys of every device this bench declares, by its logical name."""
+    return {device.name: tuple(device.keys) for device in _configured_devices(config)}
+
+
+def _configured_devices(config: AgenticHILConfig) -> list[_Device]:
+    granted = permission_summary(config)
+    devices: list[_Device] = []
+    for name, debugger in config.debuggers.items():
+        devices.append(_Device(name, DebuggerDevice.kind, DebuggerDevice(config_id=name, debugger=debugger).lock_keys, {
+            "backend": debugger.type, "target_type": debugger.target_type, "permissions": granted["debuggers"][name],
+        }))
+    for name, port in config.com_ports.items():
+        devices.append(_Device(name, UartDevice.kind, UartDevice(config_id=name, port=port).lock_keys, {
+            "baudrate": port.baudrate, "bound": not com_port_is_unbound(port), "permissions": granted["com_ports"][name],
+        }))
+    for name, bus in config.can_buses.items():
+        devices.append(_Device(name, CanDevice.kind, CanDevice(config_id=name, bus=bus).lock_keys, {
+            "adapter": bus.adapter, "bitrate": bus.bitrate, "fd": bus.fd, "listen_only": bus.listen_only,
+            "participants": sorted(bus.shares), "permissions": granted["can_buses"][name],
+        }))
+    for name, supply in config.power_supplies.items():
+        # A supply is locked by its port: the two are one unit and take one key.
+        supply_port = config.com_ports.get(supply.com_port)
+        keys = UartDevice(config_id=supply.com_port, port=supply_port).lock_keys if supply_port is not None else ()
+        devices.append(_Device(name, PowerSupplyDevice.kind, keys, {
+            "supply_type": supply.type, "com_port": supply.com_port, "powers": list(supply.powers),
+        }))
+    return devices
 
 
 def _lock_root() -> Path | None:

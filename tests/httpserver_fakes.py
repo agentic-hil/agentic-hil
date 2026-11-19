@@ -373,9 +373,11 @@ def running_http(
         assert not worker.is_alive(), "HTTP server thread did not finish"
 
 
-# A peer outside loopback, from the RFC 5737 documentation range: what a request
-# from another machine looks like once the listener reports its address.
-FOREIGN_PEER = "192.0.2.10"
+# A peer outside loopback: what a request from another machine on the LAN looks
+# like once the listener reports its address. It sits in an RFC 1918 range the
+# listener admits by default (#891), so it is answered and refused only where an
+# endpoint answers loopback alone.
+FOREIGN_PEER = "192.168.0.10"
 
 
 @contextmanager

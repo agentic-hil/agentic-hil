@@ -257,6 +257,37 @@ Do not assume that `mcpServers`, `servers`, `mcp`, `env`, `cwd`, or `enabled` ar
 
 Source: [MCP stdio transport specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#stdio).
 
+## The bench server over HTTP
+
+Everything above starts the local stdio server on the machine the board is
+plugged into. A shared bench, the bench server `agentic-hil serve` runs on that
+machine, also answers MCP over Streamable HTTP at `/mcp`, so an agent on
+another machine of the same network can use the bench without running anything
+of Agentic HIL itself. In a host that takes remote MCP servers, the entry is a
+URL rather than a command:
+
+```text
+Name:      agentic-hil-bench
+Transport: Streamable HTTP
+URL:       http://<bench address>:8765/mcp
+```
+
+That endpoint offers the plan-only tools and no others: check a plan, submit it
+as a job, follow the job, withdraw it and read its report, and read the bench's
+devices, probes, ports, buses, leases and queue. No tool there flashes, resets
+or writes to a device directly, and none reads or changes the configuration: a
+job runs under the bench's own configuration and permissions, in the bench's
+queue, exactly as one submitted with `curl` does. Artifacts reach the bench by
+upload, with the command the submission's answer gives.
+
+The listener's checks apply to `/mcp` as to every other path: the peer has to be
+on a network `allowed_networks` lists, the `Host` header has to name the
+listener or a configured hostname, and a browser `Origin` outside
+`allowed_origins` is refused. There is no authentication. Setting the bench up,
+and what it does and does not protect, is in [Shared bench](shared-bench.md).
+
+Source: [MCP Streamable HTTP transport specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http).
+
 ## Verify the Connection
 
 1. Confirm the host reports `agentic-hil` as connected.

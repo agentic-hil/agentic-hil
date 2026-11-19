@@ -59,9 +59,10 @@ def test_serve_refuses_without_server_settings(tmp_path: Path, monkeypatch: pyte
     assert sorted(str(item.relative_to(tmp_path)) for item in tmp_path.rglob("*")) == before
 
 
-def test_serve_refuses_non_loopback_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_serve_refuses_a_listen_address_that_is_not_an_ipv4_literal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # A listen address is an address (#891): a name is refused before anything opens.
     isolated_config(tmp_path, monkeypatch)
-    settings = ServerSettings(host="0.0.0.0")
+    settings = ServerSettings(host="bench.example")
     patch_seam(monkeypatch, "load_server_settings", lambda config: settings)
     factory, constructor = observe_no_start(monkeypatch)
 
@@ -73,7 +74,6 @@ def test_serve_refuses_non_loopback_settings(tmp_path: Path, monkeypatch: pytest
     assert result["ok"] is False
     assert result["error_type"] == "server_listen_refused"
     assert result.get("remediation")
-    assert "#891" in json.dumps(result)
     factory.assert_not_called()
     constructor.assert_not_called()
 
@@ -190,9 +190,10 @@ def test_server_lock_warning_at_startup_and_in_doctor(
         finally:
             lifecycle.append("exited")
 
-    def construct(received: ServerSettings, backend: JobService) -> ThreadingHTTPServer:
+    # The bench view and the /mcp reads arrive as keywords once serve wires them (#891).
+    def construct(received: ServerSettings, backend: JobService, **wired: object) -> ThreadingHTTPServer:
         assert received == settings and backend is service
-        server = original_constructor(received, backend)
+        server = original_constructor(received, backend, **wired)
         opened.append(server)
         return server
 

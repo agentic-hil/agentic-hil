@@ -88,6 +88,10 @@ Write down what the device should do in a reviewable YAML test plan. The test re
 
 Plans name logical devices, and the bench configuration connects them to real hardware. Use the same plan at your desk and in CI. A failed step stops the run; sessions are cleaned up, and configured recovery actions and their outcomes are recorded with the test results. [Write your first hardware test.](docs/testing.md)
 
+## Share a bench
+
+One board can serve a team. Run `agentic-hil serve` on the machine the board is plugged into, and the other machines of your network submit test plans to it over HTTP: with `agentic-hil remote submit --wait` from a shell or a CI job, with `curl`, or from an agent through the bench's MCP endpoint. The bench queues each plan as a job and runs it under its own configuration and permissions, so a submission carries a plan and its artifacts and nothing that could change what the bench allows. There is no authentication, so a shared bench belongs on a network you trust. [Set up a shared bench.](docs/shared-bench.md)
+
 ## Set boundaries that hold
 
 You decide which devices and actions your agent may use. Agentic HIL rejects undeclared devices before opening a driver. It enforces permissions, validates requests, applies timeouts, and records what happened. The CLI, MCP tools, pytest plugin, and test reactor all pass through the same gate.
@@ -130,6 +134,7 @@ Your agent can drive the same steps through [MCP tools](docs/mcp-tools.md). Run 
 | Drive hardware through MCP | [docs/mcp-tools.md](docs/mcp-tools.md) |
 | Connect a specific MCP host | [docs/mcp-hosts.md](docs/mcp-hosts.md) |
 | Write hardware tests with YAML or pytest | [docs/testing.md](docs/testing.md) |
+| Share one bench with the machines on your network | [docs/shared-bench.md](docs/shared-bench.md) |
 | Understand how safety boundaries and recovery work | [docs/safety-model.md](docs/safety-model.md) and [docs/security-design.md](docs/security-design.md) |
 | Find platform and response-time commitments | [docs/support.md](docs/support.md) |
 | Diagnose a failed run | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) |

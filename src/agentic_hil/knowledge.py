@@ -676,18 +676,17 @@ READ_VALIDATION_NEXT_STEP = (
 ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "server_not_configured": ErrorRemedy(
         meaning="The authoritative configuration has no server block, so this bench serves no jobs.",
-        remediation=("Use a bench configuration with a server block after the server-configuration integration is installed.",),
+        remediation=(
+            "Add a server block naming `job_root` to the version 4 configuration of the machine the hardware is plugged into, then start `agentic-hil serve` again.",
+        ),
         do_not=("Do not submit configuration or permissions over HTTP or bypass configuration validation.",),
     ),
     "server_listen_refused": ErrorRemedy(
-        meaning="This transport accepts only the loopback listen address.",
-        remediation=("Use 127.0.0.1 as the listen address. Non-loopback listening belongs to #891.",),
-        do_not=("Do not expose this listener through another bind address.",),
-    ),
-    "job_store_unavailable": ErrorRemedy(
-        meaning="The job-store implementation is missing, so serve refuses before listening.",
-        remediation=("Install the integrated job store and scheduler before starting serve.",),
-        do_not=("Do not treat the HTTP transport alone as an executing bench server.",),
+        meaning="The bench server listens on an IPv4 address, and the listen address it was given is a name or an IPv6 address.",
+        remediation=(
+            "Set `server.listen` to an IPv4 address and a port: 127.0.0.1 for this machine alone, the address of one interface, or 0.0.0.0 for every interface; name the bench's DNS names in `server.hostnames`.",
+        ),
+        do_not=("Do not reach a network the operator does not trust: `server.allowed_networks` bounds who is answered, and nothing in this release authenticates a caller.",),
     ),
     "origin_refused": ErrorRemedy(
         meaning="The request carries an Origin that the server does not allow.",
@@ -719,11 +718,6 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         remediation=("Wait for Retry-After before retrying the submission with the same Idempotency-Key.",),
         do_not=("Do not flood the queue with new keys for the same submission.",),
     ),
-    "per_user_limit": ErrorRemedy(
-        meaning="The submitter's configured job limit has been reached.",
-        remediation=("Wait for Retry-After and for existing jobs to end before retrying.",),
-        do_not=("Do not change the self-declared submitter to evade the limit.",),
-    ),
     "artifact_unreferenced": ErrorRemedy(
         meaning="The submitted plan does not reference this artifact path.",
         remediation=("Upload a missing relative artifact path named by the plan and submission response.",),
@@ -754,10 +748,23 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         remediation=("Inspect the recorded reason and submit a new job if it is still needed.",),
         do_not=("Do not assume expiry means any hardware step passed.",),
     ),
-    "job_runtime_exceeded": ErrorRemedy(
-        meaning="The job exceeded its allowed runtime.",
-        remediation=("Read its report and logs with the job token before adjusting the plan or bench runtime allowance.",),
-        do_not=("Do not infer cleanup or hardware success from the runtime limit alone.",),
+    "job_not_ended": ErrorRemedy(
+        meaning="The job is still waiting or running, so it has no report, JUnit file or evidence yet.",
+        remediation=("Follow its status (GET /v1/jobs/<id> with Prefer: wait, or `agentic-hil remote submit --wait`) until its state is one that ends, then ask again.",),
+        do_not=("Do not read the missing report as a pass or a failure; the job has no verdict yet.",),
+    ),
+    "bench_unreachable": ErrorRemedy(
+        meaning="`agentic-hil remote` could not reach the shared bench, or what answered was not the bench server's API: `backend_error` says which.",
+        remediation=(
+            "Check the address in `--bench` or `AGENTIC_HIL_BENCH_URL`, and that `agentic-hil serve` runs on the bench and listens where this machine can reach it.",
+            "A bench that listens on 127.0.0.1 alone is reachable from the bench machine only; its operator sets `server.listen`, and `server.allowed_networks` must include this machine's network.",
+        ),
+        do_not=("Do not read an unreachable bench as a failed run; nothing was submitted, or the job runs on and its status says how.",),
+    ),
+    "remote_artifact_missing": ErrorRemedy(
+        meaning="The plan names an artifact that is not a file inside the directory it is submitted from, so `agentic-hil remote submit` sent nothing.",
+        remediation=("Build the artifact, or run the command from the directory the plan's `image_path` values are relative to, then submit again.",),
+        do_not=("Do not point the plan at a file outside the project to get round this; the bench takes only the paths its plan names.",),
     ),
     "blocked_by_incident": ErrorRemedy(
         meaning="A bench incident prevents the job from using its devices.",

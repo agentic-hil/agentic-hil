@@ -109,11 +109,17 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["job_root"],
-      "description": "Version 4 only. Bench job configuration; limits and listener settings are represented, not enforced by the job worker.",
+      "description": "Version 4 only. The bench server `agentic-hil serve` runs: where its jobs live, the address it listens on, who it answers and its limits. Read at startup; a change needs a restart.",
       "properties": {
         "job_root": {"type": "string", "minLength": 1, "description": "Absolute root for fresh job workspaces."},
-        "listen": {"type": "string", "default": "127.0.0.1:8765"},
-        "hostnames": {"type": "array", "items": {"type": "string"}, "default": []},
+        "listen": {"type": "string", "default": "127.0.0.1:8765", "description": "IPv4 address and port the bench server listens on. Without it the server listens on 127.0.0.1 and no other machine reaches it; 0.0.0.0 listens on every IPv4 address of this machine."},
+        "allowed_networks": {
+          "type": "array",
+          "items": {"type": "string"},
+          "default": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
+          "description": "IPv4 networks in CIDR form whose connections the bench server answers; any other connection is closed before a byte is read. Loopback is always answered. An empty list answers loopback alone."
+        },
+        "hostnames": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Names a request's Host may carry besides the listen address, such as the bench's DNS name."},
         "allowed_origins": {"type": "array", "items": {"type": "string"}, "default": []},
         "retention_days": {"type": "integer", "minimum": 1, "default": 14},
         "limits": {

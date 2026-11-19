@@ -27,6 +27,7 @@ from httpserver_fakes import (
 )
 from support import scaled_time_bound
 
+from agentic_hil import httpserver
 from agentic_hil.httpapi import JobEvent, JobEvents, JobStatus
 
 YAML = {"Content-Type": "application/yaml"}
@@ -232,7 +233,9 @@ def test_withdrawal_token_and_state_responses() -> None:
         assert response.json() == running
         assert service.calls[-1] == Call("withdraw", (JOB_ID,), {"job_token": TOKEN})
 
-        for error_type in ("job_finished", "job_withdrawn", "job_expired", "job_runtime_exceeded"):
+        # The ended refusals by the transport's own set, so a name harmonized
+        # with the scheduler's (#891) is the name this proves.
+        for error_type in sorted(httpserver._ENDED_ERRORS):
             error = service_error(error_type)
             service.script("withdraw", error)
             response = request(server, "DELETE", JOB_PATH, headers=BEARER)

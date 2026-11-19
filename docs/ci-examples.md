@@ -14,6 +14,11 @@ the build command and the pinned version, and nothing else. This page is what
 the two files assume: what the runner has to provide, what the jobs leave
 behind, and which half of the trust rule a workflow can state at all.
 
+A third file is for a board that is not on the runner but on a
+[shared bench](shared-bench.md) elsewhere on your network:
+[`examples/ci/shared-bench.yml`](https://github.com/agentic-hil/agentic-hil/blob/master/examples/ci/shared-bench.yml)
+is described [below](#submitting-to-a-shared-bench).
+
 Both examples exist because the projects that need them do not all use the
 planned [`agentic-hil/run` action](github-action-design.md). The action, when
 it ships, will collapse most of the hardware job into one step; the refusals,
@@ -208,6 +213,34 @@ looked at it.
 - **They never degrade to a run without hardware.** There is no fallback path
   that turns a bench failure green, because a green job that did not test the
   board is the false green the whole product exists to avoid.
+
+## Submitting to a shared bench
+
+[`examples/ci/shared-bench.yml`](https://github.com/agentic-hil/agentic-hil/blob/master/examples/ci/shared-bench.yml)
+is the GitHub Actions shape for a bench that runs `agentic-hil serve` on the
+machine its board is plugged into. The workflow's runner has no board: it
+builds the firmware, submits the plan with
+`agentic-hil remote submit --wait --junit-xml`, and uploads the JUnit file and
+the run's report with `if: always()`. `--wait` follows the job through the
+bench's queue and exits with the run's own verdict, so a red run fails the job
+the way a local `test-reactor` does.
+
+What differs from the two files above:
+
+- **The runner only has to reach the bench.** It is self-hosted because the
+  bench answers the networks its `allowed_networks` lists and a hosted runner
+  is on none of them, but it needs no probe, no toolchain for the board and no
+  authoritative configuration. The bench applies its own.
+- **Nothing is pinned in the file.** The bench's address is the repository
+  variable `AGENTIC_HIL_BENCH_URL`, and the release the runner installs is the
+  repository variable `AGENTIC_HIL_VERSION`, set to the release the bench runs.
+- **No concurrency group.** The bench queues jobs itself, so two workflows
+  submitting at once wait their turn there rather than in GitHub.
+
+The trust rule does not change. The job's `if:` is the hardware job's, word for
+word, because a plan submitted from here drives the same kind of board, and the
+bench takes a plan from anybody who reaches its port: the repository's runner
+group and fork settings, and that `if:`, are what keep a fork's plan off it.
 
 ## The bench this project runs itself
 

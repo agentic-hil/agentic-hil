@@ -69,7 +69,11 @@ def prepare_job(
     bench_config: AgenticHILConfig, *, job_id: str, submitted_by: str,
     plan_name: str, plan_bytes: bytes, artifacts: Mapping[str, bytes],
 ) -> AgenticHILConfig:
-    """Place original bytes under guarded nested paths in a fresh workspace."""
+    """Place original bytes under guarded nested paths in a fresh workspace.
+
+    The workspace is fresh when it is not there yet, or is the empty directory
+    the job store made for it with the rest of the job's directory. Anything
+    else is a workspace something already wrote into, and is refused."""
     job = _job_config(bench_config, job_id)
     # Check all targets before creating directories, using the writer's own
     # validator so escaped names keep the local refusal unchanged.
@@ -77,9 +81,9 @@ def prepare_job(
     targets = [(safe_file_path(configured_work_path(job, name), workspace=job.work_dir), data) for name, data in files]
     root = safe_directory(Path(job.work_dir).parent.parent)
     with safe_file_lock(root / ("." + job_id + ".lock"), workspace=root):
-        directory = Path(job.work_dir).parent
-        if os.path.lexists(directory):
-            raise FileExistsError(str(directory))
+        workspace = Path(job.work_dir)
+        if os.path.lexists(workspace) and (workspace.is_symlink() or not workspace.is_dir() or any(workspace.iterdir())):
+            raise FileExistsError(str(workspace))
         safe_directory(job.work_dir)
         for path, data in targets:
             safe_configured_directory(job, str(path.parent), "job.content")
@@ -89,9 +93,12 @@ def prepare_job(
 
 def run_job(
     *, bench_config_path: str, bench_workspace: str, job_id: str,
-    submitted_by: str, plan_name: str,
+    submitted_by: str, plan_name: str, run_handle: str | None = None,
 ) -> JsonObject:
-    """Run a prepared plan using only launcher-selected authoritative policy."""
+    """Run a prepared plan using only launcher-selected authoritative policy.
+
+    `run_handle` is the handle the scheduler allocated for this attempt, which
+    the run registers under so the scheduler finds its record."""
     with job_report_context(job_id, submitted_by):
         try:
             bench = load_authoritative_config(bench_workspace, config_path=bench_config_path)
@@ -113,7 +120,7 @@ def run_job(
                     "cleanup_required": True, "quarantined": True, "retry_safe": False,
                     **remediation_fields("resource_quarantined"),
                 })
-            return with_job_fields(run_plan(job, plan_name, return_failed_report=True))
+            return with_job_fields(run_plan(job, plan_name, run_handle=run_handle, return_failed_report=True))
         except ConfigError as error:
             return with_job_fields(error.to_dict())
 
@@ -125,9 +132,11 @@ def main() -> int:
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--submitted-by", required=True)
     parser.add_argument("--plan", required=True)
+    parser.add_argument("--run-handle", default=None)
     args = parser.parse_args()
     result = run_job(bench_config_path=args.bench_config, bench_workspace=args.bench_workspace,
-                     job_id=args.job_id, submitted_by=args.submitted_by, plan_name=args.plan)
+                     job_id=args.job_id, submitted_by=args.submitted_by, plan_name=args.plan,
+                     run_handle=args.run_handle)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if overall_success(result) else 1
 
