@@ -22,8 +22,8 @@ from threading import Event
 from typing import cast
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from agentic_hil import bench, mcp_http
-from agentic_hil.httpapi import BenchReads, ByteRange, JobService, JobServiceError, ServerSettings
+from agentic_hil import bench, httpread, mcp_http
+from agentic_hil.httpapi import BenchReads, ByteRange, JobService, JobServiceError, McpBenchReads, ServerSettings
 from agentic_hil.types import JsonObject
 
 
@@ -44,9 +44,13 @@ def server_lock_warning() -> str | None:
 
 
 class _JobHTTPServer(ThreadingHTTPServer):
-    def __init__(self, settings: ServerSettings, service: JobService, bench_reads: BenchReads | None = None) -> None:
+    def __init__(
+        self, settings: ServerSettings, service: JobService, bench_reads: McpBenchReads | None = None,
+        *, bench: BenchReads | None = None,
+    ) -> None:
         self.settings = settings
         self.service = service
+        self.bench = bench
         self.mcp = mcp_http.McpEndpoint(settings, service, bench_reads)
         self.stopping = Event()
         super().__init__((settings.host, settings.port), _JobRequestHandler)
@@ -57,11 +61,12 @@ class _JobHTTPServer(ThreadingHTTPServer):
 
 
 def create_http_server(
-    settings: ServerSettings, service: JobService, *, bench_reads: BenchReads | None = None,
+    settings: ServerSettings, service: JobService, *,
+    bench_reads: McpBenchReads | None = None, bench: BenchReads | None = None,
 ) -> ThreadingHTTPServer:
     """Construct the production IPv4 loopback listener for the supplied service."""
     validate_listen_address(settings)
-    return _JobHTTPServer(settings, service, bench_reads)
+    return _JobHTTPServer(settings, service, bench_reads, bench=bench)
 
 
 _ERROR_STATUS = {
@@ -79,6 +84,9 @@ _ERROR_STATUS = {
     "unsupported_media_type": 415,
     "range_not_satisfiable": 416,
     "invalid_argument": 400,
+    "admin_loopback_only": 403,
+    "device_not_found": 404,
+    "bench_view_unavailable": 503,
 }
 _ENDED_ERRORS = {"job_finished", "job_withdrawn", "job_expired", "job_runtime_exceeded"}
 
@@ -215,6 +223,10 @@ class _JobRequestHandler(BaseHTTPRequestHandler):
 
     def _route(self) -> None:
         parsed = urlsplit(self.path)
+        answered = httpread.route(self.command, parsed, self.headers, self.client_address, self.job_server.service, self.job_server.bench, self._body)
+        if answered is not None:
+            self._respond(answered.code, answered.body, answered.media_type, answered.headers)
+            return
         path = parsed.path
         if path == "/mcp":
             mcp_http.handle(self)

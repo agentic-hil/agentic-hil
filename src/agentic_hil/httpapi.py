@@ -66,6 +66,31 @@ class LogRead:
     complete: bool
 
 
+# How long one reading of the host's USB inventory serves every reader (#889).
+INVENTORY_MAX_AGE_S = 5
+
+
+@dataclass(frozen=True)
+class QueueSnapshot:
+    """The queue in order; each entry carries queue_position and waiting_for."""
+
+    entries: tuple[JsonObject, ...]
+
+
+@dataclass(frozen=True)
+class DeviceActivity:
+    """What the job store knows about one logical device.
+
+    state is "held" (a job runs on it), "reserved" (a job is granted it next)
+    or None. recent_jobs are store records; the transport projects them.
+    """
+
+    state: str | None
+    job_id: str | None
+    drained: bool
+    recent_jobs: tuple[JsonObject, ...]
+
+
 class JobServiceError(ConfigError):
     """A service failure, with validation_error in details for plan rejection.
 
@@ -123,8 +148,62 @@ class JobService(Protocol):
         byte_range: ByteRange | None, follow: bool, timeout_s: float,
     ) -> LogRead: ...
 
+    def jobs(
+        self, *, state: str | None, device: str | None, user: str | None, since: str | None,
+    ) -> tuple[JsonObject, ...]:
+        """Every job record the filters admit, newest first."""
+        ...
+
+    def queue(self) -> QueueSnapshot: ...
+
+    def device_activity(self) -> Mapping[str, DeviceActivity]:
+        """Job activity keyed by logical device name; a device absent here is idle."""
+        ...
+
+    def metrics(self) -> str:
+        """Prometheus exposition text: queue length, wait time, utilisation per device."""
+        ...
+
+    def drain(self, device: str) -> JsonObject:
+        """Grant the device to no new job.
+
+        The job running on it ends normally, and every waiting entry that
+        needs it carries {"device": device, "reason": "drained"} in waiting_for.
+        """
+        ...
+
+    def recover(self, device: str, *, operator_statement: str, accept_config_change: bool) -> JsonObject:
+        """Resolve the device's standing incident with an operator's statement.
+
+        Runs hardware_recover on the tool service that ran the job, with its
+        semantics, and answers its result.
+        """
+        ...
+
 
 class BenchReads(Protocol):
+    """Inventory and configuration reads that reach no device (#889)."""
+
+    def server_info(self) -> JsonObject: ...
+
+    def devices(self) -> JsonObject: ...
+
+    def device(self, name: str) -> JsonObject: ...
+
+    def probes(self) -> JsonObject: ...
+
+    def ports(self) -> JsonObject: ...
+
+    def backends(self) -> JsonObject: ...
+
+    def leases(self) -> JsonObject: ...
+
+    def ledger(self) -> JsonObject: ...
+
+    def doctor(self) -> JsonObject: ...
+
+
+class McpBenchReads(Protocol):
     """The content of the open read endpoints, which #889 supplies.
 
     The five tools that also exist locally answer in the local tools' field

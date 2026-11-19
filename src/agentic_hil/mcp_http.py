@@ -24,7 +24,7 @@ from jsonschema import Draft202012Validator
 
 from agentic_hil import __version__
 from agentic_hil.contracts import EMPTY_OBJECT_SCHEMA, NONEMPTY_STRING, object_schema, validate_tool_arguments
-from agentic_hil.httpapi import BenchReads, JobService, JobServiceError, ServerSettings
+from agentic_hil.httpapi import JobService, JobServiceError, McpBenchReads, ServerSettings
 from agentic_hil.knowledge import remediation_fields
 from agentic_hil.mcp import (
     JSONRPC_INVALID_REQUEST,
@@ -210,7 +210,7 @@ class McpSession:
 class McpEndpoint:
     """The /mcp state of one listener. Sessions live in memory until DELETE or the process ends."""
 
-    def __init__(self, settings: ServerSettings, service: JobService, bench_reads: BenchReads | None = None) -> None:
+    def __init__(self, settings: ServerSettings, service: JobService, bench_reads: McpBenchReads | None = None) -> None:
         self.settings = settings
         self.service = service
         self.bench_reads = bench_reads
@@ -439,7 +439,7 @@ def _job_token(call: _McpCall, run: str, arguments: JsonObject) -> str:
     )
 
 
-def _reads(call: _McpCall, name: str) -> BenchReads:
+def _reads(call: _McpCall, name: str) -> McpBenchReads:
     reads = call.endpoint.bench_reads
     if reads is None:
         raise JobServiceError(

@@ -786,6 +786,21 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=("Do not read the bench through direct hardware tools or a local MCP server on the bench machine instead.",),
     ),
+    "admin_loopback_only": ErrorRemedy(
+        meaning="Draining and recovering a device are answered only to a client connected from 127.0.0.1 on the bench itself.",
+        remediation=("Send the drain or recover request from a shell on the bench machine, to the listener at 127.0.0.1.",),
+        do_not=("Do not add an X-Forwarded-For or similar header naming 127.0.0.1; only the connection's own address is read.",),
+    ),
+    "device_not_found": ErrorRemedy(
+        meaning="The bench's authoritative configuration declares no device by this name.",
+        remediation=("Read GET /v1/devices for the logical device names this bench declares and use one of them.",),
+        do_not=("Do not address a device by its serial number, port path or CAN channel; the server names devices by their configured names.",),
+    ),
+    "bench_view_unavailable": ErrorRemedy(
+        meaning="This server runs without a bench view, so it answers no inventory read.",
+        remediation=("Use the queue, the job list and the job routes, which still answer, or start the server with `agentic-hil serve`, which provides the bench view.",),
+        do_not=("Do not read the bench inventory by opening its devices directly while jobs may be running on them.",),
+    ),
     CONFIG_STALE_ERROR: ErrorRemedy(
         meaning=(
             "The authoritative configuration on disk is not the one this MCP server is enforcing, so the backend it "

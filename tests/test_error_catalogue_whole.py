@@ -646,8 +646,10 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # is the 56th scanned module.
 # `agentic_hil.jobstore` and `agentic_hil.scheduler`, the bench job store and
 # its fair scheduler (#887), are the 57th and the 58th. The MCP transport at
-# /mcp (#890) adds `agentic_hil.mcp_http`, the 59th.
-SCANNED_MODULE_COUNT = 59
+# /mcp (#890) adds `agentic_hil.mcp_http`, the 59th. The open read endpoints
+# (#889) add `agentic_hil.httpread` and `agentic_hil.benchview`, the 60th and
+# the 61st.
+SCANNED_MODULE_COUNT = 61
 # The power supply tools (#733) add seven, the 220th to the 226th: the six
 # `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
 # `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
@@ -664,7 +666,9 @@ SCANNED_MODULE_COUNT = 59
 # `job_input_invalid`, `max_queued_jobs_per_user`, `plan_runtime_exceeded` and
 # `worker_start_failed`.
 # The MCP transport at /mcp (#890) adds `bench_reads_unavailable`, the 246th.
-COLLECTED_TYPE_COUNT = 246
+# The open read endpoints (#889) add three: `admin_loopback_only`,
+# `device_not_found` and `bench_view_unavailable`.
+COLLECTED_TYPE_COUNT = 249
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -744,7 +748,11 @@ COLLECTED_TYPE_COUNT = 246
 # The MCP transport at /mcp (#890) adds three, one function in `mcp_http` for
 # each: `_unknown_tool` writes `unknown_tool`, `_job_token` writes
 # `job_token_missing` and `_reads` writes `bench_reads_unavailable`.
-PRODUCER_COUNT = 741
+# The open read endpoints (#889) add five: one function each writing
+# `admin_loopback_only`, `bench_view_unavailable` and `device_not_found`, and
+# two writing `invalid_argument`, one for the job filters and one for the
+# recover body.
+PRODUCER_COUNT = 746
 
 
 def pin_problems(inventory: Inventory) -> list[str]:

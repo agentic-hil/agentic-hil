@@ -23,8 +23,8 @@ from httpserver_fakes import (
     PLAN,
     TOKEN,
     Call,
-    ScriptedBenchReads,
     ScriptedJobService,
+    ScriptedMcpBenchReads,
     WaitReply,
     background_mcp,
     mcp_call,
@@ -70,7 +70,7 @@ UNKNOWN_SESSION = "fixture-unknown-session"
 def test_initialize_and_tools_list_serve_exactly_the_plan_only_tools() -> None:
     """AC1: the handshake, exactly the 13 plan-only tools, and every other name refused before any call."""
     service = ScriptedJobService()
-    reads = ScriptedBenchReads()
+    reads = ScriptedMcpBenchReads()
     with running_http(service, bench_reads=reads) as server:
         initialize = rpc("initialize", {
             "protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": MCP_CLIENT_NAME, "version": "1.0"},
@@ -295,7 +295,7 @@ def test_withdraw_makes_the_delete_call_and_takes_a_token_outside_its_session() 
 def test_foreign_origin_and_host_are_refused_on_mcp() -> None:
     """AC5: #888's guard answers 403 on /mcp before the body is read and before any call."""
     service = ScriptedJobService()
-    reads = ScriptedBenchReads()
+    reads = ScriptedMcpBenchReads()
     message = json.dumps(rpc("initialize", {"protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {}})).encode("utf-8")
     with running_http(service, bench_reads=reads) as server:
         for method, body in (("POST", message), ("DELETE", None)):
@@ -367,7 +367,7 @@ def test_read_tools_without_a_provider_answer_the_refusal_whole() -> None:
 def test_read_tools_pass_provider_content_and_mark_only_own_jobs() -> None:
     service = ScriptedJobService()
     service.script("submit", submission())
-    reads = ScriptedBenchReads()
+    reads = ScriptedMcpBenchReads()
     replies = {name: {"fixture_read": name, "entries": [{"name": "dut"}]} for name in READ_TOOLS if name != "bench_jobs_list"}
     for name, reply in replies.items():
         reads.script(name, reply)
