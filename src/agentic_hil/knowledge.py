@@ -3270,6 +3270,91 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not report the plan as failed either: a stopped run has no verdict on the steps it did not reach.",
         ),
     ),
+    # The bench job queue (#887): admission, its quota and runtime cap, and an
+    # attempt whose worker never came up.
+    "job_input_invalid": ErrorRemedy(
+        meaning=(
+            "A value handed to the bench job queue is not one it can accept, so nothing was queued and nothing ran: "
+            "a `submitter_label` that is empty, too long or not printable, a `max_queue_s` that is not a positive "
+            "finite number, a plan or artifact file outside the workspace or unreadable, an artifact named by a path "
+            "its plan does not name, a job id that is not one submission returned, artifacts provided to a job that "
+            "is not awaiting them, a scheduler setting out of range, or a queue snapshot this version cannot read. "
+            "`field` names the value when there is one."
+        ),
+        remediation=(
+            "Read `summary` and `field`: they name the value that was refused.",
+            "Correct that value and submit again. Nothing was queued, so the retry is safe and takes a new place in "
+            "the queue.",
+            "For a scheduler setting, correct it where the scheduler is configured and start the scheduler again.",
+            "A queue snapshot that does not read is `queue.json` under the job root: move it aside to keep it for "
+            "inspection, and the scheduler starts again with an empty queue.",
+        ),
+        do_not=(
+            "Do not move a plan or an artifact outside the workspace to get round a refusal. Both are read from "
+            "inside the workspace, and nothing relaxes that.",
+            "Do not edit the queue snapshot by hand to repair it.",
+        ),
+    ),
+    "max_queued_jobs_per_user": ErrorRemedy(
+        meaning=(
+            "This `submitter_label` already has as many jobs waiting or running as `max_queued_jobs_per_user` "
+            "allows, so the job was rejected and took no place in the queue. A job counts from the moment it is "
+            "queued until its attempt has ended, a start that is still coming up included; a job awaiting artifacts "
+            "does not count. The label is the submitter's own word for who it is (`submitter_label_source` says so), "
+            "so the quota keeps turns fair between cooperating submitters and is not a security boundary."
+        ),
+        remediation=(
+            "Wait for one of this label's jobs to end, or withdraw one that is no longer wanted, then submit again.",
+            "Read the status of this label's jobs for their places and estimates before choosing which to withdraw.",
+        ),
+        do_not=(
+            "Do not submit under another label to get round the quota. The label is how the queue keeps turns fair.",
+            "Do not resubmit in a loop. A rejected submission keeps no place.",
+        ),
+    ),
+    "plan_runtime_exceeded": ErrorRemedy(
+        meaning=(
+            "The plan cannot finish within the scheduler's `max_job_runtime_s`. At admission it means the plan's "
+            "lower bound, `estimate.lower_bound_s`, is above the cap: its delays, and each repeat at the fewest "
+            "iterations its `count` and `duration_s` allow. The job was rejected and took no place in the queue. On "
+            "a job that was running it means the attempt ran past the cap and was stopped cooperatively, so its "
+            "state is `runtime_exceeded`, its devices were closed the way a passing run closes them, and its run "
+            "report says which steps ran."
+        ),
+        remediation=(
+            "Compare `estimate.lower_bound_s` with the cap, then shorten the delays, lower a repeat's `count` or "
+            "`duration_s`, or split the plan into jobs that each fit.",
+            "For a job stopped at the cap, read its run report for the step it stopped after before submitting a plan "
+            "that fits.",
+            "If the plan really needs longer, ask the operator to raise `max_job_runtime_s`.",
+        ),
+        do_not=(
+            "Do not resubmit the same plan unchanged. Its lower bound is the same every time.",
+            "Do not read a job stopped at the cap as a failure of the firmware. The steps it did not reach have no "
+            "verdict.",
+        ),
+    ),
+    "worker_start_failed": ErrorRemedy(
+        meaning=(
+            "The scheduler could not start a worker for this job's attempt, or the worker ended before it published "
+            "a record, so no run exists under `attempt_handle` and the job is in state `start_failed`. That attempt "
+            "locked and drove nothing. `summary` carries the reason when the start itself failed: a runs directory "
+            "that cannot be written, for example, or an artifact the job was given whose workspace file no longer "
+            "holds the bytes that were provided."
+        ),
+        remediation=(
+            "Read `summary`. When a worker did start, its output is kept in the job's `logs` directory.",
+            "Fix what it names and submit the plan again. The job's place is not kept, and the retry is safe because "
+            "nothing ran.",
+            "For an artifact that changed, restore the workspace file to the bytes that were provided, or submit a new "
+            "job with the artifact as it now is.",
+        ),
+        do_not=(
+            "Do not delete the runs directory or the job directory to clear this. Other runs and this job's evidence "
+            "live there.",
+            "Do not resubmit unchanged in a loop. The start fails the same way until its cause is fixed.",
+        ),
+    ),
     "reactor_exception": ErrorRemedy(
         meaning=(
             "The test reactor raised outside any step, which is a defect in Agentic HIL rather than a verdict on the "
