@@ -761,9 +761,16 @@ class Scheduler:
         data["canonical_report_path"] = report["canonical_report_path"]
 
     def _observe(self) -> None:
-        """Read what the devices jobs need say about themselves: who holds them, and what incident stands."""
-        jobs = self._jobs({QUEUED, *ACTIVE_JOB_STATES})
-        keys = sorted({key for data in jobs for key in data["lock_keys"]})
+        """Read what the devices queued jobs wait for say about themselves: who holds them, and what incident stands.
+
+        A device a job of this queue occupies is not read. The queue waits for
+        it whatever its records say, and they are the records that job's worker
+        is writing: Windows refuses a rename over a file somebody has open, so a
+        poll here could make the worker's own lease release fail and quarantine
+        a device it had cleanly handed back.
+        """
+        occupied = {key for data in self._jobs(ACTIVE_JOB_STATES) for key in data["lock_keys"]}
+        keys = sorted({key for data in self._jobs({QUEUED}) for key in data["lock_keys"]} - occupied)
         # The hold a worker this queue saw end left behind names that worker,
         # and the worker is gone: the record is all that is left of it.
         dead = {(key, data["worker_pid"]) for data in self._jobs({WORKER_GONE}) if isinstance(data.get("worker_pid"), int) for key in data["lock_keys"]}
