@@ -19,6 +19,7 @@ from threading import Event, Thread
 from typing import Any
 
 import pytest
+import yaml
 from bench_job_fakes import (
     IMAGE,
     IMAGE_PATH,
@@ -38,7 +39,7 @@ from support import scaled_time_bound
 
 from agentic_hil import httpserver
 from agentic_hil.benchjobs import JobWorkerSource, JobWorkspacePreparer
-from agentic_hil.config import ConfigError
+from agentic_hil.config import ConfigError, load_authoritative_config
 from agentic_hil.httpapi import ByteRange, JobServiceError
 from agentic_hil.jobstore import Job, JobStore
 from agentic_hil.knowledge import ERROR_CATALOGUE, lookup_remedy, remediation_fields
@@ -194,6 +195,25 @@ def test_uploads_complete_a_job_that_awaits_artifacts(tmp_path: Path, monkeypatc
         assert (workspace / IMAGE_PATH).read_bytes() == IMAGE
         assert (workspace / ".agentic-hil" / "testconfig.yaml").read_bytes() == plan_bytes
         assert wait_for_state(service, job_id, TERMINAL)["state"] == "finished"
+
+
+def test_an_artifact_is_never_placed_over_the_jobs_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plan naming the path its own plan is placed at cannot have another plan uploaded there and run instead."""
+    bench = job_bench(tmp_path, monkeypatch)
+    # Artifact roots and extensions wide enough that preflight lets the plan through.
+    document = bench.document()
+    document["artifacts"].update(allowed_roots=["."], allowed_extensions=[".yaml"])
+    bench.config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    bench.config = load_authoritative_config(bench.workspace)
+    placed_plan = ".agentic-hil/testconfig.yaml"
+    with open_service(bench, FakeWorkerSource()) as service:
+        submitted = submit(service, plan(name="names its own plan", image=placed_plan), "alice")
+        job_id, token = submitted["job_id"], submitted["job_token"]
+        assert submitted["missing_artifacts"] == [placed_plan], submitted
+
+        substitute = plan(name="substituted plan")
+        assert refusal(lambda: service.upload_artifact(job_id, placed_plan, substitute, job_token=token)).error_type == "job_input_invalid"
+        assert stored_jobs(bench)[job_id]["state"] == "rejected"
 
 
 def test_withdraw_answers_by_the_state_the_job_is_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -403,10 +423,13 @@ def test_the_job_workspace_is_placed_in_the_directory_the_store_created(tmp_path
     assert occupied.value.error_type == "job_input_invalid"
 
 
-def test_the_job_worker_writes_the_self_declared_submitter_into_the_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The real worker, on a plan that only waits: what the client said it is reaches the report, marked as said."""
+@pytest.mark.parametrize("label", ["carol", "-carol"])
+def test_the_job_worker_writes_the_self_declared_submitter_into_the_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, label: str) -> None:
+    """The real worker, on a plan that only waits: what the client said it is reaches the report, marked as said.
+
+    A label that starts with a dash is a label too, not an option of the worker's command line."""
     bench = job_bench(tmp_path, monkeypatch)
-    source = JobWorkerSource(bench.config, submitter_of=lambda job_id: "carol")
+    source = JobWorkerSource(bench.config, submitter_of=lambda job_id: label)
     preparer = JobWorkspacePreparer(bench.config)
     store = JobStore(bench.job_root)
     created = store.create("testconfig.yaml")
@@ -425,7 +448,7 @@ def test_the_job_worker_writes_the_self_declared_submitter_into_the_report(tmp_p
     assert record is not None and record["state"] in {"finished", "stopped"}, record
     report = json.loads(canonical_run_report_path(config, handle).read_text(encoding="utf-8"))
     assert report["job_id"] == created.job_id
-    assert report["submitted_by"] == "carol"
+    assert report["submitted_by"] == label
     assert report["submitted_by_source"] == "client"
 
 

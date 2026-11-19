@@ -149,6 +149,9 @@ class JobWorkspacePreparer:
         return _job_config(self.bench, job.job_id)
 
     def prepare(self, job: Job) -> tuple[AgenticHILConfig, Path]:
+        onto_plan = next((relative for relative in sorted(job.artifacts) if Path(relative) == Path(PLAN_PATH)), None)
+        if onto_plan is not None:
+            raise invalid_input("An artifact cannot be placed where the job's plan is placed.", {"job_id": job.job_id, "artifact": onto_plan})
         try:
             files = {PLAN_PATH: safe_read_bytes(job.plan_path)}
             files.update({relative: safe_read_bytes(staged) for relative, staged in sorted(job.artifacts.items())})
@@ -252,7 +255,7 @@ class JobWorkerSource(RunWorkerSource):
                     "--bench-config", str(self.bench.config_path),
                     "--bench-workspace", str(self.bench.work_dir),
                     "--job-id", spawn.job_id,
-                    "--submitted-by", spawn.submitted_by,
+                    f"--submitted-by={spawn.submitted_by}",
                     "--plan", spawn.plan,
                     "--run-handle", spawn.handle,
                 ],

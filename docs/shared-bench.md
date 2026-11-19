@@ -24,7 +24,7 @@ server:
   job_root: /var/lib/agentic-hil/jobs
   listen: 0.0.0.0:8765
   allowed_networks: [192.168.1.0/24]
-  hostnames: [bench.lab]
+  hostnames: [bench.example]
 ```
 
 Then, on that machine:
@@ -58,7 +58,7 @@ says rather than anything a request claims about itself:
   stops a web page that points a name of its own at the bench's address (DNS
   rebinding) from reaching it through a browser on the network. Submitters
   who reach the bench by address need no entry; a name they use instead, such
-  as `bench.lab` above, has to be listed in `hostnames`.
+  as `bench.example` above, has to be listed in `hostnames`.
 - **The browser origin.** A request carrying an `Origin` header outside
   `allowed_origins` is refused before its body is read, and no answer carries
   a CORS header. Empty, the default, means no browser can submit or read.
