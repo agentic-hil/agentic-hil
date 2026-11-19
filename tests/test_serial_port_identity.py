@@ -1073,8 +1073,10 @@ def test_versions_one_and_two_keep_loading_an_entry_that_names_no_hardware(tmp_p
         # The runtime answer is unchanged: still a warning, still not a refusal.
         assert device.identity_warning == VOLATILE_SERIAL_DEVICE_WARNING
 
-    # And the loader reads all three versions, so nothing has to move at all.
-    assert list(SUPPORTED_CONFIG_VERSIONS) == [LEGACY_CONFIG_VERSION, READ_FREE_CONFIG_VERSION, IDENTIFIED_COM_PORT_CONFIG_VERSION]
+    # The loader reads versions 1 through 4; existing configurations need no migration.
+    from agentic_hil.types import SERVER_CONFIG_VERSION
+
+    assert list(SUPPORTED_CONFIG_VERSIONS) == [LEGACY_CONFIG_VERSION, READ_FREE_CONFIG_VERSION, IDENTIFIED_COM_PORT_CONFIG_VERSION, SERVER_CONFIG_VERSION]
     assert CURRENT_CONFIG_VERSION == IDENTIFIED_COM_PORT_CONFIG_VERSION
 
 

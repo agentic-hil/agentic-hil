@@ -640,9 +640,12 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # the 51st; `agentic_hil.power_supply`, the power-supply config module (#731),
 # was the 50th; `agentic_hil.backends.esptool`, the ESP32 backend, was the 49th.
 # The HTTP transport (#888) adds `agentic_hil.httpapi` and
-# `agentic_hil.httpserver` to the previous 52 modules. The open read endpoints
+# `agentic_hil.httpserver` to the previous 52 modules.
+# `agentic_hil.serverjobs`, the job worker for #886, is the 55th scanned module.
+# `agentic_hil.windows_device_lock`, the Windows device-lock pipe module (#885),
+# is the 56th scanned module. The open read endpoints
 # (#889) add `agentic_hil.httpread` and `agentic_hil.benchview`.
-SCANNED_MODULE_COUNT = 56
+SCANNED_MODULE_COUNT = 58
 # The power supply tools (#733) add seven, the 220th to the 226th: the six
 # `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
 # `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
@@ -728,11 +731,15 @@ COLLECTED_TYPE_COUNT = 244
 # UartRunner._defmt_expect is the one producer of that type.
 # STLinkBackend._failure_result and STLinkBackend.info produce target_command_error (#870).
 # The completed HTTP transport and serve command (#888) add fourteen producers.
+# Server jobs (#886) add five producers: `config.server_config` writes
+# `config_invalid`; `serverjobs._job_config` writes `config_invalid` and
+# `invalid_argument`; `serverjobs.run_job` writes `config_invalid` and
+# `resource_quarantined`. These existing types add no type to the count.
 # The open read endpoints (#889) add five: one function each writing
 # `admin_loopback_only`, `bench_view_unavailable` and `device_not_found`, and
 # two writing `invalid_argument`, one for the job filters and one for the
 # recover body.
-PRODUCER_COUNT = 731
+PRODUCER_COUNT = 736
 
 
 def pin_problems(inventory: Inventory) -> list[str]:

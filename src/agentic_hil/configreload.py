@@ -126,6 +126,7 @@ NOT_RELOADED_SECTIONS: tuple[tuple[str, str], ...] = (
     ("reports", "an operator-owned path; a running server's audit trail may not move underneath it."),
     ("logs", "an operator-owned path; a running server's audit trail may not move underneath it."),
     ("power_supplies", "the bench supplies, their limits and their grants, all owned by the file's owner. Only a restart adopts them, a lowered limit included."),
+    ("server", "the bench job settings. Only a restart adopts them."),
     ("<entry>.permissions", "every device entry's own grants. Never re-read; a restart adopts them."),
 )
 
@@ -247,6 +248,7 @@ def restart_view(config: AgenticHILConfig) -> JsonObject:
         "reports": asdict(config.reports),
         "logs": asdict(config.logs),
         "power_supplies": {name: asdict(entry) for name, entry in config.power_supplies.items()},
+        **({"server": asdict(config.server)} if config.server is not None else {}),
     }
 
 

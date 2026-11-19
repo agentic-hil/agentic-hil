@@ -41,8 +41,14 @@ from agentic_hil.devices import (
 from agentic_hil.knowledge import attach_quarantine_guidance, recovery_operator_command, remediation_fields
 from agentic_hil.power_supply import supply_secrets
 from agentic_hil.redact import filesystem_error_detail, redact_sensitive, redact_values
-from agentic_hil.report import CALL_SCOPED_LEASE_TOOLS, CONFIG_IN_FORCE_KEY, CONTACT_MARKER_KEY, read_report_state
-from agentic_hil.types import AgenticHILConfig, JsonObject
+from agentic_hil.report import (
+    CALL_SCOPED_LEASE_TOOLS,
+    CONFIG_IN_FORCE_KEY,
+    CONTACT_MARKER_KEY,
+    read_report_state,
+    with_job_fields,
+)
+from agentic_hil.types import AgenticHILConfig, BenchOwnership, JsonObject
 
 LEASE_VERSION = 2
 DEBUGGER_DISCOVERY_RESOURCE = "debugger-discovery:all"
@@ -617,7 +623,10 @@ class HardwareCoordinator:
         self.owner_started_at = utc_now_iso()
         self.config_sha256 = lease_config_sha256(config)
         self._state_directories: dict[tuple[str, ...], Path] = {}
-        self.project_key = project_resource(config)
+        self.ownership = config.bench_ownership or BenchOwnership(
+            project_resource(config), str(Path(config.work_dir).resolve()), str(Path(config.config_path).resolve()),
+        )
+        self.project_key = self.ownership.project_resource
         self.project_lock: _LifetimeLock | None = None
         # Exclusivity is machine-wide and keyed on the physical device, so it
         # cannot live beside the per-configuration state under state_root; see
@@ -1446,7 +1455,7 @@ class HardwareCoordinator:
             "time": utc_now_iso(),
         }
         try:
-            safe_append_text(self.root / "recovery.jsonl", json.dumps(event) + "\n")
+            safe_append_text(self.root / "recovery.jsonl", json.dumps(redact_values(with_job_fields(event), supply_secrets(self.config))) + "\n")
         except OSError:
             return False
         return True
@@ -1700,7 +1709,7 @@ class HardwareCoordinator:
             "time": utc_now_iso(),
         }
         try:
-            safe_append_text(self.root / "recovery.jsonl", json.dumps(event) + "\n")
+            safe_append_text(self.root / "recovery.jsonl", json.dumps(redact_values(with_job_fields(event), supply_secrets(self.config))) + "\n")
         except OSError:
             return False
         return True
@@ -2026,7 +2035,7 @@ class HardwareCoordinator:
                 "resumed": False,
                 "time": utc_now_iso(),
             }
-            safe_append_text(self.root / "recovery.jsonl", json.dumps(audit_event) + "\n")
+            safe_append_text(self.root / "recovery.jsonl", json.dumps(redact_values(with_job_fields(audit_event), supply_secrets(self.config))) + "\n")
             released = self._base_record("released", resources)
             released.update(
                 {
@@ -2217,7 +2226,7 @@ class HardwareCoordinator:
                 if operator_statement:
                     audit_event["operator_statement"] = operator_statement
                 try:
-                    safe_append_text(self.root / "recovery.jsonl", json.dumps(audit_event) + "\n")
+                    safe_append_text(self.root / "recovery.jsonl", json.dumps(redact_values(with_job_fields(audit_event), supply_secrets(self.config))) + "\n")
                 except BaseException as error:
                     return {"ok": False, "tool": "hardware_recover", "error_type": "recovery_audit_failed", "summary": "Recovery audit could not be persisted; quarantine remains active.", "backend_error": str(error), "audit_ok": False, "cleanup_required": True, "quarantined": True, "quarantine_id": quarantine_id, **remediation_fields("recovery_audit_failed")}
                 released = self._base_record("released", resources)
@@ -2386,7 +2395,7 @@ class HardwareCoordinator:
                 # Evidence first, as in `recover`: a retirement the ledger does
                 # not hold does not happen.
                 try:
-                    safe_append_text(self.root / "recovery.jsonl", json.dumps(audit_event) + "\n")
+                    safe_append_text(self.root / "recovery.jsonl", json.dumps(redact_values(with_job_fields(audit_event), supply_secrets(self.config))) + "\n")
                 except BaseException as error:
                     if isinstance(error, (KeyboardInterrupt, SystemExit)):
                         raise
@@ -2544,8 +2553,8 @@ class HardwareCoordinator:
             "owner_pid": os.getpid(),
             "owner_started_at": self.owner_started_at,
             "frontend": self.frontend,
-            "workspace": str(Path(self.config.work_dir).resolve()),
-            "config_path": str(Path(self.config.config_path).resolve()),
+            "workspace": self.ownership.workspace,
+            "config_path": self.ownership.config_path,
             "config_sha256": self.config_sha256,
             "project_resource": self.project_key,
             # What this project's own policy and probe grants permit it to settle
@@ -2683,8 +2692,8 @@ class HardwareCoordinator:
     def _record_matches_project(self, record: JsonObject) -> bool:
         return (
             record.get("project_resource") == self.project_key
-            and record.get("workspace") == str(Path(self.config.work_dir).resolve())
-            and record.get("config_path") == str(Path(self.config.config_path).resolve())
+            and record.get("workspace") == self.ownership.workspace
+            and record.get("config_path") == self.ownership.config_path
         )
 
     def _record_matches_config(self, record: JsonObject) -> bool:

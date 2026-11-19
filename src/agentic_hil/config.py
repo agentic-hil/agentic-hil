@@ -56,6 +56,8 @@ from agentic_hil.types import (
     ProjectPermissions,
     RecoveryConfig,
     ReportsConfig,
+    ServerConfig,
+    ServerLimitsConfig,
     TargetConfig,
     ValidationConfig,
     com_port_carries_hardware_identity,
@@ -218,6 +220,7 @@ class ValidatedDocument:
     com_ports: dict[str, ComPortConfig]
     can_buses: dict[str, CanBusConfig]
     power_supplies: dict[str, PowerSupplyConfig]
+    server: ServerConfig | None = None
 
 
 def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
@@ -254,6 +257,7 @@ def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
     reject_legacy_power_supplies(raw, config_path, config_version)
     reject_read_permissions(raw, config_path, config_version)
     validate_config_schema(raw, config_path)
+    server = server_config(raw.get("server"), config_path)
 
     workspace_value = str(raw["workspace_root"])
     workspace_requested = Path(workspace_value).expanduser()
@@ -303,6 +307,30 @@ def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
         com_ports=com_ports,
         can_buses=can_buses,
         power_supplies=power_supplies,
+        server=server,
+    )
+
+
+def server_config(raw: Any, config_path: str) -> ServerConfig | None:
+    """Parse represented server settings without DNS or listener operations."""
+    if raw is None:
+        return None
+    job_root = str(raw["job_root"])
+    if not Path(job_root).is_absolute():
+        raise ConfigError("config_invalid", "server.job_root must be an absolute path.",
+                          {"path": config_path, "field": "server.job_root", "value": job_root})
+    listen = raw.get("listen", "127.0.0.1:8765")
+    match = re.fullmatch(r"(?:\[[^\[\]\s]+\]|[^:\[\]\s]+):([0-9]+)", listen)
+    if match is None or not 1 <= int(match[1]) <= 65535:
+        raise ConfigError("config_invalid", "server.listen must be host:port with a port in 1..65535.",
+                          {"path": config_path, "field": "server.listen", "value": listen})
+    return ServerConfig(
+        job_root=job_root,
+        listen=listen,
+        hostnames=tuple(raw.get("hostnames", ())),
+        allowed_origins=tuple(raw.get("allowed_origins", ())),
+        retention_days=raw.get("retention_days", 14),
+        limits=ServerLimitsConfig(**raw.get("limits", {})),
     )
 
 
@@ -421,6 +449,7 @@ def assembled_config(raw: Any, document: ValidatedDocument, resolved_config_path
         reports=reports_config(reports_raw),
         logs=logs_config(logs_raw),
         recovery=recovery_config(recovery_raw),
+        server=document.server,
         debugger_id=single[0],
         debugger=single[1],
         config_version=document.config_version,
@@ -460,9 +489,9 @@ def bind_debugger(config: AgenticHILConfig, debugger_id: str) -> AgenticHILConfi
     return bound
 
 
-def load_authoritative_config(expected_workspace: str | Path | None = None) -> AgenticHILConfig:
+def load_authoritative_config(expected_workspace: str | Path | None = None, *, config_path: str | None = None) -> AgenticHILConfig:
     expected = Path(expected_workspace or Path.cwd()).resolve()
-    config_path = os.environ.get(CONFIG_ENV)
+    config_path = config_path or os.environ.get(CONFIG_ENV)
     if config_path:
         requested = Path(config_path).expanduser()
         if not requested.is_absolute():

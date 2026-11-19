@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
@@ -107,8 +108,19 @@ def normalize_doctor(value: object, config_path: Path, home_lock_root: Path) -> 
     return value
 
 
+# On Windows every device-lock hold is also a machine-wide named pipe (#885),
+# and doctor says so; elsewhere the home directory is seen by this account alone.
+HOME_DEVICE_LOCK_SUMMARY = (
+    "Device locks are taken in this account's <home-locks> and, from this version on, also held through a "
+    "machine-wide named pipe, so every account and session on this machine sees a hold."
+    if os.name == "nt"
+    else "Device locks are taken in this account's <home-locks>; another account on this machine does not see them."
+)
+
+
 # Frozen from doctor's current return structure for recorded_doctor's observations.
-# Only the two explicitly normalized fixture paths vary across hosts.
+# Only the two explicitly normalized fixture paths vary across hosts, and the
+# device-lock summary, which differs between Windows and other systems (#885).
 DOCTOR_WITHOUT_SERVER: JsonObject = {
     "ok": True,
     "tool": "agentic_hil_doctor",
@@ -123,7 +135,7 @@ DOCTOR_WITHOUT_SERVER: JsonObject = {
     "bench_binding": {"ok": True, "summary": "Recorded binding."},
     "device_locks": {
         "ok": True, "root": "home", "path": "<home-locks>",
-        "summary": "Device locks are taken in this account's <home-locks>; another account on this machine does not see them.",
+        "summary": HOME_DEVICE_LOCK_SUMMARY,
     },
     "unhealthy": [], "standing_incidents": [],
     "installation": {"recorded": True}, "mcp": {"recorded": True},
