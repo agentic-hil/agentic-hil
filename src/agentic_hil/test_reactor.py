@@ -15,7 +15,7 @@ from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
 from agentic_hil.backends.common import DEBUG_SESSION_WAY_OUT
 from agentic_hil.backends.gdbdebug import INTEGER_VALUE_WIDTHS
-from agentic_hil.can import parse_can_id, parse_hex_bytes
+from agentic_hil.can import broker_incident_scope, parse_can_id, parse_hex_bytes
 from agentic_hil.comports import COM_PORT_NOT_BOUND, data_result, decode_bytes, matched_span_bytes
 from agentic_hil.config import (
     ADOPT_HARDWARE_COMMAND,
@@ -3675,6 +3675,17 @@ class TestReactor:
                 for field in ("remediation", "do_not"):
                     if field in failure:
                         result[field] = failure[field]
+            # A CAN broker's incident names its bus by the configured id; the
+            # run names it by its lock key as well, read from this bench's own
+            # configuration, which is the key every participant's lock starts
+            # with. A scheduler matches the other jobs on that bus by it, whether
+            # or not a cleanup failed after the step did.
+            incident_scope = broker_incident_scope(failure)
+            bus_id = failure.get("bus_id")
+            if incident_scope is not None and isinstance(bus_id, str) and bus_id in self.config.can_buses:
+                result["incident_scope"] = incident_scope
+                result["bus"] = can_device(self.config, bus_id).lock_key
+                result["bus_id"] = bus_id
         elif stopped:
             # A stopped run is not a passed run and it is not a failed one
             # either, so it says which of the two it is by name. The steps that
