@@ -281,6 +281,44 @@ The start command answers as soon as the run holds the devices it declared, so a
 
 Killing the worker instead is the case this exists to replace. A process that dies without releasing anything is the dead-owner case the bench already handles: the status command names it (`worker_gone`) rather than guessing what the run had reached, a stop is refused because there is nobody left to honour it, and `agentic-hil lease-status` is what reads and heals the bench. Locks are machine-wide and unchanged by any of this: a detached run holds what it declared, and every other caller is refused with the owner named.
 
+### Driving the bench job queue
+
+Several callers sharing one bench meet as refusals: the second run that asks for a held board is told `device_busy` and left to try again. `agentic_hil.scheduler.Scheduler` puts them in one fair queue instead. It is a library interface: the process that owns the queue builds it from the bench's configuration and a `SchedulerSettings`, submits plans, and calls `tick()` on its own cadence, and `next_due_at()` says when the next time-bound step falls due. It adds no command and no MCP tool. A run started outside the queue is the ordinary run it always was: it holds what it declared, and the queue sees it as a holder.
+
+```python
+import time
+from pathlib import Path
+
+from agentic_hil.config import load_authoritative_config
+from agentic_hil.jobstore import SchedulerSettings
+from agentic_hil.scheduler import Scheduler
+
+config = load_authoritative_config(".")
+settings = SchedulerSettings(job_root=Path(config.work_dir) / ".agentic-hil" / "jobs")
+scheduler = Scheduler(config, settings)
+job = scheduler.submit(plan=Path(".agentic-hil/testconfig.yaml"), artifacts={}, submitter_label="nightly")
+while scheduler.status(job.job_id)["state"] in {"queued", "starting", "running", "withdrawing", "stopping"}:
+    scheduler.tick()
+    time.sleep(1)
+print(scheduler.status(job.job_id))
+```
+
+**Admission.** Submission copies the plan into the job's own directory byte for byte and records its SHA-256 as `plan_digest`; a plan or an artifact is read only from inside the workspace, and the job root has to be inside it too, because the copy is the plan that runs. The copy is loaded and preflighted exactly as the reactor loads and preflights a plan, and a refusal rejects the job under the refusal's own type. Three more refusals are the queue's: `plan_runtime_exceeded` when the plan's lower bound is above `max_job_runtime_s`, `max_queued_jobs_per_user` when the submitter already has that many jobs waiting or running (five by default), and `job_input_invalid` for a value the queue cannot take. A rejected job takes no sequence number. The lower bound, `estimate.lower_bound_s`, is the plan's delays plus each `repeat` at the fewest iterations it allows: `count` times its body, at least the longer of `duration_s` and one body, and the smaller of those two when it names both.
+
+A plan that names an artifact which is neither in the workspace nor provided waits as `awaiting_artifacts`, with no sequence number. `provide_artifacts` stages the files in the job's directory under the paths the plan names them by, and the job is admitted then. The default workspace preparer runs a job in the bench's own workspace with the bench's own configuration, so a staged artifact is the record of the bytes that were provided, and a start whose workspace file no longer holds them is refused as `worker_start_failed` rather than run.
+
+**The order.** An admitted job takes the next sequence number and keeps it while it waits. The queue is one list in that order, and each tick starts the oldest job whose whole device set is free. A younger job passes an older one only on devices nothing older has claimed: once a job has waited `reserve_after_s` (600 seconds by default) its whole set is reserved for it, and nothing younger takes any of those devices in front of it. With `reserve_after_s` at zero the queue is strictly first in, first out: while the oldest waiting job cannot start, nothing starts. Devices conflict by their lock keys, so two configured names for one physical unit are one device, and two participants of one shared CAN bus are two.
+
+**Availability is read, never tested.** Whether a device is held is read off the holder record the bench's own mutex writes, the same record a refused run names its holder from. No lock is opened, taken or given back to find out, because such a probe is a hold, and a run reaching for the device in that instant would be refused because of the queue. A record can outlive its holder, so a job held up by one tries again after `retry_interval_s` and lets its worker meet the real lock. A worker that finds a device held runs no step and ends as `device_busy`; the job returns to the queue with its own sequence number, queue time and deadline, and tries again after `retry_interval_s`. A standing incident on a device, one an operator has to recover, holds back every job that needs it, and status names it under `blocked_by_incident`.
+
+**A running job.** Every attempt is the reactor's own detached worker, started with a `wait_s` of 0 under a handle the queue allocated and recorded before the worker existed. A waiting job that is withdrawn ends as `withdrawn` at once. A running one is `withdrawing` while its worker honours the same cooperative stop `test-reactor-stop` writes, and ends `withdrawn` with its devices closed in the usual order. Only the label that submitted a job may withdraw it or provide its artifacts; nothing authenticates that label, and status says so with `submitter_label_source: caller_supplied`. An attempt that runs past `max_job_runtime_s` is stopped the same way and ends `runtime_exceeded`. A worker the queue started that has not ended `stop_grace_s` after a stop is ended as that process and no other, and its job still ends in the outcome the stop named, `runtime_exceeded` or `withdrawn`, with the last run record in its job report and its cleanup unconfirmed. A job that waits past its queue deadline, its own `max_queue_s` capped by the setting, ends `expired` without starting. A worker that ends with a bus-scoped CAN incident stops the other jobs running on that bus, and each of them keeps the incident under `cause`; a participant-scoped incident stops nobody else.
+
+**When the queue starts again.** The jobs, their sequence numbers and the next number live in one snapshot under `job_root`, replaced whole on every change, so a queue that starts again reads exactly what the last change left. It does not adopt a worker it did not start: a worker still running is asked to stop, it is not ended by a process the queue never owned, and nothing behind it starts until it is gone. Every attempt an earlier queue started then ends as `worker_gone` with the run record it left, whether its worker stopped when asked, finished on its own or died, because nobody supervised it to its end. A worker that dies under the queue that started it, without a stop that names another outcome, ends its job as `worker_gone` too, and the next job on those devices starts through the recovery every run already performs.
+
+**Status.** `status(job_id)` answers with the job's state, whether its attempt ever ran (`started`), its `sequence`, `queued_at` and `queue_deadline`, its `error_type` and `cause`, and an `estimate` of `lower_bound_s`, `history_samples` and `duration_s`, the last two from the finished runs of the same plan digest. `devices` is keyed by the SHA-256 of each lock key and never by the key itself; each entry gives the job's `position` among the jobs waiting for that device, `reserved_for`, the job `occupied_by` it, the `holder` by frontend and label only, `held_since`, `estimated_free_at` or the `estimate_unknown_reason` when there is no estimate, and `blocked_by_incident`. `report_path` names the job's own report: the run record it ended on, whether the run's own report exists (`canonical_report_missing`), and whether its cleanup was confirmed (`cleanup_confirmed`). `canonical_report_path` is the run's report under the state root.
+
+**Retention.** `retention_days` after a job ended, its directory (`plan`, `artifacts`, `workspace`, `report` and `logs`) is removed together with its entry. The run's own report and every ledger under the state root are left as they are.
+
 ## pytest Plugin
 
 Installing `agentic_hil` registers the `agentic_hil` pytest plugin, so CI regression suites can drive the same permission-gated tools without an MCP client.

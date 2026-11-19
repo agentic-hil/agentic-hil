@@ -644,7 +644,9 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # `agentic_hil.serverjobs`, the job worker for #886, is the 55th scanned module.
 # `agentic_hil.windows_device_lock`, the Windows device-lock pipe module (#885),
 # is the 56th scanned module.
-SCANNED_MODULE_COUNT = 56
+# `agentic_hil.jobstore` and `agentic_hil.scheduler`, the bench job store and
+# its fair scheduler (#887), are the 57th and the 58th.
+SCANNED_MODULE_COUNT = 58
 # The power supply tools (#733) add seven, the 220th to the 226th: the six
 # `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
 # `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
@@ -657,7 +659,10 @@ SCANNED_MODULE_COUNT = 56
 # Defmt plan assertions (#837) add the defmt_expect_timeout type.
 # ST-Link's recorded DEV_TARGET_CMD_ERR (#870) adds target_command_error.
 # The completed HTTP transport (#888) adds nine collected error types.
-COLLECTED_TYPE_COUNT = 241
+# The bench job queue (#887) adds four, the 242nd to the 245th:
+# `job_input_invalid`, `max_queued_jobs_per_user`, `plan_runtime_exceeded` and
+# `worker_start_failed`.
+COLLECTED_TYPE_COUNT = 245
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -732,7 +737,9 @@ COLLECTED_TYPE_COUNT = 241
 # `config_invalid`; `serverjobs._job_config` writes `config_invalid` and
 # `invalid_argument`; `serverjobs.run_job` writes `config_invalid` and
 # `resource_quarantined`. These existing types add no type to the count.
-PRODUCER_COUNT = 731
+# The bench job queue (#887) adds seven, its four new types among them; the
+# types it forwards from a refusal or a worker record are pinned below.
+PRODUCER_COUNT = 738
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
@@ -783,6 +790,18 @@ PINNED_DYNAMIC: dict[DynamicSite, str] = {
     ("backends.rs3005p", "RS3005PBackend.classify_last_error", "fault.error_type"): (
         "the fault this backend last raised, typed by a literal at each raise of PowerSupplyFault in this module"
     ),
+    ("scheduler", "Scheduler._admit", "refusal.get('error_type', 'test_config_invalid')"): (
+        "the preflight refusal's existing type, forwarded by admission, with test_config_invalid when the refusal names none"
+    ),
+    ("scheduler", "Scheduler._bus_incident", "record['error_type']"): (
+        "the originating worker record's bus-incident type, which the affected participant jobs retain"
+    ),
+    ("scheduler", "Scheduler._terminal", "record['error_type']"): "the worker record's own type, preserved by terminal reconciliation",
+    ("scheduler", "Scheduler.provide_artifacts", "error.error_type"): "the validation exception's own type, preserved by artifact completion",
+    ("scheduler", "Scheduler.status", "copy.deepcopy(data.get('error_type'))"): (
+        "the stored job's type, copied into the status view without creating another type"
+    ),
+    ("scheduler", "Scheduler.submit", "error.error_type"): "the validation exception's own type, preserved by submission",
 }
 
 
