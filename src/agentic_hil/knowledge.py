@@ -674,6 +674,111 @@ READ_VALIDATION_NEXT_STEP = (
 # from the scoped key to the bare one, so a scope nobody wrote an entry for still
 # gets the general fix instead of nothing.
 ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
+    "server_not_configured": ErrorRemedy(
+        meaning="The authoritative configuration has no server block, so this bench serves no jobs.",
+        remediation=("Use a bench configuration with a server block after the server-configuration integration is installed.",),
+        do_not=("Do not submit configuration or permissions over HTTP or bypass configuration validation.",),
+    ),
+    "server_listen_refused": ErrorRemedy(
+        meaning="This transport accepts only the loopback listen address.",
+        remediation=("Use 127.0.0.1 as the listen address. Non-loopback listening belongs to #891.",),
+        do_not=("Do not expose this listener through another bind address.",),
+    ),
+    "job_store_unavailable": ErrorRemedy(
+        meaning="The job-store implementation is missing, so serve refuses before listening.",
+        remediation=("Install the integrated job store and scheduler before starting serve.",),
+        do_not=("Do not treat the HTTP transport alone as an executing bench server.",),
+    ),
+    "origin_refused": ErrorRemedy(
+        meaning="The request carries an Origin that the server does not allow.",
+        remediation=("Use a permitted client origin, or a command-line client that sends no Origin header.",),
+        do_not=("Do not assume loopback access makes a browser form a trusted request.",),
+    ),
+    "host_refused": ErrorRemedy(
+        meaning="The request Host is neither the listener nor a configured hostname.",
+        remediation=("Address the listener directly or use a hostname listed in server.hostnames.",),
+        do_not=("Do not reuse an unrelated site's Host header for a bench request.",),
+    ),
+    "job_token_missing": ErrorRemedy(
+        meaning="This job resource requires the token returned on submission.",
+        remediation=("Send that job's token in Authorization: Bearer for uploads, withdrawal and private results.",),
+        do_not=("Do not place the token in a URL or query string.",),
+    ),
+    "job_token_invalid": ErrorRemedy(
+        meaning="The supplied bearer token does not belong to this job.",
+        remediation=("Use the job ID and token from the same submission response.",),
+        do_not=("Do not use another submitter's job token or retry the same incorrect token.",),
+    ),
+    "job_not_found": ErrorRemedy(
+        meaning="The requested job resource is not available.",
+        remediation=("Use the resource Location from the submission response and check the job ID.",),
+        do_not=("Do not invent a job ID or assume a missing resource has run successfully.",),
+    ),
+    "queue_full": ErrorRemedy(
+        meaning="The job queue has no admission capacity at present.",
+        remediation=("Wait for Retry-After before retrying the submission with the same Idempotency-Key.",),
+        do_not=("Do not flood the queue with new keys for the same submission.",),
+    ),
+    "per_user_limit": ErrorRemedy(
+        meaning="The submitter's configured job limit has been reached.",
+        remediation=("Wait for Retry-After and for existing jobs to end before retrying.",),
+        do_not=("Do not change the self-declared submitter to evade the limit.",),
+    ),
+    "artifact_unreferenced": ErrorRemedy(
+        meaning="The submitted plan does not reference this artifact path.",
+        remediation=("Upload a missing relative artifact path named by the plan and submission response.",),
+        do_not=("Do not send configuration files or arbitrary workspace contents as artifacts.",),
+    ),
+    "artifact_already_uploaded": ErrorRemedy(
+        meaning="An artifact has already been accepted for this job path.",
+        remediation=("Continue with the existing upload, or submit a new plan when different bytes are required.",),
+        do_not=("Do not try to overwrite accepted job artifacts.",),
+    ),
+    "artifact_missing": ErrorRemedy(
+        meaning="The job did not receive all required artifacts within its allowed upload time.",
+        remediation=("Submit the plan again with all required artifacts available.",),
+        do_not=("Do not assume a partly uploaded job held a queue position or ran.",),
+    ),
+    "job_finished": ErrorRemedy(
+        meaning="The job has already ended and cannot be withdrawn.",
+        remediation=("Fetch its report with the job token to inspect the outcome.",),
+        do_not=("Do not retry withdrawal on an ended job.",),
+    ),
+    "job_withdrawn": ErrorRemedy(
+        meaning="The job has already been withdrawn.",
+        remediation=("Inspect its status and any report; submit a new job if another execution is needed.",),
+        do_not=("Do not treat withdrawal as a successful hardware result.",),
+    ),
+    "job_expired": ErrorRemedy(
+        meaning="The job has expired and cannot be withdrawn or resumed.",
+        remediation=("Inspect the recorded reason and submit a new job if it is still needed.",),
+        do_not=("Do not assume expiry means any hardware step passed.",),
+    ),
+    "job_runtime_exceeded": ErrorRemedy(
+        meaning="The job exceeded its allowed runtime.",
+        remediation=("Read its report and logs with the job token before adjusting the plan or bench runtime allowance.",),
+        do_not=("Do not infer cleanup or hardware success from the runtime limit alone.",),
+    ),
+    "blocked_by_incident": ErrorRemedy(
+        meaning="A bench incident prevents the job from using its devices.",
+        remediation=("Read the incident's recovery guidance and resolve it through the existing bench recovery flow.",),
+        do_not=("Do not clear lock or incident records to force execution.",),
+    ),
+    "request_too_large": ErrorRemedy(
+        meaning="The HTTP request exceeds the configured upload size limit.",
+        remediation=("Reduce the submission size or use an appropriate bench upload allowance.",),
+        do_not=("Do not omit Content-Length to evade the upload bound.",),
+    ),
+    "unsupported_media_type": ErrorRemedy(
+        meaning="The endpoint does not accept the request's content type.",
+        remediation=("Submit application/yaml or multipart/form-data for plans, and application/octet-stream for artifact PUTs.",),
+        do_not=("Do not send a submission manifest or bundle instead of the plan and artifact parts.",),
+    ),
+    "range_not_satisfiable": ErrorRemedy(
+        meaning="The requested log byte range cannot be read.",
+        remediation=("Read Content-Range for the current size and request an available byte range.",),
+        do_not=("Do not assume the log contains bytes beyond its reported size.",),
+    ),
     CONFIG_STALE_ERROR: ErrorRemedy(
         meaning=(
             "The authoritative configuration on disk is not the one this MCP server is enforcing, so the backend it "
@@ -4711,10 +4816,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "relaxes), `allowed_root` (enforced under `validation.require_allowed_root`), `allowed_extension` "
             "(enforced under `validation.require_allowed_extension`), `regular_file` and `single_link`, and the "
             "format checks `elf_header`, `hex_parseable` and `bin_size_plausible`. A debug session also refuses an "
-            "image that is not an `.elf`, because it needs the symbols."
+            "image that is not an `.elf`, because it needs the symbols. An HTTP artifact upload also refuses a "
+            "Content-Digest that does not match its bytes, before the job service receives them."
         ),
         remediation=(
             "Read `validation` and the summary; the summary says which check stopped it.",
+            "For an HTTP Content-Digest failure, send the intended bytes and their matching SHA-256 digest.",
             "A format check that is false means the file is not the image its extension claims: rebuild it, or point "
             "at the build's real output. `regular_file` or `single_link` false means a link, a directory or a second "
             "hard link: use the plain file the build wrote.",
@@ -9222,7 +9329,7 @@ A third thing *describes* the hardware contact and guards nothing. Every tool in
 | what is locked | the physical device: `physical:<resource_id>`, `probe:<serial>`, `probe-exe:<executable>`, `com:serial:<serial_number>`, `com:<device>`, `can:<adapter>:<channel>` |
 | case | a name for hardware (`resource_id`, a probe serial, a port's `serial_number`, a CAN channel) folds case on every platform, because `0669FF` and `0669ff` are one unit wherever the bench runs. A host path (a debugger executable, a serial device) folds the way its own filesystem does, so `COM7` and `com7` are one port on Windows while `/dev/ttyACM0` and `/dev/ttyacm0` are two on Linux. Two entries whose `resource_id` values differ only in case are refused at config load rather than merged |
 | a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order (attaching a second adapter can hand one entry another board), so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so, and from `version: 3` on that warning is a property of the file instead: such an entry must declare what identifies it with `identity_source` or the configuration is refused at load, naming `agentic-hil adopt-hardware`. `vid`/`pid` sit beside the serial and name the device *type* rather than a unit, so they are never a lock key: a USB serial is unique only within its vendor, so a serial matching under a foreign vid/pid is refused too, and an adapter that publishes no serial at all is compared on the type alone, which separates a CH340 from an ST-Link and not one CH340 from another, and `identity_source: vid_pid` says exactly that. An entry that *does* name hardware is opened on one ground only: the attached device is `confirmed` to be the board it names. A port that has come to be a different board is refused with `com_port_identity_mismatch`; a port whose identity cannot be checked at all (no serial backend, not enumerated exactly once, no serial reported, or no USB ids reported where the entry names them) is refused with `com_port_identity_unverified`, because a check that could not run does not prove the name still leads to its board. Both refuse before the port is opened and are retry-safe. An entry that names no hardware is opened as `not_declared`, unverified by design |
-| where | `~/.agentic-hil/device-locks`, one agreed place per account, never under `state_root`: a lock kept per configuration is not a bench lock. On Linux, where an administrator created `/var/lib/agentic-hil/device-locks` for the group `agentic-hil`, every account keeps its device locks there instead, so two accounts on one board see each other's hold. One that exists and cannot be used refuses every device lock with `device_lock_root_unusable` rather than falling back to the home directory |
+| where | `~/.agentic-hil/device-locks`, one agreed place per account, never under `state_root`: a lock kept per configuration is not a bench lock. On Linux, where an administrator created `/var/lib/agentic-hil/device-locks` for the group `agentic-hil`, every account keeps its device locks there instead, so two accounts on one board see each other's hold. One that exists and cannot be used refuses every device lock with `device_lock_root_unusable` rather than falling back to the home directory. On Windows each device lock is also a named pipe, `\\\\.\\pipe\\agentic-hil-<digest>` with the digest of its `<digest>.lock`, which every account and session of the machine sees with no setup: another account's run is refused with `device_busy` naming the holder's pid as the kernel reports it. The file stays beside it, so an older version in the same account is still kept out, and `reclaimed_from` still comes from the file alone |
 | how long | the whole run, from the declaration to its end; the lease each call takes borrows that hold |
 | what may be touched | only what the test description declares; anything else is refused with `undeclared_device` |
 | contention | refused with `device_busy`, naming the holder; waiting happens only when the caller asked for it with `wait_s`, and stays bounded |
@@ -9268,9 +9375,9 @@ Nothing times a run out, and that is deliberate: dropping a device that may be m
 | the client disconnects | stdin reaches EOF, the server shuts its service down, and an open run is released on the way out |
 | the server process dies | the operating system drops the advisory lock it held; the next owner takes the device and its result carries `reclaimed` with reason `owner_process_exited_without_release` |
 
-So an abandoned run costs nothing beyond the life of the server process. While it lasts, a contender's `device_busy` refusal carries `heartbeat_age_s` and, past four heartbeat intervals, `holder_heartbeat_stale: true`. An idle holder is visible rather than merely obstructive. A refusal that carries no `holder` carries no heartbeat either: the device is held by an owner whose record does not name it yet, so wait for it, bounded by `wait_s`, rather than reading it as a hang. Call `bench_run_status` if you are unsure whether you still hold the bench, and `bench_run_stop` to be sure you do not.
+So an abandoned run costs nothing beyond the life of the server process. While it lasts, a contender's `device_busy` refusal carries `heartbeat_age_s` and, past four heartbeat intervals, `holder_heartbeat_stale: true`. An idle holder is visible rather than merely obstructive. A refusal that carries no `holder` carries no heartbeat either: the device is held by an owner whose record does not name it yet, so wait for it, bounded by `wait_s`, rather than reading it as a hang. On Windows a contender in another account reads the holder off its named pipe rather than a file: the answer is the heartbeat, a holder that keeps the pipe and says nothing within a few seconds is `holder_heartbeat_stale: true`, and a pipe that closes before it answers is a hold whose owner is not named yet, as above. Call `bench_run_status` if you are unsure whether you still hold the bench, and `bench_run_stop` to be sure you do not.
 
-One case is outside this: a server process left running with its stdin never closed, by a host that leaked the pipe. It sees no disconnect and holds the run. Ending that process is the answer; never delete a lock file under `~/.agentic-hil/device-locks` or `/var/lib/agentic-hil/device-locks`.
+One case is outside this: a server process left running with its stdin never closed, by a host that leaked the pipe. It sees no disconnect and holds the run. Ending that process is the answer; never delete a lock file under `~/.agentic-hil/device-locks` or `/var/lib/agentic-hil/device-locks`. On Windows the hold is a named pipe as well, which no file operation removes and which goes only with its process, so ending the process is the answer there too.
 
 ### Two config entries, one board
 
@@ -9453,11 +9560,11 @@ The executable that check accepts is one owned by you or by root, executable, an
 | authoritative configuration | `%APPDATA%\\agentic-hil\\projects\\<name>-<digest>\\config.yaml`, else `%USERPROFILE%\\.agentic-hil\\projects\\<name>-<digest>\\config.yaml` | `$XDG_CONFIG_HOME/agentic-hil/projects/<name>-<digest>/config.yaml`, else `~/.agentic-hil/projects/<name>-<digest>/config.yaml` |
 | `state_root` | `%LOCALAPPDATA%\\agentic-hil`, else `%USERPROFILE%\\.agentic-hil\\state` | `$XDG_STATE_HOME/agentic-hil`, else `~/.agentic-hil/state` |
 | record of configurations bound by `AGENTIC_HIL_CONFIG` | `%APPDATA%\\agentic-hil\\external-projects.json`, and `%USERPROFILE%\\.agentic-hil\\external-projects.json` | `$XDG_CONFIG_HOME/agentic-hil/external-projects.json`, and `~/.agentic-hil/external-projects.json` |
-| device locks | `%USERPROFILE%\\.agentic-hil\\device-locks`, fixed | `~/.agentic-hil/device-locks`, fixed; on Linux `/var/lib/agentic-hil/device-locks` instead, for every account, where an administrator created it |
+| device locks | `%USERPROFILE%\\.agentic-hil\\device-locks`, fixed, and each hold is also a named pipe in the machine's pipe namespace, shared across accounts and sessions with no setup | `~/.agentic-hil/device-locks`, fixed; on Linux `/var/lib/agentic-hil/device-locks` instead, for every account, where an administrator created it |
 
 Two roots wherever a row names two, best first: the platform default, then `~/.agentic-hil`, which is the walk `agentic-hil init` runs and the root every path refusal already recommends. `else` is meant literally, the second root is taken when the first cannot be written, checked as a write rather than as merely existing, which is what a redirected profile or a packaged host does to the default. The configuration adds one rule on top of that order, that an existing file wins over it: a configuration already written under the fallback is this workspace's authoritative one, every later load finds it there, and `init --force` rewrites it where it is rather than generating a second beside the default. The record is the row spelled `and`, because both of its files can hold entries at once; the `AGENTIC_HIL_CONFIG` bullet below says how they are read and which one a write lands in.
 
-The device lock directory is not configurable and has no environment override. It is the one place every process on this machine agrees to look for who holds a board, and an override is how two sessions stop seeing each other, which is the failure it exists to prevent. The home directory is chosen because every process of one user reaches it without having to agree on a configuration first.
+The device lock directory is not configurable and has no environment override. It is the one place every process on this machine agrees to look for who holds a board, and an override is how two sessions stop seeing each other, which is the failure it exists to prevent. The home directory is chosen because every process of one user reaches it without having to agree on a configuration first. On Windows every lock taken there is also a named pipe that every account and session of the machine sees, with no setup and no administrator, so two accounts on one board see each other's hold. The pipe's name is the lock's digest when the directory is the one under the profile the operating system names for the process's own account; a process whose `HOME` or `USERPROFILE` moves its directory elsewhere keeps its locks and its pipe names there, apart from every other account, as its files always were.
 
 ## Choosing another location
 

@@ -76,8 +76,11 @@ bound per red run.
 Nothing has to be marked to make this safe. Every test already gets its own
 HOME, config, state and temporary storage, and its device-lock root, its CAN
 broker endpoint and its run records all follow that HOME, so two workers cannot
-meet in a configuration, a lock, a socket or a scratch file. Four things a new
-test has to keep true for that to stay so:
+meet in a configuration, a lock, a socket or a scratch file. On Windows the named
+pipe beside each device lock follows it too: a lock root other than the
+account's own profile adds a digest of the root to the pipe's name, so a test's
+pipes are its own and never the ones a live session on the machine takes. Four
+things a new test has to keep true for that to stay so:
 
 - Assert about your own entries, never about a listing of a shared directory.
   The system temp root that holds the sandboxes is the one directory every

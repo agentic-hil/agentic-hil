@@ -636,12 +636,17 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # ---------------------------------------------------------------------------
 # What the pins hold.
 
-# `agentic_hil.jobstore` and `agentic_hil.scheduler`, the bench job store and
-# its fair scheduler (#887), are the 53rd and the 54th.
 # `agentic_hil.backends.rs3005p`, the RS-3005P power supply backend (#735), is
 # the 51st; `agentic_hil.power_supply`, the power-supply config module (#731),
 # was the 50th; `agentic_hil.backends.esptool`, the ESP32 backend, was the 49th.
-SCANNED_MODULE_COUNT = 54
+# The HTTP transport (#888) adds `agentic_hil.httpapi` and
+# `agentic_hil.httpserver` to the previous 52 modules.
+# `agentic_hil.serverjobs`, the job worker for #886, is the 55th scanned module.
+# `agentic_hil.windows_device_lock`, the Windows device-lock pipe module (#885),
+# is the 56th scanned module.
+# `agentic_hil.jobstore` and `agentic_hil.scheduler`, the bench job store and
+# its fair scheduler (#887), are the 57th and the 58th.
+SCANNED_MODULE_COUNT = 58
 # The power supply tools (#733) add seven, the 220th to the 226th: the six
 # `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
 # `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
@@ -653,10 +658,11 @@ SCANNED_MODULE_COUNT = 54
 # `defmt_table_changed` and `defmt_table_invalid`.
 # Defmt plan assertions (#837) add the defmt_expect_timeout type.
 # ST-Link's recorded DEV_TARGET_CMD_ERR (#870) adds target_command_error.
-# The bench job queue (#887) adds four, the 233rd to the 236th:
+# The completed HTTP transport (#888) adds nine collected error types.
+# The bench job queue (#887) adds four, the 242nd to the 245th:
 # `job_input_invalid`, `max_queued_jobs_per_user`, `plan_runtime_exceeded` and
 # `worker_start_failed`.
-COLLECTED_TYPE_COUNT = 236
+COLLECTED_TYPE_COUNT = 245
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -726,9 +732,14 @@ COLLECTED_TYPE_COUNT = 236
 # or a flash capture decodes with, and is the only writer of all three.
 # UartRunner._defmt_expect is the one producer of that type.
 # STLinkBackend._failure_result and STLinkBackend.info produce target_command_error (#870).
+# The completed HTTP transport and serve command (#888) add fourteen producers.
+# Server jobs (#886) add five producers: `config.server_config` writes
+# `config_invalid`; `serverjobs._job_config` writes `config_invalid` and
+# `invalid_argument`; `serverjobs.run_job` writes `config_invalid` and
+# `resource_quarantined`. These existing types add no type to the count.
 # The bench job queue (#887) adds seven, its four new types among them; the
 # types it forwards from a refusal or a worker record are pinned below.
-PRODUCER_COUNT = 719
+PRODUCER_COUNT = 738
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
