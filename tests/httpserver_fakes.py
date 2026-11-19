@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import dataclass
-from http.client import HTTPConnection
+from http.client import HTTPConnection, HTTPException
 from http.server import ThreadingHTTPServer
 from threading import Event, Lock, Thread
 from typing import Any
@@ -33,6 +34,10 @@ TOKEN = "test-job-token"
 JOB_ID = "job-example"
 JOB_PATH = f"/v1/jobs/{JOB_ID}"
 ARTIFACT_PATH = f"{JOB_PATH}/artifacts/build/app.elf"
+MCP_PATH = "/mcp"
+MCP_PROTOCOL_VERSION = "2025-06-18"
+MCP_CLIENT_NAME = "fixture-mcp-host"
+MCP_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
 
 
 @dataclass(frozen=True)
@@ -116,6 +121,53 @@ class ScriptedJobService:
         byte_range: ByteRange | None, follow: bool, timeout_s: float,
     ) -> LogRead:
         return self._call("log", job_id, n, job_token=job_token, byte_range=byte_range, follow=follow, timeout_s=timeout_s)
+
+
+class ScriptedBenchReads:
+    """A fake of httpapi.BenchReads: planted replies only, recording each call."""
+
+    def __init__(self) -> None:
+        self.calls: list[Call] = []
+        self.scripts: dict[str, deque[Any]] = defaultdict(deque)
+        self.lock = Lock()
+
+    def script(self, method: str, *replies: Any) -> None:
+        with self.lock:
+            self.scripts[method].extend(replies)
+
+    def _call(self, method: str, **kwargs: Any) -> JsonObject:
+        call = Call(method, (), kwargs)
+        with self.lock:
+            self.calls.append(call)
+            assert self.scripts[method], f"Unexpected BenchReads call: {call}"
+            reply = self.scripts[method].popleft()
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+    def bench_describe(self) -> JsonObject:
+        return self._call("bench_describe")
+
+    def bench_queue_status(self) -> JsonObject:
+        return self._call("bench_queue_status")
+
+    def bench_jobs_list(self, *, state: str | None, device: str | None, user: str | None, since: str | None) -> JsonObject:
+        return self._call("bench_jobs_list", state=state, device=device, user=user, since=since)
+
+    def debugger_probes_list(self) -> JsonObject:
+        return self._call("debugger_probes_list")
+
+    def debugger_info(self) -> JsonObject:
+        return self._call("debugger_info")
+
+    def com_ports_list(self) -> JsonObject:
+        return self._call("com_ports_list")
+
+    def can_buses_list(self) -> JsonObject:
+        return self._call("can_buses_list")
+
+    def hardware_lease_status(self) -> JsonObject:
+        return self._call("hardware_lease_status")
 
 
 class WaitReply:
@@ -202,10 +254,39 @@ def short_settings(**overrides: Any) -> ServerSettings:
     })
 
 
+def record_handler_errors(server: ThreadingHTTPServer) -> None:
+    """Keep what a handler thread raised, so a request helper raises it in the test.
+
+    The server still reports it the way it did; to the client such an exception
+    is only a closed connection, which names nothing."""
+    errors: list[BaseException] = []
+    report = server.handle_error
+
+    def handle_error(request: Any, client_address: Any) -> None:
+        error = sys.exc_info()[1]
+        if error is not None:
+            errors.append(error)
+        report(request, client_address)
+
+    server.handle_error = handle_error
+    server.handler_errors = errors
+
+
+def raise_handler_error(server: ThreadingHTTPServer) -> None:
+    """Raise the first exception a handler thread of `server` let out, if any."""
+    errors = getattr(server, "handler_errors", [])
+    if errors:
+        raise errors[0]
+
+
 @contextmanager
-def running_http(service: ScriptedJobService, settings: ServerSettings | None = None) -> Iterator[ThreadingHTTPServer]:
+def running_http(
+    service: ScriptedJobService, settings: ServerSettings | None = None, *, bench_reads: ScriptedBenchReads | None = None,
+) -> Iterator[ThreadingHTTPServer]:
     # Deliberately called here, when a test enters the context, never in setup.
-    server = httpserver.create_http_server(settings or short_settings(), service)
+    extra: dict[str, Any] = {} if bench_reads is None else {"bench_reads": bench_reads}
+    server = httpserver.create_http_server(settings or short_settings(), service, **extra)
+    record_handler_errors(server)
     worker = Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
     worker.start()
     try:
@@ -231,6 +312,106 @@ def multipart() -> tuple[bytes, str]:
         "Content-Type: application/octet-stream\r\n\r\n"
     ).encode() + IMAGE + f"\r\n--{boundary}--\r\n".encode()
     return body, f"multipart/form-data; boundary={boundary}"
+
+
+def rpc(method: str, params: JsonObject | None = None, request_id: int = 1) -> JsonObject:
+    message: JsonObject = {"jsonrpc": "2.0", "id": request_id, "method": method}
+    if params is not None:
+        message["params"] = params
+    return message
+
+
+def mcp_request(
+    server: ThreadingHTTPServer, method: str, *,
+    message: Any = None, session: str | None = None, headers: Mapping[str, str | None] | None = None,
+) -> Response:
+    """One request to /mcp, with the session and protocol headers once there is a session.
+
+    A header given as None is left out. What a handler thread raised is raised
+    here, in the test, rather than the closed connection it leaves behind."""
+    combined: dict[str, str] = dict(MCP_HEADERS) if message is not None else {"Accept": MCP_HEADERS["Accept"]}
+    if session is not None:
+        combined["Mcp-Session-Id"] = session
+        combined["MCP-Protocol-Version"] = MCP_PROTOCOL_VERSION
+    for name, value in (headers or {}).items():
+        if value is None:
+            combined.pop(name, None)
+        else:
+            combined[name] = value
+    body = None if message is None else json.dumps(message).encode("utf-8")
+    response: Response | None = None
+    failure: BaseException | None = None
+    try:
+        response = request(server, method, MCP_PATH, body=body, headers=combined)
+    except (OSError, HTTPException) as error:
+        failure = error
+    raise_handler_error(server)
+    if failure is not None:
+        raise failure
+    assert response is not None
+    return response
+
+
+def mcp_initialize(
+    server: ThreadingHTTPServer, *, client_name: str = MCP_CLIENT_NAME, headers: Mapping[str, str | None] | None = None,
+) -> tuple[str, Response]:
+    """The 2025-06-18 handshake: initialize, then notifications/initialized. Returns the session id."""
+    params = {"protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": client_name, "version": "1.0"}}
+    response = mcp_request(server, "POST", message=rpc("initialize", params), headers=headers)
+    assert response.status == 200, response
+    session = response.headers.get("mcp-session-id")
+    assert session, response.headers
+    notified = mcp_request(server, "POST", message={"jsonrpc": "2.0", "method": "notifications/initialized"}, session=session, headers=headers)
+    assert notified.status == 202, notified
+    return session, response
+
+
+def mcp_call(
+    server: ThreadingHTTPServer, session: str, name: str, arguments: JsonObject | None = None, *,
+    request_id: int = 1, headers: Mapping[str, str | None] | None = None,
+) -> JsonObject:
+    """The `result` of one tools/call answered as plain JSON."""
+    message = rpc("tools/call", {"name": name, "arguments": arguments or {}}, request_id)
+    response = mcp_request(server, "POST", message=message, session=session, headers=headers)
+    assert response.status == 200, response
+    assert response.headers["content-type"].split(";", 1)[0] == "application/json", response.headers
+    body = response.json()
+    assert body.get("id") == request_id and "error" not in body, body
+    result = body["result"]
+    assert isinstance(result, dict) and isinstance(result.get("structuredContent"), dict), result
+    return result
+
+
+@contextmanager
+def background_mcp(
+    server: ThreadingHTTPServer, service: ScriptedJobService, message: Any, *, session: str,
+) -> Iterator[Future[Response]]:
+    future: Future[Response] = Future()
+
+    def work() -> None:
+        try:
+            future.set_result(mcp_request(server, "POST", message=message, session=session))
+        except BaseException as error:
+            future.set_exception(error)
+
+    worker = Thread(target=work, daemon=True)
+    worker.start()
+    try:
+        yield future
+    finally:
+        service.release_waiters()
+        worker.join(scaled_time_bound(15))
+        assert not worker.is_alive(), "MCP client thread did not finish"
+
+
+def sse_messages(body: bytes) -> list[Any]:
+    """The JSON messages of an event stream in order; comments and keep-alives carry none."""
+    messages = []
+    for frame in body.decode("utf-8").replace("\r\n", "\n").split("\n\n"):
+        data = [line[len("data:"):].lstrip() for line in frame.splitlines() if line.startswith("data:")]
+        if data:
+            messages.append(json.loads("\n".join(data)))
+    return messages
 
 
 def submission(state: str = "queued") -> JsonObject:

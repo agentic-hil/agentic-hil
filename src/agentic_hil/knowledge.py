@@ -779,6 +779,13 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         remediation=("Read Content-Range for the current size and request an available byte range.",),
         do_not=("Do not assume the log contains bytes beyond its reported size.",),
     ),
+    "bench_reads_unavailable": ErrorRemedy(
+        meaning="This bench server runs without a provider for the open read endpoints, so the read tools at /mcp have nothing to answer from.",
+        remediation=(
+            "Ask the operator to start the server with the read provider of the open read endpoints (#889); the job tools at /mcp work without it.",
+        ),
+        do_not=("Do not read the bench through direct hardware tools or a local MCP server on the bench machine instead.",),
+    ),
     CONFIG_STALE_ERROR: ErrorRemedy(
         meaning=(
             "The authoritative configuration on disk is not the one this MCP server is enforcing, so the backend it "

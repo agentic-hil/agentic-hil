@@ -22,8 +22,8 @@ from threading import Event
 from typing import cast
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from agentic_hil import bench
-from agentic_hil.httpapi import ByteRange, JobService, JobServiceError, ServerSettings
+from agentic_hil import bench, mcp_http
+from agentic_hil.httpapi import BenchReads, ByteRange, JobService, JobServiceError, ServerSettings
 from agentic_hil.types import JsonObject
 
 
@@ -44,9 +44,10 @@ def server_lock_warning() -> str | None:
 
 
 class _JobHTTPServer(ThreadingHTTPServer):
-    def __init__(self, settings: ServerSettings, service: JobService) -> None:
+    def __init__(self, settings: ServerSettings, service: JobService, bench_reads: BenchReads | None = None) -> None:
         self.settings = settings
         self.service = service
+        self.mcp = mcp_http.McpEndpoint(settings, service, bench_reads)
         self.stopping = Event()
         super().__init__((settings.host, settings.port), _JobRequestHandler)
 
@@ -55,10 +56,12 @@ class _JobHTTPServer(ThreadingHTTPServer):
         super().server_close()
 
 
-def create_http_server(settings: ServerSettings, service: JobService) -> ThreadingHTTPServer:
+def create_http_server(
+    settings: ServerSettings, service: JobService, *, bench_reads: BenchReads | None = None,
+) -> ThreadingHTTPServer:
     """Construct the production IPv4 loopback listener for the supplied service."""
     validate_listen_address(settings)
-    return _JobHTTPServer(settings, service)
+    return _JobHTTPServer(settings, service, bench_reads)
 
 
 _ERROR_STATUS = {
@@ -213,6 +216,9 @@ class _JobRequestHandler(BaseHTTPRequestHandler):
     def _route(self) -> None:
         parsed = urlsplit(self.path)
         path = parsed.path
+        if path == "/mcp":
+            mcp_http.handle(self)
+            return
         service = self.job_server.service
         if self.command == "POST" and path in ("/v1/jobs", "/v1/plans/check"):
             plan, artifacts = self._plan()
