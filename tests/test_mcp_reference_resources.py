@@ -484,13 +484,19 @@ def test_the_path_table_names_every_root_a_file_can_land_under(service: AgenticH
         "`%APPDATA%\\agentic-hil\\external-projects.json`, and `%USERPROFILE%\\.agentic-hil\\external-projects.json`",
         "`$XDG_CONFIG_HOME/agentic-hil/external-projects.json`, and `~/.agentic-hil/external-projects.json`",
     ]
-    # And the one location that has no second root keeps saying so. The machine
-    # directory on Linux is no fallback either: where it exists it replaces the
-    # home directory for every account (#777).
-    assert cells["device locks"] == [
-        "`%USERPROFILE%\\.agentic-hil\\device-locks`, fixed",
-        "`~/.agentic-hil/device-locks`, fixed; on Linux `/var/lib/agentic-hil/device-locks` instead, for every account, where an administrator created it",
-    ]
+    # Windows keeps its profile file and adds cross-account pipe ownership.
+    # The Linux directory still replaces the home directory where it exists.
+    assert cells["device locks"][1] == (
+        "`~/.agentic-hil/device-locks`, fixed; on Linux `/var/lib/agentic-hil/device-locks` instead, for every account, where an administrator created it"
+    )
+    windows = cells["device locks"][0]
+    if not (
+        "%USERPROFILE%\\.agentic-hil\\device-locks" in windows
+        and "named pipe" in windows.lower()
+        and "across accounts" in windows.lower()
+        and ("no setup" in windows.lower() or "without setup" in windows.lower())
+    ):
+        raise AssertionError("Windows device-lock reference omits shared pipe ownership")
 
 
 def _prose_lines(text: str) -> list[str]:

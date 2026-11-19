@@ -17,12 +17,17 @@ account's, though, and two accounts on one board diverge the same way (#777),
 so on Linux a directory an administrator creates for a group,
 ``/var/lib/agentic-hil/device-locks``, takes the home's place for every account
 whenever it exists, and one that exists and cannot be used refuses the lock
-rather than send it home.
+rather than send it home. Windows closes the same split without an
+administrator (#885): every device lock there is also a named pipe beside the
+file, a name that belongs to no account and that every account and session of
+the machine sees (``windows_device_lock``). The file stays, because an older
+version of the same account knows only the file.
 
 **Crash safety without an operator.** Ownership is the OS advisory lock on
 ``<digest>.lock``, which the kernel drops when the holding process dies. A
 killed run therefore frees its devices with no quarantine, no
-``recover --confirm-safe-state``, and no waiting. The sibling
+``recover --confirm-safe-state``, and no waiting. The pipe is the kernel's in
+the same way: its name goes with the holder's handle. The sibling
 ``<digest>.holder.json`` only *describes* the holder so a refusal can name it;
 it is advisory, and taking the OS lock over a record that still says ``held``
 is how this module detects that the previous owner died.
@@ -45,6 +50,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agentic_hil import windows_device_lock
 from agentic_hil.config import (
     ConfigError,
     _close_windows_handles,
@@ -307,7 +313,9 @@ def device_lock_root() -> Path:
     environment override, because an override is how two sessions stop seeing
     each other. The home directory is chosen because every process of this user
     reaches it without having to agree on a configuration first. Where the
-    machine directory exists, it is that instead, for every account alike.
+    machine directory exists, it is that instead, for every account alike. On
+    Windows a hold taken here is also a named pipe, which is what another
+    account sees.
     """
     machine = machine_device_lock_root()
     if machine is not None:
@@ -318,7 +326,8 @@ def device_lock_root() -> Path:
 
 def machine_lock_root_applies() -> bool:
     """Linux alone: on macOS ``/var`` is a link, which the walk refuses, and
-    Windows keeps its locks under the profile."""
+    Windows keeps its lock files under the profile and shares each hold through
+    a named pipe instead (#885)."""
     return sys.platform.startswith("linux")
 
 
@@ -421,6 +430,9 @@ class _HeldDevice:
     acquired_at: str
     holders: int = 1
     reclaimed_from: JsonObject | None = None
+    # On Windows, the pipe every account sees beside the file only this account
+    # sees (#885); None everywhere else.
+    pipe: windows_device_lock.HeldPipe | None = None
 
 
 class BenchMutex:
@@ -495,7 +507,7 @@ class BenchMutex:
         if not wanted:
             return []
         deadline = time.monotonic() + validated_wait(wait_s)
-        return self._take(wanted, deadline, stop_requested)
+        return self._take(wanted, deadline, stop_requested, pipes=os.name == "nt")
 
     def acquire_named(self, resource: str, *, wait_s: float = 0.0) -> bool:
         """Hold one machine-wide lock by name, whether or not it is a device.
@@ -579,16 +591,29 @@ class BenchMutex:
         """The recorded holder of a device, whether or not it is still alive."""
         return self._read_holder(resource)
 
-    def busy_result(self, resource: str, *, waited_s: float = 0.0) -> JsonObject:
-        on_disk = self._read_holder(resource) or {}
-        # Only a record in state `held` says who holds the device. A released
-        # one is what the last owner wrote as it let go, and the lock can be
-        # held again while it is still on disk: before the new holder has
-        # written its own, when that write failed, or under a lock that writes
-        # none. Read as the holder, it named an owner that is gone, with its
-        # old timestamps and a heartbeat that stopped when it let go.
-        record = on_disk if on_disk.get("state") == "held" else {}
-        holder = record.get("owner") if isinstance(record.get("owner"), dict) else None
+    def busy_result(self, resource: str, *, waited_s: float = 0.0, pipe: windows_device_lock.PipeTaken | None = None) -> JsonObject:
+        answer = None if pipe is None else windows_device_lock.ask(pipe.name)
+        if answer is None:
+            on_disk = self._read_holder(resource) or {}
+            # Only a record in state `held` says who holds the device. A released
+            # one is what the last owner wrote as it let go, and the lock can be
+            # held again while it is still on disk: before the new holder has
+            # written its own, when that write failed, or under a lock that writes
+            # none. Read as the holder, it named an owner that is gone, with its
+            # old timestamps and a heartbeat that stopped when it let go.
+            record = on_disk if on_disk.get("state") == "held" else {}
+            holder = record.get("owner") if isinstance(record.get("owner"), dict) else None
+        else:
+            # The file was free and the pipe was not (#885): the holder is
+            # another account, or a process whose lock root lies elsewhere. What
+            # its pipe answers now is the evidence, never a record this account
+            # wrote here earlier. The pid is the kernel's; the rest is the
+            # holder's own statement.
+            on_disk = {}
+            record = answer.record or {}
+            owner = record.get("owner")
+            claimed = owner if isinstance(owner, dict) else {}
+            holder = None if answer.pid is None else {**claimed, "pid": answer.pid}
         result: JsonObject = {
             "ok": False,
             "error_type": "device_busy",
@@ -601,16 +626,20 @@ class BenchMutex:
         }
         if holder is not None:
             result["holder"] = holder
-            # A pid names a process only within one PID namespace and one boot,
-            # and the record comes from whichever process holds the lock, in a
-            # directory another container or host may share. Whether this
-            # process holds the lock is answered by its own lock table, which
-            # no other process writes; the pid keeps the flag off a record some
-            # earlier holder left behind and off a forked child, which inherits
-            # the table.
-            lock_key = _LifetimeLock(self.root / f"{resource_digest(resource)}.lock").local_key
-            with _LOCAL_LOCKS_GUARD:
-                held_here = lock_key in _LOCAL_LOCKS
+            if answer is None:
+                # A pid names a process only within one PID namespace and one boot,
+                # and the record comes from whichever process holds the lock, in a
+                # directory another container or host may share. Whether this
+                # process holds the lock is answered by its own lock table, which
+                # no other process writes; the pid keeps the flag off a record some
+                # earlier holder left behind and off a forked child, which inherits
+                # the table.
+                lock_key = _LifetimeLock(self.root / f"{resource_digest(resource)}.lock").local_key
+                with _LOCAL_LOCKS_GUARD:
+                    held_here = lock_key in _LOCAL_LOCKS
+            else:
+                # The kernel read this pid off the pipe: it is the process that holds it.
+                held_here = True
             if held_here and holder.get("pid") == os.getpid():
                 result["holder_is_this_process"] = True
         age = _age_seconds(record.get("heartbeat_at"))
@@ -619,6 +648,10 @@ class BenchMutex:
             interval = record.get("heartbeat_interval_s")
             if isinstance(interval, (int, float)) and age > max(float(interval) * 4, 60.0):
                 result["holder_heartbeat_stale"] = True
+        if answer is not None and answer.stale:
+            # Connected, still held, and silent past the answer deadline: the
+            # pipe's form of a heartbeat that stopped.
+            result["holder_heartbeat_stale"] = True
         if waited_s > 0:
             result["waited_s"] = round(waited_s, 3)
         # The catalogue's steps, merged where the refusal is built, so every path
@@ -627,14 +660,19 @@ class BenchMutex:
         result.update(remediation_fields("device_busy"))
         return result
 
-    def _take(self, resources: list[str], deadline: float, stop_requested: Callable[[], bool] | None = None) -> list[str]:
-        """Retry complete sets, publishing ownership only after all locks are ours."""
+    def _take(self, resources: list[str], deadline: float, stop_requested: Callable[[], bool] | None = None, *, pipes: bool = False) -> list[str]:
+        """Retry complete sets, publishing ownership only after all locks are ours.
+
+        With `pipes` (devices on Windows, #885) each device is the file and then
+        its pipe, and a pipe that cannot be created gives its file back with the
+        rest of the attempt: busy, never free."""
         started = time.monotonic()
         while True:
             with self._guard:
                 # Pin one root for this attempt, even while _held is empty.
                 root = self.root
                 locks: dict[str, _LifetimeLock] = {}
+                held_pipes: dict[str, windows_device_lock.HeldPipe] = {}
                 failure: tuple[str, OSError] | None = None
                 with ExitStack() as rollback:
                     for resource in resources:
@@ -648,6 +686,19 @@ class BenchMutex:
                             break
                         rollback.callback(lock.release)
                         locks[resource] = lock
+                        if not pipes:
+                            continue
+                        # After the file and given back before it, so a contender
+                        # of this account still meets the file first. Silent until
+                        # the whole set is ours: a reader of a tentative pipe sees
+                        # it close under it on rollback, busy and never stale.
+                        try:
+                            pipe = windows_device_lock.take(resource_digest(resource), root)
+                        except windows_device_lock.PipeTaken as error:
+                            failure = (resource, error)
+                            break
+                        rollback.callback(pipe.close)
+                        held_pipes[resource] = pipe
                     if failure is None:
                         # Read reclamation evidence only after the whole set is
                         # secured. A failed attempt must not overwrite a dead
@@ -656,7 +707,13 @@ class BenchMutex:
                         for resource, lock in locks.items():
                             previous = self._read_holder(resource, lock.path.parent)
                             reclaimed = previous if isinstance(previous, dict) and previous.get("state") == "held" else None
-                            taken[resource] = _HeldDevice(resource=resource, lock=lock, acquired_at=utc_now_iso(), reclaimed_from=_reclaim_detail(reclaimed))
+                            taken[resource] = _HeldDevice(
+                                resource=resource,
+                                lock=lock,
+                                acquired_at=utc_now_iso(),
+                                reclaimed_from=_reclaim_detail(reclaimed),
+                                pipe=held_pipes.get(resource),
+                            )
                         for resource in resources:
                             if resource in self._held:
                                 self._held[resource].holders += 1
@@ -693,7 +750,8 @@ class BenchMutex:
                     }
                 ) from blocked_error
             if time.monotonic() >= deadline:
-                result = self.busy_result(resource, waited_s=time.monotonic() - started)
+                pipe_taken = blocked_error if isinstance(blocked_error, windows_device_lock.PipeTaken) else None
+                result = self.busy_result(resource, waited_s=time.monotonic() - started, pipe=pipe_taken)
                 if not isinstance(blocked_error, BlockingIOError):
                     result.update(filesystem_error_detail(blocked_error))
                 raise DeviceBusyError(result) from blocked_error
@@ -710,7 +768,13 @@ class BenchMutex:
         with suppress(ConfigError, OSError):
             self._write_holder(resource, "released", released=True)
         self._held.pop(resource, None)
-        held.lock.release()
+        try:
+            # The pipe before the file, the reverse of taking them; the file is
+            # given back even when the pipe's cleanup fails.
+            if held.pipe is not None:
+                held.pipe.close()
+        finally:
+            held.lock.release()
         if not self._held:
             self._stop_heartbeat_pump()
 
@@ -732,6 +796,11 @@ class BenchMutex:
             record["released_at"] = record["heartbeat_at"]
         if held is not None and held.reclaimed_from is not None:
             record["reclaimed_from"] = held.reclaimed_from
+        if held is not None and held.pipe is not None and state == "held":
+            # What the pipe answers every account from now on, the owner's label
+            # included (#885). Handed over before the write, so a record the disk
+            # refuses still reaches a contender of another account.
+            held.pipe.publish(record)
         # Beside the lock it describes, which is where a contender reads it.
         root = held.lock.path.parent if held is not None else self.root
         atomic_write_text(self._holder_path(resource, root), json.dumps(record, indent=2) + "\n", mode=lock_file_mode(root))
@@ -819,7 +888,12 @@ def _busy_summary(resource: str, holder: JsonObject | None, *, released: bool = 
             return f"Physical device {resource} is held, but the current holder is not known: the record beside its lock is marked released and names nobody who holds it now."
         return f"Physical device {resource} is held by another Agentic HIL owner."
     label = holder.get("label")
-    who = f"pid {holder.get('pid')} on {holder.get('host')} ({holder.get('frontend')})"
+    # A pipe that kept silent names its holder by the kernel's pid alone (#885).
+    who = f"pid {holder.get('pid')}"
+    if holder.get("host"):
+        who = f"{who} on {holder.get('host')}"
+    if holder.get("frontend"):
+        who = f"{who} ({holder.get('frontend')})"
     if label:
         who = f"{who} running {label}"
     return f"Physical device {resource} is held by {who}."

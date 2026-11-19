@@ -5167,11 +5167,18 @@ def _doctor_device_locks() -> JsonObject:
             "summary": f"Device locks are taken in the machine directory {machine}, shared by every account in its group.",
         }
     home = Path(os.path.expanduser("~")) / BENCH_ROOT_NAME / DEVICE_LOCK_DIRECTORY_NAME
+    summary = f"Device locks are taken in this account's {home}; another account on this machine does not see them."
+    if os.name == "nt":
+        # On Windows every hold is also a machine-wide named pipe (#885).
+        summary = (
+            f"Device locks are taken in this account's {home} and, from this version on, also held through a "
+            "machine-wide named pipe, so every account and session on this machine sees a hold."
+        )
     return {
         "ok": True,
         "root": "home",
         "path": str(home),
-        "summary": f"Device locks are taken in this account's {home}; another account on this machine does not see them.",
+        "summary": summary,
     }
 
 
