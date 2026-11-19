@@ -5,6 +5,17 @@
   "description": "Authoritative Agentic HIL project configuration containing all hardware resources, permissions, and limits. Reading a device needs no permission from version 2 on: exclusivity for the duration of a run replaced the read permission, so allow_probe and allow_read exist only in version 1 files. Writing and state-changing operations are declared per device: on the debugger that may be flashed or reset, and on each COM port and CAN bus that may be written. A generated configuration sets every one of them true, except allow_raw_debugger_commands and allow_mass_erase which it sets false because either one being true refuses flashing on that probe, so the bench is workable without hand-edited YAML. What an agent may write into a permission through project_config_set is false and nothing else, so that call can only ever narrow this file; regenerating it is a separate door with a separate grant (allow_config_write, or agentic-hil init --force at a person's shell) and it writes permissions again from the skeleton and the file it replaces.",
   "type": "object",
   "additionalProperties": false,
+  "if": {"required": ["version"], "properties": {"version": {"const": 4}}},
+  "else": {
+    "additionalProperties": false,
+    "properties": {
+      "version": true, "workspace_root": true, "state_root": true,
+      "permissions": true, "provenance": true, "target": true,
+      "debuggers": true, "debug": true, "artifacts": true,
+      "com_ports": true, "can_buses": true, "power_supplies": true,
+      "validation": true, "reports": true, "logs": true, "recovery": true
+    }
+  },
   "$defs": {
     "debugger_permissions": {
       "type": "object",
@@ -88,10 +99,36 @@
       "enum": [
         1,
         2,
-        3
+        3,
+        4
       ],
       "default": 1,
-      "description": "Which rules this file is read under; all three are read, so no file already on disk has to move. Absent means version 1: reading is gated by allow_probe and allow_read, which is how every file written before that release behaves and keeps behaving. Version 2 has no read permission at all; migrating means removing those keys and setting version: 2 in one edit. Version 3 additionally requires every com_ports entry to say which hardware it is - a serial_number, a resource_id, a /dev/serial/by-id/... device name, or an explicit identity_source naming what identifies it instead. `agentic-hil adopt-hardware` fills that in from the attached adapter and is run before the version is raised. A new file should say 3."
+      "description": "Which rules this file is read under; versions 1 through 4 are read, so no file already on disk has to move. Absent means version 1: reading is gated by allow_probe and allow_read, which is how every file written before that release behaves and keeps behaving. Version 2 has no read permission at all; migrating means removing those keys and setting version: 2 in one edit. Version 3 additionally requires every com_ports entry to say which hardware it is - a serial_number, a resource_id, a /dev/serial/by-id/... device name, or an explicit identity_source naming what identifies it instead. `agentic-hil adopt-hardware` fills that in from the attached adapter and is run before the version is raised. Version 4 additionally permits an optional server block. Local generation still writes version 3."
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_root"],
+      "description": "Version 4 only. Bench job configuration; limits and listener settings are represented, not enforced by the job worker.",
+      "properties": {
+        "job_root": {"type": "string", "minLength": 1, "description": "Absolute root for fresh job workspaces."},
+        "listen": {"type": "string", "default": "127.0.0.1:8765"},
+        "hostnames": {"type": "array", "items": {"type": "string"}, "default": []},
+        "allowed_origins": {"type": "array", "items": {"type": "string"}, "default": []},
+        "retention_days": {"type": "integer", "minimum": 1, "default": 14},
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_upload_mb": {"type": "integer", "minimum": 1, "default": 64},
+            "max_artifact_wait_s": {"type": "integer", "minimum": 1, "default": 600},
+            "max_job_runtime_s": {"type": "integer", "minimum": 1, "default": 900},
+            "max_queue_s": {"type": "integer", "minimum": 1, "default": 86400},
+            "reserve_after_s": {"type": "integer", "minimum": 0, "default": 600},
+            "max_queued_jobs_per_user": {"type": "integer", "minimum": 1, "default": 5}
+          }
+        }
+      }
     },
     "workspace_root": {
       "type": "string",

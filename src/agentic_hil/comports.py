@@ -51,6 +51,7 @@ from agentic_hil.report import (
     safe_filename,
     timestamp_for_filename,
     utc_now_iso,
+    with_job_fields,
     write_report,
 )
 from agentic_hil.types import (
@@ -889,6 +890,9 @@ class ComPortSession:
         if contact is None:
             self.contact.record("serial_open")
         self.log_path = log_path
+        # Capture on the worker thread; passive feedback is written by a reader
+        # thread which does not inherit context variables.
+        self.job_fields = with_job_fields({})
         self.started_at = utc_now_iso()
         self.active = True
         self.buffer = bytearray()
@@ -950,6 +954,7 @@ class ComPortSession:
         workspace log, as they always have.
         """
         with self.audit_lock:
+            event = {**event, **self.job_fields}
             if config is None:
                 return append_jsonl(self.log_path, event)
             return append_jsonl_audited(config, self.log_path, event)

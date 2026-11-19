@@ -639,7 +639,8 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # `agentic_hil.backends.rs3005p`, the RS-3005P power supply backend (#735), is
 # the 51st; `agentic_hil.power_supply`, the power-supply config module (#731),
 # was the 50th; `agentic_hil.backends.esptool`, the ESP32 backend, was the 49th.
-SCANNED_MODULE_COUNT = 52
+# `agentic_hil.serverjobs`, the job worker for #886, is the 53rd scanned module.
+SCANNED_MODULE_COUNT = 53
 # The power supply tools (#733) add seven, the 220th to the 226th: the six
 # `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
 # `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
@@ -721,7 +722,11 @@ COLLECTED_TYPE_COUNT = 232
 # or a flash capture decodes with, and is the only writer of all three.
 # UartRunner._defmt_expect is the one producer of that type.
 # STLinkBackend._failure_result and STLinkBackend.info produce target_command_error (#870).
-PRODUCER_COUNT = 712
+# Server jobs (#886) add five producers: `config.server_config` writes
+# `config_invalid`; `serverjobs._job_config` writes `config_invalid` and
+# `invalid_argument`; `serverjobs.run_job` writes `config_invalid` and
+# `resource_quarantined`. These existing types leave the type count at 232.
+PRODUCER_COUNT = 717
 
 
 def pin_problems(inventory: Inventory) -> list[str]:

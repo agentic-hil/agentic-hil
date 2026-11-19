@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- Represent optional version 4 bench-server settings and run unchanged plans from isolated job workspaces under the bench's hardware policy, with bench-owned incidents and client-claimed attribution on job reports and ledgers. (#886)
+
 ## [0.27.0] - 2026-11-18
 
 ### Added

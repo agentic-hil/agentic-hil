@@ -4,8 +4,9 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Callable
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +32,22 @@ from agentic_hil.redact import filesystem_error_detail, redact_values
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 _GENESIS_DIGEST = "0" * 64
+_JOB_FIELDS: ContextVar[JsonObject | None] = ContextVar("job_report_fields", default=None)
+
+
+@contextmanager
+def job_report_context(job_id: str, submitted_by: str) -> Iterator[None]:
+    """Attribute writes during one trusted worker invocation, never bench commands."""
+    token = _JOB_FIELDS.set({"job_id": job_id, "submitted_by": submitted_by, "submitted_by_source": "client"})
+    try:
+        yield
+    finally:
+        _JOB_FIELDS.reset(token)
+
+
+def with_job_fields(value: JsonObject) -> JsonObject:
+    """Runtime claims override payload fields before redaction and audit hashing."""
+    return {**value, **(_JOB_FIELDS.get() or {})}
 
 
 def utc_now_iso() -> str:
@@ -52,7 +69,7 @@ def logs_directory(config: AgenticHILConfig) -> str:
 def append_jsonl(log_path: str, event: JsonObject, config: AgenticHILConfig | None = None) -> Exception | None:
     # Masked once, before either copy is written, so the workspace log and the
     # canonical ledger hold the same line and neither holds a supply serial.
-    entry = redact_values(dict(event), supply_secrets(config))
+    entry = redact_values(with_job_fields(event), supply_secrets(config))
     entry.setdefault("time", utc_now_iso())
     line = json.dumps(entry) + "\n"
     # The canonical trusted copy is written FIRST: if the untrusted workspace
@@ -383,7 +400,7 @@ def config_in_force(config: AgenticHILConfig) -> JsonObject:
 def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     # A supply serial never reaches a report on disk, whichever field of the run
     # carried it: every copy written below is made from this masked one.
-    enriched = redact_values(dict(report), supply_secrets(config))
+    enriched = redact_values(with_job_fields(report), supply_secrets(config))
     enriched.setdefault("audit_ok", True)
     # setdefault, not assignment: `recommit_report_with_status` and the adoption
     # path commit the same report again after a terminal lease transition, and
