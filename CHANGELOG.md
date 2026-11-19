@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- Add `agentic-hil serve` and a standard-library HTTP job transport on `127.0.0.1`, with multipart submission, bearer-protected uploads and results, conditional status reads, resumable events and browser request checks. The settings adapter and job-service factory are integration seams; startup refuses until server configuration and the job store are integrated. Server settings also enable the startup and doctor warning when other accounts cannot see the server's device locks. (#888)
+
 ## [0.27.0] - 2026-11-18
 
 ### Added
