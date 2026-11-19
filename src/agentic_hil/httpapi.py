@@ -203,6 +203,33 @@ class BenchReads(Protocol):
     def doctor(self) -> JsonObject: ...
 
 
+class McpBenchReads(Protocol):
+    """The content of the open read endpoints, which #889 supplies.
+
+    The five tools that also exist locally answer in the local tools' field
+    names. /mcp passes every answer through unchanged. Each method may raise
+    JobServiceError.
+    """
+
+    def bench_describe(self) -> JsonObject: ...
+
+    def bench_queue_status(self) -> JsonObject: ...
+
+    def bench_jobs_list(
+        self, *, state: str | None, device: str | None, user: str | None, since: str | None,
+    ) -> JsonObject: ...
+
+    def debugger_probes_list(self) -> JsonObject: ...
+
+    def debugger_info(self) -> JsonObject: ...
+
+    def com_ports_list(self) -> JsonObject: ...
+
+    def can_buses_list(self) -> JsonObject: ...
+
+    def hardware_lease_status(self) -> JsonObject: ...
+
+
 def load_server_settings(config: AgenticHILConfig) -> ServerSettings | None:
     """Recognise settings on already-loaded configuration, pending #886.
 

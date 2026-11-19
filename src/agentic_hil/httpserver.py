@@ -22,8 +22,8 @@ from threading import Event
 from typing import cast
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from agentic_hil import bench, httpread
-from agentic_hil.httpapi import BenchReads, ByteRange, JobService, JobServiceError, ServerSettings
+from agentic_hil import bench, httpread, mcp_http
+from agentic_hil.httpapi import BenchReads, ByteRange, JobService, JobServiceError, McpBenchReads, ServerSettings
 from agentic_hil.types import JsonObject
 
 
@@ -44,10 +44,14 @@ def server_lock_warning() -> str | None:
 
 
 class _JobHTTPServer(ThreadingHTTPServer):
-    def __init__(self, settings: ServerSettings, service: JobService, *, bench: BenchReads | None = None) -> None:
+    def __init__(
+        self, settings: ServerSettings, service: JobService, bench_reads: McpBenchReads | None = None,
+        *, bench: BenchReads | None = None,
+    ) -> None:
         self.settings = settings
         self.service = service
         self.bench = bench
+        self.mcp = mcp_http.McpEndpoint(settings, service, bench_reads)
         self.stopping = Event()
         super().__init__((settings.host, settings.port), _JobRequestHandler)
 
@@ -56,10 +60,13 @@ class _JobHTTPServer(ThreadingHTTPServer):
         super().server_close()
 
 
-def create_http_server(settings: ServerSettings, service: JobService, *, bench: BenchReads | None = None) -> ThreadingHTTPServer:
+def create_http_server(
+    settings: ServerSettings, service: JobService, *,
+    bench_reads: McpBenchReads | None = None, bench: BenchReads | None = None,
+) -> ThreadingHTTPServer:
     """Construct the production IPv4 loopback listener for the supplied service."""
     validate_listen_address(settings)
-    return _JobHTTPServer(settings, service, bench=bench)
+    return _JobHTTPServer(settings, service, bench_reads, bench=bench)
 
 
 _ERROR_STATUS = {
@@ -221,6 +228,9 @@ class _JobRequestHandler(BaseHTTPRequestHandler):
             self._respond(answered.code, answered.body, answered.media_type, answered.headers)
             return
         path = parsed.path
+        if path == "/mcp":
+            mcp_http.handle(self)
+            return
         service = self.job_server.service
         if self.command == "POST" and path in ("/v1/jobs", "/v1/plans/check"):
             plan, artifacts = self._plan()
