@@ -149,8 +149,22 @@ def run(command: list[str], stdout_file: str | None) -> int:
         relays = [threading.Thread(target=relay, args=(child.stderr, sys.stderr, redact), daemon=True)]
         if report is None:
             relays.append(threading.Thread(target=relay, args=(child.stdout, sys.stdout, redact), daemon=True))
-        for thread in relays:
-            thread.start()
+        # A signal sent to this process goes to any one of its threads that
+        # does not block it, and Python runs the handler in the main thread
+        # alone, once it is back from the wait below. Linux picks the main
+        # thread; macOS may pick a relay, and then the wait ends only when the
+        # command exits by itself, without ever hearing the signal. The relays
+        # inherit the signals blocked while they start, so only the main thread
+        # can take one; one that lands meanwhile is taken when it unblocks.
+        masked = hasattr(signal, "pthread_sigmask")
+        if masked:
+            mask = signal.pthread_sigmask(signal.SIG_BLOCK, list(previous))
+        try:
+            for thread in relays:
+                thread.start()
+        finally:
+            if masked:
+                signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         returncode = child.wait()
         for thread in relays:
             thread.join(READER_GRACE_S)

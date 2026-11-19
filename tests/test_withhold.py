@@ -304,3 +304,31 @@ def test_a_stop_signal_reaches_the_command_and_what_it_says_then_is_withheld(tmp
 
     assert wrapper.returncode == 3, err
     assert out == "stopping the plan on probe [withheld]\n"
+
+
+@pytest.mark.skipif(not hasattr(signal, "pthread_sigmask"), reason="a thread's signal mask exists on POSIX alone")
+def test_a_stop_signal_sent_to_the_process_is_never_taken_by_a_relay(
+    sysfs: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture
+) -> None:
+    """The relays block the signals the main thread passes on, and the main thread blocks none of them.
+
+    A signal sent to the process goes to any one of its threads that does not
+    block it. Linux picks the main thread; macOS may pick a relay, and then the
+    main thread, the only one Python runs the handler in, stays inside the wait
+    for the command the signal was meant for until the command exits by itself.
+    """
+    relay = withhold.relay
+    masks: list[set[int]] = []
+
+    def watched(source: object, sink: object, redact: object) -> None:
+        masks.append(set(signal.pthread_sigmask(signal.SIG_BLOCK, [])))
+        relay(source, sink, redact)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(withhold, "relay", watched)
+    assert withhold.main(["run", "--", *a_command("print('hello')")]) == 0
+
+    assert capfd.readouterr().out == "hello\n"
+    assert len(masks) == 2
+    for mask in masks:
+        assert {signal.SIGINT, signal.SIGTERM} <= mask
+    assert not {signal.SIGINT, signal.SIGTERM} & set(signal.pthread_sigmask(signal.SIG_BLOCK, []))
