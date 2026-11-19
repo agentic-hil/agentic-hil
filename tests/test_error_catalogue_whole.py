@@ -642,7 +642,9 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # The HTTP transport (#888) adds `agentic_hil.httpapi` and
 # `agentic_hil.httpserver` to the previous 52 modules.
 # `agentic_hil.serverjobs`, the job worker for #886, is the 55th scanned module.
-SCANNED_MODULE_COUNT = 55
+# `agentic_hil.windows_device_lock`, the Windows device-lock pipe module (#885),
+# is the 56th scanned module.
+SCANNED_MODULE_COUNT = 56
 # The power supply tools (#733) add seven, the 220th to the 226th: the six
 # `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
 # `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
