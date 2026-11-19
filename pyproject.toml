@@ -188,6 +188,7 @@ files = [
   "src/agentic_hil/httpserver.py",
   "src/agentic_hil/jobstore.py",
   "src/agentic_hil/mcp.py",
+  "src/agentic_hil/mcp_http.py",
   "src/agentic_hil/power_supply.py",
   "src/agentic_hil/redact.py",
   "src/agentic_hil/report.py",

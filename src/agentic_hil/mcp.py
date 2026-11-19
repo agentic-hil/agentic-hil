@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import weakref
+from collections.abc import Callable
 from typing import Any
 
 from agentic_hil import __version__
@@ -297,7 +298,14 @@ def handle_mcp_message(message: Any, tools: AgenticHILToolService) -> JsonObject
     return handle_single_mcp_message(message, tools)
 
 
-def handle_single_mcp_message(message: Any, tools: AgenticHILToolService) -> JsonObject | None:
+def handle_single_mcp_message(
+    message: Any, tools: Any, method_handler: Callable[[Any, str, Any, Any], JsonObject] | None = None,
+) -> JsonObject | None:
+    """One JSON-RPC message, answered by `method_handler`, `handle_method` when it is None.
+
+    The envelope (the jsonrpc check, notifications, -32602 and -32603) is this
+    code for every transport; `/mcp` passes its own method handler and its call
+    context as `tools`."""
     if not isinstance(message, dict):
         return error_response(None, JSONRPC_INVALID_REQUEST, "Invalid Request")
     request_id = message.get("id")
@@ -307,7 +315,7 @@ def handle_single_mcp_message(message: Any, tools: AgenticHILToolService) -> Jso
     if is_notification:
         return None
     try:
-        return handle_method(request_id, str(message["method"]), message.get("params", {}), tools)
+        return (method_handler or handle_method)(request_id, str(message["method"]), message.get("params", {}), tools)
     except InvalidParamsError as error:
         return error_response(request_id, JSONRPC_INVALID_PARAMS, "Invalid params", {"summary": fault_summary(error)})
     except Exception as error:
