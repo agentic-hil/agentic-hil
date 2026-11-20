@@ -648,8 +648,9 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # its fair scheduler (#887), are the 57th and the 58th. The MCP transport at
 # /mcp (#890) adds `agentic_hil.mcp_http`, the 59th. The open read endpoints
 # (#889) add `agentic_hil.httpread` and `agentic_hil.benchview`, the 60th and
-# the 61st.
-SCANNED_MODULE_COUNT = 61
+# the 61st. The bench server's job service and its remote client (#891) add
+# `agentic_hil.benchjobs` and `agentic_hil.remote`, the 62nd and the 63rd.
+SCANNED_MODULE_COUNT = 63
 # The power supply tools (#733) add seven, the 220th to the 226th: the six
 # `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
 # `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
@@ -668,7 +669,14 @@ SCANNED_MODULE_COUNT = 61
 # The MCP transport at /mcp (#890) adds `bench_reads_unavailable`, the 246th.
 # The open read endpoints (#889) add three: `admin_loopback_only`,
 # `device_not_found` and `bench_view_unavailable`.
-COLLECTED_TYPE_COUNT = 249
+# The bench server's wiring and its remote client (#891) take one away,
+# `job_store_unavailable`, which nothing writes once serve runs on the real job
+# service, and add eleven, the 249th to the 259th: the job service writes
+# `job_token_invalid`, `job_finished`, `job_withdrawn`, `job_expired`,
+# `job_not_ended`, `artifact_unreferenced`, `artifact_already_uploaded` and
+# `range_not_satisfiable`, the scheduler `artifact_missing`, and the client
+# `bench_unreachable` and `remote_artifact_missing`.
+COLLECTED_TYPE_COUNT = 259
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -752,7 +760,21 @@ COLLECTED_TYPE_COUNT = 249
 # `admin_loopback_only`, `bench_view_unavailable` and `device_not_found`, and
 # two writing `invalid_argument`, one for the job filters and one for the
 # recover body.
-PRODUCER_COUNT = 746
+# The bench server's wiring and its remote client (#891) take one away,
+# `httpapi.open_job_service` writing `job_store_unavailable`, and add seventeen.
+# Thirteen are in `benchjobs`, one function per refusal family:
+# `_not_found` writes `job_not_found`, `_token_refused` `job_token_invalid`,
+# `_ended_refusal` the four ended types (`job_finished`, `job_withdrawn`,
+# `job_expired`, `plan_runtime_exceeded`), `_not_ended` `job_not_ended`,
+# `_admission_refusal` `max_queued_jobs_per_user`, `_artifact_refusal`
+# `artifact_unreferenced` and `artifact_already_uploaded`, `_range_refused`
+# `range_not_satisfiable`, `_device_refused` `device_not_found` and
+# `_filter_refused` `invalid_argument`. `Scheduler.tick` writes
+# `artifact_missing`. Three are in `remote`: `_unreachable` writes
+# `bench_unreachable`, `_missing_artifact` `remote_artifact_missing` and
+# `_stored_token` `job_token_missing`. `server_not_configured` moves from
+# `cli.serve` to `cli.bench_server`, which changes no count.
+PRODUCER_COUNT = 762
 
 
 def pin_problems(inventory: Inventory) -> list[str]:
@@ -811,11 +833,19 @@ PINNED_DYNAMIC: dict[DynamicSite, str] = {
         "which the affected participant jobs retain"
     ),
     ("scheduler", "Scheduler._terminal", "record['error_type']"): "the worker record's own type, preserved by terminal reconciliation",
-    ("scheduler", "Scheduler.provide_artifacts", "error.error_type"): "the validation exception's own type, preserved by artifact completion",
+    ("scheduler", "Scheduler._provide", "error.error_type"): (
+        "the validation exception's own type, preserved by artifact completion, whether the artifacts arrive as files or as bytes"
+    ),
     ("scheduler", "Scheduler.status", "copy.deepcopy(data.get('error_type'))"): (
         "the stored job's type, copied into the status view without creating another type"
     ),
-    ("scheduler", "Scheduler.submit", "error.error_type"): "the validation exception's own type, preserved by submission",
+    ("scheduler", "Scheduler._submit", "error.error_type"): (
+        "the validation exception's own type, preserved by submission, whether the plan arrives as a file or as bytes"
+    ),
+    ("benchjobs", "_admission_refusal", "error_type"): (
+        "the scheduler's own refusal of a submitted plan (job_input_invalid, plan_runtime_exceeded or the preflight "
+        "refusal it forwards), handed to the HTTP API under that type with the refusal as validation_error"
+    ),
 }
 
 
@@ -1190,7 +1220,13 @@ def test_each_exclusion_is_true(pair: Pair, reference: AgenticHILToolService, tm
 
 
 def test_every_computed_type_is_pinned_with_what_it_carries() -> None:
-    assert scanned().dynamic == set(PINNED_DYNAMIC)
+    # A fresh scan, and the two differences sorted, so the refusal names the
+    # same sites in the same order whatever the hash seed of the run.
+    computed = scan().dynamic
+    missing = sorted(set(PINNED_DYNAMIC) - computed)
+    unpinned = sorted(computed - set(PINNED_DYNAMIC))
+    if missing or unpinned:
+        raise AssertionError(f"pinned and not computed: {missing}; computed and not pinned: {unpinned}")
     for site, reason in PINNED_DYNAMIC.items():
         assert reason.strip(), site
 

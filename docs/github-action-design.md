@@ -41,16 +41,19 @@ a permission, install a debugger toolchain, or clear a quarantine.
 
 ## What it is not
 
-**There is no hosted or remote bench, by design.** The `bench` input exists so
-that this is stated rather than implied: `local` is the only accepted value, and
-anything else (a hostname, a bench identifier, `remote`, `auto`) is refused
-before anything is installed, with an error that says remote execution is not
-available. Agentic HIL's whole safety model rests on one machine holding one
+**There is no hosted bench, by design.** The `bench` input exists so that this
+is stated rather than implied: `local` is the only accepted value, and anything
+else (a hostname, a bench identifier, `remote`, `auto`) is refused before
+anything is installed, with an error that says the action runs on the bench
+itself. Agentic HIL's whole safety model rests on one machine holding one
 physical device under an operating-system lock, with the policy file on that
-machine and outside the repository (see [safety model](safety-model.md)).
-Routing a run to a bench elsewhere would need a trust and transport story that
-does not exist here, and an input that quietly accepted a hostname would be a
-promise the product cannot keep.
+machine and outside the repository (see [safety model](safety-model.md)). A
+bench elsewhere on your own network is a different shape and not this input:
+its operator runs `agentic-hil serve` on the machine the board is plugged into,
+which keeps the policy and the locks there, and a workflow submits to it with
+`agentic-hil remote submit`, as `examples/ci/shared-bench.yml` does (see
+[shared bench](shared-bench.md)). An input that quietly accepted a hostname
+would hide which of the two a run was.
 
 **The authoritative configuration never comes from the repository.** It is not
 an input, not a file the workflow writes, and not something the action

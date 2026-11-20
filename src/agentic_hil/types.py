@@ -601,6 +601,11 @@ class ServerLimitsConfig:
     max_queued_jobs_per_user: int = 5
 
 
+# The networks a bench server answers when `server.allowed_networks` names none:
+# the three private IPv4 ranges. Loopback is answered beside whatever is listed.
+DEFAULT_ALLOWED_NETWORKS = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+
+
 @dataclass(frozen=True)
 class ServerConfig:
     job_root: str
@@ -609,6 +614,7 @@ class ServerConfig:
     allowed_origins: tuple[str, ...] = ()
     limits: ServerLimitsConfig = field(default_factory=ServerLimitsConfig)
     retention_days: int = 14
+    allowed_networks: tuple[str, ...] = DEFAULT_ALLOWED_NETWORKS
 
 
 @dataclass(frozen=True)

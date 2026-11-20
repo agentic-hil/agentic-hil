@@ -1,9 +1,16 @@
-"""Standard-library loopback HTTP transport for submitted plans.
+"""Standard-library HTTP transport for submitted plans, on loopback or a trusted LAN.
 
 The service is the only path to jobs: this module reads no configuration,
 plan, artifact or result files, and never builds, imports or executes uploads.
 Long polls and event streams use their connection threads and bounded service
 reads. Bearer credentials and URL queries are never written to request logs.
+
+Who is answered is decided three times, each by what the connection itself
+says rather than by anything a request claims: a peer outside
+`allowed_networks` is closed before a byte is read, a Host that names neither
+this listener nor a configured hostname is refused, and an Origin outside
+`allowed_origins` is refused before a body is read. No answer carries a CORS
+header, so a page in a browser can neither submit nor read.
 """
 
 from __future__ import annotations
@@ -18,19 +25,71 @@ from email import policy
 from email.message import Message
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import IPv4Address
 from threading import Event
-from typing import cast
+from typing import Any, cast
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from agentic_hil import bench, httpread, mcp_http
 from agentic_hil.httpapi import BenchReads, ByteRange, JobService, JobServiceError, McpBenchReads, ServerSettings
 from agentic_hil.types import JsonObject
 
+# The listen address that means every IPv4 address of this machine.
+_WILDCARD = IPv4Address("0.0.0.0")
+
 
 def validate_listen_address(settings: ServerSettings) -> None:
-    """Refuse other listen addresses before constructing a socket."""
-    if settings.host != "127.0.0.1":
-        raise JobServiceError("server_listen_refused", "serve listens only on 127.0.0.1; #891 introduces non-loopback listening.")
+    """Refuse a listen address that is not an IPv4 address, before constructing a socket.
+
+    A name would be resolved to whatever it resolves to at startup, and the
+    listener is IPv4 alone, so neither a hostname nor an IPv6 address is one."""
+    try:
+        IPv4Address(settings.host)
+    except ValueError as error:
+        raise JobServiceError(
+            "server_listen_refused",
+            "The bench server listens on an IPv4 address, and this listen address is not one.",
+            {"listen": settings.host},
+        ) from error
+
+
+def peer_admitted(address: str, settings: ServerSettings) -> bool:
+    """Whether a connection from the socket peer `address` is answered at all.
+
+    Loopback is answered whatever `allowed_networks` says, so the bench machine
+    always reaches its own server; any other peer only from a listed network."""
+    try:
+        peer = IPv4Address(address)
+    except ValueError:
+        return False
+    return peer.is_loopback or any(peer in network for network in settings.allowed_networks)
+
+
+def host_allowed(value: str, settings: ServerSettings, port: int, local_address: str) -> bool:
+    """Whether a request's Host header names this listener.
+
+    `port` is the bound port and `local_address` the address the connection
+    arrived on. A Host names the listener by a configured hostname or by its
+    address: the listen address, or for a wildcard listen the local address of
+    this connection, which a client reaching it by address sends and a page
+    rebinding a name of its own does not. A port, when given, is the bound one."""
+    try:
+        authority = urlsplit("//" + value)
+        if authority.path or authority.query or authority.fragment or authority.username is not None or authority.password is not None:
+            return False
+        host = authority.hostname
+        if authority.port not in (None, port):
+            return False
+    except ValueError:
+        return False
+    if host is None:
+        return False
+    try:
+        wildcard = IPv4Address(settings.host) == _WILDCARD
+    except ValueError:
+        wildcard = False
+    address = local_address if wildcard else settings.host
+    return host.lower() in {address.lower(), *(name.lower() for name in settings.hostnames)}
 
 
 def server_lock_warning() -> str | None:
@@ -55,6 +114,14 @@ class _JobHTTPServer(ThreadingHTTPServer):
         self.stopping = Event()
         super().__init__((settings.host, settings.port), _JobRequestHandler)
 
+    def verify_request(self, request: Any, client_address: Any) -> bool:
+        """Close a connection from outside `allowed_networks` before a byte of it is read.
+
+        No answer is sent, so a peer the bench does not serve learns nothing
+        from it, and nothing is logged: this server keeps no request log."""
+        address = client_address[0] if isinstance(client_address, tuple) and client_address else None
+        return isinstance(address, str) and peer_admitted(address, self.settings)
+
     def server_close(self) -> None:
         self.stopping.set()
         super().server_close()
@@ -64,7 +131,7 @@ def create_http_server(
     settings: ServerSettings, service: JobService, *,
     bench_reads: McpBenchReads | None = None, bench: BenchReads | None = None,
 ) -> ThreadingHTTPServer:
-    """Construct the production IPv4 loopback listener for the supplied service."""
+    """Construct the production IPv4 listener for the supplied service."""
     validate_listen_address(settings)
     return _JobHTTPServer(settings, service, bench_reads, bench=bench)
 
@@ -77,9 +144,14 @@ _ERROR_STATUS = {
     "job_token_missing": 401,
     "artifact_unreferenced": 409,
     "artifact_already_uploaded": 409,
-    "per_user_limit": 429,
+    "max_queued_jobs_per_user": 429,
     "queue_full": 503,
     "job_not_found": 404,
+    "job_not_ended": 409,
+    "job_finished": 409,
+    "job_withdrawn": 409,
+    "job_expired": 409,
+    "plan_runtime_exceeded": 409,
     "request_too_large": 413,
     "unsupported_media_type": 415,
     "range_not_satisfiable": 416,
@@ -88,7 +160,7 @@ _ERROR_STATUS = {
     "device_not_found": 404,
     "bench_view_unavailable": 503,
 }
-_ENDED_ERRORS = {"job_finished", "job_withdrawn", "job_expired", "job_runtime_exceeded"}
+_ENDED_ERRORS = {"job_finished", "job_withdrawn", "job_expired", "plan_runtime_exceeded"}
 
 
 class _JobRequestHandler(BaseHTTPRequestHandler):
@@ -139,21 +211,16 @@ class _JobRequestHandler(BaseHTTPRequestHandler):
         if origins and (len(origins) != 1 or origins[0] not in settings.allowed_origins):
             raise JobServiceError("origin_refused", "The request Origin is not allowed by this server.")
         hosts = self.headers.get_all("Host", [])
-        if len(hosts) != 1 or not self._host_allowed(hosts[0]):
+        if len(hosts) != 1 or not host_allowed(hosts[0], settings, self.job_server.server_port, self._local_address()):
             raise JobServiceError("host_refused", "The request Host is not this listener or a configured hostname.")
 
-    def _host_allowed(self, value: str) -> bool:
+    def _local_address(self) -> str:
+        """The address this connection arrived on, which a wildcard listener's Host may name."""
         try:
-            authority = urlsplit("//" + value)
-            if authority.path or authority.query or authority.fragment or authority.username is not None or authority.password is not None:
-                return False
-            host = authority.hostname
-            if authority.port not in (None, self.job_server.server_port):
-                return False
-        except ValueError:
-            return False
-        settings = self.job_server.settings
-        return host is not None and host.lower() in {settings.host, *(name.lower() for name in settings.hostnames)}
+            local = self.connection.getsockname()
+        except OSError:
+            return self.job_server.settings.host
+        return str(local[0]) if isinstance(local, tuple) and local else self.job_server.settings.host
 
     def _token(self) -> str:
         values = self.headers.get_all("Authorization", [])

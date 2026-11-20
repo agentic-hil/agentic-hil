@@ -1,0 +1,102 @@
+# A worked GitHub Actions workflow for a project whose tests run on a shared
+# bench: a machine on your network with the board plugged into it, running
+# `agentic-hil serve`. Copy it to `.github/workflows/shared-bench.yml` in your
+# own repository and change three things: the runner labels, the plan path and
+# the build command. The bench's address and the release to install are
+# repository variables, so neither is written here.
+#
+# The difference from examples/ci/github-actions.yml is where the board is. That
+# workflow runs on the machine the board is plugged into; this one runs anywhere
+# that can reach the bench's port, builds there, and hands the plan and the image
+# to the bench, which queues the job, runs it with its own configuration and its
+# own permissions, and answers with the report and the JUnit file. Nothing here
+# can name a device, a permission or a configuration: a plan is all a submission
+# carries. Setting up the bench is in docs/shared-bench.md.
+name: Shared bench
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hardware:
+    # Self-hosted because the bench answers its own network and nothing else: a
+    # hosted runner is outside every network the bench's `allowed_networks`
+    # lists, and opening the bench to it would open it to the internet. The
+    # label says which runners sit where the bench can be reached.
+    runs-on: [self-hosted, bench-lan]
+
+    # The trust rule of the hardware job in examples/ci/github-actions.yml,
+    # unchanged, because a plan submitted here drives the same board: no pull
+    # request from a fork, no `pull_request_target`, and no `workflow_run`. The
+    # bench takes a plan from anybody who reaches its port, so this `if:` and
+    # the repository's runner and fork settings are what keep a fork's plan off
+    # it. See docs/ci-examples.md for the split.
+    if: >-
+      github.event_name != 'pull_request_target'
+      && github.event_name != 'workflow_run'
+      && (github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository)
+
+    # The bench queues the job, so no concurrency group is needed here, and
+    # this covers the wait in the queue as well as the run.
+    timeout-minutes: 60
+
+    env:
+      # Where the bench listens, such as http://192.168.1.20:8765. Every
+      # `agentic-hil remote` command reads it, so no step repeats it.
+      AGENTIC_HIL_BENCH_URL: ${{ vars.AGENTIC_HIL_BENCH_URL }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # The client needs no configuration, no probe and no permission: it reads
+      # the plan, sends it, and waits. The exact release comes from the
+      # repository variable AGENTIC_HIL_VERSION, the one the bench runs.
+      - name: Install the pinned Agentic HIL
+        run: python -m pip install "agentic-hil==${{ vars.AGENTIC_HIL_VERSION }}"
+
+      # The one project-specific step. Yours will differ; what matters is that
+      # every artifact the plan names exists before it is submitted, because the
+      # submission carries them.
+      - name: Build the firmware
+        run: |
+          cmake --preset Debug
+          cmake --build --preset Debug
+
+      # One submission: the plan and every artifact it names. `--wait` follows
+      # the job through the bench's queue to its end and exits with the run's
+      # own verdict, so a red run fails this step the way a local test-reactor
+      # does. `--junit-xml` writes the run's JUnit file, and `--json` the
+      # report. `--user` is the name the job is queued under; it is
+      # self-declared and everyone who reaches the bench reads it.
+      #
+      # A cancelled workflow leaves its job on the bench. The job's token is kept
+      # under .agentic-hil/remote/ in this checkout, so
+      # `agentic-hil remote withdraw --job <job id>` from it takes the job out.
+      - name: Run the test plan on the shared bench
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          agentic-hil remote submit --plan tests/hil/nominal.testconfig.yaml --wait --junit-xml artifacts/junit-nominal.xml --user "ci-$GITHUB_REPOSITORY" --json > artifacts/report-nominal.json
+
+      # `if: always()` because the red run is the one whose result matters
+      # most. `warn` rather than `error`, because a job that never reached a
+      # report has already failed for a reason worth reading.
+      - name: Upload the run result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: shared-bench-run
+          path: artifacts/
+          if-no-files-found: warn

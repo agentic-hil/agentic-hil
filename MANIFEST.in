@@ -86,6 +86,9 @@ exclude tests/test_macos_installer_recording.py
 # and its test imports it and reads `.readthedocs.yaml`, `mkdocs.yml` and
 # docs/release-strategy.md, none of which ships.
 exclude tests/test_readthedocs_moved.py
+# The shared bench's pages are held to what they say by a test that reads
+# mkdocs.yml, CLAUDE.md and most of docs/, which a distribution does not carry.
+exclude tests/test_shared_bench_docs.py
 recursive-include examples *.py *.md *.yaml *.yml
 # The firmware demo is repository content, not package content.
 prune examples/nucleo-f446re_demo

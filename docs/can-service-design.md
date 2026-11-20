@@ -68,8 +68,11 @@ bus by each holding a participant connection, not by racing for the bus lock.
 
 ### Transport and authentication
 
-- Local IPC only: `AF_UNIX` on POSIX, named pipes on Windows. No network
-  listener of any kind.
+- Local IPC only: `AF_UNIX` on POSIX, named pipes on Windows. The broker never
+  listens on the network: it opens no network listener of any kind. A shared bench's
+  `agentic-hil serve` is a separate process that takes test plans over HTTP;
+  a job it runs reaches the bus through this broker like any local run, and the
+  broker's own transport stays local.
 - Connections authenticate with an HMAC authkey created with the broker; the
   attach handshake additionally proves the broker is the process actually
   holding the bus lock (a lock probe, not a self-description), so a stale or

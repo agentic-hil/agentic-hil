@@ -1,6 +1,7 @@
-"""Integration seams for the loopback job transport.
+"""Integration seams of the bench server's HTTP transport.
 
-Configuration and job execution are supplied by the other bench-server parts.
+The listener's settings come from the configuration's `server` block, and the
+jobs from the job service over the bench's job store and scheduler.
 """
 
 from __future__ import annotations
@@ -8,10 +9,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from ipaddress import IPv4Network
 from typing import Protocol
 
 from agentic_hil.config import ConfigError
 from agentic_hil.types import AgenticHILConfig, JsonObject
+
+# The private IPv4 ranges a listener admits peers from unless `server.allowed_networks`
+# names others (#891). Loopback is admitted beside whatever is listed.
+PRIVATE_NETWORKS = (IPv4Network("10.0.0.0/8"), IPv4Network("172.16.0.0/12"), IPv4Network("192.168.0.0/16"))
 
 
 @dataclass(frozen=True)
@@ -20,6 +26,7 @@ class ServerSettings:
     port: int = 8765
     hostnames: tuple[str, ...] = ()
     allowed_origins: tuple[str, ...] = ()
+    allowed_networks: tuple[IPv4Network, ...] = PRIVATE_NETWORKS
     max_upload_mb: int = 64
     max_artifact_wait_s: float = 600.0
     prefer_wait_cap_s: float = 60.0
@@ -231,20 +238,35 @@ class McpBenchReads(Protocol):
 
 
 def load_server_settings(config: AgenticHILConfig) -> ServerSettings | None:
-    """Recognise settings on already-loaded configuration, pending #886.
+    """The listener's settings from the loaded `server` block, or None where there is none.
 
-    This adapter deliberately examines no block contents. The configuration
-    integration replaces it; the current schema still refuses a server key.
+    Read off the block the configuration loader already validated, and nothing
+    parsed a second time: the listen address and port, the names and origins a
+    request may carry, the networks a connection is answered from, and the
+    upload limits the transport enforces. The rest keep their defaults.
     """
-    return ServerSettings() if getattr(config, "server", None) is not None else None
+    server = getattr(config, "server", None)
+    if server is None:
+        return None
+    host, _, port = server.listen.rpartition(":")
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    return ServerSettings(
+        host=host,
+        port=int(port),
+        hostnames=tuple(server.hostnames),
+        allowed_origins=tuple(server.allowed_origins),
+        allowed_networks=tuple(IPv4Network(network) for network in server.allowed_networks),
+        max_upload_mb=server.limits.max_upload_mb,
+        max_artifact_wait_s=float(server.limits.max_artifact_wait_s),
+    )
 
 
 def open_job_service(
     config: AgenticHILConfig, settings: ServerSettings,
 ) -> AbstractContextManager[JobService]:
-    """Refuse until #887 supplies its context-managed store implementation.
+    """The bench's job service over its job store and scheduler, open for as long as the context lasts."""
+    # Imported here: the job service imports this module.
+    from agentic_hil import benchjobs
 
-    Settings, including max_artifact_wait_s, belong to that implementation.
-    No job directory or worker is created by this transport integration seam.
-    """
-    raise JobServiceError("job_store_unavailable", "The job store is missing; serve cannot listen without a job service.")
+    return benchjobs.open_bench_job_service(config, settings)

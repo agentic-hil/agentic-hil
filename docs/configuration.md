@@ -20,15 +20,22 @@ A configured path is checked for what it *is*: every component is opened without
 ## Bench job configuration (version 4)
 
 An authoritative bench configuration can opt into job execution with
-`version: 4` and a `server` block. Versions 1 through 3 retain their existing
-rules and refuse this block as an unknown top-level field. Local configuration
-generation still writes version 3. Omitting `server` leaves local execution
-unchanged, including in a version 4 document.
+`version: 4` and a `server` block, which `agentic-hil serve`, the bench server,
+reads at startup. Versions 1 through 3 retain their existing rules and refuse
+this block as an unknown top-level field. Local configuration generation still
+writes version 3. Omitting `server` leaves local execution unchanged, including
+in a version 4 document, and `agentic-hil serve` then refuses to start.
+
+A shared bench is configured once, on the machine the hardware is plugged
+into: its devices, permissions and limits live in that machine's authoritative
+configuration, and a machine that submits to it needs no Agentic HIL
+configuration at all. [Shared bench](shared-bench.md) is the guide to running one.
 
 ```yaml
 server:
   job_root: /var/lib/agentic-hil/jobs  # required, absolute
   listen: 127.0.0.1:8765
+  allowed_networks: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
   hostnames: []
   allowed_origins: []
   limits:
@@ -42,22 +49,32 @@ server:
 ```
 
 The values shown are the defaults, except `job_root`, which has no default.
-`listen` accepts a host and port from 1 through 65535, including bracketed IPv6.
-Validation does not resolve the host or open a socket. Limits and retention
-are positive integers, with zero also accepted for `reserve_after_s`; booleans
-are refused. Unknown keys in `server` or `server.limits` are refused.
-Hostnames represent additional accepted Host headers and allowed origins
-represent browser origins. Empty origins represent no browser access.
+`listen` accepts a host and port from 1 through 65535; the bench server listens
+on an IPv4 address, so a name or an IPv6 address is refused when it starts
+(`server_listen_refused`). Without `listen` it listens on 127.0.0.1 and no other
+machine reaches it; `0.0.0.0` listens on every IPv4 address of the machine.
+`allowed_networks` lists the IPv4 networks, in CIDR form, whose connections the
+server answers; a connection from anywhere else is closed before a byte of it is
+read. Loopback is always answered, and an empty list answers loopback alone. An
+entry with host bits set, an IPv6 network or anything that is not a network is
+refused at load. Validation does not resolve a host or open a socket. Limits and
+retention are positive integers, with zero also accepted for `reserve_after_s`;
+booleans are refused. Unknown keys in `server` or `server.limits` are refused.
+`hostnames` lists the names a request's Host header may carry beside the listen
+address, and `allowed_origins` the browser origins allowed to call it. Empty
+origins mean no browser access.
 
-These settings are represented and validated in this foundation only. It does
-not open a listener, receive uploads, enforce these limits, schedule jobs or
-delete retained workspaces. `max_upload_mb` represents the plan plus artifacts;
-`max_artifact_wait_s` represents waiting for later artifacts; `max_job_runtime_s`
-and `max_queue_s` represent runtime and queue bounds; `reserve_after_s` represents
-the threshold after which later jobs cannot pass (zero means strict ordering).
-`max_queued_jobs_per_user` represents a per-client queue bound and
-`retention_days` represents retention. Existing artifact validation and hardware
-permissions remain effective. All server settings require a restart;
+The bench server enforces the limits. `max_upload_mb` bounds one request: a
+submission's plan and artifacts together, or one artifact upload.
+`max_artifact_wait_s` is how long a job waits for the artifacts its plan names
+before it expires as `artifact_missing`. `max_job_runtime_s` caps an attempt (a
+plan whose lower bound is above it is refused at admission), and `max_queue_s`
+caps how long a job may wait to start. `reserve_after_s` is the wait after which
+a job's devices are claimed for it so no younger job passes it on them (zero
+means strict ordering). `max_queued_jobs_per_user` bounds how many jobs one
+self-declared submitter may have waiting or running, and `retention_days` how
+long an ended job's directory is kept. Existing artifact validation and
+hardware permissions remain effective. All server settings require a restart;
 description reload does not adopt them.
 
 The trusted launcher prepares a fresh `<job_root>/<job_id>/workspace/`, places

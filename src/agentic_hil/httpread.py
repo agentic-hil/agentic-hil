@@ -91,11 +91,11 @@ def route(
         statement, accept_config_change = _recover_arguments(read_body())
         return _json(service.recover(name, operator_statement=statement, accept_config_change=accept_config_change))
     if path == "/v1/queue":
-        return _json({"entries": [_queued(entry) for entry in service.queue().entries]})
+        return _json({"entries": [public_queue_entry(entry) for entry in service.queue().entries]})
     if path == "/v1/jobs":
         filters = _job_filters(parsed.query)
         jobs = service.jobs(state=filters["state"], device=filters["device"], user=filters["user"], since=filters["since"])
-        return _json({"jobs": [_public(job) for job in jobs]})
+        return _json({"jobs": [public_job_record(job) for job in jobs]})
     if path == "/v1/metrics":
         return ReadResponse(200, service.metrics().encode("utf-8"), _METRICS_TYPE)
     if path == "/v1/errors":
@@ -158,12 +158,14 @@ def _recover_arguments(body: bytes) -> tuple[str, bool]:
     )
 
 
-def _public(record: Mapping[str, Any]) -> JsonObject:
+def public_job_record(record: Mapping[str, Any]) -> JsonObject:
+    """What anyone may read of a job record: `_PUBLIC_JOB_FIELDS` and nothing else."""
     return {key: value for key, value in record.items() if key in _PUBLIC_JOB_FIELDS}
 
 
-def _queued(entry: Mapping[str, Any]) -> JsonObject:
-    projected = _public(entry)
+def public_queue_entry(entry: Mapping[str, Any]) -> JsonObject:
+    """A queue entry as anyone may read it: its public record, its place, and why it waits."""
+    projected = public_job_record(entry)
     if "queue_position" in entry:
         projected["queue_position"] = entry["queue_position"]
     waiting = entry.get("waiting_for")
@@ -187,7 +189,7 @@ def _with_public_jobs(answer: JsonObject) -> JsonObject:
     if "recent_jobs" not in answer:
         return answer
     recent = answer["recent_jobs"]
-    jobs = [_public(job) for job in recent if isinstance(job, Mapping)] if isinstance(recent, (list, tuple)) else []
+    jobs = [public_job_record(job) for job in recent if isinstance(job, Mapping)] if isinstance(recent, (list, tuple)) else []
     return {**answer, "recent_jobs": jobs}
 
 
