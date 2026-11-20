@@ -75,11 +75,26 @@ _URL_SCHEME_CHARS = frozenset(
 )
 _URL_SCHEME_START = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 
-# The `user:secret` that follows a validated `://`, split so the account (`user:`)
-# is kept and only the password span is masked. Matched with `.match(text, pos)`
-# anchored immediately after the `://`, exactly as the old contiguous pattern
-# required; the `@` lookahead leaves a bare `://host` (no userinfo) untouched.
-_URL_USERINFO_AFTER_SEP = re.compile(r"[^\s:/?#@]+:(?P<secret>[^\s/?#@]+)(?=@)")
+# The `user:secret@` that follows a validated `://` is read as two runs, the
+# account (kept) and the password (masked), each ended by the first character
+# that cannot belong to it: whitespace or one of `:/?#@` for the account,
+# whitespace or one of `/?#@` for the password, inside which a colon is data. A
+# credential is a non-empty account ended by `:` and a non-empty password ended
+# by `@`, so a bare `://host` (no userinfo) and a `://user@host` (no password)
+# are left untouched. Each run's end is found with a one-character search
+# instead of a `[^...]+` repetition: the first stop ends the run and the stop
+# itself is the verdict, so no shorter run is ever retried. Request-derived text
+# reaches this pass on the bench server, and a repetition offers a backtracking
+# engine exactly the retries that make a pattern polynomial.
+_URL_ACCOUNT_END = re.compile(r"[\s:/?#@]")
+_URL_PASSWORD_END = re.compile(r"[\s/?#@]")
+
+
+def _run_end(stop: re.Pattern[str], text: str, pos: int) -> int:
+    """The index of the first character at or after *pos* that *stop* matches,
+    or the length of *text* when the run reaches its end."""
+    found = stop.search(text, pos)
+    return len(text) if found is None else found.start()
 
 
 def _url_password_span(text: str, sep: int) -> tuple[int, int] | None:
@@ -89,16 +104,21 @@ def _url_password_span(text: str, sep: int) -> tuple[int, int] | None:
     The scheme is the maximal run of scheme-valid characters ending at the `://`,
     taken to start at that run's first letter, so a leading `.`, `-` or `+`, part
     of the run but unable to begin a scheme, is punctuation before the URL and
-    does not hide it. The userinfo is matched forward from just past the `://`."""
+    does not hide it. The userinfo is read forward from just past the `://`."""
     run_start = sep
     while run_start > 0 and text[run_start - 1] in _URL_SCHEME_CHARS:
         run_start -= 1
     if not any(text[i] in _URL_SCHEME_START for i in range(run_start, sep)):
         return None
-    match = _URL_USERINFO_AFTER_SEP.match(text, sep + 3)
-    if match is None:
+    account_start = sep + 3
+    account_end = _run_end(_URL_ACCOUNT_END, text, account_start)
+    if account_end == account_start or not text.startswith(":", account_end):
         return None
-    return match.start("secret"), match.end("secret")
+    start = account_end + 1
+    end = _run_end(_URL_PASSWORD_END, text, start)
+    if end == start or not text.startswith("@", end):
+        return None
+    return start, end
 
 
 def _mask_url_userinfo(text: str) -> str:
