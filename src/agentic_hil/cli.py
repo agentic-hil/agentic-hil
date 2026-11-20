@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from agentic_hil import __version__, httpapi, httpserver, upgrade
+from agentic_hil import __version__, benchview, httpapi, httpserver, upgrade
 from agentic_hil.adopt import discovery_remedy, enumerated_stlink_ports, is_unset, project_config_adopt_hardware
 from agentic_hil.bench import (
     BENCH_ROOT_NAME,
@@ -5389,9 +5389,12 @@ def serve(config_path: str | None = None) -> int:
             {"config_path": config.config_path},
         )
     httpserver.validate_listen_address(settings)
-    with httpapi.open_job_service(config, settings) as service:
+    with httpapi.open_job_service(config, settings) as service, benchview.BenchView(config, settings, activity=service.device_activity) as view:
         warning = httpserver.server_lock_warning()
         server = httpserver.create_http_server(settings, service)
+        # The open reads (#889): the listener answers them from this view, which
+        # reads no device and closes after the listener does.
+        server.bench = view
         try:
             if warning:
                 print(f"Warning: {warning}", file=sys.stderr)
