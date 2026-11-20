@@ -806,8 +806,9 @@ PINNED_DYNAMIC: dict[DynamicSite, str] = {
     ("scheduler", "Scheduler._admit", "refusal.get('error_type', 'test_config_invalid')"): (
         "the preflight refusal's existing type, forwarded by admission, with test_config_invalid when the refusal names none"
     ),
-    ("scheduler", "Scheduler._bus_incident", "record['error_type']"): (
-        "the originating worker record's bus-incident type, which the affected participant jobs retain"
+    ("scheduler", "Scheduler._bus_incident", "record.get('step_error_type') or record['error_type']"): (
+        "the originating worker record's bus-incident type, its failed step's type when the record names one, "
+        "which the affected participant jobs retain"
     ),
     ("scheduler", "Scheduler._terminal", "record['error_type']"): "the worker record's own type, preserved by terminal reconciliation",
     ("scheduler", "Scheduler.provide_artifacts", "error.error_type"): "the validation exception's own type, preserved by artifact completion",

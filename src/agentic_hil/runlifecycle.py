@@ -652,7 +652,11 @@ class RunRegistration:
             "report_path": result.get("report_path"),
             "finished_at": utc_now_iso(),
         }
-        for field in ("remediation", "do_not"):
+        # The failed step's own type and, for a CAN incident, its scope and bus
+        # travel too: a cleanup that failed after the step leaves the top-level
+        # type `cleanup_failed`, and whoever reads the record still has to see
+        # which bus failed under it.
+        for field in ("remediation", "do_not", "step_error_type", "incident_scope", "bus", "bus_id"):
             if field in result:
                 fields[field] = result[field]
         canonical = result.get(CANONICAL_REPORT_KEY)

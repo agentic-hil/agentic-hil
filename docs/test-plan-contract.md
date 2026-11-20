@@ -227,7 +227,12 @@ how the loop ended: `exit_reason` (`count`, `duration_s` or `step_failed`),
 `failed_nested_step` and `failed_nested_action`. `failed_step` stays the
 top-level number of the block and `step_error_type` the inner step's own error,
 so the two questions a reader asks (which step, and what went wrong) keep their
-answers whether or not the plan nests. A plan refused before execution reports
+answers whether or not the plan nests. When the step that failed met a CAN
+broker's incident, the report also carries `incident_scope` (`bus` or
+`participant`), `bus` (that bus's lock key, which every participant's lock key
+on it starts with) and `bus_id` (the bus's configured id), and the run record
+carries them beside `step_error_type`, so a cleanup that failed afterwards does
+not hide which bus failed. A plan refused before execution reports
 `validation_error` instead, naming the step index, the offending field, the
 route and the action; and `steps` is empty, because none ran.
 

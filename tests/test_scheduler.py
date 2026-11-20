@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,9 +13,12 @@ from pathlib import Path
 import pytest
 import yaml
 from conftest import FAKE_OPENOCD, write_authoritative_config
+from test_can_broker import FAKE_CAN_BRIDGE, reaped_brokers  # noqa: F401  (fixture)
 from test_test_reactor import RecordingService
 
+from agentic_hil import reactorrun, runlifecycle
 from agentic_hil.bench import BenchMutex, BenchOwner, resource_digest
+from agentic_hil.canbroker import bus_lock_key
 from agentic_hil.config import load_authoritative_config
 from agentic_hil.jobstore import SchedulerSettings
 from agentic_hil.scheduler import BenchHolderSource, Scheduler
@@ -106,6 +110,62 @@ class Workers:
         self.gone.add(handle)
 
 
+class RealWorkerAttempts(Workers):
+    """Scripted workers, except for the named plans, whose attempts run the reactor's own worker code.
+
+    That code runs here, in process and to its end, under the handle the
+    scheduler allocated: the record the scheduler then reads is the one
+    `RunRegistration` wrote around a real `TestReactor` run, and the report is
+    the reactor's own. Nothing is spawned, so the broker that run starts is one
+    `reaped_brokers` sees.
+    """
+
+    def __init__(self, real_plans):
+        super().__init__()
+        self.real_plans = set(real_plans)
+        self.real = set()
+
+    def start(self, config, handle, plan, *, wait_s):
+        assert wait_s == 0
+        if Path(plan).name not in self.real_plans:
+            super().start(config, handle, plan, wait_s=wait_s)
+            return
+        self.real.add(handle)
+        reactorrun.run_plan(config, str(plan), wait_s=wait_s, run_handle=handle, return_failed_report=True)
+
+    def record(self, config, handle):
+        if handle in self.real:
+            return runlifecycle.read_run_record(config, handle)
+        return super().record(config, handle)
+
+    def is_gone(self, config, handle):
+        if handle in self.real:
+            return runlifecycle.worker_is_gone(config, handle)
+        return super().is_gone(config, handle)
+
+
+@pytest.fixture
+def ended_worker_holds(monkeypatch):
+    """End the device holds an in-process worker run leaves, as its process's exit would.
+
+    A run whose CAN lease a bus incident quarantined keeps that hold until its
+    bench run ends, which for a detached worker is when its process exits. Run
+    here, inside the test process, the hold would outlive the test, so every
+    owner the test makes is released once the test is over.
+    """
+    made = []
+    original = BenchMutex.__init__
+
+    def init(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        made.append(self)
+
+    monkeypatch.setattr(BenchMutex, "__init__", init)
+    yield made
+    for mutex in made:
+        mutex.release_all()
+
+
 @dataclass
 class Bench:
     workspace: Path
@@ -135,7 +195,13 @@ class Bench:
         return plan_devices(self.config, loaded).lock_keys
 
 
-def make_bench(tmp_path, monkeypatch, **settings):
+def make_bench(tmp_path, monkeypatch, *, can_bridge=False, **settings):
+    """The bench every test here queues on.
+
+    ``can_bridge`` puts the scripted CAN bridge behind both buses, so a run can
+    really open them through the broker, and gives ``ecu_a`` a budget of one
+    frame. Without it the configuration is the one the scripted workers need.
+    """
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     executable = tmp_path / "fake_openocd.py"
@@ -149,11 +215,14 @@ def make_bench(tmp_path, monkeypatch, **settings):
                             "allow_debug_execution": True, "allow_raw_debugger_commands": False,
                             "allow_mass_erase": False},
         }
+    budget = {"ecu_a": {"max_frames": 1}} if can_bridge else {}
     buses = {
         name: {
-            "adapter": "process", "channel": name, "executable": executable.as_posix(),
+            "adapter": "process", "channel": name,
+            "executable": FAKE_CAN_BRIDGE.as_posix() if can_bridge else executable.as_posix(),
             "permissions": {"allow_read": True, "allow_write": True},
-            "shares": {participant: {"permissions": {"allow_read": True, "allow_write": True}}
+            "shares": {participant: {"permissions": {"allow_read": True, "allow_write": True},
+                                     **budget.get(participant, {})}
                        for participant in ("ecu_a", "ecu_b")},
         }
         for name in ("shared", "unrelated")
@@ -201,6 +270,17 @@ def running(scheduler, job):
     scheduler.tick()
     assert status(scheduler, job)["state"] == "running", status(scheduler, job)
     return status(scheduler, job)["attempt_handle"]
+
+
+def run_worker_code_from_this_tree(monkeypatch):
+    """Let the broker a run starts import this tree's package, as `owned_workers` does for a worker."""
+    source = str(Path(__file__).resolve().parents[1] / "src")
+    monkeypatch.setenv("PYTHONPATH", source + os.pathsep + os.environ.get("PYTHONPATH", ""))
+
+
+def run_report(record):
+    """The run's own report, the per-run copy its record names."""
+    return json.loads(Path(record["canonical_report_path"]).read_text(encoding="utf-8"))
 
 
 def test_passing_then_reservation(tmp_path, monkeypatch):
@@ -444,7 +524,7 @@ def test_incident_blocking_and_bus_cause(tmp_path, monkeypatch):
     scheduler.tick()
     hb, hc = running(scheduler, b), running(scheduler, c)
     bus = key.rsplit("#", 1)[0]
-    cause = {"error_type": "can_bus_incident", "incident_scope": "bus", "bus": bus, "summary": "scripted bus loss"}
+    cause = {"error_type": "can_bus_incident", "incident_scope": "bus", "bus": bus, "bus_id": "shared", "summary": "scripted bus loss"}
     bench.workers.finish(ha, run_ok=False, **cause)
     scheduler.tick()
     assert hb in bench.workers.stops
@@ -464,6 +544,132 @@ def test_incident_blocking_and_bus_cause(tmp_path, monkeypatch):
     assert bench.workers.stops == stops_before
     assert hb2 not in bench.workers.stops
     assert status(scheduler, b2)["state"] == "running"
+
+
+def test_a_real_worker_bus_incident_stops_every_participant_job_on_that_bus(tmp_path, monkeypatch, reaped_brokers, ended_worker_holds):  # noqa: F811
+    bench = make_bench(tmp_path, monkeypatch, can_bridge=True)
+    # The adapter fails the first read the broker makes, which is a fault of the bus itself.
+    monkeypatch.setenv("FAKE_CAN_BRIDGE_FAIL_READ", "1")
+    run_worker_code_from_this_tree(monkeypatch)
+    workers = RealWorkerAttempts({"origin.yaml"})
+    scheduler = bench.scheduler(worker_source=workers)
+    peer = bench.plan("peer", can_steps("ecu_b"), version=6)
+    other = bench.plan("other", can_steps("ecu_a", "unrelated"), version=6)
+    origin = bench.plan("origin", [
+        {"action": "can_open", "bus_id": "shared", "participant": "ecu_a", "clear_rx_queue": False},
+        {"action": "can_read", "bus_id": "shared", "participant": "ecu_a", "max_frames": 1},
+    ], version=6)
+    b, c = submit(scheduler, peer, "alice"), submit(scheduler, other, "bob")
+    scheduler.tick()
+    hb = running(scheduler, b)
+    running(scheduler, c)
+    a = submit(scheduler, origin, "carol")
+    # The originating job is dispatched, and its run goes to its end inside this tick.
+    scheduler.tick()
+    # Its worker is seen gone and its record is reconciled.
+    scheduler.tick()
+
+    # What the real worker wrote: its record and its own report.
+    assert status(scheduler, a)["state"] == "finished", status(scheduler, a)
+    ha = status(scheduler, a)["attempt_handle"]
+    assert ha in workers.real
+    record = runlifecycle.read_run_record(bench.config, ha)
+    assert record["run"] == ha
+    assert record["detached"] is True
+    assert record["state"] == "finished"
+    assert record["error_type"] == "cleanup_failed", record
+    report = run_report(record)
+    assert report["run"] == ha
+    assert report["error_type"] == "cleanup_failed"
+    assert report["step_error_type"] == "can_bus_incident"
+    assert report["failed_step"] == 2
+    failed = report["steps"][1]["result"]
+    assert failed["error_type"] == "can_bus_incident"
+    assert failed["bus_id"] == "shared"
+    assert failed["participant"] == "ecu_a"
+    assert failed["abort"]["scope"] == "bus"
+    assert failed["bus_gated"] is True
+    # The incident quarantined the participant's lease, so its close cannot give it back.
+    cleanup = report["cleanup_errors"][0]
+    assert cleanup["action"] == "can_close"
+    assert cleanup["result"]["error_type"] == "session_lease_held", cleanup
+    assert "can_read_effect_unconfirmed" in cleanup["result"]["cleanup_reasons"]
+
+    bus_key = bus_lock_key(bench.config, "shared")
+    assert bus_key == bench.keys(peer)[0].rsplit("#", 1)[0]
+    named = {key: report.get(key) for key in ("incident_scope", "bus", "bus_id")}
+    if named != {"incident_scope": "bus", "bus": bus_key, "bus_id": "shared"}:
+        raise AssertionError("the real worker report names no bus-scoped CAN incident on bus shared")
+    assert record.get("step_error_type") == "can_bus_incident"
+    assert record.get("incident_scope") == "bus"
+    assert record.get("bus") == bus_key
+    assert record.get("bus_id") == "shared"
+
+    # The other participant on that bus is stopped, and nothing on another bus is.
+    assert workers.stops == [hb]
+    assert status(scheduler, b)["state"] == "stopping"
+    assert scheduler.store.get(b.job_id)["stop_reason"] == "bus_incident"
+    cause = {"error_type": "can_bus_incident", "incident_scope": "bus", "bus": bus_key, "bus_id": "shared", "summary": None}
+    assert status(scheduler, a)["cause"] == cause
+    assert status(scheduler, b)["cause"] == cause
+    assert status(scheduler, a)["error_type"] == "cleanup_failed"
+    assert status(scheduler, c)["state"] == "running"
+    assert status(scheduler, c)["cause"] is None
+
+    # The stopped participant's worker honours the stop, and its job keeps the cause.
+    workers.records[hb] = {**workers.records[hb], "state": "stopped", "run_ok": False, "error_type": "run_stopped"}
+    workers.gone.add(hb)
+    scheduler.tick()
+    assert status(scheduler, b)["state"] == "stopped"
+    assert status(scheduler, b)["cause"] == cause
+    assert workers.stops == [hb]
+
+
+def test_a_real_worker_participant_incident_stops_no_other_job(tmp_path, monkeypatch, reaped_brokers):  # noqa: F811
+    bench = make_bench(tmp_path, monkeypatch, can_bridge=True)
+    run_worker_code_from_this_tree(monkeypatch)
+    workers = RealWorkerAttempts({"budget.yaml"})
+    scheduler = bench.scheduler(worker_source=workers)
+    peer = bench.plan("peer", can_steps("ecu_b"), version=6)
+    # ecu_a may put one frame on the bus; the second spends a budget it no longer has.
+    budget = bench.plan("budget", [
+        {"action": "can_open", "bus_id": "shared", "participant": "ecu_a", "clear_rx_queue": False},
+        {"action": "can_send", "bus_id": "shared", "participant": "ecu_a", "frame_id": 257, "data_hex": "01"},
+        {"action": "can_send", "bus_id": "shared", "participant": "ecu_a", "frame_id": 257, "data_hex": "02"},
+    ], version=6)
+    b = submit(scheduler, peer, "alice")
+    scheduler.tick()
+    running(scheduler, b)
+    a = submit(scheduler, budget, "carol")
+    scheduler.tick()
+    scheduler.tick()
+
+    assert status(scheduler, a)["state"] == "finished", status(scheduler, a)
+    record = runlifecycle.read_run_record(bench.config, status(scheduler, a)["attempt_handle"])
+    assert record["detached"] is True
+    assert record["state"] == "finished"
+    assert record["error_type"] == "can_participant_frame_budget_exhausted", record
+    report = run_report(record)
+    assert report["step_error_type"] == "can_participant_frame_budget_exhausted"
+    assert report["failed_step"] == 3
+    failed = report["steps"][2]["result"]
+    assert failed["error_type"] == "can_participant_frame_budget_exhausted"
+    assert failed["bus_id"] == "shared"
+    assert failed["abort"]["scope"] == "participant"
+
+    bus_key = bus_lock_key(bench.config, "shared")
+    named = {key: report.get(key) for key in ("incident_scope", "bus", "bus_id")}
+    if named != {"incident_scope": "participant", "bus": bus_key, "bus_id": "shared"}:
+        raise AssertionError("the real worker report names no participant-scoped CAN incident on bus shared")
+    assert record.get("incident_scope") == "participant"
+    assert record.get("bus") == bus_key
+    assert record.get("bus_id") == "shared"
+    assert record.get("step_error_type") == "can_participant_frame_budget_exhausted"
+
+    assert workers.stops == []
+    assert status(scheduler, b)["state"] == "running"
+    assert status(scheduler, b)["cause"] is None
+    assert status(scheduler, a)["cause"] is None
 
 
 def test_submitter_queue_limit(tmp_path, monkeypatch):

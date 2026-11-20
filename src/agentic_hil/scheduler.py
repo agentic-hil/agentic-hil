@@ -612,7 +612,9 @@ class Scheduler:
             if isinstance(record, dict) and run_state in runlifecycle.TERMINAL_RUN_STATES and self._refused_at_start(data, record):
                 self._requeue(data, now)
                 return
-            if isinstance(record, dict) and record.get("error_type") == "can_bus_incident" and record.get("incident_scope") == "bus":
+            # Judged by the failed step's type when the record names one: a
+            # cleanup that failed after the incident does not hide it.
+            if isinstance(record, dict) and (record.get("step_error_type") or record.get("error_type")) == "can_bus_incident" and record.get("incident_scope") == "bus":
                 self._bus_incident(data, record, now)
             self._terminal(data, record if isinstance(record, dict) else None, now)
             return
@@ -673,7 +675,13 @@ class Scheduler:
 
     def _bus_incident(self, data: JsonObject, record: JsonObject, now: float) -> None:
         """A bus every participant shares failed: the other jobs on it stop, and all of them keep the cause."""
-        cause = {"error_type": record["error_type"], "incident_scope": record.get("incident_scope"), "bus": record.get("bus"), "summary": record.get("summary")}
+        cause = {
+            "error_type": record.get("step_error_type") or record["error_type"],
+            "incident_scope": record.get("incident_scope"),
+            "bus": record.get("bus"),
+            "bus_id": record.get("bus_id"),
+            "summary": record.get("summary"),
+        }
         data["cause"] = cause
         bus = cause["bus"]
         if not isinstance(bus, str) or not bus:
