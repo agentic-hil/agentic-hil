@@ -25,11 +25,10 @@ at once.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 from pathlib import Path
-
-import json
 
 import pytest
 from conftest import write_config
