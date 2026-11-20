@@ -19,13 +19,15 @@ to carry, so the content pass runs under stream keys only.
 
 from __future__ import annotations
 
+import re
 import time
+from itertools import product
 
 import pytest
 from support import scaled_time_bound
 
 from agentic_hil.cli import emit_result
-from agentic_hil.redact import redact_sensitive
+from agentic_hil.redact import redact_sensitive, redact_stream_text
 
 MARKER = "[redacted]"
 
@@ -289,6 +291,82 @@ def test_a_long_scheme_like_run_without_a_url_is_scanned_in_linear_time() -> Non
 
     assert elapsed < scaled_time_bound(5.0), f"scanning a 1 MB scheme-like run took {elapsed:.2f}s"
     assert out == line
+
+
+def test_a_long_userinfo_after_a_scheme_is_scanned_in_linear_time() -> None:
+    """The text after a `://` reaches this pass from request-derived results on
+    the bench server, so the account and the password after it must each be read
+    once, however long they run and however they end.
+
+    The first two lines are the shapes CodeQL names for the userinfo pattern: an
+    account run with no colon after it, and a colon-studded password run that
+    never reaches the `@` a credential needs. A repetition retried from every
+    start position is quadratic on both. The third repeats a near miss after
+    every `://` of a long line, and the fourth repeats a real credential, so the
+    scan is held to one pass whether every URL is refused or every one is
+    masked, and each output is asserted alongside the time."""
+    refused = (
+        "x://" + "!" * 1_000_000,
+        "x://!:" + "!:!" * 333_333,
+        "x://!:!" * 150_000,
+    )
+    for line in refused:
+        start = time.perf_counter()
+        out = redact_sensitive({"stderr": line})["stderr"]
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < scaled_time_bound(5.0), f"scanning {line[:12]!r}... ({len(line)} characters) took {elapsed:.2f}s"
+        assert out == line
+
+    masked = "x://user:pass@host " * 50_000
+    start = time.perf_counter()
+    out = redact_sensitive({"stderr": masked})["stderr"]
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < scaled_time_bound(5.0), f"masking 50000 credentialed URLs took {elapsed:.2f}s"
+    assert out == f"x://user:{MARKER}@host " * 50_000
+
+
+# The credentialed-URL rule written as one regex, independently of the scanner,
+# as the oracle the scanner has to agree with: a maximal run of scheme
+# characters holding at least one letter, then `://`, an account of one or more
+# characters that are neither whitespace nor `:/?#@`, a colon, and a password of
+# one or more characters that are neither whitespace nor `/?#@`, followed by
+# `@`. As a lone regex it is quadratic on long scheme-like runs, which is why
+# the module does not use it, and harmless on the short strings below.
+_CREDENTIALED_URL_ORACLE = re.compile(
+    r"(?<![A-Za-z0-9+.\-])[A-Za-z0-9+.\-]*?[A-Za-z][A-Za-z0-9+.\-]*://"
+    r"[^\s:/?#@]+:(?P<secret>[^\s/?#@]+)(?=@)"
+)
+
+
+def _oracle_mask(text: str) -> str:
+    return _CREDENTIALED_URL_ORACLE.sub(lambda match: text[match.start() : match.start("secret")] + MARKER, text)
+
+
+def test_the_userinfo_scan_masks_exactly_what_the_credentialed_url_rule_names() -> None:
+    """Every short string over the characters that decide the rule is masked the
+    way the rule says, and nothing else is touched.
+
+    The alphabet holds one character of each kind the scan tells apart: a
+    letter that can begin a scheme, a `.` that can only continue one, the colon
+    that ends an account and is data in a password, the slash that ends both and
+    builds `://`, the `@` that makes the span a credential, and whitespace,
+    which ends both runs like `?` and `#` do. The heads put each tail in a
+    different position: after a scheme, after a run that cannot be one, inside
+    an account and inside a password."""
+    alphabet = "a.:/@ "
+    heads = ("a://", ".://", "a.://", "a://a:", "a://a:a")
+    tails = ("".join(chars) for length in range(6) for chars in product(alphabet, repeat=length))
+
+    mismatches = []
+    for tail in tails:
+        for head in heads:
+            text = head + tail
+            if redact_stream_text(text) != _oracle_mask(text):
+                mismatches.append(text)
+
+    assert not mismatches, f"{len(mismatches)} strings disagree with the rule, first {mismatches[:5]!r}"
 
 
 def test_an_unquoted_value_runs_through_the_punctuation_that_is_valid_inside_it() -> None:
