@@ -894,7 +894,7 @@ BASE_EXPRESSIONS = {
     "test_install_eval.py": {"20": 1},
     "test_pyocd_without_a_probe.py": {"CONFIGURED_TIMEOUT_S": 3, "2 * CONFIGURED_TIMEOUT_S": 3},
     "test_reactor_runtime.py": {"runlifecycle.WORKER_EXIT_GRACE_S + 3.0": 1},
-    "test_redact.py": {"5.0": 2},
+    "test_redact.py": {"5.0": 4},
     "test_run_lifecycle.py": {"30": 1, "60": 1, "timeout_s": 2},
 }
 
