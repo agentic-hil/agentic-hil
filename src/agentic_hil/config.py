@@ -13,6 +13,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
@@ -3030,6 +3031,34 @@ def safe_read_text(
     return safe_read_bytes(file_path, workspace=workspace).decode(encoding)
 
 
+# Windows refuses a rename onto a name another handle holds open (`winerror` 5,
+# under every share mode) and a rename of a source another handle holds without
+# delete sharing (`winerror` 32), both recorded on NTFS. The holders that cause it
+# on a bench are short-lived: another process reading the report, an agent's own
+# file read, a virus scanner or the indexer looking at a file that just changed.
+# One such refusal failed a report write, and a failed report write quarantines
+# the bench, so the two are retried for this long before the refusal is raised
+# as Windows gave it. A refusal that outlasts the budget, such as a real access
+# denial, is the failure it always was, only later.
+WINDOWS_REPLACE_RETRY_BUDGET_S = 2.0
+WINDOWS_REPLACE_RETRY_WINERRORS = frozenset({5, 32})
+
+
+def _windows_replace(source: Path, destination: Path) -> None:
+    deadline = time.monotonic() + WINDOWS_REPLACE_RETRY_BUDGET_S
+    delay = 0.005
+    while True:
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError as error:
+            remaining = deadline - time.monotonic()
+            if getattr(error, "winerror", None) not in WINDOWS_REPLACE_RETRY_WINERRORS or remaining <= 0:
+                raise
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 0.1)
+
+
 def atomic_write_bytes(
     file_path: str | Path,
     data: bytes,
@@ -3093,7 +3122,7 @@ def atomic_write_bytes(
                     handle.write(data)
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(temporary_path, path)
+                _windows_replace(temporary_path, path)
             finally:
                 if temporary_path.exists():
                     temporary_path.unlink()
