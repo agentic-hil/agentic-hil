@@ -3,7 +3,7 @@
 Agentic Hardware-in-the-Loop (Agentic HIL) exposes the same local MCP stdio server and the same tool semantics in every host. Only the host configuration syntax changes.
 
 Every block below was verified against the linked host documentation on
-2026-11-17. Two of them print a shape their host still reads but now documents
+2026-11-22. Two of them print a shape their host still reads but now documents
 as the older one, VS Code's user-profile `servers` format and OpenCode's V1
 `mcp` entries, and their sections say so. Moving that date is a release chore, described under "The Host
 Documentation Check" in [Release Strategy](release-strategy.md), because a date

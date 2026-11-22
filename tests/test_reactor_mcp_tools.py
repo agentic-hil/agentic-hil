@@ -33,6 +33,7 @@ from test_run_lifecycle import (
 )
 
 from agentic_hil.config import ConfigError, load_authoritative_config
+from agentic_hil.report import CANONICAL_REPORT_KEY
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 
 RESET_PLAN = "version: 4\nsteps:\n  - {device: dut, action: reset}\n"
@@ -108,7 +109,15 @@ def test_a_detached_plan_started_over_mcp_answers_with_a_handle_and_then_finishe
     is not asked. A plan short enough to finish inside a test can also finish
     inside the start command's own poll on a machine busy enough, which is #364
     in the command line's spelling of this. What is asked is the handle, the
-    bench behind it and the ending, and the ending is waited for."""
+    bench behind it and the ending, and the ending is waited for.
+
+    The report the answer names follows the state it was caught in. A run still
+    going is sent to the workspace mirror, the only report it can name before it
+    has written one. A run caught already over is sent to its own copy under the
+    state root, which no later run overwrites, because that is the one report a
+    finished record proves was written (`run_report_named`). Holding a finished
+    answer to the mirror failed whenever the runner was slow enough for the plan
+    to end inside the poll."""
     workspace, plan = bench_workspace(tmp_path, monkeypatch, SHORT_DELAY_PLAN)
     config = load_authoritative_config(workspace)
 
@@ -122,7 +131,11 @@ def test_a_detached_plan_started_over_mcp_answers_with_a_handle_and_then_finishe
         f"a run this call had just launched answered {result.get('state')!r}: {result.get('summary')!r}"
     )
     assert result["run"].startswith("run-")
-    assert result["report_path"] == ".agentic-hil/reports/last-report.json"
+    if result["state"] == "running":
+        assert result["report_path"] == ".agentic-hil/reports/last-report.json"
+    else:
+        assert result["report_path"] == result[CANONICAL_REPORT_KEY], result
+        assert Path(result["report_path"]).name == f"{result['run']}.json", result
     finished = wait_for_state(config, result["run"], {"finished", "stopped", "worker_gone"})
     assert finished["state"] == "finished", (
         f"the run ended in state {finished.get('state')!r} ({finished.get('summary')!r}); its worker printed:\n"
