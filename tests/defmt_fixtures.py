@@ -40,14 +40,11 @@ def exclusive_file_lock(path: Path) -> Iterator[None]:
     """Hold one byte of a lock file across processes on Windows and POSIX."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as lock_file:
-        lock_file.seek(0, os.SEEK_END)
-        if lock_file.tell() == 0:
-            lock_file.write(b"\0")
-            lock_file.flush()
         descriptor = lock_file.fileno()
         if os.name == "nt":
             import msvcrt
 
+            # Windows can lock byte zero even when the file is empty.
             while True:
                 lock_file.seek(0)
                 try:
