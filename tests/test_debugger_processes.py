@@ -77,8 +77,9 @@ ROOT = Path(__file__).resolve().parents[1]
 FAKE_HUNG_DEBUGGER = ROOT / "tests" / "fixtures" / "fake_openocd_hung.py"
 
 # The deadline the hung fake is given, and the longest the whole call may take
-# before the test says the deadline was not enforced. The fake sleeps for 30 s,
-# so a call that only ends when the fake does ends well outside this. Nine
+# before the test says the deadline was not enforced. Both are base values the
+# tests pass through scaled_time_bound. The fake sleeps for twice the scaled
+# ceiling, so a call that only ends when the fake does ends well outside it. Nine
 # hangs run in this module (three probes, one settle, two discoveries, three
 # version checks), each costing the deadline plus the reap, so the deadline is
 # the smallest number the contract can be measured against.
@@ -116,7 +117,7 @@ BACKENDS = ["openocd", "pyocd", "stlink"]
 # Arrangements.
 
 
-def config_with_debugger(directory: Path, tool: Path, *, debugger_type: str = "openocd", timeout_s: int = HANG_TIMEOUT_S) -> Path:
+def config_with_debugger(directory: Path, tool: Path, *, debugger_type: str = "openocd", timeout_s: float = HANG_TIMEOUT_S) -> Path:
     """A configuration whose one debugger is `tool`, allowed `timeout_s` seconds.
 
     `write_config` writes every entry with `timeout_s: 5`; the hung-tool tests
@@ -267,7 +268,8 @@ def written_log(config, result: dict) -> dict:
 
 def call_with_a_hung_debugger(tmp_path: Path, tool: str, debugger_type: str) -> tuple[object, dict, float]:
     """One tool call against the hung fake: the configuration, the result and the seconds it took."""
-    config = load_config(str(config_with_debugger(tmp_path, FAKE_HUNG_DEBUGGER, debugger_type=debugger_type)))
+    timeout_s = scaled_time_bound(HANG_TIMEOUT_S)
+    config = load_config(str(config_with_debugger(tmp_path, FAKE_HUNG_DEBUGGER, debugger_type=debugger_type, timeout_s=timeout_s)))
     service = AgenticHILToolService(config)
     started = time.monotonic()
     try:
@@ -281,6 +283,7 @@ def call_with_a_hung_debugger(tmp_path: Path, tool: str, debugger_type: str) -> 
 def pid_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     recorded = tmp_path / "hung-debugger.pids"
     monkeypatch.setenv("AGENTIC_HIL_TEST_PID_FILE", str(recorded))
+    monkeypatch.setenv("AGENTIC_HIL_TEST_DEBUGGER_HANG_S", str(2 * scaled_time_bound(CALL_CEILING_S)))
     return recorded
 
 
@@ -311,9 +314,9 @@ def test_a_hanging_debugger_is_reaped_and_answers_timeout(tmp_path: Path, pid_fi
     assert result["backend"] == debugger_type
     assert result["likely_causes"], result
     assert result["log_path"], result
-    # The deadline was the deadline: the call ended because timeout_s ran out,
-    # not because the fake's own 30 s sleep did.
-    assert elapsed < scaled_time_bound(CALL_CEILING_S), f"the call took {elapsed:.1f} s against a {HANG_TIMEOUT_S} s deadline"
+    # The call ended when the scaled timeout_s expired, before the fake's own
+    # sleep could finish.
+    assert elapsed < scaled_time_bound(CALL_CEILING_S), f"the call took {elapsed:.1f} s against a configured deadline of {scaled_time_bound(HANG_TIMEOUT_S)} s"
 
     log = written_log(config, result)
     assert log["timed_out"] is True, log
@@ -354,7 +357,7 @@ def test_a_hanging_probe_discovery_answers_its_own_timeout_sentence(tmp_path: Pa
     assert result["summary"] == "Debugger probe discovery timed out."
     assert result["target_contacted"] is False
     assert result["side_effect_status"] == "not_started"
-    assert elapsed < scaled_time_bound(CALL_CEILING_S), f"the call took {elapsed:.1f} s against a {HANG_TIMEOUT_S} s deadline"
+    assert elapsed < scaled_time_bound(CALL_CEILING_S), f"the call took {elapsed:.1f} s against a configured deadline of {scaled_time_bound(HANG_TIMEOUT_S)} s"
     assert wait_until_gone(recorded_pids(pid_file), REAP_CEILING_S) == [], "the debugger or its child survived the reap"
 
 
@@ -373,7 +376,7 @@ def test_a_hanging_version_check_answers_its_own_timeout_sentence(tmp_path: Path
     assert result["error_type"] == "timeout"
     assert result["summary"] == "Debugger version check timed out."
     assert result["backend"] == debugger_type
-    assert elapsed < scaled_time_bound(CALL_CEILING_S), f"the call took {elapsed:.1f} s against a {HANG_TIMEOUT_S} s deadline"
+    assert elapsed < scaled_time_bound(CALL_CEILING_S), f"the call took {elapsed:.1f} s against a configured deadline of {scaled_time_bound(HANG_TIMEOUT_S)} s"
     assert wait_until_gone(recorded_pids(pid_file), REAP_CEILING_S) == [], "the debugger or its child survived the reap"
 
 

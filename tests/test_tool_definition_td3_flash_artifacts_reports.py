@@ -42,6 +42,7 @@ from conftest import (
     FAKE_PYOCD,
     write_config,
 )
+from support import scaled_time_bound
 from test_debug_sessions import START_TIMEOUT_S, debug_service
 from test_debugger_processes import CALL_CEILING_S, FAKE_HUNG_DEBUGGER, config_with_debugger
 from test_mcp_reference_resources import read_text
@@ -1495,11 +1496,11 @@ def test_a_flash_is_bounded_by_the_debugger_timeout(tmp_path: Path) -> None:
 
 
 def test_the_debugger_timeout_bounds_each_command_not_the_whole_call(tmp_path: Path) -> None:
-    """pyOCD flashes and then resets in two commands. Each takes 2 s against a
-    3.5 s timeout_s: the call succeeds although it runs longer than timeout_s,
-    because the bound applies to each command on its own."""
-    timeout_s = 3.5
-    delay_s = 2.0
+    """pyOCD flashes and then resets in two commands. Each takes a scaled 2 s
+    against a scaled 3.5 s timeout_s. The call succeeds although it runs longer
+    than timeout_s, because the bound applies to each command on its own."""
+    timeout_s = scaled_time_bound(3.5)
+    delay_s = scaled_time_bound(2.0)
     fake = tmp_path / "slow_pyocd.py"
     fake.write_text(SLOW_PYOCD.format(delay_s=delay_s, fake=str(FAKE_PYOCD)), encoding="utf-8")
     service = new_service(tmp_path / "ws", debugger_type="pyocd", debugger_executable=fake, timeout_s=timeout_s)

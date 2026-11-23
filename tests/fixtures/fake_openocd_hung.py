@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 
-HANG_S = 30.0
+HANG_S = float(os.environ.get("AGENTIC_HIL_TEST_DEBUGGER_HANG_S", "30"))
 
 
 def record_pid() -> None:

@@ -30,6 +30,7 @@ strips esptool's own variables):
 * `AGENTIC_HIL_FAKE_ESPTOOL_VERSION`: what `version` reports, 5.5.0 by default.
   A 4.x answers in esptool 4's words, `esptool.py v4.8.1`.
 * `AGENTIC_HIL_FAKE_ESPTOOL_VERSION_HANG`: `1` makes `version` never answer.
+* `AGENTIC_HIL_FAKE_ESPTOOL_PORT_HANG_S`: how long a hung port command sleeps.
 * `AGENTIC_HIL_FAKE_ESPTOOL_CHIP`: the chip on the board, the way esptool names
   it (`ESP32`, `ESP32-S3`), ESP32 by default.
 * `AGENTIC_HIL_FAKE_ESPTOOL_SCENARIO`: what a command that opens the port does,
@@ -301,7 +302,7 @@ def main() -> int:
     if scenario == "hang":
         sys.stdout.write(f"Serial port {port}:\nConnecting...")
         sys.stdout.flush()
-        time.sleep(60)
+        time.sleep(float(os.environ.get("AGENTIC_HIL_FAKE_ESPTOOL_PORT_HANG_S", "60")))
         return 0
     attached = os.environ.get("AGENTIC_HIL_FAKE_ESPTOOL_CHIP", "ESP32")
     if scenario == "no_serial_data":
