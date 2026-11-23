@@ -34,10 +34,16 @@ RTS lines have to restart the chip into its bootloader the way the auto-reset
 circuit on Espressif's ESP32-DevKitC does, and
 [An ESP32 through esptool](configuration.md#an-esp32-through-esptool) says what
 that changes and what a board with only FLASH and RST buttons answers instead.
-The Nucleo-F446RE is the
-reference this is proven on: it is the board in
-[the STM32 starter](https://github.com/agentic-hil/stm32-starter) and in the
-worked example in this repository. It is the reference, not the requirement.
+The Nucleo-F446RE remains the reference board for
+[the STM32 starter](https://github.com/agentic-hil/stm32-starter) and its
+worked example in this repository.
+
+A recorded shared-bench run with Agentic HIL 0.28.0 demonstrated CMSIS-DAP
+through pyOCD on a Raspberry Pi Pico H (RP2040) behind a Raspberry Pi Debug
+Probe. The run flashed the [Pico H demo](https://github.com/agentic-hil/agentic-hil/tree/master/examples/pico-rp2040_demo),
+reset the board in run mode, and received the complete `Hello World` line
+on the probe's UART within the five-second timeout. The flash step reported
+`verify: false`. The UART line after reset confirmed that the image ran.
 
 ## Response
 

@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- A bare-metal Raspberry Pi Pico H (RP2040) demo that flashes through a
+  Raspberry Pi Debug Probe and pyOCD, resets, and checks the boot line on UART0. (#919)
+
 ### Fixed
 
 - ST-Link flash failure guidance now explains which quarantine fields to read before a hot-plug retry, where to turn if the retry is refused, the limits of the H533 `under_reset` evidence, and how to diagnose an exit-0 flash without verification. (#911)

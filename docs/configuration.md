@@ -228,6 +228,39 @@ Three things bound it:
 
 `connect_mode` sits with the other things the bench *is*, under `allow_config_description_write`: it grants nothing, and both of its values are a flash the configuration already allows.
 
+## An RP2040 behind a Raspberry Pi Debug Probe
+
+These version 3 entries bind the Pico H debugger and UART to two interfaces
+of the same Raspberry Pi Debug Probe. Use the full probe ID from
+`agentic-hil debugger-probes` for both serial fields. Point `device` to the
+probe's UART port on your host.
+
+```yaml
+debuggers:
+  dut:
+    type: pyocd
+    target_type: rp2040
+    probe_id: "REPLACE-DEBUG-PROBE-SERIAL"
+    permissions:
+      allow_flash: true
+      allow_reset: true
+      allow_debug_execution: true
+      allow_raw_debugger_commands: false
+      allow_mass_erase: false
+
+com_ports:
+  dut_uart:
+    device: "<DEBUG_PROBE_UART_DEVICE>"
+    serial_number: "REPLACE-DEBUG-PROBE-SERIAL"
+    baudrate: 115200
+    permissions:
+      allow_write: false
+```
+
+The [Pico H demo configuration](https://github.com/agentic-hil/agentic-hil/blob/master/examples/pico-rp2040_demo/config.example.yaml)
+includes the workspace and state roots and the firmware artifact settings.
+Copy it to an operator-controlled location and replace the host values.
+
 ## An ESP32 through esptool
 
 An ESP32 development board has no debug probe. `type: esptool` reaches the chip the way esptool always does: it pulls the chip into its ROM bootloader through the DTR and RTS lines of the board's USB-UART bridge (a CP210x, CH340 or FTDI part), flashes it over the same serial line, and lets it go again. So the entry names the `com_ports` entry of that bridge where other entries name a probe, and that entry says which board it is:
