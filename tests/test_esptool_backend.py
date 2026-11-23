@@ -233,13 +233,14 @@ def test_an_exit_status_of_zero_without_the_success_lines_is_no_success(
 
 def test_an_esptool_that_stops_answering_is_killed_at_its_deadline(tmp_path: Path, esptool_log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(SCENARIO, "hang")
+    monkeypatch.setenv("AGENTIC_HIL_FAKE_ESPTOOL_PORT_HANG_S", str(scaled_time_bound(60)))
 
-    result = call(esptool_config(tmp_path, timeout_s=1, auto_recover="off"), "probe_target")
+    result = call(esptool_config(tmp_path, timeout_s=scaled_time_bound(1), auto_recover="off"), "probe_target")
 
     assert result["error_type"] == "timeout", result
     # Killed after it had started connecting, so where it stopped is unknown.
     assert result["retry_safe"] is False and result["side_effect_status"] == "unknown", result
-    # The fake sleeps for a minute; the deadline is what ended it.
+    # The fake sleeps for twice this ceiling, so the deadline is what ended it.
     assert result["elapsed_ms"] < scaled_time_bound(30) * 1000, result
 
 
