@@ -1,0 +1,17 @@
+version: 3
+name: pico-rp2040-hello-world
+steps:
+  - device: dut
+    action: flash
+    image_path: build/Debug/pico-rp2040_demo.elf
+    reset_after_flash: false
+  - device: dut_uart
+    action: uart_open
+    clear_buffer: true
+  - device: dut
+    action: reset
+    mode: run
+  - device: dut_uart
+    action: uart_read
+    comparator: {equals: "Hello World"}
+    timeout_s: 5

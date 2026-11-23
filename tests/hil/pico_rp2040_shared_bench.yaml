@@ -1,0 +1,17 @@
+version: 3
+name: pico-rp2040-shared-bench
+steps:
+  - debugger: pico_h
+    action: flash
+    image_path: examples/pico-rp2040_demo/build/Debug/pico-rp2040_demo.elf
+    reset_after_flash: false
+  - port_id: pico_h_uart
+    action: uart_open
+    clear_buffer: true
+  - debugger: pico_h
+    action: reset
+    mode: run
+  - port_id: pico_h_uart
+    action: uart_expect
+    pattern: '(?m)^Hello World\r?\n'
+    timeout_s: 5

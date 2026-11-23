@@ -1,0 +1,12 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/cmake/gnu-arm.cmake",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"}
+    }
+  ]
+}
