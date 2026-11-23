@@ -9,7 +9,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
-from support import scaled_time_bound
+from bench_job_fakes import wait_until
+from support import TIME_SCALE_VARIABLE, scaled_time_bound
 from test_scheduler import delay, make_bench, status, submit
 
 from agentic_hil import runlifecycle
@@ -26,7 +27,7 @@ def owned_workers(monkeypatch):
     original = runlifecycle.spawn_run_worker
     source = str(Path(__file__).resolve().parents[1] / "src")
     monkeypatch.setenv("PYTHONPATH", source + os.pathsep + os.environ.get("PYTHONPATH", ""))
-    monkeypatch.setenv("AGENTIC_HIL_TEST_TIME_SCALE", "3")
+    monkeypatch.setenv(TIME_SCALE_VARIABLE, str(max(3, scaled_time_bound(1))))
 
     def spawn(config, handle, test_config_path, *, wait_s):
         assert wait_s == 0
@@ -188,7 +189,7 @@ def test_killed_worker_releases_devices_for_successor(tmp_path, monkeypatch):
             child = children[handle]
             terminate_process_tree(child, scaled_time_bound(10), graceful=False)
             child.wait(timeout=scaled_time_bound(30))
-            assert runlifecycle.worker_is_gone(bench.config, handle)
+            wait_until(lambda: runlifecycle.worker_is_gone(bench.config, handle), "killed worker lifetime lock release")
             # This observer is the test, not a scheduler availability probe.
             observer.acquire(bench.keys(plan), wait_s=0)
             observer.release_all()
