@@ -456,9 +456,9 @@ types-jsonschema==4.26.0.20261006 \
     --hash=sha256:29301f4e65e3928540cdf5e23ad716e38bb0c0b416a48dada213edd3d70206ec \
     --hash=sha256:3eb7db61b6819d40addfdaac7173e749071a7d4a9a4394f0c844598ec84b2500
     # via -r requirements/typecheck.in
-types-pyyaml==6.0.12.20261111 \
-    --hash=sha256:b7e46cbc847dc235305e95e3e3570792d72e6ccf64bf9b831306f48da490322d \
-    --hash=sha256:c511f563eaf820b948c4ff6f43fe0b9d48b227be442a69058d9f68f139cae1fb
+types-pyyaml==6.0.12.20261113 \
+    --hash=sha256:0828be2580fd94151182364f4d0158e4de62fdbeeb8d4296f7f7d2b6c22bb640 \
+    --hash=sha256:3600749e613748afdc4327f0b17c3296cf880cdbc7335f320007abd9dd815f67
     # via -r requirements/typecheck.in
 typing-extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
