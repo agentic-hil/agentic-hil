@@ -255,7 +255,7 @@ class ProjectPermissions:
 
 @dataclass(frozen=True)
 class DebuggerConfig:
-    type: Literal["openocd", "stlink", "pyocd", "esptool"]
+    type: Literal["openocd", "stlink", "pyocd", "esptool", "picotool"]
     executable: str | None
     probe_id: str | None
     target_type: str | None

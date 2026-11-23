@@ -24,11 +24,12 @@ not a board:
 | ST-Link | OpenOCD, or the STM32CubeProgrammer CLI |
 | CMSIS-DAP probes | pyOCD |
 | an ESP32 board's USB-UART bridge (CP210x, CH340, FTDI) with an auto-reset circuit | esptool 5: flashing, reset and probing, no debug sessions |
+| RP2040 and RP2350 boards using their own USB port | picotool 2: verified UF2, ELF and BIN flashing, reboot and probing, no typed debug. Hardware-unproven. |
 
-All four backends are supported. Your board is reached through one of them, so
-what decides whether a bench works is the probe on it, the backend behind that
-probe, and the target script or controller name your configuration binds to it,
-which [Configuration](configuration.md) describes. An ESP32 board has no probe:
+OpenOCD, STM32CubeProgrammer CLI, pyOCD and esptool have hardware support
+evidence. The probe or USB interface, backend, and target settings determine
+which boards the bench can reach. See [Configuration](configuration.md).
+An ESP32 board has no probe:
 esptool reaches the chip through the serial bridge on the board, whose DTR and
 RTS lines have to restart the chip into its bootloader the way the auto-reset
 circuit on Espressif's ESP32-DevKitC does, and

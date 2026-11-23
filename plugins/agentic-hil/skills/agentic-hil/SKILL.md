@@ -46,13 +46,18 @@ device only for its own duration, and between flash and read the board is free
 for anything else on the machine. Inside a run only the declared devices may be
 touched.
 
-Do not substitute `openocd`, `pyocd`, `esptool`, `st-flash`, `st-util`, `JLinkExe`,
+Do not substitute `openocd`, `pyocd`, `esptool`, `picotool`, `st-flash`, `st-util`, `JLinkExe`,
 `gdb`, `screen`, `minicom`, `picocom`, `cansend`, or `candump` for these tools, and do
 not open `/dev/tty*`, `COM*`, or a SocketCAN interface yourself. Reach for a raw
 command only when no Agentic HIL tool covers the request, and say plainly that
 you are stepping outside the gate.
 
 ## Answer hardware questions by calling a tool
+
+On a configured `type: picotool` board, use the same flash, reset and probe
+tools. Listing checks configured USB serials without rebooting. Use
+`com_ports_list` for the serial of a running application with USB stdio.
+Reset mode `halt` enters BOOTSEL and typed debug tools return `not_supported`.
 
 Reading the configuration file tells you what is *configured*; it never tells
 you what the hardware is doing, so it does not answer the question. Call the

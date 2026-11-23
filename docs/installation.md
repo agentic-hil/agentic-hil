@@ -266,6 +266,11 @@ shell is one copy away once you have read what is in them.
 
 ## Platforms and debugger backends
 
+Install native picotool 2.x separately for RP2040 and RP2350 USB flashing,
+reboot and probing. Put it on `PATH` or set `debuggers.<name>.executable`.
+See [the Pico configuration](configuration.md#an-rp2040-or-rp2350-board-through-picotool)
+for WinUSB and udev setup.
+
 Linux, macOS, and Windows (CI-tested on Python 3.10 to 3.15, and on the newest Python release). Debugger backends: OpenOCD (debug sessions need 0.11.0 or newer; flashing, reset and memory reads need no particular release), pyOCD (`agentic-hil[pyocd]`: covers most ARM Cortex-M targets via CMSIS packs and the in-circuit debuggers or programmers pyOCD itself supports, set `debuggers.<name>.target_type`; debug sessions run through `pyocd gdbserver` from the same install), and STM32CubeProgrammer CLI (auto-discovered on Windows; debug sessions run through the ST-LINK_gdbserver STM32CubeCLT installs, found beside the CLI of the same STM32CubeCLT or named as `debuggers.<name>.gdb_server_executable`), and esptool (`agentic-hil[esptool]`: ESP32-family chips through the USB-UART bridge on the board, esptool 5.x only; flashing, reset and probing, no debug sessions). An esptool entry remembers that it left the chip in its ROM bootloader, after `reset_target` mode `halt` or a flash without a reset, only for the life of the server process: a server started fresh resets the chip into its application on its first `probe_target`. Direct CAN requires `agentic-hil[can]` (python-can); CAN also supports a configured `process` bridge backend.
 
 Installing pyOCD is not enough to reach an STM32 part. Most vendor target types, the whole STM32F4 family included, come from a CMSIS device-family pack rather than pyOCD's built-in list, so they need a second, deliberate step:

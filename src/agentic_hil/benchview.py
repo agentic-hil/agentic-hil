@@ -61,7 +61,7 @@ _UNREADABLE_NEXT_STEP = (
 # The probe enumerations that open every attached probe over USB, which run only
 # while no debugger is held, and the one that reads the host's USB serial
 # inventory and opens nothing. esptool has no probe to list.
-_LISTED_BY_OPENING = frozenset({"pyocd", "stlink"})
+_LISTED_BY_OPENING = frozenset({"pyocd", "stlink", "picotool"})
 _LISTED_FROM_INVENTORY = frozenset({"openocd"})
 _LISTABLE = _LISTED_BY_OPENING | _LISTED_FROM_INVENTORY
 # The host's serial port inventory, kept beside the probe listings.
@@ -198,6 +198,8 @@ class BenchView:
         readings = {backend: self._probe_reading(backend, name) for backend, name in self._probe_sources().items()}
         configured: dict[str, set[str]] = {}
         probes: JsonObject = {}
+        picotool_reading = readings.get("picotool")
+        picotool_rows = {item["debugger_id"]: item for item in picotool_reading.listed} if picotool_reading is not None else {}
         for name, debugger in config.debuggers.items():
             if debugger.probe_id:
                 configured.setdefault(debugger.type, set()).add(fold_hardware_id(debugger.probe_id))
@@ -205,6 +207,17 @@ class BenchView:
                 probes[name] = {"backend": debugger.type, "status": "not_listable"}
             elif not config.probe_allowed(debugger):
                 probes[name] = {"backend": debugger.type, "status": "not_listed"}
+            elif debugger.type == "picotool":
+                row = picotool_rows.get(name, {})
+                present = row.get("present")
+                probes[name] = {
+                    "backend": "picotool",
+                    "status": "present" if present is True else "absent" if present is False else "unknown",
+                    "present": present,
+                    "target_state": row.get("target_state"),
+                    "chip": row.get("chip"),
+                    "observed_at": picotool_reading.observed_at if picotool_reading is not None else None,
+                }
             else:
                 reading = readings[debugger.type]
                 probes[name] = {
@@ -217,7 +230,12 @@ class BenchView:
             for backend, reading in readings.items()
         ]
         unconfigured = None if None in counts else sum(count for count in counts if count is not None)
-        return self._answer({"probes": probes, "present_not_configured": unconfigured})
+        answer: JsonObject = {"probes": probes, "present_not_configured": unconfigured}
+        if any(debugger.type == "picotool" for debugger in config.debuggers.values()):
+            from agentic_hil.backends.picotool import PICOTOOL_LISTING_NOTICE
+
+            answer.update({"picotool_scope": PICOTOOL_LISTING_NOTICE, "present_not_configured": None})
+        return self._answer(answer)
 
     def ports(self) -> JsonObject:
         config = self.config
@@ -401,7 +419,18 @@ class BenchView:
 
     def _probe_reading(self, backend: str, name: str) -> _Reading | None:
         may_list = self._no_debugger_held if backend in _LISTED_BY_OPENING else None
+        if backend == "picotool":
+            return self._reading(backend, "probes", lambda: self._picotool_listing(name), may_list)
         return self._reading(backend, "probes", lambda: self._backend(name).list_probes(), may_list)
+
+    def _picotool_listing(self, name: str) -> JsonObject:
+        from agentic_hil.tools import AgenticHILToolService
+
+        service = AgenticHILToolService(bind_debugger(self.config, name))
+        try:
+            return service.call("debugger_probes_list")
+        finally:
+            service.close()
 
     def _reading(
         self, source: str, key: str, enumerate_host: Callable[[], JsonObject], may_enumerate: Callable[[], bool] | None = None,

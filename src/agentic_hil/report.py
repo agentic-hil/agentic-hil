@@ -949,6 +949,11 @@ def classify_failure_report(config: AgenticHILConfig, likely_causes: Callable[[s
         result["failed_step"] = report["failed_step"]
     if "step_error_type" in report:
         result["step_error_type"] = report["step_error_type"]
+    if report.get("backend") == "picotool":
+        if "backend_output" in report:
+            result["backend_output"] = report["backend_output"]
+        advice: JsonObject = {key: report[key] for key in ("remediation", "do_not") if key in report}
+        result.update(advice or remediation_fields(error_type, "picotool", permission=report.get("permission")))
     return attach_canonical_audit_evidence(config, result)
 
 

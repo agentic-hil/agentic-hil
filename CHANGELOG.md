@@ -8,6 +8,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Added
 
+- Add picotool 2 support for serial-pinned USB detection, verified UF2, ELF and BIN flashing, and reboot on configured RP2040 and RP2350 boards. Hardware qualification is pending.
 - A bare-metal Raspberry Pi Pico H (RP2040) demo that flashes through a
   Raspberry Pi Debug Probe and pyOCD, resets, and checks the boot line on UART0. (#919)
 
