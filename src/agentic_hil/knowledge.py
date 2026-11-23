@@ -4533,9 +4533,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     # only where the reader finds that line.
     "flash_failed:stlink": ErrorRemedy(
         meaning=(
-            "STM32CubeProgrammer's flash did not finish: the backend read a failed download, or another failure line, "
-            "out of the CLI's transcript. The whole transcript travels with the result under `programmer_output`, and "
-            "which lines the CLI printed is in it and nowhere else.\n\n"
+            "The backend read a failed download or another failure line in STM32CubeProgrammer's transcript. "
+            "This entry also covers a CLI exit 0 without `Download verified successfully` "
+            "(`backend_error_type: flash_unconfirmed`, with `operation_result`). The whole transcript travels with "
+            "the result under `programmer_output`.\n\n"
             "Two failed downloads were recorded, and both ended in the same two lines, `Error: failed to download  "
             "Sector[0]` and then `Error: failed to download the File`. One was an image, or a `.bin` written at its "
             "configured address, that lay outside the part's flash: a raw binary based past the end of a "
@@ -4564,12 +4565,18 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "right one to the operator, whose edit of the configuration it is. If the image does not fit, a retry "
             "cannot fix it and neither can another connect mode: the out-of-range recording was already made under "
             "reset.",
-            "If the image fits and the banner reads `Connect mode: Hot Plug`, retry the flash once with nothing changed. "
-            "A core still executing from the flash being written can defeat a hot-plug download, and on the bench this "
-            "was recorded on the immediate retry programmed and verified. The durable fix for that cause is connecting "
-            "under reset for the flash: set `debuggers.<name>.connect_mode` to `under_reset` (STM32CubeProgrammer's "
-            "`mode=UR`) with `project_config_set`, which needs the probe's reset line wired to the target's NRST, and "
-            "put it in force with `project_config_reload_description` or a server restart.",
+            "For `flash_unconfirmed`, read `operation_result` for the expected and matched confirmation lines. "
+            "Check that `debuggers.<name>.executable` launches the STM32CubeProgrammer CLI directly without a wrapper.",
+            "Read `quarantined` on the flash result and `incident_stands` from `hardware_lease_status`. "
+            "If `incident_stands` is true, follow `quarantine_guidance` and stop. If `incident_stands` is false, "
+            "the image fits and the banner reads `Connect mode: Hot Plug`, retry the flash once with nothing changed. "
+            "This is not a free retry (`retry_safe` is false). If the retry is refused with `resource_quarantined`, "
+            "follow `quarantine_guidance` and stop there.",
+            "If the image fits and the download failed under hot plug, you can set `debuggers.<name>.connect_mode` "
+            "to `under_reset` (STM32CubeProgrammer's `mode=UR`) through `project_config_set` under "
+            "`allow_config_description_write`. This requires the probe's reset line wired to the target's NRST. "
+            "Apply the setting with `project_config_reload_description` or a server restart. "
+            "`under_reset` was measured for the erase refusal. `under_reset` was not measured for this H533 download failure.",
             "If the image fits and the flash fails the same way once more, look past the two recorded causes as well "
             "as at them: a hot-plug failure may simply have happened twice, and one recorded success on the next "
             "attempt does not rule that out. Ask the device what it refuses rather than guessing: read the option "

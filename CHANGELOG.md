@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- ST-Link flash failure guidance now explains which quarantine fields to read before a hot-plug retry, where to turn if the retry is refused, the limits of the H533 `under_reset` evidence, and how to diagnose an exit-0 flash without verification. (#911)
+
 ## [0.28.0] - 2026-11-22
 
 ### Added
