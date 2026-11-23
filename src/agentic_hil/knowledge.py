@@ -46,7 +46,7 @@ DEBUGGER_BACKEND_URI_PREFIX = f"{DEBUGGER_BACKENDS_URI}/"
 JSON_MIME = "application/json"
 MARKDOWN_MIME = "text/markdown"
 
-BACKENDS = ("openocd", "stlink", "pyocd", "esptool")
+BACKENDS = ("openocd", "stlink", "pyocd", "esptool", "picotool")
 
 # The plan the reactor reads when nobody names another one, and the packaged
 # schema every plan is validated against. Both live here rather than in
@@ -674,6 +674,59 @@ READ_VALIDATION_NEXT_STEP = (
 # from the scoped key to the bare one, so a scope nobody wrote an entry for still
 # gets the general fix instead of nothing.
 ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
+    "target_not_detected:picotool": ErrorRemedy(
+        "Picotool could not find an accessible RP-series board with the configured USB serial.",
+        (
+            "Check probe_id against the USB serial reported by com_ports_list while the application runs with USB stdio.",
+            "Build the application with the pico_stdio_usb reset interface, or enter BOOTSEL manually.",
+            "On Windows, bind WinUSB to RP2 Boot (Interface 1) for RP2040 with Zadig. On Linux, install picotool's udev rules.",
+            "Close any other picotool invocation or IDE extension that may be holding the USB interface.",
+        ),
+    ),
+    "debugger_not_found:picotool": ErrorRemedy(
+        "The host could not run a supported picotool 2.x executable.",
+        ("Install native picotool 2.x on the host.", "Put it on PATH or set debuggers.<name>.executable to the installed binary."),
+    ),
+    "target_type_invalid:picotool": ErrorRemedy(
+        "The selected board's observed chip family differs from target_type.",
+        ("Check the board's USB serial and select its actual family, rp2040 or rp2350.",),
+    ),
+    "invalid_argument:picotool": ErrorRemedy(
+        "The input does not describe an operation picotool can perform.",
+        ("Use UF2, ELF or BIN for a flash. For BIN set flash_address to a 4 KiB-aligned address from 0x10000000 to 0x10fff000.",),
+    ),
+    "not_supported:picotool": ErrorRemedy(
+        "Picotool does not provide typed CPU debug or the OpenOCD reset-init event.",
+        ("Use a supported CPU debug backend for debug operations or reset-init. Use reset_target with run or halt for a USB reboot.",),
+    ),
+    "timeout:picotool": ErrorRemedy(
+        "Picotool did not finish within the configured deadline.",
+        ("Read the log and check USB access and the board's current state before retrying. Adjust timeout_s if the operation needs more time.",),
+    ),
+    "probe_failed:picotool": ErrorRemedy(
+        "Picotool did not confirm the board's state.",
+        ("Read the picotool diagnostic and check the USB connection, driver and BOOTSEL state.",),
+    ),
+    "flash_failed:picotool": ErrorRemedy(
+        "Picotool did not confirm the write and the requested final state.",
+        ("Read the log, check the image fits this board, and establish its current state before attempting another flash.",),
+    ),
+    "verify_failed:picotool": ErrorRemedy(
+        "Picotool reported a verification failure.",
+        ("Check the image and the USB connection. Confirm the board's state and flash a known image with verification.",),
+    ),
+    "reset_failed:picotool": ErrorRemedy(
+        "Picotool did not confirm the requested reboot.",
+        ("Check the board's current state and USB reset interface. If the application does not expose that interface, enter BOOTSEL manually.",),
+    ),
+    "device_busy:picotool": ErrorRemedy(
+        "Another Agentic HIL call holds the board or the host's picotool lock.",
+        ("Wait for the current call or board lease to finish before retrying.",),
+    ),
+    "permission_denied:picotool": ErrorRemedy(
+        "The selected operation conflicts with the permissions of this picotool entry.",
+        ("Review `{permission}` in the authoritative configuration. Flashing requires allow_flash with both flash interlocks disabled. Explicit reset and starting the application after flashing require allow_reset.",),
+    ),
     "server_not_configured": ErrorRemedy(
         meaning="The authoritative configuration has no server block, so this bench serves no jobs.",
         remediation=(
@@ -8268,6 +8321,20 @@ _PROBE_BACKEND_COM_PORT: JsonObject = {
     "note": "Only an esptool entry names a com_ports entry; this backend is identified by its probe, so the key is refused at load. project_config_set does not remove it either, so an entry leaves esptool only in the file, by the operator's hand.",
 }
 DEBUGGER_FIELD_MATRIX: JsonObject = {
+    "picotool": {
+        "tool": "picotool 2.x",
+        "type": {"status": "required", "value": "picotool", "note": "Flashes, reboots and probes RP2040 and RP2350 boards through their USB ports. Typed debug is unavailable."},
+        "executable": {"status": "discovered", "note": "Uses native picotool on PATH unless configured explicitly. Requires a 2.x version before device access."},
+        "gdb_server_executable": {"status": "ignored"},
+        "com_port": _PROBE_BACKEND_COM_PORT,
+        "probe_id": {"status": "required", "unset": "refused", "note": "The board's USB serial for every device command and its physical lease. For a running application with USB stdio, use the serial from com_ports_list."},
+        "target_type": {"status": "optional", "note": "rp2040 or rp2350. A configured family must match the board before flashing."},
+        "interface": {"status": "ignored"},
+        "interface_cfg": {"status": "ignored"},
+        "target_cfg": {"status": "ignored"},
+        "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "The board is reached through USB. under_reset is refused at load."},
+        "flash_address": {"status": "conditional", "note": "Required only for BIN. Use a 4 KiB-aligned address in the first XIP flash window, from 0x10000000 up to but excluding 0x11000000."},
+    },
     "openocd": {
         "tool": "openocd",
         "type": {"status": "optional", "value": "openocd", "note": "Default. Omit only if no other backend is meant. Settable over MCP behind allow_config_description_write, and switching an entry to this backend has to carry interface_cfg and target_cfg in the same call, because OpenOCD reaches the board through no other route; an entry that does not name them is refused rather than left half switched. Send executable in that call too, or `null` to have OpenOCD discovered on PATH: an executable already in the entry was chosen for the backend the entry is leaving."},
@@ -8342,7 +8409,7 @@ MULTI_PROBE_RULE = {
 }
 
 FLASH_ADDRESS_RULE = {
-    "rule": "flash_address is required only for a .bin artifact, on every backend (openocd, stlink, pyocd and esptool).",
+    "rule": "flash_address is required only for a .bin artifact, on every backend (openocd, stlink, pyocd, esptool and picotool).",
     "why": ".bin carries no load address. .elf and .hex do, and the field is not read for them.",
     "failure_when_missing": "error_type `invalid_argument` from flash_firmware, before anything reaches the target.",
     "example": "0x08000000 for STM32 internal flash; 0x10000 for an ESP-IDF application on an ESP32.",
@@ -9637,6 +9704,7 @@ Which field names the target depends on the backend. Setting the wrong one is si
 | `stlink` | none; STM32CubeProgrammer identifies the part itself | not applicable |
 | `pyocd` | `target_type` | pyOCD's built-in list plus every installed CMSIS device-family pack |
 | `esptool` | `target_type`, optional; unset, esptool reads the chip family off the ROM bootloader | esptool's own `--chip` list: `esp32`, `esp32s3`, `esp32c3`, ... |
+| `picotool` | `target_type`, optional; set, the detected family must match before flashing | `rp2040`, `rp2350` |
 
 ## Known-good values, STM32 Nucleo-F446RE with the on-board ST-Link
 
@@ -10081,7 +10149,7 @@ MCP_RESOURCES: list[JsonObject] = [
         DEBUGGER_BACKENDS_URI,
         "debugger-backends",
         "Required fields per debugger backend",
-        "Which of type, executable, gdb_server_executable, com_port, probe_id, target_type, interface, interface_cfg, target_cfg, connect_mode and flash_address each of openocd, stlink, pyocd and esptool requires, discovers, ignores, or refuses; when probe_id becomes mandatory; when flash_address is needed; which backend can connect under reset; how an ESP32 is reached through a com_ports entry instead of a probe; and which of bootstrap discovery's two enumerations answers on a given host, which decides the type and executable a generated entry gets.",
+        "Which of type, executable, gdb_server_executable, com_port, probe_id, target_type, interface, interface_cfg, target_cfg, connect_mode and flash_address each of openocd, stlink, pyocd, esptool and picotool requires, discovers, ignores, or refuses. Includes when probe_id and flash_address are required, which backend can connect under reset, how esptool uses a com_ports entry, how picotool selects a Pico board by USB serial, and how bootstrap discovery chooses a backend.",
         JSON_MIME,
     ),
     _resource_descriptor(
@@ -10154,7 +10222,7 @@ MCP_RESOURCE_TEMPLATES: list[JsonObject] = [
         "uriTemplate": DEBUGGER_BACKEND_URI_PREFIX + "{backend}",
         "name": "debugger-backend",
         "title": "Required fields for one debugger backend",
-        "description": "The field matrix for a single backend: openocd, stlink, pyocd, or esptool.",
+        "description": "The field matrix for a single backend: openocd, stlink, pyocd, esptool or picotool.",
         "mimeType": JSON_MIME,
     },
 ]

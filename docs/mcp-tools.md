@@ -19,6 +19,12 @@ Host configuration schemas are not portable: VS Code uses `servers`, Claude Code
 
 ## The tool surface
 
+For configured RP2040 and RP2350 boards, picotool lists only the configured
+USB serials and probes without rebooting. Use `com_ports_list` to find the
+serial while the application runs with USB stdio. `flash_firmware` verifies UF2,
+ELF and BIN, and `reset_target` supports `run` (application) and `halt`
+(BOOTSEL). Picotool refuses `init` and all typed debug tools with `not_supported`.
+
 | Group | Tools | Notes |
 |-------|-------|-------|
 | Debugger | `debugger_info`, `debugger_probes_list`, `probe_target`, `reset_target` | Before configuration exists, MCP probe-ID listing uses bootstrap enumeration under the machine-wide discovery lock; after configuration, it runs the configured backend's own enumeration on pyOCD and STM32CubeProgrammer; OpenOCD has none, so on an OpenOCD bench the ids come from this host's USB serial inventory, which names an ST-Link and no other adapter, and `discovered_by` says which enumeration answered. An OpenOCD entry whose `interface_cfg` names another adapter still refuses `not_supported`. `reset_target` modes `run` and `halt` work on every backend; `init` also runs the target's reset-init event script and is OpenOCD-only: stlink and pyocd refuse it with `not_supported` rather than halting instead. On pyocd `probe_target` connects with the target pack's DebugCoreStart sequence disabled, as the reads do, so probing a core `reset_target` halted leaves it halted. An esptool entry has no probe: `debugger_probes_list` answers `not_supported` and points at `com_ports_list`, `probe_target` resets the ESP32 into its ROM bootloader to read it and so needs `allow_reset` too, `reset_target` mode `halt` holds the chip in that bootloader, and `init` is refused as on stlink and pyocd |

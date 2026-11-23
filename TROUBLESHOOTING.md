@@ -99,6 +99,10 @@ Fix: stop and ask the human operator. The operator reviews the external config c
 
 ## 4. `debugger_not_found`
 
+For `type: picotool`, install native picotool 2.x, add it to `PATH` or set
+`debuggers.<name>.executable`. `picotool_not_found` means it could not be started.
+`picotool_version_unsupported` means it did not report a readable 2.x version.
+
 Symptom: `agentic-hil doctor` fails, and the debugger's `check` names `error_type: "debugger_not_found"`. At a terminal that is the `check  FAILED` line under the entry in the `Debuggers` section.
 
 Likely cause: OpenOCD (or pyOCD for `type: "pyocd"`, or STM32CubeProgrammer CLI for `type: "stlink"`) is not installed, not on `PATH`, or the configured `debuggers.<name>.executable` could not be pinned.
@@ -190,6 +194,13 @@ With `backend_error_type: "adapter_access_denied"` the probe is attached and thi
 `agentic-hil doctor` asks this before any hardware call does. On Linux it finds the configured probe's USB device node the way discovery does (the probe's USB identity under `/sys/bus/usb/devices`, narrowed by `probe_id`), asks the kernel whether this account may open it for reading and writing, and opens nothing. The probe half is Linux-only, because that sysfs tree is where the node comes from and macOS has no equivalent of it; the serial port half below answers everywhere off Windows. An entry that pins no `probe_id` is answered only where its backend opens an ST-Link (`type: stlink`, or `type: openocd` with an `interface_cfg` from the `stlink` family), because that is the one probe identity this check recognises and the sole attached ST-Link is not a pyOCD or CMSIS-DAP entry's probe. A node it may not open fails `debuggers.<name>.device_access` with `error_type: "device_access_denied"` and exits non-zero. The check names the node, its owner, group and mode, and where this account stands: `account_in_group: true` with `login_in_group: false` means the account joined the group after this login began, and logging in again (a new SSH session or desktop login) is the whole fix. A node owned by `root:root` is one no udev rule applies to, so joining a group changes nothing until the rule is installed and the probe replugged. Do not `chmod` the node or run as root: udev recreates the node on the next plug, and a run as root leaves files in the state root this account cannot change. `agentic-hil init` runs the same check after it binds a probe and a port, keeps the file it wrote, and repeats the check's sentences as warnings. A probe that is not on USB on this machine gets no check, and `doctor` says of it what it said before.
 
 ## 7. `target_not_detected`
+
+On RP2040 and RP2350 through picotool, check `probe_id` against the port's
+USB serial in `com_ports_list` while the application runs with USB stdio.
+Enter BOOTSEL manually when the firmware lacks the `pico_stdio_usb` reset
+interface. For RP2040 on Windows, check the WinUSB binding to **RP2 Boot
+(Interface 1)** in Zadig. On Linux, check picotool's udev rules. Close other
+picotool invocations or IDE extensions holding the USB interface.
 
 Symptom: `probe_target` returns `ok: false` with `error_type: "target_not_detected"`.
 

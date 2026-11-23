@@ -365,12 +365,17 @@ class AgenticHILToolService:
     def debugger_probes_list(self) -> JsonObject:
         if self._dispatch_depth == 0:
             return self.call("debugger_probes_list")
-        if not self.config.probe_allowed():
+        if not self._probe_listing_allowed():
             return tool_error("debugger_probes_list", "permission_denied", "Debugger probe discovery is disabled by the authoritative config.", self.debugger_permission_key("allow_probe"))
         result = self.backend.list_probes()
         if result.get("cleanup_required") is not True and result.get("side_effect_status") not in {"unknown", "partial"}:
             result = {**result, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
         return result
+
+    def _probe_listing_allowed(self) -> bool:
+        if _backend_kind(self.config) == "picotool":
+            return any(entry.type == "picotool" and self.config.probe_allowed(entry) for entry in self.config.debuggers.values())
+        return self.config.probe_allowed()
 
     def probe_target(self) -> JsonObject:
         if self._dispatch_depth == 0:
@@ -2657,7 +2662,7 @@ class AgenticHILToolService:
             return self._invoke_dispatch(lambda: self.reset_target(args.get("mode", "run")))
         if name == "probe_target" and not self.config.probe_allowed():
             return self._invoke_dispatch(self.probe_target)
-        if name == "debugger_probes_list" and not self.config.probe_allowed():
+        if name == "debugger_probes_list" and not self._probe_listing_allowed():
             return self._invoke_dispatch(self.debugger_probes_list)
         # A symbol read the backend serves with no session behind it is a
         # standalone probe contact the same way `probe_target` is, so it needs
@@ -2779,7 +2784,15 @@ class AgenticHILToolService:
                 }
             else:
                 try:
-                    resources = (DEBUGGER_DISCOVERY_RESOURCE,) if name == "debugger_probes_list" else debugger_effect_devices(self.config)
+                    resources: tuple[Device | str, ...]
+                    if name == "debugger_probes_list":
+                        resources = (
+                            tuple(debugger_device(self.config, entry_id) for entry_id, entry in self.config.debuggers.items()
+                                  if entry.type == "picotool" and self.config.probe_allowed(entry))
+                            if _backend_kind(self.config) == "picotool" else (DEBUGGER_DISCOVERY_RESOURCE,)
+                        )
+                    else:
+                        resources = debugger_effect_devices(self.config)
                     lease = self.coordinator.acquire(*resources, for_recovery=for_recovery)
                 except CoordinationError as error:
                     return {"tool": name, "side_effect_committed": False, **error.result}

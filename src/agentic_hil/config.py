@@ -990,6 +990,7 @@ def host_debugger_executable(debugger_type: str) -> str | None:
         # name is the deprecated shim of the same package, and on PATH it is
         # just as likely to be a stray copy of the 4.x script.
         "esptool": ["esptool"],
+        "picotool": ["picotool", "picotool.exe"],
     }[debugger_type]
     for candidate in candidates:
         found = shutil.which(candidate)
@@ -3573,7 +3574,7 @@ def resolve_esptool_ports(debuggers: dict[str, DebuggerConfig], com_ports: dict[
     return resolved
 
 
-DEBUGGER_TYPES = ("openocd", "stlink", "pyocd", "esptool")
+DEBUGGER_TYPES = ("openocd", "stlink", "pyocd", "esptool", "picotool")
 
 
 def named_debugger_config(name: str, value: Any, default_target: TargetConfig) -> DebuggerConfig:
@@ -3610,11 +3611,21 @@ def debugger_config(raw: JsonObject, debugger_type: str, field: str = "debugger"
             "type to esptool.",
             {"field": f"{field}.com_port", "value": str(raw.get("com_port"))[:128]},
         )
+    executable = optional_string(raw.get("executable"))
+    probe_id = optional_string(raw.get("probe_id"))
+    target_type = optional_string(raw.get("target_type"))
+    if debugger_type == "picotool":
+        if probe_id is None or not probe_id.strip() or probe_id.startswith(("-", "@")):
+            raise ConfigError("config_invalid", "Picotool requires a USB serial without a leading '-' or '@'.", {"field": f"{field}.probe_id"})
+        if target_type is not None and target_type not in {"rp2040", "rp2350"}:
+            raise ConfigError("config_invalid", "The picotool target_type must be rp2040 or rp2350.", {"field": f"{field}.target_type"})
+        if executable is not None:
+            executable = str(Path(executable))
     return DebuggerConfig(
         type=debugger_type,  # type: ignore[arg-type]
-        executable=optional_string(raw.get("executable")),
-        probe_id=optional_string(raw.get("probe_id")),
-        target_type=esptool_chip(raw.get("target_type"), f"{field}.target_type") if debugger_type == "esptool" else optional_string(raw.get("target_type")),
+        executable=executable,
+        probe_id=probe_id,
+        target_type=esptool_chip(raw.get("target_type"), f"{field}.target_type") if debugger_type == "esptool" else target_type,
         interface=str(raw.get("interface", "SWD")),
         interface_cfg=str(raw.get("interface_cfg", "interface/stlink.cfg")),
         target_cfg=str(raw.get("target_cfg", "target/stm32f4x.cfg")),
@@ -3705,6 +3716,7 @@ DEBUGGER_CONNECT_MODES: dict[str, tuple[str, ...]] = {
     "openocd": ("hotplug",),
     "pyocd": ("hotplug",),
     "esptool": ("hotplug",),
+    "picotool": ("hotplug",),
 }
 DEFAULT_DEBUGGER_CONNECT_MODE = "hotplug"
 

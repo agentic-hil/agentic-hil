@@ -509,11 +509,11 @@ class BenchMutex:
         deadline = time.monotonic() + validated_wait(wait_s)
         return self._take(wanted, deadline, stop_requested, pipes=os.name == "nt")
 
-    def acquire_named(self, resource: str, *, wait_s: float = 0.0) -> bool:
+    def acquire_named(self, resource: str, *, wait_s: float = 0.0, use_windows_pipe: bool = False) -> bool:
         """Hold one machine-wide lock by name, whether or not it is a device.
 
         `acquire` locks devices and skips everything else, because a run declares
-        devices and the mutex's job is boards. The one non-device name that still
+        devices and the mutex's job is boards. A non-device name that still
         wants a machine-wide lock is the enumeration pseudo-resource
         `debugger-discovery:all`: it serialises probe enumeration across the
         machine rather than naming a board. Under a lease the coordinator locks it
@@ -522,9 +522,11 @@ class BenchMutex:
         two first-time `init`s enumerate one at a time rather than over each other.
         Folded and taken through the same path as a device, so a caller cannot
         split it by spelling and the holder record names whoever holds it. Raises
-        DeviceBusyError naming the holder, exactly as `acquire` does."""
+        DeviceBusyError naming the holder, exactly as `acquire` does. Native
+        picotool calls opt into the Windows pipe to share one invocation lock
+        across user profiles."""
         deadline = time.monotonic() + validated_wait(wait_s)
-        return bool(self._take([fold_resource_name(resource)], deadline))
+        return bool(self._take([fold_resource_name(resource)], deadline, pipes=use_windows_pipe and os.name == "nt"))
 
     def release(self, resources: list[str] | tuple[str, ...]) -> None:
         with self._guard:

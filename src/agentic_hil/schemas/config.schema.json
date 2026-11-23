@@ -265,7 +265,8 @@
               "openocd",
               "stlink",
               "pyocd",
-              "esptool"
+              "esptool",
+              "picotool"
             ],
             "description": "Which debug stack drives this probe. It is part of the bench description and is settable behind allow_config_description_write, beside executable, interface_cfg and target_cfg, which already decide which binary runs with which scripts. A change to it is refused unless the entry that comes out of the call carries what the named backend requires and this surface can write: switching to openocd needs interface_cfg and target_cfg, so a backend switch lands whole or not at all. Send executable in the same call too, or null to have the new backend's binary discovered, because an executable already in the entry was chosen for the backend the entry is leaving. esptool flashes Espressif chips through their ROM bootloader over a serial line; it needs com_port, which this surface cannot write, so an entry becomes esptool only through the file."
           },
