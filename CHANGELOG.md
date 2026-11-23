@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- Add picotool 2 support for serial-pinned USB detection, verified UF2, ELF and BIN flashing, and reboot on configured RP2040 and RP2350 boards. Hardware qualification is pending.
+
 ### Fixed
 
 - ST-Link flash failure guidance now explains which quarantine fields to read before a hot-plug retry, where to turn if the retry is refused, the limits of the H533 `under_reset` evidence, and how to diagnose an exit-0 flash without verification. (#911)

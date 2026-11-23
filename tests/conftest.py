@@ -570,6 +570,21 @@ def _no_host_debugger_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_host_picotool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent native discovery in either the config or backend lookup path."""
+    import shutil
+
+    original_which = shutil.which
+
+    def without_picotool(command, *args, **kwargs):
+        if Path(os.fsdecode(command)).name.lower() in {"picotool", "picotool.exe"}:
+            return None
+        return original_which(command, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "which", without_picotool)
+
+
+@pytest.fixture(autouse=True)
 def _no_host_stlink_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """A session on the stlink backend finds no stlink-server on the machine running the suite.
 

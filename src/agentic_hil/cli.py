@@ -5897,13 +5897,23 @@ def debugger_probes() -> JsonObject:
             "configured_debuggers": sorted(config.debuggers),
         }
     results: JsonObject = {}
+    picotool_listing: JsonObject | None = None
     for name in granted:
+        if config.debuggers[name].type == "picotool" and picotool_listing is not None:
+            continue
         service = AgenticHILToolService(bind_debugger(config, name))
         try:
-            results[name] = service.call("debugger_probes_list")
+            listing = service.call("debugger_probes_list")
         finally:
             service.close()
+        if config.debuggers[name].type == "picotool":
+            picotool_listing = listing
+            rows = {row["debugger_id"]: {"ok": True, **row} for row in listing.get("probes", [])}
+            results.update(rows or {name: listing})
+        else:
+            results[name] = listing
     failed = sorted(name for name, result in results.items() if not overall_success(result))
+    picotool_failed = picotool_listing is not None and not overall_success(picotool_listing)
     # A child that answered without error but says its enumeration is not
     # authoritative (`complete: false`, which the OpenOCD USB-serial listing
     # always sets) is not a failure, so it stays out of `failed` and off `ok`;
@@ -5915,30 +5925,38 @@ def debugger_probes() -> JsonObject:
         # `all`, not `any`: one probe answering must not report the run as
         # healthy while another failed, and the CLI exit code is derived from
         # this verdict alone.
-        "ok": not failed,
+        "ok": not failed and not picotool_failed,
         "tool": "debugger_probes_list",
         "debuggers": results,
         "summary": (
             f"Probe discovery failed for: {', '.join(failed)}."
             if failed
+            else "The picotool listing did not complete successfully."
+            if picotool_failed
             else f"Probe discovery ran for {len(results)} configured debugger(s), but at least one listing is not an "
             f"authoritative count of attached probes (`complete: false`): {', '.join(incomplete)}."
             if incomplete
             else f"Probe discovery ran for {len(results)} configured debugger(s)."
         ),
     }
+    containment_results = list(results.values())
+    if picotool_listing is not None:
+        from agentic_hil.backends.picotool import PICOTOOL_LISTING_NOTICE
+
+        aggregate["picotool_scope"] = PICOTOOL_LISTING_NOTICE
+        containment_results.append(picotool_listing)
     # A containment marker on any probe has to reach the top level, or
     # overall_success() reads clean over a nested quarantine. `complete: false`
     # rides up the same way and for a different reason: it scores no verdict at
     # either level, and a caller reading only the aggregate still has to be able
     # to see that a VCP-less probe could sit beside the ones a child saw.
     for marker, unsafe in (("cleanup_required", True), ("quarantined", True), ("audit_ok", False), ("complete", False)):
-        if any(result.get(marker) is unsafe for result in results.values()):
+        if any(result.get(marker) is unsafe for result in containment_results):
             aggregate[marker] = unsafe
-    unsafe_effect = next((result.get("side_effect_status") for result in results.values() if result.get("side_effect_status") in {"unknown", "partial"}), None)
+    unsafe_effect = next((result.get("side_effect_status") for result in containment_results if result.get("side_effect_status") in {"unknown", "partial"}), None)
     if unsafe_effect is not None:
         aggregate["side_effect_status"] = unsafe_effect
-    quarantine_id = next((result.get("quarantine_id") for result in results.values() if result.get("quarantine_id")), None)
+    quarantine_id = next((result.get("quarantine_id") for result in containment_results if result.get("quarantine_id")), None)
     if quarantine_id is not None:
         aggregate["quarantine_id"] = quarantine_id
     return aggregate

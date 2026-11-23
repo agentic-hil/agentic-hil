@@ -650,7 +650,8 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # (#889) add `agentic_hil.httpread` and `agentic_hil.benchview`, the 60th and
 # the 61st. The bench server's job service and its remote client (#891) add
 # `agentic_hil.benchjobs` and `agentic_hil.remote`, the 62nd and the 63rd.
-SCANNED_MODULE_COUNT = 63
+# Picotool (#917) adds a module before its first refusal is implemented.
+SCANNED_MODULE_COUNT = 64
 # The power supply tools (#733) add seven, the 220th to the 226th: the six
 # `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
 # `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)
@@ -676,7 +677,7 @@ SCANNED_MODULE_COUNT = 63
 # `job_not_ended`, `artifact_unreferenced`, `artifact_already_uploaded` and
 # `range_not_satisfiable`, the scheduler `artifact_missing`, and the client
 # `bench_unreachable` and `remote_artifact_missing`.
-COLLECTED_TYPE_COUNT = 259
+COLLECTED_TYPE_COUNT = 260
 # A producer is a type together with a function that writes it. A type many
 # functions write, such as `invalid_argument`, keeps its place among the types
 # when one of those functions drops out of the scan, so the type count alone
@@ -774,7 +775,7 @@ COLLECTED_TYPE_COUNT = 259
 # `bench_unreachable`, `_missing_artifact` `remote_artifact_missing` and
 # `_stored_token` `job_token_missing`. `server_not_configured` moves from
 # `cli.serve` to `cli.bench_server`, which changes no count.
-PRODUCER_COUNT = 762
+PRODUCER_COUNT = 774
 
 
 def pin_problems(inventory: Inventory) -> list[str]:

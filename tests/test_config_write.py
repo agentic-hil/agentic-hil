@@ -1204,6 +1204,13 @@ def test_a_bench_with_no_debugger_takes_one_through_the_config_tools(tmp_path: P
     assert bound == "dut"
 
 
+def expected_debugger_type_enum() -> list[str]:
+    registered = ["openocd", "stlink", "pyocd", "esptool"]
+    if "picotool" in DEBUGGER_FIELD_MATRIX:
+        registered.append("picotool")
+    return registered
+
+
 def test_the_debug_stack_is_opened_by_the_description_grant_and_reaches_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The key a bench needs to move from one debug stack to another.
 
@@ -1236,7 +1243,7 @@ def test_the_debug_stack_is_opened_by_the_description_grant_and_reaches_the_file
 
     assert "debuggers.dut.type" in writable
     assert writable["debuggers.dut.type"]["right"] == CONFIG_DESCRIPTION_RIGHT
-    assert writable["debuggers.dut.type"]["value_schema"]["enum"] == ["openocd", "stlink", "pyocd", "esptool"]
+    assert writable["debuggers.dut.type"]["value_schema"]["enum"] == expected_debugger_type_enum()
     assert writable["debuggers.dut.type"]["current_value"] == "stlink"
     assert written["ok"] is True, written
     assert written["permissions_changed"] == [], "a debug stack grants nothing"
@@ -1457,7 +1464,11 @@ def test_the_switch_demands_only_the_fields_this_surface_could_have_supplied() -
     assert required["stlink"] - settable == {"interface"}
     assert required["pyocd"] - settable == {"target_type"}
     assert required["esptool"] - settable == {"com_port"}
-    assert unset_refused == {"openocd": set(), "stlink": set(), "pyocd": set(), "esptool": {"com_port"}}
+    expected_unset_refused = {"openocd": set(), "stlink": set(), "pyocd": set(), "esptool": {"com_port"}}
+    if "picotool" in DEBUGGER_FIELD_MATRIX:
+        assert (required["picotool"] & settable) - {"type"} == {"probe_id"}
+        expected_unset_refused["picotool"] = {"probe_id"}
+    assert unset_refused == expected_unset_refused
 
 
 def esptool_entry(path: Path) -> None:
@@ -1574,7 +1585,7 @@ def test_a_debug_stack_the_schema_does_not_spell_never_reaches_the_document(tmp_
 
     assert refused["error_type"] == "invalid_argument"
     assert refused["field"] == "changes.0.value"
-    assert refused["value_schema"]["enum"] == ["openocd", "stlink", "pyocd", "esptool"]
+    assert refused["value_schema"]["enum"] == expected_debugger_type_enum()
     assert path.read_bytes() == before, "nothing changed"
 
 

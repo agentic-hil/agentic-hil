@@ -265,6 +265,42 @@ What follows from there being no probe:
 
 `agentic-hil doctor` checks `target_type` without opening the port: it puts the name to esptool as `--chip=<name> version`, and a family this esptool does not know is red, with the close matches and the list esptool accepts. The MCP resource `agentic-hil://reference/debugger-backends/esptool` has the field matrix.
 
+## An RP2040 or RP2350 board through picotool
+
+Configure one debugger per board. Copy the board's USB serial from
+`com_ports_list` while its application runs with USB stdio. Picotool matches
+that same value after a reboot into BOOTSEL. For RP2040 in BOOTSEL, the match
+uses the flash ID, which is the SDK's unique board ID.
+
+```yaml
+debuggers:
+  pico2:
+    type: picotool
+    probe_id: "<board USB serial>"
+    target_type: rp2350
+    flash_address: "0x10000000"
+    permissions:
+      allow_flash: true
+      allow_reset: true
+artifacts:
+  allowed_extensions: [".uf2", ".elf", ".bin"]
+```
+
+`probe_id` is required. `target_type` is optional and accepts `rp2040` or
+`rp2350`. Picotool 2.x is taken from `PATH` unless `executable` names it.
+BIN requires an explicit 4 KiB-aligned `flash_address` in
+`0x10000000 <= address < 0x11000000`. UF2 and ELF supply their own addresses.
+
+The board must be in BOOTSEL or running an application that exposes the USB
+reset interface from `pico_stdio_usb`. Enter BOOTSEL manually if the application
+lacks that interface. On Windows, bind WinUSB to **RP2 Boot (Interface 1)** for
+RP2040 with Zadig. On Linux, install picotool's `udev/60-picotool.rules` for
+non-root access.
+
+Probe and listing leave the application running. Listing examines only
+configured serials. A verified flash without post-flash reset leaves the
+board in BOOTSEL. Reset mode `halt` also enters BOOTSEL, stopping the application.
+
 ## Bench power supplies
 
 A bench power supply that feeds the board is declared under `power_supplies`, next to the debugger and the ports, so the configuration that says which board a run reaches also says what powers it. The section is read from version 2 on (`version: 2` or `version: 3`), where an exclusive hold on the bench is what keeps a reading undisturbed; a version 1 file that declares a supply is refused at load. Each entry names its model, the `com_ports` entry it is reached through, and the debuggers whose boards it powers:
