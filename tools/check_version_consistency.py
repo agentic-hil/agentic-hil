@@ -227,6 +227,9 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     # The Pico H bench result and its documentation test name the release that ran the demo.
     "docs/support.md": "the Pico H qualification records the release that ran on the shared bench",
     "tests/test_pico_rp2040_demo.py": "checks the recorded Pico H qualification release",
+    # The defmt reference decoder's lock pins gimli 0.29.0. That crate's version
+    # became visible to the sweep when our release number caught up with it.
+    "tests/fixtures/defmt/reference-decoder/Cargo.lock": "the locked gimli crate's version, not this project's",
     # The TLS-proxy eval's proof 3 runs one published install.sh, named by its
     # release and pinned by the SHA-256 of exactly those bytes. A release stamp
     # that moved the version without the digest would make proof 3 refuse the
