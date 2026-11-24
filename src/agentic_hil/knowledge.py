@@ -2585,26 +2585,20 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     COM_PORT_BUSY_ERROR: ErrorRemedy(
         meaning=(
-            "The serial device named by `com_ports.<name>.device` is already held by another program, so the session "
-            "was refused where the operating system refused the open: no handle was created, nothing was written, and "
-            "the port kept doing whatever the other holder is doing with it. `configured_device` is the device name "
-            "that was tried. This is a refusal about which process owns the port right now, not a quarantine: the "
-            "bench was not touched and no incident was opened.\n\n"
-            "The session asks for the port exclusively rather than sharing it. Sharing was never a mode this could "
-            "work in: two writers on one line interleave their bytes, and the failure then surfaces much later as a "
-            "response that does not match the stimulus, which is an unknown board state, and an unknown board state "
-            "is a quarantine. Failing at the open turns that into this refusal."
+            "The server holds the serial port's device lock, but the operating system refused the exclusive open. "
+            "The holder is outside the server's lock domain. It may use another account's lock directory, an older "
+            "installation's home directory, or a tool that takes no device lock. Same-domain holders are refused "
+            "earlier as `device_busy`. The summary identifies the server's machine or account lock directory. "
+            "`configured_device` is the device name that was tried. No handle was created and nothing was written."
         ),
         remediation=(
-            "Find the holder and stop it. On Linux, `fuser -v <device>` or `lsof <device>` names the process; on "
-            "Windows, close the terminal, IDE serial monitor or flashing tool that has the port open.",
-            "A second test runner, an open serial monitor and a modem manager are the three usual holders. On Linux, "
-            "`ModemManager` probes new serial adapters on its own and can hold one for several seconds after it is "
-            "plugged in; retrying shortly afterwards is enough, or exclude the adapter from it by udev rule.",
+            "Look outside the lock directory named in the summary. Check another account with a separate lock "
+            "directory, an older installation using its home directory, or a tool that takes no device lock. "
+            "On Linux, `fuser -v <device>` or `lsof <device>` can identify the holder.",
+            "Wait for the holder to finish or have it close the port. A holder in this server's lock domain is "
+            "reported as `device_busy` before the open.",
             "Retry the session once the port is free. The bench was never blocked: `retry_safe` is true and there is "
             "nothing to recover.",
-            "If the holder is a second Agentic HIL run on this host, let it finish. Two runs on one board is what the "
-            "device lock exists to prevent, and it reports that case as `device_busy` with the holder named.",
         ),
         do_not=(
             "Do not run `recover --confirm-safe-state` over this. No lease was quarantined and no board state is in "
@@ -2615,13 +2609,18 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     f"{COM_PORT_BUSY_ERROR}:{FLASH_CAPTURE_SCOPE}": ErrorRemedy(
         meaning=(
-            "The COM port a `flash_firmware` `capture` names is held by another program, so the capture's session was "
-            "refused where the operating system refused the open, before the flash: nothing was flashed, the target "
-            "was not reset and no handle was created. `configured_device` is the device name that was tried."
+            "The server holds the capture port's device lock, but the operating system refused the exclusive open "
+            "before the flash. The holder is outside the server's lock domain. It may use another account's lock "
+            "directory, an older installation's home directory, or a tool that takes no device lock. Same-domain "
+            "holders are refused earlier as `device_busy`. The summary identifies the server's machine or account "
+            "lock directory. `configured_device` is the device name that was tried. Nothing was flashed or reset."
         ),
         remediation=(
-            "Find the holder and stop it. On Linux, `fuser -v <device>` or `lsof <device>` names the process; on "
-            "Windows, close the terminal, IDE serial monitor or flashing tool that has the port open.",
+            "Look outside the lock directory named in the summary. Check another account with a separate lock "
+            "directory, an older installation using its home directory, or a tool that takes no device lock. "
+            "On Linux, `fuser -v <device>` or `lsof <device>` can identify the holder.",
+            "Wait for the holder to finish or have it close the port. A holder in this server's lock domain is "
+            "reported as `device_busy` before the open.",
             "Then call `flash_firmware` again with the same `capture`. Nothing was flashed, so the retry starts from "
             "nothing.",
         ),

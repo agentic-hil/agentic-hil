@@ -12,16 +12,17 @@ entire failure being prevented.
 A third, `bench_in_container.py`, runs the bench tier in its image against the
 board attached to this machine, under rootless Podman or Docker, and queues here
 for the same reason and one more. On a machine with a board, this lock is also
-what makes a second run of the tier wait its turn before it builds anything,
-rather than meet the first at the device locks, which stay the backstop.
+what makes a second run of the tier wait its turn before it builds anything.
+The tier wrapper separately holds the host product's device locks for the
+entire hardware stage and gives its container a private lock directory.
 
 All three are standalone scripts run from checkouts that may not be installed,
 so this is stdlib only and lives beside them.
 
 As a command, for the callers that cannot import it: a workflow whose steps
 drive the board one after another, and a run by hand of something that is not
-one of those tools. Anything that holds the board without this lock is met by
-the others as `device_busy` in the middle of what it was doing.
+one of those tools. A hardware stage also waits for outside product clients
+at the device locks before starting its container.
 
     python3 tools/run_lock.py take --state FILE --for-the-life-of PID [--tool T] [--runs-for R] [--no-wait]
     python3 tools/run_lock.py give-back --state FILE

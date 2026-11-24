@@ -31,6 +31,7 @@ import errno
 import inspect
 import json
 import os
+import re
 import sys
 from contextlib import suppress
 from pathlib import Path
@@ -38,7 +39,9 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import write_config
+from test_flash_capture import Board, BoardBackend, firmware
 
+from agentic_hil import bench as bench_module
 from agentic_hil.can import CanBusService, CanBusSession
 from agentic_hil.comports import PORT_BUSY_ERRNOS, ComPortService, ComPortSession, serial_port_busy
 from agentic_hil.config import load_config
@@ -50,6 +53,7 @@ from agentic_hil.report import (
     last_report_path,
     no_contact_refusal,
 )
+from agentic_hil.test_reactor import TestReactor, load_test_config
 from agentic_hil.tools import AgenticHILToolService
 
 # Device locks are machine-wide, so a port id, a device name and a bus id shared
@@ -97,8 +101,9 @@ class FakePort:
     Nothing here matches on the message, and neither does the code under test.
     """
 
-    def __init__(self, held: bool = False) -> None:
+    def __init__(self, held: bool = False, *, open_error: OSError | None = None) -> None:
         self.held = held
+        self.open_error = open_error
         self.opens = 0
         self.exclusive_at_open: object = "never opened"
 
@@ -117,6 +122,8 @@ class FakeHandle:
         self.port_device.opens += 1
         self.port_device.exclusive_at_open = self.exclusive
         if self.port_device.held:
+            if self.port_device.open_error is not None:
+                raise self.port_device.open_error
             raise OSError(errno.EWOULDBLOCK, f"Could not exclusively lock port {DEVICE}: [Errno 11] Resource temporarily unavailable")
         self.is_open = True
 
@@ -141,6 +148,79 @@ class FakeHandle:
 
 def install_fake_serial(monkeypatch: pytest.MonkeyPatch, port: FakePort) -> None:
     monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: port.handle()))
+
+
+def explains_outside_lock_causes(text: str) -> bool:
+    return all(
+        re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        for pattern in (
+            r"\b(?:different|another|other) (?:user|account)\b",
+            r"\b(?:older|old|earlier|previous|pre-[\d.]+) (?:version|release|installation|build|Agentic HIL)\b",
+            r"\b(?:no (?:device |product )?locks?|(?:does not|doesn't|never) (?:\w+ ){0,3}(?:lock|locks)|non[- ]?locking)\b",
+        )
+    )
+
+
+def test_busy_open_explains_the_active_lock_domain_on_every_entry_point(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = "The busy serial open did not explain the held product lock and its directory scope."
+    home = tmp_path / "private-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    machine_root = tmp_path / "machine-locks"
+    machine_root.mkdir()
+    monkeypatch.setattr(bench_module, "MACHINE_DEVICE_LOCK_ROOT", machine_root)
+    for scope in ("machine", "account"):
+        selected_root = machine_root if scope == "machine" else None
+        monkeypatch.setattr(bench_module, "machine_device_lock_root", lambda root=selected_root: root)
+        workspace = tmp_path / scope
+        config = com_config(workspace)
+        fake_board = Board()
+        backend = BoardBackend(fake_board)
+        service = AgenticHILToolService(config, backend=backend)
+        plan_path = workspace / "busy-port.yaml"
+        plan_path.write_text(f"version: 2\nsteps:\n  - {{port_id: {PORT_ID}, action: uart_open}}\n", encoding="utf-8")
+        plan = load_test_config(str(plan_path), str(workspace))
+        flash_args = {**firmware(workspace), "reset_after_flash": True, "capture": {"port_id": PORT_ID}}
+
+        try:
+            for number in (errno.EBUSY, errno.EAGAIN):
+                port = FakePort(held=True, open_error=OSError(number, "serial open refused"))
+                install_fake_serial(monkeypatch, port)
+                direct = service.call("com_session_start", {"port_id": PORT_ID})
+                capture = service.call("flash_firmware", flash_args)
+                assert "flash_firmware" not in backend.calls, "The flash began before the serial-open refusal"
+                plan_result = TestReactor(service.config, service).run(plan)
+                assert plan_result["failed_step"] == 1, plan_result
+                step = plan_result["steps"][0]["result"]
+                assert port.opens == 3
+                for result in (direct, capture, step):
+                    summary = str(result.get("summary", ""))
+                    advice = " ".join(result.get("remediation", ()))
+                    names_machine = re.search(
+                        r"\bmachine(?:[- ]wide)?(?:'s)? (?:device[- ])?(?:lock(?:ing)? )?directory\b",
+                        summary, re.IGNORECASE,
+                    )
+                    names_account = re.search(
+                        r"\b(?:(?:this|current) (?:account|user)'s (?:own\b|(?:home |profile |(?:device[- ])?lock )?directory\b)"
+                        r"|this server's own (?:account|home|profile)\b)",
+                        summary, re.IGNORECASE,
+                    )
+                    explains_hold = re.search(r"\b(?:holds?|acquired|has taken|already (?:has|owns))\b[^.]*\b(?:device|port|product) lock\b", summary, re.IGNORECASE)
+                    if (
+                        result.get("error_type") != COM_PORT_BUSY_ERROR
+                        or not explains_hold
+                        or bool(names_machine) != (scope == "machine")
+                        or bool(names_account) != (scope == "account")
+                        or not explains_outside_lock_causes(f"{summary} {advice}")
+                        or str(home).casefold() in json.dumps(result).replace("\\\\", "\\").casefold()
+                    ):
+                        raise AssertionError(message)
+        finally:
+            service.close()
+            fake_board.finish()
 
 
 # ---------------------------------------------------------------------------

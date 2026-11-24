@@ -15,6 +15,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
   Raspberry Pi Debug Probe and pyOCD, resets, and checks the boot line on UART0. (#919)
 - The shared-bench HardFault plan for the Nucleo-F446RE stops at `HardFault_Handler` and checks `CFSR.UNDEFINSTR` (bit 16) and `HFSR.FORCED` (bit 30). It reads and records `MMFAR` and `BFAR`. In the probe, `MMARVALID` and `BFARVALID` were clear, so neither reading identifies a fault address. The plan reads the frame as stacked (`r0`, `r1`, `r2`, `r3`, `r12`, `lr`, `pc`, `xPSR`) after the firmware copies it. The shared bench uses OpenOCD 0.12.0 and the released `agentic-hil serve` 0.28.0. Serve leaves the GDB build unidentified. #756 remains open for a recording with an identified `arm-none-eabi-gdb` build. (#921)
 
+### Changed
+
+- Each hardware bench stage reserves its probe and serial ports through teardown while tier servers coordinate in a private lock directory. Busy serial opens name the server's lock scope and explain outside contention. Failed stages record observable host device holders in `device-holders.json`. (#800)
+
 ### Fixed
 
 - ST-Link flash failure guidance now explains which quarantine fields to read before a hot-plug retry, where to turn if the retry is refused, the limits of the H533 `under_reset` evidence, and how to diagnose an exit-0 flash without verification. (#911)

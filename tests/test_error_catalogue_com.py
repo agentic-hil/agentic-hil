@@ -44,6 +44,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 from conftest import FAKE_GDB, write_config
 from support import scaled_time_bound
+from test_contact_marker import FakePort, explains_outside_lock_causes, install_fake_serial
 from test_read_until import DIE, ScriptedSerialHandle, close, tools_call
 
 import agentic_hil
@@ -610,6 +611,36 @@ def entry_of(error_type: str) -> dict:
     entry = catalogue_entry(error_type)
     assert entry is not None, f"the catalogue has no entry for {error_type}"
     return entry
+
+
+def test_busy_catalogue_explains_outside_holders_and_preserves_windows_open_failure(bench: SimpleNamespace) -> None:
+    port = FakePort(held=True, open_error=OSError("Could not open port: PermissionError(13, 'Access is denied.', None, 5)"))
+    install_fake_serial(bench.monkeypatch, port)
+    refused = call(bench.service, "com_session_start", {"port_id": PORT_ID})
+    assert port.opens == 1
+    assert refused["error_type"] == "com_port_open_failed", refused
+
+    message = "The busy error catalogue does not explain contention outside the server's lock domain."
+    for key in ("com_port_busy", "com_port_busy:flash_capture"):
+        remedy = catalogue_entry(key)
+        if remedy is None:
+            raise AssertionError(message)
+        meaning, advice = remedy["meaning"], " ".join(remedy["remediation"])
+        for text in (meaning, advice):
+            if not explains_outside_lock_causes(text) or not re.search(r"\b(?:lock (?:directory|domain)|device locks?)\b", text, re.IGNORECASE):
+                raise AssertionError(message)
+        if "device_busy" not in f"{meaning} {advice}":
+            raise AssertionError(message)
+        for step in remedy["remediation"]:
+            for sentence in sentences(step):
+                mentions_hil = re.search(r"\b(?:second|another|other) Agentic HIL (?:run|server|client|process)\b", sentence, re.IGNORECASE)
+                outside_domain = re.search(
+                    r"\b(?:(?:another|different|other) (?:account|(?:device[- ])?lock (?:directory|domain))"
+                    r"|(?:older|earlier) (?:Agentic HIL )?(?:version|release|installation)|outside\b[^.]*\block domain)\b",
+                    sentence, re.IGNORECASE,
+                )
+                if mentions_hil and not outside_domain and "device_busy" not in sentence:
+                    raise AssertionError(message)
 
 
 # The statuses `verify_port_identity` refuses as unverified, read off the
