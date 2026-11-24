@@ -20,9 +20,8 @@ A run, in order:
   the source is this tool's checkout; `--source` selects another checkout and
   `--expected-commit` can bind it to a full SHA before any hardware check or
   build. Uncommitted changes are named, and are not what runs;
-* runs the tier in a container that normally gets the probe's device nodes and
-  the adapter's, the machine's device locks and a directory of the run's own for
-  its report.
+* takes the host's device locks for the selected probe and UARTs, then runs the
+  tier with those devices, a private device-lock directory and a report directory.
   The opt-in `--live-device-tree` mode instead bind mounts host `/dev` read only
   for USB re-enumeration and pyOCD discovery-reset stages; neither mode gives the container network,
   capabilities or the host process table;
@@ -147,38 +146,20 @@ name, so the flag states that the board is there: no bridge, two of them, one
 with other than one port or one this user cannot open is a refusal, before the
 queue and again after it. Without the flag no bridge is handed in.
 
-Serialisation. Two runs must never drive the board at once. The backstop is the
-device locks the product takes under ~/.agentic-hil/device-locks, or in the
-machine directory /var/lib/agentic-hil/device-locks where an administrator
-created one for every account of a group (#777). The machine directory is
-mounted at its own path and the home one at the same place under the
-container's home, so the product inside finds the locks where the product
-outside does, and a flock on a file in a bind mount is one lock on the host and
-in every container, whatever their pid namespaces. A machine directory that
-exists and cannot be used refuses the run, as the product refuses every device
-lock over it, rather than handing the tier the home one: locks there are locks
-no other account sees. The stage without the device group withholds every
-supplementary group, the lock group among them, and cannot open the board
-either, so it is handed the home directory. The container keeps a pid namespace of its own
-and gets a host name of its own, so a holder record written inside it names
-that container, and a check that compares the host before the pid cannot take
-it for a process on the host. `--pid=host` was the other way to share the
-locks, and it buys nothing here: a device lock is the flock, never a judgement
-on whether its holder's pid is alive, and `--pid=host` would hand the tier
-every process of this user to see and to signal. Ahead of the device locks, a
-run takes the machine's run lock (run_lock.py beside this file, the one
-ci_linux.py and loop_in_container.py take), so runs of these tools, by hand or
-from the gate, queue behind one another instead of meeting as device_busy
-halfway through the tier. The gate's workflow shares its concurrency group with
-the scheduled bench workflow, which queues the two on GitHub's side; anything
-else that drives the board meets the device locks alone. A run as root is
-refused, because root's home holds device locks no run of the invoking user
-takes.
+Serialisation. The stage parent holds the probe and UARTs through tier teardown
+using the host product's device locks. It uses /var/lib/agentic-hil/device-locks
+where configured, otherwise ~/.agentic-hil/device-locks. An unusable machine
+directory refuses the stage. The stage waits at most 900 seconds for the whole
+set, or refuses immediately with `--no-wait`. Inside the container, the tier
+servers take their per-call locks in a private directory shared only within that
+stage. The host reservation also applies when the container's device group is
+withheld. The per-account run lock (run_lock.py) still queues builds and handles
+leftover containers. The gate and scheduled workflow also share a GitHub
+concurrency group. A run as root is refused.
 
 The tier's own redirections. The tier moves the product's configuration and
-state roots into its temporary directory and keeps HOME, because the device
-locks are under it. In the container HOME is /bench-home, where the image has
-nothing but the place the machine's lock directory is mounted.
+state roots into its temporary directory and keeps HOME. The private device
+locks are mounted under /bench-home in the container.
 
 What is withheld. The gate's log and its artifact can be read by anyone who can
 read the repository, and the tier prints the probe's serial number and paths of
@@ -214,9 +195,9 @@ Usage, from a checkout on the machine the board is attached to:
     python3 tools/bench_in_container.py --build-only         # the image alone, anywhere
 
 Everything after `--` goes to pytest and replaces the default selection,
-`tests/bench -v`. The JUnit report and the log land in `--output`,
-bench-results by default. What the machine has to provide once is in
-tools/bench/README.md.
+`tests/bench -v`. The JUnit report and log land in `--output`, bench-results
+by default. A failed tier also writes `device-holders.json` there. What the
+machine has to provide once is in tools/bench/README.md.
 
 Exit status: pytest's own when it reported; 2 when this machine cannot run the
 tier, Docker with another probe attached included; 3 when the image did not
@@ -247,17 +228,21 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterable
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
 # A standalone script run from checkouts that need not be installed, like the
 # two tools beside it, so their modules are reached by naming this directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ci_linux import repository_root, result_summary, tests_accounted_for  # noqa: E402
 from run_lock import RunLock, RunLockBusy  # noqa: E402
+
+from agentic_hil import device_lock_protocol  # noqa: E402
 
 TOOL_NAME = "tools/bench_in_container.py"
 # What a run queued behind this one is told. The tier flashes, debugs and reads
@@ -331,11 +316,12 @@ CONTAINER_PREFIX = "agentic-hil-bench-"
 
 CONTAINER_HOME = "/bench-home"
 CONTAINER_LOCKS = f"{CONTAINER_HOME}/.agentic-hil/device-locks"
-# The machine directory the product prefers on Linux where it exists, mounted at
-# its own path. Its rules are the product's own, `machine_device_lock_root` in
+# The host directory the product prefers on Linux where it exists. Its rules
+# are the product's own, `machine_device_lock_root` in
 # src/agentic_hil/bench.py, asked here before the queue so a run that could take
 # no lock is refused before it builds anything.
 MACHINE_LOCKS = "/var/lib/agentic-hil/device-locks"
+DEVICE_WAIT_S = 900
 MACHINE_LOCKS_SETUP = (
     "sudo groupadd agentic-hil; sudo install -d -m 0755 /var/lib/agentic-hil; "
     "sudo install -d -o root -g agentic-hil -m 2770 /var/lib/agentic-hil/device-locks; "
@@ -348,6 +334,7 @@ CONTAINER_USB_DEVICES = "/sys/bus/usb/devices"
 RESULTS = "/results"
 REPORT_NAME = "bench-junit.xml"
 LOG_NAME = "bench-tier.log"
+DEVICE_HOLDERS_NAME = "device-holders.json"
 # The most this reads of a report out of the tier's directory. The whole tier's
 # JUnit report is a few hundred kilobytes; this is a ceiling on what a directory
 # the tier writes can make this process hold, not an estimate.
@@ -413,6 +400,7 @@ PRODUCT_COMMAND = "agentic-hil"
 
 SYSFS = Path("/sys")
 SERIAL_BY_ID = Path("/dev/serial/by-id")
+PROC_ROOT = Path("/proc")
 TTY_NAME = re.compile(r"^tty[A-Za-z0-9_]+$")
 
 WITHHELD = "[withheld]"
@@ -844,6 +832,9 @@ class Devices:
     usb_uart: str | None = None
     esp32: str | None = None
     other_probes: tuple[str, ...] = ()
+    uart_serial_numbers: tuple[str, ...] = ()
+    probe_resource_id: str | None = None
+    configured_ports: tuple[dict, ...] = ()
 
     @property
     def ttys(self) -> tuple[str, ...]:
@@ -895,8 +886,8 @@ def the_devices(usb_devices: list[str], serial_devices: list[str]) -> Devices:
     return Devices(usb, ports, probe.serial_numbers)
 
 
-def configured_probe_id(directory: str, voice: Voice) -> tuple[str, str]:
-    """The debugger the authoritative configuration for `directory` binds, and the serial number of its probe.
+def configured_probe_id(directory: str, voice: Voice) -> tuple[str, str, dict]:
+    """The bound debugger, its probe serial and the doctor document that names them.
 
     Read through the product's own doctor, so the configuration is found,
     bound to its workspace and validated by the product. Every serial number
@@ -952,7 +943,7 @@ def configured_probe_id(directory: str, voice: Voice) -> tuple[str, str]:
             f"the debugger `{name}` the authoritative configuration for {directory} binds has no probe_id, so it names "
             f"no probe. `{PRODUCT_COMMAND} adopt-hardware` in that directory fills it in from the attached probe",
         )
-    return name, probe_id.strip()
+    return name, probe_id.strip(), report
 
 
 def the_configured_probe(directory: str, voice: Voice) -> Devices:
@@ -963,7 +954,7 @@ def the_configured_probe(directory: str, voice: Voice) -> Devices:
     """
     probes = discover_probes()
     voice.withhold(serial for probe in probes for serial in probe.serial_numbers)
-    debugger, probe_id = configured_probe_id(directory, voice)
+    debugger, probe_id, report = configured_probe_id(directory, voice)
     wanted = probe_id.casefold()
     named = f"the probe the debugger `{debugger}` names in the authoritative configuration for {directory}"
     matching = [probe for probe in probes if any(serial.casefold() == wanted for serial in probe.serial_numbers)]
@@ -990,7 +981,15 @@ def the_configured_probe(directory: str, voice: Voice) -> Devices:
     usb = tuple(checked_node(node) for node in probe.usb_nodes)
     ports = tuple(checked_node(node) for node in probe.serial_ports)
     voice(f"running against {named}: the one at {probe.where}")
-    return Devices(usb, ports, probe.serial_numbers)
+    probe_resource = report["debuggers"][debugger].get("resource_id")
+    ports_report = report.get("com_ports")
+    configured_ports = tuple(entry for entry in ports_report.values() if isinstance(entry, dict)) if isinstance(ports_report, dict) else ()
+    voice.withhold(entry["serial_number"] for entry in configured_ports if isinstance(entry.get("serial_number"), str))
+    return Devices(
+        usb, ports, probe.serial_numbers,
+        probe_resource_id=probe_resource if isinstance(probe_resource, str) else None,
+        configured_ports=configured_ports,
+    )
 
 
 def the_other_probes(devices: Devices, voice: Voice) -> Devices:
@@ -1109,8 +1108,8 @@ def check_access(runtime: str, devices: Devices) -> None:
             raise Refused(EXIT_NO_PROBE, reason)
 
 
-def the_usb_uart(runtime: str, required: bool, voice: Voice) -> str | None:
-    """The node of the one USB-UART adapter this run hands in, or None where there is none to hand in.
+def the_usb_uart(runtime: str, required: bool, voice: Voice) -> tuple[str | None, tuple[str, ...]]:
+    """The selected USB-UART adapter's node and serials, if one is handed in.
 
     Every adapter's serial numbers are withheld before anything about one is
     said. Without `required` a run goes on without an adapter, and the tier
@@ -1142,16 +1141,16 @@ def the_usb_uart(runtime: str, required: bool, voice: Voice) -> str | None:
         else:
             reason = why_not_openable(runtime, node)
     if reason is None:
-        return node
+        return node, adapters[0].serial_numbers
     if required:
         raise Refused(EXIT_NO_PROBE, f"{reason}; --require-usb-uart says this run hands one in, so nothing was run")
     if adapters:
         voice(f"{reason}; no adapter is handed in, and the tier deselects its tests marked usb_uart")
-    return None
+    return None, ()
 
 
-def the_esp32(runtime: str, voice: Voice) -> str:
-    """The node of the one ESP32 board's bridge `--esp32` hands in; every reason there is none is a refusal.
+def the_esp32(runtime: str, voice: Voice) -> tuple[str, tuple[str, ...]]:
+    """The selected ESP32 bridge's node and serials, or a refusal.
 
     Every bridge's serial number is withheld before anything about one is said,
     as the adapter's are.
@@ -1179,7 +1178,7 @@ def the_esp32(runtime: str, voice: Voice) -> str:
         else:
             reason = why_not_openable(runtime, node)
             if reason is None:
-                return node
+                return node, bridges[0].serial_numbers
     raise Refused(EXIT_NO_PROBE, f"{reason}; --esp32 says this run hands an ESP32 board in, so nothing was run")
 
 
@@ -1212,9 +1211,8 @@ def check_this_machine(runtime: str) -> None:
     if effective_uid() == 0:
         raise Refused(
             EXIT_CANNOT_RUN_HERE,
-            "this runs as root. The tier takes its device locks under the home of whoever runs it, and root's are not "
-            "the ones the board's own user takes, so a run as root could drive a board another run is holding. Run "
-            "it as the user the board's rights were given to",
+            "this runs as root. The stage must reserve the board in the lock directory its ordinary clients use. "
+            "Run it as the user the board's rights were given to",
         )
     if runtime == "podman" and shutil.which("crun") is None:
         raise Refused(
@@ -1225,17 +1223,10 @@ def check_this_machine(runtime: str) -> None:
         )
 
 
-def device_lock_directory(groups_withheld: bool = False) -> str:
-    """The device-lock directory the tier is handed.
-
-    The machine directory where it exists, unless the stage withholds the groups
-    it is entered through; else this user's own, created as the product would
-    create it. A link anywhere in either is refused: the product walks the
-    directory without following links and refuses one on the host, and mounting
-    a link's target would give the container locks the host's runs never take.
-    """
+def device_lock_directory() -> str:
+    """The host product lock directory used by the stage parent."""
     machine = machine_lock_directory()
-    if machine is not None and not groups_withheld:
+    if machine is not None:
         return machine
     root = Path(os.path.expanduser("~")) / ".agentic-hil"
     locks = root / "device-locks"
@@ -1249,8 +1240,7 @@ def device_lock_directory(groups_withheld: bool = False) -> str:
         if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
             raise Refused(
                 EXIT_CANNOT_RUN_HERE,
-                f"{directory} is not a plain directory. The product refuses a link there, and mounting what it points "
-                "at would give the tier device locks no run on this machine takes",
+                f"{directory} is not a plain directory. The product refuses a link there, so the stage cannot reserve devices",
             )
     return str(locks)
 
@@ -1271,8 +1261,7 @@ def machine_lock_directory() -> str | None:
         raise Refused(
             EXIT_CANNOT_RUN_HERE,
             f"the machine's device-lock directory {MACHINE_LOCKS} {problem}. The product refuses every device lock "
-            f"while it is so, and the tier is not handed the home directory instead, whose locks no other account "
-            f"sees. Set it up as: {MACHINE_LOCKS_SETUP}",
+            f"while it is so, so the stage cannot reserve devices. Set it up as: {MACHINE_LOCKS_SETUP}",
         )
     return MACHINE_LOCKS
 
@@ -1296,12 +1285,78 @@ def machine_lock_problem(status: os.stat_result, parent: os.stat_result) -> str 
     return None
 
 
+def stage_device_keys(devices: Devices, serial_spellings: Iterable[str]) -> set[str]:
+    ports = set(devices.ttys)
+    spellings = {*ports, *serial_spellings}
+
+    serials = {serial.casefold() for serial in (*devices.serial_numbers, *devices.uart_serial_numbers)}
+    physical = {devices.probe_resource_id} if devices.probe_resource_id else set()
+    for entry in devices.configured_ports:
+        device = entry.get("device")
+        serial = entry.get("serial_number")
+        resource = entry.get("resource_id")
+        matches_path = isinstance(device, str) and bool(device) and canonical_node(device) in ports
+        if matches_path:
+            spellings.add(device)
+        if isinstance(resource, str) and resource and (matches_path or isinstance(serial, str) and serial.casefold() in serials):
+            physical.add(resource)
+    return {
+        *(f"probe:{serial.casefold()}" for serial in devices.serial_numbers),
+        *(f"com:serial:{serial}" for serial in serials),
+        *(f"com:{os.path.normcase(port)}" for port in spellings),
+        *(f"physical:{alias.casefold()}" for alias in physical),
+    }
+
+
+def hold_stage_devices(locks: ExitStack, root: str, keys: set[str], label: str, *, no_wait: bool) -> None:
+    """Take the complete set, rolling back every tentative lock on contention."""
+    shared = root == MACHINE_LOCKS
+    paths = {key: device_lock_protocol.lock_path(Path(root), key) for key in sorted(keys)}
+    deadline = time.monotonic() + (0 if no_wait else DEVICE_WAIT_S)
+    while True:
+        for path in paths.values():
+            try:
+                descriptor = device_lock_protocol.take_lock(path, shared=shared)
+            except device_lock_protocol.LockOccupied:
+                busy_path = path
+                break
+            except OSError as error:
+                raise Refused(EXIT_LOCKED, f"could not reserve the stage's devices: {error}") from None
+            locks.callback(os.close, descriptor)
+        else:
+            acquired_at = datetime.now(timezone.utc).isoformat()
+            owner = {"pid": os.getpid(), "label": label}
+            for key, path in paths.items():
+                record = {"version": 1, "state": "held", "acquired_at": acquired_at, "owner": owner, "resource": key}
+                try:
+                    device_lock_protocol.write_holder(path, record, shared=shared)
+                except OSError as error:
+                    raise Refused(EXIT_LOCKED, f"could not publish the stage's device hold: {error}") from None
+                locks.callback(release_holder_record, path, record, shared=shared)
+            return
+
+        locks.close()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            holder = device_lock_protocol.holder_label(busy_path)
+            bound = "--no-wait was given" if no_wait else f"the {DEVICE_WAIT_S}-second device wait expired"
+            raise Refused(EXIT_LOCKED, f"a required device is held by {holder}; {bound}, so the tier was not started")
+        pause(min(1.0, remaining))
+
+
+def release_holder_record(path: Path, record: dict[str, object], *, shared: bool) -> None:
+    # Update while the file lock is still held. An unwriteable record must
+    # never prevent the descriptor from closing.
+    with suppress(OSError):
+        device_lock_protocol.write_holder(path, {**record, "state": "released"}, shared=shared)
+
+
 def prepare_output(option: str) -> Path:
     """The output directory, with no report or log of an earlier run left in it."""
     output = Path(option).resolve()
     try:
         output.mkdir(parents=True, exist_ok=True)
-        for name in (REPORT_NAME, LOG_NAME):
+        for name in (REPORT_NAME, LOG_NAME, DEVICE_HOLDERS_NAME):
             with suppress(FileNotFoundError):
                 (output / name).unlink()
     except OSError as error:
@@ -1309,19 +1364,129 @@ def prepare_output(option: str) -> Path:
     return output
 
 
-def stage_stable_names(serial_ports: tuple[str, ...], destination: Path) -> Path | None:
+def write_device_holders(devices: Devices, output: Path, redact: Redactor) -> None:
+    """Record observable host holders without publishing process arguments or link names."""
+    nodes: dict[str, set[int]] = {}
+    by_inode: dict[tuple[int, int], set[str]] = {}
+    by_device: dict[int, set[str]] = {}
+    complete = True
+    for node in devices.nodes:
+        node = canonical_node(node)
+        if (
+            not node.startswith("/dev/")
+            or node.startswith(("/dev/serial/by-id/", "/dev/serial/by-path/"))
+            or redact(node) != node
+        ):
+            complete = False
+            continue
+        nodes.setdefault(node, set())
+        try:
+            status = device_status(node)
+        except OSError:
+            complete = False
+            continue
+        if not stat.S_ISCHR(status.st_mode):
+            complete = False
+            continue
+        by_inode.setdefault((status.st_dev, status.st_ino), set()).add(node)
+        by_device.setdefault(status.st_rdev, set()).add(node)
+
+    try:
+        lines = (PROC_ROOT / "locks").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        complete = False
+        lines = []
+    for line in lines:
+        fields = line.split()
+        if fields[1:2] != ["FLOCK"]:
+            continue
+        try:
+            pid = int(fields[4])
+            major, minor, inode = fields[5].split(":")
+            identity = (os.makedev(int(major, 16), int(minor, 16)), int(inode))
+        except (ValueError, IndexError, AttributeError, OverflowError):
+            complete = False
+            continue
+        for node in by_inode.get(identity, ()):
+            nodes[node].add(pid)
+
+    try:
+        processes = [entry for entry in PROC_ROOT.iterdir() if entry.name.isascii() and entry.name.isdecimal()]
+    except OSError:
+        complete = False
+        processes = []
+    for process in processes:
+        try:
+            for descriptor in (process / "fd").iterdir():
+                try:
+                    status = descriptor.stat()
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    complete = False
+                    continue
+                if stat.S_ISCHR(status.st_mode):
+                    for node in by_device.get(status.st_rdev, ()):
+                        nodes[node].add(int(process.name))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            complete = False
+
+    holders = {}
+    account_uid = effective_uid()
+    for pid in sorted(set().union(*nodes.values())):
+        process = PROC_ROOT / str(pid)
+        try:
+            command = (process / "comm").read_text(encoding="utf-8", errors="replace").rstrip("\n")
+            # Effective UID is the second value in the kernel status record.
+            status = (process / "status").read_text(encoding="utf-8", errors="replace")
+            uid = next(int(line.split()[2]) for line in status.splitlines() if line.startswith("Uid:"))
+        except (OSError, ValueError, IndexError, StopIteration):
+            complete = False
+            continue
+        # comm is a task name, but a process can put anything in it. Strip
+        # directory components before applying the stage's identity redactor.
+        command = command.replace("\\", "/").rsplit("/", 1)[-1]
+        holders[pid] = {"pid": pid, "command": redact(command), "same_account": uid == account_uid}
+
+    record = {
+        "complete": complete,
+        "devices": {node: [holders[pid] for pid in sorted(pids) if pid in holders] for node, pids in sorted(nodes.items())},
+    }
+    descriptor, filename = tempfile.mkstemp(dir=output, prefix=f".{DEVICE_HOLDERS_NAME}.")
+    temporary = Path(filename)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(record, stream, indent=2)
+            stream.write("\n")
+        temporary.replace(output / DEVICE_HOLDERS_NAME)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def record_failed_stage(devices: Devices, output: Path, voice: Voice) -> None:
+    try:
+        write_device_holders(devices, output, voice.redact)
+    except OSError as error:
+        voice(f"could not write {DEVICE_HOLDERS_NAME}: {error}")
+
+
+def stable_serial_links(directory: Path, wanted: set[str]) -> dict[str, str]:
+    try:
+        entries = sorted(directory.iterdir(), key=lambda entry: entry.name)
+    except OSError:
+        return {}
+    return {entry.name: target for entry in entries if (target := os.path.realpath(entry)) in wanted}
+
+
+def stage_stable_names(links: dict[str, str], destination: Path) -> Path | None:
     """The /dev/serial/by-id links of the ports handed in, rebuilt apart from the host's.
 
     Each points at the node's own path, which is where the runtime puts the node
     in the container. Links to any other device are left out, and no name is
     printed: a name carries the serial number of the probe or the adapter.
     """
-    try:
-        entries = sorted(SERIAL_BY_ID.iterdir(), key=lambda entry: entry.name)
-    except OSError:
-        return None
-    wanted = set(serial_ports)
-    links = {entry.name: target for entry in entries if (target := os.path.realpath(entry)) in wanted}
     if not links:
         return None
     destination.mkdir(mode=0o700)
@@ -1654,9 +1819,8 @@ def tier_command(
     else:
         for node in devices.nodes:
             command += ["--device", node]
-    # The machine directory at its own path, where the product inside looks for
-    # it first; the home one under the container's home.
-    command += ["-v", f"{locks}:{MACHINE_LOCKS if locks == MACHINE_LOCKS else CONTAINER_LOCKS}", "-v", f"{results}:{RESULTS}"]
+    # The stage parent keeps the host locks. Tier servers share their own root.
+    command += ["-v", f"{locks}:{CONTAINER_LOCKS}", "-v", f"{results}:{RESULTS}"]
     if stable_names is not None and not live_device_tree:
         command += ["-v", f"{stable_names}:{CONTAINER_SERIAL_BY_ID}:ro"]
     for key, value in ENVIRONMENT.items():
@@ -1936,7 +2100,7 @@ def parse_options(argv: list[str] | None) -> argparse.Namespace:
             "sessions on the STM32CubeProgrammer backend) from this runner-local, SHA-256-pinned licensed archive."
         ),
     )
-    parser.add_argument("--no-wait", action="store_true", help="Refuse instead of queueing when another run holds this machine.")
+    parser.add_argument("--no-wait", action="store_true", help="Refuse immediately if the run queue or a required device is held.")
     parser.add_argument("--build-only", action="store_true", help="Build the image and stop; needs no probe and runs anywhere.")
     parser.add_argument(
         "--distribution",
@@ -2038,7 +2202,7 @@ def main(argv: list[str] | None = None) -> int:
                 the_usb_uart(runtime, True, voice)
             if options.esp32:
                 the_esp32(runtime, voice)
-            locks = device_lock_directory(options.without_device_group)
+            device_lock_directory()
     except Refused as refusal:
         voice(str(refusal))
         return refusal.status
@@ -2076,6 +2240,7 @@ def main(argv: list[str] | None = None) -> int:
     workdir = Path(tempfile.mkdtemp(prefix=CONTAINER_PREFIX))
     left_behind: LeftBehind | None = None
     name: str | None = None
+    device_holds = ExitStack()
     try:
         if running:
             output = prepare_output(options.output)
@@ -2101,12 +2266,23 @@ def main(argv: list[str] | None = None) -> int:
         devices = the_probe(options, voice)
         voice.withhold(devices.serial_numbers)
         check_access(runtime, devices)
+        uart, uart_serials = the_usb_uart(runtime, options.require_usb_uart, voice)
+        esp32, esp32_serials = the_esp32(runtime, voice) if options.esp32 else (None, ())
         devices = replace(
-            devices,
-            usb_uart=the_usb_uart(runtime, options.require_usb_uart, voice),
-            esp32=the_esp32(runtime, voice) if options.esp32 else None,
+            devices, usb_uart=uart, esp32=esp32, uart_serial_numbers=uart_serials + esp32_serials,
         )
-        stable_names = None if options.live_device_tree else stage_stable_names(devices.ttys, workdir / "by-id")
+        ports = set(devices.ttys)
+        by_id = stable_serial_links(SERIAL_BY_ID, ports)
+        spellings = [*options.serial_device, *(f"/dev/serial/by-id/{link}" for link in by_id)]
+        if options.live_device_tree:
+            by_path = stable_serial_links(SERIAL_BY_ID.with_name("by-path"), ports)
+            spellings.extend(f"/dev/serial/by-path/{link}" for link in by_path)
+        keys = stage_device_keys(devices, spellings)
+        label = f"hardware bench stage ({options.distribution or 'default image'})"
+        hold_stage_devices(device_holds, device_lock_directory(), keys, label, no_wait=options.no_wait)
+        private_locks = workdir / "device-locks"
+        private_locks.mkdir(mode=0o700)
+        stable_names = None if options.live_device_tree else stage_stable_names(by_id, workdir / "by-id")
         # The one directory the tier writes to, and it is the run's own: the
         # output directory, which a gate uploads, is never mounted.
         results = workdir / "results"
@@ -2115,12 +2291,20 @@ def main(argv: list[str] | None = None) -> int:
         run_id = os.environ.get("GITHUB_RUN_ID", "local")
         run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
         command = tier_command(
-            runtime, image_id, name, devices, locks, results, stable_names, pytest_args,
+            runtime, image_id, name, devices, str(private_locks), results, stable_names, pytest_args,
             commit, f"{run_id}-{run_attempt}", withhold_groups=options.without_device_group,
             live_device_tree=options.live_device_tree,
         )
         voice(f"$ {shlex.join(command)}")
-        returncode, printed, interrupted = run_tier(runtime, name, command, output / LOG_NAME, voice.redact, voice, signals)
+        try:
+            returncode, printed, interrupted = run_tier(runtime, name, command, output / LOG_NAME, voice.redact, voice, signals)
+        except Exception:
+            signals.hold_off()
+            state = confirm_removed(runtime, name)
+            if state is not None:
+                left_behind = LeftBehind(runtime, [(name, state)])
+            record_failed_stage(devices, output, voice)
+            raise
         # What follows decides what is published and whether the machine is
         # handed on, and a second interrupt must not cut it short.
         signals.hold_off()
@@ -2130,6 +2314,8 @@ def main(argv: list[str] | None = None) -> int:
             status, verdict = EXIT_INTERRUPTED, "interrupted: the run was stopped before the tier finished, so there is no verdict"
         else:
             status, verdict = judge(returncode, printed, pytest_args)
+        if status != 0 or state is not None:
+            record_failed_stage(devices, output, voice)
         with suppress(OSError), open(output / LOG_NAME, "a", encoding="utf-8") as log:
             log.write(f"{voice.redact(f'verdict: {verdict}')}\n")
         voice(f"verdict: {verdict}")
@@ -2151,17 +2337,23 @@ def main(argv: list[str] | None = None) -> int:
         # interrupt. Either way the container may still be there.
         voice(f"interrupted while {name} was starting or winding down; making sure it is gone")
         state = confirm_removed(runtime, name)
+        record_failed_stage(devices, output, voice)
         if state is None:
             voice("interrupted: the run was stopped before the tier finished, so there is no verdict")
             return EXIT_INTERRUPTED
         left_behind = LeftBehind(runtime, [(name, state)])
     finally:
-        signals.restore()
-        remove_tree(workdir)
-        if left_behind is None:
-            lock.release()
-        else:
-            lock.retain_for_cleanup(left_behind.detail)
+        try:
+            remove_tree(workdir)
+        finally:
+            try:
+                device_holds.close()
+            finally:
+                signals.restore()
+                if left_behind is None:
+                    lock.release()
+                else:
+                    lock.retain_for_cleanup(left_behind.detail)
     voice(
         f"{left_behind.detail} The machine's run lock at {lock.path} stays held and marked for cleanup, so no run starts "
         "beside it; remove the lock file once the container is gone"

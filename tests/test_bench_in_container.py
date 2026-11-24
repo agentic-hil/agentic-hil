@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import re
 import shutil
@@ -47,11 +48,16 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from support import scaled_time_bound
+
+from agentic_hil.bench import BenchMutex, DeviceBusyError
+from agentic_hil.types import fold_device_path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
@@ -240,7 +246,7 @@ def an_esp32_bridge(
 
 def a_node(*, mode: int = 0o660, uid: int = 0, gid: int = SERIAL_GROUP, rdev: int = 0) -> SimpleNamespace:
     """A character device's stat result, which is all the runner asks of a node."""
-    return SimpleNamespace(st_mode=stat.S_IFCHR | mode, st_uid=uid, st_gid=gid, st_rdev=rdev)
+    return SimpleNamespace(st_mode=stat.S_IFCHR | mode, st_uid=uid, st_gid=gid, st_rdev=rdev, st_dev=0, st_ino=0)
 
 
 class Completed:
@@ -352,10 +358,18 @@ def stage(root: Path, commit: str, destination: Path) -> None:
 @pytest.fixture
 def machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, a_machine_of_this_tests_own: Path) -> SimpleNamespace:
     """A Linux machine with one probe on it, as the runner sees one."""
+    return scripted_machine(tmp_path, monkeypatch, a_machine_of_this_tests_own)
+
+
+def scripted_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_home: Path) -> SimpleNamespace:
     sysfs = tmp_path / "sys"
     a_usb_device(sysfs, "1-1")
     by_id = tmp_path / "by-id"
     by_id.mkdir()
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    (proc / "locks").touch()
+    monkeypatch.setattr(bench_in_container, "PROC_ROOT", proc, raising=False)
     statuses = {USB_NODE: a_node(mode=0o664, gid=USB_GROUP), TTY_NODE: a_node(gid=SERIAL_GROUP)}
     openable = {USB_NODE, TTY_NODE}
     installed = {"podman", "crun", "docker"}
@@ -416,9 +430,30 @@ def machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, a_machine_of_this_t
         openable=openable,
         installed=installed,
         runtime=runtime,
-        home=a_machine_of_this_tests_own,
+        home=lock_home,
         output=tmp_path / "results",
     )
+
+
+def script_stage_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-account CI queue is separate from the product device locks."""
+
+    class Queue:
+        path = tmp_path / "ci-queue"
+
+        def acquire(self, *, wait: bool) -> None:
+            pass
+
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(bench_in_container, "RunLock", lambda **kwargs: Queue())
+
+
+@pytest.fixture
+def stage_machine(machine: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    script_stage_queue(tmp_path, monkeypatch)
+    return machine
 
 
 def run(machine: SimpleNamespace, *argv: str) -> int:
@@ -442,6 +477,436 @@ def mounted_at(command: list[str], target: str) -> str:
     found = [value for value in option_values(command, "-v") if value.split(":")[-1] == target or value.endswith(f":{target}:ro")]
     assert len(found) == 1, option_values(command, "-v")
     return found[0][: found[0].rindex(f":{target}")]
+
+
+def product_busy(client: BenchMutex, key: str) -> dict | None:
+    """Ask the real product mutex and give back an unexpectedly free device."""
+    try:
+        client.acquire([key])
+    except DeviceBusyError as refusal:
+        return refusal.result
+    else:
+        client.release([key])
+        return None
+
+
+def home_device_locks(machine: SimpleNamespace) -> Path:
+    root = machine.home / ".agentic-hil" / "device-locks"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def probe_key() -> str:
+    return f"probe:{PROBE_SERIAL.casefold()}"
+
+
+def uart_key(path: str) -> str:
+    return f"com:{fold_device_path(path)}"
+
+
+def test_stage_holds_each_handed_device_against_outside_product_clients(
+    stage_machine: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    machine = stage_machine
+    message = "The stage did not hold every handed device against the outside product client until stage exit."
+    adapter_path = "/dev/ttyUSB8"
+    stable_name = f"/dev/serial/by-id/{ADAPTER_BY_ID}"
+    a_usb_uart(machine.sysfs, "1-3", ttys=("ttyUSB0",))
+    an_esp32_bridge(machine.sysfs, "1-6", vendor="10c4", product="ea60", serial=BRIDGE_SERIAL)
+    machine.statuses.update({ADAPTER_NODE: a_node(), adapter_path: a_node(), ESP32_NODE: a_node()})
+    machine.openable.update({ADAPTER_NODE, adapter_path, ESP32_NODE})
+    (machine.by_id / ADAPTER_BY_ID).touch()
+    realpath = os.path.realpath
+
+    def resolve_node(path, *args, **kwargs):
+        if path in (machine.by_id / ADAPTER_BY_ID, stable_name):
+            return adapter_path
+        return realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(bench_in_container.os.path, "realpath", resolve_node)
+    monkeypatch.setattr(bench_in_container, "canonical_node", lambda path: adapter_path if path == stable_name else path)
+    monkeypatch.setattr(bench_in_container.os, "symlink", lambda target, link: Path(link).write_text(target, encoding="utf-8"))
+    original_build = bench_in_container.build_image
+
+    def build_and_rediscover(*args, **kwargs):
+        image = original_build(*args, **kwargs)
+        if ADAPTER_NODE in machine.openable:
+            shutil.rmtree(machine.sysfs / "bus" / "usb" / "devices" / "1-3")
+            a_usb_uart(machine.sysfs, "1-3", ttys=("ttyUSB8",))
+            machine.openable.remove(ADAPTER_NODE)
+        return image
+
+    monkeypatch.setattr(bench_in_container, "build_image", build_and_rediscover)
+    outer_root = home_device_locks(machine)
+    outside = BenchMutex(root=outer_root)
+    waiter = BenchMutex(root=outer_root)
+    waiting = threading.Event()
+    acquired = threading.Event()
+    stop_waiting = threading.Event()
+    timeout = scaled_time_bound(15)
+    wait_errors = []
+
+    def still_waiting() -> bool:
+        waiting.set()
+        return stop_waiting.is_set()
+
+    def wait_for_probe() -> None:
+        try:
+            waiter.acquire([probe_key()], wait_s=timeout, stop_requested=still_waiting)
+            acquired.set()
+        except Exception as error:
+            wait_errors.append(error)
+        finally:
+            waiter.release_all()
+
+    thread = threading.Thread(target=wait_for_probe)
+    hardware_keys = [
+        probe_key(), uart_key(TTY_NODE), f"com:serial:{PROBE_SERIAL.casefold()}",
+        uart_key(adapter_path), f"com:serial:{ADAPTER_SERIAL.casefold()}",
+        uart_key(ESP32_NODE), f"com:serial:{BRIDGE_SERIAL.casefold()}",
+    ]
+    configured_keys = ["physical:nightly-probe", "physical:nightly-adapter"]
+    unselected_key = "physical:other-board"
+
+    def check_stage_holds(keys: list[str]) -> None:
+        for key in keys:
+            answer = product_busy(outside, key)
+            label = (answer or {}).get("holder", {}).get("label", "")
+            if (answer or {}).get("error_type") != "device_busy" or "stage" not in label.casefold():
+                raise AssertionError(message)
+            assert all(secret.casefold() not in label.casefold() for secret in (PROBE_SERIAL, ADAPTER_SERIAL, BRIDGE_SERIAL, HOST_NAME, HOME, str(machine.home)))
+
+    def run_stage(keys: list[str], *args: str, wait: bool = False) -> None:
+        inspected = False
+        runtime_run = bench_in_container.subprocess.run
+
+        def check_tier(command: list[str]) -> None:
+            assert handed_in(command) == [adapter_path]
+            assert board_handed_in(command) == [ESP32_NODE]
+            check_stage_holds(keys)
+            for key in [uart_key(ADAPTER_NODE), unselected_key, *(configured_keys if wait else [])]:
+                assert product_busy(outside, key) is None
+            if wait:
+                thread.start()
+                assert waiting.wait(scaled_time_bound(15)), f"Product waiter did not observe contention: {wait_errors}"
+                assert not acquired.is_set()
+
+        def inspect_tier(command: list[str], **kwargs: object) -> Completed:
+            nonlocal inspected
+            if Runtime.verb(command) == "container" and "inspect" in command:
+                check_stage_holds(keys)
+                if wait and acquired.is_set():
+                    raise AssertionError(message)
+                inspected = True
+            return runtime_run(command, **kwargs)
+
+        machine.runtime.during_run = check_tier
+        with monkeypatch.context() as patch:
+            patch.setattr(bench_in_container.subprocess, "run", inspect_tier)
+            assert run(machine, "--esp32", "--require-usb-uart", *args) == 0
+        assert inspected, "The scripted tier never reached post-tier container inspection"
+
+    try:
+        run_stage([*hardware_keys, uart_key(stable_name)], wait=True)
+        if not acquired.wait(scaled_time_bound(15)):
+            raise AssertionError(message)
+    finally:
+        stop_waiting.set()
+        if thread.ident is not None:
+            thread.join(timeout)
+            assert not thread.is_alive()
+    assert not wait_errors
+
+    demo = tmp_path / "demo"
+    demo.mkdir()
+    doctor = {
+        "debuggers": {"dut": {"bound": True, "probe_id": PROBE_SERIAL, "resource_id": "Nightly-Probe"}},
+        "com_ports": {
+            "adapter": {"device": stable_name, "serial_number": ADAPTER_SERIAL, "resource_id": "Nightly-Adapter"},
+            "other": {"device": "/dev/ttyUSB99", "resource_id": "Other-Board"},
+        },
+    }
+    monkeypatch.setattr(bench_in_container, "bench_doctor", lambda directory: json.dumps(doctor))
+    run_stage([*hardware_keys, *configured_keys], "--live-device-tree", "--probe-from-config", str(demo))
+
+
+def test_tier_servers_exclude_each_other_in_the_private_stage_lock_directory(
+    stage_machine: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    machine = stage_machine
+    message = "The tier did not share a private per-stage lock directory among its servers."
+    monkeypatch.setenv("GITHUB_RUN_ID", "742001")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    home_root = home_device_locks(machine)
+    machine_root = tmp_path / "machine-locks" / "device-locks"
+    machine_root.mkdir(parents=True)
+    inner_roots = set()
+
+    def observe_tier(command: list[str], outer_root: Path, *, without_groups: bool) -> None:
+        target = f"{bench_in_container.CONTAINER_HOME}/.agentic-hil/device-locks"
+        mounts = [volume.removesuffix(f":{target}") for volume in option_values(command, "-v") if volume.endswith(f":{target}")]
+        if len(mounts) != 1 or Path(mounts[0]) in {home_root, machine_root, *inner_roots}:
+            raise AssertionError(message)
+        inner_root = Path(mounts[0])
+        assert inner_root.is_dir()
+        inner_roots.add(inner_root)
+        outer_mounts = tuple(f"{root.as_posix().casefold()}:" for root in (home_root, machine_root))
+        if any(volume.replace("\\", "/").casefold().startswith(outer_mounts) for volume in option_values(command, "-v")):
+            raise AssertionError(message)
+        first = BenchMutex(root=inner_root)
+        second = BenchMutex(root=inner_root)
+        key = uart_key(TTY_NODE)
+        first.acquire([key])
+        try:
+            assert (product_busy(second, key) or {}).get("error_type") == "device_busy"
+            assert (product_busy(BenchMutex(root=outer_root), key) or {}).get("error_type") == "device_busy"
+        finally:
+            first.release_all()
+        assert product_busy(second, key) is None
+        environment = option_values(command, "-e")
+        assert f"HOME={bench_in_container.CONTAINER_HOME}" in environment
+        assert "AGENTIC_HIL_BENCH=1" in environment
+        assert f"AGENTIC_HIL_BENCH_COMMIT={COMMIT}" in environment
+        assert "AGENTIC_HIL_BENCH_RUN_ID=742001-2" in environment
+        assert ("keep-groups" not in option_values(command, "--group-add")) == without_groups
+
+    machine.runtime.during_run = lambda command: observe_tier(command, home_root, without_groups=False)
+    assert run(machine) == 0
+    monkeypatch.setattr(bench_in_container, "MACHINE_LOCKS", machine_root.as_posix())
+    a_machine_lock_directory(monkeypatch)
+    for without_groups in (False, True):
+        machine.runtime.during_run = lambda command, withheld=without_groups: observe_tier(command, machine_root, without_groups=withheld)
+        assert run(machine, *(["--without-device-group"] if without_groups else [])) == 0
+
+
+def test_stage_waits_for_an_existing_product_holder_before_launch(
+    stage_machine: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    machine = stage_machine
+    message = "The stage did not refuse the occupied device before launching the tier."
+    outer_root = home_device_locks(machine)
+    occupied = BenchMutex(root=outer_root, label="another bench job")
+    rollback_probe = BenchMutex(root=outer_root)
+    earlier_key = uart_key(TTY_NODE)
+    elapsed = 0.0
+    waits = []
+    contacts = []
+    machine.runtime.during_run = lambda command: contacts.append(command)
+
+    def poll(seconds: float) -> None:
+        nonlocal elapsed
+        waits.append(seconds)
+        assert product_busy(rollback_probe, earlier_key) is None, "A tentative stage hold survived a retry"
+        elapsed = max(899.0, elapsed + seconds)
+
+    monkeypatch.setattr(bench_in_container, "time", SimpleNamespace(monotonic=lambda: elapsed, sleep=poll))
+    monkeypatch.setattr(bench_in_container, "pause", poll)
+    occupied.acquire([probe_key()])
+    try:
+        for args in ((), ("--no-wait",)):
+            elapsed = 0.0
+            waits.clear()
+            status = run(machine, *args)
+            error = capsys.readouterr().err
+            if status == 0 or "another bench job" not in error or machine.runtime.issued("run") or contacts:
+                raise AssertionError(message)
+            if args:
+                assert not waits
+            else:
+                assert waits
+                assert elapsed == pytest.approx(900.0)
+            assert product_busy(rollback_probe, earlier_key) is None
+    finally:
+        occupied.release_all()
+
+
+def stage_child(tmp_path: Path, lock_home: Path, started, finish) -> None:
+    with pytest.MonkeyPatch.context() as patch:
+        stage = scripted_machine(tmp_path, patch, lock_home)
+        script_stage_queue(tmp_path, patch)
+
+        def pause_tier(command: list[str]) -> None:
+            started.set()
+            if not finish.wait(scaled_time_bound(30)):
+                raise RuntimeError("Timed out waiting for the parent to end the test")
+
+        stage.runtime.during_run = pause_tier
+        run(stage)
+
+
+def test_stage_device_holds_end_on_every_exit_including_process_death(stage_machine: SimpleNamespace, tmp_path: Path) -> None:
+    machine = stage_machine
+    message = "Product acquisition did not change from busy during the stage to free after its exit."
+    outside = BenchMutex(root=home_device_locks(machine))
+    keys = [probe_key(), uart_key(TTY_NODE), f"com:serial:{PROBE_SERIAL.casefold()}"]
+    observed = []
+
+    def observe_tier(command: list[str]) -> None:
+        observed.append([(product_busy(outside, key) or {}).get("error_type") for key in keys])
+
+    class RuntimeFailed(RuntimeError):
+        pass
+
+    def crash_runtime(command: list[str]) -> None:
+        observe_tier(command)
+        raise RuntimeFailed("scripted container runtime failure")
+
+    for outcome in ("pass", "fail", "interrupt", "runtime error"):
+        observed.clear()
+        machine.runtime.during_run = crash_runtime if outcome == "runtime error" else observe_tier
+        machine.runtime.interrupted = outcome == "interrupt"
+        machine.runtime.tier_returncode = {"fail": 1, "interrupt": 2}.get(outcome, 0)
+        machine.runtime.tier_output = MARKED + "=== 1 failed in 0.20s ===\n" if outcome == "fail" else PASSING_TIER
+        try:
+            status = run(machine)
+        except RuntimeFailed:
+            assert outcome == "runtime error"
+        else:
+            assert (status == 0) == (outcome == "pass")
+        if observed != [["device_busy"] * len(keys)] or any(product_busy(outside, key) is not None for key in keys):
+            raise AssertionError(message)
+
+    child_dir = tmp_path / "child"
+    child_dir.mkdir()
+    context = multiprocessing.get_context("spawn")
+    started = context.Event()
+    finish = context.Event()
+    process = context.Process(target=stage_child, args=(child_dir, machine.home, started, finish))
+    timeout = scaled_time_bound(15)
+    process.start()
+    try:
+        assert started.wait(scaled_time_bound(15)), f"Stage child did not launch the scripted tier (exit {process.exitcode})"
+        if any((product_busy(outside, key) or {}).get("error_type") != "device_busy" for key in keys):
+            raise AssertionError(message)
+    finally:
+        if process.is_alive():
+            process.kill()
+        process.join(timeout)
+        assert not process.is_alive()
+        process.close()
+    if any(product_busy(outside, key) is not None for key in keys):
+        raise AssertionError(message)
+
+
+def test_failed_stage_records_host_device_holders_and_pass_clears_the_record(
+    adapter: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    machine = adapter
+    script_stage_queue(tmp_path, monkeypatch)
+    proc = tmp_path / "proc"
+    stable_name = f"/dev/serial/by-id/usb-STLink_{PROBE_SERIAL}-if02"
+    monkeypatch.setattr(bench_in_container, "canonical_node", lambda path: TTY_NODE if path == stable_name else path)
+    nodes = {
+        USB_NODE: (0x801, 107, 0xBD04),
+        TTY_NODE: (0x801, 109, 0xA600),
+        ADAPTER_NODE: (0x801, 113, 0xBC00),
+    }
+    for node, (device, inode, character_device) in nodes.items():
+        vars(machine.statuses[node]).update(st_dev=device, st_ino=inode, st_rdev=character_device)
+    (proc / "locks").write_text(
+        "1: FLOCK ADVISORY READ 701 08:01:109 0 EOF\n"
+        "2: FLOCK ADVISORY READ 702 08:01:109 0 EOF\n"
+        "2: -> FLOCK ADVISORY WRITE 706 08:01:109 0 EOF\n"
+        "3: POSIX ADVISORY WRITE 705 08:01:109 0 EOF\n"
+        "4: FLOCK ADVISORY WRITE 705 08:03:109 0 EOF\n",
+        encoding="utf-8",
+    )
+    fd_statuses = {}
+    process_uids = {}
+    for pid, command, uid, descriptors in (
+        (701, "plotter", UID, ()),
+        (702, "serial-monitor", UID + 1, (TTY_NODE, TTY_NODE)),
+        (703, "debugger", UID + 1, (USB_NODE,)),
+        (704, "unrelated", UID, ("/dev/null",)),
+        (705, "other-filesystem", UID, ()),
+        (706, "waiting-for-lock", UID, ()),
+    ):
+        process = proc / str(pid)
+        fd_dir = process / "fd"
+        fd_dir.mkdir(parents=True)
+        process_uids[process] = uid
+        (process / "comm").write_text(f"{command}\n", encoding="utf-8")
+        (process / "status").write_text(f"Name:\t{command}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n", encoding="utf-8")
+        (process / "cmdline").write_bytes(f"{HOME}/{USER}/{HOST_NAME}/{PROBE_SERIAL}\0".encode())
+        for index, node in enumerate(descriptors):
+            descriptor = fd_dir / str(index)
+            descriptor.touch()
+            # A held node can be seen through a different filesystem inode.
+            fd_statuses[descriptor] = SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=nodes.get(node, (0, 0, 0x103))[2], st_dev=0x802, st_ino=250 + index)
+    original_stat = Path.stat
+    original_device_status = bench_in_container.device_status
+
+    def fake_stat(path: Path, *args, **kwargs):
+        if path in fd_statuses:
+            return fd_statuses[path]
+        if path in process_uids:
+            return SimpleNamespace(st_mode=stat.S_IFDIR, st_uid=process_uids[path])
+        return original_stat(path, *args, **kwargs)
+
+    def fake_device_status(path: str):
+        if Path(path).is_relative_to(proc):
+            return fake_stat(Path(path))
+        return original_device_status(path)
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    monkeypatch.setattr(bench_in_container, "device_status", fake_device_status)
+    # These Linux device numbers fit in the low bytes. Supply the decode on
+    # hosts whose os module has no major/minor; the real procfs is never read.
+    monkeypatch.setattr(bench_in_container.os, "major", lambda device: device >> 8, raising=False)
+    monkeypatch.setattr(bench_in_container.os, "minor", lambda device: device & 0xFF, raising=False)
+    monkeypatch.setattr(bench_in_container.os, "makedev", lambda major, minor: (major << 8) | minor, raising=False)
+
+    def failed_stage() -> dict:
+        assert run(machine, "--usb-device", USB_NODE, "--serial-device", stable_name, "--require-usb-uart") != 0
+        artifact = (machine.output / "device-holders.json").read_text(encoding="utf-8")
+        for secret in (USER, HOME, HOST_NAME, PROBE_SERIAL, stable_name, "/dev/serial/by-id", "/dev/serial/by-path"):
+            assert secret.casefold() not in artifact.casefold()
+        return json.loads(artifact)
+
+    machine.runtime.tier_output = MARKED + "=== 1 failed in 0.20s ===\n"
+    machine.runtime.tier_returncode = 1
+    record = failed_stage()
+    assert record["complete"] is True
+    assert record["devices"].keys() == nodes.keys()
+    assert record["devices"][ADAPTER_NODE] == []
+    assert record["devices"][USB_NODE] == [{"pid": 703, "command": "debugger", "same_account": False}]
+    assert sorted(record["devices"][TTY_NODE], key=lambda holder: holder["pid"]) == [
+        {"pid": 701, "command": "plotter", "same_account": True},
+        {"pid": 702, "command": "serial-monitor", "same_account": False},
+    ]
+
+    original_iterdir = Path.iterdir
+    denied = proc / "703" / "fd"
+
+    def fake_iterdir(path: Path):
+        if path == denied:
+            raise PermissionError("scripted access denial")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
+    record = failed_stage()
+    assert record["complete"] is False
+    assert record["devices"][USB_NODE] == []
+
+    machine.runtime.tier_returncode = 0
+    machine.runtime.tier_output = PASSING_TIER
+    assert run(machine, "--require-usb-uart") == 0
+    assert not (machine.output / "device-holders.json").exists()
+
+
+def test_unreleased_changed_records_issue_800_once() -> None:
+    changelog = (REPOSITORY_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    unreleased = re.search(r"^## \[Unreleased\][ \t]*\n(.*?)(?=^## |\Z)", changelog, re.MULTILINE | re.DOTALL)
+    changed = re.search(r"^### Changed[ \t]*\n(.*?)(?=^### |\Z)", unreleased[1], re.MULTILINE | re.DOTALL) if unreleased else None
+
+    def issue_entries(section: str) -> list[str]:
+        entries = re.split(r"(?m)^(?=[*+-] )", section)
+        return [entry.strip() for entry in entries if re.search(r"#800\b", entry)]
+
+    matched = issue_entries(changed[1]) if changed else []
+    all_entries = issue_entries(unreleased[1]) if unreleased else []
+    if len(matched) != 1 or len(all_entries) != 1 or not matched[0].endswith("(#800)"):
+        raise AssertionError("Unreleased Changed must contain one entry ending in (#800).")
 
 
 # The command lines.
@@ -574,26 +1039,6 @@ def test_the_container_gets_the_board_and_nothing_of_the_machine_besides(machine
     assert "--sig-proxy=false" in command
     assert option_values(command, "--hostname") == option_values(command, "--name")
     assert option_values(command, "--label") == [f"{bench_in_container.RUN_LABEL}={UID}"]
-
-
-def test_the_tier_finds_the_machines_device_locks_under_its_own_home(machine: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The device locks are the backstop against every other run on this
-    machine, and the tier keeps HOME to reach them. So the container's home is
-    where the machine's lock directory is mounted, and only that directory."""
-    monkeypatch.setenv("GITHUB_RUN_ID", "742001")
-    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
-    assert run(machine) == 0
-
-    command = machine.runtime.tier
-    locks = machine.home / ".agentic-hil" / "device-locks"
-    assert locks.is_dir()
-    assert mounted_at(command, bench_in_container.CONTAINER_LOCKS) == str(locks)
-    assert f"{bench_in_container.CONTAINER_HOME}/.agentic-hil/device-locks" == bench_in_container.CONTAINER_LOCKS
-    environment = option_values(command, "-e")
-    assert f"HOME={bench_in_container.CONTAINER_HOME}" in environment
-    assert "AGENTIC_HIL_BENCH=1" in environment
-    assert f"AGENTIC_HIL_BENCH_COMMIT={COMMIT}" in environment
-    assert "AGENTIC_HIL_BENCH_RUN_ID=742001-2" in environment
 
 
 def test_the_tier_writes_its_report_into_a_directory_of_the_runs_own(machine: SimpleNamespace) -> None:
@@ -2108,30 +2553,6 @@ def a_machine_lock_directory(monkeypatch: pytest.MonkeyPatch, mode: int = stat.S
     monkeypatch.setattr(bench_in_container, "lock_directory_status", status_of)
     monkeypatch.setattr(bench_in_container, "can_enter", lambda path: enterable)
     return machine_locks
-
-
-def test_the_tier_mounts_the_machines_shared_lock_directory_at_its_own_path(machine: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Where it exists, the product inside uses it as the product outside does:
-    one set of locks for the tier, the host and every other account."""
-    machine_locks = a_machine_lock_directory(monkeypatch)
-
-    assert run(machine) == 0
-
-    command = machine.runtime.tier
-    assert mounted_at(command, machine_locks) == machine_locks
-    assert not [volume for volume in option_values(command, "-v") if volume.endswith(f":{bench_in_container.CONTAINER_LOCKS}")]
-
-
-def test_the_stage_without_the_device_group_keeps_the_home_lock_directory(machine: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
-    """That stage withholds every supplementary group, the lock group among them,
-    and cannot open the board either: the home directory is all it can use."""
-    machine_locks = a_machine_lock_directory(monkeypatch)
-
-    assert run(machine, "--without-device-group") == 0
-
-    command = machine.runtime.tier
-    assert mounted_at(command, bench_in_container.CONTAINER_LOCKS) == str(machine.home / ".agentic-hil" / "device-locks")
-    assert not [volume for volume in option_values(command, "-v") if volume.endswith(f":{machine_locks}")]
 
 
 @pytest.mark.parametrize(

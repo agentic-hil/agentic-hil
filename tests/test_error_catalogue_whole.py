@@ -651,7 +651,7 @@ def blocks(function: ast.FunctionDef) -> Iterator[list[ast.stmt]]:
 # the 61st. The bench server's job service and its remote client (#891) add
 # `agentic_hil.benchjobs` and `agentic_hil.remote`, the 62nd and the 63rd.
 # Picotool (#917) adds a module before its first refusal is implemented.
-SCANNED_MODULE_COUNT = 64
+SCANNED_MODULE_COUNT = 65
 # The power supply tools (#733) add seven, the 220th to the 226th: the six
 # `power_supply_*` refusals (`limit_exceeded`, `identity_unknown`,
 # `identity_mismatch`, `no_reply`, `readback_mismatch`, `protection_not_armed`)

@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentic_hil import defmt
+from agentic_hil import bench, defmt
 from agentic_hil.config import ADOPT_HARDWARE_COMMAND, ConfigError, display_path, safe_append_text
 from agentic_hil.coordination import (
     CoordinationError,
@@ -700,7 +700,9 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
 PORT_BUSY_ERRNOS = (errno.EWOULDBLOCK, errno.EAGAIN, errno.EBUSY)
 
 
-def serial_port_busy(error: BaseException, port_id: str, port_config: ComPortConfig) -> JsonObject | None:
+def serial_port_busy(
+    error: BaseException, port_id: str, port_config: ComPortConfig, *, lock_root: Path | None = None,
+) -> JsonObject | None:
     """The refusal for a port another program already holds, or ``None``.
 
     Open time only and by OS number only, and both halves of that are the
@@ -726,6 +728,17 @@ def serial_port_busy(error: BaseException, port_id: str, port_config: ComPortCon
     """
     if not any(raised_errno(error, number) for number in PORT_BUSY_ERRNOS):
         return None
+    summary = (
+        f"COM port {port_config.device} is held by another program, so the session was refused at the open. "
+        "No handle was created and nothing was written to the line."
+    )
+    if lock_root is not None:
+        directory = "the machine's device-lock directory" if lock_root == bench.MACHINE_DEVICE_LOCK_ROOT else "this account's own device-lock directory"
+        summary += (
+            f" This server holds the port's device lock in {directory}. "
+            "The holder is outside that lock domain: it uses a different directory under another account, "
+            "an older installation's home directory, or a tool that takes no device lock."
+        )
     return {
         "ok": False,
         "tool": "com_session_start",
@@ -737,10 +750,7 @@ def serial_port_busy(error: BaseException, port_id: str, port_config: ComPortCon
         # it. Naming a key invites the one repair the remediation warns against:
         # pointing the entry at whichever device is free, which is another board.
         "configured_device": port_config.device,
-        "summary": (
-            f"COM port {port_config.device} is held by another program, so the session was refused at the open: no "
-            "handle was created and nothing was written to the line."
-        ),
+        "summary": summary,
         "backend_error": str(error),
         "target_contacted": False,
         "side_effect_committed": False,
@@ -1995,7 +2005,7 @@ class ComPortService:
             # The port never carried a byte of this session either way: a
             # failed open does at most what a normal open/close cycle does, and
             # that cycle never needed a physical inspection.
-            busy = serial_port_busy(error, port_id, port_config)
+            busy = serial_port_busy(error, port_id, port_config, lock_root=self.coordinator.bench.root)
             failure = busy if busy is not None else open_failure(error)
             if not getattr(serial_handle, "is_open", False):
                 return {**failure, "cleanup_confirmed": True, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
