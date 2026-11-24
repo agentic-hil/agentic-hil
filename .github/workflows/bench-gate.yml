@@ -21,7 +21,7 @@
 # reaches the machine as the image built from it, whose build runs that
 # commit's Dockerfile with the network a build needs, and as the tier that image
 # runs with no network, no capabilities and normally only the probe's device
-# nodes, the machine's device-lock directory and a directory of the run's own,
+# nodes, a private device-lock directory and a directory of the run's own,
 # out of which the report alone is copied. The opt-in pyOCD discovery and USB
 # reset stages instead get the host /dev tree read only so a recreated node is
 # visible. Their code never runs on the machine itself, beside the runner's own

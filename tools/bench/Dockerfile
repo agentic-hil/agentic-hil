@@ -119,10 +119,10 @@ RUN mkdir /tmp/wheel-source \
 RUN mkdir -p /etc/agentic-hil \
     && printf 'The bench tier runs here. Written by tools/bench/Dockerfile.\n' > /etc/agentic-hil/bench-test-image
 
-# A home that belongs to no account. The tier's commands keep HOME, because the
-# machine-wide device locks are under it, so the runner mounts the machine's
-# lock directory at .agentic-hil/device-locks in here; nothing else of the
-# machine's home comes in. Writable by every user and sticky, because the image
+# A home that belongs to no account. The tier's commands keep HOME, because their
+# device locks are under it, so the runner mounts the stage's private lock
+# directory at .agentic-hil/device-locks in here; nothing of the machine's home
+# comes in. Writable by every user and sticky, because the image
 # cannot know who it runs as: under rootless Podman it is the container's root,
 # which is the invoking user, and under Docker it is the invoking user's uid.
 RUN install -d -m 1777 /bench-home /bench-home/.agentic-hil

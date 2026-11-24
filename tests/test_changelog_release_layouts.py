@@ -79,7 +79,7 @@ def _redirect_changelog(monkeypatch: pytest.MonkeyPatch, changelog: str) -> None
 
 
 def _run_check(check: str) -> None:
-    # The source distribution collects this file without checkout-only test modules.
+    # Imported when the check runs, so collecting this file imports no other test module.
     module, function = check.rsplit(".", 1)
     getattr(import_module(module), function)()
 
