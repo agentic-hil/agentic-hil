@@ -21,6 +21,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Fixed
 
+- Hardware bench stages reserve the bound probe's configured resource alias and keep host device locks until the runtime confirms the container is gone, even if the stage process exits first. (#930)
 - Version 7 plans can use the ELF confirmed by a named debugger for `uart_open` with `defmt: true`. If probes confirm different ELFs, implicit table selection is refused before the port opens. (#925)
 - ST-Link flash failure guidance now explains which quarantine fields to read before a hot-plug retry, where to turn if the retry is refused, the limits of the H533 `under_reset` evidence, and how to diagnose an exit-0 flash without verification. (#911)
 

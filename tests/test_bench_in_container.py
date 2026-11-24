@@ -36,6 +36,7 @@ there for.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import multiprocessing
@@ -49,14 +50,21 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from support import scaled_time_bound
+import yaml
+from conftest import write_authoritative_config
+from support import _windows_process_is_running, scaled_time_bound, wait_until_process_ended
 
+import agentic_hil.cli as cli
 from agentic_hil.bench import BenchMutex, DeviceBusyError
+from agentic_hil.config import load_authoritative_config
+from agentic_hil.devices import DebuggerDevice, UartDevice
 from agentic_hil.types import fold_device_path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
@@ -68,6 +76,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = REPOSITORY_ROOT / "tools" / "bench" / "Dockerfile"
 IGNORE_FILE = REPOSITORY_ROOT / "tools" / "bench" / "Dockerfile.dockerignore"
 README = REPOSITORY_ROOT / "tools" / "bench" / "README.md"
+SCRIPTED_RUNTIME = Path(__file__).parent / "fixtures" / "fake_stage_runtime.py"
+PROBE_ALIAS = "Nightly-Probe"
 
 # A probe serial, a host name, a home and a user that belong to no machine. What
 # they stand for is exactly what must never reach a log somebody else can read.
@@ -276,6 +286,9 @@ class FakeProcess:
             raise KeyboardInterrupt
         return self._returncode
 
+    def poll(self) -> int | None:
+        return None if self._interrupted else self._returncode
+
     def kill(self) -> None:
         self.killed = True
 
@@ -300,6 +313,8 @@ class Runtime:
 
     @staticmethod
     def verb(command: list[str]) -> str:
+        if command[:2] == [sys.executable, str(SCRIPTED_RUNTIME)]:
+            command = command[3:]
         rest = command[1:]
         if rest[:1] == ["--runtime"]:
             rest = rest[2:]
@@ -315,6 +330,8 @@ class Runtime:
         return runs[0]
 
     def run(self, command: list[str], **kwargs: object) -> Completed:
+        if command[:2] == [sys.executable, str(SCRIPTED_RUNTIME)]:
+            command = command[3:]
         self.commands.append(list(command))
         verb = self.verb(command)
         if verb == "ps":
@@ -356,9 +373,50 @@ def stage(root: Path, commit: str, destination: Path) -> None:
 
 
 @pytest.fixture
-def machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, a_machine_of_this_tests_own: Path) -> SimpleNamespace:
+def machine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, a_machine_of_this_tests_own: Path, request: pytest.FixtureRequest,
+) -> SimpleNamespace:
     """A Linux machine with one probe on it, as the runner sees one."""
-    return scripted_machine(tmp_path, monkeypatch, a_machine_of_this_tests_own)
+    machine = scripted_machine(tmp_path, monkeypatch, a_machine_of_this_tests_own)
+    state = tmp_path / "local-runtime"
+    state.mkdir()
+    holders = []
+
+    def launch(command: list[str], **kwargs: object):
+        if command[0] == sys.executable:
+            child = subprocess.Popen(command, **kwargs)
+            holders.append(child)
+            return child
+        if Runtime.verb(command) == "run":
+            (state / "inspected-running").unlink(missing_ok=True)
+            (state / "container").write_text(option_values(command, "--name")[0], encoding="utf-8")
+            (state / "visible").touch()
+        return machine.runtime.popen(command, **kwargs)
+
+    def finish_holders() -> None:
+        if not any(child.poll() is None for child in holders):
+            return
+        try:
+            if machine.runtime.never_removed and (state / "visible").exists():
+                await_stage_file(state / "inspected-running")
+        finally:
+            (state / "visible").unlink(missing_ok=True)
+            survivors = []
+            for child in holders:
+                try:
+                    child.wait(timeout=scaled_time_bound(3))
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=scaled_time_bound(3))
+                    survivors.append(child.pid)
+            assert not survivors, f"Device holders outlived the test: {survivors}"
+
+    request.addfinalizer(finish_holders)
+    monkeypatch.setattr(bench_in_container, "runtime_inspection_argv", lambda runtime: [
+        sys.executable, str(SCRIPTED_RUNTIME), str(state), runtime,
+    ])
+    monkeypatch.setattr(bench_in_container.subprocess, "Popen", launch)
+    return machine
 
 
 def scripted_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_home: Path) -> SimpleNamespace:
@@ -421,6 +479,9 @@ def scripted_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_home:
             DEVNULL=subprocess.DEVNULL,
             TimeoutExpired=subprocess.TimeoutExpired,
             SubprocessError=subprocess.SubprocessError,
+            CREATE_NEW_PROCESS_GROUP=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            DETACHED_PROCESS=getattr(subprocess, "DETACHED_PROCESS", 0),
+            CREATE_NO_WINDOW=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         ),
     )
     return SimpleNamespace(
@@ -445,6 +506,9 @@ def script_stage_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             pass
 
         def release(self) -> None:
+            pass
+
+        def retain_for_cleanup(self, detail: str) -> None:
             pass
 
     monkeypatch.setattr(bench_in_container, "RunLock", lambda **kwargs: Queue())
@@ -502,6 +566,31 @@ def probe_key() -> str:
 
 def uart_key(path: str) -> str:
     return f"com:{fold_device_path(path)}"
+
+
+def bench_config(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, *,
+    alias: str | None = None, probe_id: str | None = PROBE_SERIAL, ports: dict | None = None,
+) -> Path:
+    config_path = write_authoritative_config(
+        workspace, monkeypatch, probe_id=probe_id, permissions={},
+        com_ports_yaml=yaml.safe_dump({"com_ports": ports or {}}),
+    )
+    if alias is not None:
+        document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        document["debuggers"]["dut"]["resource_id"] = alias
+        config_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+    return config_path
+
+
+def real_doctor_report(workspace: Path, config_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    with monkeypatch.context() as patch:
+        patch.chdir(workspace)
+        patch.setenv("AGENTIC_HIL_CONFIG", str(config_path))
+        patch.setattr(cli, "probe_access", lambda *args, **kwargs: None)
+        patch.setattr(cli, "port_access", lambda *args, **kwargs: None)
+        patch.setattr(cli, "_doctor_probe_check", lambda *args: ({"ok": True}, {"ok": True}))
+        return cli.doctor()
 
 
 def test_stage_holds_each_handed_device_against_outside_product_clients(
@@ -565,8 +654,9 @@ def test_stage_holds_each_handed_device_against_outside_product_clients(
         uart_key(adapter_path), f"com:serial:{ADAPTER_SERIAL.casefold()}",
         uart_key(ESP32_NODE), f"com:serial:{BRIDGE_SERIAL.casefold()}",
     ]
+    unselected_port_key = "physical:other-board"
     configured_keys = ["physical:nightly-probe", "physical:nightly-adapter"]
-    unselected_key = "physical:other-board"
+    alias_clients = []
 
     def check_stage_holds(keys: list[str]) -> None:
         for key in keys:
@@ -575,8 +665,14 @@ def test_stage_holds_each_handed_device_against_outside_product_clients(
             if (answer or {}).get("error_type") != "device_busy" or "stage" not in label.casefold():
                 raise AssertionError(message)
             assert all(secret.casefold() not in label.casefold() for secret in (PROBE_SERIAL, ADAPTER_SERIAL, BRIDGE_SERIAL, HOST_NAME, HOME, str(machine.home)))
+        if configured_keys[0] in keys:
+            for client, client_keys in alias_clients:
+                with pytest.raises(DeviceBusyError) as busy:
+                    client.acquire(client_keys)
+                assert busy.value.result["error_type"] == "device_busy"
+                assert "stage" in busy.value.result["holder"]["label"].casefold()
 
-    def run_stage(keys: list[str], *args: str, wait: bool = False) -> None:
+    def run_stage(keys: list[str], *args: str, wait: bool = False, free_keys: tuple[str, ...] = ()) -> None:
         inspected = False
         runtime_run = bench_in_container.subprocess.run
 
@@ -584,7 +680,7 @@ def test_stage_holds_each_handed_device_against_outside_product_clients(
             assert handed_in(command) == [adapter_path]
             assert board_handed_in(command) == [ESP32_NODE]
             check_stage_holds(keys)
-            for key in [uart_key(ADAPTER_NODE), unselected_key, *(configured_keys if wait else [])]:
+            for key in [uart_key(ADAPTER_NODE), unselected_port_key, *free_keys, *(configured_keys if wait else [])]:
                 assert product_busy(outside, key) is None
             if wait:
                 thread.start()
@@ -618,16 +714,44 @@ def test_stage_holds_each_handed_device_against_outside_product_clients(
     assert not wait_errors
 
     demo = tmp_path / "demo"
-    demo.mkdir()
-    doctor = {
-        "debuggers": {"dut": {"bound": True, "probe_id": PROBE_SERIAL, "resource_id": "Nightly-Probe"}},
-        "com_ports": {
-            "adapter": {"device": stable_name, "serial_number": ADAPTER_SERIAL, "resource_id": "Nightly-Adapter"},
-            "other": {"device": "/dev/ttyUSB99", "resource_id": "Other-Board"},
+    config_path = bench_config(demo, monkeypatch, alias=PROBE_ALIAS, ports={
+        "adapter": {"device": stable_name, "serial_number": ADAPTER_SERIAL, "resource_id": "Nightly-Adapter"},
+        "other": {"device": "/dev/ttyUSB99", "resource_id": "Other-Board"},
+    })
+    report = real_doctor_report(demo, config_path, monkeypatch)
+    assert report["debuggers"]["dut"]["bound"]
+    assert all(port.get("resource_id") != PROBE_ALIAS for port in report["com_ports"].values())
+    client_workspace = tmp_path / "client"
+    client_path = bench_config(client_workspace, monkeypatch, alias=PROBE_ALIAS, probe_id=None, ports={
+        "uart": {"device": TTY_NODE, "resource_id": PROBE_ALIAS},
+    })
+    client_config = load_authoritative_config(client_workspace, config_path=str(client_path))
+    devices = (
+        DebuggerDevice(config_id="dut", debugger=client_config.debuggers["dut"]),
+        UartDevice(config_id="uart", port=client_config.com_ports["uart"]),
+    )
+    for device in devices:
+        assert device.lock_keys == ("physical:nightly-probe",)
+        alias_clients.append((BenchMutex(root=outer_root), device.lock_keys))
+    keys = [*hardware_keys, *configured_keys]
+    args = ("--live-device-tree", "--probe-from-config", str(demo))
+    monkeypatch.setattr(bench_in_container, "bench_doctor", lambda directory: json.dumps(report))
+    run_stage(keys, *args)
+    for client, client_keys in alias_clients:
+        assert client.acquire(client_keys) == list(client_keys)
+        client.release_all()
+
+    # Doctor auto-binds a sole debugger. Model an explicit selection separately
+    # so the positive alias check uses the original report.
+    report_with_spare = {
+        **report,
+        "debuggers": {
+            **report["debuggers"],
+            "spare": {"bound": False, "probe_id": SECOND_SERIAL, "resource_id": "Spare-Probe"},
         },
     }
-    monkeypatch.setattr(bench_in_container, "bench_doctor", lambda directory: json.dumps(doctor))
-    run_stage([*hardware_keys, *configured_keys], "--live-device-tree", "--probe-from-config", str(demo))
+    monkeypatch.setattr(bench_in_container, "bench_doctor", lambda directory: json.dumps(report_with_spare))
+    run_stage(keys, *args, free_keys=("physical:spare-probe",))
 
 
 def test_tier_servers_exclude_each_other_in_the_private_stage_lock_directory(
@@ -720,25 +844,246 @@ def test_stage_waits_for_an_existing_product_holder_before_launch(
         occupied.release_all()
 
 
-def stage_child(tmp_path: Path, lock_home: Path, started, finish) -> None:
+def stage_keys() -> list[str]:
+    return [probe_key(), uart_key(TTY_NODE), f"com:serial:{PROBE_SERIAL.casefold()}"]
+
+
+def await_stage_file(path: Path) -> None:
+    deadline = time.monotonic() + scaled_time_bound(15)
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"The scripted stage did not reach {path.name}")
+        time.sleep(0.02)
+
+
+def connect_scripted_runtime(machine: SimpleNamespace, patch: pytest.MonkeyPatch, state: Path, mode: str) -> None:
+    argv = [sys.executable, str(SCRIPTED_RUNTIME), str(state)]
+    patch.setattr(bench_in_container, "runtime_inspection_argv", lambda runtime: argv)
+    runtime = machine.runtime
+    fake_run = runtime.run
+    fake_popen = runtime.popen
+
+    def run_command(command: list[str], **kwargs: object):
+        if command[:len(argv)] == argv:
+            return subprocess.run(command, **kwargs)
+        verb = Runtime.verb(command)
+        if verb in {"ps", "stop", "rm"}:
+            runtime.commands.append(list(command))
+            result = subprocess.run([*argv, *command[1:]], **kwargs)
+            if verb == "stop" and mode == "cancel" and not (state / "sent-sigterm").exists():
+                signal.raise_signal(signal.SIGTERM)
+                (state / "sent-sigterm").touch()
+            return result
+        return fake_run(command, **kwargs)
+
+    class RunningTier(FakeProcess):
+        def poll(self) -> int | None:
+            return self._returncode if (state / "finish-worker").exists() else None
+
+        def wait(self, timeout: float | None = None) -> int:
+            seconds = scaled_time_bound(15) if timeout is None else timeout
+            deadline = time.monotonic() + seconds
+            while self.poll() is None:
+                if mode == "cancel" and (state / "send-sigint").exists() and not (state / "stop-requested").exists():
+                    signal.raise_signal(signal.SIGINT)
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired("scripted container client", seconds)
+                time.sleep(0.02)
+            return self._returncode
+
+    def popen(command: list[str], **kwargs: object):
+        if command[0] == sys.executable:
+            child = subprocess.Popen(command, **kwargs)
+            environment = kwargs.get("env") or os.environ
+            tracked = "RUNNER_TRACKING_ID" in environment
+            (state / f"holder-{child.pid}").write_text("tracked" if tracked else "untracked", encoding="utf-8")
+            return child
+        if Runtime.verb(command) != "run" or mode == "successor":
+            return fake_popen(command, **kwargs)
+        (state / "container").write_text(option_values(command, "--name")[0], encoding="utf-8")
+        if mode in {"cancel", "leftover"}:
+            return RunningTier(PASSING_TIER)
+        return fake_popen(command, **kwargs)
+
+    patch.setattr(bench_in_container, "subprocess", SimpleNamespace(**{
+        **vars(bench_in_container.subprocess), "run": run_command, "Popen": popen,
+    }))
+
+
+def stage_child(directory: Path, lock_home: Path, state: Path, mode: str) -> None:
     with pytest.MonkeyPatch.context() as patch:
-        stage = scripted_machine(tmp_path, patch, lock_home)
-        script_stage_queue(tmp_path, patch)
+        machine = scripted_machine(directory, patch, lock_home)
+        script_stage_queue(directory, patch)
+        patch.setenv("RUNNER_TRACKING_ID", "scripted-stage")
+        connect_scripted_runtime(machine, patch, state, mode)
+        patch.setattr(bench_in_container, "REMOVAL_POLLS", 2)
+        if mode == "before-launch":
+            def before_launch(*args, **kwargs):
+                (state / "before-launch").touch()
+                await_stage_file(state / "finish-worker")
+                raise AssertionError("The fixture must end the stage before it launches")
 
-        def pause_tier(command: list[str]) -> None:
-            started.set()
-            if not finish.wait(scaled_time_bound(30)):
-                raise RuntimeError("Timed out waiting for the parent to end the test")
-
-        stage.runtime.during_run = pause_tier
-        run(stage)
+            patch.setattr(bench_in_container, "tier_command", before_launch)
+        raise SystemExit(run(machine))
 
 
-def test_stage_device_holds_end_on_every_exit_including_process_death(stage_machine: SimpleNamespace, tmp_path: Path) -> None:
+def wait_for_fixture_process(pid: int, seconds: float) -> None:
+    def windows_probe(pid: int, signum: int) -> None:
+        if not _windows_process_is_running(pid):
+            raise ProcessLookupError(pid)
+
+    if os.name == "nt":
+        wait_until_process_ended(pid, seconds, signal_probe=windows_probe, read_stat=lambda pid: "")
+    else:
+        wait_until_process_ended(pid, seconds)
+
+
+class ProcessStage:
+    def __init__(self, state: Path, home: Path) -> None:
+        self.state = state
+        self.home = home
+        self.process = None
+        self.worker = None
+
+    def start(self, mode: str) -> None:
+        directory = self.state / "stage"
+        directory.mkdir()
+        if mode != "before-launch":
+            self.worker = subprocess.Popen(
+                [sys.executable, str(SCRIPTED_RUNTIME), str(self.state), "worker"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            await_stage_file(self.state / "worker-ready")
+        if mode in {"exit-7", "leftover"}:
+            (self.state / "visible").touch()
+        context = multiprocessing.get_context("spawn")
+        self.process = context.Process(target=stage_child, args=(directory, self.home, self.state, mode))
+        self.process.start()
+        await_stage_file(self.state / ("before-launch" if mode == "before-launch" else "container"))
+
+    def kill(self) -> None:
+        self.process.kill()
+        self.process.join(scaled_time_bound(10))
+        assert not self.process.is_alive()
+        assert self.process.exitcode != 0
+
+    def remove_container(self) -> None:
+        (self.state / "finish-worker").touch()
+        if self.worker is not None:
+            assert self.worker.wait(timeout=scaled_time_bound(5)) == 0
+        (self.state / "visible").unlink(missing_ok=True)
+        (self.state / "unresponsive").unlink(missing_ok=True)
+
+    def simulate_job_cleanup(self) -> None:
+        for marker in self.state.glob("holder-*"):
+            if marker.read_text(encoding="utf-8") == "tracked":
+                self.kill_recorded_process(marker)
+
+    @staticmethod
+    def kill_recorded_process(marker: Path) -> None:
+        pid = int(marker.name.split("-")[1])
+        try:
+            wait_for_fixture_process(pid, 0)
+        except AssertionError:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+            wait_for_fixture_process(pid, scaled_time_bound(3))
+
+    def close(self) -> None:
+        # Restore inspection before ending the stage so an orphan can exit normally.
+        (self.state / "finish-worker").touch()
+        (self.state / "visible").unlink(missing_ok=True)
+        (self.state / "unresponsive").unlink(missing_ok=True)
+        try:
+            self.close_stage()
+        finally:
+            try:
+                self.close_worker()
+            finally:
+                self.close_recorded_children()
+
+    def close_stage(self) -> None:
+        if self.process is not None and self.process.pid is not None:
+            if self.process.is_alive():
+                self.process.kill()
+            self.process.join(scaled_time_bound(5))
+            assert not self.process.is_alive()
+            self.process.close()
+
+    def close_worker(self) -> None:
+        if self.worker is not None:
+            try:
+                self.worker.wait(timeout=scaled_time_bound(3))
+            except subprocess.TimeoutExpired:
+                self.worker.kill()
+                self.worker.wait(timeout=scaled_time_bound(3))
+                raise AssertionError("The scripted container process outlived its test") from None
+
+    def close_recorded_children(self) -> None:
+        deadline = time.monotonic() + scaled_time_bound(2)
+        survivors = []
+        for marker in [*self.state.glob("holder-*"), *self.state.glob("runtime-*")]:
+            try:
+                wait_for_fixture_process(int(marker.name.split("-")[1]), max(0, deadline - time.monotonic()))
+            except AssertionError:
+                survivors.append(marker)
+        for marker in survivors:
+            self.kill_recorded_process(marker)
+        assert not survivors, f"Scripted stage processes outlived the test: {survivors}"
+
+
+@pytest.fixture
+def process_stage(tmp_path: Path, a_machine_of_this_tests_own: Path, request: pytest.FixtureRequest) -> ProcessStage:
+    state = tmp_path / "runtime"
+    state.mkdir()
+    fixture = ProcessStage(state, a_machine_of_this_tests_own)
+    request.addfinalizer(fixture.close)
+    return fixture
+
+
+def assert_stage_devices_busy(outside: BenchMutex, message: str) -> None:
+    for key in stage_keys():
+        refusal = product_busy(outside, key)
+        if refusal is None:
+            raise AssertionError(message)
+        assert refusal["error_type"] == "device_busy"
+        assert "stage" in refusal["holder"]["label"].casefold()
+
+
+def await_waiting_client(outside: BenchMutex, stage: ProcessStage, during_wait: Callable[[], None]) -> None:
+    waiting = threading.Event()
+    acquired = threading.Event()
+    failures = []
+
+    def waiter() -> None:
+        try:
+            outside.acquire(stage_keys(), wait_s=scaled_time_bound(15), stop_requested=lambda: waiting.set() or False)
+            acquired.set()
+        except Exception as error:
+            failures.append(error)
+        finally:
+            outside.release_all()
+
+    client = threading.Thread(target=waiter)
+    client.start()
+    try:
+        assert waiting.wait(scaled_time_bound(5))
+        during_wait()
+        assert not acquired.is_set()
+        stage.remove_container()
+        assert acquired.wait(scaled_time_bound(10)), failures
+    finally:
+        client.join(scaled_time_bound(16))
+        assert not client.is_alive()
+
+
+def test_stage_device_holds_end_on_every_exit_including_process_death(
+    stage_machine: SimpleNamespace, process_stage: ProcessStage,
+) -> None:
     machine = stage_machine
     message = "Product acquisition did not change from busy during the stage to free after its exit."
     outside = BenchMutex(root=home_device_locks(machine))
-    keys = [probe_key(), uart_key(TTY_NODE), f"com:serial:{PROBE_SERIAL.casefold()}"]
+    keys = stage_keys()
     observed = []
 
     def observe_tier(command: list[str]) -> None:
@@ -766,26 +1111,82 @@ def test_stage_device_holds_end_on_every_exit_including_process_death(stage_mach
         if observed != [["device_busy"] * len(keys)] or any(product_busy(outside, key) is not None for key in keys):
             raise AssertionError(message)
 
-    child_dir = tmp_path / "child"
-    child_dir.mkdir()
-    context = multiprocessing.get_context("spawn")
-    started = context.Event()
-    finish = context.Event()
-    process = context.Process(target=stage_child, args=(child_dir, machine.home, started, finish))
-    timeout = scaled_time_bound(15)
-    process.start()
-    try:
-        assert started.wait(scaled_time_bound(15)), f"Stage child did not launch the scripted tier (exit {process.exitcode})"
-        if any((product_busy(outside, key) or {}).get("error_type") != "device_busy" for key in keys):
-            raise AssertionError(message)
-    finally:
-        if process.is_alive():
-            process.kill()
-        process.join(timeout)
-        assert not process.is_alive()
-        process.close()
-    if any(product_busy(outside, key) is not None for key in keys):
-        raise AssertionError(message)
+    process_stage.start("cancel")
+    assert_stage_devices_busy(outside, message)
+    state = process_stage.state
+    (state / "send-sigint").touch()
+    await_stage_file(state / "sent-sigterm")
+    process_stage.kill()
+    process_stage.simulate_job_cleanup()
+    message = "An outside client acquired a stage device after cancellation and stage death before container removal was confirmed."
+    assert process_stage.worker.poll() is None
+    assert_stage_devices_busy(outside, message)
+    (state / "visible").touch()
+    await_stage_file(state / "inspected-running")
+    assert_stage_devices_busy(outside, message)
+
+    def lose_runtime() -> None:
+        (state / "unresponsive").touch()
+        await_stage_file(state / "inspected-unresponsive")
+        assert_stage_devices_busy(outside, message)
+
+    await_waiting_client(BenchMutex(root=home_device_locks(machine)), process_stage, lose_runtime)
+
+
+def test_exit_7_keeps_devices_busy_until_a_waiter_observes_confirmed_removal(
+    machine: SimpleNamespace, process_stage: ProcessStage,
+) -> None:
+    process_stage.start("exit-7")
+    process_stage.process.join(scaled_time_bound(15))
+    assert process_stage.process.exitcode == 7
+    assert process_stage.worker.poll() is None
+    outside = BenchMutex(root=home_device_locks(machine))
+    message = "An outside client acquired a stage device after exit 7 while container removal was unconfirmed."
+    assert_stage_devices_busy(outside, message)
+    await_stage_file(process_stage.state / "inspected-by-holder")
+
+    def lose_runtime() -> None:
+        (process_stage.state / "unresponsive").touch()
+        await_stage_file(process_stage.state / "inspected-unresponsive")
+        assert_stage_devices_busy(outside, message)
+
+    await_waiting_client(BenchMutex(root=home_device_locks(machine)), process_stage, lose_runtime)
+
+
+def test_kill_before_launch_announcement_releases_all_devices(machine: SimpleNamespace, process_stage: ProcessStage) -> None:
+    process_stage.start("before-launch")
+    outside = BenchMutex(root=home_device_locks(machine))
+    assert_stage_devices_busy(outside, "The stage did not hold its devices before launch")
+    process_stage.kill()
+    assert not (process_stage.state / "container").exists()
+    assert outside.acquire(stage_keys(), wait_s=scaled_time_bound(3)) == sorted(stage_keys())
+    outside.release_all()
+
+
+def test_next_stage_acquires_devices_after_its_leftover_sweep(
+    stage_machine: SimpleNamespace, process_stage: ProcessStage, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    machine = stage_machine
+    process_stage.start("leftover")
+    process_stage.kill()
+    # Once an independent holder has observed presence, the sweep exercises the
+    # ordinary removal path, without relying on the unseen-launch grace period.
+    if any(process_stage.state.glob("holder-*")):
+        await_stage_file(process_stage.state / "inspected-running")
+    (process_stage.state / "allow-removal").touch()
+    connect_scripted_runtime(machine, monkeypatch, process_stage.state, "successor")
+    monkeypatch.setattr(bench_in_container, "DEVICE_WAIT_S", scaled_time_bound(5))
+    monkeypatch.setattr(bench_in_container, "STOP_TIMEOUT_S", 2)
+    launched = threading.Event()
+
+    def observe_tier(command: list[str]) -> None:
+        assert (process_stage.state / "removed").is_file()
+        assert_stage_devices_busy(BenchMutex(root=home_device_locks(machine)), "The next stage did not acquire the devices")
+        launched.set()
+
+    machine.runtime.during_run = observe_tier
+    assert run(machine) == 0
+    assert launched.is_set()
 
 
 def test_failed_stage_records_host_device_holders_and_pass_clears_the_record(
@@ -907,6 +1308,43 @@ def test_unreleased_changed_records_issue_800_once() -> None:
     all_entries = issue_entries(unreleased[1]) if unreleased else []
     if len(matched) != 1 or len(all_entries) != 1 or not matched[0].endswith("(#800)"):
         raise AssertionError("Unreleased Changed must contain one entry ending in (#800).")
+
+
+def test_stage_lock_contract_in_module_docstring_readme_and_release_notes() -> None:
+    changelog = (REPOSITORY_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    readme = README.read_text(encoding="utf-8")
+    source = (REPOSITORY_ROOT / "tools" / "bench_in_container.py").read_text(encoding="utf-8")
+    module_docstring = ast.get_docstring(ast.parse(source)) or ""
+
+    def describes_stage_locks(content: str) -> bool:
+        prose = " ".join(content.casefold().split())
+        return (
+            all(term in prose for term in (
+                "/var/lib/agentic-hil/device-locks", "~/.agentic-hil/device-locks",
+                "private", "/bench-home", "host", "container", "bound", "probe_id",
+                "resource_id", "serial_number", "device", "doctor",
+            ))
+            and bool(re.search(r"container.{0,100}(gone|removed|removal)|removal.{0,70}container", prose))
+            and "into the container at the same place under its home" not in prose
+            and "reads two keys of doctor's document" not in prose
+        )
+
+    entries = []
+    for release in re.split(r"(?m)^## ", changelog)[1:]:
+        for section in re.split(r"(?m)^### ", release)[1:]:
+            heading = section.splitlines()[0].strip()
+            for entry in re.split(r"(?m)^(?=[*+-] )", section):
+                if re.search(r"#930\b", entry):
+                    entries.append((heading, entry.strip()))
+    fixed = (
+        len(entries) == 1 and entries[0][0] == "Fixed" and entries[0][1].endswith("(#930)")
+        and not re.search(r"#800\b", entries[0][1])
+    )
+    if not (fixed and describes_stage_locks(readme) and describes_stage_locks(module_docstring)):
+        raise AssertionError(
+            "The module docstring and bench README must describe the host and private lock roots, "
+            "container lifetime and doctor fields, with one Fixed entry ending in (#930)."
+        )
 
 
 # The command lines.
@@ -1617,16 +2055,46 @@ def test_the_serial_number_is_compared_as_the_product_compares_it(several: Simpl
     assert option_values(several.runtime.tier, "--device") == [USB_NODE, TTY_NODE]
 
 
-def test_the_document_read_is_the_one_doctor_prints() -> None:
-    """The two keys the runner reads, where doctor puts them: a debugger entry
-    names its probe in `probe_id` and says in `bound` whether it is the one the
-    configuration binds. Read from doctor's own source, since the runner is a
-    stdlib script that never imports the product."""
-    source = (REPOSITORY_ROOT / "src" / "agentic_hil" / "cli.py").read_text(encoding="utf-8")
-    entry = source[source.index('        "debuggers": {\n            name: {') :]
-    entry = entry[: entry.index("for name, entry in config.debuggers.items()")]
-    assert '"probe_id": entry.probe_id,' in entry
-    assert '"bound": name == config.debugger_id,' in entry
+def test_the_document_read_is_the_one_doctor_prints(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "demo"
+    config_path = bench_config(workspace, monkeypatch, ports={"dut_uart": {"device": TTY_NODE}})
+    report = real_doctor_report(workspace, config_path, monkeypatch)
+    fixture = a_doctor_document()
+    assert fixture.keys() <= report.keys()
+    for section in ("debuggers", "com_ports"):
+        emitted = set().union(*(entry.keys() for entry in report[section].values()))
+        assert all(entry.keys() <= emitted for entry in fixture[section].values())
+    assert {"probe_id", "bound"} <= report["debuggers"]["dut"].keys()
+
+
+def test_doctor_reports_alias_or_null_and_only_a_legacy_omission_warns_once(
+    stage_machine: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    reports = {}
+    for alias in (PROBE_ALIAS, None):
+        workspace = tmp_path / ("without-alias" if alias is None else "with-alias")
+        config_path = bench_config(workspace, monkeypatch, alias=alias)
+        reports[alias] = (workspace, real_doctor_report(workspace, config_path, monkeypatch))
+    for alias, (_, report) in reports.items():
+        if not report["debuggers"] or any(
+            "resource_id" not in debugger or debugger["resource_id"] != alias for debugger in report["debuggers"].values()
+        ):
+            raise AssertionError("The real doctor report must include the configured resource_id or null on every debugger entry.")
+
+    workspace, report = reports[None]
+    monkeypatch.setattr(bench_in_container, "bench_doctor", lambda directory: json.dumps(report))
+    capsys.readouterr()
+    assert run(stage_machine, "--probe-from-config", str(workspace)) == 0
+    assert "resource_id" not in capsys.readouterr().err
+
+    workspace, report = reports[PROBE_ALIAS]
+    del report["debuggers"]["dut"]["resource_id"]
+    assert run(stage_machine, "--probe-from-config", str(workspace)) == 0
+    warnings = [line.casefold() for line in capsys.readouterr().err.splitlines() if "resource_id" in line]
+    assert len(warnings) == 1
+    message = warnings[0]
+    assert "probe" in message and ("alone" in message or "only" in message)
+    assert any(phrase in message for phrase in ("can still", "not kept out", "not excluded", "not blocked", "not prevented"))
 
 
 @pytest.mark.parametrize(

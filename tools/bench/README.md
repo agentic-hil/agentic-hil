@@ -202,10 +202,17 @@ apply.
   that report, read as a regular file and never through a link, is copied out.
 - The run lock is the one `tools/ci_linux.py` and `tools/loop_in_container.py`
   take, `~/.agentic-hil/ci-linux.lock`, so runs of any of them on one machine
-  queue behind one another. `--no-wait` refuses instead of queueing. Below it,
-  the machine's device-lock directory, `~/.agentic-hil/device-locks`, is mounted
-  into the container at the same place under its home, so the tier and every
-  other run on the machine still meet at the board's own lock.
+  queue behind one another. `--no-wait` refuses instead of queueing. A separate
+  holder reserves the probe and UARTs in the host product's device-lock
+  directory, `/var/lib/agentic-hil/device-locks` where configured, otherwise
+  `~/.agentic-hil/device-locks`. Outside product clients receive `device_busy`
+  naming the stage until the runtime confirms the container is gone. The hold
+  survives stage death, exit 7 and runtime outages. It releases automatically
+  on confirmed removal. If the stage exits before announcing the launch, its
+  device holds release immediately. After an announced launch, the holder gives
+  a container it has yet to see up to 120 seconds to appear before requiring a
+  fresh inspection confirming absence. Tier servers coordinate through a
+  private directory mounted under `/bench-home` in the container.
 - Anything else that drives the board from the machine itself takes the same
   lock with `tools/run_lock.py`: `python3 tools/run_lock.py run -- <command>`
   holds it for one command's life, queued like these tools, and exits with the
@@ -222,10 +229,14 @@ apply.
   configuration is the one the operator made once with `agentic-hil init` in
   DIR, read through the product installed on the machine, `agentic-hil doctor
   --json` run in DIR, so the product finds and validates it and this tool
-  reads two keys of doctor's document: the debugger it binds, `bound`, and that
-  debugger's `probe_id`. The probe is the one attached probe whose USB serial
-  number is that `probe_id`, compared case folded as the product compares
-  them, and its nodes are found through sysfs as discovery finds them. Every
+  reads `bound`, `probe_id` and `resource_id` from the debugger entries. The
+  stage reserves the bound debugger's configured `resource_id`, if present.
+  It reads `device`, `serial_number` and `resource_id` from COM entries to
+  reserve aliases for the ports it hands in. If an older installed doctor omits
+  the debugger field, the stage continues and warns that clients using only
+  that alias can still acquire the probe. The probe is the one attached probe
+  whose USB serial number matches that `probe_id`, using the product's
+  case-folded comparison. The stage finds its nodes through sysfs. Every
   serial number doctor's document names and every attached probe's is
   withheld. A configuration that does not load, binds no debugger or names no
   probe, a probe it names that is not attached, two attached probes carrying
@@ -251,9 +262,10 @@ apply.
 - `--esp32` hands in the bench's ESP32 board for the ESP32 stage; see "The ESP32
   board" below.
 
-In ordinary stages, the container gets only the probe's device nodes, the
-adapter's and, with `--esp32`, the ESP32 board's bridge's, the machine's device-lock directory, the serial ports'
-`/dev/serial/by-id` links read only, and the directory the report is written to. The USB live-device-tree
+In ordinary stages, the container gets the probe's device nodes, the adapter's
+and, with `--esp32`, the ESP32 board's bridge's. It also gets the private
+device-lock directory, the serial ports' read-only `/dev/serial/by-id` links,
+and the directory the report is written to. The USB live-device-tree
 stage instead gets the host `/dev` directory read only, as described above. The
 container has no network or capabilities, and has a process table and host name
 of its own. A run as root is refused, because root's device locks are not the
@@ -372,10 +384,11 @@ while it does.
 A container the runner cannot confirm removed may still hold the board. The
 runner then exits 7, names the container and the command that removes it, and
 leaves the run lock held and marked for cleanup, so no run of these tools starts
-beside it; once the container is gone, remove the lock file. Every run also
-stops and removes any container an earlier run of the same user left behind
-before it builds anything, after giving one that is still running a minute to
-finish its teardown.
+beside it. The separate device holder releases the probe and UARTs automatically
+on confirmed removal. Once the container is gone, remove the run lock file.
+Every run also stops and removes any container an earlier run of the same user
+left behind before it builds anything, after giving one that is still running
+a minute to finish its teardown.
 
 ## The verdict
 
