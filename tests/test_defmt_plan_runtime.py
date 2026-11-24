@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from defmt_fixtures import missing_toolchain_prerequisite
 from support import scaled_time_bound
 from test_flash_capture import Board, BoardBackend
 
+from agentic_hil.comports import ComPortSession
 from agentic_hil.config import load_config
 from agentic_hil.test_reactor import TestReactor, build_test_step
 from agentic_hil.tools import AgenticHILToolService
@@ -199,6 +201,26 @@ def _required_overflow_runtime(request: pytest.FixtureRequest, toolchain_environ
         return request.getfixturevalue("runtime")
 
 
+def _wait_until_logged(session: ComPortSession) -> None:
+    """Wait until the reader has written everything the drain received to the session log.
+
+    `Board.transmit` returns once the drain has read the line, but the reader
+    logs that input on its own thread, and a full buffer is one entry of hex and
+    text ending in an fsync. `com_session_stop` joins the reader for
+    max(1 s, timeout_s + 0.5 s), so a teardown close that starts while that
+    entry is still being written can outlast the join on a loaded host and
+    answer com_port_close_failed. `log_received` takes the queue and writes its
+    entry under `audit_lock`, so an empty queue seen under that lock is input
+    already on the log."""
+    deadline = time.monotonic() + scaled_time_bound(5.0)
+    while time.monotonic() < deadline:
+        with session.audit_lock, session.lock:
+            if not session.received:
+                return
+        time.sleep(0.005)
+    raise AssertionError("The COM reader did not log the overflow batch.")
+
+
 def _overflow_serial_buffer(runtime: Runtime) -> None:
     session = runtime.service.com_ports.sessions[PORT_ID]
     with session.lock:
@@ -215,6 +237,7 @@ def _overflow_serial_buffer(runtime: Runtime) -> None:
 
     # Separators contain no target frame. The real drain must trim these bytes.
     board.transmit(b"\0" * (capacity + 1))
+    _wait_until_logged(session)
 
     with board.guard:
         assert not board.line
