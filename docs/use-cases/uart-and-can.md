@@ -161,10 +161,14 @@ prints) under `frames`, in place of `data`:
 ```
 
 - `defmt: true` reads the table of the ELF the last confirmed `flash_firmware`
-  of this server wrote. The file is validated again and its digest compared
-  with the one that was flashed, so a rebuild on that path is refused as
-  `defmt_table_changed`. With no such ELF (nothing flashed here, or a `.hex` or
-  `.bin` flashed last) the start is refused as `defmt_table_not_available`.
+  of this server wrote. In a test plan, `uart_open` uses the sole confirmed
+  ELF across the probes the plan flashed, including flashes through a named
+  probe. The file is validated again and its digest compared with the one that
+  was flashed, so a rebuild on that path is refused as `defmt_table_changed`.
+  If there is no confirmed ELF or the plan's probes confirmed different ELFs,
+  the start is refused as `defmt_table_not_available` before the port opens.
+  When the probes confirmed different ELFs, pass the ELF of the board behind
+  the port as `image_path` to decode with `proven: false`.
 - `defmt: {"image_path": ...}` names an ELF for a board flashed some other way.
   It meets the same artifact policy a flash does, decodes whether or not this
   server ever flashed anything, and says `proven: false` unless its path and

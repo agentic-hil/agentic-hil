@@ -6469,15 +6469,18 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "defmt_table_not_available": ErrorRemedy(
         meaning=(
-            "com_session_start was asked for defmt: true, which decodes with the table of the ELF the last confirmed "
-            "flash_firmware of this server wrote, and there is no such ELF: nothing was flashed through this server, "
-            "the last flash wrote a .hex or a .bin, which carry no table, or it was not confirmed. Nothing was opened "
-            "and an open session kept the mode it had."
+            "com_session_start was asked for defmt: true, which needs a confirmed ELF. The server may have no "
+            "confirmed ELF because nothing was flashed here, the last flash wrote a .hex or a .bin, or the flash "
+            "was unconfirmed. A plan also refuses implicit selection when its probes have confirmed different ELFs. "
+            "Nothing was opened and an open session kept the mode it had."
         ),
         remediation=(
-            "Flash the ELF the build produced with flash_firmware, then call com_session_start with defmt: true again.",
-            "For a board flashed some other way, pass the ELF it runs as defmt with its image_path instead. That "
-            "session decodes, and says proven: false, because nothing here confirms the board runs that file.",
+            "If there is no confirmed ELF, flash the ELF the build produced with flash_firmware, then retry with defmt: true.",
+            "If the plan's probes confirmed different ELFs, pass the ELF of the board behind this port as defmt "
+            "with its image_path. It decodes with proven: false while different images are confirmed. To retry "
+            "defmt: true, confirm the same ELF on every probe in the run.",
+            "For a board flashed some other way, pass the ELF it runs as defmt with its image_path. The session "
+            "decodes with proven: false when the server has no confirmed ELF.",
         ),
         do_not=(
             "Do not decode the line by hand or with another tool's table. Frames read against a table that does not "
