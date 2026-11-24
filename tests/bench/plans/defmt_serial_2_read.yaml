@@ -1,0 +1,26 @@
+version: 7
+name: defmt-serial-f446re-read
+steps:
+  - action: flash
+    debugger: f446re
+    image_path: tests/bench/firmware/defmt_serial/target/thumbv7em-none-eabihf/release/defmt-serial-f446re
+    reset_after_flash: false
+  - action: uart_open
+    port_id: f446re_vcp
+    defmt:
+      image_path: tests/bench/firmware/defmt_serial/target/thumbv7em-none-eabihf/release/defmt-serial-f446re
+    clear_buffer: true
+  - action: reset
+    debugger: f446re
+    mode: run
+  - action: delay
+    port_id: f446re_vcp
+    duration_ms: 250
+  - action: uart_read
+    port_id: f446re_vcp
+  - action: defmt_expect
+    port_id: f446re_vcp
+    timeout_s: 5
+    format: "F446RE sample {=u8} value {=u16}"
+  - action: uart_close
+    port_id: f446re_vcp
