@@ -241,6 +241,33 @@ def backend_error_line(result: JsonObject) -> str | None:
     return lines[0] if lines else None
 
 
+class PlanDefmtProvenance:
+    """Confirmed ELF artifacts on the probes used by one plan."""
+
+    def __init__(self, com_ports: ComPortService) -> None:
+        self.com_ports = com_ports
+        self._by_debugger: dict[str, JsonObject] = {}
+
+    def remember(self, debugger_id: str | None, artifact: JsonObject | None) -> None:
+        if debugger_id is None:
+            return
+        if artifact is None:
+            self._by_debugger.pop(debugger_id, None)
+        else:
+            self._by_debugger[debugger_id] = artifact
+
+    def resolve(self) -> tuple[JsonObject | None, bool]:
+        """Return the sole confirmed ELF, or report conflicting identities."""
+        distinct = {
+            identity: artifact
+            for artifact in self._by_debugger.values()
+            if (identity := elf_identity(artifact)) is not None
+        }
+        if len(distinct) == 1:
+            return next(iter(distinct.values())), False
+        return None, len(distinct) > 1
+
+
 class AgenticHILToolService:
     def __init__(
         self,
@@ -251,6 +278,8 @@ class AgenticHILToolService:
         can_buses: CanBusService | None = None,
         coordinator: HardwareCoordinator | None = None,
         frontend: str = "python",
+        *,
+        plan_defmt: PlanDefmtProvenance | None = None,
     ):
         self.config = config
         self.coordinator = coordinator or HardwareCoordinator(config, frontend)
@@ -288,6 +317,7 @@ class AgenticHILToolService:
         # the board. It is a fact about this bench, not an artifact handle:
         # nothing is staged or held open by it.
         self._symbol_elf: JsonObject | None = None
+        self._plan_defmt = plan_defmt
         self._debug_lease: HardwareLease | None = None
         # A one-shot lease that quarantined has no session handle to reach it
         # again. Without this the lease stays registered and unreachable for the
@@ -488,14 +518,33 @@ class AgenticHILToolService:
         # is proven exactly while its ELF is this confirmed programming.
         self._reprove_defmt_sessions()
 
+    def share_plan_defmt(self) -> PlanDefmtProvenance:
+        """Share the base UART's provenance when the plan first uses another probe."""
+        if self._plan_defmt is None:
+            self._plan_defmt = PlanDefmtProvenance(self.com_ports)
+            self._plan_defmt.remember(self.config.debugger_id, self._symbol_elf)
+        return self._plan_defmt
+
+    def _confirmed_uart_elf(self) -> tuple[JsonObject | None, bool]:
+        if self._plan_defmt is not None and self.com_ports is self._plan_defmt.com_ports:
+            return self._plan_defmt.resolve()
+        return self._symbol_elf, False
+
     def _reprove_defmt_sessions(self) -> None:
         """Tell the COM service's decoding sessions what the confirmed programming now is.
 
         A COM service injected by a caller that predates defmt decoding has no
         decoding sessions to tell, and is left alone."""
+        if self._plan_defmt is not None:
+            self._plan_defmt.remember(self.config.debugger_id, self._symbol_elf)
+            if self.com_ports is not self._plan_defmt.com_ports:
+                artifact, _ = self._plan_defmt.resolve()
+                self._plan_defmt.com_ports.reprove_defmt(elf_identity(artifact))
+
+        artifact, _ = self._confirmed_uart_elf()
         reprove = getattr(self.com_ports, "reprove_defmt", None)
         if callable(reprove):
-            reprove(elf_identity(self._symbol_elf))
+            reprove(elf_identity(artifact))
 
     def _capture_check(self, capture: object, reset_after_flash: bool) -> JsonObject:
         """What refuses a capture, asked before the board is touched.
@@ -656,10 +705,10 @@ class AgenticHILToolService:
         * `flashing`, the image a `flash_firmware` with `capture.defmt` is about
           to write, already validated by that call with its bytes kept. Not
           proven until the flash is confirmed (`_prove_capture`).
-        * `spec` true, the ELF the last confirmed `flash_firmware` of this
-          service wrote. It is validated again and its digest compared with the
-          one that was flashed, so a rebuild on that path is
-          `defmt_table_changed` rather than a table that describes another build.
+        * `spec` true, the service's confirmed ELF or the sole confirmed ELF
+          identity across the plan's probes. It is validated again and its
+          digest compared with the one that was flashed. A rebuild on that path
+          produces `defmt_table_changed`.
         * `spec` `{"image_path": ...}`, an ELF named outright, for a board
           flashed some other way. It decodes whether or not anything was flashed
           here, and is proven only when its path and digest are the confirmed
@@ -670,16 +719,19 @@ class AgenticHILToolService:
         `{"ok": True, "stream": DefmtStream}`."""
         refused: JsonObject = {"ok": False, "tool": tool, **NOT_STARTED, "retry_safe": True}
         identity: tuple[str, str] | None
+        flashed, conflicting = self._confirmed_uart_elf() if flashing is None else (None, False)
         if flashing is not None:
             artifact, data, origin = flashing["artifact"], flashing.get("data"), "capture"
             identity = elf_identity(artifact)
         elif spec is True:
-            flashed = self._symbol_elf
             if flashed is None:
+                summary = "defmt: true reads the table of the ELF the last confirmed flash_firmware of this server wrote, and there is none: nothing was flashed here, the flash was a .hex or .bin, or it was not confirmed."
+                if conflicting:
+                    summary = "defmt: true cannot select a table because probes in this plan confirmed different ELFs."
                 return {
                     **refused,
                     "error_type": "defmt_table_not_available",
-                    "summary": "defmt: true reads the table of the ELF the last confirmed flash_firmware of this server wrote, and there is none: nothing was flashed here, the flash was a .hex or .bin, or it was not confirmed.",
+                    "summary": summary,
                     **remediation_fields("defmt_table_not_available"),
                 }
             validation = self.artifacts.validate_local_path(str(flashed["resolved_path"]), keep_bytes=True)
@@ -715,7 +767,7 @@ class AgenticHILToolService:
                 "image_path": artifact.get("path"),
                 **remediation_fields("defmt_table_invalid"),
             }
-        proven = flashing is None and identity is not None and identity == elf_identity(self._symbol_elf)
+        proven = identity is not None and identity == elf_identity(flashed)
         source: JsonObject = {"origin": origin, "path": artifact.get("path"), "sha256": artifact.get("integrity_sha256"), "proven": proven}
         return {"ok": True, "stream": DefmtStream(defmt.DefmtBinding(table, source), identity)}
 

@@ -16,6 +16,8 @@ two copies were kept in step.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from agentic_hil.config import ConfigError
 from agentic_hil.coordination import CoordinationError
 from agentic_hil.devices import declared_keys
@@ -119,8 +121,23 @@ def run_plan(
     return result_with_junit_xml(result, junit_xml, plan_steps=test_config.steps)
 
 
-def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wait_s: float, registration: RunRegistration) -> JsonObject:
+def _plan_services(config: AgenticHILConfig) -> tuple[AgenticHILToolService, Callable[[AgenticHILConfig], AgenticHILToolService]]:
+    """Construct the base service and its bound-debugger service factory."""
     service = AgenticHILToolService(config, frontend="reactor")
+
+    def debugger_service_factory(bound_config: AgenticHILConfig) -> AgenticHILToolService:
+        return AgenticHILToolService(
+            bound_config,
+            coordinator=service.coordinator,
+            frontend="reactor",
+            plan_defmt=service.share_plan_defmt(),
+        )
+
+    return service, debugger_service_factory
+
+
+def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wait_s: float, registration: RunRegistration) -> JsonObject:
+    service, debugger_service_factory = _plan_services(config)
     # The plan's devices are held from before its first step to after its last,
     # not around each call: between two steps there would otherwise be no lock at
     # all, and an observation from outside could reach the board exactly where
@@ -171,11 +188,6 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
     # A run refused the bench above never reaches this and is answered as the
     # finished run it is.
     registration.running()
-    # A step naming another probe gets its own service driving that debugger,
-    # sharing the base coordinator so the whole project stays one owner.
-    def debugger_service_factory(bound_config: AgenticHILConfig) -> AgenticHILToolService:
-        return AgenticHILToolService(bound_config, coordinator=service.coordinator, frontend="reactor")
-
     # Construction happens inside the guarded block: the factory builds real
     # per-probe services while the plan runs, so a failure there must still
     # produce a JSON error result and fall through to service.close() below.
