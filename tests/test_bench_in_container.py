@@ -896,17 +896,24 @@ def test_failed_stage_records_host_device_holders_and_pass_clears_the_record(
 
 def test_unreleased_changed_records_issue_800_once() -> None:
     changelog = (REPOSITORY_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    unreleased = re.search(r"^## \[Unreleased\][ \t]*\n(.*?)(?=^## |\Z)", changelog, re.MULTILINE | re.DOTALL)
-    changed = re.search(r"^### Changed[ \t]*\n(.*?)(?=^### |\Z)", unreleased[1], re.MULTILINE | re.DOTALL) if unreleased else None
+    releases = re.findall(
+        r"^##[ \t]+(?:\[Unreleased\]|\[\d+\.\d+\.\d+\] - \d{4}-\d{2}-\d{2})[ \t]*\n(.*?)(?=^##[ \t]|\Z)",
+        changelog, re.MULTILINE | re.DOTALL,
+    )
 
     def issue_entries(section: str) -> list[str]:
         entries = re.split(r"(?m)^(?=[*+-] )", section)
         return [entry.strip() for entry in entries if re.search(r"#800\b", entry)]
 
-    matched = issue_entries(changed[1]) if changed else []
-    all_entries = issue_entries(unreleased[1]) if unreleased else []
+    matched = [
+        entry
+        for release in releases
+        for changed in re.findall(r"^### Changed[ \t]*\n(.*?)(?=^###[ \t]|\Z)", release, re.MULTILINE | re.DOTALL)
+        for entry in issue_entries(changed)
+    ]
+    all_entries = [entry for release in releases for entry in issue_entries(release)]
     if len(matched) != 1 or len(all_entries) != 1 or not matched[0].endswith("(#800)"):
-        raise AssertionError("Unreleased Changed must contain one entry ending in (#800).")
+        raise AssertionError("The changelog must contain one entry ending in (#800), under Changed.")
 
 
 # The command lines.

@@ -27,6 +27,11 @@ CHECKS = {
         "Add picotool 2 support",
         "published picotool configuration and support contract is incomplete",
     ),
+    "bench-stage": (
+        "test_bench_in_container.test_unreleased_changed_records_issue_800_once",
+        "(#800)",
+        "must contain one entry ending in",
+    ),
 }
 
 
@@ -93,6 +98,17 @@ def test_reopened_release_rejects_missing_entry(monkeypatch: pytest.MonkeyPatch,
     changelog = _release_changelog(marker, reopened=True)
     entry = _entry(changelog, marker)
     _redirect_changelog(monkeypatch, changelog[:entry.start()] + changelog[entry.end():])
+    with pytest.raises(AssertionError, match=message):
+        _run_check(check)
+
+
+def test_reopened_release_rejects_second_bench_stage_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    check, marker, message = CHECKS["bench-stage"]
+    changelog = _release_changelog(marker, reopened=True)
+    entry = _entry(changelog, marker)
+    doubled = changelog.replace(f"{UNRELEASED}\n", f"{UNRELEASED}\n\n### Changed\n\n{entry[0]}", 1)
+    assert doubled != changelog
+    _redirect_changelog(monkeypatch, doubled)
     with pytest.raises(AssertionError, match=message):
         _run_check(check)
 
