@@ -99,8 +99,9 @@ Fix: stop and ask the human operator. The operator reviews the external config c
 
 ## 4. `debugger_not_found`
 
-For `type: picotool`, install native picotool 2.x, add it to `PATH` or set
-`debuggers.<name>.executable`. `picotool_not_found` means it could not be started.
+For `type: picotool`, install native picotool and add it to `PATH` or set
+`debuggers.<name>.executable`. Recognized releases are 2.0.0, 2.1.0, 2.1.1,
+2.2.0, 2.2.0-a4, 2.3.0 and 2.3.1. `picotool_not_found` means it could not be started.
 `picotool_version_unsupported` means it did not report a readable 2.x version.
 
 Symptom: `agentic-hil doctor` fails, and the debugger's `check` names `error_type: "debugger_not_found"`. At a terminal that is the `check  FAILED` line under the entry in the `Debuggers` section.
@@ -201,6 +202,12 @@ Enter BOOTSEL manually when the firmware lacks the `pico_stdio_usb` reset
 interface. For RP2040 on Windows, check the WinUSB binding to **RP2 Boot
 (Interface 1)** in Zadig. On Linux, check picotool's udev rules. Close other
 picotool invocations or IDE extensions holding the USB interface.
+
+Picotool 2.0.0 leaves the chip family unknown while the board is running. If
+`target_type` is configured, use `reset_target` in `halt` mode to enter BOOTSEL
+before flashing, or use picotool 2.1.0 or newer. With picotool below 2.3.0 on
+Windows, enter BOOTSEL with `reset_target` in `halt` mode before flashing a
+running RP2040.
 
 Symptom: `probe_target` returns `ok: false` with `error_type: "target_not_detected"`.
 

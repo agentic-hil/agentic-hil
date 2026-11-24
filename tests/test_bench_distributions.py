@@ -298,9 +298,8 @@ def heads(machine: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> SimpleNa
     """The machine, with a committed tree that carries the heads, and the file each build read."""
     monkeypatch.setattr(bench_in_container, "stage_committed_tree", a_tree_with_heads)
     built: list[tuple[str, str]] = []
-    original = machine.runtime.popen
-    # The machine's fixture handed the tool the fake's own method, so the
-    # recording goes where the tool looks for it.
+    # Record build inputs while preserving the machine fixture's holder tracking.
+    original = bench_in_container.subprocess.Popen
 
     def popen(command: list[str], **kwargs: object):
         if machine.runtime.verb(command) == "build":

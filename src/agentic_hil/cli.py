@@ -5711,6 +5711,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
             name: {
                 "type": entry.type,
                 "probe_id": entry.probe_id,
+                "resource_id": entry.resource_id,
                 "bound": name == config.debugger_id,
                 "permissions": granted["debuggers"][name],
                 **({"scripts": _doctor_debugger_scripts(entry)} if entry.type == "openocd" else {}),

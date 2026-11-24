@@ -20,8 +20,9 @@ from typing import get_args, get_type_hints
 
 import pytest
 import yaml
-from conftest import DEFAULT_TEST_PERMISSIONS, write_config
-from httpserver_fakes import short_settings
+from conftest import DEFAULT_TEST_PERMISSIONS, write_authoritative_config, write_config
+from fixtures.fake_picotool import TRANSCRIPTS, info_diagnostic
+from httpserver_fakes import ScriptedJobService, answer, running_reads, short_settings
 from support import process_is_running, scaled_time_bound
 from test_config_write import bench, changes, service
 
@@ -30,9 +31,16 @@ from agentic_hil import cli, windows_device_lock
 from agentic_hil import config as configuration
 from agentic_hil.backends import common
 from agentic_hil.backends.common import CONTACT_UNPROVEN, NOT_CONTACTED
+from agentic_hil.backends.picotool import PicotoolBackend
 from agentic_hil.benchview import BenchView
-from agentic_hil.config import ConfigError, load_config
-from agentic_hil.knowledge import BACKENDS, catalogue_entry, debugger_backends_document
+from agentic_hil.config import ConfigError, bind_debugger, load_authoritative_config, load_config
+from agentic_hil.knowledge import (
+    BACKENDS,
+    TARGET_SUPPORT_URI,
+    catalogue_entry,
+    debugger_backends_document,
+    read_resource,
+)
 from agentic_hil.runevidence import write_run_evidence
 from agentic_hil.test_reactor import TestReactor, load_test_config
 from agentic_hil.tools import AgenticHILToolService
@@ -961,6 +969,16 @@ def test_log_report_and_export_redact_tracking_serial_and_host_paths(pico):
         assert all(path.replace("\\", "/") not in normal for path in host_paths), content
 
 
+def added_release_entries(changelog):
+    releases = re.findall(
+        r"^##[ \t]+(?:\[unreleased\]|\[\d+\.\d+\.\d+\] - \d{4}-\d{2}-\d{2})[ \t]*\n(.*?)(?=^##[ \t]|\Z)",
+        changelog, re.I | re.M | re.S,
+    )
+    for release in releases:
+        for added in re.findall(r"^### added[ \t]*\n(.*?)(?=^###[ \t]|\Z)", release, re.I | re.M | re.S):
+            yield from re.findall(r"(?m)^[-*+][ \t]+[^\n]*(?:\n[ \t]+[^\n]*)*", added)
+
+
 def test_published_picotool_configuration_and_support_contract():
     paths = (
         "src/agentic_hil/schemas/config.schema.json",
@@ -974,16 +992,7 @@ def test_published_picotool_configuration_and_support_contract():
     types = schema["properties"]["debuggers"]["additionalProperties"]["properties"]["type"]["enum"]
     section = re.search(r"(?m)^#+ an rp2040 or rp2350 board through picotool\s*$([\s\S]*?)(?=^#+\s|\Z)", config)
     support_rows = [line for line in support.splitlines() if line.startswith("|") and "picotool 2" in line]
-    releases = re.findall(
-        r"^##[ \t]+(?:\[unreleased\]|\[\d+\.\d+\.\d+\] - \d{4}-\d{2}-\d{2})[ \t]*\n(.*?)(?=^##[ \t]|\Z)",
-        changelog, re.M | re.S,
-    )
-    picotool_entry = any(
-        "picotool" in entry
-        for release in releases
-        for added in re.findall(r"^### added[ \t]*\n(.*?)(?=^###[ \t]|\Z)", release, re.M | re.S)
-        for entry in re.findall(r"(?m)^[-*+][ \t]+[^\n]*(?:\n[ \t]+[^\n]*)*", added)
-    )
+    picotool_entry = any("picotool" in entry for entry in added_release_entries(changelog))
     if not (
         "picotool" in types
         and section
@@ -999,3 +1008,307 @@ def test_published_picotool_configuration_and_support_contract():
         and picotool_entry
     ):
         raise AssertionError("published picotool configuration and support contract is incomplete")
+
+
+def authoritative_picotool(pico, *, family=None, extra_debuggers=""):
+    workspace = pico.root / "workspace"
+    return write_authoritative_config(
+        workspace, pico.monkeypatch, debugger_type="picotool", debugger_executable=FAKE,
+        probe_id=SERIAL, target_type=family, state_root=pico.root / "bench-state",
+        flash_address="0x10000000", debuggers_yaml=extra_debuggers,
+    )
+
+
+def doctor_command(workspace):
+    result = subprocess.run(
+        [sys.executable, "-m", "agentic_hil", "doctor", "--json"], cwd=workspace,
+        capture_output=True, encoding="utf-8", timeout=scaled_time_bound(120), check=False,
+    )
+    assert result.stdout.strip(), result.stderr
+    return result.returncode, json.loads(result.stdout)
+
+
+def http_doctor(config):
+    with (
+        BenchView(config, short_settings(), activity=lambda: {}) as view,
+        running_reads(ScriptedJobService(), bench=view) as server,
+    ):
+        return answer(server, "GET", "/v1/doctor").json()
+
+
+def has_fields(result, fields):
+    return all(key in result and result[key] == value for key, value in fields.items())
+
+
+@pytest.mark.parametrize("family", ["rp2040", "rp2350", None], ids=["rp2040", "rp2350", "unset"])
+def test_picotool_doctor_contract(pico, family):
+    authoritative_picotool(pico, family=family)
+    workspace = pico.root / "workspace"
+    pico.monkeypatch.chdir(workspace)
+    config = load_authoritative_config(workspace)
+    support = PicotoolBackend(bind_debugger(config, "dut")).target_support()
+    exit_code, cli_report = doctor_command(workspace)
+    http_report = http_doctor(config)
+    expected = {
+        "ok": True, "tool": "debugger_target_support", "backend": "picotool",
+        "target_type": family, "status": "supported" if family else "not_configured",
+    }
+    cli_support = cli_report.get("debuggers", {}).get("dut", {}).get("target_support", {})
+    healthy = {"ok": True, "unhealthy": []}
+    if not (
+        exit_code == 0 and has_fields(cli_report, healthy) and has_fields(http_report, healthy)
+        and all(has_fields(report, expected) and report.get("summary") for report in (support, cli_support))
+    ):
+        raise AssertionError("picotool target support and doctor disagree with the healthy configuration contract")
+
+
+def test_picotool_doctor_refusals(pico):
+    workspace = pico.root / "workspace"
+    authoritative_picotool(pico, family="rp9999")
+    exit_code, invalid_file = doctor_command(workspace)
+    authoritative_picotool(pico, family="rp2040")
+    pico.monkeypatch.chdir(workspace)
+    config = load_authoritative_config(workspace)
+    bound = bind_debugger(config, "dut")
+    malformed = replace(bound, debugger=replace(bound.debugger, target_type="rp9999"))
+    support = PicotoolBackend(malformed).target_support()
+    unsupported = {
+        "ok": False, "tool": "debugger_target_support", "backend": "picotool", "target_type": "rp9999",
+        "status": "unsupported", "error_type": "target_type_invalid",
+    }
+    pico.monkeypatch.setattr(PicotoolBackend, "target_support", lambda self: unsupported)
+    failed = cli.doctor()
+    http_report = http_doctor(config)
+    if not (
+        exit_code != 0
+        and has_fields(invalid_file, {"ok": False, "error_type": "config_invalid", "field": "debuggers.dut.target_type"})
+        and has_fields(support, unsupported) and support.get("summary")
+        and support.get("remediation") == catalogue_entry("target_type_invalid:picotool")["remediation"]
+        and has_fields(failed, {"ok": False, "unhealthy": ["target_support"]})
+        and http_report.get("ok") is False
+    ):
+        raise AssertionError("picotool does not report invalid target support with the required refusal")
+
+
+@pytest.mark.parametrize("version", tuple(TRANSCRIPTS))
+def test_picotool_reported_version(pico, version):
+    pico.set(VERSION=version)
+    result = call(runtime_config(pico.root / "workspace"), "debugger_info")
+    if not has_fields(result, {"ok": True, "version": version}):
+        raise AssertionError("debugger_info did not report the printed picotool version")
+
+
+@pytest.mark.parametrize("version", tuple(TRANSCRIPTS))
+def test_picotool_release_detection(pico, version):
+    pico.set(VERSION=version)
+    for index, (label, settings, raw, status, state, chip) in enumerate(detection_cases(version)):
+        expected_board = {"ok": True, "present": True, "target_state": state, "chip": chip}
+        if state == "absent":
+            expected_probe = {"ok": False, "error_type": "target_not_detected", **NOT_CONTACTED}
+            expected_row = {"ok": True, "present": False}
+        elif state == "unrecognized":
+            expected_probe = expected_row = {"ok": False, "error_type": "probe_failed"}
+        else:
+            expected_probe = expected_row = expected_board
+
+        for surface, expected in (("probe_target", expected_probe), ("debugger_probes_list", expected_row)):
+            with pico.monkeypatch.context() as env:
+                for name, value in settings.items():
+                    env.setenv(PREFIX + name, value)
+                if raw is not None:
+                    for name, value in {"RAW_COMMAND": "info", "STDOUT": raw, "EXIT": str(status)}.items():
+                        env.setenv(PREFIX + name, value)
+                config = runtime_config(pico.root / f"{index}-{surface}")
+                result = call(config, surface)
+            observed = listing_rows(result).get("dut", {}) if surface == "debugger_probes_list" else result
+            if (
+                not has_fields(observed, expected)
+                or (state == "unrecognized" and ("present" in observed or observed.get("target_state") == "application"))
+            ):
+                # Preserve the declared assertion message while exposing the offending matrix cell in pytest.
+                actual = {key: observed.get(key) for key in (*expected, "present", "target_state")}
+                print(f"{label}, {surface}: expected {expected}, got {actual}")
+                raise AssertionError("picotool board detection disagrees with the release transcript")
+
+
+def detection_cases(version):
+    dialects = ["unix", "unix-wrapped"]
+    if TRANSCRIPTS[version].legacy_windows_hint:
+        dialects.append("windows")
+    for dialect in dialects:
+        yield dialect, {"STATE": "absent", "DIALECT": dialect}, None, None, "absent", None
+        for physical_chip in ("RP2040", "RP2350"):
+            chip = None if version == "2.0.0" else physical_chip
+            yield dialect, {"STATE": "application", "DIALECT": dialect, "CHIP": physical_chip}, None, None, "application", chip
+    yield "bootsel", {"STATE": "bootsel", "CHIP": "RP2350"}, None, None, "bootsel", "RP2350"
+    absent = info_diagnostic(version, SERIAL)
+    running = info_diagnostic(version, SERIAL, chip="RP2350")
+    yield "other USB device", {}, absent + "\nbut:\n\nA MicroPython device is connected.\n", -7, "absent", None
+    yield "different serial", {}, info_diagnostic(version, OTHER_SERIAL, chip="RP2350"), -7, "unrecognized", None
+    yield "missing period", {}, absent.removesuffix(".\n") + "\n", -7, "unrecognized", None
+    yield "wrong exit status without hint", {}, absent, -8, "unrecognized", None
+    yield "wrong exit status with running hint", {}, running, -8, "unrecognized", None
+    truncated = running.split(", so consider", 1)[0] + "\n"
+    yield "truncated running hint", {}, truncated, -7, "absent", None
+
+
+def test_picotool_unknown_running_family(pico):
+    pico.set(VERSION="2.0.0", STATE="application", CHIP="RP2350")
+    workspace = pico.root / "workspace"
+    config = runtime_config(workspace, family="rp2350", flash_address="0x10000000")
+    result = call(config, "flash_firmware", firmware(workspace))
+    guidance = f"{result.get('summary')} {result.get('remediation')}".lower()
+    if not (
+        has_fields(result, {"ok": False, "error_type": "target_type_invalid", **NOT_CONTACTED})
+        and not result.get("cleanup_required") and not result.get("quarantine_id")
+        and all(term in guidance for term in ("bootsel", "reset_target", "halt", "2.1.0"))
+    ):
+        raise AssertionError("picotool did not explain the unknown running family before load")
+    assert_info(pico.devices())
+
+
+@pytest.mark.parametrize("version", ["2.0.0", "2.2.0"])
+def test_picotool_release_flash_reset(pico, version):
+    pico.set(VERSION=version, CHIP="RP2350", WAIT_RETRIES=1, DIALECT="windows" if os.name == "nt" else "unix")
+    workspace = pico.root / "workspace"
+    config = runtime_config(workspace, flash_address="0x10000000")
+    payload = firmware(workspace)
+    for initial_state in ("bootsel", "application"):
+        pico.set(STATE=initial_state)
+        pico.states.unlink(missing_ok=True)
+        start = len(pico.runs())
+        flash = call(config, "flash_firmware", {**payload, "reset_after_flash": True})
+        if not has_fields(flash, {"ok": True, "verified": True, "success_confirmed": True, "target_state": "application"}):
+            raise AssertionError("picotool did not confirm flash and reset from both board states")
+        assert_load(pico, payload, state=initial_state, reset=True, address="0x10000000", start=start)
+        states = json.loads(pico.states.read_text(encoding="utf-8")) if pico.states.exists() else {}
+        assert states.get(SERIAL, initial_state) == "application"
+
+        pico.states.unlink(missing_ok=True)
+        start = len(pico.runs())
+        mode, destination = ("run", "application") if initial_state == "bootsel" else ("halt", "bootsel")
+        reset = call(config, "reset_target", {"mode": mode})
+        if not has_fields(reset, {"ok": True, "success_confirmed": True, "target_state": destination}):
+            raise AssertionError("picotool did not confirm flash and reset from both board states")
+        info, reboot = pico.devices(start=start)
+        assert_info([info])
+        expected = {"reboot", "-a" if mode == "run" else "-u", "--ser", SERIAL}
+        if initial_state == "application":
+            expected.add("-f")
+        assert set(reboot["argv"]) == expected
+        assert json.loads(pico.states.read_text(encoding="utf-8"))[SERIAL] == destination
+
+
+UNRECOGNIZED_INFO_CALLS = ("probe_target", "debugger_probes_list", "flash_firmware", "reset_target")
+
+
+@pytest.mark.parametrize("tool", UNRECOGNIZED_INFO_CALLS)
+def test_picotool_unrecognized_info(pico, tool):
+    version = "2.3.0"
+    pico.set(VERSION=version, MALFORMED_INFO_SERIAL=SERIAL)
+    extra = ""
+    if tool == "debugger_probes_list":
+        extra = yaml.safe_dump({"debuggers": {"other": {
+            "type": "picotool", "executable": str(FAKE), "probe_id": OTHER_SERIAL,
+        }}})
+        pico.set(BOARDS=json.dumps({OTHER_SERIAL: {"state": "bootsel", "chip": "RP2040"}}))
+    authoritative_picotool(pico, extra_debuggers=extra)
+    workspace = pico.root / "workspace"
+    config = bind_debugger(load_authoritative_config(workspace), "dut")
+    assert config.recovery.auto_recover == "reset_halt"
+    arguments = firmware(workspace) if tool == "flash_firmware" else {"mode": "halt"} if tool == "reset_target" else {}
+    result = call(config, tool, arguments)
+    summary = str(result.get("summary", "")).lower()
+    expected = {
+        "ok": False, "error_type": "probe_failed", "side_effect_committed": False,
+        "side_effect_status": "not_started", "hardware_state": "unchanged", "lease_state": "released",
+    }
+    if not (
+        has_fields(result, expected) and version in summary and unrecognized_wording(summary)
+        and "target_contacted" not in result and not result.get("cleanup_required") and not result.get("quarantine_id")
+    ):
+        raise AssertionError("unrecognized picotool info did not end as a settled probe failure")
+    records = pico.devices(None)
+    if tool == "debugger_probes_list":
+        bad, good = records
+        assert_info([bad])
+        assert_info([good], OTHER_SERIAL)
+        assert has_fields(listing_rows(result).get("other", {}), {"ok": True, "present": True, "target_state": "bootsel", "chip": "RP2040"})
+    else:
+        assert_info(records)
+
+
+def unrecognized_wording(text):
+    return re.search(r"unrecogni[sz]ed|(?:not|cannot|could not) recogni[sz]e[ds]?", text) is not None
+
+
+def guidance_text(value):
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return " ".join(text.lower().replace("`", "").split())
+
+
+def describes_releases(text):
+    return all(re.search(rf"\b{re.escape(version)}\b(?!-\w)", text) for version in TRANSCRIPTS) or (
+        "2.2.0-a4" in text
+        and re.search(r"2\.0\.0\s*(?:to|through|up to|[-\u2013\u2014])\s*2\.3\.1", text)
+    )
+
+
+def describes_unknown_family(text):
+    return (
+        "2.0.0" in text and re.search(r"\brunning\b|\bapplication\b", text)
+        and re.search(r"\bchip\b|\bfamily\b", text)
+        and re.search(r"\bunknown\b|\bnull\b|\bcannot\b|\bdoes (?:not|n't)\b|\bdoesn't\b|\bdoesn’t\b", text)
+    )
+
+
+def describes_windows_workaround(text):
+    return (
+        all(term in text for term in ("windows", "2.3.0", "rp2040", "reset_target", "halt", "flash"))
+        and re.search(r"\bbefore\b|\bbelow\b|\bolder\b|\bearlier\b|\bprior\b|<\s*2\.3\.0", text)
+    )
+
+
+def picotool_guidance(document):
+    return guidance_text("\n".join(
+        line
+        for paragraph in re.split(r"\n[ \t]*\n", document)
+        if "picotool" in paragraph.lower()
+        for line in paragraph.splitlines()
+        if not line.lstrip().startswith("|") or "picotool" in line.lower()
+    ))
+
+
+def test_picotool_published_release_guidance():
+    target_type = guidance_text(catalogue_entry("target_type_invalid:picotool"))
+    probe_failed = guidance_text(catalogue_entry("probe_failed:picotool"))
+    field_matrix = guidance_text(debugger_backends_document()["backends"].get("picotool", {}))
+    target_support = (read_resource(TARGET_SUPPORT_URI) or {}).get("text", "")
+    target_row = guidance_text(next((line for line in target_support.splitlines() if line.startswith("| `picotool`")), ""))
+    support = (ROOT / "docs/support.md").read_text(encoding="utf-8")
+    configuration_doc = (ROOT / "docs/configuration.md").read_text(encoding="utf-8")
+    installation = (ROOT / "docs/installation.md").read_text(encoding="utf-8")
+    troubleshooting = (ROOT / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    support_row = next((line for line in support.splitlines() if line.startswith("|") and "picotool" in line), "")
+    entry = next((entry for entry in added_release_entries(changelog) if re.match(r"^[-*+][ \t]+Add picotool 2 support\b", entry)), "")
+    sections = [
+        picotool_guidance(support),
+        guidance_text(re.split(r"(?m)^## ", configuration_doc.split("## An RP2040 or RP2350 board through picotool", 1)[-1])[0]),
+        picotool_guidance(installation),
+        picotool_guidance(troubleshooting),
+        guidance_text(entry),
+    ]
+    if not (
+        re.search(r"\bdiffer\w*\b|\bmismatch\w*\b|\bdoes not match\b", target_type)
+        and describes_unknown_family(target_type)
+        and all(term in target_type for term in ("bootsel", "reset_target", "halt", "2.1.0"))
+        and unrecognized_wording(probe_failed) and describes_releases(probe_failed)
+        and describes_releases(field_matrix) and describes_unknown_family(target_row)
+        and all(describes_releases(section) for section in sections)
+        and all(describes_unknown_family(section) and describes_windows_workaround(section) for section in sections)
+        and describes_windows_workaround(field_matrix + " " + target_row)
+        and "Hardware-unproven" in support_row
+        and "(#917)" in entry
+    ):
+        raise AssertionError("published picotool guidance omits release compatibility or recovery instructions")

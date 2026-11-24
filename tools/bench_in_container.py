@@ -146,16 +146,28 @@ name, so the flag states that the board is there: no bridge, two of them, one
 with other than one port or one this user cannot open is a refusal, before the
 queue and again after it. Without the flag no bridge is handed in.
 
-Serialisation. The stage parent holds the probe and UARTs through tier teardown
-using the host product's device locks. It uses /var/lib/agentic-hil/device-locks
-where configured, otherwise ~/.agentic-hil/device-locks. An unusable machine
-directory refuses the stage. The stage waits at most 900 seconds for the whole
-set, or refuses immediately with `--no-wait`. Inside the container, the tier
-servers take their per-call locks in a private directory shared only within that
-stage. The host reservation also applies when the container's device group is
-withheld. The per-account run lock (run_lock.py) still queues builds and handles
-leftover containers. The gate and scheduled workflow also share a GitHub
-concurrency group. A run as root is refused.
+Serialisation. A separate holder reserves the probe and UARTs using the host
+product's device locks in /var/lib/agentic-hil/device-locks where configured,
+otherwise ~/.agentic-hil/device-locks. An unusable machine directory refuses
+the stage. The stage waits at most 900 seconds for the set, or refuses
+immediately with `--no-wait`. The hold lasts until the runtime confirms the
+container is gone, even if the stage has been killed or has exited with status
+7. An unavailable runtime leaves the hold in place. Before launch is announced,
+stage exit releases any acquired device locks immediately. After announcement,
+an orphaned holder allows up to 120 seconds for a container it has yet to see
+and then requires a fresh inspection confirming absence. Tier servers take
+their per-call locks in a private directory shared only within the container.
+The host reservation also applies when the container's device group is withheld.
+The per-account run lock (run_lock.py) still queues builds and handles leftover
+containers. The gate and scheduled workflow also share a GitHub concurrency
+group. A run as root is refused.
+
+For `--probe-from-config`, doctor supplies `bound`, `probe_id` and
+`resource_id` on debugger entries. The holder reserves the bound debugger's
+alias when supplied. The stage reads `device`, `serial_number` and
+`resource_id` from COM entries to reserve aliases for the ports it hands in.
+An older doctor without the bound debugger's `resource_id` produces a warning
+and the stage proceeds with the identities available.
 
 The tier's own redirections. The tier moves the product's configuration and
 state roots into its temporary directory and keeps HOME. The private device
@@ -228,21 +240,19 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterable
-from contextlib import ExitStack, suppress
+from contextlib import suppress
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from pathlib import Path
+from queue import Empty, Queue
 from typing import TextIO
 
 # A standalone script run from checkouts that need not be installed, like the
 # two tools beside it, so their modules are reached by naming this directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from bench_device_holder import POLL_S, inspect_container, read_control, send_control  # noqa: E402
 from ci_linux import repository_root, result_summary, tests_accounted_for  # noqa: E402
 from run_lock import RunLock, RunLockBusy  # noqa: E402
-
-from agentic_hil import device_lock_protocol  # noqa: E402
 
 TOOL_NAME = "tools/bench_in_container.py"
 # What a run queued behind this one is told. The tier flashes, debugs and reads
@@ -420,6 +430,9 @@ CLIENT_GRACE_S = 30
 READER_GRACE_S = 30
 REMOVAL_POLLS = 15
 COMMAND_TIMEOUT_S = 120
+# The first acquisition includes starting Python and publishing the lock records.
+HOLDER_ACQUIRE_REPLY_TIMEOUT_S = 60
+HOLDER_REPLY_TIMEOUT_S = 5
 BUILD_PRUNE_TIMEOUT_S = 300
 
 
@@ -834,6 +847,7 @@ class Devices:
     other_probes: tuple[str, ...] = ()
     uart_serial_numbers: tuple[str, ...] = ()
     probe_resource_id: str | None = None
+    probe_resource_id_missing: bool = False
     configured_ports: tuple[dict, ...] = ()
 
     @property
@@ -981,13 +995,15 @@ def the_configured_probe(directory: str, voice: Voice) -> Devices:
     usb = tuple(checked_node(node) for node in probe.usb_nodes)
     ports = tuple(checked_node(node) for node in probe.serial_ports)
     voice(f"running against {named}: the one at {probe.where}")
-    probe_resource = report["debuggers"][debugger].get("resource_id")
+    debugger_entry = report["debuggers"][debugger]
+    probe_resource = debugger_entry.get("resource_id")
     ports_report = report.get("com_ports")
     configured_ports = tuple(entry for entry in ports_report.values() if isinstance(entry, dict)) if isinstance(ports_report, dict) else ()
     voice.withhold(entry["serial_number"] for entry in configured_ports if isinstance(entry.get("serial_number"), str))
     return Devices(
         usb, ports, probe.serial_numbers,
         probe_resource_id=probe_resource if isinstance(probe_resource, str) else None,
+        probe_resource_id_missing="resource_id" not in debugger_entry,
         configured_ports=configured_ports,
     )
 
@@ -1224,7 +1240,7 @@ def check_this_machine(runtime: str) -> None:
 
 
 def device_lock_directory() -> str:
-    """The host product lock directory used by the stage parent."""
+    """The host product lock directory used by the stage's holder."""
     machine = machine_lock_directory()
     if machine is not None:
         return machine
@@ -1308,47 +1324,122 @@ def stage_device_keys(devices: Devices, serial_spellings: Iterable[str]) -> set[
     }
 
 
-def hold_stage_devices(locks: ExitStack, root: str, keys: set[str], label: str, *, no_wait: bool) -> None:
-    """Take the complete set, rolling back every tentative lock on contention."""
-    shared = root == MACHINE_LOCKS
-    paths = {key: device_lock_protocol.lock_path(Path(root), key) for key in sorted(keys)}
-    deadline = time.monotonic() + (0 if no_wait else DEVICE_WAIT_S)
-    while True:
-        for path in paths.values():
-            try:
-                descriptor = device_lock_protocol.take_lock(path, shared=shared)
-            except device_lock_protocol.LockOccupied:
-                busy_path = path
-                break
-            except OSError as error:
-                raise Refused(EXIT_LOCKED, f"could not reserve the stage's devices: {error}") from None
-            locks.callback(os.close, descriptor)
-        else:
-            acquired_at = datetime.now(timezone.utc).isoformat()
-            owner = {"pid": os.getpid(), "label": label}
-            for key, path in paths.items():
-                record = {"version": 1, "state": "held", "acquired_at": acquired_at, "owner": owner, "resource": key}
-                try:
-                    device_lock_protocol.write_holder(path, record, shared=shared)
-                except OSError as error:
-                    raise Refused(EXIT_LOCKED, f"could not publish the stage's device hold: {error}") from None
-                locks.callback(release_holder_record, path, record, shared=shared)
-            return
+class HolderFailed(RuntimeError):
+    """The host lock holder could not confirm that it was ready or finished."""
 
-        locks.close()
+
+class StageDeviceHolder:
+    """The stage side of the private control channel to the host lock holder."""
+
+    def __init__(self) -> None:
+        environment = os.environ.copy()
+        environment.pop("RUNNER_TRACKING_ID", None)
+        self.process = subprocess.Popen(
+            [sys.executable, "-S", str(Path(__file__).with_name("bench_device_holder.py"))],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            encoding="utf-8", env=environment, start_new_session=os.name != "nt",
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+        )
+        self.announced = False
+        self.client_finished = False
+        self.release_requested = False
+        self.replies: Queue[dict | None] = Queue()
+        assert self.process.stdout is not None
+        reader = threading.Thread(target=read_control, args=(self.process.stdout, self.replies), daemon=True)
+        try:
+            reader.start()
+        except BaseException:
+            self.close()
+            raise
+
+    def send(self, **message: object) -> None:
+        assert self.process.stdin is not None
+        try:
+            send_control(self.process.stdin, **message)
+        except OSError as error:
+            raise HolderFailed("the stage's device lock holder closed its control channel") from error
+
+    def receive(self, timeout: float = HOLDER_REPLY_TIMEOUT_S) -> dict:
+        try:
+            reply = self.replies.get(timeout=timeout)
+        except Empty:
+            raise HolderFailed("the stage's device lock holder did not reply") from None
+        if reply is None:
+            raise HolderFailed("the stage's device lock holder exited unexpectedly")
+        return reply
+
+    def announce(self, runtime: str, name: str) -> None:
+        self.send(action="launch", argv=runtime_inspection_argv(runtime), name=name, launch_grace_s=COMMAND_TIMEOUT_S)
+        if self.receive().get("status") != "launch":
+            raise HolderFailed("the stage's device lock holder did not acknowledge launch")
+        self.require_alive()
+        self.announced = True
+
+    def require_alive(self) -> None:
+        if self.process.poll() is not None:
+            raise HolderFailed("the stage's device lock holder exited unexpectedly")
+
+    def release(self) -> None:
+        """Called only after the stage confirms that the container is gone."""
+        self.release_requested = True
+        deadline = time.monotonic() + HOLDER_REPLY_TIMEOUT_S
+        self.send(action="release")
+        self.close_channel()
+        if self.receive(max(0, deadline - time.monotonic())).get("status") != "released":
+            raise HolderFailed("the stage's device lock holder did not acknowledge release")
+        try:
+            code = self.process.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            raise HolderFailed("the stage's device lock holder did not exit after release") from None
+        if code != 0:
+            raise HolderFailed("the stage's device lock holder exited unsuccessfully after release")
+
+    def close_channel(self) -> None:
+        assert self.process.stdin is not None
+        with suppress(OSError):
+            self.process.stdin.close()
+
+    def close(self) -> None:
+        self.close_channel()
+        if self.announced and not self.release_requested:
+            # Container removal is unconfirmed. The holder will inspect on EOF.
+            return
+        try:
+            self.process.wait(timeout=0 if self.release_requested else HOLDER_REPLY_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=HOLDER_REPLY_TIMEOUT_S)
+
+
+def hold_stage_devices(holder: StageDeviceHolder, root: str, keys: set[str], label: str, *, no_wait: bool) -> None:
+    """Wait in the stage while the holder attempts the complete set."""
+    deadline = time.monotonic() + (0 if no_wait else DEVICE_WAIT_S)
+    ordered_keys = sorted(keys)
+    while True:
+        try:
+            holder.send(action="acquire", root=root, keys=ordered_keys, label=label, shared=root == MACHINE_LOCKS)
+            try:
+                reply = holder.receive(HOLDER_ACQUIRE_REPLY_TIMEOUT_S)
+            except KeyboardInterrupt as interrupted:
+                try:
+                    reply = holder.receive(0)
+                except HolderFailed:
+                    raise interrupted from None
+                if "error" not in reply and ("busy" not in reply or time.monotonic() < deadline):
+                    raise
+        except HolderFailed as error:
+            raise Refused(EXIT_LOCKED, str(error)) from error
+        if reply.get("status") == "ready":
+            return
+        if "error" in reply:
+            raise Refused(EXIT_LOCKED, reply["error"])
+        if "busy" not in reply:
+            raise Refused(EXIT_LOCKED, "the stage's device lock holder did not report whether the devices were acquired")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            holder = device_lock_protocol.holder_label(busy_path)
             bound = "--no-wait was given" if no_wait else f"the {DEVICE_WAIT_S}-second device wait expired"
-            raise Refused(EXIT_LOCKED, f"a required device is held by {holder}; {bound}, so the tier was not started")
+            raise Refused(EXIT_LOCKED, f"a required device is held by {reply['busy']}; {bound}, so the tier was not started")
         pause(min(1.0, remaining))
-
-
-def release_holder_record(path: Path, record: dict[str, object], *, shared: bool) -> None:
-    # Update while the file lock is still held. An unwriteable record must
-    # never prevent the descriptor from closing.
-    with suppress(OSError):
-        device_lock_protocol.write_holder(path, {**record, "state": "released"}, shared=shared)
 
 
 def prepare_output(option: str) -> Path:
@@ -1510,18 +1601,13 @@ def runtime_run(command: list[str], timeout: float = COMMAND_TIMEOUT_S):
     )
 
 
+def runtime_inspection_argv(runtime: str) -> list[str]:
+    return [runtime]
+
+
 def container_state(runtime: str, name: str) -> str | None:
     """None once the container is gone; otherwise what the runtime says it is."""
-    try:
-        result = runtime_run([runtime, "container", "inspect", "--format", "{{.State.Status}}", name])
-    except (OSError, subprocess.SubprocessError) as error:
-        return f"unknown: {error}"
-    if result.returncode == 0:
-        return result.stdout.strip() or "present"
-    answer = f"{result.stdout}\n{result.stderr}"
-    if "no such" in answer.lower() or "not found" in answer.lower():
-        return None
-    return f"unknown: {last_line(answer)}"
+    return inspect_container(runtime_inspection_argv(runtime), name, runtime_run)
 
 
 def stop_and_remove(runtime: str, name: str) -> None:
@@ -1819,7 +1905,7 @@ def tier_command(
     else:
         for node in devices.nodes:
             command += ["--device", node]
-    # The stage parent keeps the host locks. Tier servers share their own root.
+    # The host holder keeps the host locks. Tier servers share their own root.
     command += ["-v", f"{locks}:{CONTAINER_LOCKS}", "-v", f"{results}:{RESULTS}"]
     if stable_names is not None and not live_device_tree:
         command += ["-v", f"{stable_names}:{CONTAINER_SERIAL_BY_ID}:ro"]
@@ -1882,11 +1968,15 @@ def _interrupted(signum: int, frame: object) -> None:
     raise KeyboardInterrupt
 
 
-def run_tier(runtime: str, name: str, command: list[str], log_path: Path, redact: Redactor, voice: Voice, signals: Signals):
+def run_tier(
+    runtime: str, name: str, command: list[str], log_path: Path, redact: Redactor,
+    voice: Voice, signals: Signals, holder: StageDeviceHolder,
+):
     """Run the container; its exit status, its output as printed, and whether it was interrupted."""
     captured: list[str] = []
     interrupted = False
     with open(log_path, "w", encoding="utf-8") as log:
+        holder.announce(runtime, name)
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
@@ -1906,7 +1996,24 @@ def run_tier(runtime: str, name: str, command: list[str], log_path: Path, redact
         )
         try:
             reader.start()
-            returncode = process.wait()
+            while True:
+                holder.require_alive()
+                try:
+                    returncode = process.wait(timeout=POLL_S)
+                except subprocess.TimeoutExpired:
+                    continue
+                holder.require_alive()
+                break
+        except HolderFailed:
+            signals.hold_off()
+            stop_and_remove(runtime, name)
+            try:
+                process.wait(timeout=CLIENT_GRACE_S)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            reader.join(timeout=READER_GRACE_S)
+            raise
         except KeyboardInterrupt:
             interrupted = True
             signals.hold_off()
@@ -1926,8 +2033,10 @@ def run_tier(runtime: str, name: str, command: list[str], log_path: Path, redact
             except subprocess.TimeoutExpired:
                 process.kill()
                 returncode = process.wait()
+        holder.client_finished = True
         if reader.ident is not None:
             reader.join(timeout=READER_GRACE_S)
+    holder.require_alive()
     return returncode, "".join(captured), interrupted
 
 
@@ -2240,7 +2349,7 @@ def main(argv: list[str] | None = None) -> int:
     workdir = Path(tempfile.mkdtemp(prefix=CONTAINER_PREFIX))
     left_behind: LeftBehind | None = None
     name: str | None = None
-    device_holds = ExitStack()
+    holder: StageDeviceHolder | None = None
     try:
         if running:
             output = prepare_output(options.output)
@@ -2265,6 +2374,8 @@ def main(argv: list[str] | None = None) -> int:
         # names one may have been changed meanwhile.
         devices = the_probe(options, voice)
         voice.withhold(devices.serial_numbers)
+        if devices.probe_resource_id_missing:
+            voice("the installed doctor omits resource_id for the bound probe, so clients using only that alias can still acquire it")
         check_access(runtime, devices)
         uart, uart_serials = the_usb_uart(runtime, options.require_usb_uart, voice)
         esp32, esp32_serials = the_esp32(runtime, voice) if options.esp32 else (None, ())
@@ -2279,7 +2390,12 @@ def main(argv: list[str] | None = None) -> int:
             spellings.extend(f"/dev/serial/by-path/{link}" for link in by_path)
         keys = stage_device_keys(devices, spellings)
         label = f"hardware bench stage ({options.distribution or 'default image'})"
-        hold_stage_devices(device_holds, device_lock_directory(), keys, label, no_wait=options.no_wait)
+        lock_root = device_lock_directory()
+        try:
+            holder = StageDeviceHolder()
+        except OSError as error:
+            raise Refused(EXIT_LOCKED, f"could not start the stage's device lock holder: {error}") from error
+        hold_stage_devices(holder, lock_root, keys, label, no_wait=options.no_wait)
         private_locks = workdir / "device-locks"
         private_locks.mkdir(mode=0o700)
         stable_names = None if options.live_device_tree else stage_stable_names(by_id, workdir / "by-id")
@@ -2297,13 +2413,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         voice(f"$ {shlex.join(command)}")
         try:
-            returncode, printed, interrupted = run_tier(runtime, name, command, output / LOG_NAME, voice.redact, voice, signals)
-        except Exception:
+            returncode, printed, interrupted = run_tier(runtime, name, command, output / LOG_NAME, voice.redact, voice, signals, holder)
+        except Exception as error:
+            if isinstance(error, HolderFailed) and not holder.announced:
+                raise Refused(EXIT_LOCKED, str(error)) from error
             signals.hold_off()
             state = confirm_removed(runtime, name)
-            if state is not None:
-                left_behind = LeftBehind(runtime, [(name, state)])
             record_failed_stage(devices, output, voice)
+            if state is not None:
+                raise LeftBehind(runtime, [(name, state)]) from error
+            if holder.announced and not isinstance(error, HolderFailed):
+                holder.release()
             raise
         # What follows decides what is published and whether the machine is
         # handed on, and a second interrupt must not cut it short.
@@ -2316,6 +2436,8 @@ def main(argv: list[str] | None = None) -> int:
             status, verdict = judge(returncode, printed, pytest_args)
         if status != 0 or state is not None:
             record_failed_stage(devices, output, voice)
+        if state is None:
+            holder.release()
         with suppress(OSError), open(output / LOG_NAME, "a", encoding="utf-8") as log:
             log.write(f"{voice.redact(f'verdict: {verdict}')}\n")
         voice(f"verdict: {verdict}")
@@ -2325,6 +2447,9 @@ def main(argv: list[str] | None = None) -> int:
     except Refused as refusal:
         voice(str(refusal))
         return refusal.status
+    except HolderFailed as error:
+        voice(str(error))
+        return EXIT_NO_RESULT
     except LeftBehind as left:
         left_behind = left
     except KeyboardInterrupt:
@@ -2339,6 +2464,12 @@ def main(argv: list[str] | None = None) -> int:
         state = confirm_removed(runtime, name)
         record_failed_stage(devices, output, voice)
         if state is None:
+            if holder is not None and holder.client_finished:
+                try:
+                    holder.release()
+                except HolderFailed as error:
+                    voice(str(error))
+                    return EXIT_NO_RESULT
             voice("interrupted: the run was stopped before the tier finished, so there is no verdict")
             return EXIT_INTERRUPTED
         left_behind = LeftBehind(runtime, [(name, state)])
@@ -2347,7 +2478,8 @@ def main(argv: list[str] | None = None) -> int:
             remove_tree(workdir)
         finally:
             try:
-                device_holds.close()
+                if holder is not None:
+                    holder.close()
             finally:
                 signals.restore()
                 if left_behind is None:

@@ -142,7 +142,7 @@ DOCTOR_WITHOUT_SERVER: JsonObject = {
     "target": {"name": "example-target", "controller": "stm32f4"},
     "debuggers": {
         "dut": {
-            "type": "openocd", "probe_id": "TESTPROBE-HTTP", "bound": True,
+            "type": "openocd", "probe_id": "TESTPROBE-HTTP", "resource_id": None, "bound": True,
             "permissions": {
                 "allow_flash": True, "allow_reset": True, "allow_debug_execution": True,
                 "allow_raw_debugger_commands": False, "allow_mass_erase": False,

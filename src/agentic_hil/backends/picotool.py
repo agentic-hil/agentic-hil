@@ -43,13 +43,16 @@ from agentic_hil.types import JsonObject
 
 PICOTOOL_LISTING_NOTICE = "Only configured picotool boards are listed. Use com_ports_list to find the USB serial of a board running an application with USB stdio."
 _PROCESS_LOCK = "picotool:all"
-_VERSION = re.compile(r"(?:picotool v)?((\d+)\.\d+\.\d+)(?:[ \t]+\([^\r\n]*\))?")
+_VERSION = re.compile(r"(?:picotool v)?(2\.2\.0-a4|2\.\d+\.\d+)(?:[ \t]+\([^\r\n]*\))?")
+_LEGACY_INFO_VERSIONS = {"2.0.0", "2.1.0", "2.1.1", "2.2.0", "2.2.0-a4"}
 _DEVICE_HEADER = "Device Information"
 _CHIP = re.compile(r"\s*type:\s*(RP2040|RP2350)\s*")
-_RESET_HINT = re.compile(
-    r"(RP2040|RP2350) device at bus \d+, address \d+ appears to have a USB serial connection, "
-    r"so consider -f \(or -F\) to force reboot in order to run the command\."
+_RUNNING_HINT = re.compile(r"(RP2040|RP2350) device at bus \d+, address \d+ appears to have a USB serial connection")
+_GENERIC_RUNNING_HINT = re.compile(
+    r"Device at bus \d+, address \d+ appears to be a RP2040 device with a USB serial connection"
 )
+_UNIX_HINT_END = ", so consider -f (or -F) to force reboot in order to run the command."
+_WINDOWS_HINT_END = ", not in BOOTSEL mode. You can force reboot into BOOTSEL mode via 'picotool reboot -f -u' first."
 _WRITE = re.compile(r"Loading into Flash:[ \t]+\[={30}\]  100%")
 _VERIFY = re.compile(r"Verifying Flash:[ \t]+\[={30}\]  100%")
 _START = "The device was rebooted to start the application."
@@ -98,10 +101,27 @@ def _redact(text: str, serial: str | None, paths: list[str]) -> str:
     return redact_stream_text(_HOST_PATH.sub("[redacted]", text))
 
 
-def _diagnostic_messages(lines: list[str]) -> list[str]:
-    # Picotool's formatting stream wraps paragraphs to the terminal width.
+def _diagnostic_paragraphs(lines: list[str]) -> list[str]:
     paragraphs = re.split(r"\n(?:[ \t]*\n)+", "\n".join(lines))
-    return [*lines, *(" ".join(paragraph.split()) for paragraph in paragraphs)]
+    return [paragraph for paragraph in paragraphs if paragraph.strip()]
+
+
+def _running_board_hint(paragraphs: list[str], version: str) -> re.Match[str] | None:
+    # Notices can share a paragraph. Wrapped hint continuations are indented.
+    messages = (
+        " ".join(message.split())
+        for paragraph in paragraphs
+        for message in re.split(r"\n(?=\S)", paragraph)
+    )
+    if next(messages, None) != "but:":
+        return None
+    pattern = _GENERIC_RUNNING_HINT if version == "2.0.0" else _RUNNING_HINT
+    endings = (_UNIX_HINT_END, _WINDOWS_HINT_END) if version in _LEGACY_INFO_VERSIONS else (_UNIX_HINT_END,)
+    for message in messages:
+        for ending in endings:
+            if message.endswith(ending) and (match := pattern.fullmatch(message.removesuffix(ending))):
+                return match
+    return None
 
 
 def _flash_confirmed(lines: list[str], final_lines: tuple[str, ...]) -> bool:
@@ -111,7 +131,11 @@ def _flash_confirmed(lines: list[str], final_lines: tuple[str, ...]) -> bool:
     verify = next((i for i in range(write + 1, len(lines) - 1) if _VERIFY.fullmatch(lines[i])), None)
     if verify is None or lines[verify + 1] != "  OK":
         return False
-    return not final_lines or any(message in final_lines for message in _diagnostic_messages(lines[verify + 2:]))
+    if not final_lines:
+        return True
+    tail = lines[verify + 2:]
+    paragraphs = (" ".join(paragraph.split()) for paragraph in _diagnostic_paragraphs(tail))
+    return any(message in final_lines for message in (*tail, *paragraphs))
 
 
 class PicotoolBackend:
@@ -138,7 +162,15 @@ class PicotoolBackend:
 
     def target_support(self) -> JsonObject:
         family = self.config.debugger.target_type
+        tool = "debugger_target_support"
+        if family is not None and family not in {"rp2040", "rp2350"}:
+            return _failure(
+                tool, "target_type_invalid", "Picotool target_type must be rp2040 or rp2350.",
+                contact={}, target_type=family, status="unsupported",
+            )
         return {
+            "ok": True,
+            "tool": tool,
             "backend": self.backend_name,
             "target_type": family,
             "status": "not_configured" if family is None else "supported",
@@ -202,7 +234,7 @@ class PicotoolBackend:
         if not run.result["ok"] or run.result.get("audit_ok") is False:
             return None, run.result
         version = _VERSION.fullmatch(run.lines[0]) if len(run.lines) == 1 else None
-        if run.status != 0 or version is None or version[2] != "2":
+        if run.status != 0 or version is None:
             return None, {**run.result, **_failure(
                 tool, "debugger_not_found", "Picotool must report a readable 2.x version before device access.",
                 backend_error_type="picotool_version_unsupported",
@@ -210,9 +242,10 @@ class PicotoolBackend:
         return executable, {**run.result, "version": version[1], "summary": "Picotool 2.x is available."}
 
     def _detect(self, tool: str) -> tuple[str | None, JsonObject]:
-        executable, version = self._version(tool)
+        executable, version_result = self._version(tool)
         if executable is None:
-            return None, version
+            return None, version_result
+        version = str(version_result["version"])
         run = self._run(tool, executable, ["info", "-d"])
         if not run.result["ok"] or run.result.get("audit_ok") is False:
             return None, run.result
@@ -220,14 +253,25 @@ class PicotoolBackend:
             chip = next((match[1] for line in run.lines if (match := _CHIP.fullmatch(line))), None)
             if chip is not None:
                 return executable, {**run.result, "present": True, "target_state": "bootsel", "chip": chip, "summary": "The selected board is in BOOTSEL."}
-        absent = f"No accessible RP-series devices in BOOTSEL mode were found with serial number {self.config.debugger.probe_id}."
-        messages = _diagnostic_messages(run.lines) if run.status == -7 else []
-        if absent in messages:
-            chip = next((match[1] for message in messages if (match := _RESET_HINT.fullmatch(message))), None)
-            if chip is not None:
+        family = "RP2040/RP2350" if version == "2.0.0" else "RP-series"
+        found = "found found" if version in _LEGACY_INFO_VERSIONS else "found"
+        absent = f"No accessible {family} devices in BOOTSEL mode were {found} with serial number {self.config.debugger.probe_id}."
+        paragraphs = _diagnostic_paragraphs(run.lines) if run.status == -7 else []
+        # Fold line breaks without collapsing spaces inside a USB serial.
+        first_message = " ".join(line.strip() for line in paragraphs[0].splitlines()) if paragraphs else ""
+        if first_message == absent:
+            hint = _running_board_hint(paragraphs[1:], version)
+            if hint is not None:
+                # 2.0.0 calls either running family an RP2040 device.
+                chip = None if version == "2.0.0" else hint[1]
                 return executable, {**run.result, "present": True, "target_state": "application", "chip": chip, "summary": "The application is running and exposes the USB reset interface."}
             return None, {**run.result, **_failure(tool, "target_not_detected", "The configured board was not detected.", present=False, chip=None)}
-        return None, {**run.result, **_failure(tool, "probe_failed", "Picotool did not confirm the selected board's state.", contact=CONTACT_UNPROVEN)}
+        # A completed, unforced info command can read the board without changing it.
+        return None, {**run.result, **_failure(
+            tool, "probe_failed", f"Picotool {version} returned an unrecognized reply to info -d.",
+            contact={"side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged"},
+            version=version,
+        )}
 
     def list_probes(self) -> JsonObject:
         tool = "debugger_probes_list"
@@ -246,7 +290,9 @@ class PicotoolBackend:
             _, result = backend._detect(tool)
             failed = result.get("audit_ok") is False or (not result["ok"] and result["error_type"] != "target_not_detected")
             if failed:
-                failure = result
+                # Give a failure that stops enumeration precedence over a settled one.
+                if not failure or result.get("cleanup_required") or result.get("audit_ok") is False:
+                    failure = result
                 rows.append({**result, "debugger_id": name, "ok": False})
                 continue
             rows.append({
@@ -254,8 +300,8 @@ class PicotoolBackend:
                 **{key: result[key] for key in ("present", "target_state", "chip", "log_path") if key in result},
             })
         return {
-            "ok": True, "tool": tool, "backend": self.backend_name, **failure,
-            "probes": rows, "summary": PICOTOOL_LISTING_NOTICE,
+            "ok": True, "tool": tool, "backend": self.backend_name, "summary": PICOTOOL_LISTING_NOTICE,
+            **failure, "probes": rows,
         }
 
     def probe_target(self) -> JsonObject:
@@ -292,8 +338,13 @@ class PicotoolBackend:
         if executable is None:
             return detected
         family = self.config.debugger.target_type
-        if family is not None and family.upper() != detected["chip"]:
-            return {**detected, **_failure(tool, "target_type_invalid", "The detected chip family does not match target_type.")}
+        chip = detected["chip"]
+        if family is not None and family.upper() != chip:
+            summary = (
+                "Picotool 2.0.0 cannot identify the running board's chip family for the target_type check."
+                if chip is None else "The detected chip family does not match target_type."
+            )
+            return {**detected, **_failure(tool, "target_type_invalid", summary)}
         running = detected["target_state"] == "application"
         if reset_after_flash:
             args.append("-x")
