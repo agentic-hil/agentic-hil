@@ -191,8 +191,27 @@ prints) under `frames`, in place of `data`:
 - The session log keeps every raw byte, decoded or not.
 
 This is specified and held by the repository's tests against a faked serial
-line and the cross-compiled image under `tests/fixtures/defmt/`. No published
-record shows it on a board yet.
+line and the cross-compiled image under `tests/fixtures/defmt/`.
+
+All three opt-in version 7 defmt plans passed on the Nucleo-F446RE over the
+ST-LINK virtual COM port with the released `agentic-hil serve` build. Each job
+verified its flash, opened UART with the same ELF, reset the board, and closed
+the UART session. The bench released the device leases after each job.
+
+With the released `agentic-hil serve` build used for these tests, `uart_open`
+with `defmt: true` returns `defmt_table_not_available` when a plan flashes
+through one of several configured debuggers, so these plans name the flashed
+ELF with `defmt: {image_path: ...}`.
+
+- `defmt_serial_1_session.yaml` matched `F446RE boot`, which the board emitted
+  after reset.
+- In `defmt_serial_2_read.yaml`, the comparator-free `uart_read` succeeded,
+  then `defmt_expect` matched a later periodic record with format
+  `F446RE sample {=u8} value {=u16}` and rendered message `F446RE sample 2 value 37`.
+- `defmt_serial_3_expect.yaml` matched all five `defmt_expect` selectors. The
+  log level `info` matched the boot record. Sample records matched the exact
+  periodic format, the first argument equal to `2`, the second argument in the
+  inclusive range `35` to `37`, and rendered text `F446RE sample 2 value 37`.
 
 ## CAN: what is enforced, and what this page cannot show yet
 
