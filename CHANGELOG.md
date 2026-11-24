@@ -9,6 +9,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 ### Added
 
 - Add picotool 2 support for serial-pinned USB detection, verified UF2, ELF and BIN flashing, and reboot on configured RP2040 and RP2350 boards. Hardware qualification is pending.
+- A bare-metal Raspberry Pi Pico H (RP2040) demo that flashes through a
+  Raspberry Pi Debug Probe and pyOCD, resets, and checks the boot line on UART0. (#919)
 - The shared-bench HardFault plan for the Nucleo-F446RE stops at `HardFault_Handler` and checks `CFSR.UNDEFINSTR` (bit 16) and `HFSR.FORCED` (bit 30). It reads and records `MMFAR` and `BFAR`. In the probe, `MMARVALID` and `BFARVALID` were clear, so neither reading identifies a fault address. The plan reads the frame as stacked (`r0`, `r1`, `r2`, `r3`, `r12`, `lr`, `pc`, `xPSR`) after the firmware copies it. The shared bench uses OpenOCD 0.12.0 and the released `agentic-hil serve` 0.28.0. Serve leaves the GDB build unidentified. #756 remains open for a recording with an identified `arm-none-eabi-gdb` build. (#921)
 
 ### Fixed

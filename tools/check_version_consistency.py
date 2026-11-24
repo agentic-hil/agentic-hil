@@ -224,6 +224,9 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     # The same for the two absent-probe CubeProgrammer recordings (#737): each
     # carries the Agentic HIL release whose probe_target and reset_target made it.
     "tests/fixtures/stm32cubeprogrammer_2_23_0_failure_recordings.json": "the recordings name the release that made them",
+    # The Pico H bench result and its documentation test name the release that ran the demo.
+    "docs/support.md": "the Pico H qualification records the release that ran on the shared bench",
+    "tests/test_pico_rp2040_demo.py": "checks the recorded Pico H qualification release",
     # The TLS-proxy eval's proof 3 runs one published install.sh, named by its
     # release and pinned by the SHA-256 of exactly those bytes. A release stamp
     # that moved the version without the digest would make proof 3 refuse the
