@@ -164,6 +164,8 @@ def explains_explicit_elf_source(passage: str, *, require_version: bool = True) 
 
 def describes_observations(passage: str, *, require_version: bool = True) -> bool:
     text = " ".join(passage.replace("`", "").casefold().split())
+    if "nucleo-f446re" not in text:
+        return False
     boot = str(load_steps("session")[-2].arguments["format"]).casefold()
     rendered = str(load_steps("expect")[-2].arguments["text"]).casefold()
     read = r"(?:uart_read|com_read|(?:plain|comparator-free)\s+(?:uart\s+|serial\s+)?read)"
@@ -181,8 +183,7 @@ def describes_observations(passage: str, *, require_version: bool = True) -> boo
         else rf"\b(?:released\s+(?:version\s+of\s+)?{serve}|{serve}\s+release)\b"
     )
     return (
-        "nucleo-f446re" in text
-        and re.search(r"\bst-link\s+(?:vcp|virtual com port)\b", text) is not None
+        re.search(r"\bst-link\s+(?:vcp|virtual com port)\b", text) is not None
         and re.search(release, text) is not None
         and boot in text
         and rendered in text
@@ -212,6 +213,13 @@ def test_guide_describes_board_observations() -> None:
 
 def test_unreleased_describes_board_observations() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    section = re.search(r"^## \[Unreleased\]\s*\n(.*?)(?=^## |\Z)", changelog, re.M | re.S)
-    if section is None or not any(describes_observations(entry) for entry in re.split(r"(?m)^- ", section[1])):
-        raise AssertionError("The Unreleased changelog must describe the three Nucleo-F446RE defmt plan observations.")
+    releases = re.findall(
+        r"^##[ \t]+(?:\[Unreleased\]|\[\d+\.\d+\.\d+\] - \d{4}-\d{2}-\d{2})[ \t]*\n(.*?)(?=^##[ \t]|\Z)",
+        changelog, re.M | re.S,
+    )
+    if not any(
+        describes_observations(entry)
+        for release in releases
+        for entry in re.findall(r"(?m)^- [^\n]*(?:\n[ \t]+[^\n]*)*", release)
+    ):
+        raise AssertionError("The changelog must describe the three Nucleo-F446RE defmt plan observations.")

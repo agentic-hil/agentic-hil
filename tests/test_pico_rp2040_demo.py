@@ -132,9 +132,15 @@ def test_repository_demo_delivery() -> None:
     support = (ROOT / "docs" / "support.md").read_text(encoding="utf-8")
     readme = (DEMO / "README.md").read_text(encoding="utf-8").lower()
 
-    unreleased = re.split(r"^##\s+", changelog, flags=re.MULTILINE)
-    release_notes = next((section for section in unreleased if section.startswith("[Unreleased]")), "")
-    added = _section(release_notes, "###", "Added")
+    releases = re.findall(
+        r"^##[ \t]+(?:\[Unreleased\]|\[\d+\.\d+\.\d+\] - \d{4}-\d{2}-\d{2})[ \t]*\n(.*?)(?=^##[ \t]|\Z)",
+        changelog, re.M | re.S,
+    )
+    demo_entry = any(
+        re.search(r"pico-rp2040_demo|(?=.*\b(?:Pico H|RP2040)\b).*\bdemo\b", entry, re.I | re.S)
+        for release in releases
+        for entry in re.findall(r"(?m)^[-*+][ \t]+[^\n]*(?:\n[ \t]+[^\n]*)*", _section(release, "###", "Added"))
+    )
     rp2040 = _section(configuration, "##", "An RP2040 behind a Raspberry Pi Debug Probe")
     readme_text = " ".join(readme.split())
     support_text = " ".join(support.lower().split())
@@ -151,7 +157,7 @@ def test_repository_demo_delivery() -> None:
     )
     expected_manifest_lines = {"prune examples/pico-rp2040_demo", "exclude tests/test_pico_rp2040_demo.py"}
     if not (
-        re.search(r"pico-rp2040_demo|\bPico H\b|\bRP2040\b", added, re.IGNORECASE)
+        demo_entry
         and expected_manifest_lines <= {" ".join(line.split()) for line in manifest.splitlines()}
         and all(detail in readme_text for detail in readme_details)
         and _has_debug_probe_entries(rp2040)

@@ -974,8 +974,16 @@ def test_published_picotool_configuration_and_support_contract():
     types = schema["properties"]["debuggers"]["additionalProperties"]["properties"]["type"]["enum"]
     section = re.search(r"(?m)^#+ an rp2040 or rp2350 board through picotool\s*$([\s\S]*?)(?=^#+\s|\Z)", config)
     support_rows = [line for line in support.splitlines() if line.startswith("|") and "picotool 2" in line]
-    unreleased = re.search(r"(?m)^## \[unreleased\]\s*$([\s\S]*?)(?=^##\s|\Z)", changelog)
-    added = re.search(r"(?m)^### added\s*$([\s\S]*?)(?=^###\s|\Z)", unreleased[1]) if unreleased else None
+    releases = re.findall(
+        r"^##[ \t]+(?:\[unreleased\]|\[\d+\.\d+\.\d+\] - \d{4}-\d{2}-\d{2})[ \t]*\n(.*?)(?=^##[ \t]|\Z)",
+        changelog, re.M | re.S,
+    )
+    picotool_entry = any(
+        "picotool" in entry
+        for release in releases
+        for added in re.findall(r"^### added[ \t]*\n(.*?)(?=^###[ \t]|\Z)", release, re.M | re.S)
+        for entry in re.findall(r"(?m)^[-*+][ \t]+[^\n]*(?:\n[ \t]+[^\n]*)*", added)
+    )
     if not (
         "picotool" in types
         and section
@@ -988,6 +996,6 @@ def test_published_picotool_configuration_and_support_contract():
         and re.search(r"unproven|not yet proven|no hardware proof", support_rows[0])
         and not re.search(r"(?m)^all five backends\b", support)
         and all("picotool" in document for document in (mcp, troubleshooting, skill, plugin_skill))
-        and added and "picotool" in added[1]
+        and picotool_entry
     ):
         raise AssertionError("published picotool configuration and support contract is incomplete")
