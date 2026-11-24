@@ -11,6 +11,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - Add picotool 2 support for serial-pinned USB detection, verified UF2, ELF and BIN flashing, and reboot on configured RP2040 and RP2350 boards. Hardware qualification is pending.
 - Add three opt-in version 7 defmt plans that passed on the Nucleo-F446RE over the ST-LINK virtual COM port with `agentic-hil serve 0.28.0`. The first matched `F446RE boot` after reset. In the second, a comparator-free `uart_read` succeeded, then `defmt_expect` matched a later periodic record. The third matched all five selectors for log level `info`, exact format `F446RE sample {=u8} value {=u16}`, first argument equal to `2`, second argument in the inclusive range `35` to `37`, and rendered text `F446RE sample 2 value 37`.
   On `agentic-hil serve 0.28.0`, when a plan flashes through one of several configured debuggers, `uart_open` with `defmt: true` returns `defmt_table_not_available`, so these plans name the flashed ELF with `defmt: {image_path: ...}`. (#813)
+- A bare-metal Raspberry Pi Pico H (RP2040) demo that flashes through a
+  Raspberry Pi Debug Probe and pyOCD, resets, and checks the boot line on UART0. (#919)
 
 ### Fixed
 

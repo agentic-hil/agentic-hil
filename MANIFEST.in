@@ -89,6 +89,9 @@ exclude tests/test_readthedocs_moved.py
 # The shared bench's pages are held to what they say by a test that reads
 # mkdocs.yml, CLAUDE.md and most of docs/, which a distribution does not carry.
 exclude tests/test_shared_bench_docs.py
+# The Pico demo test reads the checkout's example and documentation files.
+exclude tests/test_pico_rp2040_demo.py
 recursive-include examples *.py *.md *.yaml *.yml
-# The firmware demo is repository content, not package content.
+# The firmware demos are repository content.
 prune examples/nucleo-f446re_demo
+prune examples/pico-rp2040_demo

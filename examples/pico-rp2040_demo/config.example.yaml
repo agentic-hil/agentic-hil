@@ -1,0 +1,25 @@
+# Copy this file to an operator-controlled location and replace its host values.
+version: 3
+workspace_root: "/absolute/path/to/pico-rp2040_demo"
+state_root: "/absolute/path/to/operator-state"
+artifacts:
+  allowed_roots: ["build/Debug"]
+  allowed_extensions: [".elf"]
+debuggers:
+  dut:
+    type: pyocd
+    target_type: rp2040
+    probe_id: "REPLACE-DEBUG-PROBE-SERIAL"
+    permissions:
+      allow_flash: true
+      allow_reset: true
+      allow_debug_execution: true
+      allow_raw_debugger_commands: false
+      allow_mass_erase: false
+com_ports:
+  dut_uart:
+    device: "<DEBUG_PROBE_UART_DEVICE>"
+    serial_number: "REPLACE-DEBUG-PROBE-SERIAL"
+    baudrate: 115200
+    permissions:
+      allow_write: false
