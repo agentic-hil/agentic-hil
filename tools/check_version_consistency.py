@@ -193,6 +193,7 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     # of the refusal they pin. Moving either to the current release would leave
     # a test about version skew with no skew in it.
     "tests/test_config_skew.py": "prose reference to the release a configuration field arrived in",
+    "tests/test_f446re_hardfault_plan.py": "the fixed release used by the shared HardFault bench",
     # The container proof's comment names the release from which agent-install
     # accepts a home-directory cwd (#235), so a reader knows why the line is
     # typed in $HOME rather than a made-up subdirectory. Prose about a behaviour,

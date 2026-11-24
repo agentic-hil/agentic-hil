@@ -1,0 +1,60 @@
+# Copy examples/nucleo-f446re_demo to a scratch directory without its build/.
+# Replace Src/main.c with tests/bench/firmware/hardfault_capture.c.
+# In the copy, run cmake --preset Debug --fresh and cmake --build --preset Debug.
+# Copy build/Debug/nucleo-f446re_demo.elf to build/hil/f446re_hardfault.elf
+# under the plan's workspace root.
+version: 5
+name: Nucleo-F446RE HardFault capture
+steps:
+  - action: flash
+    debugger: f446re
+    image_path: build/hil/f446re_hardfault.elf
+    reset_after_flash: false
+  - action: uart_open
+    port_id: f446re_vcp
+    clear_buffer: true
+  - action: reset
+    debugger: f446re
+    mode: run
+  - action: uart_expect
+    port_id: f446re_vcp
+    text: "hardfault capture image booted\n"
+    timeout_s: 5
+  - action: uart_close
+    port_id: f446re_vcp
+  - action: debug_start
+    debugger: f446re
+    image_path: build/hil/f446re_hardfault.elf
+    mode: reset_halt
+  - action: run_until_breakpoint
+    debugger: f446re
+    location: HardFault_Handler
+    timeout_s: 5
+  - action: read_symbol
+    debugger: f446re
+    symbol: scb_cfsr
+    size_bytes: 4
+    comparator: {mask: 0x00010000, equals: 0x00010000}
+  - action: read_symbol
+    debugger: f446re
+    symbol: scb_hfsr
+    size_bytes: 4
+    comparator: {mask: 0x40000000, equals: 0x40000000}
+  - action: read_symbol
+    debugger: f446re
+    symbol: scb_mmfar
+    size_bytes: 4
+  - action: read_symbol
+    debugger: f446re
+    symbol: scb_bfar
+    size_bytes: 4
+  - action: run_until_breakpoint
+    debugger: f446re
+    location: fault_captured
+    timeout_s: 5
+  - action: read_symbol
+    debugger: f446re
+    symbol: fault_frame
+    size_bytes: 32
+  - action: debug_stop
+    debugger: f446re
