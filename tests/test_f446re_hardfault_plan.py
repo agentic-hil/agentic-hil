@@ -166,12 +166,17 @@ def test_recorded_bench_release() -> None:
 
 
 def check_hardfault_changelog(changelog: str) -> None:
-    unreleased = re.search(r"^## \[Unreleased\][ \t]*\n(.*?)(?=^## |\Z)", changelog, re.M | re.S)
-    assert unreleased, "CHANGELOG.md needs an Unreleased section"
-    added = re.search(r"^### Added[ \t]*\n(.*?)(?=^### |\Z)", unreleased[1], re.M | re.S)
-    assert added, "CHANGELOG.md needs an Unreleased / Added section"
-    entries = re.split(r"(?m)^[-*+] +", added[1])
-    entry = next((item for item in entries if "HardFault_Handler" in item), "")
+    releases = re.findall(
+        r"^##[ \t]+(?:\[Unreleased\]|\[\d+\.\d+\.\d+\] - \d{4}-\d{2}-\d{2})[ \t]*\n(.*?)(?=^##[ \t]|\Z)",
+        changelog, re.M | re.S,
+    )
+    entries = (
+        entry
+        for release in releases
+        for added in re.findall(r"^### Added[ \t]*\n(.*?)(?=^###[ \t]|\Z)", release, re.M | re.S)
+        for entry in re.findall(r"(?m)^[-*+][ \t]+[^\n]*(?:\n[ \t]+[^\n]*)*", added)
+    )
+    entry = next((entry for entry in entries if re.search(r"\bHardFault_Handler\b", entry)), "")
     entry = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", entry)
     entry = " ".join(entry.replace("`", "").replace("**", "").split())
 
