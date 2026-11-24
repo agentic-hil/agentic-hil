@@ -8,7 +8,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Added
 
-- Add picotool 2 support for serial-pinned USB detection, verified UF2, ELF and BIN flashing, and reboot on configured RP2040 and RP2350 boards. Hardware qualification is pending.
+- Add picotool 2 support for serial-pinned USB detection, verified UF2, ELF and BIN flashing, and reboot on configured RP2040 and RP2350 boards. Hardware qualification is pending. (#917)
 - Add three opt-in version 7 defmt plans that passed on the Nucleo-F446RE over the ST-LINK virtual COM port with `agentic-hil serve 0.28.0`. The first matched `F446RE boot` after reset. In the second, a comparator-free `uart_read` succeeded, then `defmt_expect` matched a later periodic record. The third matched all five selectors for log level `info`, exact format `F446RE sample {=u8} value {=u16}`, first argument equal to `2`, second argument in the inclusive range `35` to `37`, and rendered text `F446RE sample 2 value 37`.
   On `agentic-hil serve 0.28.0`, when a plan flashes through one of several configured debuggers, `uart_open` with `defmt: true` returns `defmt_table_not_available`, so these plans name the flashed ELF with `defmt: {image_path: ...}`. (#813)
 - A bare-metal Raspberry Pi Pico H (RP2040) demo that flashes through a
@@ -18,11 +18,13 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 ### Changed
 
 - Each hardware bench stage reserves its probe and serial ports through teardown while tier servers coordinate in a private lock directory. Busy serial opens name the server's lock scope and explain outside contention. Failed stages record observable host device holders in `device-holders.json`. (#800)
+- `docs/mcp-hosts.md` was checked against every host page it links on 2026-11-24. Every block still matches the shape its host documents, and the two hosts that document a newer shape are where 0.28.0 left them: VS Code still reads the user-profile `servers` format, still to be removed in February 2027, and OpenCode still reads and still accepts the V1 `mcp` entries. No block changed.
 
 ### Fixed
 
 - Version 7 plans can use the ELF confirmed by a named debugger for `uart_open` with `defmt: true`. If probes confirm different ELFs, implicit table selection is refused before the port opens. (#925)
 - ST-Link flash failure guidance now explains which quarantine fields to read before a hot-plug retry, where to turn if the retry is refused, the limits of the H533 `under_reset` evidence, and how to diagnose an exit-0 flash without verification. (#911)
+- `requirements/sbom.txt` pins rpds-py 2026.9.1 from Python 3.11 on again and keeps 0.30.0 for 3.10. The dependency update of #908 regenerated the lock and folded both entries back into rpds-py 0.30.0 for every Python, which publishes no wheel for 3.15, so the job that attaches the distributions, the SBOM and their attestations to the GitHub release would have failed on the newest Python. `requirements/runtime.txt` kept the split.
 
 ## [0.28.0] - 2026-11-22
 
