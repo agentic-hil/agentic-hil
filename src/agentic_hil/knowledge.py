@@ -669,6 +669,12 @@ READ_VALIDATION_NEXT_STEP = (
     "configuration field that fixes it; the steps below are the general form of the same three answers."
 )
 
+_PICOTOOL_RELEASES = "Recognized picotool releases are 2.0.0, 2.1.0, 2.1.1, 2.2.0, 2.2.0-a4, 2.3.0 and 2.3.1."
+_PICOTOOL_WINDOWS_FLASH = (
+    "With picotool below 2.3.0 on Windows, use reset_target mode halt to enter BOOTSEL "
+    "before flashing a running RP2040."
+)
+
 # Keys are "<error_type>" or "<error_type>:<scope>", where scope is the config
 # field the error names or the debugger backend that raised it. Lookup falls back
 # from the scoped key to the bare one, so a scope nobody wrote an entry for still
@@ -685,11 +691,14 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "debugger_not_found:picotool": ErrorRemedy(
         "The host could not run a supported picotool 2.x executable.",
-        ("Install native picotool 2.x on the host.", "Put it on PATH or set debuggers.<name>.executable to the installed binary."),
+        ("Install native picotool on the host. " + _PICOTOOL_RELEASES, "Put it on PATH or set debuggers.<name>.executable to the installed binary."),
     ),
     "target_type_invalid:picotool": ErrorRemedy(
-        "The selected board's observed chip family differs from target_type.",
-        ("Check the board's USB serial and select its actual family, rp2040 or rp2350.",),
+        "The target_type is invalid, differs from the observed chip family, or cannot be checked because picotool 2.0.0 leaves the running chip family unknown.",
+        (
+            "Check the board's USB serial and select its actual family, rp2040 or rp2350.",
+            "If picotool 2.0.0 cannot identify the running chip, enter BOOTSEL with reset_target mode halt or use picotool 2.1.0 or newer.",
+        ),
     ),
     "invalid_argument:picotool": ErrorRemedy(
         "The input does not describe an operation picotool can perform.",
@@ -704,12 +713,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ("Read the log and check USB access and the board's current state before retrying. Adjust timeout_s if the operation needs more time.",),
     ),
     "probe_failed:picotool": ErrorRemedy(
-        "Picotool did not confirm the board's state.",
-        ("Read the picotool diagnostic and check the USB connection, driver and BOOTSEL state.",),
+        "Picotool returned an unrecognized reply to a read-only board query.",
+        ("Read the picotool diagnostic and check the USB connection, driver and BOOTSEL state.", _PICOTOOL_RELEASES),
     ),
     "flash_failed:picotool": ErrorRemedy(
         "Picotool did not confirm the write and the requested final state.",
-        ("Read the log, check the image fits this board, and establish its current state before attempting another flash.",),
+        ("Read the log, check the image fits this board, and establish its current state before attempting another flash.", _PICOTOOL_WINDOWS_FLASH),
     ),
     "verify_failed:picotool": ErrorRemedy(
         "Picotool reported a verification failure.",
@@ -8326,11 +8335,11 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
     "picotool": {
         "tool": "picotool 2.x",
         "type": {"status": "required", "value": "picotool", "note": "Flashes, reboots and probes RP2040 and RP2350 boards through their USB ports. Typed debug is unavailable."},
-        "executable": {"status": "discovered", "note": "Uses native picotool on PATH unless configured explicitly. Requires a 2.x version before device access."},
+        "executable": {"status": "discovered", "note": "Uses native picotool on PATH unless configured explicitly. " + _PICOTOOL_RELEASES},
         "gdb_server_executable": {"status": "ignored"},
         "com_port": _PROBE_BACKEND_COM_PORT,
         "probe_id": {"status": "required", "unset": "refused", "note": "The board's USB serial for every device command and its physical lease. For a running application with USB stdio, use the serial from com_ports_list."},
-        "target_type": {"status": "optional", "note": "rp2040 or rp2350. A configured family must match the board before flashing."},
+        "target_type": {"status": "optional", "note": "rp2040 or rp2350. A configured family must match the board before flashing. Picotool 2.0.0 leaves the running chip family unknown. " + _PICOTOOL_WINDOWS_FLASH},
         "interface": {"status": "ignored"},
         "interface_cfg": {"status": "ignored"},
         "target_cfg": {"status": "ignored"},
@@ -9706,7 +9715,7 @@ Which field names the target depends on the backend. Setting the wrong one is si
 | `stlink` | none; STM32CubeProgrammer identifies the part itself | not applicable |
 | `pyocd` | `target_type` | pyOCD's built-in list plus every installed CMSIS device-family pack |
 | `esptool` | `target_type`, optional; unset, esptool reads the chip family off the ROM bootloader | esptool's own `--chip` list: `esp32`, `esp32s3`, `esp32c3`, ... |
-| `picotool` | `target_type`, optional; set, the detected family must match before flashing | `rp2040`, `rp2350` |
+| `picotool` | `target_type`, optional. A configured family must match before flashing. Picotool 2.0.0 leaves the running chip family unknown. With picotool below 2.3.0 on Windows, use `reset_target` mode `halt` to enter BOOTSEL before flashing a running RP2040. | `rp2040`, `rp2350`. Recognized picotool releases are 2.0.0, 2.1.0, 2.1.1, 2.2.0, 2.2.0-a4, 2.3.0 and 2.3.1. |
 
 ## Known-good values, STM32 Nucleo-F446RE with the on-board ST-Link
 

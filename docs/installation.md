@@ -266,8 +266,12 @@ shell is one copy away once you have read what is in them.
 
 ## Platforms and debugger backends
 
-Install native picotool 2.x separately for RP2040 and RP2350 USB flashing,
+Install native picotool separately for RP2040 and RP2350 USB flashing,
 reboot and probing. Put it on `PATH` or set `debuggers.<name>.executable`.
+Recognized releases are 2.0.0, 2.1.0, 2.1.1, 2.2.0, 2.2.0-a4, 2.3.0 and 2.3.1.
+Picotool 2.0.0 cannot identify the chip family of a running board. With
+picotool below 2.3.0 on Windows, use `reset_target` in `halt` mode to enter
+BOOTSEL before flashing a running RP2040.
 See [the Pico configuration](configuration.md#an-rp2040-or-rp2350-board-through-picotool)
 for WinUSB and udev setup.
 

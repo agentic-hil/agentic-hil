@@ -320,9 +320,16 @@ artifacts:
 ```
 
 `probe_id` is required. `target_type` is optional and accepts `rp2040` or
-`rp2350`. Picotool 2.x is taken from `PATH` unless `executable` names it.
+`rp2350`. Picotool is taken from `PATH` unless `executable` names it.
+Recognized releases are 2.0.0, 2.1.0, 2.1.1, 2.2.0, 2.2.0-a4, 2.3.0 and 2.3.1.
 BIN requires an explicit 4 KiB-aligned `flash_address` in
 `0x10000000 <= address < 0x11000000`. UF2 and ELF supply their own addresses.
+
+Picotool 2.0.0 cannot identify the chip family of a running board. When
+`target_type` is set, enter BOOTSEL with `reset_target` in `halt` mode or use
+picotool 2.1.0 or newer before flashing. With picotool below 2.3.0 on Windows,
+use `reset_target` in `halt` mode to enter BOOTSEL before flashing a running
+RP2040.
 
 The board must be in BOOTSEL or running an application that exposes the USB
 reset interface from `pico_stdio_usb`. Enter BOOTSEL manually if the application

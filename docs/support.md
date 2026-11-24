@@ -26,6 +26,11 @@ not a board:
 | an ESP32 board's USB-UART bridge (CP210x, CH340, FTDI) with an auto-reset circuit | esptool 5: flashing, reset and probing, no debug sessions |
 | RP2040 and RP2350 boards using their own USB port | picotool 2: verified UF2, ELF and BIN flashing, reboot and probing, no typed debug. Hardware-unproven. |
 
+Recognized picotool releases are 2.0.0, 2.1.0, 2.1.1, 2.2.0, 2.2.0-a4, 2.3.0
+and 2.3.1. Picotool 2.0.0 leaves the chip family unknown while a board is
+running. With picotool below 2.3.0 on Windows, use `reset_target` in `halt` mode
+to enter BOOTSEL before flashing a running RP2040.
+
 OpenOCD, STM32CubeProgrammer CLI, pyOCD and esptool have hardware support
 evidence. The probe or USB interface, backend, and target settings determine
 which boards the bench can reach. See [Configuration](configuration.md).

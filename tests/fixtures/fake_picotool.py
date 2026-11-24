@@ -1,4 +1,4 @@
-"""Scripted picotool subprocess for the #917 acceptance tests."""
+"""Scripted picotool subprocess for the #917 and #932 acceptance tests."""
 
 import hashlib
 import json
@@ -6,7 +6,9 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from textwrap import fill
 
 PREFIX = "AGENTIC_HIL_FAKE_PICOTOOL_"
 COMMANDS = {"info", "load", "reboot"}
@@ -53,6 +55,47 @@ LEFT_ACCESSIBLE = (
     "The device has been left accessible, but without the drive mounted; use 'picotool reboot' "
     "to reboot into regular BOOTSEL mode or application mode.\n"
 )
+
+
+@dataclass(frozen=True)
+class Transcript:
+    legacy_chip_hint: bool = False
+    duplicate_found: bool = False
+    legacy_windows_hint: bool = False
+
+
+# Upstream raspberrypi/picotool tags and the wordings quoted in #932.
+TRANSCRIPTS = {
+    "2.0.0": Transcript(legacy_chip_hint=True, duplicate_found=True, legacy_windows_hint=True),
+    "2.1.0": Transcript(duplicate_found=True, legacy_windows_hint=True),
+    "2.1.1": Transcript(duplicate_found=True, legacy_windows_hint=True),
+    "2.2.0": Transcript(duplicate_found=True, legacy_windows_hint=True),
+    "2.2.0-a4": Transcript(duplicate_found=True, legacy_windows_hint=True),
+    "2.3.0": Transcript(),
+    "2.3.1": Transcript(),
+}
+
+
+def info_diagnostic(tag, serial, *, chip=None, dialect="unix"):
+    transcript = TRANSCRIPTS[tag]
+    family = "RP2040/RP2350" if transcript.legacy_chip_hint else "RP-series"
+    found = "found found" if transcript.duplicate_found else "found"
+    first = f"No accessible {family} devices in BOOTSEL mode were {found} with serial number {serial}."
+    if dialect == "unix-wrapped":
+        first = fill(first, width=80, break_long_words=False, break_on_hyphens=False)
+    if chip is None:
+        return first + "\n"
+    if transcript.legacy_chip_hint:
+        hint = "Device at bus 1, address 2 appears to be a RP2040 device with a USB serial connection"
+    else:
+        hint = f"{chip} device at bus 1, address 2 appears to have a USB serial connection"
+    if dialect == "windows" and transcript.legacy_windows_hint:
+        hint += ", not in BOOTSEL mode. You can force reboot into BOOTSEL mode via 'picotool reboot -f -u' first."
+    else:
+        hint += ", so consider -f (or -F) to force reboot in order to run the command."
+    if dialect == "unix-wrapped":
+        hint = fill(hint, width=80, subsequent_indent="    ", break_long_words=False, break_on_hyphens=False)
+    return f"{first}\n\nbut:\n\n{hint}\n"
 
 
 def setting(name, default=""):
@@ -127,7 +170,13 @@ def remember(states, serial, state):
         Path(state_file).write_text(json.dumps(states), encoding="utf-8")
 
 
-def not_found(serial, chip, running, command):
+def not_found(serial, chip, running, command, version):
+    if command == "info":
+        sys.stdout.write(info_diagnostic(
+            version if version in TRANSCRIPTS else "2.3.1",
+            serial, chip=chip if running else None, dialect=setting("DIALECT", "unix"),
+        ))
+        return -7
     print(f"No accessible RP-series devices in BOOTSEL mode were found with serial number {serial}.")
     if running:
         suffix = "-f to force the reboot." if command == "reboot" else "-f (or -F) to force reboot in order to run the command."
@@ -135,18 +184,19 @@ def not_found(serial, chip, running, command):
     return -7
 
 
-def flash(argv, chip, from_application):
+def flash(argv, chip, from_application, version):
+    legacy_spacing = version == "2.0.0"
     if from_application:
         sys.stdout.write(FORCE_ENTRY)
         retries = int(setting("WAIT_RETRIES", "0"))
-        if retries >= 1:
+        if retries >= 1 and not legacy_spacing:
             sys.stdout.write("\nWaiting for device to reboot" + "..." * (retries - 1))
         sys.stdout.write("\n\n")
     if chip == "RP2350" and (family := setting("ABSOLUTE_FAMILY")):
         sys.stdout.write(f"Family ID {family} can be downloaded in absolute space:\n  00000000->00400000\n")
-    sys.stdout.write(WRITE_COMPLETE)
+    sys.stdout.write(WRITE_COMPLETE.replace(":   [", ": [") if legacy_spacing else WRITE_COMPLETE)
     if "-v" in argv:
-        sys.stdout.write(VERIFY_COMPLETE)
+        sys.stdout.write(VERIFY_COMPLETE.replace(":      [", ":    [") if legacy_spacing else VERIFY_COMPLETE)
     if "-x" in argv:
         sys.stdout.write("\n" + FLASH_START)
         return "application"
@@ -183,19 +233,32 @@ def main(argv):
         sys.stdout.write(setting("STDOUT").replace("{artifact}", artifact))
         sys.stderr.write(setting("STDERR").replace("{artifact}", artifact))
         return int(setting("EXIT", "0"))
+    version = setting("VERSION", "2.3.1")
     if command == "version":
-        version = setting("VERSION", "2.3.1")
         print(version if "-s" in argv else f"picotool v{version} (Windows, GNU-14.2.0, Release)")
         return 0
 
+    if command == "info" and serial == setting("MALFORMED_INFO_SERIAL"):
+        sys.stdout.write("Device Information\n flash size:  2048K\n")
+        return 0
     state, chip, states = board_state(serial)
     forced = "-f" in argv or "-F" in argv
     if state in {"absent", "no-reset-interface"} or (state == "application" and not forced):
-        return not_found(serial, chip, state == "application", command)
+        return not_found(serial, chip, state == "application", command, version)
     if command == "info":
         sys.stdout.write(DEVICE_INFORMATION[chip])
     elif command == "load":
-        after = flash(argv, chip, state == "application")
+        transcript = TRANSCRIPTS.get(version)
+        if (
+            state == "application" and chip == "RP2040" and setting("DIALECT") == "windows"
+            and transcript is not None and transcript.legacy_windows_hint
+        ):
+            print(
+                "ERROR: Forced commands do not work with RP2040 on Windows - you can force reboot into BOOTSEL mode "
+                "via 'picotool reboot -f -u' instead."
+            )
+            return -8
+        after = flash(argv, chip, state == "application", version)
         if after != state:
             remember(states, serial, after)
     else:
