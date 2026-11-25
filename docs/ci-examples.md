@@ -285,8 +285,8 @@ container's sysfs, so the debugger inside enumerates only the one it is handed.
 Beside it, `.github/workflows/bench-gate.yml` runs this repository's own bench
 tier, `tests/bench`, on the same board for one commit named when it is
 dispatched, and on no other event. The tier runs in an image built from that
-commit, `tools/bench/Dockerfile`, which gets the probe's device nodes and the
-machine's device locks and nothing else of the machine, so the named commit's
+commit, `tools/bench/Dockerfile`, which gets the probe's device nodes and a
+private device-lock directory and nothing else of the machine, so the named commit's
 code never runs on the runner itself. The two workflows share one concurrency
 group and never hold the board at once. How the tier runs in its image, and what
 the machine provides once, is in `tools/bench/README.md`.
