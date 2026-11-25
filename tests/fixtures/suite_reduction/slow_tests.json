@@ -1,0 +1,293 @@
+{
+  "slice": "B",
+  "base_commit": "9f2769017ebc3525317dee008b4944834e307331",
+  "seconds_source": "Local Windows pytest JUnit testcase durations. Each pair used the same command and machine. Picotool, defmt, install eval and pyOCD used a four-worker selection at time scale 6. Loopback and source walk used a separate serial selection. Debugger process timings come from a serial selection of nine hang cases and include the Windows process-identity correction. Seconds sum only the measured cases within each module, including setup and teardown. Counts are from full module collection. OpenOCD readiness and debugger process-tree cases retain the startup time needed to record their transcripts and process identities. GDB interrupt cases retain their original acknowledgement allowance because the scaled lower cap increased the wait at factor 6. The CI target is 130 s saved per macOS leg, with about 90 s expected per Linux and Windows leg because the remaining cases retain real processes and deadlines.",
+  "modules": [
+    {
+      "module": "tests/test_bench_job_service.py",
+      "tests_before": 14,
+      "tests_after": 14,
+      "seconds_before": 5.14,
+      "seconds_after": 5.386
+    },
+    {
+      "module": "tests/test_bench_server_wiring.py",
+      "tests_before": 2,
+      "tests_after": 2,
+      "seconds_before": 8.629,
+      "seconds_after": 2.542
+    },
+    {
+      "module": "tests/test_benchview.py",
+      "tests_before": 3,
+      "tests_after": 3,
+      "seconds_before": 10.066,
+      "seconds_after": 5.127
+    },
+    {
+      "module": "tests/test_debug_backend_refusals.py",
+      "tests_before": 179,
+      "tests_after": 179,
+      "seconds_before": 28.346,
+      "seconds_after": 8.743
+    },
+    {
+      "module": "tests/test_debugger_processes.py",
+      "tests_before": 27,
+      "tests_after": 27,
+      "seconds_before": 119.165,
+      "seconds_after": 118.061
+    },
+    {
+      "module": "tests/test_defmt.py",
+      "tests_before": 63,
+      "tests_after": 63,
+      "seconds_before": 66.413,
+      "seconds_after": 50.264
+    },
+    {
+      "module": "tests/test_defmt_delivery.py",
+      "tests_before": 5,
+      "tests_after": 5,
+      "seconds_before": 270.58,
+      "seconds_after": 138.4
+    },
+    {
+      "module": "tests/test_install_eval.py",
+      "tests_before": 148,
+      "tests_after": 148,
+      "seconds_before": 104.219,
+      "seconds_after": 1.006
+    },
+    {
+      "module": "tests/test_picotool_backend.py",
+      "tests_before": 111,
+      "tests_after": 111,
+      "seconds_before": 551.851,
+      "seconds_after": 335.41
+    },
+    {
+      "module": "tests/test_pyocd_without_a_probe.py",
+      "tests_before": 24,
+      "tests_after": 24,
+      "seconds_before": 18.91,
+      "seconds_after": 12.051
+    },
+    {
+      "module": "tests/test_remote_client.py",
+      "tests_before": 5,
+      "tests_after": 5,
+      "seconds_before": 5.149,
+      "seconds_after": 3.934
+    },
+    {
+      "module": "tests/test_scaled_time_bounds.py",
+      "tests_before": 66,
+      "tests_after": 66,
+      "seconds_before": 52.909,
+      "seconds_after": 22.466
+    }
+  ],
+  "clusters": [
+    {
+      "id": "picotool-release-replay",
+      "action": "cheaper",
+      "nodes": [
+        "tests/test_picotool_backend.py::test_picotool_release_detection"
+      ],
+      "cases_before": 7,
+      "cases_after": 7,
+      "reason": "Replay the fake picotool handler in process for each release while exercising both real service surfaces with the original argv, output and exit status. Load one YAML configuration for each release and surface. Each cell has a fresh service, workspace, environment and state root for its own logs, reports and audit records. Local summed case time was 551.851 s before and 335.410 s after.",
+      "surviving_tests": [
+        "tests/test_picotool_backend.py::test_picotool_release_detection"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/backends/picotool.py",
+          "find": "paragraphs = _diagnostic_paragraphs(run.lines) if run.status == -7 else []",
+          "replace": "paragraphs = _diagnostic_paragraphs(run.lines) if run.status == -8 else []",
+          "caught_before": "tests/test_picotool_backend.py::test_picotool_release_detection[2.3.1]",
+          "caught_after": "tests/test_picotool_backend.py::test_picotool_release_detection[2.3.1]"
+        }
+      ]
+    },
+    {
+      "id": "pyocd-reset-deadlines",
+      "action": "cheaper",
+      "nodes": [
+        "tests/test_debug_backend_refusals.py::test_pyocd_flash_then_timed_out_reset_names_the_timeout",
+        "tests/test_pyocd_without_a_probe.py::test_a_pyocd_that_hangs_despite_the_flag_is_still_a_timeout_with_cleanup"
+      ],
+      "cases_before": 2,
+      "cases_after": 2,
+      "reason": "Configure a two-second product deadline for the deliberately hung reset processes. Give the successful flash and probe enumeration startup headroom without intercepting the reset budget. Each reset and its reaping still run in a real subprocess. Local summed case time was 47.256 s before and 20.794 s after.",
+      "surviving_tests": [
+        "tests/test_debug_backend_refusals.py::test_pyocd_flash_then_timed_out_reset_names_the_timeout",
+        "tests/test_pyocd_without_a_probe.py::test_a_pyocd_that_hangs_despite_the_flag_is_still_a_timeout_with_cleanup"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/backends/pyocd.py",
+          "find": "spawn_command(args, str(Path(str(resolved[\"executable_path\"])).parent), self.config.debugger.timeout_s)",
+          "replace": "spawn_command(args, str(Path(str(resolved[\"executable_path\"])).parent), 300)",
+          "caught_before": "tests/test_debug_backend_refusals.py::test_pyocd_flash_then_timed_out_reset_names_the_timeout",
+          "caught_after": "tests/test_debug_backend_refusals.py::test_pyocd_flash_then_timed_out_reset_names_the_timeout"
+        }
+      ]
+    },
+    {
+      "id": "loopback-http-bind",
+      "action": "cheaper",
+      "nodes": [
+        "tests/test_bench_job_service.py::test_a_foreign_token_or_none_cannot_reach_another_submitters_job",
+        "tests/test_benchview.py::test_reads_take_no_lock_and_reach_no_device",
+        "tests/test_bench_server_wiring.py::test_serve_wires_the_bench_view_the_mcp_reads_and_the_job_store",
+        "tests/test_remote_client.py::test_refusals_and_transport_errors_exit_1_and_usage_errors_exit_2"
+      ],
+      "cases_before": 4,
+      "cases_after": 4,
+      "reason": "Use the numeric address for the HTTP server name at bind. The real loopback transport, request handling and job state assertions still run. Across four instrumented Windows binds, the real getfqdn calls took 0.043156 s total. Total bind time went from 0.044025 s to 0.003351 s with the numeric lookup. Reverse lookup remains a hypothesis for the reported macOS delay until measured on that platform. The server-job attribution, artifact refusal and local parity tests keep the real workers that produce the per-job exits, results and logs. The CLI verdict matrix already invokes the CLI in-process and keeps independent state for each case. Local summed case time was 28.984 s before and 16.989 s after.",
+      "surviving_tests": [
+        "tests/test_bench_job_service.py::test_a_foreign_token_or_none_cannot_reach_another_submitters_job",
+        "tests/test_benchview.py::test_reads_take_no_lock_and_reach_no_device",
+        "tests/test_bench_server_wiring.py::test_serve_wires_the_bench_view_the_mcp_reads_and_the_job_store",
+        "tests/test_remote_client.py::test_refusals_and_transport_errors_exit_1_and_usage_errors_exit_2"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/httpserver.py",
+          "find": "\"job_token_invalid\": 403,",
+          "replace": "\"job_token_invalid\": 400,",
+          "caught_before": "tests/test_bench_job_service.py::test_a_foreign_token_or_none_cannot_reach_another_submitters_job",
+          "caught_after": "tests/test_bench_job_service.py::test_a_foreign_token_or_none_cannot_reach_another_submitters_job"
+        }
+      ]
+    },
+    {
+      "id": "defmt-build",
+      "action": "cheaper",
+      "nodes": [
+        "tests/test_defmt.py::test_the_table_of_a_real_image_names_its_encoding_timestamp_and_statements",
+        "tests/test_defmt.py::test_every_frame_decodes_to_the_line_defmt_decoder_printed",
+        "tests/test_defmt.py::test_the_suite_encoder_writes_the_recorded_stream",
+        "tests/test_defmt.py::test_broken_frames_are_errors_exactly_where_defmt_decoder_found_them",
+        "tests/test_defmt.py::test_a_stream_that_arrives_in_pieces_decodes_to_the_same_frames",
+        "tests/test_defmt.py::test_decode_stream_limit_preserves_unconsumed_frames",
+        "tests/test_defmt.py::test_arguments_are_json_values_in_the_order_the_firmware_passed_them",
+        "tests/test_defmt.py::test_a_float_reads_as_the_number_it_prints_and_a_non_finite_one_as_its_name",
+        "tests/test_defmt.py::test_nested_values_keep_their_format_and_primitives_unwrap",
+        "tests/test_defmt.py::test_a_raw_stream_that_loses_sync_says_so_once_and_consumes_the_rest",
+        "tests/test_defmt.py::test_a_raw_stream_waits_for_the_rest_of_a_frame",
+        "tests/test_defmt.py::test_counts_describe_what_a_batch_holds",
+        "tests/test_defmt.py::test_the_suite_encoder_round_trips_a_nested_enum",
+        "tests/test_defmt_delivery.py::test_documented_replay_examples_match_public_results"
+      ],
+      "cases_before": 24,
+      "cases_after": 24,
+      "reason": "Group fixture users on one worker and reuse Cargo dependencies across two artifact builds. Each image is still built and copied before the next build. Local summed case time was 67.988 s before and 51.156 s after.",
+      "surviving_tests": [
+        "tests/test_defmt.py::test_the_table_of_a_real_image_names_its_encoding_timestamp_and_statements",
+        "tests/test_defmt.py::test_every_frame_decodes_to_the_line_defmt_decoder_printed",
+        "tests/test_defmt.py::test_the_suite_encoder_writes_the_recorded_stream",
+        "tests/test_defmt.py::test_broken_frames_are_errors_exactly_where_defmt_decoder_found_them",
+        "tests/test_defmt.py::test_a_stream_that_arrives_in_pieces_decodes_to_the_same_frames",
+        "tests/test_defmt.py::test_decode_stream_limit_preserves_unconsumed_frames",
+        "tests/test_defmt.py::test_arguments_are_json_values_in_the_order_the_firmware_passed_them",
+        "tests/test_defmt.py::test_a_float_reads_as_the_number_it_prints_and_a_non_finite_one_as_its_name",
+        "tests/test_defmt.py::test_nested_values_keep_their_format_and_primitives_unwrap",
+        "tests/test_defmt.py::test_a_raw_stream_that_loses_sync_says_so_once_and_consumes_the_rest",
+        "tests/test_defmt.py::test_a_raw_stream_waits_for_the_rest_of_a_frame",
+        "tests/test_defmt.py::test_counts_describe_what_a_batch_holds",
+        "tests/test_defmt.py::test_the_suite_encoder_round_trips_a_nested_enum",
+        "tests/test_defmt_delivery.py::test_documented_replay_examples_match_public_results"
+      ],
+      "defects": [
+        {
+          "file": "src/agentic_hil/defmt.py",
+          "find": "DefmtTable(entries=entries, timestamp=timestamp, encoding=str(encoding), version=version, bitflags=bitflags)",
+          "replace": "DefmtTable(entries=entries, timestamp=None, encoding=str(encoding), version=version, bitflags=bitflags)",
+          "caught_before": "tests/test_defmt.py::test_the_table_of_a_real_image_names_its_encoding_timestamp_and_statements",
+          "caught_after": "tests/test_defmt.py::test_the_table_of_a_real_image_names_its_encoding_timestamp_and_statements"
+        }
+      ]
+    },
+    {
+      "id": "defmt-packaged-audit",
+      "action": "cheaper",
+      "nodes": [
+        "tests/test_defmt_delivery.py::test_distributions_collect_and_replay_without_rust"
+      ],
+      "cases_before": 1,
+      "cases_after": 1,
+      "reason": "Batch audit probes in one instrumented descendant per packaged session. Each probe still needs the same denial, and the artifact build, sdist collection and both replay environments remain. Local summed case time was 269.005 s before and 137.508 s after.",
+      "surviving_tests": [
+        "tests/test_defmt_delivery.py::test_distributions_collect_and_replay_without_rust"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_defmt_delivery.py",
+          "find": "for name in (\"defmt_reference\", \"reference-decoder\"))",
+          "replace": "for name in (\"reference-decoder\",))",
+          "caught_before": "tests/test_defmt_delivery.py::test_distributions_collect_and_replay_without_rust",
+          "caught_after": "tests/test_defmt_delivery.py::test_distributions_collect_and_replay_without_rust"
+        }
+      ]
+    },
+    {
+      "id": "install-dry-run-evidence",
+      "action": "cheaper",
+      "nodes": [
+        "tests/test_install_eval.py::test_dry_run_cross_products_cases_and_jobs_without_secret_values"
+      ],
+      "cases_before": 1,
+      "cases_after": 1,
+      "reason": "Memoize tree evidence for the real dry-run matrix while preserving all case/job payloads and the serialized secret check. Local summed case time was 104.219 s before and 1.006 s after.",
+      "surviving_tests": [
+        "tests/test_install_eval.py::test_dry_run_cross_products_cases_and_jobs_without_secret_values"
+      ],
+      "defects": [
+        {
+          "file": "evals/install/runner.py",
+          "find": "for case in matrix.cases:\n        for job in matrix.jobs:\n            payload = job_payload",
+          "replace": "for case in matrix.cases if not matrix.jobs else ():\n        for job in matrix.jobs:\n            payload = job_payload",
+          "caught_before": "tests/test_install_eval.py::test_dry_run_cross_products_cases_and_jobs_without_secret_values",
+          "caught_after": "tests/test_install_eval.py::test_dry_run_cross_products_cases_and_jobs_without_secret_values"
+        }
+      ]
+    },
+    {
+      "id": "scaled-time-source-walks",
+      "action": "cheaper",
+      "nodes": [
+        "tests/test_scaled_time_bounds.py::test_every_wall_clock_ceiling_in_the_suite_is_taken_through_the_helper",
+        "tests/test_scaled_time_bounds.py::test_no_floor_in_the_suite_takes_the_factor",
+        "tests/test_scaled_time_bounds.py::test_nothing_outside_a_helper_call_is_part_of_a_bound",
+        "tests/test_scaled_time_bounds.py::test_every_exemption_still_names_one_comparison_the_walk_finds",
+        "tests/test_scaled_time_bounds.py::test_every_file_still_holds_the_ceilings_it_held",
+        "tests/test_scaled_time_bounds.py::test_the_timeout_walk_reads_every_tier_the_suite_has",
+        "tests/test_scaled_time_bounds.py::test_every_budget_the_suite_hands_a_call_takes_the_factor"
+      ],
+      "cases_before": 7,
+      "cases_after": 7,
+      "reason": "Share the suite walk's source text and parsed files and cache the comparison results. Walks on synthetic trees stay independent. Local summed case time was 52.909 s before and 22.466 s after.",
+      "surviving_tests": [
+        "tests/test_scaled_time_bounds.py::test_every_wall_clock_ceiling_in_the_suite_is_taken_through_the_helper",
+        "tests/test_scaled_time_bounds.py::test_no_floor_in_the_suite_takes_the_factor",
+        "tests/test_scaled_time_bounds.py::test_nothing_outside_a_helper_call_is_part_of_a_bound",
+        "tests/test_scaled_time_bounds.py::test_every_exemption_still_names_one_comparison_the_walk_finds",
+        "tests/test_scaled_time_bounds.py::test_every_file_still_holds_the_ceilings_it_held",
+        "tests/test_scaled_time_bounds.py::test_the_timeout_walk_reads_every_tier_the_suite_has",
+        "tests/test_scaled_time_bounds.py::test_every_budget_the_suite_hands_a_call_takes_the_factor"
+      ],
+      "defects": [
+        {
+          "file": "tests/test_debugger_processes.py",
+          "find": "elapsed < scaled_time_bound(EMPTIED_GROUP_CEILING_S)",
+          "replace": "elapsed < EMPTIED_GROUP_CEILING_S",
+          "caught_before": "tests/test_scaled_time_bounds.py::test_every_wall_clock_ceiling_in_the_suite_is_taken_through_the_helper",
+          "caught_after": "tests/test_scaled_time_bounds.py::test_every_wall_clock_ceiling_in_the_suite_is_taken_through_the_helper"
+        }
+      ]
+    }
+  ]
+}

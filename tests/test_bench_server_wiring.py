@@ -24,6 +24,7 @@ from agentic_hil import benchjobs, cli, httpapi
 REPO = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.usefixtures("no_loopback_name_lookup")
 def test_serve_wires_the_bench_view_the_mcp_reads_and_the_job_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bench = job_bench(tmp_path, monkeypatch)
     workers = FakeWorkerSource()

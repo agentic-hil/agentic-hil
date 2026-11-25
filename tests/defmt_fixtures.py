@@ -81,9 +81,11 @@ def build_images(target_dir: Path) -> dict[str, Path]:
     target_dir.mkdir(parents=True, exist_ok=True)
     image_dir = target_dir / "images"
     image_dir.mkdir(parents=True, exist_ok=True)
+    # The release artifact is copied before the next feature build replaces it.
+    # Cargo can retain the common dependencies for that second build.
+    cargo_target = target_dir / "firmware"
     images: dict[str, Path] = {}
     for name, feature in VARIANTS.items():
-        cargo_target = target_dir / "firmware" / name
         environment = {
             **os.environ,
             "CARGO_TARGET_DIR": str(cargo_target),
