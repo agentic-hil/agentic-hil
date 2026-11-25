@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import struct
 import subprocess
 import tempfile
@@ -11,6 +12,7 @@ import time
 import uuid
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager, suppress
+from http.server import HTTPServer
 from pathlib import Path
 
 import defmt_fixtures
@@ -18,6 +20,17 @@ import pytest
 import yaml
 
 pytest_plugins = ["pytester", "suite_ledger", "tdqs_model_selection"]
+
+DEFMT_BUILD_GROUP = "defmt-firmware-build"
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if not hasattr(config, "workerinput"):
+        return
+    for item in items:
+        if isinstance(item, pytest.Function) and "defmt_images" in item.fixturenames:
+            item.add_marker(pytest.mark.xdist_group(DEFMT_BUILD_GROUP))
 
 
 def _require_defmt_toolchain() -> None:
@@ -50,6 +63,24 @@ from support import (  # noqa: E402
 # name it lives under. A test about the reader itself calls this one, and every
 # other test gets the stub.
 from agentic_hil.upgrade import _newest_released_version as read_the_release_index  # noqa: E402,F401
+
+
+@pytest.fixture
+def no_loopback_name_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give HTTPServer its numeric name during loopback bind."""
+    server_bind = HTTPServer.server_bind
+    getfqdn = socket.getfqdn
+
+    def bind(server: HTTPServer) -> None:
+        def numeric_loopback(name: str = "") -> str:
+            return name if name in {"127.0.0.1", "::1"} else getfqdn(name)
+
+        with monkeypatch.context() as bind_patch:
+            bind_patch.setattr(socket, "getfqdn", numeric_loopback)
+            server_bind(server)
+
+    monkeypatch.setattr(HTTPServer, "server_bind", bind)
+
 
 # Where every test's isolated HOME, config, state and temporary storage go.
 # Resolved once, here, out of the system temp root and before any test has

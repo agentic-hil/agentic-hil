@@ -353,9 +353,19 @@ probes = [
     ("import subprocess, sys; subprocess.run([sys.executable, '-c', 'import socket; socket.socket()'])", "packaged replay forbids unaudited subprocesses"),
     ("import defmt_reference", "packaged replay forbids regeneration imports"),
 ]
-for source, message in probes:
-    child = subprocess.run([sys.executable, "-c", source], capture_output=True, text=True, timeout=15)
-    assert child.returncode != 0 and message in child.stderr, child.stderr
+# The audit installs once in this child. Every operation still has to be
+# denied independently before the next one is tried.
+probe_driver = """
+for source, message in PROBES:
+    try:
+        exec(source, {})
+    except AssertionError as error:
+        assert str(error) == message, (source, error)
+    else:
+        raise AssertionError(("audit allowed", source))
+"""
+child = subprocess.run([sys.executable, "-c", "PROBES = " + repr(probes) + "\n" + probe_driver], capture_output=True, text=True, timeout=15)
+assert child.returncode == 0, child.stderr
 try:
     original_popen([sys.executable, "-c", "import socket; socket.socket()"])
 except AssertionError as error:

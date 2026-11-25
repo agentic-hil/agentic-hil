@@ -666,8 +666,9 @@ def is_exempt(entry: Comparison | TimeoutSite) -> bool:
     return any(needle in entry.statement for needle in EXEMPT_BOUNDS.get(entry.name, ()))
 
 
-def suite_comparisons() -> list[Comparison]:
-    return [entry for path in walked_files() for entry in comparisons_in(path.read_text(encoding="utf-8"), path)]
+@functools.cache
+def suite_comparisons() -> tuple[Comparison, ...]:
+    return tuple(entry for path in walked_files() for entry in comparisons_in(suite_walk().source(path), path))
 
 
 def suite_ceilings() -> list[Comparison]:
@@ -769,7 +770,7 @@ def test_every_wall_clock_ceiling_in_the_suite_is_taken_through_the_helper() -> 
     The failure lists the offenders by file and line, because the reader is
     somebody deciding what to change, not somebody deciding whether to rerun.
     """
-    walk = TimeoutWalk(TESTS)
+    walk = suite_walk()
     offenders = [entry for entry in suite_ceilings() if not entry.through_the_helper and not ceiling_takes_the_factor(entry, walk)]
 
     assert not offenders, "wall-clock ceilings a loaded host cannot be granted any slack on:\n" + "\n".join(
@@ -1378,15 +1379,21 @@ class TimeoutWalk:
 
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
+        self.sources: dict[Path, str] = {}
         self.parsed: dict[Path, tuple[ast.Module, list[str]]] = {}
         self.bound: dict[Path, dict[str, list[ast.stmt]]] = {}
         self.function_locals: dict[ast.AST, frozenset[str]] = {}
+
+    def source(self, path: Path) -> str:
+        if path not in self.sources:
+            self.sources[path] = path.read_text(encoding="utf-8")
+        return self.sources[path]
 
     def module(self, path: Path) -> tuple[ast.Module, list[str]]:
         """A file's parse tree and lines. A byte order mark is not code, and a
         file that does not parse fails the walk by name instead of going unread."""
         if path not in self.parsed:
-            text = path.read_text(encoding="utf-8-sig")
+            text = self.source(path).removeprefix("\ufeff")
             self.parsed[path] = (ast.parse(text, filename=str(path)), text.split("\n"))
         return self.parsed[path]
 
@@ -1549,9 +1556,14 @@ def timeout_sites_under(root: Path) -> list[TimeoutSite]:
 
 
 @functools.cache
+def suite_walk() -> TimeoutWalk:
+    return TimeoutWalk(TESTS)
+
+
+@functools.cache
 def suite_timeout_sites() -> tuple[TimeoutSite, ...]:
     """The suite's own sites, read once per process, because the whole tree is parsed."""
-    return tuple(timeout_sites_under(TESTS))
+    return tuple(suite_walk().sites())
 
 
 def refused_timeouts(sites: Iterable[TimeoutSite]) -> list[TimeoutSite]:

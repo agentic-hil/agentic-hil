@@ -14,9 +14,9 @@
 #
 # Built and run by tools/bench_in_container.py, which builds this file from the
 # committed tree rather than the working tree, hands the probe's USB node and
-# its serial port to the container, mounts the machine's device locks and reads
-# pytest's summary line as the verdict. From a checkout on the machine the board
-# is attached to:
+# its serial port to the container, mounts a private device-lock directory and
+# reads pytest's summary line as the verdict. From a checkout on the machine the
+# board is attached to:
 #
 #     python3 tools/bench_in_container.py
 #

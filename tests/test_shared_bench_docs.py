@@ -85,6 +85,53 @@ def test_the_shared_bench_page_is_published_with_its_boundary() -> None:
     assert stray_addresses(page) == []
 
 
+def test_queue_and_leases_document_job_visibility() -> None:
+    queue_guide = words(section(read("docs/shared-bench.md"), "The queue")).replace("`", "")
+    changelog = read("CHANGELOG.md")
+
+    queued_jobs = r"(?:waiting|queued) jobs?"
+    assert re.search(rf"/v1/queue[^.!?]*{queued_jobs}|{queued_jobs}[^.!?]*/v1/queue", queue_guide), (
+        "describe the jobs the queue shows"
+    )
+    assert re.search(r"/v1/leases[^.!?]*(?:hold|held)", queue_guide), "describe the holds the lease read shows"
+    assert re.search(
+        r"/v1/queue[^.!?]*(?:first|before|then|followed by)[^.!?]*/v1/leases"
+        r"|(?:first|after reading)[^.!?]*/v1/queue[^.!?]*/v1/leases"
+        r"|/v1/leases[^.!?]*after[^.!?]*/v1/queue",
+        queue_guide,
+    ), "tell clients to read the queue before the leases"
+    assert any(
+        re.search(r"between (?:(?:the|these|those) )?(?:two )?(?:reads|requests)", sentence)
+        and re.search(r"\bstart(?:s|ing|ed)?\b", sentence)
+        and re.search(r"\b(?:second|leases?|holds?)\b", sentence)
+        for sentence in re.split(r"[.!?]\s+", queue_guide)
+    ), "explain how the lease read covers a job that starts between reads"
+    assert re.search(
+        r"(?:no|not (?:a|an|grant|reserve)|neither|do(?:es)? not)[^.!?]*reserv",
+        queue_guide,
+    ), "explain that the reads grant no reservation"
+    assert re.search(
+        r"(?:submit(?:ted|s|ting)?|submission|new job)[^.!?]*start[^.!?]*(?:any time|anytime|whenever)",
+        queue_guide,
+    ), "explain that a later job can start at any time"
+
+    releases = re.findall(
+        r"(?ms)^##[ \t]+(?:\[Unreleased\]|\[\d+\.\d+\.\d+\] - \d{4}-\d{2}-\d{2})[ \t]*\n(.*?)(?=^##[ \t]|\Z)",
+        changelog,
+    )
+    entries = [
+        entry
+        for release in releases
+        for fixed in re.findall(r"(?ms)^###[ \t]+Fixed[ \t]*\n(.*?)(?=^###[ \t]|\Z)", release)
+        for entry in re.split(r"(?m)^[*+-][ \t]+", fixed)[1:]
+        if re.search(r"#937\b", entry)
+    ]
+    assert len(entries) == 1, "record exactly one #937 entry under Fixed"
+    assert re.search(r"\bjobs?\b", entries[0], re.I) and re.search(
+        r"\b(?:holds?|held|leases)\b", entries[0], re.I
+    ), "describe the job hold fix in the #937 entry"
+
+
 def test_readme_names_the_shared_bench() -> None:
     readme = read("README.md")
     if "shared bench" not in words(readme) or "docs/shared-bench.md" not in readme:

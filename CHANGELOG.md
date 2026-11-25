@@ -14,6 +14,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
   The session logs omit the GDB build. Each job report supplies the bench configuration digest, which links the job to the configured `arm-none-eabi-gdb`. Its `--version` output on the recording day identifies the xPack build.
   Both recording plans end red by design and keep the stop records in their evidence bundles. The companion plan passed on the same bench using an image built from the same firmware source, without recapturing the fixture. Both recording plans passed the plan check. (#756)
 
+### Fixed
+
+- Keep device holds visible in the bench server's HTTP and MCP reads from job dispatch until the scheduler records the end, including for jobs on shared CAN buses. (#937)
+
 ## [0.29.0] - 2026-11-25
 
 ### Added
