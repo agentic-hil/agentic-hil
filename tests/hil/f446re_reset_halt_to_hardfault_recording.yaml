@@ -1,0 +1,30 @@
+# Copy examples/nucleo-f446re_demo to a scratch directory without its build/.
+# Replace Src/main.c with tests/bench/firmware/undefined_instruction.c.
+# In the copy, run cmake --preset Debug --fresh and cmake --build --preset Debug.
+# Copy build/Debug/nucleo-f446re_demo.elf to build/hil/f446re_undefined_instruction.elf
+# under the plan's workspace root.
+#
+# Ends red by design at step 4 (timeout) because SystemInit cannot be reached.
+# The job's evidence bundle holds the GDB/MI stops at Reset_Handler and main
+# and the SIGINT stop in HardFault_Handler.
+version: 5
+name: Nucleo-F446RE reset-halt to HardFault recording
+steps:
+  - action: flash
+    debugger: f446re
+    image_path: build/hil/f446re_undefined_instruction.elf
+    reset_after_flash: false
+  - action: debug_start
+    debugger: f446re
+    image_path: build/hil/f446re_undefined_instruction.elf
+    mode: reset_halt
+  - action: run_until_breakpoint
+    debugger: f446re
+    location: main
+    timeout_s: 5
+  - action: run_until_breakpoint
+    debugger: f446re
+    location: SystemInit
+    timeout_s: 5
+  - action: debug_stop
+    debugger: f446re

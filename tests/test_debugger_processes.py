@@ -50,6 +50,7 @@ nothing here repeats it.
 from __future__ import annotations
 
 import ctypes
+import inspect
 import json
 import os
 import re
@@ -58,7 +59,9 @@ import signal
 import subprocess
 import sys
 import time
+from ctypes import wintypes
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 from conftest import FAKE_OPENOCD, FAKE_PYOCD, FAKE_STLINK, write_authoritative_config, write_config
@@ -206,33 +209,94 @@ def path_without_openocd(monkeypatch: pytest.MonkeyPatch) -> None:
     path_without_a_toolchain(monkeypatch)
 
 
-def recorded_pids(pid_file: Path) -> list[int]:
-    return [int(line) for line in pid_file.read_text(encoding="utf-8").split() if line.strip()]
+class RecordedProcess(NamedTuple):
+    pid: int
+    created: int | None = None
 
 
-def process_is_gone(pid: int) -> bool:
-    """Whether the operating system no longer runs `pid`.
+def windows_creation_time(kernel32, handle: int) -> int:
+    get_times = kernel32.GetProcessTimes
+    get_times.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    get_times.restype = wintypes.BOOL
+    created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+    if not get_times(handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return (created.dwHighDateTime << 32) | created.dwLowDateTime
+
+
+def hung_debugger(tmp_path: Path) -> Path:
+    if not WINDOWS:
+        return FAKE_HUNG_DEBUGGER
+
+    # Record creation time inside each process, before Windows can reuse its PID.
+    # The real fake still starts and hangs its own child through this launcher.
+    launcher = tmp_path / "hung_debugger.py"
+    launcher.write_text(
+        "import ctypes\nimport os\nimport runpy\nfrom ctypes import wintypes\n\n"
+        + inspect.getsource(windows_creation_time)
+        + '''
+def record_identity():
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    current_process = kernel32.GetCurrentProcess
+    current_process.restype = wintypes.HANDLE
+    created = windows_creation_time(kernel32, current_process())
+    with open(os.environ["AGENTIC_HIL_TEST_PID_FILE"], "a", encoding="utf-8") as handle:
+        handle.write(f"{os.getpid()} {created}\\n")
+
+'''
+        + f'main = runpy.run_path({str(FAKE_HUNG_DEBUGGER)!r})["main"]\n'
+        + 'main.__globals__.update(__file__=__file__, record_pid=record_identity)\n'
+        + "raise SystemExit(main())\n",
+        encoding="utf-8",
+    )
+    return launcher
+
+
+def recorded_processes(pid_file: Path) -> list[RecordedProcess]:
+    return [
+        RecordedProcess(*map(int, line.split()))
+        for line in pid_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def process_is_gone(process: RecordedProcess) -> bool:
+    """Whether the operating system no longer runs the recorded process.
 
     On Linux a process the reap has already killed can still be a zombie when
     nobody has waited for it (the grandchild's parent died first), and a zombie
     runs nothing, so the state is read out of procfs rather than inferred from
-    `kill(pid, 0)`, which succeeds on one. On Windows an open handle with an exit
-    code other than STILL_ACTIVE is a process that has ended.
+    `kill(pid, 0)`, which succeeds on one. On Windows a signalled handle is an
+    exited process, and the creation time distinguishes a reused PID.
     """
+    pid, created = process
     if WINDOWS:
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        assert created is not None, process
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         process_query_limited_information = 0x1000
-        still_active = 259
-        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        synchronize = 0x100000
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        open_process.restype = wintypes.HANDLE
+        wait_for_process = kernel32.WaitForSingleObject
+        wait_for_process.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        wait_for_process.restype = wintypes.DWORD
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        handle = open_process(process_query_limited_information | synchronize, False, pid)
         if not handle:
-            return True
-        try:
-            exit_code = ctypes.c_ulong()
-            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            error = ctypes.get_last_error()
+            if error in {5, 87}:  # ERROR_ACCESS_DENIED for a reused PID or ERROR_INVALID_PARAMETER for an absent PID.
                 return True
-            return exit_code.value != still_active
+            raise ctypes.WinError(error)
+        try:
+            wait_result = wait_for_process(handle, 0)
+            if wait_result == 0xFFFFFFFF:  # WAIT_FAILED
+                raise ctypes.WinError(ctypes.get_last_error())
+            return wait_result == 0 or windows_creation_time(kernel32, handle) != created
         finally:
-            kernel32.CloseHandle(handle)
+            close_handle(handle)
     status = Path(f"/proc/{pid}/status")
     if status.is_dir() or status.is_file():
         try:
@@ -249,14 +313,14 @@ def process_is_gone(pid: int) -> bool:
     return False
 
 
-def wait_until_gone(pids: list[int], timeout_s: float) -> list[int]:
-    """The pids of `pids` still running after `timeout_s`, ideally none."""
+def wait_until_gone(processes: list[RecordedProcess], timeout_s: float) -> list[int]:
+    """The PIDs of recorded processes still running after `timeout_s`."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        if all(process_is_gone(pid) for pid in pids):
+        if all(process_is_gone(process) for process in processes):
             return []
         time.sleep(0.05)
-    return [pid for pid in pids if not process_is_gone(pid)]
+    return [process.pid for process in processes if not process_is_gone(process)]
 
 
 def written_log(config, result: dict) -> dict:
@@ -269,7 +333,7 @@ def written_log(config, result: dict) -> dict:
 def call_with_a_hung_debugger(tmp_path: Path, tool: str, debugger_type: str) -> tuple[object, dict, float]:
     """One tool call against the hung fake: the configuration, the result and the seconds it took."""
     timeout_s = scaled_time_bound(HANG_TIMEOUT_S)
-    config = load_config(str(config_with_debugger(tmp_path, FAKE_HUNG_DEBUGGER, debugger_type=debugger_type, timeout_s=timeout_s)))
+    config = load_config(str(config_with_debugger(tmp_path, hung_debugger(tmp_path), debugger_type=debugger_type, timeout_s=timeout_s)))
     service = AgenticHILToolService(config)
     started = time.monotonic()
     try:
@@ -327,9 +391,9 @@ def test_a_hanging_debugger_is_reaped_and_answers_timeout(tmp_path: Path, pid_fi
     # than once, and every one of those processes has to be gone as well. The
     # survivors check is the contract; how many lines the file holds is not,
     # since the kill can land between the parent's line and the child's.
-    pids = recorded_pids(pid_file)
-    assert len(pids) >= 2, f"the fake did not record itself and its child: {pids}"
-    assert wait_until_gone(pids, REAP_CEILING_S) == [], "the debugger or its child survived the reap"
+    processes = recorded_processes(pid_file)
+    assert len(processes) >= 2, f"the fake did not record itself and its child: {processes}"
+    assert wait_until_gone(processes, REAP_CEILING_S) == [], "the debugger or its child survived the reap"
 
 
 def test_a_timed_out_probe_keeps_the_target_state_unconfirmed(tmp_path: Path, pid_file: Path) -> None:
@@ -358,7 +422,7 @@ def test_a_hanging_probe_discovery_answers_its_own_timeout_sentence(tmp_path: Pa
     assert result["target_contacted"] is False
     assert result["side_effect_status"] == "not_started"
     assert elapsed < scaled_time_bound(CALL_CEILING_S), f"the call took {elapsed:.1f} s against a configured deadline of {scaled_time_bound(HANG_TIMEOUT_S)} s"
-    assert wait_until_gone(recorded_pids(pid_file), REAP_CEILING_S) == [], "the debugger or its child survived the reap"
+    assert wait_until_gone(recorded_processes(pid_file), REAP_CEILING_S) == [], "the debugger or its child survived the reap"
 
 
 @pytest.mark.parametrize("debugger_type", BACKENDS)
@@ -377,7 +441,7 @@ def test_a_hanging_version_check_answers_its_own_timeout_sentence(tmp_path: Path
     assert result["summary"] == "Debugger version check timed out."
     assert result["backend"] == debugger_type
     assert elapsed < scaled_time_bound(CALL_CEILING_S), f"the call took {elapsed:.1f} s against a configured deadline of {scaled_time_bound(HANG_TIMEOUT_S)} s"
-    assert wait_until_gone(recorded_pids(pid_file), REAP_CEILING_S) == [], "the debugger or its child survived the reap"
+    assert wait_until_gone(recorded_processes(pid_file), REAP_CEILING_S) == [], "the debugger or its child survived the reap"
 
 
 def test_a_debugger_that_finishes_inside_the_deadline_is_untouched(tmp_path: Path) -> None:

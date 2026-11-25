@@ -1258,7 +1258,7 @@ def test_pyocd_flash_then_failed_reset_is_partial(tmp_path: Path) -> None:
     assert "success_confirmed" not in result, result
 
 
-def test_pyocd_flash_then_timed_out_reset_names_the_timeout(tmp_path: Path) -> None:
+def test_pyocd_flash_then_timed_out_reset_names_the_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The same partial effect, but the reset never answered: the timeout is a field, not only a cause (#655).
 
     `error_type` stays `reset_failed`, the word for a failed post-flash reset,
@@ -1267,9 +1267,19 @@ def test_pyocd_flash_then_timed_out_reset_names_the_timeout(tmp_path: Path) -> N
     the summary, the causes and the steps are the timeout's, so a caller can
     tell a reset that hung from one the target refused.
     """
-    # Long enough for the flash, a spawned interpreter, on a loaded machine;
-    # the reset sleeps far past it.
-    config = config_for(tmp_path, "pyocd", FAKE_PYOCD_RESET_HANGS, timeout_s=8)
+    from agentic_hil.backends import pyocd
+
+    config = config_for(tmp_path, "pyocd", FAKE_PYOCD_RESET_HANGS, timeout_s=2)
+    spawn = pyocd.spawn_command
+
+    def allow_flash_startup(command: list[str], cwd: str, timeout_seconds: float) -> pyocd.CompletedCommand:
+        if command[2] in {"flash", "json"}:
+            timeout_seconds = max(timeout_seconds, scaled_time_bound(8))
+        return spawn(command, cwd, timeout_seconds)
+
+    # Commands that must return get startup slack. The hung reset uses exactly
+    # the deadline the backend supplies.
+    monkeypatch.setattr(pyocd, "spawn_command", allow_flash_startup)
 
     result = call(config, "flash_firmware", {"image_path": "build/firmware.elf", "reset_after_flash": True})
 

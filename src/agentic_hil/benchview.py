@@ -274,34 +274,28 @@ class BenchView:
         return self._answer({"backends": answers})
 
     def leases(self) -> JsonObject:
-        """Who holds each device, from every process on this machine, and every standing incident with its next step."""
+        """Device holds from active jobs and machine holder records, plus standing incidents."""
         devices = self._configured()
         names = _names_by_key(devices)
-        held = self._held_records(names)
-        readable = held is not None
-        held_by_key = held or {}
         activity = self._activity_now()
+        occupied_keys = {key for known in activity.values() for keys in known.held_job_keys.values() for key in keys}
+        held = self._held_records(names.keys() | occupied_keys)
+        held_by_key = held or {}
         holds: list[JsonObject] = []
         for device in devices:
-            detail = next((held_by_key[key] for key in device.keys if key in held_by_key), None)
-            if detail is None:
-                continue
-            holder: JsonObject = detail["holder"] if isinstance(detail.get("holder"), dict) else {}
-            hold: JsonObject = {
-                "device": device.name,
-                "kind": device.kind,
-                **{key: detail[key] for key in _HOLD_FIELDS if key in detail},
-                "holder": {key: holder[key] for key in _HOLDER_FIELDS if key in holder},
-            }
+            device_record = next((held_by_key[key] for key in device.keys if key in held_by_key), None)
             known = activity.get(device.name)
-            if known is not None and known.state == "held" and known.job_id:
-                hold["job_id"] = known.job_id
-            holds.append(hold)
+            if known is not None and known.held_job_keys:
+                for job_id, keys in known.held_job_keys.items():
+                    record = next((held_by_key[key] for key in keys if key in held_by_key), device_record)
+                    holds.append({**_lease_hold(device, record or {}), "job_id": job_id})
+            elif device_record is not None:
+                holds.append(_lease_hold(device, device_record))
         incidents = self._incidents()
         own = project_resource(self.config)
         return self._answer({
             "holds": holds,
-            "holds_readable": readable,
+            "holds_readable": held is not None,
             "incidents": [_incident(entry, names, own) for entry in incidents or []],
             "incidents_readable": incidents is not None,
         })
@@ -363,9 +357,9 @@ class BenchView:
     def _held_records(self, keys: Iterable[str]) -> dict[str, JsonObject] | None:
         """Each of `keys` whose holder record says it is held, with what `busy_result` reads off that record.
 
-        None where the lock directory cannot be read. Both reads only open the
-        record; neither tries the lock. A record outlives an owner that died
-        holding it, so a device can read as held after its holder is gone (its
+        None where the lock directory cannot be read. A single read supplies both
+        the state and details without trying the lock. A record outlives an owner
+        that died holding it, so a device can read as held after its holder is gone (its
         heartbeat then reads stale), until the next owner takes it and gives it
         back. That errs the way a reader of a bench has to: toward leaving a
         device alone."""
@@ -380,7 +374,7 @@ class BenchView:
         for key in sorted(set(keys)):
             record = reader.holder(key)
             if record is not None and record.get("state") == "held":
-                records[key] = reader.busy_result(key)
+                records[key] = reader.busy_result(key, observed_holder=record)
         return records
 
     def _incidents(self) -> list[JsonObject] | None:
@@ -633,6 +627,16 @@ def _names_by_key(devices: list[_Device]) -> dict[str, list[str]]:
     # Not a device: the host-wide probe enumeration, which every debugger needs.
     names.setdefault(DEBUGGER_DISCOVERY_RESOURCE, set()).update(device.name for device in devices if device.kind == DebuggerDevice.kind)
     return {key: sorted(value) for key, value in names.items()}
+
+
+def _lease_hold(device: _Device, record: JsonObject) -> JsonObject:
+    holder: JsonObject = record["holder"] if isinstance(record.get("holder"), dict) else {}
+    return {
+        "device": device.name,
+        "kind": device.kind,
+        **{key: record[key] for key in _HOLD_FIELDS if key in record},
+        "holder": {key: holder[key] for key in _HOLDER_FIELDS if key in holder},
+    }
 
 
 def _described(device: _Device, situation: _Situation) -> JsonObject:

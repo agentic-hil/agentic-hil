@@ -71,6 +71,8 @@ exclude tests/test_bench_esp32_images.py
 # The HardFault plan test reads checkout-only bench files and imports the
 # repository's version check from tools/.
 exclude tests/test_f446re_hardfault_plan.py
+# The Arm GDB replay test reads checkout-only bench plans and firmware.
+exclude tests/test_gdb_mi_arm_recordings.py
 # The H533RE recording test reads checkout-only plans and firmware sources.
 exclude tests/test_h533re_under_reset_recordings.py
 # The container test of the install eval's startup arm imports the verifier out
@@ -96,6 +98,8 @@ exclude tests/test_readthedocs_moved.py
 exclude tests/test_shared_bench_docs.py
 # The Pico demo test reads the checkout's example and documentation files.
 exclude tests/test_pico_rp2040_demo.py
+# The Nano demo test reads checkout-only firmware and imports its tools.
+exclude tests/test_nano_esp32s3_demo.py
 # These read CHANGELOG.md, docs/ and the bench plans and firmware, which a
 # distribution does not carry.
 exclude tests/test_changelog_release_layouts.py
@@ -104,3 +108,4 @@ recursive-include examples *.py *.md *.yaml *.yml
 # The firmware demos are repository content.
 prune examples/nucleo-f446re_demo
 prune examples/pico-rp2040_demo
+prune examples/nano-esp32s3_demo

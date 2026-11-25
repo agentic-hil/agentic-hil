@@ -40,6 +40,20 @@ RTS lines have to restart the chip into its bootloader the way the auto-reset
 circuit on Espressif's ESP32-DevKitC does, and
 [An ESP32 through esptool](configuration.md#an-esp32-through-esptool) says what
 that changes and what a board with only FLASH and RST buttons answers instead.
+
+The Arduino Nano ESP32 demo uses the board's native USB-Serial/JTAG interface
+for verified flash, reset to run and read-only console checks. The shared-bench
+qualification plan checks 20 consecutive A/B cycles. Its job steps bound what
+can be reported about reconnects. Physical disconnect is outside the plan.
+Two supplemental plans, `nano_esp32s3_console_refuses_flash.yaml` and
+`nano_esp32s3_console_refuses_reset.yaml`, exercise flash and reset while the
+console is open. The step is refused with `device_busy` before esptool runs.
+Only a configuration with exactly one debugger also names the console in
+`held_by_com_session`. An image must be running before each of these plans. No
+receipt of them from the shared bench is published; the pull request says what
+was evidenced on the board. Probe exclusion and competing port owners are
+covered offline.
+
 The Nucleo-F446RE remains the reference board for
 [the STM32 starter](https://github.com/agentic-hil/stm32-starter) and its
 worked example in this repository.

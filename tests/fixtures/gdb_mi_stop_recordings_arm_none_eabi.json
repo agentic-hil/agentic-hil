@@ -1,0 +1,64 @@
+{
+  "schema": "agentic-hil.gdb-mi-stop-recording/v1",
+  "provenance": {
+    "source_commit": "9f2769017ebc3525317dee008b4944834e307331",
+    "recorded_on": "2026-11-25",
+    "run_id": "job-07ee9aecf1ff95e7, job-c2a4b07d17c0e862",
+    "workflow_url": null,
+    "workflow_url_note": "no workflow ran; the two serve job ids identify the runs, one per scenario",
+    "recorded_by": "two test plans run as agentic-hil serve jobs, not the bench stage of tests/bench/test_bench_faults.py; its path sanitizer is the redaction",
+    "agentic_hil_version": "0.28.0",
+    "gdb_version": "GNU gdb (xPack GNU Arm Embedded GCC x86_64) 14.2.90.20240526-git",
+    "gdb_executable": "arm-none-eabi-gdb",
+    "gdb_executable_sha256": "98dcb123acc98fa50917f661e28cdef00094508b809081abfed81bf36a26d700",
+    "gdb_identity": "the session logs name no GDB: each job report carries the bench config digest below, that config names this arm-none-eabi-gdb as debug.gdb_executable, and gdb_version is the first line of its --version on the bench on the recording day",
+    "bench_config_sha256": "199f03151137349b04077e47cb1b13592004b85480fd1c777b2280e80c427bdf",
+    "backend": "openocd",
+    "backend_version": "Open On-Chip Debugger 0.12.0",
+    "board": "ST Nucleo-F446RE (STM32F446RE)",
+    "firmware_image": "undefined_instruction",
+    "firmware_source": "tests/bench/firmware/undefined_instruction.c",
+    "firmware_elf_sha256": "90c8d27a1a1fa363b09894c079bd622d1fae7b3d25e4dbb721036249a134133b",
+    "firmware_toolchain": "arm-none-eabi-gcc (GNU Tools for STM32 14.3.rel1.20251027-0700) 14.3.1 20250623",
+    "evidence_artifacts": {
+      "attach_hardfault": {
+        "evidence.zip_sha256": "cfc368b023ca06d4e85529e5a8409cad3325ba76f0afa5a85076be7e9e600d92",
+        "gdb_session_log_sha256": "bfb414b03b069e4f7fb6f35cc5c5b9ebbcef79d087cf1f471d964c5bbc2f2f8d"
+      },
+      "reset_halt_to_hardfault": {
+        "evidence.zip_sha256": "42460f10db4fb129e56621e2ebce682f49b4b79d73787fcca7328d6d32fd1f5b",
+        "gdb_session_log_sha256": "c42e5c847ced8dc783ac89e4ee7418e50cd06f59baaf0faa56ede41528831387"
+      }
+    },
+    "redacted_fields": {
+      "frame.file": "absolute source path replaced with <path redacted>; relative source names retained",
+      "frame.fullname": "absolute source path replaced with <path redacted>; relative source names retained"
+    }
+  },
+  "recordings": [
+    {
+      "scenario": "attach_hardfault",
+      "job_id": "job-07ee9aecf1ff95e7",
+      "records": [
+        "*stopped,frame={addr=\"0x08000416\",func=\"HardFault_Handler\",args=[],file=\"<path redacted>\",fullname=\"<path redacted>\",line=\"87\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\""
+      ],
+      "expected_stop_reasons": [
+        "exception:hardfault"
+      ]
+    },
+    {
+      "scenario": "reset_halt_to_hardfault",
+      "job_id": "job-c2a4b07d17c0e862",
+      "records": [
+        "*stopped,frame={addr=\"0x08000430\",func=\"Reset_Handler\",args=[],file=\"<path redacted>\",fullname=\"<path redacted>\",line=\"56\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+        "*stopped,reason=\"breakpoint-hit\",disp=\"keep\",bkptno=\"1\",frame={addr=\"0x0800041c\",func=\"main\",args=[],file=\"<path redacted>\",fullname=\"<path redacted>\",line=\"93\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\"",
+        "*stopped,reason=\"signal-received\",signal-name=\"SIGINT\",signal-meaning=\"Interrupt\",frame={addr=\"0x08000416\",func=\"HardFault_Handler\",args=[],file=\"<path redacted>\",fullname=\"<path redacted>\",line=\"87\",arch=\"armv7e-m\"},thread-id=\"1\",stopped-threads=\"all\""
+      ],
+      "expected_stop_reasons": [
+        "reset",
+        "breakpoint_hit:expected",
+        "exception:hardfault"
+      ]
+    }
+  ]
+}
