@@ -10,6 +10,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - Add the Arduino Nano ESP32 demo with reproducible ESP32-S3 A/B images, a native USB shared-bench qualification plan, and sanitized result reporting. (#719)
 
+### Fixed
+
+- Keep device holds visible in the bench server's HTTP and MCP reads from job dispatch until the scheduler records the end, including for jobs on shared CAN buses. (#937)
+
 ## [0.29.0] - 2026-11-25
 
 ### Added

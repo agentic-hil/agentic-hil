@@ -79,6 +79,13 @@ devices are claimed for it, so younger jobs stop passing it on them. The queue
 is open to read: `GET /v1/queue`, or `agentic-hil remote queue`, shows every
 waiting job, whose it is, and what it waits for.
 
+`GET /v1/leases` shows holds for active jobs from dispatch until the scheduler
+records their end, as well as recorded device holds from outside the queue.
+To check whether a device is in use, read `/v1/queue` first, then `/v1/leases`.
+A job that starts between the two reads appears in the second answer if it is
+still active. The reads grant no reservation. A job submitted after the reads
+can start at any time.
+
 Every job carries the name it was submitted under. `agentic-hil remote submit`
 sends `--user` when it is given and this machine's login name when it is not;
 a request without a `From` header, such as a bare `curl`, is queued as
