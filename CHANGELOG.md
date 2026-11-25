@@ -8,6 +8,11 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Added
 
+- Preserve four GDB/MI stop records for two HardFault scenarios captured with `arm-none-eabi-gdb` on the Nucleo-F446RE at the shared bench.
+  Two `agentic-hil serve` plans replaced the pytest bench stage. The captures use job IDs `job-07ee9aecf1ff95e7` and `job-c2a4b07d17c0e862` in place of a workflow URL.
+  Replay lives in `tests/test_gdb_mi_arm_recordings.py` because another change edits `tests/test_gdb_mi_recordings.py`.
+  The session logs omit the GDB build. Each job report supplies the bench configuration digest, which links the job to the configured `arm-none-eabi-gdb`. Its `--version` output on the recording day identifies the xPack build.
+  Both recording plans end red by design and keep the stop records in their evidence bundles. The companion plan passed on the same bench using an image built from the same firmware source, without recapturing the fixture. Both recording plans passed the plan check. (#756)
 - Add the Arduino Nano ESP32 demo with reproducible ESP32-S3 A/B images, a native USB shared-bench qualification plan, and sanitized result reporting. (#719)
 
 ### Fixed

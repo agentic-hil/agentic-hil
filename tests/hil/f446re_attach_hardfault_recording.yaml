@@ -1,0 +1,33 @@
+# Copy examples/nucleo-f446re_demo to a scratch directory without its build/.
+# Replace Src/main.c with tests/bench/firmware/undefined_instruction.c.
+# In the copy, run cmake --preset Debug --fresh and cmake --build --preset Debug.
+# Copy build/Debug/nucleo-f446re_demo.elf to build/hil/f446re_undefined_instruction.elf
+# under the plan's workspace root.
+#
+# Ends red by design at step 6 (target_exception). The job's evidence bundle
+# holds the reasonless GDB/MI stop in HardFault_Handler.
+version: 5
+name: Nucleo-F446RE attach HardFault recording
+steps:
+  - action: flash
+    debugger: f446re
+    image_path: build/hil/f446re_undefined_instruction.elf
+    reset_after_flash: false
+  - action: uart_open
+    port_id: f446re_vcp
+    clear_buffer: true
+  - action: reset
+    debugger: f446re
+    mode: run
+  - action: uart_expect
+    port_id: f446re_vcp
+    text: "undefined instruction image booted"
+    timeout_s: 5
+  - action: uart_close
+    port_id: f446re_vcp
+  - action: debug_start
+    debugger: f446re
+    image_path: build/hil/f446re_undefined_instruction.elf
+    mode: attach
+  - action: debug_stop
+    debugger: f446re
