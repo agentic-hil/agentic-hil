@@ -94,6 +94,8 @@ exclude tests/test_readthedocs_moved.py
 exclude tests/test_shared_bench_docs.py
 # The Pico demo test reads the checkout's example and documentation files.
 exclude tests/test_pico_rp2040_demo.py
+# The Nano demo test reads checkout-only firmware and imports its tools.
+exclude tests/test_nano_esp32s3_demo.py
 # These read CHANGELOG.md, docs/ and the bench plans and firmware, which a
 # distribution does not carry.
 exclude tests/test_changelog_release_layouts.py
@@ -102,3 +104,4 @@ recursive-include examples *.py *.md *.yaml *.yml
 # The firmware demos are repository content.
 prune examples/nucleo-f446re_demo
 prune examples/pico-rp2040_demo
+prune examples/nano-esp32s3_demo

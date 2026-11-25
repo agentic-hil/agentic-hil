@@ -1,0 +1,25 @@
+# Copy to the authoritative configuration location and replace all placeholders.
+version: 3
+workspace_root: "<DEMO_WORKSPACE_ROOT>"
+state_root: "<TRUSTED_STATE_ROOT>"
+artifacts:
+  allowed_roots: ["."]
+  allowed_extensions: [".bin"]
+debuggers:
+  esp32s3:
+    type: esptool
+    target_type: esp32s3
+    flash_address: "0x0"
+    com_port: esp32s3
+    permissions:
+      allow_flash: true
+      allow_reset: true
+      allow_raw_debugger_commands: false
+      allow_mass_erase: false
+com_ports:
+  esp32s3:
+    device: "/dev/serial/by-id/replace-with-nano-usb-device"
+    serial_number: "REPLACE-WITH-USB-MAC"
+    baudrate: 115200
+    permissions:
+      allow_write: false

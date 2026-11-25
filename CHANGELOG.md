@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- Add the Arduino Nano ESP32 demo with reproducible ESP32-S3 A/B images, a native USB shared-bench qualification plan, and sanitized result reporting. (#719)
+
 ## [0.29.0] - 2026-11-25
 
 ### Added
