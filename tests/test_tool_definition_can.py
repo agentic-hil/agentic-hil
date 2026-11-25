@@ -49,6 +49,7 @@ from test_can_frame_and_routing import RecordingBus, fake_can_module
 from test_can_participant_sessions import BUS as SHARED_BUS
 from test_can_participant_sessions import SHARES_YAML, SharedFakeParticipant
 from test_mcp_envelope import real_service
+from test_mcp_result_text import assert_table
 from test_tool_descriptions import DESCRIPTION_LIMIT, PROPERTY_DESCRIPTION_LIMIT, property_descriptions
 
 import agentic_hil
@@ -248,10 +249,13 @@ RELATIONS: list[tuple[Callable[[str], bool], str, str]] = [
 ]
 
 
-@pytest.mark.parametrize(("check", "true_statement", "inverted"), RELATIONS, ids=[f"{check.__name__}-{index}" for index, (check, _, _) in enumerate(RELATIONS)])
-def test_each_relation_check_refuses_its_inverted_statement(check: Callable[[str], bool], true_statement: str, inverted: str) -> None:
-    assert check(true_statement), true_statement
-    assert not check(inverted), inverted
+def test_each_relation_check_refuses_its_inverted_statement() -> None:
+    def check_row(check: Callable[[str], bool], true_statement: str, inverted: str) -> None:
+        assert check(true_statement), true_statement
+        assert not check(inverted), inverted
+
+    rows = RELATIONS
+    assert_table(rows, check_row, ids=[f"{check.__name__}-{index}" for index, (check, _, _) in enumerate(RELATIONS)])
 
 
 # ---------------------------------------------------------------------------

@@ -46,6 +46,7 @@ from support import scaled_time_bound
 from test_debug_sessions import START_TIMEOUT_S, debug_service
 from test_debugger_processes import CALL_CEILING_S, FAKE_HUNG_DEBUGGER, config_with_debugger
 from test_mcp_reference_resources import read_text
+from test_mcp_result_text import assert_table
 from test_read_until import close
 from test_tool_definition_uart import (
     NEGATION,
@@ -1113,13 +1114,16 @@ PARAPHRASES = [
 ]
 
 
-@pytest.mark.parametrize(("check", "accepted", "rejected"), PARAPHRASES, ids=[check.__name__ for check, _, _ in PARAPHRASES])
-def test_each_relation_accepts_its_paraphrases_and_rejects_their_inversions(check, accepted: tuple[str, ...], rejected: tuple[str, ...]) -> None:
-    arguments = ("allow_flash",) if check is needs_with_refusal else ()
-    for text in accepted:
-        assert check(text, *arguments), text
-    for text in rejected:
-        assert not check(text, *arguments), text
+def test_each_relation_accepts_its_paraphrases_and_rejects_their_inversions() -> None:
+    def check_row(check, accepted: tuple[str, ...], rejected: tuple[str, ...]) -> None:
+        arguments = ("allow_flash",) if check is needs_with_refusal else ()
+        for text in accepted:
+            assert check(text, *arguments), text
+        for text in rejected:
+            assert not check(text, *arguments), text
+
+    rows = PARAPHRASES
+    assert_table(rows, check_row, ids=[check.__name__ for check, _, _ in PARAPHRASES])
 
 
 # One meaning flipped in the listed definition: the whole tool, every
@@ -1192,17 +1196,21 @@ def scoped(tool: dict, scope: tuple[str, ...] | None) -> str:
     return nested_text(tool, *scope)
 
 
-@pytest.mark.parametrize(("name", "scope", "check", "arguments", "pattern", "replacement"), MUTATIONS)
-def test_each_check_refuses_the_listed_definition_with_its_meaning_flipped(listed: dict[str, dict], name: str, scope, check, arguments: tuple, pattern: str, replacement: str) -> None:
+def test_each_check_refuses_the_listed_definition_with_its_meaning_flipped(listed: dict[str, dict]) -> None:
     """The check holds for the definition as listed, and the same definition
     with one meaning flipped fails it: a check that only looks for words would
     pass both."""
-    original = scoped(listed[name], scope)
-    assert check(original, *arguments), original
-    flipped, count = mutated(listed[name], pattern, replacement)
-    assert count >= 1, (pattern, original)
-    text = scoped(flipped, scope)
-    assert not check(text, *arguments), text
+
+    def check_row(name: str, scope, check, arguments: tuple, pattern: str, replacement: str) -> None:
+        original = scoped(listed[name], scope)
+        assert check(original, *arguments), original
+        flipped, count = mutated(listed[name], pattern, replacement)
+        assert count >= 1, (pattern, original)
+        text = scoped(flipped, scope)
+        assert not check(text, *arguments), text
+
+    rows = MUTATIONS
+    assert_table(rows, check_row)
 
 
 # ---------------------------------------------------------------------------

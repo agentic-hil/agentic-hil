@@ -68,6 +68,7 @@ from test_error_catalogue_ec2_artifacts_reports import clauses
 from test_error_catalogue_ec3_run_coordination import CONSUMERS, NEGATION
 from test_error_catalogue_ec3_run_coordination import EXCLUDED as RUN_EXCLUDED
 from test_error_catalogue_ec3_run_coordination import PINNED_DYNAMIC as RUN_DYNAMIC_SITES
+from test_mcp_result_text import assert_table
 
 import agentic_hil
 from agentic_hil import humanize
@@ -79,6 +80,8 @@ from agentic_hil.report import SUCCESS_CHECKS, classify_failure_report, write_re
 from agentic_hil.tools import AgenticHILToolService
 
 PACKAGE = Path(str(agentic_hil.__file__)).parent
+PACKAGE_SCAN_GROUP = "error_catalogue_package_scan"
+pytestmark = pytest.mark.xdist_group(PACKAGE_SCAN_GROUP)
 Pair = tuple[str, str | None]
 # (module, function, expression), the key the run and artifact guards pin
 # their computed sites under; the module is named relative to the package.
@@ -1233,7 +1236,7 @@ def test_every_computed_type_is_pinned_with_what_it_carries() -> None:
 
 
 def test_the_scan_reads_every_module_and_the_pinned_number_of_types() -> None:
-    inventory = scan()
+    inventory = scanned()
     assert inventory.modules == module_names()
     problems = pin_problems(inventory)
     if problems:
@@ -1625,14 +1628,20 @@ def unknown_debugger_error_with(part: str, said: str, instead: str) -> dict:
     return entry
 
 
-@pytest.mark.parametrize("turned", sorted(LEASE_TURNED))
-def test_an_entry_that_holds_a_lease_state_against_a_record_the_check_lets_through_fails(turned: str) -> None:
-    assert lease_problems(unknown_debugger_error_with(*LEASE_TURNED[turned])) != []
+def test_an_entry_that_holds_a_lease_state_against_a_record_the_check_lets_through_fails() -> None:
+    def check_row(turned: str) -> None:
+        assert lease_problems(unknown_debugger_error_with(*LEASE_TURNED[turned])) != []
+
+    rows = ((turned,) for turned in sorted(LEASE_TURNED))
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("restated", sorted(LEASE_RESTATED))
-def test_an_entry_that_lets_each_passing_lease_state_through_another_way_passes(restated: str) -> None:
-    assert lease_problems(unknown_debugger_error_with(*LEASE_RESTATED[restated])) == []
+def test_an_entry_that_lets_each_passing_lease_state_through_another_way_passes() -> None:
+    def check_row(restated: str) -> None:
+        assert lease_problems(unknown_debugger_error_with(*LEASE_RESTATED[restated])) == []
+
+    rows = ((restated,) for restated in sorted(LEASE_RESTATED))
+    assert_table(rows, check_row)
 
 
 # The fields a refusal written as a dict carries for every type, and the advice
@@ -1825,13 +1834,16 @@ MCP_TURNED: dict[str, tuple[str, str]] = {
 }
 
 
-@pytest.mark.parametrize("turned", sorted(MCP_TURNED))
-def test_a_meaning_that_says_a_refusal_carries_fields_it_does_not_fails(turned: str) -> None:
-    said, wrong = MCP_TURNED[turned]
-    meaning = (catalogue_entry("mcp_command_untrusted") or {})["meaning"]
-    assert meaning.count(said) == 1, said
+def test_a_meaning_that_says_a_refusal_carries_fields_it_does_not_fails() -> None:
+    def check_row(turned: str) -> None:
+        said, wrong = MCP_TURNED[turned]
+        meaning = (catalogue_entry("mcp_command_untrusted") or {})["meaning"]
+        assert meaning.count(said) == 1, said
 
-    assert mcp_field_problems(meaning.replace(said, wrong)) != []
+        assert mcp_field_problems(meaning.replace(said, wrong)) != []
+
+    rows = ((turned,) for turned in sorted(MCP_TURNED))
+    assert_table(rows, check_row)
 
 
 # The meaning with what sets one refusal off, or the fields it carries, said
@@ -1853,10 +1865,13 @@ MCP_RESTATED: dict[str, tuple[str, str]] = {
 }
 
 
-@pytest.mark.parametrize("restated", sorted(MCP_RESTATED))
-def test_a_meaning_that_says_each_refusal_carries_its_fields_another_way_passes(restated: str) -> None:
-    said, again = MCP_RESTATED[restated]
-    meaning = (catalogue_entry("mcp_command_untrusted") or {})["meaning"]
-    assert meaning.count(said) == 1, said
+def test_a_meaning_that_says_each_refusal_carries_its_fields_another_way_passes() -> None:
+    def check_row(restated: str) -> None:
+        said, again = MCP_RESTATED[restated]
+        meaning = (catalogue_entry("mcp_command_untrusted") or {})["meaning"]
+        assert meaning.count(said) == 1, said
 
-    assert mcp_field_problems(meaning.replace(said, again)) == []
+        assert mcp_field_problems(meaning.replace(said, again)) == []
+
+    rows = ((restated,) for restated in sorted(MCP_RESTATED))
+    assert_table(rows, check_row)

@@ -48,6 +48,7 @@ from test_debug_sessions import (
     start_debug_session,
     stlink_dump_service,
 )
+from test_mcp_result_text import assert_table
 from test_tool_definition_debug_sessions import (
     CEILING,
     FLOOR,
@@ -560,9 +561,11 @@ def not_tied_to_one_backend(text: str) -> bool:
 # --- the checks accept paraphrases and reject inversions --------------------------
 
 
-@pytest.mark.parametrize(
-    ("check", "text", "accepted"),
-    [
+def test_each_check_accepts_a_paraphrase_and_rejects_an_inversion() -> None:
+    def check_row(check: Callable[[str], bool], text: str, accepted: bool) -> None:
+        assert bool(check(text)) is accepted, (check.__name__, text)
+
+    rows = [
         (reads_target_memory, "Read an allowed symbol's bytes from target memory.", True),
         (reads_target_memory, "Reads the memory a symbol occupies on the board.", True),
         (reads_target_memory, "Find a symbol's address. Reads no memory.", False),
@@ -716,15 +719,15 @@ def not_tied_to_one_backend(text: str) -> bool:
         (not_tied_to_one_backend, "Reset the board; 'init' is OpenOCD-only.", True),
         (not_tied_to_one_backend, "Reset the board. OpenOCD backend only.", False),
         (not_tied_to_one_backend, "Lists probes, only on OpenOCD.", False),
-    ],
-)
-def test_each_check_accepts_a_paraphrase_and_rejects_an_inversion(check: Callable[[str], bool], text: str, accepted: bool) -> None:
-    assert bool(check(text)) is accepted, (check.__name__, text)
+    ]
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize(
-    ("text", "error_type", "circumstance", "when", "accepted"),
-    [
+def test_the_refusal_check_wants_the_circumstance_beside_the_code_in_its_direction() -> None:
+    def check_row(text: str, error_type: str, circumstance: str, when: str, accepted: bool) -> None:
+        assert explains(text, error_type, circumstance, when) is accepted, (error_type, when, text)
+
+    rows = [
         ("Allowed if in debug.allowed_symbols or debug.allow_all_symbols is true, else permission_denied.", "permission_denied", ALLOWLIST, "absent", True),
         ("Not in debug.allowed_symbols: permission_denied.", "permission_denied", ALLOWLIST, "absent", True),
         ("Over debug.max_dump_size_bytes: permission_denied.", "permission_denied", ALLOWLIST, "absent", False),
@@ -762,48 +765,62 @@ def test_each_check_accepts_a_paraphrase_and_rejects_an_inversion(check: Callabl
         ("Failures: reset_failed (the reset was confirmed).", "reset_failed", RESET_FAILED, "absent", False),
         ("permission_denied without allow_probe (config version 1).", "permission_denied", ALLOW_PROBE, "absent", True),
         ("permission_denied with allow_probe (config version 1).", "permission_denied", ALLOW_PROBE, "absent", False),
-    ],
-)
-def test_the_refusal_check_wants_the_circumstance_beside_the_code_in_its_direction(text: str, error_type: str, circumstance: str, when: str, accepted: bool) -> None:
-    assert explains(text, error_type, circumstance, when) is accepted, (error_type, when, text)
+    ]
+    assert_table(rows, check_row)
 
 
 # --- all six definitions -----------------------------------------------------------
 
 
-@pytest.mark.parametrize("tool", TOOLS)
-def test_every_input_property_carries_its_own_description(listed: dict[str, dict], tool: str) -> None:
-    for name, text in property_texts(listed[tool]).items():
-        assert text.strip(), (tool, name)
+def test_every_input_property_carries_its_own_description(listed: dict[str, dict]) -> None:
+    def check_row(tool: str) -> None:
+        for name, text in property_texts(listed[tool]).items():
+            assert text.strip(), (tool, name)
+
+    rows = ((tool,) for tool in TOOLS)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("tool", TOOLS)
-def test_each_description_fits_the_listing_budget(listed: dict[str, dict], tool: str) -> None:
-    assert len(description(listed, tool)) <= DESCRIPTION_LIMIT, (tool, len(description(listed, tool)))
-    for name, text in property_texts(listed[tool]).items():
-        assert len(text) <= PROPERTY_LIMIT, (tool, name, len(text))
+def test_each_description_fits_the_listing_budget(listed: dict[str, dict]) -> None:
+    def check_row(tool: str) -> None:
+        assert len(description(listed, tool)) <= DESCRIPTION_LIMIT, (tool, len(description(listed, tool)))
+        for name, text in property_texts(listed[tool]).items():
+            assert len(text) <= PROPERTY_LIMIT, (tool, name, len(text))
+
+    rows = ((tool,) for tool in TOOLS)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("tool", TOOLS)
-def test_every_identifier_a_definition_names_exists(listed: dict[str, dict], known_literals: set[str], tool: str) -> None:
+def test_every_identifier_a_definition_names_exists(listed: dict[str, dict], known_literals: set[str]) -> None:
     """Each snake_case word is a listed tool, an argument, a string the source
     produces or reads, or a symbol an example offers."""
-    text = whole(listed, tool)
-    offered = {word for example in examples(text) for word in re.findall(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+", example)}
 
-    assert unknown_identifiers(text, listed, listed[tool], known_literals | offered) == []
+    def check_row(tool: str) -> None:
+        text = whole(listed, tool)
+        offered = {word for example in examples(text) for word in re.findall(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+", example)}
 
+        assert unknown_identifiers(text, listed, listed[tool], known_literals | offered) == []
 
-@pytest.mark.parametrize("tool", TOOLS)
-def test_the_definitions_name_the_probe_and_the_board_the_project_way(listed: dict[str, dict], tool: str) -> None:
-    text = whole(listed, tool)
-    assert uses_the_audience_words(text), text
-    assert allow_probe_is_qualified(text), text
+    rows = ((tool,) for tool in TOOLS)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("tool", BACKEND_NEUTRAL)
-def test_the_tools_that_run_on_every_backend_are_not_described_as_tied_to_one(listed: dict[str, dict], tool: str) -> None:
-    assert not_tied_to_one_backend(description(listed, tool)), description(listed, tool)
+def test_the_definitions_name_the_probe_and_the_board_the_project_way(listed: dict[str, dict]) -> None:
+    def check_row(tool: str) -> None:
+        text = whole(listed, tool)
+        assert uses_the_audience_words(text), text
+        assert allow_probe_is_qualified(text), text
+
+    rows = ((tool,) for tool in TOOLS)
+    assert_table(rows, check_row)
+
+
+def test_the_tools_that_run_on_every_backend_are_not_described_as_tied_to_one(listed: dict[str, dict]) -> None:
+    def check_row(tool: str) -> None:
+        assert not_tied_to_one_backend(description(listed, tool)), description(listed, tool)
+
+    rows = ((tool,) for tool in BACKEND_NEUTRAL)
+    assert_table(rows, check_row)
 
 
 def test_the_annotations_keep_what_the_code_does(listed: dict[str, dict]) -> None:
@@ -822,62 +839,82 @@ def test_the_annotations_keep_what_the_code_does(listed: dict[str, dict]) -> Non
 # --- the two symbol reads: definitions --------------------------------------------
 
 
-@pytest.mark.parametrize("tool", READS)
-def test_each_read_says_it_reads_target_memory(listed: dict[str, dict], tool: str) -> None:
-    assert reads_target_memory(description(listed, tool)), description(listed, tool)
+def test_each_read_says_it_reads_target_memory(listed: dict[str, dict]) -> None:
+    def check_row(tool: str) -> None:
+        assert reads_target_memory(description(listed, tool)), description(listed, tool)
+
+    rows = ((tool,) for tool in READS)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("tool", READS)
-def test_each_symbol_description_names_the_syntax_and_gives_only_valid_examples(listed: dict[str, dict], tool: str) -> None:
-    text = property_text(listed, tool, "symbol")
-    assert names_symbol_syntax(text), text
-    offered = examples(text)
-    assert offered, text
-    others = {"output_path": "build/symbol.hex"} if tool == DUMP else {}
-    for example in offered:
-        assert validate_tool_arguments(tool, {"symbol": example, **others}) is None, (example, text)
-        assert DEBUG_SYMBOL_PATTERN.match(example), (example, text)
+def test_each_symbol_description_names_the_syntax_and_gives_only_valid_examples(listed: dict[str, dict]) -> None:
+    def check_row(tool: str) -> None:
+        text = property_text(listed, tool, "symbol")
+        assert names_symbol_syntax(text), text
+        offered = examples(text)
+        assert offered, text
+        others = {"output_path": "build/symbol.hex"} if tool == DUMP else {}
+        for example in offered:
+            assert validate_tool_arguments(tool, {"symbol": example, **others}) is None, (example, text)
+            assert DEBUG_SYMBOL_PATTERN.match(example), (example, text)
+
+    rows = ((tool,) for tool in READS)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("tool", READS)
-def test_each_read_states_the_symbol_policy_and_its_refusals(listed: dict[str, dict], tool: str) -> None:
-    text = whole(listed, tool)
-    assert allows_either_policy_key(text), text
-    assert allow_all_grants_when_true(text), text
-    assert states_allow_all_default_false(text), text
-    assert explains(text, "permission_denied", ALLOWLIST), text
-    assert explains(text, "symbol_not_found", NOT_IN_ELF), text
+def test_each_read_states_the_symbol_policy_and_its_refusals(listed: dict[str, dict]) -> None:
+    def check_row(tool: str) -> None:
+        text = whole(listed, tool)
+        assert allows_either_policy_key(text), text
+        assert allow_all_grants_when_true(text), text
+        assert states_allow_all_default_false(text), text
+        assert explains(text, "permission_denied", ALLOWLIST), text
+        assert explains(text, "symbol_not_found", NOT_IN_ELF), text
+
+    rows = ((tool,) for tool in READS)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("tool", READS)
-def test_each_read_ties_each_prerequisite_to_its_backend_in_one_sentence(listed: dict[str, dict], tool: str) -> None:
+def test_each_read_ties_each_prerequisite_to_its_backend_in_one_sentence(listed: dict[str, dict]) -> None:
     """OpenOCD reads through the session; pyOCD and STM32CubeProgrammer from the ELF
     this server flashed. Said once, so a change to that support edits one phrase."""
-    text = description(listed, tool)
-    assert backend_support_is_one_sentence(text), text
-    for name, prop in property_texts(listed[tool]).items():
-        assert not any(re.search(rf"\b{backend}\b", prop, re.IGNORECASE) for backend in BACKEND_NAMES), (name, prop)
-    assert openocd_needs_a_session(text), text
-    assert sessionless_backends_need_this_servers_flashed_elf(text), text
-    assert explains(text, "session_not_active", SESSION), text
-    assert explains(text, "symbol_source_not_available", FLASHED_ELF), text
+
+    def check_row(tool: str) -> None:
+        text = description(listed, tool)
+        assert backend_support_is_one_sentence(text), text
+        for name, prop in property_texts(listed[tool]).items():
+            assert not any(re.search(rf"\b{backend}\b", prop, re.IGNORECASE) for backend in BACKEND_NAMES), (name, prop)
+        assert openocd_needs_a_session(text), text
+        assert sessionless_backends_need_this_servers_flashed_elf(text), text
+        assert explains(text, "session_not_active", SESSION), text
+        assert explains(text, "symbol_source_not_available", FLASHED_ELF), text
+
+    rows = ((tool,) for tool in READS)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("tool", READS)
-def test_each_read_says_an_open_session_answers_on_every_backend(listed: dict[str, dict], tool: str) -> None:
+def test_each_read_says_an_open_session_answers_on_every_backend(listed: dict[str, dict]) -> None:
     """#698: an open session answers on every backend; without one, OpenOCD
     refuses with session_not_active while pyOCD and STM32CubeProgrammer
     resolve against the ELF flash_firmware last wrote. The session is still
     named by the tool that opens it."""
-    text = description(listed, tool)
-    assert an_open_session_answers_on_every_backend(text), text
-    assert names(text, "debug_start_session"), text
-    assert flashed_elf_only_without_a_session(text), text
+
+    def check_row(tool: str) -> None:
+        text = description(listed, tool)
+        assert an_open_session_answers_on_every_backend(text), text
+        assert names(text, "debug_start_session"), text
+        assert flashed_elf_only_without_a_session(text), text
+
+    rows = ((tool,) for tool in READS)
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("tool", READS)
-def test_each_read_states_the_size_cap(listed: dict[str, dict], tool: str) -> None:
-    assert caps_the_read_size(whole(listed, tool)), whole(listed, tool)
+def test_each_read_states_the_size_cap(listed: dict[str, dict]) -> None:
+    def check_row(tool: str) -> None:
+        assert caps_the_read_size(whole(listed, tool)), whole(listed, tool)
+
+    rows = ((tool,) for tool in READS)
+    assert_table(rows, check_row)
 
 
 def test_the_value_read_names_its_readings_and_when_the_integers_come(listed: dict[str, dict]) -> None:

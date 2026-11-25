@@ -45,6 +45,7 @@ import pytest
 from conftest import FAKE_GDB, write_config
 from support import scaled_time_bound
 from test_contact_marker import FakePort, explains_outside_lock_causes, install_fake_serial
+from test_mcp_result_text import assert_table
 from test_read_until import DIE, ScriptedSerialHandle, close, tools_call
 
 import agentic_hil
@@ -344,9 +345,12 @@ def test_the_types_owned_elsewhere_stay_out_of_the_com_inventory() -> None:
     assert not owned & set(com_scan().found)
 
 
-@pytest.mark.parametrize("error_type", sorted(COM_ERROR_TYPES))
-def test_every_com_error_type_has_a_catalogue_entry(error_type: str) -> None:
-    assert error_type in ERROR_CATALOGUE, f"the catalogue has no entry for {error_type}"
+def test_every_com_error_type_has_a_catalogue_entry() -> None:
+    def check_row(error_type: str) -> None:
+        assert error_type in ERROR_CATALOGUE, f"the catalogue has no entry for {error_type}"
+
+    rows = ((error_type,) for error_type in sorted(COM_ERROR_TYPES))
+    assert_table(rows, check_row)
 
 
 # Each is appended to comports.py as it stands. A refusal written any of these
@@ -575,17 +579,20 @@ def resolved(service: AgenticHILToolService, error_type: str) -> dict:
     return json.loads(contents[0]["text"])
 
 
-@pytest.mark.parametrize("error_type", sorted(COM_ERROR_TYPES))
-def test_the_reference_resolves_every_com_error_type(reference: AgenticHILToolService, error_type: str) -> None:
-    entry = resolved(reference, error_type)
+def test_the_reference_resolves_every_com_error_type(reference: AgenticHILToolService) -> None:
+    def check_row(error_type: str) -> None:
+        entry = resolved(reference, error_type)
 
-    assert entry == catalogue_entry(error_type)
-    assert entry["error_type"] == error_type
-    assert entry["meaning"].strip(), entry
-    assert entry["remediation"], entry
-    assert all(isinstance(step, str) and step.strip() for step in entry["remediation"]), entry
-    assert entry.get("do_not"), entry
-    assert all(isinstance(step, str) and step.strip() for step in entry["do_not"]), entry
+        assert entry == catalogue_entry(error_type)
+        assert entry["error_type"] == error_type
+        assert entry["meaning"].strip(), entry
+        assert entry["remediation"], entry
+        assert all(isinstance(step, str) and step.strip() for step in entry["remediation"]), entry
+        assert entry.get("do_not"), entry
+        assert all(isinstance(step, str) and step.strip() for step in entry["do_not"]), entry
+
+    rows = ((error_type,) for error_type in sorted(COM_ERROR_TYPES))
+    assert_table(rows, check_row)
 
 
 # ---------------------------------------------------------------------------
@@ -813,22 +820,28 @@ def test_every_new_entry_has_its_claims() -> None:
     assert set(ORDER) <= NEW_ENTRIES
 
 
-@pytest.mark.parametrize("error_type", sorted(CLAIMS))
-def test_a_new_entry_says_what_the_code_does(error_type: str) -> None:
-    entry = entry_of(error_type)
-    where = {"meaning": [entry["meaning"]], "first": entry["remediation"][:1], "steps": entry["remediation"], "do_not": entry.get("do_not", [])}
+def test_a_new_entry_says_what_the_code_does() -> None:
+    def check_row(error_type: str) -> None:
+        entry = entry_of(error_type)
+        where = {"meaning": [entry["meaning"]], "first": entry["remediation"][:1], "steps": entry["remediation"], "do_not": entry.get("do_not", [])}
 
-    unmet = [(place, patterns) for place, patterns in CLAIMS[error_type] if not says(where[place], *patterns)]
-    assert unmet == [], (unmet, entry)
+        unmet = [(place, patterns) for place, patterns in CLAIMS[error_type] if not says(where[place], *patterns)]
+        assert unmet == [], (unmet, entry)
+
+    rows = ((error_type,) for error_type in sorted(CLAIMS))
+    assert_table(rows, check_row)
 
 
-@pytest.mark.parametrize("error_type", sorted(ORDER))
-def test_a_new_entry_orders_its_steps_the_way_the_state_needs(error_type: str) -> None:
-    steps = entry_of(error_type)["remediation"]
-    indexes = [step_index(steps, *patterns) for patterns in ORDER[error_type]]
+def test_a_new_entry_orders_its_steps_the_way_the_state_needs() -> None:
+    def check_row(error_type: str) -> None:
+        steps = entry_of(error_type)["remediation"]
+        indexes = [step_index(steps, *patterns) for patterns in ORDER[error_type]]
 
-    assert -1 not in indexes, (indexes, steps)
-    assert indexes == sorted(indexes) and len(set(indexes)) == len(indexes), (indexes, steps)
+        assert -1 not in indexes, (indexes, steps)
+        assert indexes == sorted(indexes) and len(set(indexes)) == len(indexes), (indexes, steps)
+
+    rows = ((error_type,) for error_type in sorted(ORDER))
+    assert_table(rows, check_row)
 
 
 def test_the_unverified_entry_names_every_status_it_is_refused_with() -> None:
