@@ -993,9 +993,16 @@ class BenchJobService:
             queue = self._queue()
             now = queue.now
             newest = sorted(self.store.jobs.values(), key=lambda data: float(data.get("submitted_at") or 0.0), reverse=True)
+            occupants: dict[str, dict[str, list[str]]] = {}
+            for key, job_id in queue.occupants.items():
+                for name in self._names_of(key):
+                    occupants.setdefault(name, {}).setdefault(job_id, []).append(key)
             activity: dict[str, DeviceActivity] = {}
             for name, keys in self._keys.items():
+                held_job_keys = {job_id: tuple(job_keys) for job_id, job_keys in occupants.get(name, {}).items()}
                 held = next((queue.occupants[key] for key in keys if key in queue.occupants), None)
+                if held is None:
+                    held = next(iter(held_job_keys), None)
                 reserved = next((queue.claimed[key] for key in keys if key in queue.claimed), None)
                 recent = tuple(self._entry(data, now) for data in newest if name in self._devices(list(data.get("lock_keys") or [])))[:RECENT_JOBS]
                 activity[name] = DeviceActivity(
@@ -1003,6 +1010,7 @@ class BenchJobService:
                     held if held is not None else reserved,
                     any(key in queue.drained for key in keys),
                     recent,
+                    held_job_keys,
                 )
         return activity
 

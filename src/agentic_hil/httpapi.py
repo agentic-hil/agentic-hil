@@ -88,14 +88,16 @@ class QueueSnapshot:
 class DeviceActivity:
     """What the job store knows about one logical device.
 
-    state is "held" (a job runs on it), "reserved" (a job is granted it next)
-    or None. recent_jobs are store records; the transport projects them.
+    state is "held" (a job occupies it), "reserved" (a job is granted it next)
+    or None. held_job_keys maps each active job to its lock keys for this device.
+    recent_jobs are store records; the transport projects them.
     """
 
     state: str | None
     job_id: str | None
     drained: bool
     recent_jobs: tuple[JsonObject, ...]
+    held_job_keys: Mapping[str, tuple[str, ...]]
 
 
 class JobServiceError(ConfigError):
