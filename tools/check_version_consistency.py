@@ -224,6 +224,10 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     # The same for the two absent-probe CubeProgrammer recordings (#737): each
     # carries the Agentic HIL release whose probe_target and reset_target made it.
     "tests/fixtures/stm32cubeprogrammer_2_23_0_failure_recordings.json": "the recordings name the release that made them",
+    "tests/fixtures/stm32cubeprogrammer_2_23_0_h533re_under_reset_recordings.json": (
+        "immutable H533RE recordings name the Agentic HIL release that ran the jobs"
+    ),
+    "tests/test_h533re_under_reset_recordings.py": "checks the fixed release recorded in the H533RE fixture",
     # The Pico H bench result and its documentation test name the release that ran the demo.
     "docs/support.md": "the Pico H qualification records the release that ran on the shared bench",
     "tests/test_pico_rp2040_demo.py": "checks the recorded Pico H qualification release",

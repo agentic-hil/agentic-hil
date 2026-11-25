@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- Record NUCLEO-H533RE first flashes with a running watchdog: hot plug failed in all six jobs, and under reset programmed and verified in all five comparable jobs. Document the NRST evidence for that board. (#752)
+
 ## [0.29.0] - 2026-11-25
 
 ### Added

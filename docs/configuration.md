@@ -205,6 +205,17 @@ Some boards refuse their first flash after every power-up and take the immediate
 
 A separate NUCLEO-H533RE recording shows that a first hot-plug flash can print the erase messages and then fail during download with `Error: failed to download  Sector[0]`, followed by `Error: failed to download the File`. The same wording appears when an image is outside the part's flash range. `under_reset` was not measured for this download case, and cannot make an out-of-range image fit; the out-of-range recording already used `mode=UR`.
 
+On a NUCLEO-H533RE running the watchdog reproducer, the first flash failed under hot plug in 6 of 6 jobs.
+Three failed during download with the two lines above, and three failed verification with a data mismatch.
+With the same plan and images, the first flash programmed and verified under `under_reset` in 5 of 5 jobs.
+In the hot-plug control, the previous image ran from flash with a 1 kHz SysTick interrupt and no watchdog.
+The control flash programmed and verified.
+
+Immediately after the under-reset flashes, `RCC_RSR` held `0x04000000` (`PINRSTF` alone), confirming that the on-board ST-LINK drove NRST on that board.
+The same read in the hot-plug control returned `0x00000000`.
+These results cover one board, one ST-LINK firmware and one STM32CubeProgrammer version.
+The firmware running before the original H533 download failure is unknown and the cause of that failure is not established.
+
 `debuggers.<name>.connect_mode` is how a bench says so once instead of retrying forever:
 
 ```yaml

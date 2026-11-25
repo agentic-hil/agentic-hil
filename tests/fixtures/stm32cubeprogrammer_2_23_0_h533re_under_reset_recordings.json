@@ -1,0 +1,1125 @@
+{
+ "what": "First flashes of a NUCLEO-H533RE with STM32CubeProgrammer 2.23.0, run as test plans on a shared bench (agentic-hil serve), one entry per job. The previous image runs from flash; the image after it is `next`. `hot_plug_first_flash_*` and `under_reset_first_flash_*` ran the same plan, tests/hil/h533re_first_flash_shared_bench.yaml, and differ only in `debuggers.<name>.connect_mode`; the previous image has its independent watchdog running (about 100 ms). `hot_plug_control` is tests/hil/h533re_hotplug_control_shared_bench.yaml, whose previous image runs from flash under a 1 kHz interrupt and starts no watchdog. The two `hot_plug_retry_*` entries flash `next` again after a failed first flash, without a watchdog running, and the two `*_reset_after_flash` entries are a flash with `reset_after_flash: true` (after the interrupt image under hot plug, after the watchdog image under reset). Each job's `plan_sha256` is the SHA-256 of the plan file it sent; the plans of the retry and reset_after_flash entries are not in the repository, and their steps are the events listed. Two more hot-plug first-flash jobs never reached the measured flash, because the failed flash before them had left IWDGRSTF set and the previous image then leaves its watchdog off; they are not recorded here. The cause of the failure #743 recorded on this board type is not established, and the firmware that ran before it is not known.",
+ "recorded_on": "2026-11-25",
+ "bench": "NUCLEO-H533RE (STM32H533, Cortex-M33, device ID 0x478) through its on-board STLINK-V3, ST-LINK firmware V3J13M4, Linux, agentic-hil serve",
+ "tool_versions": {
+  "stm32cubeprogrammer": "2.23.0",
+  "stm32cubeclt": "1.22.0"
+ },
+ "connect_mode_reader": "Only flash_firmware reads connect_mode: the reset steps in these jobs connected Normal and the memory reads Hot Plug, whatever the entry said.",
+ "reset_flags": "RCC_RSR of the STM32H533 (RM0481 table 118): a reset through the NRST pin alone sets PINRSTF (0x04000000) and no other flag; a reset the core asks for sets SFTRSTF beside it (0x14000000). The previous image clears the flags at its boot, so a read after the flash shows the resets of the flash.",
+ "limits": "One board, one ST-LINK firmware, one STM32CubeProgrammer version. A core that merely runs from flash did not fail here (`hot_plug_control`); the watchdog image did. A first flash under hot plug failed with the two lines of #743 in three jobs and with `Download verification failed` in three. An earlier series on agentic-hil 0.28.0 used the same source with a 9.6 KB payload: 3 of 4 hot-plug first flashes ended in the two lines of #743, and one programmed and verified, with IWDGRSTF in the flags the next image printed; the payload was then enlarged so that the download outlasts the watchdog.",
+ "redaction": "The probe's serial number is `[redacted]` and the private directory an image was staged in is `[staging]`. Of the UART lines between two programmer calls the last complete one is kept, and of several flashes in a job only the last one's transcript.",
+ "memory_map": "NVM size 512 KBytes: flash 0x08000000-0x0807FFFF.",
+ "firmware": {
+  "source": "tests/bench/firmware/h533re_under_reset.c",
+  "linker_script": "tests/bench/firmware/h533re_under_reset.ld",
+  "compiler": "arm-none-eabi-gcc (GNU Tools for STM32 14.3.rel1.20251027-0700) 14.3.1 20250623",
+  "flags": [
+   "-mcpu=cortex-m33",
+   "-mthumb",
+   "-mfloat-abi=soft",
+   "-O1",
+   "-g0",
+   "-std=gnu11",
+   "-Wall",
+   "-Wextra",
+   "-Werror",
+   "-ffreestanding",
+   "-nostdlib",
+   "-nostartfiles",
+   "-Wl,--build-id=none",
+   "-Wl,--fatal-warnings"
+  ],
+  "images": {
+   "next": {
+    "file": "h533re_under_reset_next.elf",
+    "define": "PREVIOUS=0",
+    "sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe"
+   },
+   "previous_systick": {
+    "file": "h533re_under_reset_previous_systick.elf",
+    "define": "PREVIOUS=1",
+    "sha256": "21643c498ecc2ea8ad73844baf3619b3ddbbf246d21af92ca54dea6ac851b48d"
+   },
+   "previous_iwdg": {
+    "file": "h533re_under_reset_previous_iwdg.elf",
+    "define": "PREVIOUS=2",
+    "sha256": "4a93992e03a34fc7a56af7b2a33e68bf0c4fc19b6103fd0df0ac584a2a211d49"
+   }
+  }
+ },
+ "recordings": {
+  "hot_plug_first_flash_1": {
+   "job_id": "job-626e05244d0c0637",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:1afacd444bba357c44ee908a39af1d5d9746bc5f52f8cde509a4d5850e87bffe",
+   "plan_sha256": "712e0b040e2fb67255779d5327459d162a48931399c5860b8eeb87823caa9cbf",
+   "outcome": "failure",
+   "events": [
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_previous_iwdg.elf",
+     "image_sha256": "4a93992e03a34fc7a56af7b2a33e68bf0c4fc19b6103fd0df0ac584a2a211d49",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_previous_iwdg.elf",
+      "-v"
+     ],
+     "returncode": 0
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=previous-iwdg boot_rsr=14000000 live_rsr=00000000 watchdog=on sum=e2f137cc beat=00000006"
+    },
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v"
+     ],
+     "returncode": 1,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Hot Plug\nReset mode  : Software reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:00.227\n\n\n\nVerifying...\n\n\n\n\nError: Data mismatch found at address  0x08002A14 (byte = 0xA7 instead of 0xA5)\n\n\nTime elapsed during verifying operation: 00:00:00.098\n\n\nError: Download verification failed\n\n\n",
+     "stderr": ""
+    }
+   ]
+  },
+  "hot_plug_first_flash_2": {
+   "job_id": "job-cbfce0e325aab0ae",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:1afacd444bba357c44ee908a39af1d5d9746bc5f52f8cde509a4d5850e87bffe",
+   "plan_sha256": "712e0b040e2fb67255779d5327459d162a48931399c5860b8eeb87823caa9cbf",
+   "outcome": "failure",
+   "events": [
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_previous_iwdg.elf",
+     "image_sha256": "4a93992e03a34fc7a56af7b2a33e68bf0c4fc19b6103fd0df0ac584a2a211d49",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_previous_iwdg.elf",
+      "-v"
+     ],
+     "returncode": 0
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=previous-iwdg boot_rsr=14000000 live_rsr=00000000 watchdog=on sum=e2f137cc beat=00000006"
+    },
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v"
+     ],
+     "returncode": 1,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Hot Plug\nReset mode  : Software reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:00.248\n\n\n\nVerifying...\n\n\n\n\nError: Data mismatch found at address  0x08000002 (byte = 0x00 instead of 0x02)\n\n\nTime elapsed during verifying operation: 00:00:00.107\n\n\nError: Download verification failed\n\n\n",
+     "stderr": ""
+    }
+   ]
+  },
+  "hot_plug_first_flash_3": {
+   "job_id": "job-e49378bc82f1a566",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:1afacd444bba357c44ee908a39af1d5d9746bc5f52f8cde509a4d5850e87bffe",
+   "plan_sha256": "712e0b040e2fb67255779d5327459d162a48931399c5860b8eeb87823caa9cbf",
+   "outcome": "failure",
+   "events": [
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_previous_iwdg.elf",
+     "image_sha256": "4a93992e03a34fc7a56af7b2a33e68bf0c4fc19b6103fd0df0ac584a2a211d49",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_previous_iwdg.elf",
+      "-v"
+     ],
+     "returncode": 0
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=previous-iwdg boot_rsr=14000000 live_rsr=00000000 watchdog=on sum=e2f137cc beat=00000006"
+    },
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v"
+     ],
+     "returncode": 1,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Hot Plug\nReset mode  : Software reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:00.228\n\n\n\nVerifying...\n\n\n\n\nError: Data mismatch found at address  0x080032B8 (byte = 0xA7 instead of 0xA5)\n\n\nTime elapsed during verifying operation: 00:00:00.097\n\n\nError: Download verification failed\n\n\n",
+     "stderr": ""
+    },
+    {
+     "uart": "ahil752 image=previous-iwdg boot_rsr=14000000 live_rsr=00000000 watchdog=on sum=e2f137cc beat=00000007"
+    }
+   ]
+  },
+  "hot_plug_first_flash_4": {
+   "job_id": "job-abbafef6be86ed36",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:1afacd444bba357c44ee908a39af1d5d9746bc5f52f8cde509a4d5850e87bffe",
+   "plan_sha256": "712e0b040e2fb67255779d5327459d162a48931399c5860b8eeb87823caa9cbf",
+   "outcome": "failure",
+   "events": [
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_previous_iwdg.elf",
+     "image_sha256": "4a93992e03a34fc7a56af7b2a33e68bf0c4fc19b6103fd0df0ac584a2a211d49",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_previous_iwdg.elf",
+      "-v"
+     ],
+     "returncode": 0
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=previous-iwdg boot_rsr=14000000 live_rsr=00000000 watchdog=on sum=e2f137cc beat=00000006"
+    },
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v"
+     ],
+     "returncode": 1,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Hot Plug\nReset mode  : Software reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nError: failed to download  Sector[0]\nError: failed to download the File\n",
+     "stderr": ""
+    }
+   ]
+  },
+  "hot_plug_first_flash_5": {
+   "job_id": "job-b4c26eaaef0265c7",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:1afacd444bba357c44ee908a39af1d5d9746bc5f52f8cde509a4d5850e87bffe",
+   "plan_sha256": "712e0b040e2fb67255779d5327459d162a48931399c5860b8eeb87823caa9cbf",
+   "outcome": "failure",
+   "events": [
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_previous_iwdg.elf",
+     "image_sha256": "4a93992e03a34fc7a56af7b2a33e68bf0c4fc19b6103fd0df0ac584a2a211d49",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_previous_iwdg.elf",
+      "-v"
+     ],
+     "returncode": 0
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=previous-iwdg boot_rsr=14000000 live_rsr=00000000 watchdog=on sum=e2f137cc beat=00000006"
+    },
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v"
+     ],
+     "returncode": 1,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Hot Plug\nReset mode  : Software reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nError: failed to download  Sector[0]\nError: failed to download the File\n",
+     "stderr": ""
+    }
+   ]
+  },
+  "hot_plug_first_flash_6": {
+   "job_id": "job-50eda4afe0f131ff",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:1afacd444bba357c44ee908a39af1d5d9746bc5f52f8cde509a4d5850e87bffe",
+   "plan_sha256": "712e0b040e2fb67255779d5327459d162a48931399c5860b8eeb87823caa9cbf",
+   "outcome": "failure",
+   "events": [
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_previous_iwdg.elf",
+     "image_sha256": "4a93992e03a34fc7a56af7b2a33e68bf0c4fc19b6103fd0df0ac584a2a211d49",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_previous_iwdg.elf",
+      "-v"
+     ],
+     "returncode": 0
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=previous-iwdg boot_rsr=14000000 live_rsr=00000000 watchdog=on sum=e2f137cc beat=00000006"
+    },
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v"
+     ],
+     "returncode": 1,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Hot Plug\nReset mode  : Software reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nError: failed to download  Sector[0]\nError: failed to download the File\n",
+     "stderr": ""
+    }
+   ]
+  },
+  "hot_plug_retry_after_verify_mismatch": {
+   "job_id": "job-b251e8f4e4e627be",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:1afacd444bba357c44ee908a39af1d5d9746bc5f52f8cde509a4d5850e87bffe",
+   "plan_sha256": "174331fbb3adc4d05eb252919b264bcc6312f2e03c449296f6458fdc54393c61",
+   "outcome": "success",
+   "events": [
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v"
+     ],
+     "returncode": 0,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Hot Plug\nReset mode  : Software reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:00.245\n\n\n\nVerifying...\n\n\n\n\nTime elapsed during verifying operation: 00:00:00.086\n\n\nDownload verified successfully\n\n\n",
+     "stderr": ""
+    },
+    {
+     "uart": "ahil752 image=next boot_rsr=34000000 live_rsr=00000000 watchdog=off sum=e2e51e24 beat=0000001b"
+    },
+    {
+     "step": "read_symbol",
+     "symbol": "rcc_rsr",
+     "value": "0x00000000",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-r",
+      "0x44020cf4",
+      "4",
+      "[staging]/symbol-value.hex"
+     ],
+     "returncode": 0
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    }
+   ]
+  },
+  "hot_plug_retry_after_download_failure": {
+   "job_id": "job-d857b64a1f7773f2",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:1afacd444bba357c44ee908a39af1d5d9746bc5f52f8cde509a4d5850e87bffe",
+   "plan_sha256": "174331fbb3adc4d05eb252919b264bcc6312f2e03c449296f6458fdc54393c61",
+   "outcome": "success",
+   "events": [
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v"
+     ],
+     "returncode": 0,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Hot Plug\nReset mode  : Software reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:00.220\n\n\n\nVerifying...\n\n\n\n\nTime elapsed during verifying operation: 00:00:00.093\n\n\nDownload verified successfully\n\n\n",
+     "stderr": ""
+    },
+    {
+     "step": "read_symbol",
+     "symbol": "rcc_rsr",
+     "value": "0x34000000",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-r",
+      "0x44020cf4",
+      "4",
+      "[staging]/symbol-value.hex"
+     ],
+     "returncode": 0
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=next boot_rsr=34000000 live_rsr=00000000 watchdog=off sum=e2e4a124 beat=00000000"
+    }
+   ]
+  },
+  "hot_plug_control": {
+   "job_id": "job-9b9ccd38a396c915",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:1afacd444bba357c44ee908a39af1d5d9746bc5f52f8cde509a4d5850e87bffe",
+   "plan_sha256": "e7717005466b06446b71750657c9c0a529f3ce85c7f309f972a2cecbed593b5a",
+   "outcome": "success",
+   "events": [
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_previous_systick.elf",
+     "image_sha256": "21643c498ecc2ea8ad73844baf3619b3ddbbf246d21af92ca54dea6ac851b48d",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_previous_systick.elf",
+      "-v"
+     ],
+     "returncode": 0
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=previous-systick boot_rsr=14000000 live_rsr=00000000 watchdog=off sum=e2eaec78 beat=00000000"
+    },
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v"
+     ],
+     "returncode": 0,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Hot Plug\nReset mode  : Software reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:00.207\n\n\n\nVerifying...\n\n\n\n\nTime elapsed during verifying operation: 00:00:00.113\n\n\nDownload verified successfully\n\n\n",
+     "stderr": ""
+    },
+    {
+     "step": "read_symbol",
+     "symbol": "rcc_rsr",
+     "value": "0x00000000"
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=next boot_rsr=14000000 live_rsr=00000000 watchdog=off sum=e2e4a124 beat=00000000"
+    }
+   ]
+  },
+  "hot_plug_reset_after_flash": {
+   "job_id": "job-e47cc522bf329dbf",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:1afacd444bba357c44ee908a39af1d5d9746bc5f52f8cde509a4d5850e87bffe",
+   "plan_sha256": "4668870e6f8ced1ac34a865acd5466c234610202ed9b89e769b2e2b7e69a1b0b",
+   "outcome": "success",
+   "events": [
+    {
+     "uart": "ahil752 image=previous-systick boot_rsr=14000000 live_rsr=00000000 watchdog=off sum=e2eaec78 beat=00000024"
+    },
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=HOTPLUG",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v",
+      "-rst"
+     ],
+     "returncode": 0,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Hot Plug\nReset mode  : Software reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:00.236\n\n\n\nVerifying...\n\n\n\n\nTime elapsed during verifying operation: 00:00:00.111\n\n\nDownload verified successfully\n\n\n\nMCU Reset\n\nSoftware reset is performed\n",
+     "stderr": ""
+    },
+    {
+     "uart": "ahil752 image=next boot_rsr=14000000 live_rsr=00000000 watchdog=off sum=e2e4a124 beat=00000000"
+    }
+   ]
+  },
+  "under_reset_first_flash_1": {
+   "job_id": "job-719df3f9d6d4d59c",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:e99fea8e06b3849c841614606fd58b02a797b6b236e56809b185e3b27f63a38b",
+   "plan_sha256": "712e0b040e2fb67255779d5327459d162a48931399c5860b8eeb87823caa9cbf",
+   "outcome": "success",
+   "events": [
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_previous_iwdg.elf",
+     "image_sha256": "4a93992e03a34fc7a56af7b2a33e68bf0c4fc19b6103fd0df0ac584a2a211d49",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=UR",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_previous_iwdg.elf",
+      "-v"
+     ],
+     "returncode": 0
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=previous-iwdg boot_rsr=14000000 live_rsr=00000000 watchdog=on sum=e2f137cc beat=00000006"
+    },
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=UR",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v"
+     ],
+     "returncode": 0,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Under Reset\nReset mode  : Hardware reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:00.263\n\n\n\nVerifying...\n\n\n\n\nTime elapsed during verifying operation: 00:00:00.109\n\n\nDownload verified successfully\n\n\n",
+     "stderr": ""
+    },
+    {
+     "step": "read_symbol",
+     "symbol": "rcc_rsr",
+     "value": "0x04000000"
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=next boot_rsr=14000000 live_rsr=00000000 watchdog=off sum=e2e4a124 beat=00000000"
+    }
+   ]
+  },
+  "under_reset_first_flash_2": {
+   "job_id": "job-da03f614f154627b",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:e99fea8e06b3849c841614606fd58b02a797b6b236e56809b185e3b27f63a38b",
+   "plan_sha256": "712e0b040e2fb67255779d5327459d162a48931399c5860b8eeb87823caa9cbf",
+   "outcome": "success",
+   "events": [
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_previous_iwdg.elf",
+     "image_sha256": "4a93992e03a34fc7a56af7b2a33e68bf0c4fc19b6103fd0df0ac584a2a211d49",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=UR",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_previous_iwdg.elf",
+      "-v"
+     ],
+     "returncode": 0
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=previous-iwdg boot_rsr=14000000 live_rsr=00000000 watchdog=on sum=e2f137cc beat=00000006"
+    },
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=UR",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v"
+     ],
+     "returncode": 0,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Under Reset\nReset mode  : Hardware reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:00.261\n\n\n\nVerifying...\n\n\n\n\nTime elapsed during verifying operation: 00:00:00.110\n\n\nDownload verified successfully\n\n\n",
+     "stderr": ""
+    },
+    {
+     "step": "read_symbol",
+     "symbol": "rcc_rsr",
+     "value": "0x04000000"
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=next boot_rsr=14000000 live_rsr=00000000 watchdog=off sum=e2e4a124 beat=00000000"
+    }
+   ]
+  },
+  "under_reset_first_flash_3": {
+   "job_id": "job-3e224817d102f7b9",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:e99fea8e06b3849c841614606fd58b02a797b6b236e56809b185e3b27f63a38b",
+   "plan_sha256": "712e0b040e2fb67255779d5327459d162a48931399c5860b8eeb87823caa9cbf",
+   "outcome": "success",
+   "events": [
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_previous_iwdg.elf",
+     "image_sha256": "4a93992e03a34fc7a56af7b2a33e68bf0c4fc19b6103fd0df0ac584a2a211d49",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=UR",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_previous_iwdg.elf",
+      "-v"
+     ],
+     "returncode": 0
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=previous-iwdg boot_rsr=14000000 live_rsr=00000000 watchdog=on sum=e2f137cc beat=00000006"
+    },
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=UR",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v"
+     ],
+     "returncode": 0,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Under Reset\nReset mode  : Hardware reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:00.218\n\n\n\nVerifying...\n\n\n\n\nTime elapsed during verifying operation: 00:00:00.106\n\n\nDownload verified successfully\n\n\n",
+     "stderr": ""
+    },
+    {
+     "step": "read_symbol",
+     "symbol": "rcc_rsr",
+     "value": "0x04000000"
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=next boot_rsr=14000000 live_rsr=00000000 watchdog=off sum=e2e4a124 beat=00000000"
+    }
+   ]
+  },
+  "under_reset_first_flash_4": {
+   "job_id": "job-31bfe440a756ed45",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:e99fea8e06b3849c841614606fd58b02a797b6b236e56809b185e3b27f63a38b",
+   "plan_sha256": "712e0b040e2fb67255779d5327459d162a48931399c5860b8eeb87823caa9cbf",
+   "outcome": "success",
+   "events": [
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_previous_iwdg.elf",
+     "image_sha256": "4a93992e03a34fc7a56af7b2a33e68bf0c4fc19b6103fd0df0ac584a2a211d49",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=UR",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_previous_iwdg.elf",
+      "-v"
+     ],
+     "returncode": 0
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=previous-iwdg boot_rsr=14000000 live_rsr=00000000 watchdog=on sum=e2f137cc beat=00000006"
+    },
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=UR",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v"
+     ],
+     "returncode": 0,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Under Reset\nReset mode  : Hardware reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:00.206\n\n\n\nVerifying...\n\n\n\n\nTime elapsed during verifying operation: 00:00:00.114\n\n\nDownload verified successfully\n\n\n",
+     "stderr": ""
+    },
+    {
+     "step": "read_symbol",
+     "symbol": "rcc_rsr",
+     "value": "0x04000000"
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=next boot_rsr=14000000 live_rsr=00000000 watchdog=off sum=e2e4a124 beat=00000000"
+    }
+   ]
+  },
+  "under_reset_first_flash_5": {
+   "job_id": "job-9a08be8ab56648f2",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:e99fea8e06b3849c841614606fd58b02a797b6b236e56809b185e3b27f63a38b",
+   "plan_sha256": "712e0b040e2fb67255779d5327459d162a48931399c5860b8eeb87823caa9cbf",
+   "outcome": "success",
+   "events": [
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_previous_iwdg.elf",
+     "image_sha256": "4a93992e03a34fc7a56af7b2a33e68bf0c4fc19b6103fd0df0ac584a2a211d49",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=UR",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_previous_iwdg.elf",
+      "-v"
+     ],
+     "returncode": 0
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=previous-iwdg boot_rsr=14000000 live_rsr=00000000 watchdog=on sum=e2f137cc beat=00000006"
+    },
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=UR",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v"
+     ],
+     "returncode": 0,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Under Reset\nReset mode  : Hardware reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:00.248\n\n\n\nVerifying...\n\n\n\n\nTime elapsed during verifying operation: 00:00:00.117\n\n\nDownload verified successfully\n\n\n",
+     "stderr": ""
+    },
+    {
+     "step": "read_symbol",
+     "symbol": "rcc_rsr",
+     "value": "0x04000000"
+    },
+    {
+     "step": "reset",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "sn=[redacted]",
+      "-rst"
+     ],
+     "returncode": 0
+    },
+    {
+     "uart": "ahil752 image=next boot_rsr=14000000 live_rsr=00000000 watchdog=off sum=e2e4a124 beat=00000000"
+    }
+   ]
+  },
+  "under_reset_reset_after_flash": {
+   "job_id": "job-0e6a0032c10b0923",
+   "agentic_hil": "0.29.0",
+   "bench_config": "sha256:e99fea8e06b3849c841614606fd58b02a797b6b236e56809b185e3b27f63a38b",
+   "plan_sha256": "0712b23012362303589fe2bc49443cb02a8b5606459835e60e5c17761baa785e",
+   "outcome": "success",
+   "events": [
+    {
+     "uart": "ahil752 image=previous-iwdg boot_rsr=14000000 live_rsr=00000000 watchdog=on sum=e2f137cc beat=00000023"
+    },
+    {
+     "step": "flash",
+     "image": "h533re_under_reset_next.elf",
+     "image_sha256": "8ddc02d5d8fb6bb5bd85444ab909353bd7326ad41aa31753fc190c190f7644fe",
+     "argv": [
+      "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI",
+      "-q",
+      "-c",
+      "port=SWD",
+      "mode=UR",
+      "sn=[redacted]",
+      "-w",
+      "[staging]/h533re_under_reset_next.elf",
+      "-v",
+      "-rst"
+     ],
+     "returncode": 0,
+     "timed_out": false,
+     "stdout": "      -------------------------------------------------------------------\n                        STM32CubeProgrammer v2.23.0                  \n      -------------------------------------------------------------------\n\nST-LINK SN  : [redacted]\nST-LINK FW  : V3J13M4\nBoard       : NUCLEO-H533RE\nVoltage     : 3.29V\nSWD freq    : 8000 KHz\nConnect mode: Under Reset\nReset mode  : Hardware reset\nDevice ID   : 0x478\nRevision ID : --\nDevice name : STM32H533/523\nNVM size    : 512 KBytes\nDevice type : MCU\nDevice CPU  : Cortex-M33\nBL Version  : 0xE2\nSFSP Version: v1.2.0\nDebug in Low Power mode enabled\n\n\n\nOpening and parsing file: h533re_under_reset_next.elf\n\n\nMemory Programming ...\n  File          : h533re_under_reset_next.elf\n  Size          : 29.61 KB \n  Address       : 0x08000000\n\n\nErasing memory corresponding to segment 0:\nErasing internal memory sectors [0 3]\nDownload in Progress:\n\n\nFile download complete\nTime elapsed during download operation: 00:00:00.205\n\n\n\nVerifying...\n\n\n\n\nTime elapsed during verifying operation: 00:00:00.090\n\n\nDownload verified successfully\n\n\n\nMCU Reset\n\nSoftware reset is performed\n",
+     "stderr": ""
+    },
+    {
+     "uart": "ahil752 image=next boot_rsr=04000000 live_rsr=00000000 watchdog=off sum=e2e4a124 beat=00000000"
+    }
+   ]
+  }
+ }
+}
