@@ -528,6 +528,24 @@ jobs:
       - name: Check locks with the image pip
         run: python tools/check_image_pip_locks.py --image ${{ matrix.image }}
 
+  sbom_lock:
+    name: SBOM lock on the release Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.x"
+
+      - name: Check the SBOM lock
+        run: python tools/check_sbom_lock.py
+
   required-ci:
     name: Required CI
     runs-on: ubuntu-latest
@@ -536,6 +554,7 @@ jobs:
       - test
       - container_tests
       - image_pip_locks
+      - sbom_lock
       - release_metadata
       - audit
       - typecheck
@@ -556,6 +575,10 @@ jobs:
           fi
           if [[ "${{ needs.image_pip_locks.result }}" != "success" ]]; then
             echo "Image pip locks finished with ${{ needs.image_pip_locks.result }}"
+            exit 1
+          fi
+          if [[ "${{ needs.sbom_lock.result }}" != "success" ]]; then
+            echo "SBOM lock check finished with ${{ needs.sbom_lock.result }}"
             exit 1
           fi
           if [[ "${{ needs.release_metadata.result }}" != "success" ]]; then

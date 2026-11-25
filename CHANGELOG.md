@@ -4,6 +4,12 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
+## [Unreleased]
+
+### Fixed
+
+- Required CI checks that the release Python on Linux x86_64 can download wheels matching the hashes in `requirements/sbom.txt`. This catches dependency updates that fold the rpds-py split before publishing to PyPI. (#929)
+
 ## [0.29.0] - 2026-11-25
 
 ### Added

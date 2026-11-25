@@ -48,6 +48,7 @@ exclude tests/test_bench_distributions.py
 # collect from a source distribution that carries none of tools/.
 exclude tests/test_install_cmsis_pack.py
 exclude tests/test_check_image_pip_locks.py
+exclude tests/test_check_sbom_lock.py
 exclude tests/test_bench_image_store.py
 # The run lock's command is `tools/run_lock.py`, which never ships either.
 exclude tests/test_run_lock_command.py

@@ -467,6 +467,55 @@ def test_image_pip_locks_cover_every_base_and_block_the_merge() -> None:
     assert "needs.image_pip_locks.result" in "\n".join(step.get("run", "") for step in required["steps"])
 
 
+def test_sbom_lock_blocks_pull_requests_on_the_release_python() -> None:
+    workflow = workflow_document(WORKFLOW)
+    release = workflow_document(WORKFLOW.with_name("workflow.yml"))
+    jobs = workflow["jobs"]
+    if "sbom_lock" not in jobs:
+        raise AssertionError("Required CI is missing the SBOM lock job")
+
+    events = triggers(workflow)
+    assert "pull_request" in events
+    assert {"paths", "paths-ignore"}.isdisjoint(events["pull_request"] or {})
+    job = jobs["sbom_lock"]
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] > 0
+    assert "if" not in job
+    assert job.get("continue-on-error", False) is False
+
+    checkout, setup, check = job["steps"]
+    assert checkout["uses"].startswith("actions/checkout@")
+    assert PINNED_ACTION.fullmatch(checkout["uses"])
+    assert checkout["with"]["persist-credentials"] is False
+    assert setup["uses"].startswith("actions/setup-python@")
+    assert PINNED_ACTION.fullmatch(setup["uses"])
+    release_setup = next(
+        step for step in release["jobs"]["release-assets"]["steps"]
+        if step.get("uses", "").startswith("actions/setup-python@")
+    )
+    assert setup["with"] == release_setup["with"]
+    assert "run" not in checkout and "run" not in setup
+    assert run_lines(job) == ["python tools/check_sbom_lock.py"]
+    assert all("if" not in step for step in job["steps"])
+    assert check.get("continue-on-error", False) is False
+
+    required = jobs["required-ci"]
+    assert "sbom_lock" in required["needs"]
+    assert required["if"] == "${{ always() }}"
+    assert required.get("continue-on-error", False) is False
+    non_success_branch = re.compile(
+        r'^if \[\[ "\$\{\{ needs\.sbom_lock\.result \}\}" != "success" \]\]; then\n'
+        r'(?:(?!fi$)[^\n]*\n)*?exit [1-9]\d*\nfi$',
+        re.MULTILINE,
+    )
+    result_step = next(
+        step for step in required["steps"]
+        if non_success_branch.search("\n".join(run_lines({"steps": [step]})))
+    )
+    assert "if" not in result_step
+    assert result_step.get("continue-on-error", False) is False
+
+
 def test_the_audit_reads_the_locked_production_dependency_set() -> None:
     """What is audited is what a bench's install resolves to, pinned.
 
