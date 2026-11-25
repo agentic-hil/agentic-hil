@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import multiprocessing
 import os
@@ -13,7 +14,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from typing import get_args, get_type_hints
@@ -22,6 +23,7 @@ import pytest
 import yaml
 from conftest import DEFAULT_TEST_PERMISSIONS, write_authoritative_config, write_config
 from fixtures.fake_picotool import TRANSCRIPTS, info_diagnostic
+from fixtures.fake_picotool import main as fake_picotool_main
 from httpserver_fakes import ScriptedJobService, answer, running_reads, short_settings
 from support import process_is_running, scaled_time_bound
 from test_config_write import bench, changes, service
@@ -29,8 +31,8 @@ from test_config_write import bench, changes, service
 from agentic_hil import bench as bench_module
 from agentic_hil import cli, windows_device_lock
 from agentic_hil import config as configuration
-from agentic_hil.backends import common
-from agentic_hil.backends.common import CONTACT_UNPROVEN, NOT_CONTACTED
+from agentic_hil.backends import common, picotool
+from agentic_hil.backends.common import CONTACT_UNPROVEN, NOT_CONTACTED, CompletedCommand
 from agentic_hil.backends.picotool import PicotoolBackend
 from agentic_hil.benchview import BenchView
 from agentic_hil.config import ConfigError, bind_debugger, load_authoritative_config, load_config
@@ -1100,7 +1102,18 @@ def test_picotool_reported_version(pico, version):
 
 @pytest.mark.parametrize("version", tuple(TRANSCRIPTS))
 def test_picotool_release_detection(pico, version):
+    def replay_command(command: list[str], cwd: str, timeout_seconds: float) -> CompletedCommand:
+        launcher = common.invocation(str(FAKE))
+        assert command[:len(launcher)] == launcher, command
+        stdout = io.StringIO(newline=os.linesep)
+        stderr = io.StringIO(newline=os.linesep)
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            status = fake_picotool_main(command[len(launcher):])
+        return CompletedCommand(stdout.getvalue(), stderr.getvalue(), native_status(status), False, False)
+
+    pico.monkeypatch.setattr(picotool, "spawn_command", replay_command)
     pico.set(VERSION=version)
+    configs = {surface: runtime_config(pico.root / surface) for surface in ("probe_target", "debugger_probes_list")}
     for index, (label, settings, raw, status, state, chip) in enumerate(detection_cases(version)):
         expected_board = {"ok": True, "present": True, "target_state": state, "chip": chip}
         if state == "absent":
@@ -1112,13 +1125,21 @@ def test_picotool_release_detection(pico, version):
             expected_probe = expected_row = expected_board
 
         for surface, expected in (("probe_target", expected_probe), ("debugger_probes_list", expected_row)):
+            # Reuse the parsed policy and give each service its own logs, reports and lease state.
+            workspace = pico.root / f"{index}-{surface}"
+            workspace.mkdir()
+            config = replace(
+                configs[surface], work_dir=str(workspace), workspace_root=str(workspace),
+                state_root=str(workspace.with_name(f"{workspace.name}-state")),
+            )
             with pico.monkeypatch.context() as env:
+                env.setenv(PREFIX + "LOG", str(workspace / pico.log.name))
+                env.setenv(PREFIX + "STATE_FILE", str(workspace / pico.states.name))
                 for name, value in settings.items():
                     env.setenv(PREFIX + name, value)
                 if raw is not None:
                     for name, value in {"RAW_COMMAND": "info", "STDOUT": raw, "EXIT": str(status)}.items():
                         env.setenv(PREFIX + name, value)
-                config = runtime_config(pico.root / f"{index}-{surface}")
                 result = call(config, surface)
             observed = listing_rows(result).get("dut", {}) if surface == "debugger_probes_list" else result
             if (

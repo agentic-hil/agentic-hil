@@ -102,6 +102,7 @@ def test_submit_and_check_plan_go_through_the_real_scheduler(tmp_path: Path, mon
         assert sorted(path.name for path in bench.job_root.iterdir() if path.is_dir()) == [job_id]
 
 
+@pytest.mark.usefixtures("no_loopback_name_lookup")
 def test_a_foreign_token_or_none_cannot_reach_another_submitters_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bench = job_bench(tmp_path, monkeypatch)
     workers = FakeWorkerSource()
