@@ -213,6 +213,14 @@ is a change that *forgets* a file, and a paths filter keys on the files a pull
 request touched. `Required CI` depends on it, so a version that does not agree
 with itself cannot reach `master`.
 
+The `SBOM lock on the release Python` job runs on every pull request and must
+pass for `Required CI` to succeed. It uses the same Python selection as
+`release-assets` on Linux x86_64. For each pin that interpreter selects in
+`requirements/sbom.txt`, pip must download a compatible wheel matching a lock
+hash. A package may use a hash-matching source distribution if it has an
+explicit exception with a reason in `tools/check_sbom_lock.py`. That list starts
+empty.
+
 Three things still cannot be established before the merge, and no rearrangement
 of the workflow changes that:
 
