@@ -258,6 +258,8 @@
     "test_a_second_session_on_a_single_owner_bus_is_refused_without_the_sharing_note",
     "test_a_share_may_not_be_named_after_a_configuration_block_or_a_grant",
     "test_a_transmitting_participant_cannot_join_a_listen_only_sniffer",
+    "test_a_view_for_standard_frames_neither_sends_nor_receives_its_extended_twin",
+    "test_an_extended_view_carries_the_extended_frame_its_number_names",
     "test_authkey_handshake_refuses_a_client_with_the_wrong_key",
     "test_broker_holds_the_machine_wide_bus_lock_for_its_lifetime",
     "test_broker_permission_refusals_name_the_participant_key",
