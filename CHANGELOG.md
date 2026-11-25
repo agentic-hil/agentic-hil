@@ -8,6 +8,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Fixed
 
+- Keep device holds visible in the bench server's HTTP and MCP reads from job dispatch until the scheduler records the end, including for jobs on shared CAN buses. (#937)
 - Required CI checks that the release Python on Linux x86_64 can download wheels matching the hashes in `requirements/sbom.txt`. This catches dependency updates that fold the rpds-py split before publishing to PyPI. (#929)
 
 ## [0.29.0] - 2026-11-25
