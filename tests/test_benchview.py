@@ -238,6 +238,7 @@ def test_no_answer_carries_a_serial_number_or_a_device_path(tmp_path: Path, monk
     assert '"console"' in json.dumps(answers["leases"])
 
 
+@pytest.mark.usefixtures("no_loopback_name_lookup")
 def test_reads_take_no_lock_and_reach_no_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     planted = planted_bench(tmp_path, monkeypatch)
     config = planted.config

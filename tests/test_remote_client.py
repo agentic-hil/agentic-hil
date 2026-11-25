@@ -150,6 +150,7 @@ def test_status_queue_withdraw_and_fetch_use_the_stored_token(tmp_path: Path, mo
         assert (reports / f"{first_id}-evidence.zip").is_file()
 
 
+@pytest.mark.usefixtures("no_loopback_name_lookup")
 def test_refusals_and_transport_errors_exit_1_and_usage_errors_exit_2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     service = ScriptedJobService()
     over_quota = service_error("max_queued_jobs_per_user", {"retry_after_s": 1})

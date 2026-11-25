@@ -332,7 +332,7 @@ def test_a_pyocd_that_hangs_despite_the_flag_is_still_a_timeout_with_cleanup(tmp
     stopped. Pinned before the change and unchanged by it.
     """
     monkeypatch.setenv("AGENTIC_HIL_FAKE_PYOCD_HANGS_DESPITE_NO_WAIT", "1")
-    config = config_for(tmp_path)
+    config = config_for(tmp_path, timeout_s=2)
     service = AgenticHILToolService(config)
     try:
         result = service.call("reset_target", {"mode": "run"})

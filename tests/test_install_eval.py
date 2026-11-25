@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -2416,6 +2417,11 @@ def test_dry_run_cross_products_cases_and_jobs_without_secret_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "super-secret-value")
+    # The whole plan reads one tree. Reuse its real evidence within this test.
+    monkeypatch.setattr(install_runner, "source_digest", cache(install_runner.source_digest))
+    monkeypatch.setattr(install_runner, "git_metadata", cache(install_runner.git_metadata))
+    monkeypatch.setattr(install_runner, "expected_mcp_tools", cache(install_runner.expected_mcp_tools))
+    monkeypatch.setattr(install_runner, "installed_version", cache(install_runner.installed_version))
     matrix = load_matrix(REPOSITORY_ROOT / "evals" / "install" / "matrix.example.json")
     plan = dry_run_plan(matrix, REPOSITORY_ROOT, REPOSITORY_ROOT, "docker")
     serialized = json.dumps(plan)
