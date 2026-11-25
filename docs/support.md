@@ -45,12 +45,14 @@ The Arduino Nano ESP32 demo uses the board's native USB-Serial/JTAG interface
 for verified flash, reset to run and read-only console checks. The shared-bench
 qualification plan checks 20 consecutive A/B cycles. Its job steps bound what
 can be reported about reconnects. Physical disconnect is outside the plan.
-The supplemental console refusal plans exercise flash and reset while the
-console is open. On a shared bench with several debuggers, the `device_busy`
-receipt identifies the lock as held by the current process. The demo matches
-that lock to the open console before publishing the refusal. See the pull
-request for the hardware receipts. Probe exclusion and competing port owners
-are covered offline.
+Two supplemental plans, `nano_esp32s3_console_refuses_flash.yaml` and
+`nano_esp32s3_console_refuses_reset.yaml`, exercise flash and reset while the
+console is open. The step is refused with `device_busy` before esptool runs.
+Only a configuration with exactly one debugger also names the console in
+`held_by_com_session`. An image must be running before each of these plans. No
+receipt of them from the shared bench is published; the pull request says what
+was evidenced on the board. Probe exclusion and competing port owners are
+covered offline.
 
 The Nucleo-F446RE remains the reference board for
 [the STM32 starter](https://github.com/agentic-hil/stm32-starter) and its

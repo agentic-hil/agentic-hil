@@ -52,14 +52,16 @@ python tools/esp32s3_demo_results.py --report <report.json> --evidence <job-id-e
 
 The supplemental plans `nano_esp32s3_console_refuses_flash.yaml` and
 `nano_esp32s3_console_refuses_reset.yaml` exercise flash and reset while the
-same console is open. Each needs A or B already running. The expected receipt
-is `device_busy` before esptool runs. A single-debugger configuration reports
-`held_by_com_session: esp32s3`. With several debuggers the receipt instead
-reports `holder_is_this_process: true`, and the refused resource must match
+same console is open. Either step is refused with `device_busy` before esptool
+runs. The refusal carries `held_by_com_session: esp32s3` only where the
+configuration has exactly one debugger. With several debuggers it carries
+`holder_is_this_process: true` instead, and the refused resource must match
 the lock recorded by the console open step. Use `--refusal` with the job
-artifacts to publish either receipt without the private lock key.
+artifacts to print the receipt without the private lock key.
 
-With reset-to-halt recovery, the failed job leaves the chip in its ROM
-bootloader. Flash A or B and reset to run before starting another refusal plan.
-See the pull request for the hardware receipts and the qualification evidence.
+An image must be running before each of these plans. With reset-to-halt
+recovery, the failed job leaves the chip in its ROM bootloader, so flash A or B
+and reset to run before starting another refusal plan. The plans are not part
+of the qualification, and no receipt of them from the shared bench is
+published. The pull request says what was evidenced on the board.
 Probe exclusion and two port owners are covered offline.
