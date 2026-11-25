@@ -593,10 +593,18 @@ class BenchMutex:
         """The recorded holder of a device, whether or not it is still alive."""
         return self._read_holder(resource)
 
-    def busy_result(self, resource: str, *, waited_s: float = 0.0, pipe: windows_device_lock.PipeTaken | None = None) -> JsonObject:
+    def busy_result(
+        self,
+        resource: str,
+        *,
+        waited_s: float = 0.0,
+        pipe: windows_device_lock.PipeTaken | None = None,
+        observed_holder: JsonObject | None = None,
+    ) -> JsonObject:
+        """Describe contention, reusing an on-disk observation when the caller has one."""
         answer = None if pipe is None else windows_device_lock.ask(pipe.name)
         if answer is None:
-            on_disk = self._read_holder(resource) or {}
+            on_disk = observed_holder if observed_holder is not None else self._read_holder(resource) or {}
             # Only a record in state `held` says who holds the device. A released
             # one is what the last owner wrote as it let go, and the lock can be
             # held again while it is still on disk: before the new holder has

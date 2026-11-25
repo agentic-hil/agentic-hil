@@ -45,10 +45,11 @@ permissions:
 # the two repositories is the bench itself. One board is wired to one machine,
 # one self-hosted runner is registered on it with these labels, and a runner runs
 # one job at a time, so a run from either repository sits in that single runner's
-# own queue while the other holds the board. The stage parent also holds the
-# host product's device locks for the probe and UARTs through tier teardown.
-# Outside product clients meet that hold as `device_busy`. Inside the container,
-# tier servers coordinate in a private device-lock directory.
+# own queue while the other holds the board. A holder process beside the stage
+# also keeps the host product's device locks for the probe and UARTs until the
+# container is gone. Outside product clients meet that hold as `device_busy`.
+# Inside the container, tier servers coordinate in a private device-lock
+# directory.
 #
 # This group's job is narrower, and real: it keeps this repository's own runs
 # from piling up on that queue, a manual dispatch started while the nightly is

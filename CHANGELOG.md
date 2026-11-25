@@ -4,6 +4,12 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
+## [Unreleased]
+
+### Fixed
+
+- Keep device holds visible in the bench server's HTTP and MCP reads from job dispatch until the scheduler records the end, including for jobs on shared CAN buses. (#937)
+
 ## [0.29.0] - 2026-11-25
 
 ### Added
