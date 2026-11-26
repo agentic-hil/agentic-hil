@@ -309,6 +309,24 @@ What follows from there being no probe:
 
 `agentic-hil doctor` checks `target_type` without opening the port: it puts the name to esptool as `--chip=<name> version`, and a family this esptool does not know is red, with the close matches and the list esptool accepts. The MCP resource `agentic-hil://reference/debugger-backends/esptool` has the field matrix.
 
+### Arduino Nano ESP32 on native USB
+
+The Nano demo shares one native USB-Serial/JTAG port between esptool and the
+read-only 115200 baud console. In the version 3 template at
+`examples/nano-esp32s3_demo/config.example.yaml`, `target_type: esp32s3` and
+`flash_address: '0x0'` select the chip and the image address. The debugger's
+`com_port` names the same console entry the plan reads. Pin the console to
+the Nano's Linux `/dev/serial/by-id` device and its USB serial number.
+
+On native USB the MAC address is the adapter serial number. Raw port
+identities, device lock names and esptool command lines can carry that
+address, even when the esptool output masks its `MAC:` line. Keep the raw
+job artifacts private and publish the sanitized result from
+`tools/esp32s3_demo_results.py`.
+
+The demo images at `0x0` replace the factory bootloader. Restore the factory
+bootloader before returning to the original firmware.
+
 ## An RP2040 or RP2350 board through picotool
 
 Configure one debugger per board. Copy the board's USB serial from
