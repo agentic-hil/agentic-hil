@@ -31,6 +31,7 @@ from fixtures.fake_st_link_gdbserver import READY_LINE as ST_LINK_READY_LINE
 from fixtures.fake_st_link_gdbserver import RECORDING as ST_LINK_RECORDING
 from fixtures.fake_st_link_gdbserver import SCENARIO_VARIABLE as ST_LINK_SCENARIO_VARIABLE
 from fixtures.fake_st_link_gdbserver import USB_REFUSAL_SCENARIO, recorded_usb_refusal
+from parameter_rows import check_parameter_rows, parameter_rows
 from support import scaled_time_bound
 from test_debug_sessions import BOOT_COUNTER_SYMBOL_TABLE, START_TIMEOUT_S, debug_service, start_debug_session
 
@@ -94,29 +95,29 @@ def run_breakpoint_cycle(service, mode: str) -> dict:
     return started
 
 
-@pytest.mark.parametrize(
-    ("mode", "after_connect"),
-    [
+def test_openocd_sessions_send_the_same_gdb_mi_commands_as_before_the_server_hooks(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, mode: str, after_connect: list[str]) -> None:
+        service = debug_service(tmp_path)
+        try:
+            started = run_breakpoint_cycle(service, mode)
+        finally:
+            service.close()
+
+        assert sent_commands(service, started) == [
+            *OPENOCD_SESSION_PROLOGUE,
+            *after_connect,
+            '-break-insert "test_done"',
+            "-exec-continue",
+            OPENOCD_DETACH_GUARD,
+            "-gdb-exit",
+        ]
+
+    rows = parameter_rows([
         ("attach", []),
         ("reset_halt", [OPENOCD_RESET_HALT]),
         ("load", [OPENOCD_RESET_HALT, "-target-download", OPENOCD_RESET_HALT]),
-    ],
-)
-def test_openocd_sessions_send_the_same_gdb_mi_commands_as_before_the_server_hooks(tmp_path: Path, mode: str, after_connect: list[str]) -> None:
-    service = debug_service(tmp_path)
-    try:
-        started = run_breakpoint_cycle(service, mode)
-    finally:
-        service.close()
-
-    assert sent_commands(service, started) == [
-        *OPENOCD_SESSION_PROLOGUE,
-        *after_connect,
-        '-break-insert "test_done"',
-        "-exec-continue",
-        OPENOCD_DETACH_GUARD,
-        "-gdb-exit",
-    ]
+    ], multiple=True, ids=['attach-after_connect0', 'reset_halt-after_connect1', 'load-after_connect2'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_openocd_session_containment_and_teardown_send_the_same_commands_as_before_the_server_hooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,33 +145,36 @@ def test_openocd_session_containment_and_teardown_send_the_same_commands_as_befo
     ]
 
 
-@pytest.mark.parametrize(("mode", "startup"), [("attach", "init; halt"), ("reset_halt", "init; reset halt"), ("load", "init; reset halt")])
-def test_openocd_debug_server_command_line_is_unchanged_by_the_server_hooks(tmp_path: Path, mode: str, startup: str) -> None:
-    service = debug_service(tmp_path)
-    try:
-        started = run_breakpoint_cycle(service, mode)
-    finally:
-        service.close()
+def test_openocd_debug_server_command_line_is_unchanged_by_the_server_hooks(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, mode: str, startup: str) -> None:
+        service = debug_service(tmp_path)
+        try:
+            started = run_breakpoint_cycle(service, mode)
+        finally:
+            service.close()
 
-    config = service.config
-    executable = resolve_work_path(config, config.debugger.executable)
-    assert session_log(service, started)["server_command"] == [
-        *invocation(str(executable)),
-        "-f",
-        "interface/stlink.cfg",
-        "-f",
-        "target/stm32f4x.cfg",
-        "-c",
-        "bindto 127.0.0.1",
-        "-c",
-        f"gdb_port {started['gdb_port']}",
-        "-c",
-        "tcl_port disabled",
-        "-c",
-        "telnet_port disabled",
-        "-c",
-        startup,
-    ]
+        config = service.config
+        executable = resolve_work_path(config, config.debugger.executable)
+        assert session_log(service, started)["server_command"] == [
+            *invocation(str(executable)),
+            "-f",
+            "interface/stlink.cfg",
+            "-f",
+            "target/stm32f4x.cfg",
+            "-c",
+            "bindto 127.0.0.1",
+            "-c",
+            f"gdb_port {started['gdb_port']}",
+            "-c",
+            "tcl_port disabled",
+            "-c",
+            "telnet_port disabled",
+            "-c",
+            startup,
+        ]
+
+    rows = parameter_rows([("attach", "init; halt"), ("reset_halt", "init; reset halt"), ("load", "init; reset halt")], multiple=True, ids=['attach-init; halt', 'reset_halt-init; reset halt', 'load-init; reset halt'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # --- pyOCD: sessions through `pyocd gdbserver` --------------------------------
@@ -227,8 +231,7 @@ def close_unsettled(service) -> None:
     service.coordinator.close()
 
 
-@pytest.mark.parametrize("mode", ["attach", "reset_halt", "load"])
-def test_pyocd_debug_server_is_started_on_the_configured_probe_and_target_at_the_reserved_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+def test_pyocd_debug_server_is_started_on_the_configured_probe_and_target_at_the_reserved_port(tmp_path: Path) -> None:
     """The recorded command line, for every mode.
 
     The configured executable, the probe's full UID as enumeration resolved it,
@@ -237,38 +240,35 @@ def test_pyocd_debug_server_is_started_on_the_configured_probe_and_target_at_the
     without it the recorded server also listened on 4444, a fixed port another
     session or another tool may hold. The reset is a GDB command in every mode
     rather than a server option, so the line is the same for all three."""
-    service, _ = pyocd_session_service(tmp_path, monkeypatch)
-    try:
-        started = run_breakpoint_cycle(service, mode)
-    finally:
-        service.close()
 
-    config = service.config
-    executable = Path(resolve_work_path(config, config.debugger.executable))
-    assert session_log(service, started)["server_command"] == [
-        *invocation(str(executable)),
-        "gdbserver",
-        "--port",
-        str(started["gdb_port"]),
-        "-O",
-        CONSOLE_OFF_OPTION,
-        "--uid",
-        PYOCD_UID,
-        "--target",
-        PYOCD_TARGET,
-        "-W",
-    ]
+    def check_row(tmp_path, monkeypatch, mode: str) -> None:
+        service, _ = pyocd_session_service(tmp_path, monkeypatch)
+        try:
+            started = run_breakpoint_cycle(service, mode)
+        finally:
+            service.close()
+
+        config = service.config
+        executable = Path(resolve_work_path(config, config.debugger.executable))
+        assert session_log(service, started)["server_command"] == [
+            *invocation(str(executable)),
+            "gdbserver",
+            "--port",
+            str(started["gdb_port"]),
+            "-O",
+            CONSOLE_OFF_OPTION,
+            "--uid",
+            PYOCD_UID,
+            "--target",
+            PYOCD_TARGET,
+            "-W",
+        ]
+
+    rows = parameter_rows(["attach", "reset_halt", "load"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(
-    ("mode", "after_connect"),
-    [
-        ("attach", []),
-        ("reset_halt", [PYOCD_RESET_HALT]),
-        ("load", [PYOCD_RESET_HALT, "-target-download", PYOCD_RESET_HALT]),
-    ],
-)
-def test_pyocd_sessions_send_no_openocd_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, after_connect: list[str]) -> None:
+def test_pyocd_sessions_send_no_openocd_command(tmp_path: Path) -> None:
     """The GDB/MI commands a session over pyOCD sends, and nothing of OpenOCD's.
 
     OpenOCD's detach guard is a Tcl event handler pyOCD has no word for: pyOCD
@@ -283,20 +283,29 @@ def test_pyocd_sessions_send_no_openocd_command(tmp_path: Path, monkeypatch: pyt
     list back before the server goes. `BREAKPOINT_REMOVAL` is that, and
     `test_a_session_takes_its_breakpoints_off_the_target_before_its_server_is_ended`
     pins it against the moment the server is ended."""
-    service, _ = pyocd_session_service(tmp_path, monkeypatch)
-    try:
-        started = run_breakpoint_cycle(service, mode)
-    finally:
-        service.close()
 
-    assert sent_commands(service, started) == [
-        *OPENOCD_SESSION_PROLOGUE,
-        *after_connect,
-        '-break-insert "test_done"',
-        "-exec-continue",
-        *BREAKPOINT_REMOVAL,
-        "-gdb-exit",
-    ]
+    def check_row(tmp_path, monkeypatch, mode: str, after_connect: list[str]) -> None:
+        service, _ = pyocd_session_service(tmp_path, monkeypatch)
+        try:
+            started = run_breakpoint_cycle(service, mode)
+        finally:
+            service.close()
+
+        assert sent_commands(service, started) == [
+            *OPENOCD_SESSION_PROLOGUE,
+            *after_connect,
+            '-break-insert "test_done"',
+            "-exec-continue",
+            *BREAKPOINT_REMOVAL,
+            "-gdb-exit",
+        ]
+
+    rows = parameter_rows([
+        ("attach", []),
+        ("reset_halt", [PYOCD_RESET_HALT]),
+        ("load", [PYOCD_RESET_HALT, "-target-download", PYOCD_RESET_HALT]),
+    ], multiple=True, ids=['attach-after_connect0', 'reset_halt-after_connect1', 'load-after_connect2'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_pyocd_session_ends_the_server_before_gdb_detaches_and_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -510,19 +519,20 @@ def test_pyocd_symbol_reads_run_inside_an_open_session_and_standalone_without_on
     assert info["address"] == value["address"], (info, value)
 
 
-@pytest.mark.parametrize(
-    ("debugger_type", "gdb_server", "opens"),
-    [("openocd", None, True), ("pyocd", None, True), ("stlink", None, False), ("stlink", FAKE_ST_LINK_GDBSERVER, True)],
-)
-def test_which_configured_backends_open_debug_sessions(tmp_path: Path, debugger_type: str, gdb_server: Path | None, opens: bool) -> None:
+def test_which_configured_backends_open_debug_sessions(tmp_path: Path) -> None:
     """STM32CubeProgrammer opens one exactly when its entry has a GDB server to run it on."""
-    from agentic_hil.tools import configured_opens_debug_sessions
 
-    config = load_config(
-        str(write_config(tmp_path, debugger_type=debugger_type, target_type=PYOCD_TARGET if debugger_type == "pyocd" else None, gdb_server_executable=gdb_server))
-    )
+    def check_row(tmp_path, _patch, debugger_type: str, gdb_server: Path | None, opens: bool) -> None:
+        from agentic_hil.tools import configured_opens_debug_sessions
 
-    assert configured_opens_debug_sessions(config) is opens
+        config = load_config(
+            str(write_config(tmp_path, debugger_type=debugger_type, target_type=PYOCD_TARGET if debugger_type == "pyocd" else None, gdb_server_executable=gdb_server))
+        )
+
+        assert configured_opens_debug_sessions(config) is opens
+
+    rows = parameter_rows([("openocd", None, True), ("pyocd", None, True), ("stlink", None, False), ("stlink", FAKE_ST_LINK_GDBSERVER, True)], multiple=True, ids=['openocd-None-True', 'pyocd-None-True', 'stlink-None-False', 'stlink-gdb_server3-True'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_pyocd_ready_line_is_the_recorded_line_for_the_reserved_port_only() -> None:
@@ -613,8 +623,7 @@ def st_link_programmer_directory(config) -> str:
     return str(Path(resolve_work_path(config, config.debugger.executable)).resolve().parent)
 
 
-@pytest.mark.parametrize("mode", ["attach", "reset_halt", "load"])
-def test_st_link_debug_server_is_started_attached_on_the_configured_probe_at_the_reserved_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+def test_st_link_debug_server_is_started_attached_on_the_configured_probe_at_the_reserved_port(tmp_path: Path) -> None:
     """The recorded command line, for every mode.
 
     The configured or found server, the port the start reserved, `-d` for the
@@ -623,35 +632,32 @@ def test_st_link_debug_server_is_started_attached_on_the_configured_probe_at_the
     serial and `-g`. `-g` in every mode: the reset is a GDB command afterwards,
     so the line is the same for all three. Never `-e`, which keeps the server up
     after its client leaves."""
-    service, _ = st_link_session_service(tmp_path, monkeypatch)
-    try:
-        started = run_breakpoint_cycle(service, mode)
-    finally:
-        service.close()
 
-    config = service.config
-    assert session_log(service, started)["server_command"] == [
-        *invocation(str(config.debugger.gdb_server_executable)),
-        "-p",
-        str(started["gdb_port"]),
-        "-d",
-        "-cp",
-        st_link_programmer_directory(config),
-        "-i",
-        ST_LINK_SERIAL,
-        "-g",
-    ]
+    def check_row(tmp_path, monkeypatch, mode: str) -> None:
+        service, _ = st_link_session_service(tmp_path, monkeypatch)
+        try:
+            started = run_breakpoint_cycle(service, mode)
+        finally:
+            service.close()
+
+        config = service.config
+        assert session_log(service, started)["server_command"] == [
+            *invocation(str(config.debugger.gdb_server_executable)),
+            "-p",
+            str(started["gdb_port"]),
+            "-d",
+            "-cp",
+            st_link_programmer_directory(config),
+            "-i",
+            ST_LINK_SERIAL,
+            "-g",
+        ]
+
+    rows = parameter_rows(["attach", "reset_halt", "load"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(
-    ("mode", "after_connect"),
-    [
-        ("attach", []),
-        ("reset_halt", [ST_LINK_RESET]),
-        ("load", [ST_LINK_RESET, "-target-download", ST_LINK_RESET]),
-    ],
-)
-def test_st_link_sessions_send_no_openocd_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, after_connect: list[str]) -> None:
+def test_st_link_sessions_send_no_openocd_command(tmp_path: Path) -> None:
     """The GDB/MI commands a session over ST-LINK_gdbserver sends, and nothing of OpenOCD's.
 
     OpenOCD's `monitor reset halt` is refused by this server (`Unknown reset
@@ -661,20 +667,29 @@ def test_st_link_sessions_send_no_openocd_command(tmp_path: Path, monkeypatch: p
     before GDB detaches, which is also why the session takes its breakpoints off
     the target itself (`BREAKPOINT_REMOVAL`), where a detach GDB got to finish
     would have carried that."""
-    service, _ = st_link_session_service(tmp_path, monkeypatch)
-    try:
-        started = run_breakpoint_cycle(service, mode)
-    finally:
-        service.close()
 
-    assert sent_commands(service, started) == [
-        *OPENOCD_SESSION_PROLOGUE,
-        *after_connect,
-        '-break-insert "test_done"',
-        "-exec-continue",
-        *BREAKPOINT_REMOVAL,
-        "-gdb-exit",
-    ]
+    def check_row(tmp_path, monkeypatch, mode: str, after_connect: list[str]) -> None:
+        service, _ = st_link_session_service(tmp_path, monkeypatch)
+        try:
+            started = run_breakpoint_cycle(service, mode)
+        finally:
+            service.close()
+
+        assert sent_commands(service, started) == [
+            *OPENOCD_SESSION_PROLOGUE,
+            *after_connect,
+            '-break-insert "test_done"',
+            "-exec-continue",
+            *BREAKPOINT_REMOVAL,
+            "-gdb-exit",
+        ]
+
+    rows = parameter_rows([
+        ("attach", []),
+        ("reset_halt", [ST_LINK_RESET]),
+        ("load", [ST_LINK_RESET, "-target-download", ST_LINK_RESET]),
+    ], multiple=True, ids=['attach-after_connect0', 'reset_halt-after_connect1', 'load-after_connect2'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_st_link_session_kills_the_server_before_gdb_detaches_and_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -876,9 +891,21 @@ def windows_recorded_lines(name: str) -> str:
     return json.loads(ST_LINK_WINDOWS_RECORDING.read_text(encoding="utf-8"))["recordings"][name]["stdout"]
 
 
-@pytest.mark.parametrize(
-    ("output", "backend_error_type", "decisive_line"),
-    [
+def test_st_link_gdb_server_output_is_classified_by_its_reason_line(tmp_path: Path) -> None:
+    """Every recorded refusal, on both hosts, by the line the server gives its reason in.
+
+    The server's own words for a missing probe are not STM32_Programmer_CLI's:
+    an unknown serial is `ST-LINK: <serial> not found`, which the CLI's reading
+    would take for a missing input file, so the server's output has a reading of
+    its own. The Windows refusals were recorded with nothing on USB."""
+
+    def check_row(_workspace, _patch, output: str, backend_error_type: str, decisive_line: str) -> None:
+        from agentic_hil.backends.stlink import classify_gdb_server_output, gdb_server_decisive_line
+
+        assert classify_gdb_server_output(output) == backend_error_type
+        assert gdb_server_decisive_line(output, backend_error_type) == decisive_line
+
+    rows = parameter_rows([
         pytest.param(
             windows_recorded_lines("start_no_probe"), "probe_not_found", "Reason: No ST-LINK found. Please check ST-LINK USB cable.", id="windows-no-probe"
         ),
@@ -918,19 +945,8 @@ def windows_recorded_lines(name: str) -> str:
             "Target USB comms error",
             id="linux-usb-refused-after-a-killed-server",
         ),
-    ],
-)
-def test_st_link_gdb_server_output_is_classified_by_its_reason_line(output: str, backend_error_type: str, decisive_line: str) -> None:
-    """Every recorded refusal, on both hosts, by the line the server gives its reason in.
-
-    The server's own words for a missing probe are not STM32_Programmer_CLI's:
-    an unknown serial is `ST-LINK: <serial> not found`, which the CLI's reading
-    would take for a missing input file, so the server's output has a reading of
-    its own. The Windows refusals were recorded with nothing on USB."""
-    from agentic_hil.backends.stlink import classify_gdb_server_output, gdb_server_decisive_line
-
-    assert classify_gdb_server_output(output) == backend_error_type
-    assert gdb_server_decisive_line(output, backend_error_type) == decisive_line
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_st_link_session_with_no_gdb_server_is_refused_naming_both_ways_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

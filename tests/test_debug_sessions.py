@@ -22,6 +22,7 @@ from conftest import (
     write_authoritative_config,
     write_config,
 )
+from parameter_rows import check_parameter_rows, parameter_rows
 
 from agentic_hil.backends.common import command_for_log
 from agentic_hil.backends.gdbdebug import GDB_AUTODETECT_CANDIDATES as BACKEND_GDB_CANDIDATES
@@ -1162,9 +1163,14 @@ def test_a_dump_answers_the_window_that_was_asked_for_and_not_the_file(tmp_path:
     assert read_intel_hex_file(output, 0x20000080, 8) is None
 
 
-@pytest.mark.parametrize(
-    "lines",
-    [
+def test_a_dump_that_is_not_the_whole_window_is_no_answer_at_all(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, lines: list[str]) -> None:
+        output = tmp_path / "memory.hex"
+        output.write_text("\n".join(lines) + "\n", encoding="ascii")
+
+        assert read_intel_hex_file(output, 0x20000080, 3) is None
+
+    rows = parameter_rows([
         [":00000001FF"],
         # A hole in the middle: the first and last bytes of the window arrive and
         # the one between them never does.
@@ -1181,14 +1187,8 @@ def test_a_dump_answers_the_window_that_was_asked_for_and_not_the_file(tmp_path:
         # A checksum that does not add up, on the record holding the window.
         [":020000042000DA", ":03008000010203FF", ":00000001FF"],
         ["not a record at all"],
-    ],
-    ids=["empty", "hole", "wrong_address", "conflicting_bytes", "unknown_record_type", "bad_checksum", "not_intel_hex"],
-)
-def test_a_dump_that_is_not_the_whole_window_is_no_answer_at_all(tmp_path: Path, lines: list[str]) -> None:
-    output = tmp_path / "memory.hex"
-    output.write_text("\n".join(lines) + "\n", encoding="ascii")
-
-    assert read_intel_hex_file(output, 0x20000080, 3) is None
+    ], ids=["empty", "hole", "wrong_address", "conflicting_bytes", "unknown_record_type", "bad_checksum", "not_intel_hex"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_dump_that_is_not_there_is_no_answer_either(tmp_path: Path) -> None:
@@ -1607,8 +1607,7 @@ def timeout_arguments(tool: str, value: object) -> dict:
     return arguments
 
 
-@pytest.mark.parametrize(("label", "value"), INVALID_TIMEOUT_VALUES, ids=[label for label, _ in INVALID_TIMEOUT_VALUES])
-def test_invalid_timeout_is_refused_as_invalid_argument(tmp_path: Path, label: str, value: object) -> None:
+def test_invalid_timeout_is_refused_as_invalid_argument(tmp_path: Path) -> None:
     """A `timeout_s` that cannot be used is refused, on every tool that takes one.
 
     This pins behaviour that was already correct rather than changing it
@@ -1622,15 +1621,20 @@ def test_invalid_timeout_is_refused_as_invalid_argument(tmp_path: Path, label: s
     Driven through `call` because that is the only entry point an MCP host can
     reach, and the three fields asserted are what it reads.
     """
-    service = debug_service(tmp_path)
-    try:
-        for tool in TIMEOUT_TOOLS:
-            result = service.call(tool, timeout_arguments(tool, value))
-            assert result["ok"] is False, (tool, label, result)
-            assert result["error_type"] == "invalid_argument", (tool, label, result)
-            assert result["field"] == "timeout_s", (tool, label, result)
-    finally:
-        service.close()
+
+    def check_row(tmp_path, _patch, label: str, value: object) -> None:
+        service = debug_service(tmp_path)
+        try:
+            for tool in TIMEOUT_TOOLS:
+                result = service.call(tool, timeout_arguments(tool, value))
+                assert result["ok"] is False, (tool, label, result)
+                assert result["error_type"] == "invalid_argument", (tool, label, result)
+                assert result["field"] == "timeout_s", (tool, label, result)
+        finally:
+            service.close()
+
+    rows = parameter_rows(INVALID_TIMEOUT_VALUES, multiple=True, ids=[label for label, _ in INVALID_TIMEOUT_VALUES])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_usable_timeout_is_not_refused_as_invalid_argument(tmp_path: Path) -> None:
@@ -2933,20 +2937,26 @@ def test_elf_symbol_table_answers_address_and_size(tmp_path: Path) -> None:
     assert read_elf_symbol_from_bytes(tmp_path, table, "main") == {"ok": True, "address": 0x080001C0, "size_bytes": 64}
 
 
-@pytest.mark.parametrize(("bits", "big_endian"), [(32, False), (32, True), (64, False), (64, True)])
-def test_elf_symbol_table_is_read_in_the_class_and_order_the_file_declares(tmp_path: Path, bits: int, big_endian: bool) -> None:
+def test_elf_symbol_table_is_read_in_the_class_and_order_the_file_declares(tmp_path: Path) -> None:
     """Four layouts, one answer. ELF32 and ELF64 order a symbol record
     differently and either can be written LSB or MSB first, so the reader is held
     to the header's own claim rather than to the one shape a Cortex-M toolchain
     happens to emit."""
-    table = elf_with_symbols([("g_pfnVectors", 0x08000000, 428)], bits=bits, big_endian=big_endian)
 
-    assert read_elf_symbol_from_bytes(tmp_path, table, "g_pfnVectors") == {"ok": True, "address": 0x08000000, "size_bytes": 428}
+    def check_row(tmp_path, _patch, bits: int, big_endian: bool) -> None:
+        table = elf_with_symbols([("g_pfnVectors", 0x08000000, 428)], bits=bits, big_endian=big_endian)
+
+        assert read_elf_symbol_from_bytes(tmp_path, table, "g_pfnVectors") == {"ok": True, "address": 0x08000000, "size_bytes": 428}
+
+    rows = parameter_rows([(32, False), (32, True), (64, False), (64, True)], multiple=True, ids=['32-False', '32-True', '64-False', '64-True'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(
-    ("entries", "symbol", "reason"),
-    [
+def test_elf_symbol_table_refuses_what_it_cannot_answer(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, entries: list[tuple], symbol: str, reason: str) -> None:
+        assert read_elf_symbol_from_bytes(tmp_path, elf_with_symbols(entries), symbol) == {"ok": False, "reason": reason}
+
+    rows = parameter_rows([
         ([("main", 0x080001C0, 64)], "g_pfnVectors", "not_found"),
         # A bare assembler label: in the table, with no `.size` behind it. A
         # zero-length read is not an answer, so this stays a refusal.
@@ -2957,23 +2967,20 @@ def test_elf_symbol_table_is_read_in_the_class_and_order_the_file_declares(tmp_p
         # Two definitions of one name: a file-order first match would be a board
         # address chosen by luck.
         ([("g_pfnVectors", 0x08000000, 428), ("g_pfnVectors", 0x08010000, 428)], "g_pfnVectors", "ambiguous"),
-    ],
-    ids=["absent", "no_size_directive", "undefined", "two_definitions"],
-)
-def test_elf_symbol_table_refuses_what_it_cannot_answer(tmp_path: Path, entries: list[tuple], symbol: str, reason: str) -> None:
-    assert read_elf_symbol_from_bytes(tmp_path, elf_with_symbols(entries), symbol) == {"ok": False, "reason": reason}
+    ], multiple=True, ids=["absent", "no_size_directive", "undefined", "two_definitions"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(
-    "data",
-    [b"", b"\x7fELF", b"not an elf at all", b"\x7fELF" + b"\x00" * 12, b"\x7fELF\x01\x01\x01" + b"\xff" * 60],
-    ids=["empty", "magic_only", "not_elf", "magic_and_zeroes", "unparsable_section_table"],
-)
-def test_elf_symbol_table_reports_a_file_it_cannot_parse_rather_than_raising(tmp_path: Path, data: bytes) -> None:
+def test_elf_symbol_table_reports_a_file_it_cannot_parse_rather_than_raising(tmp_path: Path) -> None:
     """Including the four-byte stand-in the rest of this suite writes. A file this
     cannot read has to come back as a reason, never as a traceback: the caller is
     holding GDB's own refusal and has to be able to report it."""
-    assert read_elf_symbol_from_bytes(tmp_path, data, "g_pfnVectors") == {"ok": False, "reason": "unreadable"}
+
+    def check_row(tmp_path, _patch, data: bytes) -> None:
+        assert read_elf_symbol_from_bytes(tmp_path, data, "g_pfnVectors") == {"ok": False, "reason": "unreadable"}
+
+    rows = parameter_rows([b"", b"\x7fELF", b"not an elf at all", b"\x7fELF" + b"\x00" * 12, b"\x7fELF\x01\x01\x01" + b"\xff" * 60], ids=["empty", "magic_only", "not_elf", "magic_and_zeroes", "unparsable_section_table"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_elf_symbol_table_reports_a_missing_file_rather_than_raising(tmp_path: Path) -> None:
@@ -3001,9 +3008,20 @@ def test_elf_symbol_table_rejects_a_string_table_size_the_file_cannot_hold(tmp_p
     assert read_elf_symbol_from_bytes(tmp_path, hostile_table, "g_pfnVectors") == {"ok": False, "reason": "unreadable"}
 
 
-@pytest.mark.parametrize(
-    ("data", "declared"),
-    [
+def test_the_image_is_asked_which_order_its_integers_are_read_in(tmp_path: Path) -> None:
+    """EI_DATA, in the words `int.from_bytes` takes.
+
+    A file that declares neither LSB nor MSB declares nothing, and is refused
+    here exactly as the symbol table refuses it: an image that states no order
+    cannot be made to state one."""
+
+    def check_row(tmp_path, _patch, data: bytes, declared: str | None) -> None:
+        path = tmp_path / "image.elf"
+        path.write_bytes(data)
+
+        assert read_elf_byte_order(path) == declared
+
+    rows = parameter_rows([
         (elf_with_symbols([("main", 0x080001C0, 64)]), "little"),
         (elf_with_symbols([("main", 0x080001C0, 64)], big_endian=True), "big"),
         (elf_with_symbols([("main", 0x080001C0, 64)], bits=64, big_endian=True), "big"),
@@ -3012,19 +3030,8 @@ def test_elf_symbol_table_rejects_a_string_table_size_the_file_cannot_hold(tmp_p
         (b"\x7fELF" + b"\x00" * 12, None),
         (b"\x7fELF", None),
         (b"not an elf at all", None),
-    ],
-    ids=["lsb", "msb", "msb_64_bit", "no_encoding", "truncated", "not_elf"],
-)
-def test_the_image_is_asked_which_order_its_integers_are_read_in(tmp_path: Path, data: bytes, declared: str | None) -> None:
-    """EI_DATA, in the words `int.from_bytes` takes.
-
-    A file that declares neither LSB nor MSB declares nothing, and is refused
-    here exactly as the symbol table refuses it: an image that states no order
-    cannot be made to state one."""
-    path = tmp_path / "image.elf"
-    path.write_bytes(data)
-
-    assert read_elf_byte_order(path) == declared
+    ], multiple=True, ids=["lsb", "msb", "msb_64_bit", "no_encoding", "truncated", "not_elf"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_missing_image_declares_no_order_rather_than_raising(tmp_path: Path) -> None:
@@ -3241,32 +3248,34 @@ def test_symbol_value_states_when_a_width_has_no_integer_reading(tmp_path: Path)
     assert value["value_not_decoded"] == "size_bytes is not 1, 2, 4 or 8, so the bytes carry no single integer reading."
 
 
-@pytest.mark.parametrize(
-    ("data", "unsigned", "signed"),
-    [
+def test_symbol_value_decoding_covers_every_integer_width(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, data: bytes, unsigned: int, signed: int) -> None:
+        decoded = decode_symbol_value(data, LITTLE_ENDIAN_IMAGE)
+
+        assert decoded["hex"] == data.hex()
+        assert decoded["byte_order"] == "little"
+        assert decoded["value_unsigned"] == unsigned
+        assert decoded["value_signed"] == signed
+
+    rows = parameter_rows([
         (b"\xff", 255, -1),
         (b"\x00\x80", 32768, -32768),
         (b"\x01\x00\x00\x00", 1, 1),
         (b"\xff\xff\xff\xff\xff\xff\xff\xff", 2**64 - 1, -1),
-    ],
-    ids=["one_byte", "two_bytes", "four_bytes", "eight_bytes"],
-)
-def test_symbol_value_decoding_covers_every_integer_width(data: bytes, unsigned: int, signed: int) -> None:
-    decoded = decode_symbol_value(data, LITTLE_ENDIAN_IMAGE)
-
-    assert decoded["hex"] == data.hex()
-    assert decoded["byte_order"] == "little"
-    assert decoded["value_unsigned"] == unsigned
-    assert decoded["value_signed"] == signed
+    ], multiple=True, ids=["one_byte", "two_bytes", "four_bytes", "eight_bytes"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("size", [0, 3, 5, 6, 7, 9, 408], ids=str)
-def test_symbol_value_decoding_offers_no_number_at_any_other_width(size: int) -> None:
-    decoded = decode_symbol_value(bytes(size), LITTLE_ENDIAN_IMAGE)
+def test_symbol_value_decoding_offers_no_number_at_any_other_width(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, size: int) -> None:
+        decoded = decode_symbol_value(bytes(size), LITTLE_ENDIAN_IMAGE)
 
-    assert decoded["hex"] == bytes(size).hex()
-    assert "value_unsigned" not in decoded and "value_signed" not in decoded
-    assert "value_not_decoded" in decoded
+        assert decoded["hex"] == bytes(size).hex()
+        assert "value_unsigned" not in decoded and "value_signed" not in decoded
+        assert "value_not_decoded" in decoded
+
+    rows = parameter_rows([0, 3, 5, 6, 7, 9, 408])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_symbol_value_decoding_reads_the_order_it_was_handed() -> None:

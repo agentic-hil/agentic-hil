@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from parameter_rows import check_parameter_rows, combine_parameter_rows, parameter_rows
 from power_supply_fakes import (
     CURRENT_RESOLUTION,
     EFFECTIVE_CURRENT,
@@ -233,50 +234,51 @@ def test_set_point_values_are_exact_decimals_never_floats(tmp_path: Path, monkey
     assert isinstance(written[2], Decimal) and written[2] == Decimal("0.1"), written
 
 
-@pytest.mark.parametrize(
-    "arguments",
-    [
+def test_an_invalid_set_point_is_refused_without_rounding(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, arguments: dict[str, Any]) -> None:
+        bench = make_bench(tmp_path, monkeypatch)
+
+        result = set_points(bench, **arguments)
+
+        assert_refused_before_contact(bench, result, "invalid_argument")
+        assert bench.unit.connections == 0
+
+    rows = parameter_rows([
         pytest.param({"voltage_v": 5.005}, id="voltage_off_resolution"),
         pytest.param({"current_a": 0.2505}, id="current_off_resolution"),
         pytest.param({"voltage_v": -1.0}, id="negative_voltage"),
         pytest.param({"current_a": -0.1}, id="negative_current"),
         pytest.param({"voltage_v": True}, id="bool_voltage"),
         pytest.param({}, id="neither_value"),
-    ],
-)
-def test_an_invalid_set_point_is_refused_without_rounding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arguments: dict[str, Any]) -> None:
-    bench = make_bench(tmp_path, monkeypatch)
-
-    result = set_points(bench, **arguments)
-
-    assert_refused_before_contact(bench, result, "invalid_argument")
-    assert bench.unit.connections == 0
+    ])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(
-    ("name", "value"),
-    [
+def test_a_set_point_too_large_to_check_is_refused_naming_the_argument(tmp_path: Path) -> None:
+    """Far above any range, its step cannot even be checked; it is refused before contact, not raised."""
+
+    def check_row(tmp_path, monkeypatch, name: str, value: float) -> None:
+        bench = make_bench(tmp_path, monkeypatch)
+        service = bench.service()
+        try:
+            result = call(bench, "power_supply_set", {"supply_id": SUPPLY, name: value}, service=service)
+            again = call(bench, "power_supply_status", {"supply_id": SUPPLY}, service=service)
+        finally:
+            service.close()
+
+        assert result["ok"] is False and result["error_type"] == "invalid_argument", result
+        assert result["field"] == name and f"`{name}`" in result["summary"], result
+        assert result.get("cleanup_reasons") in (None, []), result
+        assert bench.unit.writes() == [], bench.unit.calls
+        assert again["ok"] is True, again
+
+    rows = parameter_rows([
         pytest.param("voltage_v", 1e30, id="voltage_1e30"),
         pytest.param("voltage_v", 1e26, id="voltage_1e26"),
         pytest.param("current_a", 1e26, id="current_1e26"),
         pytest.param("voltage_v", 10**40, id="voltage_integer_1e40"),
-    ],
-)
-def test_a_set_point_too_large_to_check_is_refused_naming_the_argument(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, value: float) -> None:
-    """Far above any range, its step cannot even be checked; it is refused before contact, not raised."""
-    bench = make_bench(tmp_path, monkeypatch)
-    service = bench.service()
-    try:
-        result = call(bench, "power_supply_set", {"supply_id": SUPPLY, name: value}, service=service)
-        again = call(bench, "power_supply_status", {"supply_id": SUPPLY}, service=service)
-    finally:
-        service.close()
-
-    assert result["ok"] is False and result["error_type"] == "invalid_argument", result
-    assert result["field"] == name and f"`{name}`" in result["summary"], result
-    assert result.get("cleanup_reasons") in (None, []), result
-    assert bench.unit.writes() == [], bench.unit.calls
-    assert again["ok"] is True, again
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_stored_set_point_above_the_limit_blocks_output_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -611,42 +613,39 @@ def raw_serial_exception() -> BaseException:
     return serial.SerialException(PORT_REFUSED)
 
 
-@pytest.mark.parametrize(
-    ("fault", "cause"),
-    [pytest.param(port_refused_fault, "port_open_failed", id="backend-fault"), pytest.param(raw_serial_exception, "serial_error", id="raw-serial-exception")],
-)
-@pytest.mark.parametrize(
-    ("tool", "arguments"),
-    [
+def test_a_serial_line_that_fails_before_any_write_is_a_plain_failure_naming_its_cause(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, tool: str, arguments: dict[str, Any], fault: Any, cause: str) -> None:
+        from agentic_hil.report import read_last_report
+
+        bench = make_bench(tmp_path, monkeypatch, unit_changes={"raises": {"identity": fault()}})
+        service = bench.service()
+        try:
+            result = call(bench, tool, {"supply_id": SUPPLY, **arguments}, service=service)
+            lease = service.call("hardware_lease_status", {})
+        finally:
+            service.close()
+
+        assert result["ok"] is False, result
+        assert result["error_type"] == "power_supply_no_reply", result
+        assert result["cause"] == cause, result
+        assert PORT_REFUSED in result["backend_error"], result
+        assert result["retry_safe"] is True, result
+        assert result.get("side_effect_status", "not_started") == "not_started", result
+        assert_not_quarantined(result)
+        assert lease["blocked"] is False, lease
+        assert_last_known_output(result)
+        assert bench.unit.writes() == [], bench.unit.calls
+        assert read_last_report(bench.config)["error_type"] == "power_supply_no_reply"
+
+    rows = combine_parameter_rows(
+        parameter_rows([
         pytest.param("power_supply_status", {}, id="status"),
         pytest.param("power_supply_set", {"voltage_v": 5.0}, id="set"),
         pytest.param("power_supply_output", {"on": True}, id="output"),
-    ],
-)
-def test_a_serial_line_that_fails_before_any_write_is_a_plain_failure_naming_its_cause(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: Any, cause: str, tool: str, arguments: dict[str, Any]
-) -> None:
-    from agentic_hil.report import read_last_report
-
-    bench = make_bench(tmp_path, monkeypatch, unit_changes={"raises": {"identity": fault()}})
-    service = bench.service()
-    try:
-        result = call(bench, tool, {"supply_id": SUPPLY, **arguments}, service=service)
-        lease = service.call("hardware_lease_status", {})
-    finally:
-        service.close()
-
-    assert result["ok"] is False, result
-    assert result["error_type"] == "power_supply_no_reply", result
-    assert result["cause"] == cause, result
-    assert PORT_REFUSED in result["backend_error"], result
-    assert result["retry_safe"] is True, result
-    assert result.get("side_effect_status", "not_started") == "not_started", result
-    assert_not_quarantined(result)
-    assert lease["blocked"] is False, lease
-    assert_last_known_output(result)
-    assert bench.unit.writes() == [], bench.unit.calls
-    assert read_last_report(bench.config)["error_type"] == "power_supply_no_reply"
+    ], multiple=True, ids=['status', 'set', 'output']),
+        parameter_rows([pytest.param(port_refused_fault, "port_open_failed", id="backend-fault"), pytest.param(raw_serial_exception, "serial_error", id="raw-serial-exception")], multiple=True, ids=['backend-fault', 'raw-serial-exception']),
+    )
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_serial_exception_after_a_write_leaves_the_supply_unconfirmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -678,28 +677,26 @@ def refused_before_sending() -> BaseException:
     return PowerSupplyFault("power_supply_no_reply", "The fake supply's backend refused the command before sending anything.", wrote=False)
 
 
-@pytest.mark.parametrize(
-    ("refusing", "type_record", "tool", "arguments"),
-    [
+def test_a_write_the_backend_refused_before_sending_is_a_plain_failure(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, refusing: str, type_record: dict[str, Any] | None, tool: str, arguments: dict[str, Any]) -> None:
+        bench = make_bench(tmp_path, monkeypatch, type_record=type_record, unit_changes={"raises": {refusing: refused_before_sending()}})
+
+        result = call(bench, tool, {"supply_id": SUPPLY, **arguments})
+
+        assert result["ok"] is False, result
+        assert result["error_type"] == "power_supply_no_reply", result
+        assert bench.unit.names()[-1] == refusing, bench.unit.calls
+        assert result["retry_safe"] is True, result
+        assert result.get("side_effect_status", "not_started") == "not_started", result
+        assert_not_quarantined(result)
+        assert_last_known_output(result)
+
+    rows = parameter_rows([
         pytest.param("set_voltage", NO_PROTECTION, "power_supply_set", {"voltage_v": 5.0}, id="setter"),
         pytest.param("set_output", NO_PROTECTION, "power_supply_output", {"on": True}, id="output"),
         pytest.param("arm_protection", None, "power_supply_set", {"voltage_v": 5.0}, id="arm"),
-    ],
-)
-def test_a_write_the_backend_refused_before_sending_is_a_plain_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusing: str, type_record: dict[str, Any] | None, tool: str, arguments: dict[str, Any]
-) -> None:
-    bench = make_bench(tmp_path, monkeypatch, type_record=type_record, unit_changes={"raises": {refusing: refused_before_sending()}})
-
-    result = call(bench, tool, {"supply_id": SUPPLY, **arguments})
-
-    assert result["ok"] is False, result
-    assert result["error_type"] == "power_supply_no_reply", result
-    assert bench.unit.names()[-1] == refusing, bench.unit.calls
-    assert result["retry_safe"] is True, result
-    assert result.get("side_effect_status", "not_started") == "not_started", result
-    assert_not_quarantined(result)
-    assert_last_known_output(result)
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_refusal_after_a_write_in_the_same_call_still_leaves_the_supply_unconfirmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -807,32 +804,30 @@ def test_the_idn_serial_is_registered_as_a_secret(tmp_path: Path, monkeypatch: p
 # Protection (rule 3, section 12.12).
 
 
-@pytest.mark.parametrize(
-    ("tool", "arguments", "first_write"),
-    [
+def test_protection_is_armed_at_the_effective_limits_before_any_write(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, tool: str, arguments: dict[str, Any], first_write: str) -> None:
+        bench = make_bench(tmp_path, monkeypatch)
+        record_sleep(monkeypatch, bench.unit)
+
+        result = call(bench, tool, {"supply_id": SUPPLY, **arguments})
+
+        assert result["ok"] is True, result
+        arms = [entry for entry in bench.unit.calls if entry[0] == "arm_protection"]
+        assert arms == [("arm_protection", 1, EFFECTIVE_VOLTAGE, EFFECTIVE_CURRENT)], bench.unit.calls
+        assert index_of(bench, "identity") < index_of(bench, "arm_protection") < index_of(bench, first_write), bench.unit.calls
+        protection = result["protection"]["1"]
+        for name, value in (("ovp", EFFECTIVE_VOLTAGE), ("ocp", EFFECTIVE_CURRENT)):
+            assert protection[name]["support"] == "threshold", protection
+            assert protection[name]["armed"] == "confirmed", protection
+            assert Decimal(protection[name]["threshold"]) == value, protection
+            assert Decimal(protection[name]["threshold_read"]) == value, protection
+
+    rows = parameter_rows([
         pytest.param("power_supply_set", {"voltage_v": 5.0}, "set_voltage", id="set"),
         pytest.param("power_supply_output", {"on": True}, "set_output", id="output_on"),
         pytest.param("power_supply_cycle", {"off_s": 0.5}, "set_output", id="cycle"),
-    ],
-)
-def test_protection_is_armed_at_the_effective_limits_before_any_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str, arguments: dict[str, Any], first_write: str
-) -> None:
-    bench = make_bench(tmp_path, monkeypatch)
-    record_sleep(monkeypatch, bench.unit)
-
-    result = call(bench, tool, {"supply_id": SUPPLY, **arguments})
-
-    assert result["ok"] is True, result
-    arms = [entry for entry in bench.unit.calls if entry[0] == "arm_protection"]
-    assert arms == [("arm_protection", 1, EFFECTIVE_VOLTAGE, EFFECTIVE_CURRENT)], bench.unit.calls
-    assert index_of(bench, "identity") < index_of(bench, "arm_protection") < index_of(bench, first_write), bench.unit.calls
-    protection = result["protection"]["1"]
-    for name, value in (("ovp", EFFECTIVE_VOLTAGE), ("ocp", EFFECTIVE_CURRENT)):
-        assert protection[name]["support"] == "threshold", protection
-        assert protection[name]["armed"] == "confirmed", protection
-        assert Decimal(protection[name]["threshold"]) == value, protection
-        assert Decimal(protection[name]["threshold_read"]) == value, protection
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize(
@@ -862,43 +857,40 @@ def test_an_unreadable_threshold_is_armed_and_reported_unconfirmed(tmp_path: Pat
     assert protection["ovp"]["threshold_read"] is None, protection
 
 
-@pytest.mark.parametrize(
-    ("arm", "cause", "side_effect"),
-    [
-        pytest.param("fault", "backend_fault", "not_started", id="backend_fault"),
-        pytest.param("mismatch", "readback_mismatch", "partial", id="readback_mismatch"),
-        pytest.param("missing", "readback_missing", "partial", id="readback_missing"),
-    ],
-)
-@pytest.mark.parametrize(
-    ("tool", "arguments"),
-    [
+def test_a_failed_arm_refuses_with_its_cause_and_writes_nothing_else(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, tool: str, arguments: dict[str, Any], arm: str, cause: str, side_effect: str) -> None:
+        bench = make_bench(tmp_path, monkeypatch, unit_changes={"arm": arm})
+        record_sleep(monkeypatch, bench.unit)
+
+        result = call(bench, tool, {"supply_id": SUPPLY, **arguments})
+
+        assert result["ok"] is False, result
+        assert result["error_type"] == "power_supply_protection_not_armed", result
+        assert result["cause"] == cause, result
+        assert result["protection"] in {"ovp", "ocp"}, result
+        assert result["retry_safe"] is False, result
+        assert result["side_effect_status"] == side_effect, result
+        assert result["hardware_state"] == ("unchanged" if side_effect == "not_started" else "unknown"), result
+        assert "requested" in result and "read_back" in result, result
+        assert setter_calls(bench) == [], bench.unit.calls
+        assert bench.unit.sleeps == []
+        assert_last_known_output(result)
+        assert result["last_known_output"]["read_at"] is not None, result
+        assert_not_quarantined(result)
+
+    rows = combine_parameter_rows(
+        parameter_rows([
         pytest.param("power_supply_set", {"voltage_v": 5.0}, id="set"),
         pytest.param("power_supply_output", {"on": True}, id="output_on"),
         pytest.param("power_supply_cycle", {"off_s": 0.5}, id="cycle"),
-    ],
-)
-def test_a_failed_arm_refuses_with_its_cause_and_writes_nothing_else(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arm: str, cause: str, side_effect: str, tool: str, arguments: dict[str, Any]
-) -> None:
-    bench = make_bench(tmp_path, monkeypatch, unit_changes={"arm": arm})
-    record_sleep(monkeypatch, bench.unit)
-
-    result = call(bench, tool, {"supply_id": SUPPLY, **arguments})
-
-    assert result["ok"] is False, result
-    assert result["error_type"] == "power_supply_protection_not_armed", result
-    assert result["cause"] == cause, result
-    assert result["protection"] in {"ovp", "ocp"}, result
-    assert result["retry_safe"] is False, result
-    assert result["side_effect_status"] == side_effect, result
-    assert result["hardware_state"] == ("unchanged" if side_effect == "not_started" else "unknown"), result
-    assert "requested" in result and "read_back" in result, result
-    assert setter_calls(bench) == [], bench.unit.calls
-    assert bench.unit.sleeps == []
-    assert_last_known_output(result)
-    assert result["last_known_output"]["read_at"] is not None, result
-    assert_not_quarantined(result)
+    ], multiple=True, ids=['set', 'output_on', 'cycle']),
+        parameter_rows([
+        pytest.param("fault", "backend_fault", "not_started", id="backend_fault"),
+        pytest.param("mismatch", "readback_mismatch", "partial", id="readback_mismatch"),
+        pytest.param("missing", "readback_missing", "partial", id="readback_missing"),
+    ], multiple=True, ids=['backend_fault', 'readback_mismatch', 'readback_missing']),
+    )
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_an_arm_without_a_reply_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -993,24 +985,22 @@ def test_an_unknown_supply_is_refused(tmp_path: Path, monkeypatch: pytest.Monkey
 # Output state (D7, C2).
 
 
-@pytest.mark.parametrize(
-    ("tool", "arguments"),
-    [
+def test_an_unreadable_output_state_answers_not_supported_before_contact(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, tool: str, arguments: dict[str, Any]) -> None:
+        bench = make_bench(tmp_path, monkeypatch, type_record=record(output_readable=False))
+
+        result = call(bench, tool, {"supply_id": SUPPLY, **arguments})
+
+        assert_refused_before_contact(bench, result, "not_supported")
+        assert result["capability"] == "output_state", result
+        assert result["retry_safe"] is False, result
+
+    rows = parameter_rows([
         pytest.param("power_supply_output", {"on": True}, id="output_on"),
         pytest.param("power_supply_output", {"on": False}, id="output_off"),
         pytest.param("power_supply_cycle", {"off_s": 0.5}, id="cycle"),
-    ],
-)
-def test_an_unreadable_output_state_answers_not_supported_before_contact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str, arguments: dict[str, Any]
-) -> None:
-    bench = make_bench(tmp_path, monkeypatch, type_record=record(output_readable=False))
-
-    result = call(bench, tool, {"supply_id": SUPPLY, **arguments})
-
-    assert_refused_before_contact(bench, result, "not_supported")
-    assert result["capability"] == "output_state", result
-    assert result["retry_safe"] is False, result
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_an_unreadable_output_state_still_allows_set_points_and_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1058,15 +1048,18 @@ def test_a_cycle_sleeps_once_between_off_and_on(tmp_path: Path, monkeypatch: pyt
     assert bench.unit.channels[1].output_on is True
 
 
-@pytest.mark.parametrize("off_s", [0.4, 30.5, 0])
-def test_a_cycle_outside_its_bounds_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, off_s: float) -> None:
-    bench = make_bench(tmp_path, monkeypatch)
-    sleeps = record_sleep(monkeypatch, bench.unit)
+def test_a_cycle_outside_its_bounds_is_refused(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, off_s: float) -> None:
+        bench = make_bench(tmp_path, monkeypatch)
+        sleeps = record_sleep(monkeypatch, bench.unit)
 
-    result = cycle(bench, off_s=off_s)
+        result = cycle(bench, off_s=off_s)
 
-    assert_refused_before_contact(bench, result, "invalid_argument")
-    assert sleeps == []
+        assert_refused_before_contact(bench, result, "invalid_argument")
+        assert sleeps == []
+
+    rows = parameter_rows([0.4, 30.5, 0])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # ---------------------------------------------------------------------------

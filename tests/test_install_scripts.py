@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from parameter_rows import check_parameter_rows, combine_parameter_rows, parameter_rows
 from support import publish_atomically, scaled_time_bound
 
 import agentic_hil.cli
@@ -1085,8 +1086,7 @@ _INSTALLER_AGENT_LISTS: dict[str, Callable[[str, Sequence[Any]], list[str]]] = {
 }
 
 
-@pytest.mark.parametrize("where", list(_INSTALLER_AGENT_LISTS))
-def test_each_agent_list_an_installer_spells_out_is_the_clis(where: str) -> None:
+def test_each_agent_list_an_installer_spells_out_is_the_clis(tmp_path: Path) -> None:
     """Every agent list either installer writes by hand says what the CLI's list says (#565).
 
     The CLI's list is `KNOWN_AGENTS`, the one `--help` prints as the choices of
@@ -1095,12 +1095,16 @@ def test_each_agent_list_an_installer_spells_out_is_the_clis(where: str) -> None
     by the name that differs, instead of an installer that detects, prints or
     looks for agents the CLI does not have.
     """
-    problems = _INSTALLER_AGENT_LISTS[where](where, agentic_hil.cli.KNOWN_AGENTS)
-    assert not problems, "\n".join(problems)
+
+    def check_row(_workspace, _patch, where: str) -> None:
+        problems = _INSTALLER_AGENT_LISTS[where](where, agentic_hil.cli.KNOWN_AGENTS)
+        assert not problems, "\n".join(problems)
+
+    rows = parameter_rows(list(_INSTALLER_AGENT_LISTS))
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("where", list(_INSTALLER_AGENT_LISTS))
-def test_each_agent_list_check_goes_red_on_a_changed_copy_of_the_clis_list(where: str) -> None:
+def test_each_agent_list_check_goes_red_on_a_changed_copy_of_the_clis_list(tmp_path: Path) -> None:
     """Each check above fails on a list that differs, and says where and in which name.
 
     The copy is the CLI's list without the agents whose command is not their
@@ -1110,17 +1114,22 @@ def test_each_agent_list_check_goes_red_on_a_changed_copy_of_the_clis_list(where
     file and the list, and each names a name the copy changed, never one it
     kept.
     """
-    kept = [agent for agent in agentic_hil.cli.KNOWN_AGENTS if _agent_command(agent) == agent.id]
-    dropped = [agent for agent in agentic_hil.cli.KNOWN_AGENTS if agent not in kept]
-    added = _CopiedAgent("example-agent", ("example-agent",), "example-cli")
-    changed = {*(name for agent in dropped for name in (*agent.aliases, _agent_command(agent)) if name), added.id, added.command}
 
-    problems = _INSTALLER_AGENT_LISTS[where](where, [*kept, added])
+    def check_row(_workspace, _patch, where: str) -> None:
+        kept = [agent for agent in agentic_hil.cli.KNOWN_AGENTS if _agent_command(agent) == agent.id]
+        dropped = [agent for agent in agentic_hil.cli.KNOWN_AGENTS if agent not in kept]
+        added = _CopiedAgent("example-agent", ("example-agent",), "example-cli")
+        changed = {*(name for agent in dropped for name in (*agent.aliases, _agent_command(agent)) if name), added.id, added.command}
 
-    assert problems, f"{where} still passes on a list without {[agent.id for agent in dropped]} and with {added.id!r}"
-    for problem in problems:
-        assert problem.startswith(where), problem
-        assert any(repr(name) in problem for name in changed), f"{problem}\nnames none of {sorted(changed)}"
+        problems = _INSTALLER_AGENT_LISTS[where](where, [*kept, added])
+
+        assert problems, f"{where} still passes on a list without {[agent.id for agent in dropped]} and with {added.id!r}"
+        for problem in problems:
+            assert problem.startswith(where), problem
+            assert any(repr(name) in problem for name in changed), f"{problem}\nnames none of {sorted(changed)}"
+
+    rows = parameter_rows(list(_INSTALLER_AGENT_LISTS))
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 
@@ -1191,8 +1200,7 @@ def test_each_kind_of_documented_agent_list_is_found() -> None:
     assert found == {_CHOICES_OF_AGENT, _COMMANDS_LOOKED_FOR, _AGENTS_OR_OTHERS}, sorted(_DOCUMENTED_AGENT_LISTS)
 
 
-@pytest.mark.parametrize("where", list(_DOCUMENTED_AGENT_LISTS))
-def test_each_agent_list_the_guides_and_the_catalogue_spell_out_is_the_clis(where: str) -> None:
+def test_each_agent_list_the_guides_and_the_catalogue_spell_out_is_the_clis(tmp_path: Path) -> None:
     """Every agent list written by hand outside the installers says what the CLI's list says.
 
     An agent added to `KNOWN_AGENTS`, renamed or given another command turns
@@ -1200,29 +1208,38 @@ def test_each_agent_list_the_guides_and_the_catalogue_spell_out_is_the_clis(wher
     name that differs, instead of a guide, a refusal or the landing page that
     offers the agents the CLI had before.
     """
-    problems = _DOCUMENTED_AGENT_LISTS[where](where, agentic_hil.cli.KNOWN_AGENTS)
-    assert not problems, "\n".join(problems)
+
+    def check_row(_workspace, _patch, where: str) -> None:
+        problems = _DOCUMENTED_AGENT_LISTS[where](where, agentic_hil.cli.KNOWN_AGENTS)
+        assert not problems, "\n".join(problems)
+
+    rows = parameter_rows(list(_DOCUMENTED_AGENT_LISTS))
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("where", list(_DOCUMENTED_AGENT_LISTS))
-def test_each_documented_agent_list_check_goes_red_on_a_changed_copy_of_the_clis_list(where: str) -> None:
+def test_each_documented_agent_list_check_goes_red_on_a_changed_copy_of_the_clis_list(tmp_path: Path) -> None:
     """Each check above fails on a list that differs, and says where and in which name.
 
     The same changed copy as for the installers' lists: the CLI's list without
     the agents whose command is not their name, and with one added whose
     command is not its name either. Nothing in the product is edited for it.
     """
-    kept = [agent for agent in agentic_hil.cli.KNOWN_AGENTS if _agent_command(agent) == agent.id]
-    dropped = [agent for agent in agentic_hil.cli.KNOWN_AGENTS if agent not in kept]
-    added = _CopiedAgent("example-agent", ("example-agent",), "example-cli")
-    changed = {*(name for agent in dropped for name in (*agent.aliases, _agent_command(agent)) if name), added.id, added.command}
 
-    problems = _DOCUMENTED_AGENT_LISTS[where](where, [*kept, added])
+    def check_row(_workspace, _patch, where: str) -> None:
+        kept = [agent for agent in agentic_hil.cli.KNOWN_AGENTS if _agent_command(agent) == agent.id]
+        dropped = [agent for agent in agentic_hil.cli.KNOWN_AGENTS if agent not in kept]
+        added = _CopiedAgent("example-agent", ("example-agent",), "example-cli")
+        changed = {*(name for agent in dropped for name in (*agent.aliases, _agent_command(agent)) if name), added.id, added.command}
 
-    assert problems, f"{where} still passes on a list without {[agent.id for agent in dropped]} and with {added.id!r}"
-    for problem in problems:
-        assert problem.startswith(where), problem
-        assert any(repr(name) in problem for name in changed), f"{problem}\nnames none of {sorted(changed)}"
+        problems = _DOCUMENTED_AGENT_LISTS[where](where, [*kept, added])
+
+        assert problems, f"{where} still passes on a list without {[agent.id for agent in dropped]} and with {added.id!r}"
+        for problem in problems:
+            assert problem.startswith(where), problem
+            assert any(repr(name) in problem for name in changed), f"{problem}\nnames none of {sorted(changed)}"
+
+    rows = parameter_rows(list(_DOCUMENTED_AGENT_LISTS))
+    check_parameter_rows(tmp_path, rows, check_row)
 
 def test_neither_script_asks_agent_install_for_a_rendering_it_gets_anyway() -> None:
     """Rendering is the default, so the frontend that shows a person says nothing.
@@ -3206,8 +3223,7 @@ def _powershell_function(source: str, name: str) -> str:
 _POWERSHELL_REFRESH_FUNCTIONS = ("Invoke-WithPurePythonYaml", "Invoke-UvOnSupportedPython", "Invoke-Uv", "Test-UvManagesTool", "Get-UvRecordedRequirements", "Get-RefreshSpec", "Install-WithUv")
 
 
-@pytest.mark.parametrize(("operator_request", "failing"), [(None, False), (None, True), ("3.12", False)])
-def test_the_powershell_interpreter_request_lasts_for_the_uv_call_alone(tmp_path: Path, operator_request: str | None, failing: bool) -> None:
+def test_the_powershell_interpreter_request_lasts_for_the_uv_call_alone(tmp_path: Path) -> None:
     """`Invoke-UvOnSupportedPython` sets UV_PYTHON for uv and takes it away again.
 
     Through `irm | iex` install.ps1 runs in the reader's own session, so a
@@ -3216,45 +3232,49 @@ def test_the_powershell_interpreter_request_lasts_for_the_uv_call_alone(tmp_path
     after it, also when the call fails, and an operator's own UV_PYTHON is
     what uv sees and what stays.
     """
-    powershell = _windows_powershell()
-    declared = _declared_python_request()
-    seen = tmp_path / "seen"
-    before = "Remove-Item Env:\\UV_PYTHON -ErrorAction SilentlyContinue\n" if operator_request is None else f"$env:UV_PYTHON = '{operator_request}'\n"
-    answer = "throw 'uv failed'" if failing else "return [pscustomobject]@{ ExitCode = 0; Output = '' }"
-    harness = (
-        "$ErrorActionPreference = 'Stop'\n"
-        f"$seen = '{seen}'\n"
-        f"$UvPythonRequest = '{declared}'\n"
-        f"{before}"
-        "function Invoke-Captured {\n"
-        "    param([string]$File, [string[]]$Arguments)\n"
-        "    Add-Content -LiteralPath $seen -Value \"during=$env:UV_PYTHON\" -Encoding utf8\n"
-        f"    {answer}\n"
-        "}\n"
-        f"{_powershell_function(_powershell_source(), 'Invoke-WithPurePythonYaml')}"
-        f"{_powershell_function(_powershell_source(), 'Invoke-UvOnSupportedPython')}"
-        "try { $null = Invoke-UvOnSupportedPython -Arguments @('tool', 'install', 'agentic-hil') } catch { }\n"
-        "Add-Content -LiteralPath $seen -Value \"after=$env:UV_PYTHON\" -Encoding utf8\n"
-    )
-    script = tmp_path / "request-harness.ps1"
-    script.write_text(harness, encoding="utf-8")
 
-    result = subprocess.run(
-        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=SCRIPT_TIMEOUT_S,
-        check=False,
-    )
+    def check_row(tmp_path, _patch, operator_request: str | None, failing: bool) -> None:
+        powershell = _windows_powershell()
+        declared = _declared_python_request()
+        seen = tmp_path / "seen"
+        before = "Remove-Item Env:\\UV_PYTHON -ErrorAction SilentlyContinue\n" if operator_request is None else f"$env:UV_PYTHON = '{operator_request}'\n"
+        answer = "throw 'uv failed'" if failing else "return [pscustomobject]@{ ExitCode = 0; Output = '' }"
+        harness = (
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$seen = '{seen}'\n"
+            f"$UvPythonRequest = '{declared}'\n"
+            f"{before}"
+            "function Invoke-Captured {\n"
+            "    param([string]$File, [string[]]$Arguments)\n"
+            "    Add-Content -LiteralPath $seen -Value \"during=$env:UV_PYTHON\" -Encoding utf8\n"
+            f"    {answer}\n"
+            "}\n"
+            f"{_powershell_function(_powershell_source(), 'Invoke-WithPurePythonYaml')}"
+            f"{_powershell_function(_powershell_source(), 'Invoke-UvOnSupportedPython')}"
+            "try { $null = Invoke-UvOnSupportedPython -Arguments @('tool', 'install', 'agentic-hil') } catch { }\n"
+            "Add-Content -LiteralPath $seen -Value \"after=$env:UV_PYTHON\" -Encoding utf8\n"
+        )
+        script = tmp_path / "request-harness.ps1"
+        script.write_text(harness, encoding="utf-8")
 
-    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
-    assert seen.read_text(encoding="utf-8-sig").splitlines() == [f"during={operator_request or declared}", f"after={operator_request or ''}"], result.stderr
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=SCRIPT_TIMEOUT_S,
+            check=False,
+        )
+
+        assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+        assert seen.read_text(encoding="utf-8-sig").splitlines() == [f"during={operator_request or declared}", f"after={operator_request or ''}"], result.stderr
+
+    rows = parameter_rows([(None, False), (None, True), ("3.12", False)], multiple=True, ids=['None-False', 'None-True', '3.12-False'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(("operator_setting", "failing"), [(None, False), (None, True), ("1", False)])
-def test_the_powershell_yaml_switch_lasts_for_the_install_call_alone(tmp_path: Path, operator_setting: str | None, failing: bool) -> None:
+def test_the_powershell_yaml_switch_lasts_for_the_install_call_alone(tmp_path: Path) -> None:
     """`Invoke-WithPurePythonYaml` sets PYYAML_FORCE_LIBYAML for one command and takes it away again.
 
     The rule UV_PYTHON follows, for the same reason: through `irm | iex`
@@ -3263,38 +3283,43 @@ def test_the_powershell_yaml_switch_lasts_for_the_install_call_alone(tmp_path: P
     command fails, and an operator's own value is what the command sees and
     what stays.
     """
-    powershell = _windows_powershell()
-    seen = tmp_path / "seen"
-    before = "Remove-Item Env:\\PYYAML_FORCE_LIBYAML -ErrorAction SilentlyContinue\n" if operator_setting is None else f"$env:PYYAML_FORCE_LIBYAML = '{operator_setting}'\n"
-    answer = "throw 'pip failed'" if failing else "return [pscustomobject]@{ ExitCode = 0; Output = '' }"
-    harness = (
-        "$ErrorActionPreference = 'Stop'\n"
-        f"$seen = '{seen}'\n"
-        f"{before}"
-        "function Invoke-Captured {\n"
-        "    param([string]$File, [string[]]$Arguments)\n"
-        "    Add-Content -LiteralPath $seen -Value \"during=$env:PYYAML_FORCE_LIBYAML\" -Encoding utf8\n"
-        f"    {answer}\n"
-        "}\n"
-        f"{_powershell_function(_powershell_source(), 'Invoke-WithPurePythonYaml')}"
-        "try { $null = Invoke-WithPurePythonYaml -File 'python' -Arguments @('-m', 'pip', 'install', 'agentic-hil') } catch { }\n"
-        "Add-Content -LiteralPath $seen -Value \"after=$env:PYYAML_FORCE_LIBYAML\" -Encoding utf8\n"
-    )
-    script = tmp_path / "yaml-switch-harness.ps1"
-    script.write_text(harness, encoding="utf-8")
 
-    result = subprocess.run(
-        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=SCRIPT_TIMEOUT_S,
-        check=False,
-    )
+    def check_row(tmp_path, _patch, operator_setting: str | None, failing: bool) -> None:
+        powershell = _windows_powershell()
+        seen = tmp_path / "seen"
+        before = "Remove-Item Env:\\PYYAML_FORCE_LIBYAML -ErrorAction SilentlyContinue\n" if operator_setting is None else f"$env:PYYAML_FORCE_LIBYAML = '{operator_setting}'\n"
+        answer = "throw 'pip failed'" if failing else "return [pscustomobject]@{ ExitCode = 0; Output = '' }"
+        harness = (
+            "$ErrorActionPreference = 'Stop'\n"
+            f"$seen = '{seen}'\n"
+            f"{before}"
+            "function Invoke-Captured {\n"
+            "    param([string]$File, [string[]]$Arguments)\n"
+            "    Add-Content -LiteralPath $seen -Value \"during=$env:PYYAML_FORCE_LIBYAML\" -Encoding utf8\n"
+            f"    {answer}\n"
+            "}\n"
+            f"{_powershell_function(_powershell_source(), 'Invoke-WithPurePythonYaml')}"
+            "try { $null = Invoke-WithPurePythonYaml -File 'python' -Arguments @('-m', 'pip', 'install', 'agentic-hil') } catch { }\n"
+            "Add-Content -LiteralPath $seen -Value \"after=$env:PYYAML_FORCE_LIBYAML\" -Encoding utf8\n"
+        )
+        script = tmp_path / "yaml-switch-harness.ps1"
+        script.write_text(harness, encoding="utf-8")
 
-    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
-    assert seen.read_text(encoding="utf-8-sig").splitlines() == [f"during={operator_setting or '0'}", f"after={operator_setting or ''}"], result.stderr
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=SCRIPT_TIMEOUT_S,
+            check=False,
+        )
+
+        assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+        assert seen.read_text(encoding="utf-8-sig").splitlines() == [f"during={operator_setting or '0'}", f"after={operator_setting or ''}"], result.stderr
+
+    rows = parameter_rows([(None, False), (None, True), ("1", False)], multiple=True, ids=['None-False', 'None-True', '1-False'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def _run_powershell_uv_refresh(tmp_path: Path, recorded_receipt: str) -> tuple[str, str]:
@@ -5778,8 +5803,7 @@ def _windows_step_five_names(tmp_path: Path, table: dict, agent_id: str) -> str:
 
 
 @WINDOWS_ONLY
-@pytest.mark.parametrize("recorded", ["cmd_running", "cmd_after", "powershell_running", "powershell_after"])
-def test_the_replayed_windows_table_answers_what_windows_answered_in_the_recording(tmp_path: Path, recorded: str) -> None:
+def test_the_replayed_windows_table_answers_what_windows_answered_in_the_recording(tmp_path: Path) -> None:
     """The replay the tests below read through, held to what Windows answered while each table stood.
 
     The recording asked both of step 5's questions for all three names over
@@ -5788,58 +5812,52 @@ def test_the_replayed_windows_table_answers_what_windows_answered_in_the_recordi
     every one of those answers back, or what the tests below measure is the
     replay and not the matcher.
     """
-    table = _npm_agent_cli_windows_tables()[recorded]
-    prelude, refused = _windows_replayed_table(tmp_path, table)
-    questions = ""
-    for number, asked in enumerate(table["asked"]):
-        if asked["question"].startswith("Get-Process -Name "):
-            name = asked["question"].removeprefix("Get-Process -Name ")
-            answer = f"@(Get-Process -Name '{name}' -ErrorAction SilentlyContinue | ForEach-Object {{ $_.Id }})"
-        else:
-            assert asked["question"] == "Win32_Process CommandLine -match", asked
-            pattern = asked["pattern"].replace("'", "''")
-            answer = (
-                "@(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Sort-Object ProcessId"
-                f" | Where-Object {{ $_.CommandLine -and $_.CommandLine -match '{pattern}' }} | ForEach-Object {{ $_.ProcessId }})"
-            )
-        questions += f"Write-Output ('{number}:' + ({answer} -join ','))\n"
-    harness = tmp_path / "replayed-questions.ps1"
-    harness.write_text(f"$ErrorActionPreference = 'Stop'\n{prelude}{questions}", encoding="utf-8")
 
-    result = subprocess.run(
-        [_windows_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=SCRIPT_TIMEOUT_S,
-        check=False,
-    )
+    def check_row(tmp_path, _patch, recorded: str) -> None:
+        table = _npm_agent_cli_windows_tables()[recorded]
+        prelude, refused = _windows_replayed_table(tmp_path, table)
+        questions = ""
+        for number, asked in enumerate(table["asked"]):
+            if asked["question"].startswith("Get-Process -Name "):
+                name = asked["question"].removeprefix("Get-Process -Name ")
+                answer = f"@(Get-Process -Name '{name}' -ErrorAction SilentlyContinue | ForEach-Object {{ $_.Id }})"
+            else:
+                assert asked["question"] == "Win32_Process CommandLine -match", asked
+                pattern = asked["pattern"].replace("'", "''")
+                answer = (
+                    "@(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Sort-Object ProcessId"
+                    f" | Where-Object {{ $_.CommandLine -and $_.CommandLine -match '{pattern}' }} | ForEach-Object {{ $_.ProcessId }})"
+                )
+            questions += f"Write-Output ('{number}:' + ({answer} -join ','))\n"
+        harness = tmp_path / "replayed-questions.ps1"
+        harness.write_text(f"$ErrorActionPreference = 'Stop'\n{prelude}{questions}", encoding="utf-8")
 
-    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
-    assert _windows_refused_by_the_replay(refused) == "", _windows_refused_by_the_replay(refused)
-    replayed = dict(line.split(":", 1) for line in result.stdout.splitlines() if line.strip())
-    mismatched = [
-        f"{asked['question']} {asked.get('pattern', '')}: recorded {asked['ids']}, replayed {replayed.get(str(number))!r}"
-        for number, asked in enumerate(table["asked"])
-        if replayed.get(str(number)) != ",".join(str(pid) for pid in asked["ids"])
-    ]
-    assert mismatched == [], "\n".join(mismatched)
+        result = subprocess.run(
+            [_windows_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=SCRIPT_TIMEOUT_S,
+            check=False,
+        )
+
+        assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+        assert _windows_refused_by_the_replay(refused) == "", _windows_refused_by_the_replay(refused)
+        replayed = dict(line.split(":", 1) for line in result.stdout.splitlines() if line.strip())
+        mismatched = [
+            f"{asked['question']} {asked.get('pattern', '')}: recorded {asked['ids']}, replayed {replayed.get(str(number))!r}"
+            for number, asked in enumerate(table["asked"])
+            if replayed.get(str(number)) != ",".join(str(pid) for pid in asked["ids"])
+        ]
+        assert mismatched == [], "\n".join(mismatched)
+
+    rows = parameter_rows(["cmd_running", "cmd_after", "powershell_running", "powershell_after"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @WINDOWS_ONLY
-@pytest.mark.parametrize("route", ["cmd", "powershell"])
-@pytest.mark.parametrize(
-    ("agent_id", "cli", "started_by_a_node_launcher"),
-    [
-        pytest.param("claude-code", "claude", False, id="claude-code"),
-        pytest.param("codex", "codex", True, id="codex"),
-        pytest.param("opencode", "opencode", False, id="opencode"),
-    ],
-)
-def test_step_five_on_windows_names_the_process_whose_name_is_the_agent_cli_name(
-    tmp_path: Path, route: str, agent_id: str, cli: str, started_by_a_node_launcher: bool
-) -> None:
+def test_step_five_on_windows_names_the_process_whose_name_is_the_agent_cli_name(tmp_path: Path) -> None:
     """Step 5 on Windows names a running agent CLI by the one process whose ProcessName is the command's name.
 
     Claude Code and opencode are native executables at the recorded versions,
@@ -5850,27 +5868,39 @@ def test_step_five_on_windows_names_the_process_whose_name_is_the_agent_cli_name
     console below both. When the recording stopped `codex.exe` alone, its node
     exited by itself, so a restart of the one named is a restart of both.
     """
-    table = _npm_agent_cli_windows_tables()[f"{route}_running"]
-    by_pid = {process["ProcessId"]: process for process in table["processes"]}
-    started = by_pid[table["started"][cli]]
-    called_by_its_name = [process for process in table["processes"] if process["ProcessName"] == cli]
-    assert len(called_by_its_name) == 1, f"the recording holds {len(called_by_its_name)} processes called {cli}"
-    anchor = called_by_its_name[0]
-    if started_by_a_node_launcher:
-        assert started["ProcessName"] == "node" and anchor["ParentProcessId"] == started["ProcessId"], (
-            f"the process called {cli} is not the child of the node launcher that was started: {anchor}, started {started}"
+
+    def check_row(tmp_path, _patch, agent_id: str, cli: str, started_by_a_node_launcher: bool, route: str) -> None:
+        table = _npm_agent_cli_windows_tables()[f"{route}_running"]
+        by_pid = {process["ProcessId"]: process for process in table["processes"]}
+        started = by_pid[table["started"][cli]]
+        called_by_its_name = [process for process in table["processes"] if process["ProcessName"] == cli]
+        assert len(called_by_its_name) == 1, f"the recording holds {len(called_by_its_name)} processes called {cli}"
+        anchor = called_by_its_name[0]
+        if started_by_a_node_launcher:
+            assert started["ProcessName"] == "node" and anchor["ParentProcessId"] == started["ProcessId"], (
+                f"the process called {cli} is not the child of the node launcher that was started: {anchor}, started {started}"
+            )
+        else:
+            assert anchor is started, f"the process called {cli} is not the one that was started: {anchor}, started {started}"
+
+        named = _windows_step_five_names(tmp_path, table, agent_id)
+
+        found = by_pid.get(int(named)) if named.isdigit() else None
+        described = f"{named} ({found['Name']}, {found['CommandLine']!r}, child of {found['ParentProcessId']})" if found else repr(named)
+        assert named == str(anchor["ProcessId"]), (
+            f"step 5 named {described} for {agent_id}, and the one process called {cli} is {anchor['ProcessId']} "
+            f"({anchor['CommandLine']!r}, child of {anchor['ParentProcessId']})"
         )
-    else:
-        assert anchor is started, f"the process called {cli} is not the one that was started: {anchor}, started {started}"
 
-    named = _windows_step_five_names(tmp_path, table, agent_id)
-
-    found = by_pid.get(int(named)) if named.isdigit() else None
-    described = f"{named} ({found['Name']}, {found['CommandLine']!r}, child of {found['ParentProcessId']})" if found else repr(named)
-    assert named == str(anchor["ProcessId"]), (
-        f"step 5 named {described} for {agent_id}, and the one process called {cli} is {anchor['ProcessId']} "
-        f"({anchor['CommandLine']!r}, child of {anchor['ParentProcessId']})"
+    rows = combine_parameter_rows(
+        parameter_rows([
+        pytest.param("claude-code", "claude", False, id="claude-code"),
+        pytest.param("codex", "codex", True, id="codex"),
+        pytest.param("opencode", "opencode", False, id="opencode"),
+    ], multiple=True, ids=['claude-code', 'codex', 'opencode']),
+        parameter_rows(["cmd", "powershell"], ids=['cmd', 'powershell']),
     )
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @WINDOWS_ONLY
@@ -5910,9 +5940,7 @@ def test_step_five_on_windows_names_the_node_launcher_when_no_process_has_the_ag
 
 
 @WINDOWS_ONLY
-@pytest.mark.parametrize("route", ["cmd", "powershell"])
-@pytest.mark.parametrize("agent_id", ["claude-code", "codex", "opencode"])
-def test_step_five_on_windows_names_no_process_once_the_agent_cli_has_exited(tmp_path: Path, route: str, agent_id: str) -> None:
+def test_step_five_on_windows_names_no_process_once_the_agent_cli_has_exited(tmp_path: Path) -> None:
     """With only the consoles and their shells left, step 5 names nothing.
 
     Each of them still carries the CLI's name: `cmd.exe /k opencode`,
@@ -5921,9 +5949,17 @@ def test_step_five_on_windows_names_no_process_once_the_agent_cli_has_exited(tmp
     CLI running, and a PID for one would ask an operator to close the window
     they started it from.
     """
-    table = _npm_agent_cli_windows_tables()[f"{route}_after"]
 
-    assert _windows_step_five_names(tmp_path, table, agent_id) == ""
+    def check_row(tmp_path, _patch, agent_id: str, route: str) -> None:
+        table = _npm_agent_cli_windows_tables()[f"{route}_after"]
+
+        assert _windows_step_five_names(tmp_path, table, agent_id) == ""
+
+    rows = combine_parameter_rows(
+        parameter_rows(["claude-code", "codex", "opencode"], ids=['claude-code', 'codex', 'opencode']),
+        parameter_rows(["cmd", "powershell"], ids=['cmd', 'powershell']),
+    )
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # ---------------------------------------------------------------------------

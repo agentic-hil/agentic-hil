@@ -72,6 +72,7 @@ from conftest import (
 # the fake and the assertion would read like a product regression. The fixture
 # says why it is a placeholder and names the recording that is owed.
 from fixtures.fake_gdb import MEMORY_READ_REFUSAL as GDB_MEMORY_READ_REFUSAL
+from parameter_rows import check_parameter_rows, parameter_rows
 from support import scaled_time_bound
 
 from agentic_hil.backends import gdbdebug
@@ -382,32 +383,35 @@ def test_debugger_info_reports_a_failing_version_check(tmp_path: Path, monkeypat
     assert result["summary"] != AVAILABLE_SUMMARY[backend_name], result
 
 
-@pytest.mark.parametrize("backend_name", BACKENDS)
-def test_debugger_info_refuses_when_the_configured_tool_vanished(tmp_path: Path, backend_name: str) -> None:
+def test_debugger_info_refuses_when_the_configured_tool_vanished(tmp_path: Path) -> None:
     """The not-found refusal, on a tool the configuration resolved and that is gone since.
 
     Config load pins the executable while the file is there; the check that
     runs later has to notice it is not, and answer the same refusal a never-
     installed tool gets rather than reporting the tool as available.
     """
-    toolchain = tmp_path / "toolchain"
-    toolchain.mkdir()
-    executable = toolchain / FAKE_BY_TYPE[backend_name].name
-    shutil.copy(FAKE_BY_TYPE[backend_name], executable)
-    config = config_for(tmp_path, backend_name, executable)
-    executable.unlink()
 
-    result = call(config, "debugger_info")
+    def check_row(tmp_path, _patch, backend_name: str) -> None:
+        toolchain = tmp_path / "toolchain"
+        toolchain.mkdir()
+        executable = toolchain / FAKE_BY_TYPE[backend_name].name
+        shutil.copy(FAKE_BY_TYPE[backend_name], executable)
+        config = config_for(tmp_path, backend_name, executable)
+        executable.unlink()
 
-    assert result["ok"] is False, result
-    assert result["tool"] == "debugger_info"
-    assert result["error_type"] == "debugger_not_found", result
-    assert result["backend_error_type"] == NOT_FOUND_BACKEND_ERROR[backend_name], result
-    assert "version" not in result, result
+        result = call(config, "debugger_info")
+
+        assert result["ok"] is False, result
+        assert result["tool"] == "debugger_info"
+        assert result["error_type"] == "debugger_not_found", result
+        assert result["backend_error_type"] == NOT_FOUND_BACKEND_ERROR[backend_name], result
+        assert "version" not in result, result
+
+    rows = parameter_rows(BACKENDS)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("backend_name", BACKENDS)
-def test_debugger_info_refuses_a_tool_that_went_between_the_resolve_and_the_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_name: str) -> None:
+def test_debugger_info_refuses_a_tool_that_went_between_the_resolve_and_the_spawn(tmp_path: Path) -> None:
     """The same refusal from the other side of a window nothing can close.
 
     `info()` resolves the executable and then spawns it, and nothing holds the
@@ -418,31 +422,35 @@ def test_debugger_info_refuses_a_tool_that_went_between_the_resolve_and_the_spaw
     resolve here answers what it answered while the file was there, which is
     exactly what it would have answered a moment before the file went.
     """
-    toolchain = tmp_path / "toolchain"
-    toolchain.mkdir()
-    # No `.py` suffix: a fake with one is spawned as an argument to this
-    # interpreter, and the interpreter is what the operating system would then
-    # find. The path under test is the one where the tool itself is the program.
-    executable = toolchain / f"{backend_name}-tool"
-    executable.write_bytes(b"#!/bin/sh\nexit 0\n")
-    config = config_for(tmp_path, backend_name, executable)
-    backend = BACKEND_CLASS[backend_name](config)
-    resolved = backend._resolve_executable()
-    assert resolved["ok"] is True, resolved
-    executable.unlink()
-    monkeypatch.setattr(backend, "_resolve_executable", lambda: dict(resolved))
 
-    result = backend.info()
+    def check_row(tmp_path, monkeypatch, backend_name: str) -> None:
+        toolchain = tmp_path / "toolchain"
+        toolchain.mkdir()
+        # No `.py` suffix: a fake with one is spawned as an argument to this
+        # interpreter, and the interpreter is what the operating system would then
+        # find. The path under test is the one where the tool itself is the program.
+        executable = toolchain / f"{backend_name}-tool"
+        executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+        config = config_for(tmp_path, backend_name, executable)
+        backend = BACKEND_CLASS[backend_name](config)
+        resolved = backend._resolve_executable()
+        assert resolved["ok"] is True, resolved
+        executable.unlink()
+        monkeypatch.setattr(backend, "_resolve_executable", lambda: dict(resolved))
 
-    assert result["ok"] is False, result
-    assert result["tool"] == "debugger_info"
-    assert result["error_type"] == "debugger_not_found", result
-    assert result["backend_error_type"] == NOT_FOUND_BACKEND_ERROR[backend_name], result
-    assert "version" not in result, result
+        result = backend.info()
+
+        assert result["ok"] is False, result
+        assert result["tool"] == "debugger_info"
+        assert result["error_type"] == "debugger_not_found", result
+        assert result["backend_error_type"] == NOT_FOUND_BACKEND_ERROR[backend_name], result
+        assert "version" not in result, result
+
+    rows = parameter_rows(BACKENDS)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("backend_name", BACKENDS)
-def test_a_failure_whose_words_match_no_bucket_is_the_same_public_error_everywhere(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_name: str) -> None:
+def test_a_failure_whose_words_match_no_bucket_is_the_same_public_error_everywhere(tmp_path: Path) -> None:
     """The neighbour of the version check: one public name for "the debugger failed and said no more".
 
     The version check above publishes `debugger_error` for a failure no bucket
@@ -453,14 +461,19 @@ def test_a_failure_whose_words_match_no_bucket_is_the_same_public_error_everywhe
     too, with the backend's own `unknown_debugger_error` still carried beside it
     for a caller that reads the backend layer.
     """
-    play_transcript(monkeypatch, stderr="Error: the tool gave up and said nothing about why\n", returncode=1)
-    config = config_for(tmp_path, backend_name, FAKE_TRANSCRIPT)
 
-    result = call(config, "probe_target")
+    def check_row(tmp_path, monkeypatch, backend_name: str) -> None:
+        play_transcript(monkeypatch, stderr="Error: the tool gave up and said nothing about why\n", returncode=1)
+        config = config_for(tmp_path, backend_name, FAKE_TRANSCRIPT)
 
-    assert result["ok"] is False, result
-    assert result["backend_error_type"] == "unknown_debugger_error", result
-    assert result["error_type"] == "debugger_error", result
+        result = call(config, "probe_target")
+
+        assert result["ok"] is False, result
+        assert result["backend_error_type"] == "unknown_debugger_error", result
+        assert result["error_type"] == "debugger_error", result
+
+    rows = parameter_rows(BACKENDS)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize("backend_name", ["openocd", "pyocd"])
@@ -843,15 +856,7 @@ def test_a_script_that_is_neither_configured_field_is_config_file_not_found(tmp_
     assert_refused_before_contact(result, config)
 
 
-@pytest.mark.parametrize(
-    ("stderr", "backend_error_type", "field"),
-    [
-        ("Error: Can't find target/stm32f4x.cfg\n", "target_config_not_found", "target_cfg"),
-        ("Error: Can't find interface/stlink.cfg\n", "interface_config_not_found", "interface_cfg"),
-        ("Error: Can't find board/other.cfg\n", "config_file_not_found", None),
-    ],
-)
-def test_a_debug_start_names_a_missing_script_as_probe_target_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: str, backend_error_type: str, field: str | None) -> None:
+def test_a_debug_start_names_a_missing_script_as_probe_target_does(tmp_path: Path) -> None:
     """#654: one missing script, one public word, whichever call met it.
 
     The session start published the classifier's own name as `error_type`
@@ -859,22 +864,31 @@ def test_a_debug_start_names_a_missing_script_as_probe_target_does(tmp_path: Pat
     answer `debugger_config_not_found` with the classifier's name in
     `backend_error_type`, and the start's summary names the field as the probe's
     does."""
-    play_transcript(monkeypatch, stderr=stderr, returncode=1)
-    probed = call(config_for(tmp_path / "probe", "openocd", FAKE_TRANSCRIPT), "probe_target")
-    service = debug_service(tmp_path / "start", server=FAKE_TRANSCRIPT)
-    try:
-        started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": START_TIMEOUT_S})
-    finally:
-        service.close()
 
-    assert probed["error_type"] == "debugger_config_not_found", probed
-    assert started["error_type"] == probed["error_type"], started
-    assert started["backend_error_type"] == backend_error_type == probed["backend_error_type"], started
-    assert started["summary"].startswith("Debug server exited before the GDB port became ready"), started["summary"]
-    if field is not None:
-        assert field in started["summary"], started["summary"]
-    assert started["remediation"] == remediation_fields("debugger_config_not_found", "openocd")["remediation"], started
-    assert started["side_effect_status"] == "not_started", started
+    def check_row(tmp_path, monkeypatch, stderr: str, backend_error_type: str, field: str | None) -> None:
+        play_transcript(monkeypatch, stderr=stderr, returncode=1)
+        probed = call(config_for(tmp_path / "probe", "openocd", FAKE_TRANSCRIPT), "probe_target")
+        service = debug_service(tmp_path / "start", server=FAKE_TRANSCRIPT)
+        try:
+            started = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach", "timeout_s": START_TIMEOUT_S})
+        finally:
+            service.close()
+
+        assert probed["error_type"] == "debugger_config_not_found", probed
+        assert started["error_type"] == probed["error_type"], started
+        assert started["backend_error_type"] == backend_error_type == probed["backend_error_type"], started
+        assert started["summary"].startswith("Debug server exited before the GDB port became ready"), started["summary"]
+        if field is not None:
+            assert field in started["summary"], started["summary"]
+        assert started["remediation"] == remediation_fields("debugger_config_not_found", "openocd")["remediation"], started
+        assert started["side_effect_status"] == "not_started", started
+
+    rows = parameter_rows([
+        ("Error: Can't find target/stm32f4x.cfg\n", "target_config_not_found", "target_cfg"),
+        ("Error: Can't find interface/stlink.cfg\n", "interface_config_not_found", "interface_cfg"),
+        ("Error: Can't find board/other.cfg\n", "config_file_not_found", None),
+    ], multiple=True, ids=["Error: Can't find target/stm32f4x.cfg\\n-target_config_not_found-target_cfg", "Error: Can't find interface/stlink.cfg\\n-interface_config_not_found-interface_cfg", "Error: Can't find board/other.cfg\\n-config_file_not_found-None"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_flash_that_failed_without_reaching_its_marker_is_flash_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -904,55 +918,63 @@ def test_a_flash_that_failed_without_reaching_its_marker_is_flash_failed(tmp_pat
 # An answering probe with a silent target: four recorded exit-1 refusals (#739).
 
 
-@pytest.mark.parametrize("name", list(CUBE_SILENT_TARGET_CASES), ids=list(CUBE_SILENT_TARGET_CASES))
-def test_stlink_silent_target_recording_fidelity(name: str) -> None:
+def test_stlink_silent_target_recording_fidelity(tmp_path: Path) -> None:
     """Keep the captured commands, streams, status and provenance independent of the replay fake."""
-    path = FIXTURES / "stm32cubeprogrammer_2_23_0_failure_recordings.json"
-    recordings = json.loads(path.read_text(encoding="utf-8"))["recordings"]
-    recorded = recordings.get(name)
-    if recorded is None:
-        raise AssertionError(f"CubeProgrammer silent-target recording is missing: {name}")
-    tool, arguments, argv = CUBE_SILENT_TARGET_CASES[name]
 
-    assert recorded["argv"] == argv
-    assert type(recorded["returncode"]) is int
-    assert recorded["returncode"] == 1
-    assert recorded["timed_out"] is False
-    assert recorded["stdout"] == CUBE_SILENT_TARGET_STDOUT
-    assert recorded["stderr"] == ""
-    assert recorded["recorded_on"] == "2026-10-23"
-    assert recorded["source_url"] == CUBE_SILENT_TARGET_SOURCE
-    assert recorded["tool_versions"] == CUBE_SILENT_TARGET_TOOL_VERSIONS
-    provenance = recorded["bench"] + " " + recorded["how"]
-    for token in ("Linux", "STLINK-V3", "V3J13M4", "NUCLEO-H533RE", "STM32CubeCLT 1.22.0", "1395351c"):
-        assert token in provenance, (name, token, provenance)
-    how = recorded["how"]
-    assert tool in how
-    if "mode" in arguments:
-        assert f"mode {arguments['mode']}" in how
-    for token in ("about a minute after reset", "PA13/PA14", "GPIO outputs", "answering probe", "silent target"):
-        assert token in how, (name, token, how)
+    def check_row(_workspace, _patch, name: str) -> None:
+        path = FIXTURES / "stm32cubeprogrammer_2_23_0_failure_recordings.json"
+        recordings = json.loads(path.read_text(encoding="utf-8"))["recordings"]
+        recorded = recordings.get(name)
+        if recorded is None:
+            raise AssertionError(f"CubeProgrammer silent-target recording is missing: {name}")
+        tool, arguments, argv = CUBE_SILENT_TARGET_CASES[name]
+
+        assert recorded["argv"] == argv
+        assert type(recorded["returncode"]) is int
+        assert recorded["returncode"] == 1
+        assert recorded["timed_out"] is False
+        assert recorded["stdout"] == CUBE_SILENT_TARGET_STDOUT
+        assert recorded["stderr"] == ""
+        assert recorded["recorded_on"] == "2026-10-23"
+        assert recorded["source_url"] == CUBE_SILENT_TARGET_SOURCE
+        assert recorded["tool_versions"] == CUBE_SILENT_TARGET_TOOL_VERSIONS
+        provenance = recorded["bench"] + " " + recorded["how"]
+        for token in ("Linux", "STLINK-V3", "V3J13M4", "NUCLEO-H533RE", "STM32CubeCLT 1.22.0", "1395351c"):
+            assert token in provenance, (name, token, provenance)
+        how = recorded["how"]
+        assert tool in how
+        if "mode" in arguments:
+            assert f"mode {arguments['mode']}" in how
+        for token in ("about a minute after reset", "PA13/PA14", "GPIO outputs", "answering probe", "silent target"):
+            assert token in how, (name, token, how)
+
+    rows = parameter_rows(list(CUBE_SILENT_TARGET_CASES))
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("name", list(CUBE_SILENT_TARGET_CASES), ids=list(CUBE_SILENT_TARGET_CASES))
-def test_stlink_silent_target_recorded_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+def test_stlink_silent_target_recorded_refusal(tmp_path: Path) -> None:
     """Replay both recorded connection attempts, without inferring contact or recovery policy."""
-    recorded = cube_failure_recording(name)
-    tool, arguments, _ = CUBE_SILENT_TARGET_CASES[name]
-    play_transcript(monkeypatch, stdout=recorded["stdout"], stderr=recorded["stderr"], returncode=recorded["returncode"])
-    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
 
-    result = call(config, tool, arguments)
+    def check_row(tmp_path, monkeypatch, name: str) -> None:
+        recorded = cube_failure_recording(name)
+        tool, arguments, _ = CUBE_SILENT_TARGET_CASES[name]
+        play_transcript(monkeypatch, stdout=recorded["stdout"], stderr=recorded["stderr"], returncode=recorded["returncode"])
+        config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
 
-    assert result["ok"] is False, result
-    assert result["backend_error_type"] == "target_not_detected", result
-    assert result["error_type"] == "target_not_detected", result
-    for key in ("stdout", "stderr", "returncode"):
-        assert result["programmer_output"][key] == recorded[key], result["programmer_output"]
-    log = log_of(config, result)
-    for key in ("stdout", "stderr", "returncode", "timed_out"):
-        assert log[key] == recorded[key], log
-    assert log["timed_out"] is False
+        result = call(config, tool, arguments)
+
+        assert result["ok"] is False, result
+        assert result["backend_error_type"] == "target_not_detected", result
+        assert result["error_type"] == "target_not_detected", result
+        for key in ("stdout", "stderr", "returncode"):
+            assert result["programmer_output"][key] == recorded[key], result["programmer_output"]
+        log = log_of(config, result)
+        for key in ("stdout", "stderr", "returncode", "timed_out"):
+            assert log[key] == recorded[key], log
+        assert log["timed_out"] is False
+
+    rows = parameter_rows(list(CUBE_SILENT_TARGET_CASES))
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # ---------------------------------------------------------------------------
@@ -1039,28 +1061,28 @@ CLASSIFIER_ROWS = [
 ]
 
 
-@pytest.mark.parametrize(
-    ("backend_name", "tool", "transcript", "expected", "source"),
-    CLASSIFIER_ROWS,
-    ids=[f"{row[0]}-{row[1]}-{row[2][1]}" if isinstance(row[2], tuple) else f"{row[0]}-{row[3]}-{index}" for index, row in enumerate(CLASSIFIER_ROWS)],
-)
-def test_classifier_buckets_from_recorded_tool_output(tmp_path: Path, backend_name: str, tool: str, transcript: str | tuple[str, str], expected: str, source: str) -> None:
+def test_classifier_buckets_from_recorded_tool_output(tmp_path: Path) -> None:
     """Each phrase lands in its own bucket, and in no other."""
-    config = load_config(str(write_config(tmp_path, debugger_type=backend_name, target_type=TARGET_TYPE[backend_name])))
-    backend = BACKEND_CLASS[backend_name](config)
 
-    if isinstance(transcript, tuple):
-        recording_name, diagnostic_id = transcript
-        recorded = cube_failure_recording(recording_name)
-        diagnostic = CUBE_SILENT_TARGET_DIAGNOSTICS[diagnostic_id]
-        lines = [line for line in recorded["stdout"].splitlines(keepends=True) if line == diagnostic]
-        assert lines == [diagnostic, diagnostic], (source, recorded["stdout"])
-        bucket = backend._classify_output(lines[0], tool)
-        if bucket != "target_not_detected":
-            raise AssertionError(f"{tool} did not classify the recorded {diagnostic_id} diagnostic as target_not_detected")
-        return
+    def check_row(tmp_path, _patch, backend_name: str, tool: str, transcript: str | tuple[str, str], expected: str, source: str) -> None:
+        config = load_config(str(write_config(tmp_path, debugger_type=backend_name, target_type=TARGET_TYPE[backend_name])))
+        backend = BACKEND_CLASS[backend_name](config)
 
-    assert backend._classify_output(transcript, tool) == expected, (source, transcript)
+        if isinstance(transcript, tuple):
+            recording_name, diagnostic_id = transcript
+            recorded = cube_failure_recording(recording_name)
+            diagnostic = CUBE_SILENT_TARGET_DIAGNOSTICS[diagnostic_id]
+            lines = [line for line in recorded["stdout"].splitlines(keepends=True) if line == diagnostic]
+            assert lines == [diagnostic, diagnostic], (source, recorded["stdout"])
+            bucket = backend._classify_output(lines[0], tool)
+            if bucket != "target_not_detected":
+                raise AssertionError(f"{tool} did not classify the recorded {diagnostic_id} diagnostic as target_not_detected")
+            return
+
+        assert backend._classify_output(transcript, tool) == expected, (source, transcript)
+
+    rows = parameter_rows(CLASSIFIER_ROWS, multiple=True, ids=[f"{row[0]}-{row[1]}-{row[2][1]}" if isinstance(row[2], tuple) else f"{row[0]}-{row[3]}-{index}" for index, row in enumerate(CLASSIFIER_ROWS)])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # The same rows through the service: the public error_type each bucket
@@ -1612,38 +1634,42 @@ STOP_ROWS = [
 ]
 
 
-@pytest.mark.parametrize(("behavior", "stop_reason", "abnormal", "error_type", "exception_type", "signal_name"), STOP_ROWS, ids=[row[1] for row in STOP_ROWS])
-def test_the_stop_reasons_a_plan_branches_on_come_through_the_fake_gdb(tmp_path: Path, behavior: str, stop_reason: str, abnormal: bool, error_type: str | None, exception_type: str | None, signal_name: str | None) -> None:
+def test_the_stop_reasons_a_plan_branches_on_come_through_the_fake_gdb(tmp_path: Path) -> None:
     """`debug_continue` and `debug_get_stop_reason` publish the documented stop_reason for each record."""
-    service = debug_service(tmp_path, fake_gdb_behavior=behavior)
-    try:
-        assert service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "load", "timeout_s": START_TIMEOUT_S})["ok"] is True
-        continued = service.call("debug_continue", {"timeout_s": 5})
-        asked = service.call("debug_get_stop_reason")
-    finally:
-        service.close()
 
-    assert continued["stop_reason"] == stop_reason, continued
-    assert continued["ok"] is not abnormal, continued
-    assert continued["target_ok"] is not abnormal, continued
-    assert asked["stop_reason"] == stop_reason, asked
-    assert asked["target_ok"] is not abnormal, asked
-    if abnormal:
-        assert continued["error_type"] == error_type, continued
-        assert continued["suggested_actions"], continued
-    else:
-        assert "error_type" not in continued, continued
-    if exception_type is not None:
-        assert continued["stop"]["exception_type"] == exception_type, continued["stop"]
-    else:
-        assert "exception_type" not in continued["stop"], continued["stop"]
-    if signal_name is not None:
-        assert continued["stop"]["signal"]["name"] == signal_name, continued["stop"]
-    elif "signal" in continued["stop"]:
-        raise AssertionError("the stop carries a signal block; the row expects none")
-    if stop_reason == "unexpected_breakpoint":
-        assert continued["stop"]["breakpoint_expected"] is False, continued["stop"]
-        assert "debug_clear_breakpoints" in " ".join(continued["suggested_actions"]), continued["suggested_actions"]
+    def check_row(tmp_path, _patch, behavior: str, stop_reason: str, abnormal: bool, error_type: str | None, exception_type: str | None, signal_name: str | None) -> None:
+        service = debug_service(tmp_path, fake_gdb_behavior=behavior)
+        try:
+            assert service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "load", "timeout_s": START_TIMEOUT_S})["ok"] is True
+            continued = service.call("debug_continue", {"timeout_s": 5})
+            asked = service.call("debug_get_stop_reason")
+        finally:
+            service.close()
+
+        assert continued["stop_reason"] == stop_reason, continued
+        assert continued["ok"] is not abnormal, continued
+        assert continued["target_ok"] is not abnormal, continued
+        assert asked["stop_reason"] == stop_reason, asked
+        assert asked["target_ok"] is not abnormal, asked
+        if abnormal:
+            assert continued["error_type"] == error_type, continued
+            assert continued["suggested_actions"], continued
+        else:
+            assert "error_type" not in continued, continued
+        if exception_type is not None:
+            assert continued["stop"]["exception_type"] == exception_type, continued["stop"]
+        else:
+            assert "exception_type" not in continued["stop"], continued["stop"]
+        if signal_name is not None:
+            assert continued["stop"]["signal"]["name"] == signal_name, continued["stop"]
+        elif "signal" in continued["stop"]:
+            raise AssertionError("the stop carries a signal block; the row expects none")
+        if stop_reason == "unexpected_breakpoint":
+            assert continued["stop"]["breakpoint_expected"] is False, continued["stop"]
+            assert "debug_clear_breakpoints" in " ".join(continued["suggested_actions"]), continued["suggested_actions"]
+
+    rows = parameter_rows(STOP_ROWS, multiple=True, ids=[row[1] for row in STOP_ROWS])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def stop_reason_of(tmp_path: Path, line: str) -> dict:
@@ -1672,24 +1698,28 @@ MI_ROWS = [
 ]
 
 
-@pytest.mark.parametrize(("line", "stop_reason", "exception_type"), MI_ROWS, ids=[f"{row[1]}-{index}" for index, row in enumerate(MI_ROWS)])
-def test_stop_reason_mapping_from_mi_stopped_records(tmp_path: Path, line: str, stop_reason: str, exception_type: str | None) -> None:
+def test_stop_reason_mapping_from_mi_stopped_records(tmp_path: Path) -> None:
     """The mapping for the documented MI cases not already covered by bench recordings.
 
     The separate real-recording fixture covers the board's HardFault, reset
     handler and main breakpoint stops exactly as Debian GDB emitted them.
     """
-    stop = stop_reason_of(tmp_path, line)
 
-    assert stop["stop_reason"] == stop_reason, stop
-    assert stop["backend_stop_reason"] == stop_result_from_line(line).reason, stop
-    if exception_type is None:
-        assert "exception_type" not in stop, stop
-    else:
-        assert stop["exception_type"] == exception_type, stop
-        assert stop["fault_type"] == exception_type, stop
-    if stop_reason == "unexpected_breakpoint":
-        assert stop["breakpoint_expected"] is False, stop
+    def check_row(tmp_path, _patch, line: str, stop_reason: str, exception_type: str | None) -> None:
+        stop = stop_reason_of(tmp_path, line)
+
+        assert stop["stop_reason"] == stop_reason, stop
+        assert stop["backend_stop_reason"] == stop_result_from_line(line).reason, stop
+        if exception_type is None:
+            assert "exception_type" not in stop, stop
+        else:
+            assert stop["exception_type"] == exception_type, stop
+            assert stop["fault_type"] == exception_type, stop
+        if stop_reason == "unexpected_breakpoint":
+            assert stop["breakpoint_expected"] is False, stop
+
+    rows = parameter_rows(MI_ROWS, multiple=True, ids=[f"{row[1]}-{index}" for index, row in enumerate(MI_ROWS)])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def halt_in(function: str, source: str) -> str:
@@ -1704,32 +1734,40 @@ def halt_in(function: str, source: str) -> str:
     return f'*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={{addr="0x08000520",func="{function}",args=[],file="{source}",fullname="{source}",line="77"}},thread-id="1",stopped-threads="all"'
 
 
-@pytest.mark.parametrize("project", ["/home/dev/blinky", "/home/dev/hardfault-lab", "/home/dev/watchdog-reset-demo"])
-def test_a_halt_at_main_reads_halted_whatever_the_project_is_called(tmp_path: Path, project: str) -> None:
+def test_a_halt_at_main_reads_halted_whatever_the_project_is_called(tmp_path: Path) -> None:
     """Why the core stopped is not read off the source path (#576).
 
     Two of these projects are named with a word a handler is named by. The
     halt is the same in all three, and so is the answer.
     """
-    stop = stop_reason_of(tmp_path, halt_in("main", f"{project}/Src/main.c"))
 
-    assert stop["stop_reason"] == "halted", stop
-    assert "exception_type" not in stop, stop
-    assert "fault_type" not in stop, stop
+    def check_row(tmp_path, _patch, project: str) -> None:
+        stop = stop_reason_of(tmp_path, halt_in("main", f"{project}/Src/main.c"))
+
+        assert stop["stop_reason"] == "halted", stop
+        assert "exception_type" not in stop, stop
+        assert "fault_type" not in stop, stop
+
+    rows = parameter_rows(["/home/dev/blinky", "/home/dev/hardfault-lab", "/home/dev/watchdog-reset-demo"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("function", ["ResetTimer", "usb_reset", "trigger_hardfault", "install_default_handler"])
-def test_a_halt_in_a_function_named_with_a_handler_word_reads_halted(tmp_path: Path, function: str) -> None:
+def test_a_halt_in_a_function_named_with_a_handler_word_reads_halted(tmp_path: Path) -> None:
     """A function that carries a handler's word is not that handler (#576).
 
     A timer reset, a USB bus reset, a fault lab's own trigger before it has
     faulted and the code that installs a default handler all run on a healthy
     core, so a halt inside any of them is a halt.
     """
-    stop = stop_reason_of(tmp_path, halt_in(function, "/home/dev/blinky/Src/main.c"))
 
-    assert stop["stop_reason"] == "halted", stop
-    assert "exception_type" not in stop, stop
+    def check_row(tmp_path, _patch, function: str) -> None:
+        stop = stop_reason_of(tmp_path, halt_in(function, "/home/dev/blinky/Src/main.c"))
+
+        assert stop["stop_reason"] == "halted", stop
+        assert "exception_type" not in stop, stop
+
+    rows = parameter_rows(["ResetTimer", "usb_reset", "trigger_hardfault", "install_default_handler"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # Manual-shaped, every row: each is a halt_in() record, shaped after the GDB
@@ -1748,8 +1786,7 @@ HANDLER_ROWS = [
 ]
 
 
-@pytest.mark.parametrize(("function", "stop_reason", "exception_type"), HANDLER_ROWS, ids=[row[0] for row in HANDLER_ROWS])
-def test_a_halt_in_a_handler_reads_what_the_handler_handles(tmp_path: Path, function: str, stop_reason: str, exception_type: str | None) -> None:
+def test_a_halt_in_a_handler_reads_what_the_handler_handles(tmp_path: Path) -> None:
     """A fault or a reset is read from the frame's function (#576).
 
     The handlers by their CMSIS names, the same handlers by libopencm3's lower
@@ -1757,14 +1794,19 @@ def test_a_halt_in_a_handler_reads_what_the_handler_handles(tmp_path: Path, func
     fault handlers hand the stacked frame to, which is where a core in that
     fault loops.
     """
-    stop = stop_reason_of(tmp_path, halt_in(function, "/home/dev/blinky/Src/handlers.c"))
 
-    assert stop["stop_reason"] == stop_reason, stop
-    if exception_type is None:
-        assert "exception_type" not in stop, stop
-    else:
-        assert stop["exception_type"] == exception_type, stop
-        assert stop["fault_type"] == exception_type, stop
+    def check_row(tmp_path, _patch, function: str, stop_reason: str, exception_type: str | None) -> None:
+        stop = stop_reason_of(tmp_path, halt_in(function, "/home/dev/blinky/Src/handlers.c"))
+
+        assert stop["stop_reason"] == stop_reason, stop
+        if exception_type is None:
+            assert "exception_type" not in stop, stop
+        else:
+            assert stop["exception_type"] == exception_type, stop
+            assert stop["fault_type"] == exception_type, stop
+
+    rows = parameter_rows(HANDLER_ROWS, multiple=True, ids=[row[0] for row in HANDLER_ROWS])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_the_end_of_a_step_is_not_read_as_an_error(tmp_path: Path) -> None:
@@ -2182,23 +2224,24 @@ REJECTED_FLASH_FAILED_STLINK = {
 }
 
 
-@pytest.mark.parametrize("name", sorted(ACCEPTED_FLASH_FAILED_STLINK))
-def test_the_flash_failed_stlink_content_check_accepts_advice_true_for_both_causes(name: str) -> None:
-    the_flash_failed_stlink_steps_hold_for_both_recorded_causes(ACCEPTED_FLASH_FAILED_STLINK[name])
+def test_the_flash_failed_stlink_content_check_accepts_advice_true_for_both_causes(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, name: str) -> None:
+        the_flash_failed_stlink_steps_hold_for_both_recorded_causes(ACCEPTED_FLASH_FAILED_STLINK[name])
+
+    rows = parameter_rows(sorted(ACCEPTED_FLASH_FAILED_STLINK))
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("name", sorted(REJECTED_FLASH_FAILED_STLINK))
-def test_the_flash_failed_stlink_content_check_refuses_advice_the_out_of_range_recording_contradicts(name: str) -> None:
-    with pytest.raises(AssertionError):
-        the_flash_failed_stlink_steps_hold_for_both_recorded_causes(REJECTED_FLASH_FAILED_STLINK[name])
+def test_the_flash_failed_stlink_content_check_refuses_advice_the_out_of_range_recording_contradicts(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, name: str) -> None:
+        with pytest.raises(AssertionError):
+            the_flash_failed_stlink_steps_hold_for_both_recorded_causes(REJECTED_FLASH_FAILED_STLINK[name])
+
+    rows = parameter_rows(sorted(REJECTED_FLASH_FAILED_STLINK))
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(
-    ("bucket", "backend_name", "tool_name", "operation", "subjects"),
-    OWED_SCOPED_ENTRIES,
-    ids=[f"{row[0]}-{row[1]}" for row in OWED_SCOPED_ENTRIES],
-)
-def test_each_bucket_the_catalogue_left_unanswered_has_its_own_backend_scoped_entry(bucket: str, backend_name: str, tool_name: str, operation: str, subjects: tuple[str, ...]) -> None:
+def test_each_bucket_the_catalogue_left_unanswered_has_its_own_backend_scoped_entry(tmp_path: Path) -> None:
     """A refusal that names a bucket and hands over no next step is the gap this closes.
 
     Non-empty is the first half; the second is that the steps are about this
@@ -2214,31 +2257,36 @@ def test_each_bucket_the_catalogue_left_unanswered_has_its_own_backend_scoped_en
     be satisfied by the `error_type` the line above already pinned and could
     never fail.
     """
-    key = f"{bucket}:{backend_name}"
 
-    fields = remediation_fields(bucket, backend_name)
-    if not fields.get("remediation"):
-        raise AssertionError(f"the catalogue hands {key} no remediation")
-    assert key in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
-    entry = catalogue_entry(key)
-    assert entry["error_type"] == bucket, entry
-    assert entry["scope"] == backend_name, entry
-    assert entry["meaning"].strip(), entry
-    said = json.dumps([entry["meaning"], entry["remediation"], entry.get("do_not", [])])
-    assert tool_name in said, said
-    assert operation in said.lower(), (operation, said)
-    for subject in subjects:
-        assert subject in said.lower(), (subject, said)
-    # The nearest neighbour in the other direction: the same backend's
-    # `flash_erase_failed`, which is the entry an implementer would most
-    # plausibly copy. Its steps are about an erase the device refused, so an
-    # entry that repeated them would answer a different failure under this name.
-    erase = remediation_fields("flash_erase_failed", backend_name)
-    assert erase.get("remediation"), backend_name
-    assert fields["remediation"] != erase["remediation"], key
-    content_check = ENTRY_CONTENT_CHECKS.get(key)
-    if content_check is not None:
-        content_check(entry)
+    def check_row(_workspace, _patch, bucket: str, backend_name: str, tool_name: str, operation: str, subjects: tuple[str, ...]) -> None:
+        key = f"{bucket}:{backend_name}"
+
+        fields = remediation_fields(bucket, backend_name)
+        if not fields.get("remediation"):
+            raise AssertionError(f"the catalogue hands {key} no remediation")
+        assert key in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
+        entry = catalogue_entry(key)
+        assert entry["error_type"] == bucket, entry
+        assert entry["scope"] == backend_name, entry
+        assert entry["meaning"].strip(), entry
+        said = json.dumps([entry["meaning"], entry["remediation"], entry.get("do_not", [])])
+        assert tool_name in said, said
+        assert operation in said.lower(), (operation, said)
+        for subject in subjects:
+            assert subject in said.lower(), (subject, said)
+        # The nearest neighbour in the other direction: the same backend's
+        # `flash_erase_failed`, which is the entry an implementer would most
+        # plausibly copy. Its steps are about an erase the device refused, so an
+        # entry that repeated them would answer a different failure under this name.
+        erase = remediation_fields("flash_erase_failed", backend_name)
+        assert erase.get("remediation"), backend_name
+        assert fields["remediation"] != erase["remediation"], key
+        content_check = ENTRY_CONTENT_CHECKS.get(key)
+        if content_check is not None:
+            content_check(entry)
+
+    rows = parameter_rows(OWED_SCOPED_ENTRIES, multiple=True, ids=[f"{row[0]}-{row[1]}" for row in OWED_SCOPED_ENTRIES])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 SHARED_BUCKETS = {"verify_failed": ("stlink", "pyocd"), "flash_failed": ("pyocd", "openocd", "stlink")}
@@ -2272,8 +2320,7 @@ SILENT_PAIRS = [
 ]
 
 
-@pytest.mark.parametrize(("bucket", "backend_name"), SILENT_PAIRS, ids=[f"{row[0]}-{row[1]}" for row in SILENT_PAIRS])
-def test_a_bucket_on_a_backend_the_catalogue_does_not_name_stays_silent(bucket: str, backend_name: str) -> None:
+def test_a_bucket_on_a_backend_the_catalogue_does_not_name_stays_silent(tmp_path: Path) -> None:
     """The neighbour that must not move: writing five entries is not writing fifteen.
 
     Each of these pairs is a bucket a backend can produce and for which nobody
@@ -2282,25 +2329,34 @@ def test_a_bucket_on_a_backend_the_catalogue_does_not_name_stays_silent(bucket: 
     generic name: an operator whose OpenOCD verify failed must not be told about
     STM32CubeProgrammer's connect mode.
     """
-    assert f"{bucket}:{backend_name}" not in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
-    assert remediation_fields(bucket, backend_name) == {}, (bucket, backend_name)
+
+    def check_row(_workspace, _patch, bucket: str, backend_name: str) -> None:
+        assert f"{bucket}:{backend_name}" not in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
+        assert remediation_fields(bucket, backend_name) == {}, (bucket, backend_name)
+
+    rows = parameter_rows(SILENT_PAIRS, multiple=True, ids=[f"{row[0]}-{row[1]}" for row in SILENT_PAIRS])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("bucket", ["verify_failed", "flash_failed", "memory_read_failed"])
-def test_the_three_buckets_grow_no_unscoped_entry(bucket: str) -> None:
+def test_the_three_buckets_grow_no_unscoped_entry(tmp_path: Path) -> None:
     """`flash_erase_failed`'s convention, which these follow: scoped entries and no generic one.
 
     An unscoped entry would be reached by every backend that has no scoped one,
     which is the fallback `lookup_remedy` performs, so adding one would answer
     the silent pairs above with advice nobody wrote for them.
     """
-    assert {key for key in ERROR_CATALOGUE if key.partition(":")[0] == "flash_erase_failed"} == {
-        "flash_erase_failed:stlink",
-        "flash_erase_failed:openocd",
-        "flash_erase_failed:pyocd",
-    }
-    assert bucket not in ERROR_CATALOGUE, bucket
-    assert remediation_fields(bucket) == {}, bucket
+
+    def check_row(_workspace, _patch, bucket: str) -> None:
+        assert {key for key in ERROR_CATALOGUE if key.partition(":")[0] == "flash_erase_failed"} == {
+            "flash_erase_failed:stlink",
+            "flash_erase_failed:openocd",
+            "flash_erase_failed:pyocd",
+        }
+        assert bucket not in ERROR_CATALOGUE, bucket
+        assert remediation_fields(bucket) == {}, bucket
+
+    rows = parameter_rows(["verify_failed", "flash_failed", "memory_read_failed"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # The two transcripts the row table already plays for these pairs, driven here
@@ -2664,12 +2720,7 @@ HAND_BUILT_READ_FAILURES = [
 ]
 
 
-@pytest.mark.parametrize(
-    ("case", "backend_name", "summary", "target_contacted"),
-    HAND_BUILT_READ_FAILURES,
-    ids=[row[0] for row in HAND_BUILT_READ_FAILURES],
-)
-def test_a_hand_built_read_failure_carries_the_entry_its_backend_has(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, backend_name: str, summary: str, target_contacted: bool | None) -> None:
+def test_a_hand_built_read_failure_carries_the_entry_its_backend_has(tmp_path: Path) -> None:
     """The gap: an entry for this backend's read bucket reaches every other result and none of these.
 
     The entry is planted for the duration of the test rather than written into
@@ -2682,28 +2733,28 @@ def test_a_hand_built_read_failure_carries_the_entry_its_backend_has(tmp_path: P
     answer for this bucket, and a merge that carried only `remediation` would
     drop the wrong fix an entry names on purpose.
     """
-    monkeypatch.setitem(ERROR_CATALOGUE, f"memory_read_failed:{backend_name}", PLANTED_READ_ENTRY)
 
-    result = drive_hand_built_read_failure(case, tmp_path, monkeypatch)
+    def check_row(tmp_path, monkeypatch, case: str, backend_name: str, summary: str, target_contacted: bool | None) -> None:
+        monkeypatch.setitem(ERROR_CATALOGUE, f"memory_read_failed:{backend_name}", PLANTED_READ_ENTRY)
 
-    assert result["ok"] is False, result
-    assert result["error_type"] == "memory_read_failed", result
-    assert result["summary"] == summary, result
-    assert result.get("target_contacted") is target_contacted, result
-    assert result.get("remediation") == list(PLANTED_READ_ENTRY.remediation), result.get("remediation")
-    assert result.get("do_not") == list(PLANTED_READ_ENTRY.do_not), result.get("do_not")
-    # The lookup and not a copy: what arrives is what the catalogue answers for
-    # this bucket on this backend, through the same scoped lookup every other
-    # result on this path already goes through.
-    assert result["remediation"] == remediation_fields("memory_read_failed", backend_name)["remediation"], result["remediation"]
+        result = drive_hand_built_read_failure(case, tmp_path, monkeypatch)
+
+        assert result["ok"] is False, result
+        assert result["error_type"] == "memory_read_failed", result
+        assert result["summary"] == summary, result
+        assert result.get("target_contacted") is target_contacted, result
+        assert result.get("remediation") == list(PLANTED_READ_ENTRY.remediation), result.get("remediation")
+        assert result.get("do_not") == list(PLANTED_READ_ENTRY.do_not), result.get("do_not")
+        # The lookup and not a copy: what arrives is what the catalogue answers for
+        # this bucket on this backend, through the same scoped lookup every other
+        # result on this path already goes through.
+        assert result["remediation"] == remediation_fields("memory_read_failed", backend_name)["remediation"], result["remediation"]
+
+    rows = parameter_rows(HAND_BUILT_READ_FAILURES, multiple=True, ids=[row[0] for row in HAND_BUILT_READ_FAILURES])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(
-    ("case", "backend_name", "summary", "target_contacted"),
-    HAND_BUILT_READ_FAILURES,
-    ids=[row[0] for row in HAND_BUILT_READ_FAILURES],
-)
-def test_a_hand_built_read_failure_stays_silent_while_its_backend_has_no_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, backend_name: str, summary: str, target_contacted: bool | None) -> None:
+def test_a_hand_built_read_failure_stays_silent_while_its_backend_has_no_entry(tmp_path: Path) -> None:
     """The neighbour that must not move, on the result rather than on the lookup.
 
     #516 pins that `remediation_fields` answers nothing for a bucket on a
@@ -2711,16 +2762,21 @@ def test_a_hand_built_read_failure_stays_silent_while_its_backend_has_no_entry(t
     would meet it: writing the merge must not put another tool's advice on these
     five under a generic name, and it must add no empty field either.
     """
-    assert f"memory_read_failed:{backend_name}" not in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
 
-    result = drive_hand_built_read_failure(case, tmp_path, monkeypatch)
+    def check_row(tmp_path, monkeypatch, case: str, backend_name: str, summary: str, target_contacted: bool | None) -> None:
+        assert f"memory_read_failed:{backend_name}" not in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
 
-    assert result["ok"] is False, result
-    assert result["error_type"] == "memory_read_failed", result
-    assert result["summary"] == summary, result
-    assert result.get("target_contacted") is target_contacted, result
-    assert "remediation" not in result, result
-    assert "do_not" not in result, result
+        result = drive_hand_built_read_failure(case, tmp_path, monkeypatch)
+
+        assert result["ok"] is False, result
+        assert result["error_type"] == "memory_read_failed", result
+        assert result["summary"] == summary, result
+        assert result.get("target_contacted") is target_contacted, result
+        assert "remediation" not in result, result
+        assert "do_not" not in result, result
+
+    rows = parameter_rows(HAND_BUILT_READ_FAILURES, multiple=True, ids=[row[0] for row in HAND_BUILT_READ_FAILURES])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_read_that_timed_out_carries_the_timeout_entry_and_not_the_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2784,43 +2840,44 @@ def stlink_target_command_log(given_back: dict, phase: str) -> dict:
     return json.loads("\n".join(given_back[phase]["log"]))
 
 
-@pytest.mark.parametrize(
-    ("index", "cycle_number", "phase"),
-    [
+def test_stlink_target_command_error_recorded_refusal(tmp_path: Path) -> None:
+    """Replay each paired diagnostic without claiming the failed call never contacted the target."""
+
+    def check_row(tmp_path, monkeypatch, index: int, cycle_number: int, phase: str) -> None:
+        cycle = stlink_session_stop_cycles()[index]
+        assert cycle["cycle"] == cycle_number
+        recorded = stlink_target_command_log(cycle["given_back"], phase)
+        assert "Error: Unable to get core ID\n" in recorded["stdout"]
+        assert STLINK_TARGET_COMMAND_DIAGNOSTIC in recorded["stdout"].splitlines()
+        assert recorded["returncode"] == 1
+        assert recorded["timed_out"] is False
+        assert recorded["stderr"] == ""
+        play_transcript(monkeypatch, stdout=recorded["stdout"], stderr=recorded["stderr"], returncode=recorded["returncode"])
+        config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
+
+        result = call(config, "probe_target")
+
+        if result.get("backend_error_type") != "target_command_error" or result.get("error_type") != "target_command_error":
+            raise AssertionError("DEV_TARGET_CMD_ERR replay must classify as target_command_error")
+        assert result["ok"] is False, result
+        assert "target_contacted" not in result, result
+        assert result["retry_safe"] is False, result
+        for key in ("stdout", "stderr", "returncode"):
+            assert result["programmer_output"][key] == recorded[key], result["programmer_output"]
+        log = log_of(config, result)
+        for key in ("stdout", "stderr", "returncode", "timed_out"):
+            assert log[key] == recorded[key], log
+        advice = remediation_fields("target_command_error", "stlink")
+        assert result.get("remediation"), result
+        assert result["remediation"] == advice["remediation"], result
+        assert result.get("do_not") == advice.get("do_not"), result
+
+    rows = parameter_rows([
         pytest.param(index, cycle, phase, id=f"cycle-{cycle:02d}-{suffix}")
         for index, cycle in STLINK_TARGET_COMMAND_CYCLES
         for phase, suffix in STLINK_TARGET_COMMAND_PHASES
-    ],
-)
-def test_stlink_target_command_error_recorded_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, index: int, cycle_number: int, phase: str) -> None:
-    """Replay each paired diagnostic without claiming the failed call never contacted the target."""
-    cycle = stlink_session_stop_cycles()[index]
-    assert cycle["cycle"] == cycle_number
-    recorded = stlink_target_command_log(cycle["given_back"], phase)
-    assert "Error: Unable to get core ID\n" in recorded["stdout"]
-    assert STLINK_TARGET_COMMAND_DIAGNOSTIC in recorded["stdout"].splitlines()
-    assert recorded["returncode"] == 1
-    assert recorded["timed_out"] is False
-    assert recorded["stderr"] == ""
-    play_transcript(monkeypatch, stdout=recorded["stdout"], stderr=recorded["stderr"], returncode=recorded["returncode"])
-    config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
-
-    result = call(config, "probe_target")
-
-    if result.get("backend_error_type") != "target_command_error" or result.get("error_type") != "target_command_error":
-        raise AssertionError("DEV_TARGET_CMD_ERR replay must classify as target_command_error")
-    assert result["ok"] is False, result
-    assert "target_contacted" not in result, result
-    assert result["retry_safe"] is False, result
-    for key in ("stdout", "stderr", "returncode"):
-        assert result["programmer_output"][key] == recorded[key], result["programmer_output"]
-    log = log_of(config, result)
-    for key in ("stdout", "stderr", "returncode", "timed_out"):
-        assert log[key] == recorded[key], log
-    advice = remediation_fields("target_command_error", "stlink")
-    assert result.get("remediation"), result
-    assert result["remediation"] == advice["remediation"], result
-    assert result.get("do_not") == advice.get("do_not"), result
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def target_command_advice_clauses(steps: list[str]) -> list[str]:

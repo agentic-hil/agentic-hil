@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from parameter_rows import check_parameter_rows, parameter_rows
 
 from evals.install.registration_gate import (
     AGENTS,
@@ -38,31 +39,37 @@ def test_gate_accepts_only_complete_evidence() -> None:
     assert read_report("diagnostics\n" + REPORT_PREFIX + json.dumps(report) + "\n") == report
 
 
-@pytest.mark.parametrize("output", ["", "all tests passed\n", REPORT_PREFIX + "{", REPORT_PREFIX + "{}", REPORT_PREFIX + "{}\n" + REPORT_PREFIX + "{}"])
-def test_zero_exit_without_one_valid_report_is_not_success(output: str) -> None:
-    with pytest.raises((ValueError, KeyError, AssertionError)):
-        read_report(output)
+def test_zero_exit_without_one_valid_report_is_not_success(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, output: str) -> None:
+        with pytest.raises((ValueError, KeyError, AssertionError)):
+            read_report(output)
+
+    rows = parameter_rows(["", "all tests passed\n", REPORT_PREFIX + "{", REPORT_PREFIX + "{}", REPORT_PREFIX + "{}\n" + REPORT_PREFIX + "{}"], ids=['', 'all tests passed\\n', 'AGENT_REGISTRATION_GATE={', 'AGENT_REGISTRATION_GATE={}', 'AGENT_REGISTRATION_GATE={}\\nAGENT_REGISTRATION_GATE={}'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("mutation", ["empty", "missing-agent", "missing-case", "duplicate", "failed", "skipped", "unfinished", "ok-false", "no-versions"])
-def test_gate_rejects_incomplete_matrix(mutation: str) -> None:
-    report = passing_report()
-    if mutation == "empty":
-        report["cases"] = []
-    elif mutation == "missing-agent":
-        report["cases"] = [row for row in report["cases"] if row["agent"] == "codex"]
-    elif mutation == "missing-case":
-        report["cases"].pop()
-    elif mutation == "duplicate":
-        report["cases"][-1] = report["cases"][0]
-    elif mutation == "ok-false":
-        report["ok"] = False
-    elif mutation == "no-versions":
-        report["versions"] = {}
-    else:
-        report["cases"][0]["status"] = mutation
-    with pytest.raises(AssertionError):
-        read_report(REPORT_PREFIX + json.dumps(report))
+def test_gate_rejects_incomplete_matrix(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, mutation: str) -> None:
+        report = passing_report()
+        if mutation == "empty":
+            report["cases"] = []
+        elif mutation == "missing-agent":
+            report["cases"] = [row for row in report["cases"] if row["agent"] == "codex"]
+        elif mutation == "missing-case":
+            report["cases"].pop()
+        elif mutation == "duplicate":
+            report["cases"][-1] = report["cases"][0]
+        elif mutation == "ok-false":
+            report["ok"] = False
+        elif mutation == "no-versions":
+            report["versions"] = {}
+        else:
+            report["cases"][0]["status"] = mutation
+        with pytest.raises(AssertionError):
+            read_report(REPORT_PREFIX + json.dumps(report))
+
+    rows = parameter_rows(["empty", "missing-agent", "missing-case", "duplicate", "failed", "skipped", "unfinished", "ok-false", "no-versions"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_missing_docker_fails_and_replaces_old_green_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,15 +113,18 @@ def test_only_script_downloads_get_network_without_host_secrets(mode: str, netwo
     assert not {"-e", "--env", "--env-file", "-v", "--volume", "--mount", "--privileged"} & set(command)
 
 
-@pytest.mark.parametrize("exit_code", [1, 125, 137])
-def test_build_and_container_failures_cannot_pass(exit_code: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail(command: list[str], **kwargs) -> subprocess.CompletedProcess:
-        kwargs["stdout"].write("container diagnostic\n")
-        return subprocess.CompletedProcess(command, exit_code)
+def test_build_and_container_failures_cannot_pass(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, exit_code: int) -> None:
+        def fail(command: list[str], **kwargs) -> subprocess.CompletedProcess:
+            kwargs["stdout"].write("container diagnostic\n")
+            return subprocess.CompletedProcess(command, exit_code)
 
-    monkeypatch.setattr("tools.test_agent_registration.subprocess.run", fail)
-    with pytest.raises(RuntimeError, match="container diagnostic"):
-        run_logged(["docker", "run", "test-image"], tmp_path / "container.log", 30)
+        monkeypatch.setattr("tools.test_agent_registration.subprocess.run", fail)
+        with pytest.raises(RuntimeError, match="container diagnostic"):
+            run_logged(["docker", "run", "test-image"], tmp_path / "container.log", 30)
+
+    rows = parameter_rows([1, 125, 137])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_timeout_is_not_converted_to_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -126,18 +136,18 @@ def test_timeout_is_not_converted_to_success(tmp_path: Path, monkeypatch: pytest
         run_logged(["docker", "run", "test-image"], tmp_path / "container.log", 30)
 
 
-@pytest.mark.parametrize(
-    ("stamped", "published", "floor"),
-    [
+def test_script_floor_is_the_stamped_release_once_the_index_serves_it(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, stamped: tuple, published: tuple, floor: tuple) -> None:
+        assert release_floor(stamped, published) == floor
+
+    rows = parameter_rows([
         # A release commit before its publish: the index cannot serve the stamped release yet.
         ((0, 22, 0), (0, 21, 5), (0, 21, 5)),
         # Once published, and on every commit after, the stamped release is the floor.
         ((0, 22, 0), (0, 22, 0), (0, 22, 0)),
         ((0, 22, 0), (0, 23, 1), (0, 22, 0)),
-    ],
-)
-def test_script_floor_is_the_stamped_release_once_the_index_serves_it(stamped: tuple, published: tuple, floor: tuple) -> None:
-    assert release_floor(stamped, published) == floor
+    ], multiple=True, ids=['stamped0-published0-floor0', 'stamped1-published1-floor1', 'stamped2-published2-floor2'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def an_index_answering(version: str):
@@ -156,9 +166,22 @@ def test_published_release_is_read_from_the_index(monkeypatch: pytest.MonkeyPatc
         published_release()
 
 
-@pytest.mark.parametrize(
-    ("served", "release"),
-    [
+def test_a_final_release_the_index_serves_is_a_floor_whatever_its_spelling(tmp_path: Path) -> None:
+    """An X.Y.Z-only regex reintroduced the false red it was fixing.
+
+    `require` failed outright on anything with a fourth field, so a `0.21.4.post1`
+    on the index would turn every script case red with nothing wrong under
+    install.sh, and the message named the index answer rather than the installer,
+    so it read like a gate bug. `release_floor` then caps the floor at RELEASE, so
+    no index answer can raise it out of reach either way.
+    """
+
+    def check_row(_workspace, monkeypatch, served: str, release: tuple[int, ...]) -> None:
+        monkeypatch.setattr("evals.install.registration_gate.urllib.request.urlopen", an_index_answering(served))
+
+        assert published_release() == release
+
+    rows = parameter_rows([
         # Every spelling of a final release the index can name as its newest.
         # None of these is a reason to fail a gate about install.sh: it installs
         # whichever of them the index serves, and the floor is the three fields.
@@ -170,34 +193,24 @@ def test_published_release_is_read_from_the_index(monkeypatch: pytest.MonkeyPatc
         ("v0.21.4", (0, 21, 4)),
         ("0.21.4.2", (0, 21, 4)),
         (" 0.21.4 ", (0, 21, 4)),
-    ],
-)
-def test_a_final_release_the_index_serves_is_a_floor_whatever_its_spelling(
-    monkeypatch: pytest.MonkeyPatch, served: str, release: tuple[int, ...]
-) -> None:
-    """An X.Y.Z-only regex reintroduced the false red it was fixing.
-
-    `require` failed outright on anything with a fourth field, so a `0.21.4.post1`
-    on the index would turn every script case red with nothing wrong under
-    install.sh, and the message named the index answer rather than the installer,
-    so it read like a gate bug. `release_floor` then caps the floor at RELEASE, so
-    no index answer can raise it out of reach either way.
-    """
-    monkeypatch.setattr("evals.install.registration_gate.urllib.request.urlopen", an_index_answering(served))
-
-    assert published_release() == release
+    ], multiple=True, ids=['0.21.4.post1-release0', '0.21.4-1-release1', '0.21.4+local.1-release2', '1.0-release3', '2-release4', 'v0.21.4-release5', '0.21.4.2-release6', ' 0.21.4 -release7'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize("served", ["", "not-a-version", "latest", "0.22.0rc1", "0.22.0.dev3", "0.22.0a1", "1.4.0-beta2"])
-def test_an_index_answer_that_is_no_floor_at_all_is_still_refused(monkeypatch: pytest.MonkeyPatch, served: str) -> None:
+def test_an_index_answer_that_is_no_floor_at_all_is_still_refused(tmp_path: Path) -> None:
     """The two answers that really are not a floor: not a version, and a release
     `install.sh` would not install. `uv tool install` takes the newest final
     release, so comparing what it installed against a pre-release floor is the
     same false red from the other side."""
-    monkeypatch.setattr("evals.install.registration_gate.urllib.request.urlopen", an_index_answering(served))
 
-    with pytest.raises(AssertionError):
-        published_release()
+    def check_row(_workspace, monkeypatch, served: str) -> None:
+        monkeypatch.setattr("evals.install.registration_gate.urllib.request.urlopen", an_index_answering(served))
+
+        with pytest.raises(AssertionError):
+            published_release()
+
+    rows = parameter_rows(["", "not-a-version", "latest", "0.22.0rc1", "0.22.0.dev3", "0.22.0a1", "1.4.0-beta2"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_an_index_that_cannot_be_reached_turns_the_gate_red(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 from defmt_wire import Nested, RzcobsEncoder, build_elf, defmt_symbol, encode_frame, rzcobs_stream
+from parameter_rows import check_parameter_rows, parameter_rows
 
 from agentic_hil import defmt
 from agentic_hil.defmt import DefmtTable, DefmtTableError, decode_stream, format_float, load_table, rzcobs_decode
@@ -279,14 +280,17 @@ RZCOBS_VECTORS = [
 ]
 
 
-@pytest.mark.parametrize(("plain", "encoded"), RZCOBS_VECTORS, ids=[f"v{index:02d}" for index in range(15)])
-def test_rzcobs_matches_the_defmt_crates_own_vectors(plain, encoded):
-    encoder = RzcobsEncoder()
-    encoder.started = True
-    assert encoder.frame(plain) == encoded
-    # Decoding pads a frame's last group with zeros, never with anything else.
-    decoded = rzcobs_decode(encoded[:-1])
-    assert decoded[: len(plain)] == plain and not decoded[len(plain) :].strip(b"\x00")
+def test_rzcobs_matches_the_defmt_crates_own_vectors(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, plain, encoded) -> None:
+        encoder = RzcobsEncoder()
+        encoder.started = True
+        assert encoder.frame(plain) == encoded
+        # Decoding pads a frame's last group with zeros, never with anything else.
+        decoded = rzcobs_decode(encoded[:-1])
+        assert decoded[: len(plain)] == plain and not decoded[len(plain) :].strip(b"\x00")
+
+    rows = parameter_rows(RZCOBS_VECTORS, multiple=True, ids=[f"v{index:02d}" for index in range(15)])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_raw_stream_that_loses_sync_says_so_once_and_consumes_the_rest(defmt_images: dict[str, Path]):
@@ -339,18 +343,17 @@ def test_a_string_length_past_the_end_of_its_frame_is_truncated_not_read_beyond(
     assert decode_stream(table, rzcobs_stream([frame])).records[0]["error"] == "truncated"
 
 
-@pytest.mark.parametrize(
-    ("format_string", "payload", "error"),
-    [
+def test_values_no_firmware_sends_are_named(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, format_string, payload, error) -> None:
+        table = synthetic({1: ("defmt_info", format_string)})
+        assert decode_stream(table, rzcobs_stream([struct.pack("<H", 1) + payload])).records[0]["error"] == error
+
+    rows = parameter_rows([
         ("{=char}", struct.pack("<I", 0xD800), "malformed"),
         ("{=str}", struct.pack("<I", 2) + b"\xff\xfe", "malformed"),
         ("{=?}", struct.pack("<H", 9), "unknown_index"),
-    ],
-    ids=["char", "str", "nested"],
-)
-def test_values_no_firmware_sends_are_named(format_string, payload, error):
-    table = synthetic({1: ("defmt_info", format_string)})
-    assert decode_stream(table, rzcobs_stream([struct.pack("<H", 1) + payload])).records[0]["error"] == error
+    ], multiple=True, ids=["char", "str", "nested"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_an_enum_discriminant_past_its_variants_is_malformed():
@@ -370,9 +373,13 @@ def test_an_error_record_carries_a_bounded_slice_of_its_bytes():
 # Rendering details the reference stream does not reach.
 
 
-@pytest.mark.parametrize(
-    ("value", "single", "text"),
-    [
+def test_floats_render_the_way_ryu_renders_them(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, value, single, text) -> None:
+        if single:
+            value = struct.unpack("<f", struct.pack("<f", value))[0]
+        assert format_float(value, single=single) == text
+
+    rows = parameter_rows([
         (1.0, True, "1.0"),
         (0.0001, False, "0.0001"),
         (-2.5e-8, False, "-2.5e-8"),
@@ -380,13 +387,8 @@ def test_an_error_record_carries_a_bounded_slice_of_its_bytes():
         (3.0e38, True, "3e38"),
         (1.17549435e-38, True, "1.1754944e-38"),
         (float("-nan"), True, "NaN"),
-    ],
-    ids=[f"f{index}" for index in range(7)],
-)
-def test_floats_render_the_way_ryu_renders_them(value, single, text):
-    if single:
-        value = struct.unpack("<f", struct.pack("<f", value))[0]
-    assert format_float(value, single=single) == text
+    ], multiple=True, ids=[f"f{index}" for index in range(7)])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_every_shortest_f32_round_trips_through_single_precision():

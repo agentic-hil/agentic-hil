@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from conftest import DEFAULT_TEST_PERMISSIONS, ESPTOOL_COM_PORTS_YAML, ESPTOOL_TEST_PORT, FAKE_ESPTOOL, write_config
+from parameter_rows import check_parameter_rows, parameter_rows
 from support import scaled_time_bound
 from test_implicit_single_action_run import install_fake_serial
 from test_serial_port_identity import CH340_PID, CH340_VID, STLINK_PID, STLINK_VID, fake_host, host_port, inventory
@@ -210,25 +211,25 @@ def test_a_write_whose_read_back_differs_is_never_reported_as_flashed(tmp_path: 
     assert "MD5 of file does not match data in flash" in result["programmer_output"]["stderr"], result
 
 
-@pytest.mark.parametrize(
-    ("tool", "arguments", "error_type", "expected"),
-    [
+def test_an_exit_status_of_zero_without_the_success_lines_is_no_success(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, tool: str, arguments: dict, error_type: str, expected: list[str]) -> None:
+        esptool_log = tmp_path / "esptool-calls.jsonl"
+        monkeypatch.setenv("AGENTIC_HIL_FAKE_ESPTOOL_LOG", str(esptool_log))
+        monkeypatch.setenv(SCENARIO, "silent")
+        write_application(tmp_path)
+
+        result = call(esptool_config(tmp_path, auto_recover="off"), tool, arguments)
+
+        assert result["ok"] is False and result["error_type"] == error_type, result
+        assert result["operation_result"] == {"confirmed": False, "expected_success_text": expected, "matched_success_text": []}, result
+        assert result["retry_safe"] is False, result
+
+    rows = parameter_rows([
         pytest.param("probe_target", {}, "target_state_unconfirmed", ["Chip type:", "Detected flash size:", "Hard resetting"], id="probe"),
         pytest.param("flash_firmware", FLASHED_APPLICATION, "flash_failed", ["Hash of data verified.", "Staying in bootloader."], id="flash"),
         pytest.param("reset_target", {"mode": "run"}, "reset_failed", ["Hard resetting"], id="reset"),
-    ],
-)
-def test_an_exit_status_of_zero_without_the_success_lines_is_no_success(
-    tmp_path: Path, esptool_log: Path, monkeypatch: pytest.MonkeyPatch, tool: str, arguments: dict, error_type: str, expected: list[str]
-) -> None:
-    monkeypatch.setenv(SCENARIO, "silent")
-    write_application(tmp_path)
-
-    result = call(esptool_config(tmp_path, auto_recover="off"), tool, arguments)
-
-    assert result["ok"] is False and result["error_type"] == error_type, result
-    assert result["operation_result"] == {"confirmed": False, "expected_success_text": expected, "matched_success_text": []}, result
-    assert result["retry_safe"] is False, result
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_an_esptool_that_stops_answering_is_killed_at_its_deadline(tmp_path: Path, esptool_log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -633,23 +634,25 @@ def test_an_incident_only_a_re_read_settles_never_resets_the_chip_to_settle_it(t
 # The image: what esptool would write where, settled before it runs.
 
 
-@pytest.mark.parametrize(
-    ("flash_address", "named"),
-    [
+def test_a_bin_needs_an_offset_that_starts_a_flash_sector(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, flash_address: str | None, named: str) -> None:
+        esptool_log = tmp_path / "esptool-calls.jsonl"
+        monkeypatch.setenv("AGENTIC_HIL_FAKE_ESPTOOL_LOG", str(esptool_log))
+        write_application(tmp_path)
+
+        result = call(esptool_config(tmp_path, flash_address=flash_address), "flash_firmware", FLASHED_APPLICATION)
+
+        assert result["error_type"] == "invalid_argument", result
+        assert result["field"] == "debuggers.dut.flash_address", result
+        assert named in result["summary"], result
+        assert runs(esptool_log) == []
+
+    rows = parameter_rows([
         pytest.param(None, "requires debuggers.dut.flash_address", id="unset"),
         pytest.param("0x10001", "'0x10001'", id="inside-a-sector"),
         pytest.param("010000", "'010000'", id="leading-zero"),
-    ],
-)
-def test_a_bin_needs_an_offset_that_starts_a_flash_sector(tmp_path: Path, esptool_log: Path, flash_address: str | None, named: str) -> None:
-    write_application(tmp_path)
-
-    result = call(esptool_config(tmp_path, flash_address=flash_address), "flash_firmware", FLASHED_APPLICATION)
-
-    assert result["error_type"] == "invalid_argument", result
-    assert result["field"] == "debuggers.dut.flash_address", result
-    assert named in result["summary"], result
-    assert runs(esptool_log) == []
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_bin_that_starts_like_intel_hex_is_refused(tmp_path: Path, esptool_log: Path) -> None:
@@ -676,25 +679,28 @@ def test_an_intel_hex_file_is_written_at_the_addresses_its_records_carry(tmp_pat
     assert Path(argv[-1]).name == "app.hex", argv
 
 
-@pytest.mark.parametrize(
-    ("text", "problem"),
-    [
+def test_an_intel_hex_file_esptool_would_write_otherwise_than_it_reads_is_refused(tmp_path: Path) -> None:
+    """esptool falls back to a raw write when the HEX library refuses a file,
+    and drops what follows the end record, so these are refused here."""
+
+    def check_row(tmp_path, monkeypatch, text: str, problem: str) -> None:
+        esptool_log = tmp_path / "esptool-calls.jsonl"
+        monkeypatch.setenv("AGENTIC_HIL_FAKE_ESPTOOL_LOG", str(esptool_log))
+        write_application(tmp_path, "app.hex", text.encode("ascii"))
+
+        result = call(esptool_config(tmp_path), "flash_firmware", {"image_path": "build/app.hex"})
+
+        assert result["error_type"] == "invalid_argument", result
+        assert problem in result["summary"], result
+        assert runs(esptool_log) == []
+
+    rows = parameter_rows([
         pytest.param(intel_hex(0x10000, APPLICATION, end=False), "no end-of-file record", id="cut-short"),
         pytest.param(intel_hex(0x10000, APPLICATION) + hex_record(0, 0, bytes(16)), "follows the end-of-file record", id="after-the-end"),
         pytest.param(intel_hex(0x10010, APPLICATION), "starts inside a 4 KiB flash sector", id="inside-a-sector"),
         pytest.param(intel_hex(0x10000, APPLICATION, end=False) + hex_record(0, 0, bytes(16)) + hex_record(1, 0), "more than once", id="written-twice"),
-    ],
-)
-def test_an_intel_hex_file_esptool_would_write_otherwise_than_it_reads_is_refused(tmp_path: Path, esptool_log: Path, text: str, problem: str) -> None:
-    """esptool falls back to a raw write when the HEX library refuses a file,
-    and drops what follows the end record, so these are refused here."""
-    write_application(tmp_path, "app.hex", text.encode("ascii"))
-
-    result = call(esptool_config(tmp_path), "flash_firmware", {"image_path": "build/app.hex"})
-
-    assert result["error_type"] == "invalid_argument", result
-    assert problem in result["summary"], result
-    assert runs(esptool_log) == []
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_an_elf_is_refused_with_the_commands_that_turn_it_into_an_image(tmp_path: Path, esptool_log: Path) -> None:
@@ -726,9 +732,15 @@ def test_the_chip_name_is_put_to_esptool_without_opening_a_port(tmp_path: Path, 
     assert not any(argument.startswith("--port") for entry in runs(esptool_log) for argument in entry["argv"]), runs(esptool_log)
 
 
-@pytest.mark.parametrize(
-    ("kwargs", "field"),
-    [
+def test_the_loader_refuses_an_esptool_entry_it_could_not_act_on_safely(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, kwargs: dict, field: str) -> None:
+        with pytest.raises(ConfigError) as refused:
+            esptool_config(tmp_path, **kwargs)
+
+        assert refused.value.error_type == "config_invalid", refused.value.summary
+        assert refused.value.details["field"] == field, refused.value.details
+
+    rows = parameter_rows([
         pytest.param({"com_port": None}, "debuggers.dut.com_port", id="no-port"),
         pytest.param({"com_port": "elsewhere"}, "debuggers.dut.com_port", id="unknown-port"),
         pytest.param({"probe_id": "E66038B713849D31"}, "debuggers.dut.probe_id", id="probe-id"),
@@ -739,14 +751,8 @@ def test_the_chip_name_is_put_to_esptool_without_opening_a_port(tmp_path: Path, 
         ),
         # Spelt as esptool prints it rather than as `--chip` takes it.
         pytest.param({"target_type": "ESP32-S3"}, "debuggers.dut.target_type", id="chip-name-shape"),
-    ],
-)
-def test_the_loader_refuses_an_esptool_entry_it_could_not_act_on_safely(tmp_path: Path, kwargs: dict, field: str) -> None:
-    with pytest.raises(ConfigError) as refused:
-        esptool_config(tmp_path, **kwargs)
-
-    assert refused.value.error_type == "config_invalid", refused.value.summary
-    assert refused.value.details["field"] == field, refused.value.details
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_the_loader_refuses_a_port_named_on_a_probe_backend(tmp_path: Path) -> None:

@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from parameter_rows import check_parameter_rows, parameter_rows
 
 from agentic_hil.types import ChannelStatus, PowerSupplyFault
 
@@ -181,28 +182,27 @@ def test_the_transcribed_identity_is_accepted_with_its_serial_redacted() -> None
     assert (identity.model, identity.firmware, identity.accepted, identity.serial) == ("RS-3005P", "V6.9", True, "[redacted]")
 
 
-@pytest.mark.parametrize(
-    ("reply", "model", "firmware"),
-    [
+def test_an_identity_other_than_rs3005p_v6_9_is_not_accepted_and_nothing_else_is_written(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, reply: str, model: str | None, firmware: str | None) -> None:
+        fake = FakeSupply(idn=reply.format(serial=synthetic_serial()).encode())
+        supply = backend(fake)
+
+        identity = supply.identity()
+
+        assert (identity.model, identity.firmware, identity.accepted) == (model, firmware, False)
+        for operation in (lambda: supply.channel_status(1), lambda: supply.set_voltage(1, Decimal("5.00")), lambda: supply.set_current(1, Decimal("0.100"))):
+            with pytest.raises(RuntimeError):
+                operation()
+        assert written(fake) == [b"*IDN?\n"]
+
+    rows = parameter_rows([
         ("RS-3005P V7.0 SN:{serial}\n", "RS-3005P", "V7.0"),
         ("KA3005P V5.8 SN:{serial}\n", "KA3005P", "V5.8"),
         ("RS-3005P V6.9\n", None, None),
         ("{serial}\n", None, None),
         ("\n", None, None),
-    ],
-    ids=["other-firmware", "other-model", "no-serial-span", "unparsed", "empty"],
-)
-def test_an_identity_other_than_rs3005p_v6_9_is_not_accepted_and_nothing_else_is_written(reply: str, model: str | None, firmware: str | None) -> None:
-    fake = FakeSupply(idn=reply.format(serial=synthetic_serial()).encode())
-    supply = backend(fake)
-
-    identity = supply.identity()
-
-    assert (identity.model, identity.firmware, identity.accepted) == (model, firmware, False)
-    for operation in (lambda: supply.channel_status(1), lambda: supply.set_voltage(1, Decimal("5.00")), lambda: supply.set_current(1, Decimal("0.100"))):
-        with pytest.raises(RuntimeError):
-            operation()
-    assert written(fake) == [b"*IDN?\n"]
+    ], multiple=True, ids=["other-firmware", "other-model", "no-serial-span", "unparsed", "empty"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_nothing_is_sent_before_the_identity_was_read() -> None:
@@ -298,29 +298,29 @@ def _closed(fake: FakeSupply) -> Any:
     return supply
 
 
-@pytest.mark.parametrize(
-    ("fake", "situation", "operation"),
-    [
+def test_a_command_the_backend_refuses_is_a_fault_that_wrote_nothing(tmp_path: Path) -> None:
+    """The layer above learns from the fault itself that nothing reached the supply."""
+
+    def check_row(_workspace, _patch, fake: Any, situation: Any, operation: Any) -> None:
+        transport = fake()
+        supply = situation(transport)
+        sent = written(transport)
+
+        with pytest.raises(PowerSupplyFault) as fault:
+            operation(supply)
+
+        assert isinstance(fault.value, RuntimeError)
+        assert (fault.value.error_type, fault.value.wrote, fault.value.cause) == ("power_supply_no_reply", False, "not_sent")
+        assert written(transport) == sent
+
+    rows = parameter_rows([
         (lambda: FakeSupply(), _before_identity, lambda supply: supply.set_voltage(1, Decimal("5.00"))),
         (lambda: FakeSupply(idn=b"KA3005P V5.8 SN:SYNTH\n"), lambda fake: (supply := backend(fake), supply.identity())[0], lambda supply: supply.set_current(1, Decimal("0.100"))),
         (lambda: FakeSupply(silent=(b"VOUT1?",)), _ended, lambda supply: supply.set_voltage(1, Decimal("5.00"))),
         (lambda: FakeSupply(), _closed, lambda supply: supply.set_voltage(1, Decimal("5.00"))),
         (lambda: FakeSupply(), _closed, lambda supply: supply.set_output(1, True)),
-    ],
-    ids=["before-identity", "identity-not-accepted", "conversation-ended", "closed", "output-switching-closed"],
-)
-def test_a_command_the_backend_refuses_is_a_fault_that_wrote_nothing(fake: Any, situation: Any, operation: Any) -> None:
-    """The layer above learns from the fault itself that nothing reached the supply."""
-    transport = fake()
-    supply = situation(transport)
-    sent = written(transport)
-
-    with pytest.raises(PowerSupplyFault) as fault:
-        operation(supply)
-
-    assert isinstance(fault.value, RuntimeError)
-    assert (fault.value.error_type, fault.value.wrote, fault.value.cause) == ("power_supply_no_reply", False, "not_sent")
-    assert written(transport) == sent
+    ], multiple=True, ids=["before-identity", "identity-not-accepted", "conversation-ended", "closed", "output-switching-closed"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_every_command_ends_in_a_newline_and_waits_for_the_previous_reply() -> None:
@@ -351,72 +351,71 @@ def test_the_rs3005p_has_one_channel(channel: int) -> None:
 # -- setters -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("operation", "value", "setter", "query"),
-    [
+def test_a_setter_writes_the_exact_value_waits_the_draft_gap_and_reads_it_back(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, operation: str, value: str, setter: bytes, query: bytes) -> None:
+        from agentic_hil.backends.rs3005p import SETTER_GAP_S
+
+        fake = FakeSupply()
+        supply = accepted(fake)
+        fake.events.clear()
+
+        getattr(supply, operation)(1, Decimal(value))
+
+        assert fake.events[:3] == [("write", setter), ("sleep", SETTER_GAP_S), ("write", query)]
+        entries = supply.evidence()[-2:]
+        assert [entry["command"] for entry in entries] == [setter.decode().strip(), query.decode().strip()]
+        assert [entry["operation"] for entry in entries] == [operation, operation]
+        assert entries[0]["reply_hex"] == "" and entries[0]["draft"]
+        assert entries[1]["reply_hex"] == (setter[len(b"VSET1:") :]).hex()
+
+    rows = parameter_rows([
         ("set_voltage", "12.34", b"VSET1:12.34\n", b"VSET1?\n"),
         ("set_voltage", "5", b"VSET1:5.00\n", b"VSET1?\n"),
         ("set_current", "1.234", b"ISET1:1.234\n", b"ISET1?\n"),
         ("set_current", "0.5", b"ISET1:0.500\n", b"ISET1?\n"),
-    ],
-)
-def test_a_setter_writes_the_exact_value_waits_the_draft_gap_and_reads_it_back(operation: str, value: str, setter: bytes, query: bytes) -> None:
-    from agentic_hil.backends.rs3005p import SETTER_GAP_S
-
-    fake = FakeSupply()
-    supply = accepted(fake)
-    fake.events.clear()
-
-    getattr(supply, operation)(1, Decimal(value))
-
-    assert fake.events[:3] == [("write", setter), ("sleep", SETTER_GAP_S), ("write", query)]
-    entries = supply.evidence()[-2:]
-    assert [entry["command"] for entry in entries] == [setter.decode().strip(), query.decode().strip()]
-    assert [entry["operation"] for entry in entries] == [operation, operation]
-    assert entries[0]["reply_hex"] == "" and entries[0]["draft"]
-    assert entries[1]["reply_hex"] == (setter[len(b"VSET1:") :]).hex()
+    ], multiple=True, ids=['set_voltage-12.34-VSET1:12.34\\n-VSET1?\\n', 'set_voltage-5-VSET1:5.00\\n-VSET1?\\n', 'set_current-1.234-ISET1:1.234\\n-ISET1?\\n', 'set_current-0.5-ISET1:0.500\\n-ISET1?\\n'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(
-    ("operation", "value"),
-    [("set_voltage", "12.345"), ("set_current", "1.2345"), ("set_voltage", "-1.00"), ("set_current", "-0.001"), ("set_voltage", "NaN"), ("set_current", "Infinity")],
-)
-def test_a_value_the_supply_cannot_take_exactly_is_refused_before_it_is_written(operation: str, value: str) -> None:
-    fake = FakeSupply()
-    supply = accepted(fake)
+def test_a_value_the_supply_cannot_take_exactly_is_refused_before_it_is_written(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, operation: str, value: str) -> None:
+        fake = FakeSupply()
+        supply = accepted(fake)
 
-    with pytest.raises(ValueError):
-        getattr(supply, operation)(1, Decimal(value))
+        with pytest.raises(ValueError):
+            getattr(supply, operation)(1, Decimal(value))
 
-    assert written(fake) == [b"*IDN?\n"]
+        assert written(fake) == [b"*IDN?\n"]
+
+    rows = parameter_rows([("set_voltage", "12.345"), ("set_current", "1.2345"), ("set_voltage", "-1.00"), ("set_current", "-0.001"), ("set_voltage", "NaN"), ("set_current", "Infinity")], multiple=True, ids=['set_voltage-12.345', 'set_current-1.2345', 'set_voltage--1.00', 'set_current--0.001', 'set_voltage-NaN', 'set_current-Infinity'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # -- no reply ----------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("silent", "steps", "wrote", "last_command"),
-    [
+def test_a_reply_that_never_comes_is_no_reply_and_says_whether_anything_was_written(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, silent: bytes, steps: tuple, wrote: bool, last_command: bytes) -> None:
+        fake = FakeSupply(silent=(silent,), status=b"" if silent == b"STATUS?" else b"\x53\n")
+        supply = backend(fake)
+
+        with pytest.raises(PowerSupplyFault) as fault:
+            supply.identity()
+            for step in steps:
+                step(supply)
+
+        assert (fault.value.error_type, fault.value.wrote) == ("power_supply_no_reply", wrote)
+        assert written(fake)[-1] == last_command
+        assert supply.classify_last_error()["last_fault"] == {"error_type": "power_supply_no_reply", "summary": fault.value.summary, "wrote": wrote}
+
+    rows = parameter_rows([
         (b"*IDN?", (), False, b"*IDN?\n"),
         (b"VOUT1?", (lambda supply: supply.channel_status(1),), False, b"VOUT1?\n"),
         (b"STATUS?", (lambda supply: supply.channel_status(1),), False, b"STATUS?\n"),
         (b"VSET1?", (lambda supply: supply.set_voltage(1, Decimal("5.00")),), True, b"VSET1?\n"),
         (b"ISET1?", (lambda supply: supply.set_current(1, Decimal("0.100")),), True, b"ISET1?\n"),
-    ],
-    ids=["identity", "measured-voltage", "status", "voltage-read-back", "current-read-back"],
-)
-def test_a_reply_that_never_comes_is_no_reply_and_says_whether_anything_was_written(silent: bytes, steps: tuple, wrote: bool, last_command: bytes) -> None:
-    fake = FakeSupply(silent=(silent,), status=b"" if silent == b"STATUS?" else b"\x53\n")
-    supply = backend(fake)
-
-    with pytest.raises(PowerSupplyFault) as fault:
-        supply.identity()
-        for step in steps:
-            step(supply)
-
-    assert (fault.value.error_type, fault.value.wrote) == ("power_supply_no_reply", wrote)
-    assert written(fake)[-1] == last_command
-    assert supply.classify_last_error()["last_fault"] == {"error_type": "power_supply_no_reply", "summary": fault.value.summary, "wrote": wrote}
+    ], multiple=True, ids=["identity", "measured-voltage", "status", "voltage-read-back", "current-read-back"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize("command", [b"*IDN?", b"ISET1?"])
@@ -452,33 +451,33 @@ def _line_lost() -> BaseException:
     return serial.SerialException("device reports readiness to read but returned no data (device disconnected or multiple access on port?)")
 
 
-@pytest.mark.parametrize(
-    ("failure", "step", "cause", "wrote"),
-    [
+def test_a_serial_line_that_fails_is_no_reply_naming_its_cause_and_whether_it_wrote(tmp_path: Path) -> None:
+    """pyserial's own errors reach the class layer as the catalogue fault, never raw."""
+
+    def check_row(_workspace, _patch, failure: Any, step: Any, cause: str, wrote: bool) -> None:
+        failures = failure()
+        (error,) = [*failures.get("write_fails", {}).values(), *failures.get("read_fails", {}).values()]
+        fake = FakeSupply(**failures)
+        supply = accepted(fake)
+
+        with pytest.raises(PowerSupplyFault) as fault:
+            step(supply)
+
+        assert (fault.value.error_type, fault.value.cause, fault.value.wrote) == ("power_supply_no_reply", cause, wrote)
+        assert type(error).__name__ in fault.value.summary and str(error) in fault.value.summary, fault.value.summary
+        assert supply.classify_last_error()["last_fault"]["error_type"] == "power_supply_no_reply"
+        sent = written(fake)
+        with pytest.raises(RuntimeError):
+            supply.channel_status(1)
+        assert written(fake) == sent
+
+    rows = parameter_rows([
         (lambda: {"write_fails": {b"VOUT1?": _write_timeout()}}, lambda supply: supply.channel_status(1), "write_timeout", False),
         (lambda: {"write_fails": {b"VSET1:5.00": _write_timeout()}}, lambda supply: supply.set_voltage(1, Decimal("5.00")), "write_timeout", True),
         (lambda: {"read_fails": {b"IOUT1?": _line_lost()}}, lambda supply: supply.channel_status(1), "serial_error", False),
         (lambda: {"read_fails": {b"ISET1?": _line_lost()}}, lambda supply: supply.set_current(1, Decimal("0.100")), "serial_error", True),
-    ],
-    ids=["query-write-timeout", "setter-write-timeout", "query-read-fails", "read-back-read-fails"],
-)
-def test_a_serial_line_that_fails_is_no_reply_naming_its_cause_and_whether_it_wrote(failure: Any, step: Any, cause: str, wrote: bool) -> None:
-    """pyserial's own errors reach the class layer as the catalogue fault, never raw."""
-    failures = failure()
-    (error,) = [*failures.get("write_fails", {}).values(), *failures.get("read_fails", {}).values()]
-    fake = FakeSupply(**failures)
-    supply = accepted(fake)
-
-    with pytest.raises(PowerSupplyFault) as fault:
-        step(supply)
-
-    assert (fault.value.error_type, fault.value.cause, fault.value.wrote) == ("power_supply_no_reply", cause, wrote)
-    assert type(error).__name__ in fault.value.summary and str(error) in fault.value.summary, fault.value.summary
-    assert supply.classify_last_error()["last_fault"]["error_type"] == "power_supply_no_reply"
-    sent = written(fake)
-    with pytest.raises(RuntimeError):
-        supply.channel_status(1)
-    assert written(fake) == sent
+    ], multiple=True, ids=["query-write-timeout", "setter-write-timeout", "query-read-fails", "read-back-read-fails"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_port_that_will_not_open_is_no_reply_and_nothing_was_written(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -615,22 +614,25 @@ def test_the_setter_format_carries_exactly_the_type_resolution() -> None:
 # -- evidence ----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("reply", ["RS-3005P V6.9 SN:{serial}\n", "KA3005P V5.8 SN:{serial}\n", "RS-3005P V6.9 SN:[redacted]\n"], ids=["accepted", "unknown-model", "transcribed"])
-def test_the_evidence_masks_the_serial_span_and_keeps_the_reply_length(reply: str) -> None:
-    serial = synthetic_serial()
-    raw = reply.format(serial=serial).encode()
-    supply = backend(FakeSupply(idn=raw))
+def test_the_evidence_masks_the_serial_span_and_keeps_the_reply_length(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, reply: str) -> None:
+        serial = synthetic_serial()
+        raw = reply.format(serial=serial).encode()
+        supply = backend(FakeSupply(idn=raw))
 
-    supply.identity()
+        supply.identity()
 
-    (entry,) = supply.evidence()
-    masked = bytes.fromhex(entry["reply_hex"])
-    span = raw.index(b"SN:") + len(b"SN:")
-    assert (entry["operation"], entry["command"]) == ("identity", "*IDN?")
-    assert len(masked) == len(raw)
-    assert masked[:span] == raw[:span] and masked.endswith(b"\n")
-    assert set(masked[span:-1]) == {ord("*")}
-    assert serial not in json.dumps(supply.evidence()) and serial.encode().hex() not in entry["reply_hex"].lower()
+        (entry,) = supply.evidence()
+        masked = bytes.fromhex(entry["reply_hex"])
+        span = raw.index(b"SN:") + len(b"SN:")
+        assert (entry["operation"], entry["command"]) == ("identity", "*IDN?")
+        assert len(masked) == len(raw)
+        assert masked[:span] == raw[:span] and masked.endswith(b"\n")
+        assert set(masked[span:-1]) == {ord("*")}
+        assert serial not in json.dumps(supply.evidence()) and serial.encode().hex() not in entry["reply_hex"].lower()
+
+    rows = parameter_rows(["RS-3005P V6.9 SN:{serial}\n", "KA3005P V5.8 SN:{serial}\n", "RS-3005P V6.9 SN:[redacted]\n"], ids=["accepted", "unknown-model", "transcribed"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_an_identity_reply_that_does_not_parse_is_masked_whole() -> None:

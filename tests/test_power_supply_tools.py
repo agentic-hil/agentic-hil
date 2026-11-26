@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from parameter_rows import check_parameter_rows, combine_parameter_rows, parameter_rows
 from power_supply_fakes import (
     THRESHOLD_TYPE,
     FakeDebugger,
@@ -61,26 +62,26 @@ def test_the_four_supply_tools_are_advertised() -> None:
     assert set(SUPPLY_TOOLS) <= set(MCP_TOOL_NAMES)
 
 
-@pytest.mark.parametrize(
-    ("name", "read_only", "destructive", "idempotent"),
-    [
+def test_the_supply_tool_annotations(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, name: str, read_only: bool, destructive: bool | None, idempotent: bool | None) -> None:
+        from agentic_hil.contracts import TOOL_ANNOTATIONS
+
+        annotations = TOOL_ANNOTATIONS[name]
+
+        assert annotations["readOnlyHint"] is read_only, annotations
+        assert annotations["openWorldHint"] is False, annotations
+        assert annotations.get("title"), annotations
+        if destructive is not None:
+            assert annotations["destructiveHint"] is destructive, annotations
+            assert annotations["idempotentHint"] is idempotent, annotations
+
+    rows = parameter_rows([
         ("power_supply_status", True, None, None),
         ("power_supply_set", False, True, True),
         ("power_supply_output", False, True, True),
         ("power_supply_cycle", False, True, False),
-    ],
-)
-def test_the_supply_tool_annotations(name: str, read_only: bool, destructive: bool | None, idempotent: bool | None) -> None:
-    from agentic_hil.contracts import TOOL_ANNOTATIONS
-
-    annotations = TOOL_ANNOTATIONS[name]
-
-    assert annotations["readOnlyHint"] is read_only, annotations
-    assert annotations["openWorldHint"] is False, annotations
-    assert annotations.get("title"), annotations
-    if destructive is not None:
-        assert annotations["destructiveHint"] is destructive, annotations
-        assert annotations["idempotentHint"] is idempotent, annotations
+    ], multiple=True, ids=['power_supply_status-True-None-None', 'power_supply_set-False-True-True', 'power_supply_output-False-True-True', 'power_supply_cycle-False-True-False'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_every_supply_tool_takes_a_supply_and_an_optional_channel() -> None:
@@ -278,23 +279,26 @@ def test_a_flash_capture_on_the_supply_port_is_refused(tmp_path: Path, monkeypat
 # The catalogue.
 
 
-@pytest.mark.parametrize("error_type", NEW_ERROR_TYPES)
-def test_each_new_error_type_has_a_catalogue_entry(error_type: str) -> None:
-    from agentic_hil.knowledge import ERROR_CATALOGUE, remediation_fields
+def test_each_new_error_type_has_a_catalogue_entry(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, error_type: str) -> None:
+        from agentic_hil.knowledge import ERROR_CATALOGUE, remediation_fields
 
-    assert error_type in ERROR_CATALOGUE
-    assert remediation_fields(error_type).get("remediation"), error_type
+        assert error_type in ERROR_CATALOGUE
+        assert remediation_fields(error_type).get("remediation"), error_type
+
+    rows = parameter_rows(NEW_ERROR_TYPES)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(
-    ("error_type", "scope"),
-    [("not_supported", "power_supply"), ("not_supported", "unbound_power_supply"), ("permission_denied", "power_supply_limits")],
-)
-def test_the_scoped_entries_carry_advice(error_type: str, scope: str) -> None:
-    from agentic_hil.knowledge import lookup_remedy, remediation_fields
+def test_the_scoped_entries_carry_advice(tmp_path: Path) -> None:
+    def check_row(_workspace, _patch, error_type: str, scope: str) -> None:
+        from agentic_hil.knowledge import lookup_remedy, remediation_fields
 
-    assert lookup_remedy(error_type, scope) is not lookup_remedy(error_type), (error_type, scope)
-    assert remediation_fields(error_type, scope).get("remediation"), (error_type, scope)
+        assert lookup_remedy(error_type, scope) is not lookup_remedy(error_type), (error_type, scope)
+        assert remediation_fields(error_type, scope).get("remediation"), (error_type, scope)
+
+    rows = parameter_rows([("not_supported", "power_supply"), ("not_supported", "unbound_power_supply"), ("permission_denied", "power_supply_limits")], multiple=True, ids=['not_supported-power_supply', 'not_supported-unbound_power_supply', 'permission_denied-power_supply_limits'])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_the_protection_entry_says_report_and_stop() -> None:
@@ -679,38 +683,33 @@ def rs3005p_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, serial_clas
     return AgenticHILToolService(config, backend=FakeDebugger())
 
 
-@pytest.mark.parametrize(
-    ("serial_class", "cause", "line"),
-    [(PortRefusedSerial, "port_open_failed", OPEN_REFUSED), (LineLostSerial, "serial_error", LINE_LOST)],
-    ids=["port-refused", "line-lost"],
-)
-@pytest.mark.parametrize(
-    ("name", "arguments"),
-    [("power_supply_status", {}), ("power_supply_set", {"voltage_v": 5.0, "current_a": 0.5})],
-    ids=["status", "set"],
-)
-def test_a_serial_failure_before_any_write_is_a_plain_failure_naming_its_cause(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, serial_class: type, cause: str, line: str, name: str, arguments: dict[str, Any]
-) -> None:
-    from agentic_hil.report import read_last_report
+def test_a_serial_failure_before_any_write_is_a_plain_failure_naming_its_cause(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, name: str, arguments: dict[str, Any], serial_class: type, cause: str, line: str) -> None:
+        from agentic_hil.report import read_last_report
 
-    service = rs3005p_service(tmp_path, monkeypatch, serial_class)
-    try:
-        result = service.call(name, {"supply_id": "bench", **arguments})
-        lease = service.call("hardware_lease_status", {})
-    finally:
-        service.close()
+        service = rs3005p_service(tmp_path, monkeypatch, serial_class)
+        try:
+            result = service.call(name, {"supply_id": "bench", **arguments})
+            lease = service.call("hardware_lease_status", {})
+        finally:
+            service.close()
 
-    assert result["ok"] is False, result
-    assert result["error_type"] == "power_supply_no_reply", result
-    assert result["cause"] == cause, result
-    assert line in result["backend_error"], result
-    assert result["retry_safe"] is True and result["side_effect_status"] == "not_started", result
-    assert "power_supply_state_unconfirmed" not in (result.get("cleanup_reasons") or []), result
-    assert result.get("quarantined") is not True and lease["blocked"] is False, (result, lease)
-    assert "last_known_output" in result, result
-    assert read_last_report(service.config)["error_type"] == "power_supply_no_reply"
-    assert not [sent for port in TranscribedSupplySerial.built for sent in port.sent if b":" in sent], "a setter was sent"
+        assert result["ok"] is False, result
+        assert result["error_type"] == "power_supply_no_reply", result
+        assert result["cause"] == cause, result
+        assert line in result["backend_error"], result
+        assert result["retry_safe"] is True and result["side_effect_status"] == "not_started", result
+        assert "power_supply_state_unconfirmed" not in (result.get("cleanup_reasons") or []), result
+        assert result.get("quarantined") is not True and lease["blocked"] is False, (result, lease)
+        assert "last_known_output" in result, result
+        assert read_last_report(service.config)["error_type"] == "power_supply_no_reply"
+        assert not [sent for port in TranscribedSupplySerial.built for sent in port.sent if b":" in sent], "a setter was sent"
+
+    rows = combine_parameter_rows(
+        parameter_rows([("power_supply_status", {}), ("power_supply_set", {"voltage_v": 5.0, "current_a": 0.5})], multiple=True, ids=['status', 'set']),
+        parameter_rows([(PortRefusedSerial, "port_open_failed", OPEN_REFUSED), (LineLostSerial, "serial_error", LINE_LOST)], multiple=True, ids=['port-refused', 'line-lost']),
+    )
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_a_setter_whose_write_times_out_leaves_the_supply_unconfirmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -29,6 +29,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import write_config
+from parameter_rows import check_parameter_rows, parameter_rows
 from support import scaled_time_bound
 from test_can_frame_and_routing import fake_can_module
 
@@ -429,39 +430,38 @@ def test_com_read_until_leaves_everything_after_the_match_buffered(tmp_path: Pat
     assert rest["buffer_remaining_bytes"] == 0, rest
 
 
-@pytest.mark.parametrize(
-    ("max_bytes", "expected", "until_matched"),
-    [
-        pytest.param(5, b"boot ", False, id="well-before-the-match"),
-        pytest.param(12, b"boot ok\r\nPAS", False, id="one-byte-short-of-the-match"),
-        pytest.param(13, b"boot ok\r\nPASS", True, id="exactly-at-the-end-of-the-match"),
-    ],
-)
-def test_com_read_until_never_hands_out_more_than_max_bytes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, max_bytes: int, expected: bytes, until_matched: bool
-) -> None:
+def test_com_read_until_never_hands_out_more_than_max_bytes(tmp_path: Path) -> None:
     """`max_bytes` still caps the answer. A match that ends past it is not
     reported as found, and the summary says the match lies beyond `max_bytes`,
     so the caller knows to read on rather than to wait again. The match is
     already buffered, so none of these calls has anything to wait for."""
-    fed = b"boot ok\r\nPASS\r\n"
-    with com_session(tmp_path, monkeypatch) as (service, handle):
-        handle.deliver(fed)
-        started = time.monotonic()
-        result = com_read(service, until="PASS", max_bytes=max_bytes, wait_timeout_s=20)
-        elapsed = time.monotonic() - started
 
-    assert result["ok"] is True, result
-    assert result["until_matched"] is until_matched, result
-    assert result["data"]["hex"] == expected.hex(), result
-    assert result["bytes_read"] == len(expected), result
-    assert result["buffer_remaining_bytes"] == len(fed) - len(expected), result
-    if until_matched:
-        assert result["matched"] == "PASS", result
-    else:
-        assert "matched" not in result, result
-        assert "max_bytes" in result["summary"], result
-    assert elapsed < scaled_time_bound(5.0), "the match was already buffered, so the call had nothing to wait for"
+    def check_row(tmp_path, monkeypatch, max_bytes: int, expected: bytes, until_matched: bool) -> None:
+        fed = b"boot ok\r\nPASS\r\n"
+        with com_session(tmp_path, monkeypatch) as (service, handle):
+            handle.deliver(fed)
+            started = time.monotonic()
+            result = com_read(service, until="PASS", max_bytes=max_bytes, wait_timeout_s=20)
+            elapsed = time.monotonic() - started
+
+        assert result["ok"] is True, result
+        assert result["until_matched"] is until_matched, result
+        assert result["data"]["hex"] == expected.hex(), result
+        assert result["bytes_read"] == len(expected), result
+        assert result["buffer_remaining_bytes"] == len(fed) - len(expected), result
+        if until_matched:
+            assert result["matched"] == "PASS", result
+        else:
+            assert "matched" not in result, result
+            assert "max_bytes" in result["summary"], result
+        assert elapsed < scaled_time_bound(5.0), "the match was already buffered, so the call had nothing to wait for"
+
+    rows = parameter_rows([
+        pytest.param(5, b"boot ", False, id="well-before-the-match"),
+        pytest.param(12, b"boot ok\r\nPAS", False, id="one-byte-short-of-the-match"),
+        pytest.param(13, b"boot ok\r\nPASS", True, id="exactly-at-the-end-of-the-match"),
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_com_read_until_answers_at_once_when_max_bytes_are_buffered_without_a_match(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -616,31 +616,30 @@ def test_com_read_report_records_the_until_entries_and_the_outcome(
     assert report["data"] == result["data"], report
 
 
-@pytest.mark.parametrize(
-    ("until", "arguments", "until_wait_s"),
-    [
-        pytest.param("PASS", {}, 10.0, id="a-string-and-the-default-wait"),
-        pytest.param(["PASS"], {"wait_timeout_s": 600}, 60.0, id="a-list-and-a-wait-past-the-cap"),
-        pytest.param("PASS", {"wait_timeout_s": 2.5}, 2.5, id="a-string-and-its-own-wait"),
-    ],
-)
-def test_com_read_report_records_until_as_a_list_and_the_wait_in_force(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, until: object, arguments: dict, until_wait_s: float
-) -> None:
+def test_com_read_report_records_until_as_a_list_and_the_wait_in_force(tmp_path: Path) -> None:
     """The report records `until` as a list however the caller gave it, and the
     wait that was in force once the default and the cap applied. The answer
     echoes neither: the caller knows what it asked, and every field costs it."""
-    with com_session(tmp_path, monkeypatch) as (service, handle):
-        handle.deliver(b"PASS\r\n")
-        result = com_read(service, until=until, **arguments)
-        report = read_last_report(service.config)
 
-    assert result["ok"] is True, result
-    assert result["until_matched"] is True, result
-    assert report["until"] == ["PASS"], report
-    assert report["until_wait_s"] == until_wait_s, report
-    assert "until" not in result, result
-    assert "until_wait_s" not in result, result
+    def check_row(tmp_path, monkeypatch, until: object, arguments: dict, until_wait_s: float) -> None:
+        with com_session(tmp_path, monkeypatch) as (service, handle):
+            handle.deliver(b"PASS\r\n")
+            result = com_read(service, until=until, **arguments)
+            report = read_last_report(service.config)
+
+        assert result["ok"] is True, result
+        assert result["until_matched"] is True, result
+        assert report["until"] == ["PASS"], report
+        assert report["until_wait_s"] == until_wait_s, report
+        assert "until" not in result, result
+        assert "until_wait_s" not in result, result
+
+    rows = parameter_rows([
+        pytest.param("PASS", {}, 10.0, id="a-string-and-the-default-wait"),
+        pytest.param(["PASS"], {"wait_timeout_s": 600}, 60.0, id="a-list-and-a-wait-past-the-cap"),
+        pytest.param("PASS", {"wait_timeout_s": 2.5}, 2.5, id="a-string-and-its-own-wait"),
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_com_read_without_until_keeps_todays_wait_and_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -677,18 +676,22 @@ REFUSED_UNTIL = [
 ]
 
 
-@pytest.mark.parametrize("until", REFUSED_UNTIL)
-def test_com_read_refuses_every_other_until_shape_before_touching_the_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, until: object) -> None:
+def test_com_read_refuses_every_other_until_shape_before_touching_the_port(tmp_path: Path) -> None:
     """`until` is a non-empty string, or 1 to 8 of them, each at most 256
     characters. Anything else is refused before the port is read: the
     buffered line is still there for the next call."""
-    with com_session(tmp_path, monkeypatch) as (service, handle):
-        handle.deliver(b"PASS\r\n")
-        refusal = com_read(service, until=until, wait_timeout_s=5)
-        kept = com_read(service)
 
-    assert_refused_for(refusal, "until")
-    assert kept["data"]["text"] == "PASS\r\n", kept
+    def check_row(tmp_path, monkeypatch, until: object) -> None:
+        with com_session(tmp_path, monkeypatch) as (service, handle):
+            handle.deliver(b"PASS\r\n")
+            refusal = com_read(service, until=until, wait_timeout_s=5)
+            kept = com_read(service)
+
+        assert_refused_for(refusal, "until")
+        assert kept["data"]["text"] == "PASS\r\n", kept
+
+    rows = parameter_rows(REFUSED_UNTIL)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 ACCEPTED_UNTIL = [
@@ -699,16 +702,20 @@ ACCEPTED_UNTIL = [
 ]
 
 
-@pytest.mark.parametrize("until", ACCEPTED_UNTIL)
-def test_com_read_accepts_until_at_its_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, until: object) -> None:
+def test_com_read_accepts_until_at_its_limits(tmp_path: Path) -> None:
     """The other side of each limit is taken."""
-    with com_session(tmp_path, monkeypatch) as (service, handle):
-        handle.deliver(b"boot\r\n")
-        result = com_read(service, until=until, wait_timeout_s=0)
 
-    assert result["ok"] is True, result
-    assert result["until_matched"] is False, result
-    assert result["data"]["text"] == "boot\r\n", result
+    def check_row(tmp_path, monkeypatch, until: object) -> None:
+        with com_session(tmp_path, monkeypatch) as (service, handle):
+            handle.deliver(b"boot\r\n")
+            result = com_read(service, until=until, wait_timeout_s=0)
+
+        assert result["ok"] is True, result
+        assert result["until_matched"] is False, result
+        assert result["data"]["text"] == "boot\r\n", result
+
+    rows = parameter_rows(ACCEPTED_UNTIL)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize(
@@ -948,19 +955,23 @@ REFUSED_UNTIL_ID = [
 ]
 
 
-@pytest.mark.parametrize("until_id", REFUSED_UNTIL_ID)
-def test_can_read_refuses_every_other_until_id_shape_before_touching_the_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, until_id: object) -> None:
+def test_can_read_refuses_every_other_until_id_shape_before_touching_the_bus(tmp_path: Path) -> None:
     """`until_id` is an arbitration id from 0 to 0x1FFFFFFF, or 1 to 8 of them.
     Anything else is refused before the bus is read: the adapter was never
     asked, and the waiting frame is still there for the next call."""
-    with can_session(tmp_path, monkeypatch, "python-can", [[A]]) as rig:
-        refusal = can_read(rig, until_id=until_id, wait_timeout_s=5)
-        asked_before_the_next_call = list(rig.bus.asked_timeouts)
-        kept = can_read(rig, wait_timeout_s=5)
 
-    assert_refused_for(refusal, "until_id")
-    assert asked_before_the_next_call == [], asked_before_the_next_call
-    assert frame_ids(kept) == [A["id"]], kept
+    def check_row(tmp_path, monkeypatch, until_id: object) -> None:
+        with can_session(tmp_path, monkeypatch, "python-can", [[A]]) as rig:
+            refusal = can_read(rig, until_id=until_id, wait_timeout_s=5)
+            asked_before_the_next_call = list(rig.bus.asked_timeouts)
+            kept = can_read(rig, wait_timeout_s=5)
+
+        assert_refused_for(refusal, "until_id")
+        assert asked_before_the_next_call == [], asked_before_the_next_call
+        assert frame_ids(kept) == [A["id"]], kept
+
+    rows = parameter_rows(REFUSED_UNTIL_ID)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 ACCEPTED_UNTIL_ID = [
@@ -971,14 +982,18 @@ ACCEPTED_UNTIL_ID = [
 ]
 
 
-@pytest.mark.parametrize("until_id", ACCEPTED_UNTIL_ID)
-def test_can_read_accepts_until_id_at_its_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, until_id: object) -> None:
+def test_can_read_accepts_until_id_at_its_limits(tmp_path: Path) -> None:
     """The other side of each limit is taken."""
-    with can_session(tmp_path, monkeypatch, "python-can", [[frame(0x050, "01")]]) as rig:
-        result = can_read(rig, until_id=until_id, wait_timeout_s=0)
 
-    assert result["ok"] is True, result
-    assert result["until_matched"] is False, result
+    def check_row(tmp_path, monkeypatch, until_id: object) -> None:
+        with can_session(tmp_path, monkeypatch, "python-can", [[frame(0x050, "01")]]) as rig:
+            result = can_read(rig, until_id=until_id, wait_timeout_s=0)
+
+        assert result["ok"] is True, result
+        assert result["until_matched"] is False, result
+
+    rows = parameter_rows(ACCEPTED_UNTIL_ID)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 # ---------------------------------------------------------------------------
@@ -1061,23 +1076,24 @@ def test_the_com_read_description_still_says_what_it_reads_what_it_replaces_and_
 # Each test imports them itself, so the rest of this module runs without them.
 
 
-@pytest.mark.parametrize(
-    ("wait_timeout_s", "expected"),
-    [
+def test_until_wait_is_ten_seconds_unless_given_and_sixty_at_most(tmp_path: Path) -> None:
+    """Every wait for `until` or `until_id` takes its length from one helper:
+    ten seconds when the caller gave none, and never more than sixty."""
+
+    def check_row(_workspace, _patch, wait_timeout_s: float | None, expected: float) -> None:
+        from agentic_hil.readuntil import until_wait_s
+
+        assert until_wait_s(wait_timeout_s) == expected
+
+    rows = parameter_rows([
         pytest.param(None, 10.0, id="none-given"),
         pytest.param(0, 0.0, id="zero"),
         pytest.param(0.3, 0.3, id="under-the-cap"),
         pytest.param(60, 60.0, id="at-the-cap"),
         pytest.param(61, 60.0, id="just-past-the-cap"),
         pytest.param(3600, 60.0, id="far-past-the-cap"),
-    ],
-)
-def test_until_wait_is_ten_seconds_unless_given_and_sixty_at_most(wait_timeout_s: float | None, expected: float) -> None:
-    """Every wait for `until` or `until_id` takes its length from one helper:
-    ten seconds when the caller gave none, and never more than sixty."""
-    from agentic_hil.readuntil import until_wait_s
-
-    assert until_wait_s(wait_timeout_s) == expected
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_until_patterns_encodes_each_entry_with_the_encoding_it_is_given() -> None:
@@ -1090,18 +1106,22 @@ def test_until_patterns_encodes_each_entry_with_the_encoding_it_is_given() -> No
     assert until_patterns(["PASS", e_acute], "latin-1") == {"ok": True, "entries": ["PASS", e_acute], "patterns": [b"PASS", b"\xe9"]}
 
 
-@pytest.mark.parametrize("until", REFUSED_UNTIL)
-def test_until_patterns_refuses_every_other_shape_under_the_callers_own_names(until: object) -> None:
+def test_until_patterns_refuses_every_other_shape_under_the_callers_own_names(tmp_path: Path) -> None:
     """Another caller gets the same checks, refused under its own tool and
     field: here `flash_firmware` and its `capture.until`."""
-    from agentic_hil.readuntil import until_patterns
 
-    refusal = until_patterns(until, "utf-8", tool="flash_firmware", field="capture.until")
+    def check_row(_workspace, _patch, until: object) -> None:
+        from agentic_hil.readuntil import until_patterns
 
-    assert refusal["ok"] is False, refusal
-    assert refusal["tool"] == "flash_firmware", refusal
-    assert refusal["error_type"] == "invalid_argument", refusal
-    assert str(refusal["field"]).startswith("capture.until"), refusal
+        refusal = until_patterns(until, "utf-8", tool="flash_firmware", field="capture.until")
+
+        assert refusal["ok"] is False, refusal
+        assert refusal["tool"] == "flash_firmware", refusal
+        assert refusal["error_type"] == "invalid_argument", refusal
+        assert str(refusal["field"]).startswith("capture.until"), refusal
+
+    rows = parameter_rows(REFUSED_UNTIL)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_until_patterns_names_the_entry_its_encoding_cannot_carry() -> None:
@@ -1116,20 +1136,21 @@ def test_until_patterns_names_the_entry_its_encoding_cannot_carry() -> None:
     assert entry in refusal["summary"], refusal
 
 
-@pytest.mark.parametrize(
-    ("buffer", "patterns", "expected"),
-    [
+def test_find_until_answers_where_the_first_match_ends_and_whose_it_is(tmp_path: Path) -> None:
+    """The matcher takes any bytes buffer and answers the end offset of the
+    match that ends first with the index of its entry, or None."""
+
+    def check_row(_workspace, _patch, buffer: bytes, patterns: list[bytes], expected: tuple[int, int] | None) -> None:
+        from agentic_hil.readuntil import find_until
+
+        assert find_until(buffer, patterns) == expected
+        assert find_until(bytearray(buffer), patterns) == expected
+
+    rows = parameter_rows([
         pytest.param(b"xABCDy", [b"ABCD", b"BC"], (4, 1), id="the-match-that-ends-first"),
         pytest.param(b"xABCy", [b"BC", b"ABC"], (4, 0), id="a-tie-goes-to-the-first-listed-shorter-entry"),
         pytest.param(b"xABCy", [b"ABC", b"BC"], (4, 0), id="a-tie-goes-to-the-first-listed-longer-entry"),
         pytest.param(b"boot PA", [b"PASS"], None, id="the-start-of-a-match-is-no-match"),
         pytest.param(b"PASS PASS", [b"PASS"], (4, 0), id="the-first-occurrence"),
-    ],
-)
-def test_find_until_answers_where_the_first_match_ends_and_whose_it_is(buffer: bytes, patterns: list[bytes], expected: tuple[int, int] | None) -> None:
-    """The matcher takes any bytes buffer and answers the end offset of the
-    match that ends first with the index of its entry, or None."""
-    from agentic_hil.readuntil import find_until
-
-    assert find_until(buffer, patterns) == expected
-    assert find_until(bytearray(buffer), patterns) == expected
+    ], multiple=True)
+    check_parameter_rows(tmp_path, rows, check_row)

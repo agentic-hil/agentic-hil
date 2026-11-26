@@ -25,6 +25,7 @@ from conftest import DEFAULT_TEST_PERMISSIONS, write_authoritative_config, write
 from fixtures.fake_picotool import TRANSCRIPTS, info_diagnostic
 from fixtures.fake_picotool import main as fake_picotool_main
 from httpserver_fakes import ScriptedJobService, answer, running_reads, short_settings
+from parameter_rows import check_parameter_rows, parameter_rows
 from support import process_is_running, scaled_time_bound
 from test_config_write import bench, changes, service
 
@@ -221,33 +222,39 @@ def yaml_config(workspace, **fields):
     return path
 
 
-@pytest.mark.parametrize("family", ["rp2040", "rp2350", None], ids=["rp2040", "rp2350", "unspecified-family"])
-def test_load_configuration(tmp_path, family):
-    config = load_config(str(yaml_config(tmp_path / "workspace", target_type=family)))
-    debugger = config.debuggers["dut"]
-    assert (debugger.type, debugger.probe_id, debugger.target_type) == ("picotool", SERIAL, family)
-    assert debugger.timeout_s == 17 and debugger.permissions.allow_flash and debugger.permissions.allow_reset
-    assert debugger.executable == str(FAKE)
-    assert "picotool" in get_args(get_type_hints(DebuggerConfig)["type"])
-    assert "picotool" in configuration.DEBUGGER_TYPES
-    assert "picotool" in BACKENDS
+def test_load_configuration(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, family) -> None:
+        config = load_config(str(yaml_config(tmp_path / "workspace", target_type=family)))
+        debugger = config.debuggers["dut"]
+        assert (debugger.type, debugger.probe_id, debugger.target_type) == ("picotool", SERIAL, family)
+        assert debugger.timeout_s == 17 and debugger.permissions.allow_flash and debugger.permissions.allow_reset
+        assert debugger.executable == str(FAKE)
+        assert "picotool" in get_args(get_type_hints(DebuggerConfig)["type"])
+        assert "picotool" in configuration.DEBUGGER_TYPES
+        assert "picotool" in BACKENDS
+
+    rows = parameter_rows(["rp2040", "rp2350", None], ids=["rp2040", "rp2350", "unspecified-family"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(("key", "value"), [
+def test_invalid_configuration(tmp_path: Path) -> None:
+    def check_row(tmp_path, _patch, key, value) -> None:
+        path = yaml_config(tmp_path / "workspace", **{key: value})
+        with pytest.raises(ConfigError) as caught:
+            load_config(str(path))
+        refusal = caught.value.to_dict()
+        if (refusal.get("error_type"), refusal.get("field")) != ("config_invalid", f"debuggers.dut.{key}"):
+            raise AssertionError("wrong picotool configuration field")
+
+    rows = parameter_rows([
     ("probe_id", None), ("probe_id", ""), ("probe_id", "-option"), ("probe_id", "@args"),
     ("target_type", "rp9999"), ("target_type", "-option"), ("target_type", "@args"),
     ("com_port", "port"), ("connect_mode", "under_reset"),
-], ids=[
+], multiple=True, ids=[
     "missing-serial", "empty-serial", "dash-serial", "at-serial", "unknown-family", "dash-family",
     "at-family", "com-port", "under-reset",
 ])
-def test_invalid_configuration(tmp_path, key, value):
-    path = yaml_config(tmp_path / "workspace", **{key: value})
-    with pytest.raises(ConfigError) as caught:
-        load_config(str(path))
-    refusal = caught.value.to_dict()
-    if (refusal.get("error_type"), refusal.get("field")) != ("config_invalid", f"debuggers.dut.{key}"):
-        raise AssertionError("wrong picotool configuration field")
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_backend_matrix_and_switch_require_probe_id(tmp_path, monkeypatch):
@@ -459,33 +466,38 @@ def assert_load(pico, payload, *, state, reset, start=0, address=None):
         assert args[args.index("-t") + 1] == original.suffix[1:]
 
 
-@pytest.mark.parametrize(("state", "reset", "extension", "upload"), [
+def test_verified_flash(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, state, reset, extension, upload) -> None:
+        monkeypatch.setattr(bench_module, "machine_device_lock_root", lambda: None)
+        pico = Pico(tmp_path, monkeypatch)
+        pico.set(STATE=state)
+        if extension == "uf2":
+            pico.set(ABSOLUTE_FAMILY="RP2350_ARM_S")
+        if state == "application" and not reset:
+            pico.set(WAIT_RETRIES=2)
+        workspace = pico.root / "workspace"
+        address = "0x10000000" if extension == "bin" else "0x1"
+        payload = firmware(workspace, extension)
+        config = runtime_config(workspace, flash_address=address, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": reset})
+        with closing_service(AgenticHILToolService(config)) as tools:
+            request = payload
+            if upload:
+                uploaded = tools.call("artifact_upload", payload)
+                assert uploaded["ok"] is True, uploaded
+                request = {"artifact_id": uploaded["artifact_id"]}
+            result = tools.call("flash_firmware", {**request, "reset_after_flash": reset})
+        assert result["ok"] is True, result
+        assert state_is(result, "application" if reset else "bootsel"), result
+        assert_load(pico, payload, state=state, reset=reset, address=address if extension == "bin" else None)
+        expected = "application" if reset else "bootsel"
+        states = json.loads(pico.states.read_text(encoding="utf-8")) if pico.states.exists() else {}
+        assert states.get(SERIAL, state) == expected
+
+    rows = parameter_rows([
     ("bootsel", True, "uf2", False), ("bootsel", False, "elf", True),
     ("application", True, "bin", False), ("application", False, "uf2", False),
-], ids=["bootsel-start-uf2", "bootsel-hold-uploaded-elf", "application-start-bin", "application-hold-uf2-flash-grant-only"])
-def test_verified_flash(pico, state, reset, extension, upload):
-    pico.set(STATE=state)
-    if extension == "uf2":
-        pico.set(ABSOLUTE_FAMILY="RP2350_ARM_S")
-    if state == "application" and not reset:
-        pico.set(WAIT_RETRIES=2)
-    workspace = pico.root / "workspace"
-    address = "0x10000000" if extension == "bin" else "0x1"
-    payload = firmware(workspace, extension)
-    config = runtime_config(workspace, flash_address=address, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": reset})
-    with closing_service(AgenticHILToolService(config)) as tools:
-        request = payload
-        if upload:
-            uploaded = tools.call("artifact_upload", payload)
-            assert uploaded["ok"] is True, uploaded
-            request = {"artifact_id": uploaded["artifact_id"]}
-        result = tools.call("flash_firmware", {**request, "reset_after_flash": reset})
-    assert result["ok"] is True, result
-    assert state_is(result, "application" if reset else "bootsel"), result
-    assert_load(pico, payload, state=state, reset=reset, address=address if extension == "bin" else None)
-    expected = "application" if reset else "bootsel"
-    states = json.loads(pico.states.read_text(encoding="utf-8")) if pico.states.exists() else {}
-    assert states.get(SERIAL, state) == expected
+], multiple=True, ids=["bootsel-start-uf2", "bootsel-hold-uploaded-elf", "application-start-bin", "application-hold-uf2-flash-grant-only"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_bin_window_endpoints_for_both_families(pico):
@@ -501,31 +513,41 @@ def test_bin_window_endpoints_for_both_families(pico):
             assert_load(pico, payload, state="bootsel", reset=False, address=address, start=start)
 
 
-@pytest.mark.parametrize(("address", "extension"), [
+def test_invalid_image_never_starts_picotool(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, address, extension) -> None:
+        monkeypatch.setattr(bench_module, "machine_device_lock_root", lambda: None)
+        pico = Pico(tmp_path, monkeypatch)
+        config = runtime_config(pico.root / "workspace", flash_address=address)
+        result = call(config, "flash_firmware", firmware(Path(config.work_dir), extension))
+        assert result["ok"] is False and result["error_type"] == "invalid_argument", result
+        assert_contact(result, NOT_CONTACTED)
+        assert pico.runs() == []
+
+    rows = parameter_rows([
     (None, "bin"), ("0x10000001", "bin"), ("0x0ffff000", "bin"), ("0x11000000", "bin"), ("0x10000000", "hex"),
-], ids=["missing-address", "unaligned", "below-base", "exclusive-end", "hex"])
-def test_invalid_image_never_starts_picotool(pico, address, extension):
-    config = runtime_config(pico.root / "workspace", flash_address=address)
-    result = call(config, "flash_firmware", firmware(Path(config.work_dir), extension))
-    assert result["ok"] is False and result["error_type"] == "invalid_argument", result
-    assert_contact(result, NOT_CONTACTED)
-    assert pico.runs() == []
+], multiple=True, ids=["missing-address", "unaligned", "below-base", "exclusive-end", "hex"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
-@pytest.mark.parametrize(("state", "family", "error"), [
+def test_flash_preflight_prevents_load(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, state, family, error) -> None:
+        monkeypatch.setattr(bench_module, "machine_device_lock_root", lambda: None)
+        pico = Pico(tmp_path, monkeypatch)
+        pico.set(STATE=state, CHIP="RP2350")
+        config = runtime_config(pico.root / "workspace", family=family, flash_address="0x10000000")
+        result = call(config, "flash_firmware", firmware(Path(config.work_dir)))
+        assert result["ok"] is False, result
+        if family:
+            assert error == result["error_type"] or "chip" in str(result.get("summary", "")).lower(), result
+        else:
+            assert result["error_type"] == error, result
+        assert_info(pico.devices())
+
+    rows = parameter_rows([
     ("bootsel", "rp2040", "target_type_invalid"),
     ("no-reset-interface", None, "target_not_detected"), ("absent", None, "target_not_detected"),
-], ids=["wrong-family", "no-reset-interface", "absent"])
-def test_flash_preflight_prevents_load(pico, state, family, error):
-    pico.set(STATE=state, CHIP="RP2350")
-    config = runtime_config(pico.root / "workspace", family=family, flash_address="0x10000000")
-    result = call(config, "flash_firmware", firmware(Path(config.work_dir)))
-    assert result["ok"] is False, result
-    if family:
-        assert error == result["error_type"] or "chip" in str(result.get("summary", "")).lower(), result
-    else:
-        assert result["error_type"] == error, result
-    assert_info(pico.devices())
+], multiple=True, ids=["wrong-family", "no-reset-interface", "absent"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def flash_transcript(*, state, write=True, verify=True, finish=None):
@@ -535,25 +557,30 @@ def flash_transcript(*, state, write=True, verify=True, finish=None):
     return entry + loading + verification + ("\n" + finish if finish else "")
 
 
-@pytest.mark.parametrize(("state", "reset", "write", "verify", "finish"), [
+def test_exit_zero_needs_flash_confirmation(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, state, reset, write, verify, finish) -> None:
+        monkeypatch.setattr(bench_module, "machine_device_lock_root", lambda: None)
+        pico = Pico(tmp_path, monkeypatch)
+        pico.set(STATE=state)
+        workspace = pico.root / "workspace"
+        config = runtime_config(workspace, flash_address="0x10000000")
+        with closing_service(AgenticHILToolService(config)) as tools:
+            pico.raw("load", stdout=flash_transcript(state=state, write=write, verify=verify, finish=finish))
+            payload = firmware(workspace)
+            result = tools.call("flash_firmware", {**payload, "reset_after_flash": reset})
+        assert result["ok"] is False, result
+        assert_contact(result, CONTACT_UNPROVEN)
+        assert_load(pico, payload, state=state, reset=reset, address="0x10000000")
+
+    rows = parameter_rows([
     ("bootsel", False, False, True, None), ("bootsel", False, True, False, None),
     ("bootsel", True, True, True, None), ("application", True, True, True, None),
     ("application", False, True, True, START),
-], ids=[
+], multiple=True, ids=[
     "write-incomplete", "verify-missing-ok", "bootsel-start-missing-reboot",
     "application-start-missing-return", "application-hold-missing-left-accessible",
 ])
-def test_exit_zero_needs_flash_confirmation(pico, state, reset, write, verify, finish):
-    pico.set(STATE=state)
-    workspace = pico.root / "workspace"
-    config = runtime_config(workspace, flash_address="0x10000000")
-    with closing_service(AgenticHILToolService(config)) as tools:
-        pico.raw("load", stdout=flash_transcript(state=state, write=write, verify=verify, finish=finish))
-        payload = firmware(workspace)
-        result = tools.call("flash_firmware", {**payload, "reset_after_flash": reset})
-    assert result["ok"] is False, result
-    assert_contact(result, CONTACT_UNPROVEN)
-    assert_load(pico, payload, state=state, reset=reset, address="0x10000000")
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_forced_start_accepts_each_documented_confirmation(pico):
@@ -570,31 +597,36 @@ def test_forced_start_accepts_each_documented_confirmation(pico):
             assert_load(pico, payload, state="application", reset=True, address="0x10000000", start=start)
 
 
-@pytest.mark.parametrize(("state", "mode"), [
-    ("bootsel", "run"), ("bootsel", "halt"), ("application", "run"), ("application", "halt"),
-], ids=["bootsel-run", "bootsel-halt", "application-run", "application-halt"])
-def test_reset_requires_its_own_confirmation(pico, state, mode):
-    pico.set(STATE=state)
-    workspace = pico.root / "workspace"
-    config = runtime_config(workspace)
-    result = call(config, "reset_target", {"mode": mode})
-    destination = "application" if mode == "run" else "bootsel"
-    assert result["ok"] is True and state_is(result, destination), result
-    assert json.loads(pico.states.read_text(encoding="utf-8"))[SERIAL] == destination
-    info, reset = pico.devices()
-    assert_info([info])
-    expected = {"reboot", "-a" if mode == "run" else "-u", "--ser", SERIAL}
-    if state == "application":
-        expected.add("-f")
-    assert set(reset["argv"]) == expected
+def test_reset_requires_its_own_confirmation(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, state, mode) -> None:
+        monkeypatch.setattr(bench_module, "machine_device_lock_root", lambda: None)
+        pico = Pico(tmp_path, monkeypatch)
+        pico.set(STATE=state)
+        workspace = pico.root / "workspace"
+        config = runtime_config(workspace)
+        result = call(config, "reset_target", {"mode": mode})
+        destination = "application" if mode == "run" else "bootsel"
+        assert result["ok"] is True and state_is(result, destination), result
+        assert json.loads(pico.states.read_text(encoding="utf-8"))[SERIAL] == destination
+        info, reset = pico.devices()
+        assert_info([info])
+        expected = {"reboot", "-a" if mode == "run" else "-u", "--ser", SERIAL}
+        if state == "application":
+            expected.add("-f")
+        assert set(reset["argv"]) == expected
 
-    pico.states.unlink()
-    opposite = "BOOTSEL" if mode == "run" else "application"
-    verb = "was asked to reboot" if state == "application" else "was rebooted"
-    pico.raw("reboot", stdout=f"The device {verb} into {opposite} mode.\n")
-    refused = call(config, "reset_target", {"mode": mode})
-    assert refused["ok"] is False, refused
-    assert_contact(refused, CONTACT_UNPROVEN)
+        pico.states.unlink()
+        opposite = "BOOTSEL" if mode == "run" else "application"
+        verb = "was asked to reboot" if state == "application" else "was rebooted"
+        pico.raw("reboot", stdout=f"The device {verb} into {opposite} mode.\n")
+        refused = call(config, "reset_target", {"mode": mode})
+        assert refused["ok"] is False, refused
+        assert_contact(refused, CONTACT_UNPROVEN)
+
+    rows = parameter_rows([
+    ("bootsel", "run"), ("bootsel", "halt"), ("application", "run"), ("application", "halt"),
+], multiple=True, ids=["bootsel-run", "bootsel-halt", "application-run", "application-halt"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize("case", ["init", "undetected"], ids=["init", "undetected"])
@@ -630,25 +662,30 @@ def test_permission_refusal_before_spawn(pico, tool, permission, value, start):
     assert pico.runs() == []
 
 
-@pytest.mark.parametrize("case", ["missing", "unsupported-major", "unreadable-version"], ids=["missing", "unsupported-major", "unreadable-version"])
-def test_precontact_executable_refusal(pico, case):
-    executable = FAKE
-    if case == "missing":
-        executable = pico.root / "missing-picotool.exe"
-    elif case == "unsupported-major":
-        pico.set(VERSION="3.0.0")
-    else:
-        pico.raw("version")
-    config = runtime_config(pico.root / "workspace", executable=executable)
-    with closing_service(AgenticHILToolService(config)) as tools:
-        result = tools.call("probe_target")
-        assert result["ok"] is False and result["error_type"] == "debugger_not_found", result
-        expected = "picotool_not_found" if case == "missing" else "picotool_version_unsupported"
-        assert result["backend_error_type"] == expected, result
-        assert_contact(result, NOT_CONTACTED)
-        assert pico.devices() == []
-        assert bool(pico.runs()) is (case != "missing")
-        assert_classification(tools, result)
+def test_precontact_executable_refusal(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, case) -> None:
+        monkeypatch.setattr(bench_module, "machine_device_lock_root", lambda: None)
+        pico = Pico(tmp_path, monkeypatch)
+        executable = FAKE
+        if case == "missing":
+            executable = pico.root / "missing-picotool.exe"
+        elif case == "unsupported-major":
+            pico.set(VERSION="3.0.0")
+        else:
+            pico.raw("version")
+        config = runtime_config(pico.root / "workspace", executable=executable)
+        with closing_service(AgenticHILToolService(config)) as tools:
+            result = tools.call("probe_target")
+            assert result["ok"] is False and result["error_type"] == "debugger_not_found", result
+            expected = "picotool_not_found" if case == "missing" else "picotool_version_unsupported"
+            assert result["backend_error_type"] == expected, result
+            assert_contact(result, NOT_CONTACTED)
+            assert pico.devices() == []
+            assert bool(pico.runs()) is (case != "missing")
+            assert_classification(tools, result)
+
+    rows = parameter_rows(["missing", "unsupported-major", "unreadable-version"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 DEBUG_CALLS = {
@@ -667,19 +704,24 @@ DEBUG_CALLS = {
 }
 
 
-@pytest.mark.parametrize("tool", list(DEBUG_CALLS), ids=list(DEBUG_CALLS))
-def test_no_typed_debug(pico, tool):
-    workspace = pico.root / "workspace"
-    config = runtime_config(workspace)
-    image = firmware(workspace, "elf")
-    with closing_service(AgenticHILToolService(config)) as tools:
-        if tool == "debug_symbol_info":
-            flashed = tools.call("flash_firmware", image)
-            assert flashed["ok"] is True, flashed
-        start = len(pico.runs())
-        result = tools.call(tool, DEBUG_CALLS[tool])
-        assert result["ok"] is False and result["error_type"] == "not_supported", result
-        assert len(pico.runs()) == start
+def test_no_typed_debug(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, tool) -> None:
+        monkeypatch.setattr(bench_module, "machine_device_lock_root", lambda: None)
+        pico = Pico(tmp_path, monkeypatch)
+        workspace = pico.root / "workspace"
+        config = runtime_config(workspace)
+        image = firmware(workspace, "elf")
+        with closing_service(AgenticHILToolService(config)) as tools:
+            if tool == "debug_symbol_info":
+                flashed = tools.call("flash_firmware", image)
+                assert flashed["ok"] is True, flashed
+            start = len(pico.runs())
+            result = tools.call(tool, DEBUG_CALLS[tool])
+            assert result["ok"] is False and result["error_type"] == "not_supported", result
+            assert len(pico.runs()) == start
+
+    rows = parameter_rows(list(DEBUG_CALLS))
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_capabilities_and_plan_refusal_before_first_flash(pico):
@@ -858,26 +900,31 @@ def test_oversized_image_after_forced_open_is_flash_failed_contact_unproven(pico
     assert load["command"] == "load" and "-F" in load["argv"]
 
 
-@pytest.mark.parametrize(("status", "error"), [
+def test_postcontact_failure_preserves_uncertainty(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, status, error) -> None:
+        monkeypatch.setattr(bench_module, "machine_device_lock_root", lambda: None)
+        pico = Pico(tmp_path, monkeypatch)
+        pico.set(STATE="application")
+        transcript = FORCE_ENTRY + "\n\n"
+        if status == -5:
+            transcript += WRITE_FRAME
+        elif status == -11:
+            transcript += WRITE_COMPLETE + VERIFY_BAR + VERIFY_MISMATCH
+        pico.raw("load", stdout=transcript, status=status)
+        workspace = pico.root / "workspace"
+        config = runtime_config(workspace, flash_address="0x10000000")
+        with closing_service(AgenticHILToolService(config)) as tools:
+            result = tools.call("flash_firmware", firmware(workspace))
+            assert result["ok"] is False, result
+            if status != -9:
+                assert result["error_type"] == error, result
+            assert_contact(result, CONTACT_UNPROVEN)
+            assert_classification(tools, result)
+
+    rows = parameter_rows([
     (-9, "flash_failed"), (-5, "flash_failed"), (-11, "verify_failed"),
-], ids=["forced-reboot", "write", "verify"])
-def test_postcontact_failure_preserves_uncertainty(pico, status, error):
-    pico.set(STATE="application")
-    transcript = FORCE_ENTRY + "\n\n"
-    if status == -5:
-        transcript += WRITE_FRAME
-    elif status == -11:
-        transcript += WRITE_COMPLETE + VERIFY_BAR + VERIFY_MISMATCH
-    pico.raw("load", stdout=transcript, status=status)
-    workspace = pico.root / "workspace"
-    config = runtime_config(workspace, flash_address="0x10000000")
-    with closing_service(AgenticHILToolService(config)) as tools:
-        result = tools.call("flash_firmware", firmware(workspace))
-        assert result["ok"] is False, result
-        if status != -9:
-            assert result["error_type"] == error, result
-        assert_contact(result, CONTACT_UNPROVEN)
-        assert_classification(tools, result)
+], multiple=True, ids=["forced-reboot", "write", "verify"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def wait_for_exit(record):
@@ -1042,26 +1089,31 @@ def has_fields(result, fields):
     return all(key in result and result[key] == value for key, value in fields.items())
 
 
-@pytest.mark.parametrize("family", ["rp2040", "rp2350", None], ids=["rp2040", "rp2350", "unset"])
-def test_picotool_doctor_contract(pico, family):
-    authoritative_picotool(pico, family=family)
-    workspace = pico.root / "workspace"
-    pico.monkeypatch.chdir(workspace)
-    config = load_authoritative_config(workspace)
-    support = PicotoolBackend(bind_debugger(config, "dut")).target_support()
-    exit_code, cli_report = doctor_command(workspace)
-    http_report = http_doctor(config)
-    expected = {
-        "ok": True, "tool": "debugger_target_support", "backend": "picotool",
-        "target_type": family, "status": "supported" if family else "not_configured",
-    }
-    cli_support = cli_report.get("debuggers", {}).get("dut", {}).get("target_support", {})
-    healthy = {"ok": True, "unhealthy": []}
-    if not (
-        exit_code == 0 and has_fields(cli_report, healthy) and has_fields(http_report, healthy)
-        and all(has_fields(report, expected) and report.get("summary") for report in (support, cli_support))
-    ):
-        raise AssertionError("picotool target support and doctor disagree with the healthy configuration contract")
+def test_picotool_doctor_contract(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, family) -> None:
+        monkeypatch.setattr(bench_module, "machine_device_lock_root", lambda: None)
+        pico = Pico(tmp_path, monkeypatch)
+        authoritative_picotool(pico, family=family)
+        workspace = pico.root / "workspace"
+        pico.monkeypatch.chdir(workspace)
+        config = load_authoritative_config(workspace)
+        support = PicotoolBackend(bind_debugger(config, "dut")).target_support()
+        exit_code, cli_report = doctor_command(workspace)
+        http_report = http_doctor(config)
+        expected = {
+            "ok": True, "tool": "debugger_target_support", "backend": "picotool",
+            "target_type": family, "status": "supported" if family else "not_configured",
+        }
+        cli_support = cli_report.get("debuggers", {}).get("dut", {}).get("target_support", {})
+        healthy = {"ok": True, "unhealthy": []}
+        if not (
+            exit_code == 0 and has_fields(cli_report, healthy) and has_fields(http_report, healthy)
+            and all(has_fields(report, expected) and report.get("summary") for report in (support, cli_support))
+        ):
+            raise AssertionError("picotool target support and doctor disagree with the healthy configuration contract")
+
+    rows = parameter_rows(["rp2040", "rp2350", None], ids=["rp2040", "rp2350", "unset"])
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def test_picotool_doctor_refusals(pico):
@@ -1092,12 +1144,17 @@ def test_picotool_doctor_refusals(pico):
         raise AssertionError("picotool does not report invalid target support with the required refusal")
 
 
-@pytest.mark.parametrize("version", tuple(TRANSCRIPTS))
-def test_picotool_reported_version(pico, version):
-    pico.set(VERSION=version)
-    result = call(runtime_config(pico.root / "workspace"), "debugger_info")
-    if not has_fields(result, {"ok": True, "version": version}):
-        raise AssertionError("debugger_info did not report the printed picotool version")
+def test_picotool_reported_version(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, version) -> None:
+        monkeypatch.setattr(bench_module, "machine_device_lock_root", lambda: None)
+        pico = Pico(tmp_path, monkeypatch)
+        pico.set(VERSION=version)
+        result = call(runtime_config(pico.root / "workspace"), "debugger_info")
+        if not has_fields(result, {"ok": True, "version": version}):
+            raise AssertionError("debugger_info did not report the printed picotool version")
+
+    rows = parameter_rows(tuple(TRANSCRIPTS))
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 @pytest.mark.parametrize("version", tuple(TRANSCRIPTS))
@@ -1223,40 +1280,45 @@ def test_picotool_release_flash_reset(pico, version):
 UNRECOGNIZED_INFO_CALLS = ("probe_target", "debugger_probes_list", "flash_firmware", "reset_target")
 
 
-@pytest.mark.parametrize("tool", UNRECOGNIZED_INFO_CALLS)
-def test_picotool_unrecognized_info(pico, tool):
-    version = "2.3.0"
-    pico.set(VERSION=version, MALFORMED_INFO_SERIAL=SERIAL)
-    extra = ""
-    if tool == "debugger_probes_list":
-        extra = yaml.safe_dump({"debuggers": {"other": {
-            "type": "picotool", "executable": str(FAKE), "probe_id": OTHER_SERIAL,
-        }}})
-        pico.set(BOARDS=json.dumps({OTHER_SERIAL: {"state": "bootsel", "chip": "RP2040"}}))
-    authoritative_picotool(pico, extra_debuggers=extra)
-    workspace = pico.root / "workspace"
-    config = bind_debugger(load_authoritative_config(workspace), "dut")
-    assert config.recovery.auto_recover == "reset_halt"
-    arguments = firmware(workspace) if tool == "flash_firmware" else {"mode": "halt"} if tool == "reset_target" else {}
-    result = call(config, tool, arguments)
-    summary = str(result.get("summary", "")).lower()
-    expected = {
-        "ok": False, "error_type": "probe_failed", "side_effect_committed": False,
-        "side_effect_status": "not_started", "hardware_state": "unchanged", "lease_state": "released",
-    }
-    if not (
-        has_fields(result, expected) and version in summary and unrecognized_wording(summary)
-        and "target_contacted" not in result and not result.get("cleanup_required") and not result.get("quarantine_id")
-    ):
-        raise AssertionError("unrecognized picotool info did not end as a settled probe failure")
-    records = pico.devices(None)
-    if tool == "debugger_probes_list":
-        bad, good = records
-        assert_info([bad])
-        assert_info([good], OTHER_SERIAL)
-        assert has_fields(listing_rows(result).get("other", {}), {"ok": True, "present": True, "target_state": "bootsel", "chip": "RP2040"})
-    else:
-        assert_info(records)
+def test_picotool_unrecognized_info(tmp_path: Path) -> None:
+    def check_row(tmp_path, monkeypatch, tool) -> None:
+        monkeypatch.setattr(bench_module, "machine_device_lock_root", lambda: None)
+        pico = Pico(tmp_path, monkeypatch)
+        version = "2.3.0"
+        pico.set(VERSION=version, MALFORMED_INFO_SERIAL=SERIAL)
+        extra = ""
+        if tool == "debugger_probes_list":
+            extra = yaml.safe_dump({"debuggers": {"other": {
+                "type": "picotool", "executable": str(FAKE), "probe_id": OTHER_SERIAL,
+            }}})
+            pico.set(BOARDS=json.dumps({OTHER_SERIAL: {"state": "bootsel", "chip": "RP2040"}}))
+        authoritative_picotool(pico, extra_debuggers=extra)
+        workspace = pico.root / "workspace"
+        config = bind_debugger(load_authoritative_config(workspace), "dut")
+        assert config.recovery.auto_recover == "reset_halt"
+        arguments = firmware(workspace) if tool == "flash_firmware" else {"mode": "halt"} if tool == "reset_target" else {}
+        result = call(config, tool, arguments)
+        summary = str(result.get("summary", "")).lower()
+        expected = {
+            "ok": False, "error_type": "probe_failed", "side_effect_committed": False,
+            "side_effect_status": "not_started", "hardware_state": "unchanged", "lease_state": "released",
+        }
+        if not (
+            has_fields(result, expected) and version in summary and unrecognized_wording(summary)
+            and "target_contacted" not in result and not result.get("cleanup_required") and not result.get("quarantine_id")
+        ):
+            raise AssertionError("unrecognized picotool info did not end as a settled probe failure")
+        records = pico.devices(None)
+        if tool == "debugger_probes_list":
+            bad, good = records
+            assert_info([bad])
+            assert_info([good], OTHER_SERIAL)
+            assert has_fields(listing_rows(result).get("other", {}), {"ok": True, "present": True, "target_state": "bootsel", "chip": "RP2040"})
+        else:
+            assert_info(records)
+
+    rows = parameter_rows(UNRECOGNIZED_INFO_CALLS)
+    check_parameter_rows(tmp_path, rows, check_row)
 
 
 def unrecognized_wording(text):
